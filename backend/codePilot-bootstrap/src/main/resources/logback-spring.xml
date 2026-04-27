@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="false">
+  <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+  <springProperty scope="context" name="APP" source="spring.application.name" defaultValue="codePilot-backend"/>
+
+  <appender name="JSON_STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+      <!-- Compact JSON; avoids leaking multi-line code payloads to log pipelines. -->
+      <pattern>
+        {"ts":"%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}","lvl":"%level","logger":"%logger{40}","app":"${APP}","thread":"%thread","trace":"%X{traceId:-}","msg":%msg}
+        %n
+      </pattern>
+    </encoder>
+  </appender>
+
+  <logger name="org.springframework" level="INFO"/>
+  <logger name="io.micrometer" level="INFO"/>
+  <logger name="com.zaxxer.hikari" level="INFO"/>
+  <logger name="io.codepilot" level="INFO"/>
+
+  <root level="INFO">
+    <appender-ref ref="JSON_STDOUT"/>
+  </root>
+</configuration>

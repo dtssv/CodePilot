@@ -1,0 +1,88 @@
+[versions]
+java            = "21"
+spring-boot     = "3.3.4"
+spring-cloud    = "2023.0.3"
+spring-ai       = "1.0.0-M2"
+spring-dep-mgmt = "1.1.6"
+spotless        = "6.25.0"
+
+# libraries
+jackson          = "2.17.2"
+caffeine         = "3.1.8"
+micrometer       = "1.13.4"
+otel             = "1.41.0"
+flyway           = "10.17.2"
+postgres-jdbc    = "42.7.4"
+pgvector         = "0.1.6"
+resilience4j     = "2.2.0"
+bucket4j         = "8.10.1"
+jose             = "10.0.3"          # Nimbus jose-jwt
+hikari           = "5.1.0"
+jcommander       = "1.83"
+springdoc        = "2.6.0"
+mapstruct        = "1.6.2"
+lombok           = "1.18.34"
+json-schema      = "1.5.1"            # networknt json-schema-validator
+jsoup            = "1.18.1"
+jtokkit          = "1.1.0"
+guava            = "33.3.1-jre"
+bouncycastle     = "1.78.1"
+awaitility       = "4.2.2"
+testcontainers   = "1.20.2"
+assertj          = "3.26.3"
+junit            = "5.11.3"
+wiremock         = "3.9.2"
+okhttp           = "4.12.0"          # for test-only HTTP helpers
+apache-commons-compress = "1.27.1"
+apache-commons-lang     = "3.17.0"
+
+[libraries]
+spring-boot-starter-webflux    = { module = "org.springframework.boot:spring-boot-starter-webflux" }
+spring-boot-starter-web        = { module = "org.springframework.boot:spring-boot-starter-web" }
+spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
+spring-boot-starter-actuator   = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-starter-security   = { module = "org.springframework.boot:spring-boot-starter-security" }
+spring-boot-starter-data-redis-reactive = { module = "org.springframework.boot:spring-boot-starter-data-redis-reactive" }
+spring-boot-starter-jdbc       = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
+spring-boot-starter-cache      = { module = "org.springframework.boot:spring-boot-starter-cache" }
+spring-boot-configuration-processor = { module = "org.springframework.boot:spring-boot-configuration-processor" }
+
+spring-ai-openai               = { module = "org.springframework.ai:spring-ai-openai-spring-boot-starter",   version.ref = "spring-ai" }
+spring-ai-pgvector             = { module = "org.springframework.ai:spring-ai-pgvector-store-spring-boot-starter", version.ref = "spring-ai" }
+spring-ai-mcp                  = { module = "org.springframework.ai:spring-ai-mcp-client-spring-boot-starter",     version.ref = "spring-ai" }
+
+springdoc-openapi              = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
+flyway-core                    = { module = "org.flywaydb:flyway-core",                version.ref = "flyway" }
+flyway-postgres                = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
+postgresql                     = { module = "org.postgresql:postgresql",               version.ref = "postgres-jdbc" }
+pgvector                       = { module = "com.pgvector:pgvector",                   version.ref = "pgvector" }
+hikari                         = { module = "com.zaxxer:HikariCP",                     version.ref = "hikari" }
+caffeine                       = { module = "com.github.ben-manes.caffeine:caffeine",  version.ref = "caffeine" }
+resilience4j-spring-boot3      = { module = "io.github.resilience4j:resilience4j-spring-boot3", version.ref = "resilience4j" }
+bucket4j-core                  = { module = "com.bucket4j:bucket4j_jdk17-core",        version.ref = "bucket4j" }
+nimbus-jose-jwt                = { module = "com.nimbusds:nimbus-jose-jwt",            version.ref = "jose" }
+json-schema-validator          = { module = "com.networknt:json-schema-validator",     version.ref = "json-schema" }
+jtokkit                        = { module = "com.knuddels:jtokkit",                    version.ref = "jtokkit" }
+mapstruct                      = { module = "org.mapstruct:mapstruct",                 version.ref = "mapstruct" }
+mapstruct-processor            = { module = "org.mapstruct:mapstruct-processor",       version.ref = "mapstruct" }
+jackson-bom                    = { module = "com.fasterxml.jackson:jackson-bom",       version.ref = "jackson" }
+apache-commons-compress        = { module = "org.apache.commons:commons-compress",     version.ref = "apache-commons-compress" }
+apache-commons-lang3           = { module = "org.apache.commons:commons-lang3",        version.ref = "apache-commons-lang" }
+bouncycastle-bcpkix            = { module = "org.bouncycastle:bcpkix-jdk18on",         version.ref = "bouncycastle" }
+guava                          = { module = "com.google.guava:guava",                  version.ref = "guava" }
+micrometer-tracing-bridge-otel = { module = "io.micrometer:micrometer-tracing-bridge-otel", version.ref = "micrometer" }
+otel-exporter-otlp             = { module = "io.opentelemetry:opentelemetry-exporter-otlp",  version.ref = "otel" }
+
+# test
+spring-boot-starter-test       = { module = "org.springframework.boot:spring-boot-starter-test" }
+junit-jupiter                  = { module = "org.junit.jupiter:junit-jupiter",         version.ref = "junit" }
+assertj-core                   = { module = "org.assertj:assertj-core",                version.ref = "assertj" }
+testcontainers-junit-jupiter   = { module = "org.testcontainers:junit-jupiter",        version.ref = "testcontainers" }
+testcontainers-postgresql      = { module = "org.testcontainers:postgresql",           version.ref = "testcontainers" }
+awaitility                     = { module = "org.awaitility:awaitility",               version.ref = "awaitility" }
+wiremock-jetty12               = { module = "org.wiremock:wiremock-standalone",        version.ref = "wiremock" }
+
+[plugins]
+spring-boot             = { id = "org.springframework.boot",                 version.ref = "spring-boot" }
+spring-dependency-mgmt  = { id = "io.spring.dependency-management",           version.ref = "spring-dep-mgmt" }
+spotless                = { id = "com.diffplug.spotless",                    version.ref = "spotless" }

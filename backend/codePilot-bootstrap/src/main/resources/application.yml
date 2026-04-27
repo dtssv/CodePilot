@@ -1,0 +1,78 @@
+server:
+  port: ${CODEPILOT_PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: framework
+  netty:
+    idle-timeout: 120s
+
+spring:
+  application:
+    name: codePilot-backend
+  main:
+    banner-mode: off
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${CODEPILOT_DB_URL:?env variable CODEPILOT_DB_URL is required}
+    username: ${CODEPILOT_DB_USER:?env variable CODEPILOT_DB_USER is required}
+    password: ${CODEPILOT_DB_PASSWORD:?env variable CODEPILOT_DB_PASSWORD is required}
+    hikari:
+      pool-name: codePilotHikari
+      maximum-pool-size: ${CODEPILOT_DB_POOL_MAX:40}
+      minimum-idle: 4
+      idle-timeout: 60000
+      max-lifetime: 1800000
+      connection-timeout: 10000
+      leak-detection-threshold: 10000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    validate-on-migrate: true
+    out-of-order: false
+  data:
+    redis:
+      url: ${CODEPILOT_REDIS_URL:?env variable CODEPILOT_REDIS_URL is required}
+      timeout: 2s
+      connect-timeout: 2s
+      lettuce:
+        pool:
+          max-active: 64
+          max-idle: 32
+          min-idle: 4
+  ai:
+    openai:
+      base-url: ${CODEPILOT_LLM_BASE_URL:?env variable CODEPILOT_LLM_BASE_URL is required}
+      api-key: ${CODEPILOT_LLM_API_KEY:?env variable CODEPILOT_LLM_API_KEY is required}
+      chat:
+        options:
+          model: ${CODEPILOT_LLM_DEFAULT_MODEL:?env variable CODEPILOT_LLM_DEFAULT_MODEL is required}
+          temperature: 0.2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  tracing:
+    sampling:
+      probability: 1.0
+
+codepilot:
+  security:
+    jwt-secret: ${CODEPILOT_JWT_SECRET:?env variable CODEPILOT_JWT_SECRET is required}
+    hmac-secret: ${CODEPILOT_HMAC_SECRET:?env variable CODEPILOT_HMAC_SECRET is required}
+    sso:
+      secret: ${CODEPILOT_SSO_SECRET:?env variable CODEPILOT_SSO_SECRET is required}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
