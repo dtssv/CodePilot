@@ -93,6 +93,14 @@ codepilot:
         secret: ${CODEPILOT_SSO_DEV_SECRET:}
         token-ttl: ${CODEPILOT_SSO_DEV_TOKEN_TTL:1h}
 
+  conversation:
+    agent:
+      max-steps: ${CODEPILOT_AGENT_MAX_STEPS:25}
+      tool-result-timeout: ${CODEPILOT_AGENT_TOOL_RESULT_TIMEOUT:5m}
+    context:
+      budget-tokens: ${CODEPILOT_CONTEXT_BUDGET_TOKENS:100000}
+      keep-recent-messages: ${CODEPILOT_CONTEXT_KEEP_RECENT:10}
+
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
