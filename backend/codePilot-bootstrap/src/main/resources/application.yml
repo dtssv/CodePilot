@@ -69,7 +69,29 @@ codepilot:
     jwt-secret: ${CODEPILOT_JWT_SECRET:?env variable CODEPILOT_JWT_SECRET is required}
     hmac-secret: ${CODEPILOT_HMAC_SECRET:?env variable CODEPILOT_HMAC_SECRET is required}
     sso:
-      secret: ${CODEPILOT_SSO_SECRET:?env variable CODEPILOT_SSO_SECRET is required}
+      # --- SSO Strategy Selection (pick one) ---
+      # 1) OIDC (recommended for production): set codepilot.security.sso.oidc.issuer-uri
+      # 2) HMAC SSO Bridge (enterprise): set codepilot.security.sso.secret
+      # 3) Dev (non-production only): set codepilot.security.sso.dev.enabled=true
+
+      # HMAC SSO Bridge — enterprise adapter signs bootstrap token with shared secret
+      secret: ${CODEPILOT_SSO_SECRET:}
+
+      # OIDC — verify IdP id_tokens via JWKs (recommended for production)
+      oidc:
+        issuer-uri: ${CODEPILOT_OIDC_ISSUER_URI:}
+        client-id: ${CODEPILOT_OIDC_CLIENT_ID:}
+        client-secret: ${CODEPILOT_OIDC_CLIENT_SECRET:}
+        jwks-uri: ${CODEPILOT_OIDC_JWKS_URI:}
+        token-endpoint: ${CODEPILOT_OIDC_TOKEN_ENDPOINT:}
+        device-authorization-endpoint: ${CODEPILOT_OIDC_DEVICE_AUTH_ENDPOINT:}
+        jwks-cache-ttl: ${CODEPILOT_OIDC_JWKS_CACHE_TTL:5m}
+
+      # Dev SSO — local development only, MUST be false in production
+      dev:
+        enabled: ${CODEPILOT_SSO_DEV_ENABLED:false}
+        secret: ${CODEPILOT_SSO_DEV_SECRET:}
+        token-ttl: ${CODEPILOT_SSO_DEV_TOKEN_TTL:1h}
 
 springdoc:
   swagger-ui:

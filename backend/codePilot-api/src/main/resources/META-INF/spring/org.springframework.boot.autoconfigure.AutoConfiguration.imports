@@ -1,0 +1,2 @@
+io.codepilot.api.auth.SsoVerifierAutoConfiguration
+io.codepilot.api.auth.DeviceCodeFlowAutoConfiguration
