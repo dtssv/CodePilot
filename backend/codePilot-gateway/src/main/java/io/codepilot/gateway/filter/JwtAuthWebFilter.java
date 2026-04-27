@@ -37,8 +37,7 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
           "/v1/auth/login",
           "/v1/auth/refresh",
           "/v1/auth/device-code",
-          "/v1/auth/device-token",
-          "/v1/models");
+          "/v1/auth/device-token");
 
   private final JwtService jwt;
 

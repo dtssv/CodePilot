@@ -93,6 +93,19 @@ codepilot:
         secret: ${CODEPILOT_SSO_DEV_SECRET:}
         token-ttl: ${CODEPILOT_SSO_DEV_TOKEN_TTL:1h}
 
+  models:
+    models:
+      - id: codePilot-default
+        name: CodePilot Default
+        caps: [tools, stream]
+        max-tokens: 128000
+      - id: codePilot-pro
+        name: CodePilot Pro
+        caps: [tools, stream, vision]
+        max-tokens: 200000
+
+  kms-key: ${CODEPILOT_KMS_KEY:}
+
   conversation:
     agent:
       max-steps: ${CODEPILOT_AGENT_MAX_STEPS:25}

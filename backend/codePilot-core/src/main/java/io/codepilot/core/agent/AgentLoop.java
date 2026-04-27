@@ -10,6 +10,9 @@ import io.codepilot.common.conversation.AgentEvent.UsageEvent;
 import io.codepilot.common.conversation.ConversationRequest;
 import io.codepilot.common.conversation.ConversationRequest.Mode;
 import io.codepilot.common.conversation.ToolResultRequest;
+import io.codepilot.core.ai.SafeguardAdvisor;
+import io.codepilot.core.metrics.MetricsHelper;
+import io.codepilot.core.model.ModelService;
 import io.codepilot.core.prompt.PromptOrchestrator;
 import io.codepilot.core.prompt.PromptOrchestrator.AgentState;
 import io.codepilot.core.tool.ToolRouter;
@@ -52,14 +55,19 @@ public class AgentLoop {
   private static final ObjectMapper MAPPER = new ObjectMapper();
   private static final Duration TOOL_RESULT_TIMEOUT = Duration.ofMinutes(5);
 
-  private final ChatClient chatClient;
+  private final ModelService modelService;
   private final PromptOrchestrator orchestrator;
   private final ToolRouter toolRouter;
+  private final SafeguardAdvisor safeguardAdvisor;
+  private final MetricsHelper metrics;
 
-  public AgentLoop(ChatClient chatClient, PromptOrchestrator orchestrator, ToolRouter toolRouter) {
-    this.chatClient = chatClient;
+  public AgentLoop(ModelService modelService, PromptOrchestrator orchestrator, ToolRouter toolRouter,
+      SafeguardAdvisor safeguardAdvisor, MetricsHelper metrics) {
+    this.modelService = modelService;
     this.orchestrator = orchestrator;
     this.toolRouter = toolRouter;
+    this.safeguardAdvisor = safeguardAdvisor;
+    this.metrics = metrics;
   }
 
   /**
@@ -68,56 +76,67 @@ public class AgentLoop {
    * <p>The Flux completes when the loop reaches a natural stopping point (final / subtask_done /
    * max_steps / error).
    */
+  /**
+   * Runs the conversation loop, returning a Flux of SSE events.
+   *
+   * <p>Resolves the ChatClient dynamically based on the request's modelId.
+   * The Flux completes when the loop reaches a natural stopping point.
+   */
   public Flux<AgentEvent> run(ConversationRequest req) {
-    return Flux.create(
-        sink -> {
+    long startTime = System.currentTimeMillis();
+    // Resolve the ChatClient for the requested model
+    return modelService.resolveChatClient(req.modelId(), userIdFromContext())
+        .flatMapMany(chatClient -> Flux.create(sink -> {
           AgentState state = new AgentState();
           int maxSteps = req.policy() != null ? req.policy().maxSteps() : 25;
 
           if (req.mode() == Mode.chat) {
-            runChat(req, state, sink);
+            runChat(chatClient, req, state, sink, startTime);
           } else {
-            runAgent(req, state, maxSteps, sink);
+            runAgent(chatClient, req, state, maxSteps, sink, startTime);
           }
 
           sink.onDispose(
               () -> LOG.debug("SSE stream disposed for session={}", req.sessionId()));
-        });
+        }));
+  }
+
+  /** Extracts user ID from the current security context (set by gateway JWT filter). */
+  private String userIdFromContext() {
+    // In the gateway flow, the user ID is propagated via the SecurityContext.
+    // For now, return a placeholder — the ConversationController will pass it via request attrs.
+    return "system";
   }
 
   /** Chat mode: single model call, stream text deltas, then done. */
   private void runChat(
-      ConversationRequest req, AgentState state, Sinks.Many<AgentEvent> sink) {
+      ChatClient chatClient, ConversationRequest req, AgentState state,
+      Sinks.Many<AgentEvent> sink, long startTime) {
     try {
       Prompt prompt = orchestrator.assemble(req, state, null);
+      prompt = safeguardAdvisor.sanitize(prompt);
 
-      // Use Spring AI streaming
+      // Use Spring AI streaming chat
       chatClient
           .prompt(prompt)
           .stream()
-          .chatResponse()
+          .content()
           .doOnNext(
-              resp -> {
-                // Extract text delta from the streaming response
-                if (resp.getResult() != null
-                    && resp.getResult().getOutput() != null
-                    && resp.getResult().getOutput().getText() != null) {
-                  String text = resp.getResult().getOutput().getText();
-                  if (!text.isEmpty()) {
-                    sink.tryEmitNext(new AgentEvent.DeltaEvent(text));
-                  }
+              text -> {
+                if (text != null && !text.isEmpty()) {
+                  sink.tryEmitNext(new AgentEvent.DeltaEvent(text));
                 }
               })
           .doOnComplete(
               () -> {
-                // Emit usage if available
-                // Emit done
+                metrics.recordAgentLatency(req.modelId(), System.currentTimeMillis() - startTime);
                 sink.tryEmitNext(
                     new DoneEvent("final", newContinuationToken(), null, null));
                 sink.tryEmitComplete();
               })
           .doOnError(
               err -> {
+                metrics.recordAgentLatency(req.modelId(), System.currentTimeMillis() - startTime);
                 LOG.error("Chat model call failed: {}", err.getMessage());
                 sink.tryEmitNext(
                     new AgentEvent.ErrorEvent(50002, "Model upstream error", null));
@@ -137,10 +156,12 @@ public class AgentLoop {
 
   /** Agent mode: multi-turn loop with plan/toolCall/result cycle. */
   private void runAgent(
+      ChatClient chatClient,
       ConversationRequest req,
       AgentState state,
       int maxSteps,
-      Sinks.Many<AgentEvent> sink) {
+      Sinks.Many<AgentEvent> sink,
+      long startTime) {
     String toolsSchema = toolRouter.toolsSchemaJson();
 
     // Start the loop in a separate thread to avoid blocking the Flux.create thread
@@ -154,6 +175,7 @@ public class AgentLoop {
 
                   // 1. Assemble prompt
                   Prompt prompt = orchestrator.assemble(req, state, toolsSchema);
+                  prompt = safeguardAdvisor.sanitize(prompt);
 
                   // 2. Call model (non-streaming for agent to get structured JSON)
                   String modelOutput;
@@ -209,6 +231,7 @@ public class AgentLoop {
 
                   if (turn.toolCall != null) {
                     sink.tryEmitNext(turn.toolCall);
+                    metrics.recordToolCall(turn.toolCall.name(), true);
 
                     // Wait for client tool result
                     String toolCallId = turn.toolCall.id();
@@ -288,6 +311,7 @@ public class AgentLoop {
                 sink.tryEmitNext(new AgentEvent.ErrorEvent(50001, e.getMessage(), null));
                 sink.tryEmitNext(new DoneEvent("failed", null, null, null));
               } finally {
+                metrics.recordAgentLatency(req.modelId(), System.currentTimeMillis() - startTime);
                 sink.tryEmitComplete();
               }
             });

@@ -212,6 +212,13 @@ public sealed interface AgentEvent {
       return "patch";
     }
 
-    public record Patch(String path, String op, ConversationRequest.Range range, String newContent) {}
+    public record Patch(
+        String path,
+        String op,
+        ConversationRequest.Range range,
+        String newContent,
+        String search,
+        String replace,
+        String description) {}
   }
 }
