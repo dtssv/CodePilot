@@ -69,7 +69,23 @@ codepilot:
     jwt-secret: ${CODEPILOT_JWT_SECRET:?env variable CODEPILOT_JWT_SECRET is required}
     hmac-secret: ${CODEPILOT_HMAC_SECRET:?env variable CODEPILOT_HMAC_SECRET is required}
     sso:
-      secret: ${CODEPILOT_SSO_SECRET:?env variable CODEPILOT_SSO_SECRET is required}
+      oidc:
+        issuer: ${CODEPILOT_OIDC_ISSUER:}
+        jwks-uri: ${CODEPILOT_OIDC_JWKS_URI:}
+        audiences:
+          - ${CODEPILOT_OIDC_AUDIENCE:codepilot}
+        jwks-cache-ttl: ${CODEPILOT_OIDC_JWKS_TTL:15m}
+        device-flow:
+          authorization-endpoint: ${CODEPILOT_OIDC_DEVICE_AUTH_ENDPOINT:}
+          token-endpoint: ${CODEPILOT_OIDC_TOKEN_ENDPOINT:}
+          client-id: ${CODEPILOT_OIDC_CLIENT_ID:}
+          client-secret: ${CODEPILOT_OIDC_CLIENT_SECRET:}
+          scope: ${CODEPILOT_OIDC_SCOPE:openid profile email offline_access}
+      hmac-bridge:
+        secret: ${CODEPILOT_SSO_BRIDGE_SECRET:}
+      dev:
+        enabled: ${CODEPILOT_SSO_DEV_ENABLED:false}
+        token: ${CODEPILOT_SSO_DEV_TOKEN:}
 
 springdoc:
   swagger-ui:

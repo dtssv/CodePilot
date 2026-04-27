@@ -44,7 +44,10 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
           "/favicon.ico",
           "/v1/version",
           "/v1/auth/login",
-          "/v1/auth/refresh");
+          "/v1/auth/refresh",
+          "/v1/auth/methods",
+          "/v1/auth/device-code",
+          "/v1/auth/device-token");
 
   private static final int MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
 

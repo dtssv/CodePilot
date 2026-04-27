@@ -26,12 +26,27 @@
 | `CODEPILOT_REDIS_URL` | Redis URL | ✓ |
 | `CODEPILOT_LLM_BASE_URL` / `_API_KEY` / `_DEFAULT_MODEL` | LLM 上游（OpenAI 协议） | ✓ |
 | `CODEPILOT_JWT_SECRET` / `CODEPILOT_HMAC_SECRET` | 鉴权与签名密钥 | ✓ |
-| `CODEPILOT_SSO_SECRET` | SSO 桥接共享密钥（用于校验外部下发的 bootstrap token） | ✓ |
+| `CODEPILOT_OIDC_*` | 生产推荐：OIDC issuer / jwks-uri / 受众 / Device Flow 端点 | 三选一（OIDC / 桥 / dev） |
+| `CODEPILOT_SSO_BRIDGE_SECRET` | 企业 SSO 桥共享密钥 | 三选一 |
+| `CODEPILOT_SSO_DEV_ENABLED` / `_TOKEN` | 仅 dev profile 生效；线上必须为 false/空 | 三选一 |
 | `CODEPILOT_DB_POOL_MAX` | HikariCP 最大连接数 | ✗（默认 40） |
 | `CODEPILOT_PORT` | 监听端口 | ✗（默认 8080） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry collector | ✗ |
 
 ## 3. 本地开发
+
+### 3.0 关于 ssoToken 的来源
+
+`/v1/auth/login` 接受一个**外部已签发**的 `ssoToken`，自身不发起认证。三种获取方式（择一启用即可）：
+
+1. **OIDC（推荐生产）** — 在 IdP（Keycloak / Okta / Azure AD / 自建 OIDC）注册 CodePilot 客户端并启用 Device Authorization。配置 `CODEPILOT_OIDC_*` 后：
+   - 插件登录时调用 `POST /v1/auth/device-code`（CodePilot 网关代发起 RFC 8628 请求），拿到 `verificationUriComplete + userCode`，引导用户在浏览器完成登录。
+   - 插件按 `interval` 轮询 `POST /v1/auth/device-token`，得到 `idToken`。
+   - 把 `idToken` 作为 `ssoToken` 调用 `/v1/auth/login`，换得 CodePilot JWT 与 `deviceSecret`。
+2. **企业 SSO 桥（HMAC）** — 部署方有自己的登录页 / 工号体系：在 IdP 之外部署一个"SSO Adapter"，登录成功后用 `CODEPILOT_SSO_BRIDGE_SECRET` 签一个短时 HMAC bootstrap token，插件直接发到 `/v1/auth/login` 即可。
+3. **Dev 登录（仅本地）** — `CODEPILOT_SSO_DEV_ENABLED=true` + dev profile 时启用；token 形如 `<dev-token>:<userId>:<tenant>:<device>`，仅用于演示与冒烟测试，**生产必须关闭**。
+
+`GET /v1/auth/methods` 返回当前服务端启用了哪些方式（`oidc / hmacBridge / dev / deviceFlow`），插件据此决定登录界面。
 
 ```bash
 # 3.1 启动依赖

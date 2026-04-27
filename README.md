@@ -104,6 +104,7 @@ cd plugin
 - system Skill 仅驻后端，永不下发；`SystemPromptLeakFilter` 双向检测。
 - 用户的 user Skill / MCP 仅本地存储（项目级 `<projectRoot>/.codePilot/...` 或全局级系统配置目录）。
 - `Authorization: Bearer <jwt>` + `X-CodePilot-Signature` HMAC 双层鉴权；时间戳 + nonce 防重放。
+- 登录方式：OIDC Device Flow（生产推荐）/ 企业 SSO 桥（HMAC bootstrap token）/ Dev 模式（仅本地）。详见 [DEPLOY.md §3.0](DEPLOY.md#30-关于-ssotoken-的来源)。
 - 所有上行内容做正则脱敏；模型输出做"代码注入 / 凭证 / PII / 系统提示词外泄"扫描。
 
 ## 开发约定
