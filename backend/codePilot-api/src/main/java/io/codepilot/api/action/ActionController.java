@@ -19,10 +19,11 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
 /**
- * One-click action endpoints (refactor, review, comment, gentest, gendoc). These are shortcuts that
- * wrap /conversation/run with a fixed mode and action-specific prompt assembly.
+ * One-click action endpoints (refactor, review, comment, gentest, gendoc, inline-completion,
+ * commit-message). These are shortcuts that wrap /conversation/run with a fixed mode and
+ * action-specific prompt assembly.
  */
-@Tag(name = "action", description = "One-click actions (refactor, review, comment, gentest, gendoc)")
+@Tag(name = "action", description = "One-click actions (refactor, review, comment, gentest, gendoc, inline-completion, commit-message)")
 @RestController
 @RequestMapping(value = "/v1/actions", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 public class ActionController {
@@ -65,6 +66,41 @@ public class ActionController {
     return runAction(req, "gendoc");
   }
 
+  @Operation(summary = "Generate git commit message from diff")
+  @PostMapping(value = "/commit-message", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> commitMessage(@RequestBody @Valid CommitMessageRequest req) {
+    String input = "[action:commit-message]\n"
+        + "Branch: " + (req.branchName() != null ? req.branchName() : "unknown") + "\n"
+        + (req.recentCommits() != null ? "Recent commits:\n" + req.recentCommits() + "\n" : "")
+        + "\n```diff\n" + req.diff() + "\n```";
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
+  @Operation(summary = "Inline code completion")
+  @PostMapping(value = "/inline-completion", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> inlineCompletion(
+      @RequestBody @Valid InlineCompletionRequest req) {
+    var sb = new StringBuilder();
+    sb.append("[action:inline-completion]\n");
+    sb.append("Language: ").append(req.language()).append('\n');
+    sb.append("File: ").append(req.filePath()).append('\n');
+    if (req.fileOutline() != null) {
+      sb.append("File outline:\n").append(req.fileOutline()).append('\n');
+    }
+    sb.append("\n[PREFIX]\n").append(req.prefix()).append('\n');
+    sb.append("[SUFFIX]\n").append(req.suffix()).append('\n');
+    sb.append("\nComplete the code at the cursor (between PREFIX and SUFFIX):");
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), sb.toString(),
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
   private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action) {
     // Build a ConversationRunRequest with mode=chat (actions are single-turn, no tools)
     // The action type is passed via the input prefix for PromptOrchestrator to pick the right Skill
@@ -86,4 +122,21 @@ public class ActionController {
       String testFramework,
       String docTarget,
       String audience) {}
+
+  public record CommitMessageRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String diff,
+      String branchName,
+      String recentCommits) {}
+
+  public record InlineCompletionRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String prefix,
+      @NotBlank String suffix,
+      @NotBlank String language,
+      @NotBlank String filePath,
+      String fileOutline,
+      Integer maxTokens) {}
 }

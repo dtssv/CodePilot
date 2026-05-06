@@ -102,7 +102,7 @@ class MarketplacePanel(private val project: Project) {
         val registries = settings.state.registries
         val registryUrl = if (selectedIdx < registries.size) registries[selectedIdx].url else null
 
-        client.listPackages(type = "skill", registryUrl = registryUrl).whenComplete { list, err ->
+        client.listPackages(type = "skill").whenComplete { list, err ->
             SwingUtilities.invokeLater {
                 officialListModel.clear()
                 if (err != null) {

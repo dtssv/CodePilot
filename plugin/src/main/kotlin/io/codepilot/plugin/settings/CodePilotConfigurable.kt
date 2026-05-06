@@ -2,7 +2,9 @@ package io.codepilot.plugin.settings
 
 import com.intellij.openapi.options.Configurable
 import com.intellij.ui.dsl.builder.bindIntText
+import com.intellij.ui.dsl.builder.bindItem
 import com.intellij.ui.dsl.builder.bindSelected
+import com.intellij.ui.dsl.builder.columns
 import com.intellij.ui.dsl.builder.bindText
 import com.intellij.ui.dsl.builder.panel
 import javax.swing.JComponent

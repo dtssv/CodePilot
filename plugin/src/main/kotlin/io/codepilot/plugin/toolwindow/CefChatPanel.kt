@@ -33,6 +33,7 @@ class CefChatPanel(private val project: Project) : Disposable {
     private val queryHandler: JBCefJSQuery
     private val sessionStore = SessionStore.getInstance()
     private val client = ConversationClient()
+    private val sessionHandle = sessionStore.newSession((project.basePath ?: project.name).hashCode().toString(16), "agent", null)
 
     private val panel = JPanel(BorderLayout())
 
@@ -116,11 +117,11 @@ class CefChatPanel(private val project: Project) : Disposable {
     }
 
     private fun handleUserMessage(text: String, mode: String) {
-        val session = sessionStore.currentSession(project)
-        val dispatcher = ToolDispatcher(project, client, session.meta.id)
+        
+        val dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            client.run(session.meta.id, text, mode) { eventType, data ->
+            client.run(sessionHandle.meta.id, text, mode) { eventType, data ->
                 dispatchToWeb(eventType, data)
                 // Handle tool calls via dispatcher
                 if (eventType == "tool_call") {
@@ -136,8 +137,8 @@ class CefChatPanel(private val project: Project) : Disposable {
     }
 
     private fun handleStop() {
-        val session = sessionStore.currentSession(project)
-        client.stop(session.meta.id)
+        
+        client.stop(sessionHandle.meta.id)
     }
 
     private fun handleRiskApproval(approved: Boolean) {
@@ -146,8 +147,8 @@ class CefChatPanel(private val project: Project) : Disposable {
     }
 
     private fun handleNeedsInputResponse(answer: String) {
-        val session = sessionStore.currentSession(project)
-        client.submitToolResult(session.meta.id, "needs_input", answer, true)
+        
+        client.submitToolResult(sessionHandle.meta.id, "needs_input", answer, true)
     }
 
     private fun resolveWebUiPath(): String {

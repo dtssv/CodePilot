@@ -28,6 +28,7 @@ class ShellExecutor(private val project: Project) {
         val osHint = args.path("osHint").asText(detectOs())
 
         val cmdLine = buildCommandLine(command, cwd, osHint)
+        val startMs = System.currentTimeMillis()
         val handler = CapturingProcessHandler(cmdLine)
         val output = handler.runProcessWithProgressIndicator(
             com.intellij.openapi.progress.EmptyProgressIndicator(),
@@ -39,7 +40,7 @@ class ShellExecutor(private val project: Project) {
         return mapOf(
             "exitCode" to output.exitCode,
             "timedOut" to output.isTimeout,
-            "durationMs" to output.executionTime,
+            "durationMs" to (System.currentTimeMillis() - startMs),
             "stdout" to stdout,
             "stderr" to stderr,
             "os" to osHint,

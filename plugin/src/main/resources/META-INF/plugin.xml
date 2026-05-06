@@ -4,6 +4,7 @@
   <vendor>CodePilot</vendor>
 
   <depends>com.intellij.modules.platform</depends>
+  <depends optional="true" config-file="codepilot-git.xml">Git4Idea</depends>
 
   <extensions defaultExtensionNs="com.intellij">
     <applicationService serviceImplementation="io.codepilot.plugin.settings.CodePilotSettings"/>
@@ -30,6 +31,8 @@
 
     <postStartupActivity implementation="io.codepilot.plugin.startup.CodePilotStartupActivity"/>
     <notificationGroup id="CodePilot" displayType="BALLOON"/>
+
+    <inlineCompletionProvider implementation="io.codepilot.plugin.completion.CodePilotInlineCompletionProvider"/>
   </extensions>
 
   <actions>

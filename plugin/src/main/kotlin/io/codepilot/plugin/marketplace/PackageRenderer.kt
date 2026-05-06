@@ -24,7 +24,7 @@ class PackageRenderer : ListCellRenderer<MarketplaceClient.Package> {
         panel.isOpaque = true
         panel.background = if (isSelected) list.selectionBackground else list.background
         panel.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createMatteBorder(0, 0, 1, 0, JBUI.CurrentTheme.Table.lineColor()),
+            BorderFactory.createMatteBorder(0, 0, 1, 0, JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground()),
             JBUI.Borders.empty(4, 6),
         )
         val title = JLabel("${value.name}  (${value.slug} ${value.latestVersion ?: ""})")

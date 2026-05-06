@@ -203,7 +203,7 @@ class CodePilotChatPanel(private val project: Project) {
         return java.util.HexFormat.of().formatHex(digest)
     }
 
-    private fun panelListener(originalInput: String) =
+    private fun panelListener(originalInput: String): ConversationClient.Listener =
         object : ConversationClient.Listener {
             override fun onDelta(text: String) = appendTranscript(text)
             override fun onPlan(payload: JsonNode) {

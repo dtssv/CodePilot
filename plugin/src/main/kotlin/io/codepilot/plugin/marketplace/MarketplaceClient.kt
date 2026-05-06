@@ -56,7 +56,7 @@ class MarketplaceClient(
     private fun <T> execute(request: Request, type: Class<T>): CompletableFuture<T> {
         val future = CompletableFuture<T>()
         http.client().newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) = future.completeExceptionally(e)
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) { future.completeExceptionally(e) }
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 response.use {
                     if (!it.isSuccessful) {
@@ -75,7 +75,7 @@ class MarketplaceClient(
     private fun executeMap(request: Request): CompletableFuture<Map<String, Any?>> {
         val future = CompletableFuture<Map<String, Any?>>()
         http.client().newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) = future.completeExceptionally(e)
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) { future.completeExceptionally(e) }
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 response.use {
                     if (!it.isSuccessful) {

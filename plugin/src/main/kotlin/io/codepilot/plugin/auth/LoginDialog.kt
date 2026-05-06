@@ -8,6 +8,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPasswordField
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.components.JBTextField
+import com.intellij.ui.dsl.builder.columns
 import com.intellij.ui.dsl.builder.panel
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.awt.BorderLayout

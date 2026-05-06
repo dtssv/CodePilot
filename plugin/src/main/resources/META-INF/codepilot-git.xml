@@ -1,0 +1,11 @@
+<idea-plugin>
+  <actions>
+    <action id="CodePilot.GenerateCommitMessage"
+            class="io.codepilot.plugin.vcs.GenerateCommitMessageAction"
+            text="Generate Commit Message with CodePilot"
+            description="Use CodePilot AI to generate a commit message from staged changes"
+            icon="AllIcons.Actions.Lightning">
+      <add-to-group group-id="Vcs.MessageActionGroup" anchor="first"/>
+    </action>
+  </actions>
+</idea-plugin>
