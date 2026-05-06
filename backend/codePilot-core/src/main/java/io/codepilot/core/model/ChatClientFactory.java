@@ -81,8 +81,8 @@ public class ChatClientFactory {
     int timeout = (Integer) row.get("timeout_ms");
 
     String apiKey = decrypt(cipher);
-    OpenAiApi api = OpenAiApi.builder().baseUrl(baseUrl).apiKey(apiKey).build();
-    OpenAiChatOptions opts = OpenAiChatOptions.builder().model(model).build();
+    OpenAiApi api = new OpenAiApi(baseUrl, apiKey);
+    OpenAiChatOptions opts = OpenAiChatOptions.builder().withModel(model).build();
     OpenAiChatModel chatModel = new OpenAiChatModel(api, opts);
 
     log.info("Built custom ChatClient for provider={} model={}", providerId, model);

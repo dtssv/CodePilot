@@ -52,7 +52,7 @@ public class ToolResultController {
       String errorMessage,
       Long durationMs) {
 
-    public boolean ok() {
+    public Boolean ok() {
       return ok != null && ok;
     }
   }

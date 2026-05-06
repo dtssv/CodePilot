@@ -165,6 +165,6 @@ public class ConversationService {
 
   private static String deltaFromChatResponse(ChatResponse r) {
     if (r == null || r.getResult() == null || r.getResult().getOutput() == null) return "";
-    return r.getResult().getOutput().getText();
+    return r.getResult().getOutput().getContent();
   }
 }

@@ -16,7 +16,7 @@ mysql-connector  = "8.3.0"
 pgvector         = "0.1.6"
 resilience4j     = "2.2.0"
 bucket4j         = "8.10.1"
-jose             = "10.0.3"          # Nimbus jose-jwt
+jose             = "9.37.3"          # Nimbus jose-jwt
 hikari           = "5.1.0"
 jcommander       = "1.83"
 springdoc        = "2.6.0"
@@ -59,7 +59,7 @@ pgvector                       = { module = "com.pgvector:pgvector",            
 hikari                         = { module = "com.zaxxer:HikariCP",                     version.ref = "hikari" }
 caffeine                       = { module = "com.github.ben-manes.caffeine:caffeine",  version.ref = "caffeine" }
 resilience4j-spring-boot3      = { module = "io.github.resilience4j:resilience4j-spring-boot3", version.ref = "resilience4j" }
-bucket4j-core                  = { module = "com.bucket4j:bucket4j_jdk17-core",        version.ref = "bucket4j" }
+bucket4j-core                  = { module = "com.bucket4j:bucket4j-core",              version.ref = "bucket4j" }
 nimbus-jose-jwt                = { module = "com.nimbusds:nimbus-jose-jwt",            version.ref = "jose" }
 json-schema-validator          = { module = "com.networknt:json-schema-validator",     version.ref = "json-schema" }
 jtokkit                        = { module = "com.knuddels:jtokkit",                    version.ref = "jtokkit" }

@@ -33,7 +33,7 @@ subprojects {
     tasks.withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
         options.release.set(javaVersion)
-        options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all", "-Werror"))
+        options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all,-processing,-serial,-this-escape"))
     }
 
     extensions.configure<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension> {

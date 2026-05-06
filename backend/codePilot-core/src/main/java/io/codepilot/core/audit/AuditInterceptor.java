@@ -1,7 +1,7 @@
 package io.codepilot.core.audit;
 
 import io.codepilot.common.api.TraceIdHolder;
-import io.codepilot.mcp.audit.AuditRepository;
+import io.codepilot.core.audit.AuditRepository;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

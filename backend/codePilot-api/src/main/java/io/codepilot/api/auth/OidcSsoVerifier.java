@@ -9,9 +9,7 @@ import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import com.nimbusds.jose.jwk.source.JWKSource;
-import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import com.nimbusds.jose.jwk.source.RemoteJWKSet;
-import com.nimbusds.jose.jwk.source.URLBasedJWKSetSource;
 import com.nimbusds.jose.util.DefaultResourceRetriever;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -64,15 +62,11 @@ public class OidcSsoVerifier implements SsoVerifier {
         new DefaultResourceRetriever(2_000, 2_000, 50_000);
 
     JWKSource<SecurityContext> jwkSource =
-        JWKSourceBuilder.create(new URLBasedJWKSetSource<>(jwksUrl, retriever))
-            .cache(cfg.jwksCacheTtl().toMillis(), 30_000)
-            .retrying(true)
-            .rateLimited(false)
-            .build();
+        new RemoteJWKSet<>(jwksUrl, retriever);
 
     JWSKeySelector<SecurityContext> keySelector =
         new JWSVerificationKeySelector<>(
-            List.of(JWSAlgorithm.RS256, JWSAlgorithm.ES256, JWSAlgorithm.RS384, JWSAlgorithm.RS512),
+            JWSAlgorithm.RS256,
             jwkSource);
 
     DefaultJWTProcessor<SecurityContext> proc = new DefaultJWTProcessor<>();

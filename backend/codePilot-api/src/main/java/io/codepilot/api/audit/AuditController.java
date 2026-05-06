@@ -1,7 +1,7 @@
 package io.codepilot.api.audit;
 
 import io.codepilot.common.api.ApiResponse;
-import io.codepilot.mcp.audit.AuditRepository;
+import io.codepilot.core.audit.AuditRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
