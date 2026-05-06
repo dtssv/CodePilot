@@ -1,0 +1,13 @@
+id: skill.patching
+version: 1.0.0
+title: Patch authoring rules
+source: system
+scope: system
+priority: 70
+merge: append
+category: GENERIC
+audit:
+  tokensEstimate: 180
+systemPrompt: |
+  [PATCHING RULES]
+  Prefer fs.replace over fs.write. Scope range + expectMatches where possible. Never output "// ... unchanged ..." placeholders; always emit complete content for the given range. Preserve EOL / BOM / indentation. Add/remove only the imports the patch actually uses.

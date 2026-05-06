@@ -13,6 +13,7 @@ import io.codepilot.core.skill.ActivatedSkill;
 import io.codepilot.core.skill.UserSkillValidator;
 import io.codepilot.core.sse.SseEvents;
 import io.codepilot.core.tool.ToolSchemaRegistry;
+import io.codepilot.core.skill.SkillRouter;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,6 +44,7 @@ public class ConversationService {
   private final StopSignalBus stopBus;
   private final SseFactory sse;
   private final ToolSchemaRegistry toolSchemas;
+  private final SkillRouter skillRouter;
 
   public ConversationService(
       ChatClient.Builder chatClientBuilder,
@@ -56,7 +58,8 @@ public class ConversationService {
       ToolResultBus bus,
       StopSignalBus stopBus,
       SseFactory sse,
-      ToolSchemaRegistry toolSchemas) {
+      ToolSchemaRegistry toolSchemas,
+      SkillRouter skillRouter) {
     this.chatClient = chatClientBuilder.build();
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
@@ -69,6 +72,7 @@ public class ConversationService {
     this.stopBus = stopBus;
     this.sse = sse;
     this.toolSchemas = toolSchemas;
+    this.skillRouter = skillRouter;
   }
 
   public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
@@ -84,11 +88,7 @@ public class ConversationService {
 
     List<ActivatedSkill> activated;
     try {
-      activated =
-          userSkillValidator.validate(
-              req.userSkills(),
-              req.projectRootHash(),
-              req.tools() == null ? Set.of() : Set.copyOf(req.tools()));
+      activated = skillRouter.route(req).skills();
     } catch (CodePilotException ex) {
       return Flux.just(
           sse.error(ex.code(), ex.getMessage()),

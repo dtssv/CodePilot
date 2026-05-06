@@ -1,0 +1,18 @@
+id: skill.lang.tsjs
+version: 1.0.0
+title: TypeScript / JavaScript profile
+source: system
+scope: system
+priority: 50
+merge: append
+category: LANG_PRIMARY
+triggers:
+  any:
+    - language: [typescript, javascript]
+    - fileGlob: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/package.json", "**/tsconfig*.json"]
+audit:
+  tokensEstimate: 180
+  tags: [tsjs]
+systemPrompt: |
+  [TS/JS]
+  Respect project's module system (ESM/CJS) and tsconfig strict. React: function components + hooks; do not mix paradigms. Async: prefer async/await; never swallow errors. Tests: vitest/jest as the project uses; follow describe/it conventions.

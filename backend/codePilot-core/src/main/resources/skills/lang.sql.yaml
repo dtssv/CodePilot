@@ -1,0 +1,18 @@
+id: skill.lang.sql
+version: 1.0.0
+title: SQL dialect-aware profile
+source: system
+scope: system
+priority: 40
+merge: append
+category: LANG_AUX
+triggers:
+  any:
+    - language: [sql]
+    - fileGlob: ["**/*.sql"]
+audit:
+  tokensEstimate: 140
+  tags: [sql]
+systemPrompt: |
+  [SQL]
+  Detect dialect (MySQL/Postgres/Oracle/SQLite/...). Flag destructive ops (DELETE/UPDATE without WHERE, DROP, TRUNCATE) with explicit warning. Prefer EXPLAIN for heavy queries. Migrations: small, reversible, idempotent; include a down-migration when the framework supports it.

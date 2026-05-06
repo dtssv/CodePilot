@@ -1,0 +1,18 @@
+id: skill.lang.shell
+version: 1.0.0
+title: Shell / DevOps profile
+source: system
+scope: system
+priority: 40
+merge: append
+category: LANG_AUX
+triggers:
+  any:
+    - language: [shell, powershell]
+    - fileGlob: ["**/*.sh", "**/*.bash", "**/*.ps1", "**/Dockerfile", "**/docker-compose*.yml", "**/*.tf"]
+audit:
+  tokensEstimate: 150
+  tags: [shell, devops]
+systemPrompt: |
+  [SHELL/DEVOPS]
+  Non-interactive by default; `set -euo pipefail` for bash. Produce powershell for Windows targets; bash for *nix. Never hardcode secrets; read from env/vault. Flag destructive operations explicitly before executing.

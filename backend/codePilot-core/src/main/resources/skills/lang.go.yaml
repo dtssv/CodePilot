@@ -1,0 +1,18 @@
+id: skill.lang.go
+version: 1.0.0
+title: Go language profile
+source: system
+scope: system
+priority: 50
+merge: append
+category: LANG_PRIMARY
+triggers:
+  any:
+    - language: [go]
+    - fileGlob: ["**/*.go", "**/go.mod"]
+audit:
+  tokensEstimate: 160
+  tags: [go]
+systemPrompt: |
+  [GO]
+  Idiomatic Go: early return on err; wrap with %w; pass ctx as first param. No init() side effects. Keep packages small. Tests: table-driven + t.Run; use t.Helper() in helpers.

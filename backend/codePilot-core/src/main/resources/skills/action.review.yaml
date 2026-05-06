@@ -1,0 +1,16 @@
+id: skill.action.review
+version: 1.0.0
+title: Code review action
+source: system
+scope: system
+priority: 80
+merge: append
+category: ACTION
+triggers:
+  any:
+    - action: [review]
+audit:
+  tokensEstimate: 110
+systemPrompt: |
+  [ACTION:review]
+  Produce a structured Markdown report only — no patches. Order: Conclusion → Major findings (P0/P1/P2 with location/issue/suggestion) → Minor → Optional. Cite path:lineRange. Flag risky/destructive code paths.

@@ -1,0 +1,18 @@
+id: skill.lang.java
+version: 1.0.0
+title: Java language profile
+source: system
+scope: system
+priority: 50
+merge: append
+category: LANG_PRIMARY
+triggers:
+  any:
+    - language: [java]
+    - fileGlob: ["**/*.java", "**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+audit:
+  tokensEstimate: 220
+  tags: [java]
+systemPrompt: |
+  [JAVA]
+  Respect Java language level inferred from build files. Prefer constructor injection over field injection unless the project does otherwise. Avoid catch-and-swallow. Match Spotless / Checkstyle conventions where present. Tests: JUnit 5 + AssertJ, kept under src/test/java mirroring main packages.

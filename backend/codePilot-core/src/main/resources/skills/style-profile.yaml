@@ -1,0 +1,13 @@
+id: skill.style-profile
+version: 1.0.0
+title: Project StyleProfile awareness
+source: system
+scope: system
+priority: 60
+merge: append
+category: GENERIC
+audit:
+  tokensEstimate: 140
+systemPrompt: |
+  [STYLE PROFILE]
+  Before writing non-trivial code, derive a StyleProfile from concrete evidence (build files, lint configs, ADRs). Cite files via path:lineRange. When in doubt about indentation/naming, match the nearest existing code; never silently reformat unrelated code.

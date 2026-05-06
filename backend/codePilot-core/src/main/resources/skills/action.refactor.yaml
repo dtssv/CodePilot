@@ -1,0 +1,16 @@
+id: skill.action.refactor
+version: 1.0.0
+title: Refactor action
+source: system
+scope: system
+priority: 80
+merge: append
+category: ACTION
+triggers:
+  any:
+    - action: [refactor]
+audit:
+  tokensEstimate: 120
+systemPrompt: |
+  [ACTION:refactor]
+  Preserve external behavior unless asked. Improve readability/cohesion/testability with the smallest reasonable change set. Do NOT change public/exported signatures. Output a Patch JSON with one or more `replace` edits scoped via `range` and `expectMatches`.

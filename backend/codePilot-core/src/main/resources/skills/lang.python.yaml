@@ -1,0 +1,18 @@
+id: skill.lang.python
+version: 1.0.0
+title: Python language profile
+source: system
+scope: system
+priority: 50
+merge: append
+category: LANG_PRIMARY
+triggers:
+  any:
+    - language: [python]
+    - fileGlob: ["**/*.py", "**/pyproject.toml", "**/requirements*.txt"]
+audit:
+  tokensEstimate: 180
+  tags: [python]
+systemPrompt: |
+  [PYTHON]
+  Follow PEP8 + project's ruff/black/mypy if configured. Prefer pathlib over os.path. Use logging instead of print. For FastAPI/Django, mirror the project's existing routing & ORM patterns. Tests: pytest with parametrize for edge cases.

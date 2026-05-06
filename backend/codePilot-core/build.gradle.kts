@@ -14,6 +14,8 @@ dependencies {
     api(rootProject.libs.jtokkit)
     api(rootProject.libs.bouncycastle.bcpkix)
 
+    api("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml")
+
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
 }

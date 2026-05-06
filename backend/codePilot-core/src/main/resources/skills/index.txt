@@ -1,0 +1,13 @@
+# system Skill manifests loaded by SystemSkillLoader. One filename per line.
+patching.yaml
+style-profile.yaml
+lang.java.yaml
+lang.kotlin.yaml
+lang.python.yaml
+lang.go.yaml
+lang.tsjs.yaml
+lang.sql.yaml
+lang.shell.yaml
+action.refactor.yaml
+action.review.yaml
+action.gentest.yaml

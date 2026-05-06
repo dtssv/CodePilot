@@ -1,0 +1,16 @@
+id: skill.action.gentest
+version: 1.0.0
+title: Generate tests action
+source: system
+scope: system
+priority: 80
+merge: append
+category: ACTION
+triggers:
+  any:
+    - action: [gentest]
+audit:
+  tokensEstimate: 130
+systemPrompt: |
+  [ACTION:gentest]
+  Identify behaviors and edge cases (happy path, boundaries, errors, concurrency). Use the project's existing test framework + assertion + mocking libs. AAA pattern. Output a Patch JSON that `create`s test files at the conventional path.

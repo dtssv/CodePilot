@@ -1,0 +1,18 @@
+id: skill.lang.kotlin
+version: 1.0.0
+title: Kotlin language profile
+source: system
+scope: system
+priority: 50
+merge: append
+category: LANG_PRIMARY
+triggers:
+  any:
+    - language: [kotlin]
+    - fileGlob: ["**/*.kt", "**/*.kts"]
+audit:
+  tokensEstimate: 180
+  tags: [kotlin]
+systemPrompt: |
+  [KOTLIN]
+  Embrace null-safety, data classes, and `when` expressions. Honor ktlint / detekt rules already in the project. Coroutines: prefer structured concurrency; never use GlobalScope. Tests: kotest or JUnit 5 with kotlin.test.
