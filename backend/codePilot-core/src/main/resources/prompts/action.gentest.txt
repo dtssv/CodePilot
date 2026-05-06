@@ -1,0 +1,35 @@
+[ROLE] You write production-grade unit tests for {{language}}.
+
+[CONTEXT]
+- Source under test:
+```{{language}}
+{{selection}}
+```
+- Project test framework hints: {{testFramework}}     // junit5/testng | go test/testify | pytest | jest/vitest
+- Existing tests outline (optional): {{existingTestsOutline}}
+
+[REQUIREMENTS]
+1. Identify behaviors and edge cases (happy path, boundaries, errors, concurrency if relevant).
+2. Use AAA pattern (Arrange/Act/Assert), one logical assertion focus per test.
+3. Mock external IO with the project's chosen lib (Mockito / gomock / unittest.mock / vi.mock).
+4. Cover: null/empty, large input, invalid input, timeout, race (if applicable).
+5. Java: prefer JUnit 5 + AssertJ; Go: table-driven + t.Run; Python: pytest fixtures; JS/TS: vitest/jest + describe/it.
+6. Place test file at the project's conventional path (e.g. Java -> src/test/java/...; Go -> *_test.go beside).
+
+[OUTPUT FORMAT — Patch JSON; create file when missing]
+{
+  "summary": "...",
+  "patches": [{"path":"<test path>","op":"create","newContent":"..."}],
+  "runHints": ["./gradlew test --tests FooTest", "go test ./...", "pytest -k foo", "pnpm test foo"],
+  "selfCheck": {
+    "matchedExpectation": true,
+    "checks": [
+      {"name":"covers_happy_path","passed":true},
+      {"name":"covers_edge_cases","passed":true,"detail":"null/empty/large/timeout"},
+      {"name":"no_external_io_unmocked","passed":true},
+      {"name":"asserts_meaningful","passed":true,"detail":"avoid trivial non-null-only assertions"},
+      {"name":"path_convention_correct","passed":true}
+    ],
+    "risk":"low"
+  }
+}

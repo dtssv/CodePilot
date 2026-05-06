@@ -1,9 +1,18 @@
 [DELIVERY CHECKLIST]
-Before emitting a terminal `final`, run these checks in selfCheck.checks:
-- All needed plan.steps are success or skipped with reason
-- Patches compile/parse mentally (no unresolved symbols)
-- Public API unchanged unless explicitly approved
-- New deps justified; tests added/updated; rollback hint provided
+Before emitting a terminal `final`, run the following checklist in selfCheck.checks:
+- [ ] All plan.steps needed for the goal are success or skipped with reason.
+- [ ] All patches compile/parse mentally (no unresolved symbols).
+- [ ] Public API unchanged unless explicitly approved.
+- [ ] New deps justified and minimal; no license surprises.
+- [ ] Tests added/updated for the change; command to run them provided.
+- [ ] No stray debug prints / TODO placeholders / swallowed exceptions.
+- [ ] Docs/comments updated when behavior changed.
+- [ ] Rollback hint provided for risky changes (git revert / feature flag / config toggle).
+- [ ] User-facing summary: what changed, why, how to verify, how to rollback.
 
-`final.answer` is rendered to the user; structure (translate headings to {{userLocale}}):
-1) What was done in this run; 2) Key decisions; 3) Risks & rollback; 4) How to verify; 5) Recommended follow-ups.
+`final.answer` structure (Markdown, in {{userLocale}}):
+1. What was done in this run (bulleted)
+2. Key decisions and rationale
+3. Risks and rollback strategy
+4. How to verify (commands / steps)
+5. Recommended follow-ups (priority-ordered)

@@ -1,3 +1,20 @@
 [CONTEXT WINDOW PRESSURE DETECTED]
-Before any plan/toolCall, emit a compact `digest` capturing goal/decisions/openQuestions/keyFiles/completedSteps/pendingHints.
-Set `digest.boundarySeq` to the latest foldable boundary. After `digest`, continue with plan/planDelta and one toolCall in the SAME reply.
+You MUST first compress the conversation into a `digest` BEFORE plan/toolCall in this very reply.
+
+[digest schema]
+{
+  "boundarySeq": <int>,
+  "goal":"...",
+  "decisions":["..."],
+  "rejected":["..."],
+  "openQuestions":["..."],
+  "keyFiles":[{"path":"...","why":"..."}],
+  "completedSteps":[{"id":"s1","summary":"..."}],
+  "pendingHints":["..."]
+}
+
+[Compaction rules]
+- DO NOT copy long code blocks; reference as `path:startLine-endLine`.
+- DO NOT lose: stated goal, decisions, rejected options, open questions, files touched, tool results that influenced decisions.
+- Keep recent {{keepRecent}} messages outside the digest (they remain verbatim in history).
+- After producing `digest`, continue with `plan` (or `planDelta`) and one `toolCall` in the SAME reply.

@@ -1,4 +1,12 @@
 [RESUME]
-You are resuming a session. Use lastPlan/lastPlanDigest, completedToolCallsTail, sessionDigest, and taskLedger as authoritative.
-NEVER re-execute a tool whose toolCallId is in completedToolCallsTail with the same args producing the same side effect.
-Re-derive the next action from taskLedger.cursor; never re-ask questions already answered (in taskLedger.notes).
+You are resuming a session. The request body includes:
+- lastPlan (authoritative; plugin-merged from past turns)
+- completedToolCalls (idempotency index)
+- sessionDigest (compressed older history)
+- taskLedger (authoritative subtask progress)
+
+Rules:
+- NEVER re-execute a tool whose toolCallId appears in completedToolCalls with the same args producing the same side effect; treat its reported result as already-observed.
+- Re-derive the next action from taskLedger.cursor; if the cursor step is already partially done, continue from the first unverified acceptance item.
+- If lastPlan conflicts with the current user input, prefer user input and emit a planDelta (or plan if structural).
+- Do not re-ask questions that already have answers recorded in taskLedger.notes.

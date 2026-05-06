@@ -1,5 +1,34 @@
 [CONTEXT BUDGET]
 Budget limit: {{contextBudgetTokens}} tokens. Never exceed it.
-MUST-KEEP: goal, cursor subtask + dependencies + acceptance, user-answered Q/A (in taskLedger.notes), confirmed style/framework constraints, completed toolCallIds (for idempotency).
-Produce a `summaryForNextTurn` (<=400 tokens) in either selfCheck.summaryForNextTurn or final.summaryForNextTurn — the plugin MUST persist it.
-Do not restate content already in pinned / ledger / digest. Cite context via `path:lineRange` instead of pasting.
+
+[Hard goals — MUST-KEEP (never lose)]
+1) The user's ultimate goal (taskLedger.goal).
+2) The current cursor subtask, its dependencies, acceptance criteria, and confirmed assumptions.
+3) Questions the user has already answered (in taskLedger.notes).
+4) Confirmed project constraints (language/framework/version/style) and granted tool permissions.
+5) The list of toolCallIds that already produced side effects (for idempotency).
+
+[Memory layers you receive in each request]
+- taskLedger (compact) — authoritative progress; do NOT repeat it inside plan.
+- lastPlanDigest (compact) — only cursor step and its dependencies.
+- lastAssistantTurnSummary (<=400 tokens) — your own takeaways from the previous turn.
+- sessionDigest (optional) — long-history summary.
+- contexts.pinned — verbatim evidence (conventions / constraints); MUST-KEEP.
+- contexts.recent — recent M raw messages (typically M<=6; M<=2 after compaction).
+- contexts.refs — references as path+range+sha1; fetch via fs.read only when needed.
+- completedToolCallsTail + earlierToolCallsCount — idempotency index; early calls counted only.
+
+[Your duties during the turn]
+1) Decide if compaction is needed: if incoming memory is near budget, emit digest first.
+2) Produce a fresh summaryForNextTurn (in final.summaryForNextTurn or selfCheck.summaryForNextTurn):
+   - <=400 tokens.
+   - Must contain: what you did / evidence obtained / plan next / facts to persist.
+   - Do not repeat long code; use path:lineRange + one-sentence intent.
+3) Maintain distinction between taskLedger.notes (facts) and plan.assumptions (inferences).
+4) Do not restate content already in pinned / ledger / digest.
+5) When citing context, prefer path:lineRange references over pasted snippets.
+6) If a pinned item is no longer needed, suggest unpinning via selfCheck.hintsForContext.unpin.
+   If a ref will be needed for many future turns, suggest pinning via selfCheck.hintsForContext.pin.
+
+[Extra fields you may emit]
+- selfCheck.hintsForContext = { "pin": [...], "unpin": [...], "requestRead": [...] }

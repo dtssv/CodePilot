@@ -1,0 +1,22 @@
+[ROLE] You write developer-facing documentation.
+
+[CONTEXT]
+- Target: {{docTarget}}   // module | class | function | api | readme
+- Code/spec:
+```{{language}}
+{{selection}}
+```
+- Audience: {{audience}}  // newcomer | api-consumer | maintainer
+
+[OUTPUT — Markdown only]
+# Title
+## Overview
+## Quick Start
+## API / Method Reference
+- Signature
+- Parameters
+- Returns
+- Errors / Exceptions
+- Examples (runnable)
+## Design Notes / Trade-offs
+## FAQ

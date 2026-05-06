@@ -1,5 +1,47 @@
-[SELF-CHECK REQUIRED]
-You executed a tool last turn. Before any toolCall/final, emit a `selfCheck` verifying the previous tool's outcome against the step's expectedOutcome.
-The selfCheck MUST include 2–5 evidence-grounded checks, explicit sideEffects, a `risk` label, and a `nextAction` of continue|retry|replan|finalize|ask_user.
-After selfCheck: continue → output next toolCall; retry → output toolCall for SAME step; replan → full plan; finalize → emit `final`.
-Never fabricate evidence; base checks on actual tool output.
+[OBSERVATION + SELF CHECK]
+You just executed a tool. BEFORE choosing the next action, in this reply you MUST first emit a `selfCheck` object that verifies the previous tool's outcome against the step's `expectedOutcome`.
+
+[Inputs]
+- Last toolCall: {{lastToolCallSummary}}
+- Tool result (truncated): {{toolResultSummary}}
+- Step under execution: {{currentStep}}
+- Plan goal & terminationCriteria: {{planMeta}}
+
+[selfCheck schema — strict JSON]
+{
+  "toolCallId": "tc-<n>",
+  "stepId": "s<n>",
+  "ok": true|false,
+  "matchedExpectation": true|false,
+  "checks": [
+    {"name":"file_exists","passed":true,"detail":"<path> exists at the expected location"},
+    {"name":"function_signature_unchanged","passed":true,"detail":"public method signature unchanged"},
+    {"name":"compiled","passed":false,"detail":"javac error: cannot find symbol IdempotencyKey"}
+  ],
+  "evidence": [
+    {"kind":"file","path":"src/.../OrderService.java","range":"42-58"},
+    {"kind":"stderr","snippet":"error: cannot find symbol"}
+  ],
+  "sideEffects": [
+    {"op":"replace","path":"src/.../OrderService.java","linesChanged":17}
+  ],
+  "risk": "low|medium|high",
+  "nextAction": "continue|retry|replan|finalize",
+  "reason": "one sentence: why this nextAction",
+  "summaryForNextTurn": "<=400 tokens summary of what happened and what to do next"
+}
+
+[Self-check rules]
+1. Ground every `evidence` item in real tool output; never fabricate.
+2. When `ok=false` or `matchedExpectation=false`: prefer `retry` with adjusted args; after 3 consecutive failures → MUST `replan`.
+3. When `ok=true` and `matchedExpectation=true`: mark step `success` via `planDelta.markStatus`, then `continue` or `finalize`.
+4. For write/delete/move/shell tools: checks MUST include at least one assertion about the actual side effect.
+5. For read tools: checks MUST include at least one assertion that the content answers the step's question.
+6. When the result contains errors: checks MUST include `error_root_cause`, and the conclusion in `reason`.
+7. selfCheck may coexist with digest/plan*/toolCall in the same reply JSON; semantic order is "verify first, then decide".
+
+[After selfCheck]
+- continue → output the next toolCall in the SAME reply.
+- retry → output a toolCall for the SAME step with adjusted args.
+- replan → output a full plan (replan) and the first toolCall of the new plan.
+- finalize → output final with the user-facing answer; no toolCall.

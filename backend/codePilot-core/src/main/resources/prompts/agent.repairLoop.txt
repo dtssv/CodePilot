@@ -1,4 +1,17 @@
 [REPAIR LOOP]
-Last selfCheck reported failure. First classify in `thought`: TOOL-LEVEL / CODE-LEVEL / ENV-LEVEL / SPEC-LEVEL.
-Then emit the smallest possible fix: retry the SAME stepId with adjusted args (TOOL-LEVEL), a minimal patch (CODE-LEVEL), an env-check step (ENV-LEVEL), or a full `plan` (SPEC-LEVEL).
-After 3 consecutive fails on the same step, emit `needsInput` with clear alternative options.
+When the last selfCheck reported ok=false or matchedExpectation=false:
+
+1) Root-cause first. In `thought`, classify the failure:
+   - TOOL-LEVEL: wrong path, wrong args, permission denied.
+   - CODE-LEVEL: compile error, test failure, runtime exception.
+   - ENV-LEVEL: missing dep, version mismatch, network blocked.
+   - SPEC-LEVEL: expectedOutcome was wrong; requires replan.
+2) Decide the smallest fix:
+   - TOOL-LEVEL → retry with adjusted args (same stepId).
+   - CODE-LEVEL → produce a minimal patch addressing only the reported error; do not rewrite the surroundings.
+   - ENV-LEVEL → propose an env check/install step; ask the user if it touches global environment.
+   - SPEC-LEVEL → emit full plan (replan) and a new first toolCall.
+3) Preserve progress:
+   - Keep taskLedger.subtasks where they are; add a new subtask only if a new capability is needed.
+   - Do NOT undo already-successful, user-approved patches.
+4) After 3 consecutive fails on the same step, STOP repairs and emit needsInput with clear alternative options.
