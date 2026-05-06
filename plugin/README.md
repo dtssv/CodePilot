@@ -20,6 +20,8 @@ cd plugin
 | Conversation client (SSE listener) | `.../plugin/conversation/` |
 | Local session store | `.../plugin/session/` |
 | ToolWindow + Chat panel | `.../plugin/toolwindow/` |
+| Marketplace Tab + Store | `.../plugin/marketplace/` |
+| MCP subprocess manager | `.../plugin/mcp/` |
 | Editor / project actions | `.../plugin/actions/` |
 | Reset commands + sentinel handling | `.../plugin/reset/` |
 | Self-update | `.../plugin/update/` |

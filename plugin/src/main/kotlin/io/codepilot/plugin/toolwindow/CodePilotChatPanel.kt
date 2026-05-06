@@ -177,7 +177,30 @@ class CodePilotChatPanel(private val project: Project) {
             ),
         )
         base.putAll(extras)
+        base["userSkills"] = collectUserSkills()
+        base["projectRootHash"] = projectRootHash()
         return base
+    }
+
+    private fun collectUserSkills(): List<Map<String, Any?>> {
+        val store = io.codepilot.plugin.marketplace.LocalMarketplaceStore.getInstance()
+        return store.activeSkills(project).map { active ->
+            mapOf(
+                "id" to active.entry.id,
+                "version" to active.entry.version,
+                "source" to "user",
+                "scope" to active.scope,
+                "projectRootHash" to projectRootHash(),
+                "sha256" to active.entry.sha256,
+                "yaml" to store.readSkillBody(active),
+            )
+        }
+    }
+
+    private fun projectRootHash(): String {
+        val base = project.basePath ?: project.name
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(base.toByteArray())
+        return java.util.HexFormat.of().formatHex(digest)
     }
 
     private fun panelListener(originalInput: String) =

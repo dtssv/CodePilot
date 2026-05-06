@@ -12,6 +12,8 @@
     <applicationService serviceImplementation="io.codepilot.plugin.auth.LoginService"/>
     <applicationService serviceImplementation="io.codepilot.plugin.session.SessionStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.update.UpdateService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.marketplace.LocalMarketplaceStore"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.mcp.McpProcessManager"/>
 
     <applicationConfigurable
         parentId="tools"
