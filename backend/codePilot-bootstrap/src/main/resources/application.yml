@@ -106,6 +106,14 @@ codepilot:
 
   kms-key: ${CODEPILOT_KMS_KEY:}
 
+  rag:
+    ttl: ${CODEPILOT_RAG_TTL:24h}
+    max-chunk-size: ${CODEPILOT_RAG_MAX_CHUNK_SIZE:4096}
+    embedding-dim: ${CODEPILOT_RAG_EMBEDDING_DIM:1536}
+
+  audit:
+    retention-days: ${CODEPILOT_AUDIT_RETENTION_DAYS:90}
+
   conversation:
     agent:
       max-steps: ${CODEPILOT_AGENT_MAX_STEPS:25}

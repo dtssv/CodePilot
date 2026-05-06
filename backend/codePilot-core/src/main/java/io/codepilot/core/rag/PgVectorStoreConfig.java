@@ -19,10 +19,6 @@ public class PgVectorStoreConfig {
 
   @Bean
   public VectorStore vectorStore(DataSource dataSource, EmbeddingModel embeddingModel) {
-    return PgVectorStore.builder(dataSource, embeddingModel)
-        .dimensions(1536)
-        .tableName("rag_chunks")
-        .schemaName("public")
-        .build();
+    return new PgVectorStore(dataSource, embeddingModel);
   }
 }

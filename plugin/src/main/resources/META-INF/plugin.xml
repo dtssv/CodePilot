@@ -1,0 +1,84 @@
+<idea-plugin>
+    <id>io.codepilot.intellij</id>
+    <name>CodePilot</name>
+    <vendor>CodePilot</vendor>
+    <description>AI-powered coding assistant with multi-model support, agent mode, and MCP/Skill marketplace</description>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- ToolWindow: Chat Panel -->
+        <toolWindow id="CodePilot Chat"
+                    secondary="true"
+                    anchor="right"
+                    factoryClass="io.codepilot.intellij.ui.ChatToolWindowFactory"
+                    icon="/icons/codepilot.svg"/>
+
+        <!-- Settings -->
+        <applicationConfigurable parentId="tools"
+                                 instance="io.codepilot.intellij.settings.CodePilotSettingsConfigurable"
+                                 id="io.codepilot.intellij.settings.CodePilotSettingsConfigurable"
+                                 displayName="CodePilot"/>
+
+        <applicationService serviceImplementation="io.codepilot.intellij.settings.CodePilotSettings"/>
+
+        <!-- Notification -->
+        <notificationGroup id="CodePilot Notifications" displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <!-- Context Actions Group (right-click menu) -->
+        <group id="CodePilot.ContextActions" text="CodePilot" popup="true"
+               icon="/icons/codepilot.svg">
+            <add-to-group group-id="EditorPopupMenu" anchor="first"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="first"/>
+
+            <action id="CodePilot.Refactor"
+                    class="io.codepilot.intellij.action.RefactorAction"
+                    text="Refactor with CodePilot"
+                    description="AI-powered refactoring">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt R"/>
+            </action>
+            <action id="CodePilot.Review"
+                    class="io.codepilot.intellij.action.ReviewAction"
+                    text="Review with CodePilot"
+                    description="AI-powered code review">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt V"/>
+            </action>
+            <action id="CodePilot.Comment"
+                    class="io.codepilot.intellij.action.CommentAction"
+                    text="Generate Comments"
+                    description="AI-powered comment generation">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt SLASH"/>
+            </action>
+            <action id="CodePilot.GenTest"
+                    class="io.codepilot.intellij.action.GenTestAction"
+                    text="Generate Tests"
+                    description="AI-powered test generation">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt T"/>
+            </action>
+            <action id="CodePilot.GenDoc"
+                    class="io.codepilot.intellij.action.GenDocAction"
+                    text="Generate Documentation"
+                    description="AI-powered documentation generation">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt D"/>
+            </action>
+            <separator/>
+            <action id="CodePilot.AddToChat"
+                    class="io.codepilot.intellij.action.AddToChatAction"
+                    text="Add to Chat"
+                    description="Add selection to CodePilot chat">
+                <keyboard-shortcut keymap="$default" first-keystroke="ctrl L"/>
+            </action>
+        </group>
+
+        <!-- Open Chat action -->
+        <action id="CodePilot.OpenChat"
+                class="io.codepilot.intellij.action.OpenChatAction"
+                text="Open CodePilot Chat"
+                description="Open the CodePilot chat window">
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl shift L"/>
+            <add-to-group group-id="ToolsMenu" anchor="first"/>
+        </action>
+    </actions>
+</idea-plugin>

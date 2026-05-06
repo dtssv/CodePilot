@@ -5,6 +5,7 @@ import io.codepilot.common.rag.RagIndexRequest.IndexItem;
 import io.codepilot.common.rag.RagSearchRequest;
 import io.codepilot.common.rag.RagSearchResult;
 import io.codepilot.common.rag.RagSearchResult.Hit;
+import io.codepilot.core.metrics.MetricsHelper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -29,9 +30,11 @@ public class RagService {
   private static final Logger LOG = LoggerFactory.getLogger(RagService.class);
 
   private final VectorStore vectorStore;
+  private final MetricsHelper metrics;
 
-  public RagService(VectorStore vectorStore) {
+  public RagService(VectorStore vectorStore, MetricsHelper metrics) {
     this.vectorStore = vectorStore;
+    this.metrics = metrics;
   }
 
   /**
@@ -62,6 +65,7 @@ public class RagService {
 
       vectorStore.add(documents);
       LOG.info("Indexed {} items for session={}", documents.size(), request.sessionId());
+      metrics.recordRagIndexed(documents.size());
       return documents.size();
     }).subscribeOn(Schedulers.boundedElastic());
   }
@@ -76,13 +80,12 @@ public class RagService {
    */
   public Mono<RagSearchResult> search(RagSearchRequest request) {
     return Mono.fromCallable(() -> {
-      var searchRequest = SearchRequest.builder()
-          .query(request.query())
-          .topK(request.topK())
-          .filterExpression("sessionId == '" + request.sessionId() + "'")
-          .build();
+      var searchRequest = SearchRequest.query(request.query())
+          .withTopK(request.topK())
+          .withFilterExpression("sessionId == '" + request.sessionId() + "'");
 
       var results = vectorStore.similaritySearch(searchRequest);
+      metrics.recordRagSearch();
 
       var hits = results.stream()
           .map(doc -> {

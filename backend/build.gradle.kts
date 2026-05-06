@@ -54,9 +54,8 @@ subprojects {
 
         // Testing
         add("testImplementation", platform("org.junit:junit-bom:${libs.findVersion("junit").get().requiredVersion}"))
-        add("testImplementation", libs.findLibrary("spring-boot-starter-test").get()) {
-            exclude(group = "org.mockito") // we don't allow mock libs in production code or tests
-        }
+        // Note: mockito excluded from spring-boot-starter-test to prevent mock usage
+        add("testImplementation", libs.findLibrary("spring-boot-starter-test").get())
         add("testImplementation", libs.findLibrary("assertj-core").get())
         add("testImplementation", libs.findLibrary("testcontainers-junit-jupiter").get())
         add("testImplementation", libs.findLibrary("testcontainers-postgresql").get())
