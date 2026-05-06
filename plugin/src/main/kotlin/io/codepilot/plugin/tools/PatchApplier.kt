@@ -37,6 +37,130 @@ class PatchApplier(private val project: Project) {
         }
     }
 
+    /**
+     * Dispatch a named tool operation (fs.write, fs.replace, fs.delete, fs.move) through the
+     * PatchApplier with DiffManager approval. Called from ToolDispatcher for mutating tools.
+     */
+    fun apply(toolName: String, args: JsonNode) {
+        ApplicationManager.getApplication().invokeLater {
+            when (toolName) {
+                "fs.write" -> {
+                    val rel = args.path("path").asText()
+                    val content = args.path("content").asText("")
+                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
+                        .put("op", "write")
+                        .put("path", rel)
+                        .put("newContent", content)
+                    applyEdit(edit)
+                }
+                "fs.replace" -> {
+                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
+                        .put("op", "replace")
+                        .put("path", args.path("path").asText())
+                        .put("search", args.path("search").asText())
+                        .put("replace", args.path("replace").asText(""))
+                        .put("regex", args.path("regex").asBoolean(false))
+                        .put("ignoreCase", args.path("ignoreCase").asBoolean(false))
+                    if (args.has("expectMatches")) edit.put("expectMatches", args.path("expectMatches").asInt())
+                    applyEdit(edit)
+                }
+                "fs.delete" -> {
+                    val rel = args.path("path").asText()
+                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
+                        .put("op", "delete")
+                        .put("path", rel)
+                    applyEdit(edit)
+                }
+                "fs.move" -> {
+                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
+                        .put("op", "move")
+                        .put("path", args.path("from").asText())
+                        .put("to", args.path("to").asText())
+                    applyEdit(edit)
+                }
+                else -> throw ToolViolation("PatchApplier: unsupported tool $toolName")
+            }
+        }
+    }
+
+    /**
+     * Apply a unified diff patch (as produced by the `ide.applyPatch` tool).
+     * Parses the unified diff format and applies each hunk with DiffManager approval.
+     */
+    fun applyUnifiedPatch(patchText: String) {
+        if (patchText.isBlank()) return
+        ApplicationManager.getApplication().invokeLater {
+            // Parse unified diff: extract file path and apply as a whole-file replace
+            val lines = patchText.lines()
+            var currentFile: String? = null
+            val hunks = StringBuilder()
+
+            for (line in lines) {
+                when {
+                    line.startsWith("+++ b/") || line.startsWith("+++ ") -> {
+                        // Flush previous file if any
+                        if (currentFile != null && hunks.isNotEmpty()) {
+                            applyHunkToFile(currentFile!!, hunks.toString())
+                            hunks.clear()
+                        }
+                        currentFile = line.removePrefix("+++ b/").removePrefix("+++ ").trim()
+                    }
+                    line.startsWith("--- ") -> { /* skip --- lines */ }
+                    currentFile != null -> hunks.appendLine(line)
+                }
+            }
+            // Apply last file
+            if (currentFile != null && hunks.isNotEmpty()) {
+                applyHunkToFile(currentFile!!, hunks.toString())
+            }
+        }
+    }
+
+    private fun applyHunkToFile(rel: String, patchContent: String) {
+        try {
+            val vf = PathGuard.resolve(project, rel)
+            val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+            val patched = applyUnifiedHunks(original, patchContent)
+            if (patched == original) return
+            if (!confirmIfNeeded(rel, original, patched, "Apply patch to $rel")) return
+            WriteCommandAction.runWriteCommandAction(project) {
+                vf.setBinaryContent(patched.toByteArray(StandardCharsets.UTF_8))
+            }
+        } catch (e: Exception) {
+            Messages.showErrorDialog(project, "Failed to apply patch to $rel: ${e.message}", "CodePilot")
+        }
+    }
+
+    private fun applyUnifiedHunks(original: String, hunkText: String): String {
+        // Simple hunk applier: process +/- lines relative to original
+        val origLines = original.lines().toMutableList()
+        val hunkLines = hunkText.lines()
+        val result = mutableListOf<String>()
+        var origIdx = 0
+
+        for (line in hunkLines) {
+            when {
+                line.startsWith("@@") -> {
+                    // Parse @@ -start,count +start,count @@
+                    val match = Regex("@@ -(\\d+)").find(line)
+                    val targetLine = (match?.groupValues?.get(1)?.toIntOrNull() ?: 1) - 1
+                    // Copy lines up to the hunk start
+                    while (origIdx < targetLine && origIdx < origLines.size) {
+                        result.add(origLines[origIdx++])
+                    }
+                }
+                line.startsWith("-") -> origIdx++ // skip removed line
+                line.startsWith("+") -> result.add(line.substring(1)) // add new line
+                line.startsWith(" ") -> { result.add(origLines.getOrElse(origIdx) { line.substring(1) }); origIdx++ }
+            }
+        }
+        // Copy remaining lines
+        while (origIdx < origLines.size) {
+            result.add(origLines[origIdx++])
+        }
+        return result.joinToString("\n")
+    }
+
     /** Apply a single Edit object (per-file change). */
     fun applyEdit(edit: JsonNode) {
         val op = edit.path("op").asText()

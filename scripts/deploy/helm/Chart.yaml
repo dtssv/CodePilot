@@ -1,0 +1,13 @@
+apiVersion: v2
+name: codepilot
+description: CodePilot AI coding assistant backend
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - coding-assistant
+  - spring-boot
+maintainers:
+  - name: CodePilot Team
+    email: ops@codepilot.local

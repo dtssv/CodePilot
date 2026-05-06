@@ -33,6 +33,8 @@ class LoginService {
                     return@whenComplete
                 }
                 flow.begin(code)
+                // Auto-open browser for device flow verification
+                openVerificationUri(code)
                 scheduleOidcPoll(flow, code)
             }
         return flow
@@ -90,6 +92,21 @@ class LoginService {
             pollMillis,
             java.util.concurrent.TimeUnit.MILLISECONDS,
         )
+    }
+
+    /**
+     * Opens the device verification URI in the system browser automatically.
+     * Falls back silently if the browser cannot be opened.
+     */
+    private fun openVerificationUri(code: AuthService.DeviceCode) {
+        val uri = code.verificationUriComplete ?: code.verificationUri ?: return
+        try {
+            com.intellij.ide.BrowserUtil.browse(uri)
+        } catch (e: Exception) {
+            // Silent fallback: user can still manually navigate
+            com.intellij.openapi.diagnostic.Logger.getInstance("LoginService")
+                .info("Could not auto-open browser for device flow: ${e.message}")
+        }
     }
 
     /** Small state holder consumed by the Swing dialog. */

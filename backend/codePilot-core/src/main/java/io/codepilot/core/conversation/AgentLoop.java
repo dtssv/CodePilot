@@ -1,11 +1,13 @@
 package io.codepilot.core.conversation;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.dto.DoneReason;
 import io.codepilot.core.dto.ModelEnvelope;
 import io.codepilot.core.dto.ToolCall;
+import io.codepilot.core.rag.ServerToolExecutor;
 import io.codepilot.core.sse.SseEvents;
 import java.time.Duration;
 import java.util.Map;
@@ -43,6 +45,7 @@ public final class AgentLoop {
   private final StopSignalBus stopBus;
   private final ObjectMapper mapper;
   private final SseFactory sse;
+  private final ServerToolExecutor serverToolExecutor;
 
   public AgentLoop(
       ChatClient chatClient,
@@ -50,13 +53,15 @@ public final class AgentLoop {
       ToolResultBus bus,
       StopSignalBus stopBus,
       ObjectMapper mapper,
-      SseFactory sse) {
+      SseFactory sse,
+      ServerToolExecutor serverToolExecutor) {
     this.chatClient = chatClient;
     this.parser = parser;
     this.bus = bus;
     this.stopBus = stopBus;
     this.mapper = mapper;
     this.sse = sse;
+    this.serverToolExecutor = serverToolExecutor;
   }
 
   /** Runs the loop and emits SSE events; respects {@code maxSteps} from the request policy. */
@@ -66,6 +71,16 @@ public final class AgentLoop {
         req.policy() != null && req.policy().maxSteps() != null ? req.policy().maxSteps() : 8;
 
     State state = new State(systemText, userText, maxSteps, req.sessionId());
+
+    // Populate completed tool call IDs from resume context for idempotency
+    if (req.completedToolCallsTail() != null) {
+      req.completedToolCallsTail().forEach(tc -> {
+        if (tc.toolCallId() != null) {
+          state.completedToolCallIds.add(tc.toolCallId());
+          state.history.append("[resumed:" + tc.name() + "] " + (Boolean.TRUE.equals(tc.ok()) ? "OK" : "ERR") + " (skipped)");
+        }
+      });
+    }
 
     Flux<ServerSentEvent<String>> stop =
         stopBus
@@ -97,6 +112,9 @@ public final class AgentLoop {
       return Flux.just(sse.event(SseEvents.DONE, Map.of("reason", "max_steps")));
     }
     state.steps++;
+
+    // Resume idempotency: skip tool calls that were already completed in a previous session
+    // The completedToolCallIds set is populated from the request's completedToolCallsTail.
 
     return invokeModel(state)
         .flatMapMany(
@@ -147,8 +165,42 @@ public final class AgentLoop {
     }
     if (env.toolCall() != null) {
       ToolCall tc = env.toolCall();
+
+      // Idempotency: skip already-completed tool calls from a resumed session
+      if (state.completedToolCallIds.contains(tc.id())) {
+        state.history.append("[tool:" + tc.name() + "] SKIPPED (already completed)");
+        return emitted.concatWith(nextTurn(state));
+      }
+
       Flux<ServerSentEvent<String>> toolEvent =
           Flux.just(sse.event(SseEvents.TOOL_CALL, tc));
+
+      // Server-side tool execution: run locally without waiting for client.
+      if (serverToolExecutor.isServerTool(tc.name())) {
+        return emitted
+            .concatWith(toolEvent)
+            .concatWith(
+                Mono.fromCallable(
+                        () -> {
+                          JsonNode argsNode = mapper.valueToTree(tc.args());
+                          return serverToolExecutor.execute(tc.name(), argsNode, state.sessionId);
+                        })
+                    .doOnNext(
+                        result ->
+                            state.history.append("[tool:" + tc.name() + "] OK: " + result))
+                    .flatMapMany(
+                        result ->
+                            Flux.<ServerSentEvent<String>>just(
+                                    sse.event(
+                                        SseEvents.TOOL_RESULT_ACK,
+                                        Map.of(
+                                            "toolCallId", tc.id(),
+                                            "ok", true,
+                                            "serverResult", result)))
+                                .concatWith(nextTurn(state))));
+      }
+
+      // Client-side tool execution: emit tool_call and wait for result on the bus.
       Mono<ToolResultEvent> waitResult =
           bus.subscribe(state.sessionId)
               .filter(e -> e.toolCallId() != null && e.toolCallId().equals(tc.id()))
@@ -203,6 +255,7 @@ public final class AgentLoop {
     final String sessionId;
     int steps;
     final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
 
     State(String systemText, String userText, int maxSteps, String sessionId) {
       this.systemText = systemText;

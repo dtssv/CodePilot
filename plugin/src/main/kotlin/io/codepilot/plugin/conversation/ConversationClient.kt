@@ -48,6 +48,66 @@ class ConversationClient(
         http.client().newCall(req).enqueue(noOpCallback)
     }
 
+    /** Convenience overload for submitting a tool result by individual fields. */
+    fun submitToolResult(sessionId: String, toolCallId: String, result: Any?, ok: Boolean) {
+        submitToolResult(mapOf(
+            "sessionId" to sessionId,
+            "toolCallId" to toolCallId,
+            "ok" to ok,
+            "result" to result,
+        ))
+    }
+
+    /**
+     * Convenience: run a conversation with a simple callback for each SSE event.
+     * Supports automatic SSE reconnection with intent=continue on disconnect.
+     */
+    fun run(
+        sessionId: String,
+        text: String,
+        mode: String,
+        maxReconnects: Int = 3,
+        onEvent: (eventType: String, data: Any?) -> Unit,
+    ) {
+        val payload = mutableMapOf<String, Any?>(
+            "sessionId" to sessionId,
+            "mode" to mode,
+            "input" to text,
+            "intent" to "new",
+        )
+        runWithReconnect(payload, maxReconnects, onEvent)
+    }
+
+    private fun runWithReconnect(
+        payload: MutableMap<String, Any?>,
+        retriesLeft: Int,
+        onEvent: (eventType: String, data: Any?) -> Unit,
+    ) {
+        run(payload.toMap(), object : Listener {
+            override fun onDelta(text: String) = onEvent("delta", mapOf("text" to text))
+            override fun onToolCall(payload: JsonNode) = onEvent("tool_call", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onToolResultAck(payload: JsonNode) = onEvent("tool_result_ack", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onPlan(payload: JsonNode) = onEvent("plan", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onPlanDelta(payload: JsonNode) = onEvent("plan_delta", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onTaskLedger(payload: JsonNode) = onEvent("task_ledger", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onRiskNotice(payload: JsonNode) = onEvent("risk_notice", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onNeedsInput(payload: JsonNode) = onEvent("needs_input", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onDigest(payload: JsonNode) = onEvent("digest", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onSelfCheck(payload: JsonNode) = onEvent("self_check", http.mapper.treeToValue(payload, Map::class.java))
+            override fun onError(code: Int, message: String) = onEvent("error", mapOf("code" to code, "message" to message))
+            override fun onDone(reason: String, payload: JsonNode) = onEvent("done", mapOf("reason" to reason))
+            override fun onClosed() {
+                // Auto-reconnect: if the stream was dropped unexpectedly (not a clean done),
+                // retry with intent=continue
+                if (retriesLeft > 0) {
+                    val retryPayload = payload.toMutableMap().apply { put("intent", "continue") }
+                    Thread.sleep(1000L * (4 - retriesLeft)) // exponential-ish backoff
+                    runWithReconnect(retryPayload, retriesLeft - 1, onEvent)
+                }
+            }
+        })
+    }
+
     private fun sseRequest(path: String, body: Any): Request {
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()

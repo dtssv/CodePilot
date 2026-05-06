@@ -176,9 +176,45 @@ open class LocalMarketplaceStore {
         val disabled: Boolean = false,
     )
 
-    data class IndexFile(val skills: MutableList<Entry> = mutableListOf())
+    data class IndexFile(val skills: MutableList<Entry> = mutableListOf(), val mcps: MutableList<McpEntry> = mutableListOf())
 
     data class ActiveSkill(val entry: Entry, val scope: String, val path: Path)
+
+    /** Represents an installed MCP server. */
+    data class McpEntry(
+        val id: String,
+        val version: String = "1.0.0",
+        val argv: List<String>,
+        val cwd: String? = null,
+        val env: Map<String, String> = emptyMap(),
+        val installedAt: String = "",
+        val disabled: Boolean = false,
+    )
+
+    /** Returns all installed and enabled MCP servers (from global scope). */
+    fun installedMcpServers(): List<McpEntry> {
+        val index = readIndex(mcpIndex())
+        return index.mcps.filter { !it.disabled }
+    }
+
+    /** Install an MCP server entry. */
+    fun installMcp(entry: McpEntry) {
+        val index = readIndex(mcpIndex())
+        index.mcps.removeAll { it.id == entry.id }
+        index.mcps.add(entry)
+        writeIndex(mcpIndex(), index)
+    }
+
+    /** Uninstall an MCP server. */
+    fun uninstallMcp(id: String): Boolean {
+        val index = readIndex(mcpIndex())
+        val before = index.mcps.size
+        index.mcps.removeAll { it.id == id }
+        writeIndex(mcpIndex(), index)
+        return index.mcps.size < before
+    }
+
+    private fun mcpIndex(): Path = globalRoot().resolve("mcps/index.json")
 
     companion object {
         @JvmStatic fun getInstance(): LocalMarketplaceStore = service()

@@ -19,13 +19,28 @@ public class RedactionService {
 
   private static final List<Rule> RULES =
       List.of(
+          // Private key blocks (PEM format)
+          new Rule(
+              "private-key",
+              Pattern.compile("-----BEGIN\\s+(RSA\\s+)?PRIVATE\\s+KEY-----[\\s\\S]*?-----END\\s+(RSA\\s+)?PRIVATE\\s+KEY-----"),
+              "[REDACTED_PRIVATE_KEY]"),
           // OpenAI / generic Bearer
-          new Rule("api-key-bearer", Pattern.compile("(?i)bearer\\s+([A-Za-z0-9._\\-]{20,})"), "Bearer ***"),
-          // sk- / pk- style keys
-          new Rule("sk-style", Pattern.compile("\\b([sp]k-[A-Za-z0-9]{20,})\\b"), "***"),
+          new Rule("api-key-bearer", Pattern.compile("(?i)bearer\\s+([A-Za-z0-9._\\-]{20,})"), "Bearer [REDACTED_API_KEY]"),
+          // sk- / pk- style keys (OpenAI, Stripe etc.)
+          new Rule("sk-style", Pattern.compile("\\b([sp]k-[A-Za-z0-9]{20,})\\b"), "[REDACTED_API_KEY]"),
           // AWS Access Key Id
           new Rule(
-              "aws-access-key", Pattern.compile("\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"), "AKIA****EXAMPLE"),
+              "aws-access-key", Pattern.compile("\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"), "[REDACTED_API_KEY]"),
+          // Generic API key patterns (key=xxx, apikey=xxx)
+          new Rule(
+              "api-key-generic",
+              Pattern.compile("(?i)(api[_-]?key|secret[_-]?key)\\s*[=:]\\s*[\"']?([A-Za-z0-9+/=._\\-]{20,})[\"']?"),
+              "$1=[REDACTED_API_KEY]"),
+          // JWT tokens (3-part base64)
+          new Rule(
+              "jwt-token",
+              Pattern.compile("eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}"),
+              "[REDACTED_JWT]"),
           // Email
           new Rule(
               "email",

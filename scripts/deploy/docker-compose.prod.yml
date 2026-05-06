@@ -1,0 +1,44 @@
+name: codepilot-prod
+
+services:
+  app:
+    image: ghcr.io/codepilot/codepilot-backend:1.0.0
+    restart: always
+    env_file: ./prod.env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: always
+    env_file: ./prod.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata: {}
+  redisdata: {}

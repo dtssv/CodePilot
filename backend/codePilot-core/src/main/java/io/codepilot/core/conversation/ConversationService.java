@@ -3,10 +3,12 @@ package io.codepilot.core.conversation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.common.api.CodePilotException;
 import io.codepilot.common.api.ErrorCodes;
+import io.codepilot.core.audit.AuditInterceptor;
 import io.codepilot.core.context.ContextBudgeter;
 import io.codepilot.core.dto.ConversationMode;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.prompt.PromptOrchestrator;
+import io.codepilot.core.rag.ServerToolExecutor;
 import io.codepilot.core.safety.RedactionService;
 import io.codepilot.core.safety.SystemPromptLeakDetector;
 import io.codepilot.core.skill.ActivatedSkill;
@@ -45,6 +47,8 @@ public class ConversationService {
   private final SseFactory sse;
   private final ToolSchemaRegistry toolSchemas;
   private final SkillRouter skillRouter;
+  private final ServerToolExecutor serverToolExecutor;
+  private final AuditInterceptor audit;
 
   public ConversationService(
       ChatClient.Builder chatClientBuilder,
@@ -59,7 +63,9 @@ public class ConversationService {
       StopSignalBus stopBus,
       SseFactory sse,
       ToolSchemaRegistry toolSchemas,
-      SkillRouter skillRouter) {
+      SkillRouter skillRouter,
+      ServerToolExecutor serverToolExecutor,
+      AuditInterceptor audit) {
     this.chatClient = chatClientBuilder.build();
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
@@ -73,11 +79,14 @@ public class ConversationService {
     this.sse = sse;
     this.toolSchemas = toolSchemas;
     this.skillRouter = skillRouter;
+    this.serverToolExecutor = serverToolExecutor;
+    this.audit = audit;
   }
 
   public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
     SystemPromptLeakDetector.Verdict verdict = leakDetector.detect(req.input());
     if (verdict.blocked()) {
+      audit.leakDetectedPre(null, verdict.matchedRule());
       return Flux.just(
           sse.error(ErrorCodes.SYSTEM_PROMPT_LEAK, "Request blocked by safety policy."),
           sse.event(SseEvents.DONE, Map.of("reason", "failed")));
@@ -119,16 +128,23 @@ public class ConversationService {
                         .toList())));
 
     if (req.mode() == ConversationMode.AGENT) {
-      AgentLoop loop = new AgentLoop(chatClient, parser, bus, stopBus, mapper, sse);
+      AgentLoop loop = new AgentLoop(chatClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
       return head.concatWith(loop.run(req, assembled.systemText(), redactedInput));
     }
 
     // chat mode: single streaming turn.
+    // Apply context budget digest if available (e.g., when history is too long)
+    String chatInput = redactedInput;
+    if (shape.localDigest() != null) {
+      chatInput = shape.localDigest() + "\n\n" + redactedInput;
+    }
+    final String finalChatInput = chatInput;
+
     Flux<ServerSentEvent<String>> body =
         chatClient
             .prompt()
             .system(assembled.systemText())
-            .user(redactedInput)
+            .user(finalChatInput)
             .stream()
             .chatResponse()
             .map(ConversationService::deltaFromChatResponse)

@@ -9,13 +9,7 @@ plugins {
 group = "io.codepilot"
 version = providers.gradleProperty("codePilotVersion").getOrElse("1.0.0")
 
-allprojects {
-    repositories {
-        mavenCentral()
-        maven("https://repo.spring.io/milestone")
-        maven("https://repo.spring.io/snapshot")
-    }
-}
+val catalog = the<VersionCatalogsExtension>().named("libs")
 
 subprojects {
     apply {
@@ -24,49 +18,53 @@ subprojects {
         plugin("com.diffplug.spotless")
     }
 
+    val javaVersion = catalog.findVersion("java").get().requiredVersion.toInt()
+    val lombokVersion = catalog.findVersion("lombok").get().requiredVersion
+    val mapstructVersion = catalog.findVersion("mapstruct").get().requiredVersion
+    val jacksonVersion = catalog.findVersion("jackson").get().requiredVersion
+    val otelVersion = catalog.findVersion("otel").get().requiredVersion
+    val junitVersion = catalog.findVersion("junit").get().requiredVersion
+
     extensions.configure<JavaPluginExtension> {
-        toolchain {
-            languageVersion.set(JavaLanguageVersion.of(libs.versions.java.get().toInt()))
-        }
         withSourcesJar()
         withJavadocJar()
     }
 
     tasks.withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
-        options.release.set(libs.versions.java.get().toInt())
+        options.release.set(javaVersion)
         options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all", "-Werror"))
     }
 
     extensions.configure<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension> {
         imports {
             mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
-            mavenBom("com.fasterxml.jackson:jackson-bom:${libs.versions.jackson.get()}")
-            mavenBom("io.opentelemetry:opentelemetry-bom:${libs.versions.otel.get()}")
+            mavenBom("com.fasterxml.jackson:jackson-bom:$jacksonVersion")
+            mavenBom("io.opentelemetry:opentelemetry-bom:$otelVersion")
         }
     }
 
     dependencies {
         // Core Java amenities
-        add("compileOnly", "org.projectlombok:lombok:${libs.versions.lombok.get()}")
-        add("annotationProcessor", "org.projectlombok:lombok:${libs.versions.lombok.get()}")
-        add("testCompileOnly", "org.projectlombok:lombok:${libs.versions.lombok.get()}")
-        add("testAnnotationProcessor", "org.projectlombok:lombok:${libs.versions.lombok.get()}")
+        add("compileOnly", "org.projectlombok:lombok:$lombokVersion")
+        add("annotationProcessor", "org.projectlombok:lombok:$lombokVersion")
+        add("testCompileOnly", "org.projectlombok:lombok:$lombokVersion")
+        add("testAnnotationProcessor", "org.projectlombok:lombok:$lombokVersion")
 
         add("annotationProcessor", "org.springframework.boot:spring-boot-configuration-processor")
-        add("annotationProcessor", libs.mapstruct.processor.get())
-        add("compileOnly", libs.mapstruct.get())
+        add("annotationProcessor", "org.mapstruct:mapstruct-processor:$mapstructVersion")
+        add("compileOnly", "org.mapstruct:mapstruct:$mapstructVersion")
 
         // Testing
-        add("testImplementation", platform("org.junit:junit-bom:${libs.versions.junit.get()}"))
-        add("testImplementation", libs.spring.boot.starter.test.get()) {
+        add("testImplementation", platform("org.junit:junit-bom:$junitVersion"))
+        add("testImplementation", "org.springframework.boot:spring-boot-starter-test") {
             exclude(group = "org.mockito") // we don't allow mock libs in production code or tests
         }
-        add("testImplementation", libs.assertj.core.get())
-        add("testImplementation", libs.testcontainers.junit.jupiter.get())
-        add("testImplementation", libs.testcontainers.postgresql.get())
-        add("testImplementation", libs.awaitility.get())
-        add("testImplementation", libs.wiremock.jetty12.get())
+        add("testImplementation", "org.assertj:assertj-core:${catalog.findVersion("assertj").get().requiredVersion}")
+        add("testImplementation", "org.testcontainers:junit-jupiter:${catalog.findVersion("testcontainers").get().requiredVersion}")
+        add("testImplementation", "org.testcontainers:postgresql:${catalog.findVersion("testcontainers").get().requiredVersion}")
+        add("testImplementation", "org.awaitility:awaitility:${catalog.findVersion("awaitility").get().requiredVersion}")
+        add("testImplementation", "org.wiremock:wiremock-standalone:${catalog.findVersion("wiremock").get().requiredVersion}")
     }
 
     extensions.configure<com.diffplug.gradle.spotless.SpotlessExtension> {

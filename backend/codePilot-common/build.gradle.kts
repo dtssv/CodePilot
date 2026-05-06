@@ -7,6 +7,6 @@ dependencies {
     api("org.springframework.boot:spring-boot-starter")
     api("com.fasterxml.jackson.core:jackson-databind")
     api("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
-    api(rootProject.libs.guava)
-    api(rootProject.libs.apache.commons.lang3)
+    api(libs.guava)
+    api(libs.apache.commons.lang3)
 }

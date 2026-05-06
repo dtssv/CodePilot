@@ -1,5 +1,5 @@
 plugins {
-    alias(rootProject.libs.plugins.spring.boot)
+    alias(libs.plugins.spring.boot)
     java
     id("org.cyclonedx.bom")
 }
@@ -17,15 +17,15 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
 
-    implementation(rootProject.libs.flyway.core)
-    implementation(rootProject.libs.flyway.postgres)
-    implementation(rootProject.libs.postgresql)
-    implementation(rootProject.libs.hikari)
+    implementation(libs.flyway.core)
+    implementation(libs.flyway.postgres)
+    implementation(libs.postgresql)
+    implementation(libs.hikari)
 
-    implementation(rootProject.libs.micrometer.tracing.bridge.otel)
-    implementation(rootProject.libs.otel.exporter.otlp)
+    implementation(libs.micrometer.tracing.bridge.otel)
+    implementation(libs.otel.exporter.otlp)
 
-    implementation(rootProject.libs.springdoc.openapi)
+    implementation(libs.springdoc.openapi)
 }
 
 springBoot {

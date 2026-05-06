@@ -7,20 +7,28 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import io.codepilot.plugin.conversation.ConversationClient
+import io.codepilot.plugin.mcp.McpProcessManager
+import io.codepilot.plugin.marketplace.LocalMarketplaceStore
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Routes a model-issued `tool_call` to a real client-side handler. Currently supports the safe
- * read tools and `fs.create`. Mutating ops (write/replace/move/delete) go through [PatchApplier]
- * via Diff approval — they are NOT executed silently here.
+ * Routes a model-issued `tool_call` to a real client-side handler. Supports:
+ * - Built-in read tools (fs.read, fs.list, fs.search, fs.outline)
+ * - fs.create (creates files)
+ * - fs.write / fs.replace / fs.delete / fs.move → routed through [PatchApplier]
+ * - shell.exec
+ * - ide.openFile / ide.diagnostics / ide.applyPatch
+ * - mcp.<server>.<tool> → routed to [McpProcessManager]
  */
 class ToolDispatcher(
     private val project: Project,
     private val client: ConversationClient,
     private val sessionId: String,
 ) {
+
+    private val patchApplier = PatchApplier(project)
 
     fun dispatch(toolCall: JsonNode) {
         val name = toolCall.path("name").asText()
@@ -29,14 +37,22 @@ class ToolDispatcher(
         ApplicationManager.getApplication().executeOnPooledThread {
             val started = System.nanoTime()
             try {
-                val result = when (name) {
-                    "fs.read" -> readFile(args)
-                    "fs.list" -> listDir(args)
-                    "fs.search" -> searchProject(args)
-                    "fs.outline" -> fileOutline(args)
-                    "fs.create" -> createFile(args)
-                    "shell.exec" -> ShellExecutor(project).execute(args)
-                    "plan.show" -> mapOf("ack" to true)
+                val result = when {
+                    name == "fs.read" -> readFile(args)
+                    name == "fs.list" -> listDir(args)
+                    name == "fs.search" -> searchProject(args)
+                    name == "fs.outline" -> fileOutline(args)
+                    name == "fs.create" -> createFile(args)
+                    name == "fs.write" -> dispatchViaPatchApplier(name, args)
+                    name == "fs.replace" -> dispatchViaPatchApplier(name, args)
+                    name == "fs.delete" -> dispatchViaPatchApplier(name, args)
+                    name == "fs.move" -> dispatchViaPatchApplier(name, args)
+                    name == "shell.exec" -> ShellExecutor(project).execute(args)
+                    name == "plan.show" -> mapOf("ack" to true)
+                    name == "ide.openFile" -> ideOpenFile(args)
+                    name == "ide.diagnostics" -> ideDiagnostics(args)
+                    name == "ide.applyPatch" -> ideApplyPatch(args)
+                    name.startsWith("mcp.") -> dispatchMcp(name, args)
                     else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
                 }
                 respond(id, true, result, null, null, started)
@@ -46,6 +62,127 @@ class ToolDispatcher(
                 respond(id, false, null, "tool_error", t.message ?: t.javaClass.simpleName, started)
             }
         }
+    }
+
+    /** Convenience overload for direct dispatch from CefChatPanel. */
+    fun dispatch(toolName: String, toolArgs: Any?, toolCallId: String) {
+        val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+        val node = mapper.createObjectNode()
+        node.put("name", toolName)
+        node.put("id", toolCallId)
+        node.set<JsonNode>("args", mapper.valueToTree(toolArgs ?: emptyMap<String, Any>()))
+        dispatch(node)
+    }
+
+    /**
+     * Initialize MCP servers from the installed list. Called once at session start.
+     * Returns the combined tools/list from all started servers.
+     */
+    fun initMcpServers(): List<Map<String, Any>> {
+        val store = LocalMarketplaceStore.getInstance()
+        val installed = store.installedMcpServers()
+        val mcpManager = McpProcessManager.getInstance()
+        val allTools = mutableListOf<Map<String, Any>>()
+
+        for (server in installed) {
+            try {
+                if (!mcpManager.isRunning(server.id)) {
+                    mcpManager.start(server.id, McpProcessManager.McpLaunchSpec(
+                        id = server.id,
+                        argv = server.argv,
+                        cwd = server.cwd,
+                        env = server.env,
+                    ))
+                }
+                // Fetch tools/list from the running server
+                val toolsResult = mcpManager.call(server.id, "tools/list", null)
+                if (toolsResult.isArray) {
+                    toolsResult.forEach { tool ->
+                        allTools.add(mapOf(
+                            "name" to "mcp.${server.id}.${tool.path("name").asText()}",
+                            "description" to tool.path("description").asText(""),
+                            "parameters" to tool.path("inputSchema"),
+                        ))
+                    }
+                }
+            } catch (e: Exception) {
+                com.intellij.openapi.diagnostic.Logger.getInstance("ToolDispatcher")
+                    .warn("Failed to start MCP server ${server.id}", e)
+            }
+        }
+        return allTools
+    }
+
+    // ---------- MCP routing ----------
+
+    private fun dispatchMcp(fullName: String, args: JsonNode): Map<String, Any?> {
+        // Parse: mcp.<serverId>.<toolName>
+        val parts = fullName.removePrefix("mcp.").split(".", limit = 2)
+        if (parts.size < 2) throw ToolViolation("Invalid MCP tool name: $fullName")
+        val serverId = parts[0]
+        val toolName = parts[1]
+
+        val mcpManager = McpProcessManager.getInstance()
+        if (!mcpManager.isRunning(serverId)) {
+            throw ToolViolation("MCP server not running: $serverId")
+        }
+
+        val result = mcpManager.call(serverId, "tools/call", mapOf("name" to toolName, "arguments" to args))
+        return mapOf("mcpResult" to result.toString())
+    }
+
+    // ---------- PatchApplier routing ----------
+
+    private fun dispatchViaPatchApplier(name: String, args: JsonNode): Map<String, Any?> {
+        patchApplier.apply(name, args)
+        return mapOf("ack" to true, "appliedVia" to "DiffManager")
+    }
+
+    // ---------- IDE tools ----------
+
+    private fun ideOpenFile(args: JsonNode): Map<String, Any?> {
+        val path = args.path("path").asText()
+        val line = args.path("line").asInt(1)
+        val vf = PathGuard.resolve(project, path)
+        ApplicationManager.getApplication().invokeLater {
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+                .openFile(vf, true)
+            val editor = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+                .selectedTextEditor
+            editor?.caretModel?.moveToLogicalPosition(
+                com.intellij.openapi.editor.LogicalPosition(line - 1, 0)
+            )
+        }
+        return mapOf("opened" to path, "line" to line)
+    }
+
+    private fun ideDiagnostics(args: JsonNode): Map<String, Any?> {
+        val path = args.path("path").asText()
+        val vf = PathGuard.resolve(project, path)
+        val psiFile = com.intellij.psi.PsiManager.getInstance(project).findFile(vf)
+            ?: return mapOf("diagnostics" to emptyList<Any>())
+        val diagnostics = com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx
+            .getInstanceEx(project).let { analyzer ->
+                // Get highlights from the document
+                val doc = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance()
+                    .getDocument(vf) ?: return mapOf("diagnostics" to emptyList<Any>())
+                com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
+                    .getHighlights(doc, null, project)
+                    .map { h ->
+                        mapOf(
+                            "line" to doc.getLineNumber(h.startOffset) + 1,
+                            "severity" to h.severity.name,
+                            "message" to (h.description ?: ""),
+                        )
+                    }
+            }
+        return mapOf("path" to path, "diagnostics" to diagnostics)
+    }
+
+    private fun ideApplyPatch(args: JsonNode): Map<String, Any?> {
+        val patchText = args.path("patch").asText()
+        patchApplier.applyUnifiedPatch(patchText)
+        return mapOf("applied" to true)
     }
 
     private fun refuse(toolCallId: String, reason: String, startedNs: Long) {
@@ -160,8 +297,6 @@ class ToolDispatcher(
 
     private fun fileOutline(args: JsonNode): Map<String, Any?> {
         val vf = PathGuard.resolve(project, args.path("path").asText())
-        // Lightweight outline: line count + first non-empty line preview. Real PSI outline can be
-        // added once a language-aware analyzer is plugged in.
         val text = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }
         return mapOf(

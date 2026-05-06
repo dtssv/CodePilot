@@ -5,17 +5,18 @@ plugins {
 dependencies {
     api(project(":codePilot-common"))
 
-    api(rootProject.libs.spring.ai.openai)
-    api(rootProject.libs.spring.ai.pgvector)
-    api(rootProject.libs.spring.ai.mcp)
+    api(libs.spring.ai.openai)
+    api(libs.spring.ai.pgvector)
+    api(libs.spring.ai.mcp)
 
-    api(rootProject.libs.caffeine)
-    api(rootProject.libs.json.schema.validator)
-    api(rootProject.libs.jtokkit)
-    api(rootProject.libs.bouncycastle.bcpkix)
+    api(libs.caffeine)
+    api(libs.json.schema.validator)
+    api(libs.jtokkit)
+    api(libs.bouncycastle.bcpkix)
 
     api("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml")
 
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
+    implementation("org.springframework.boot:spring-boot-starter-jdbc")
 }

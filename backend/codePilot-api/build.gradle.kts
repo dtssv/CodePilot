@@ -7,7 +7,7 @@ dependencies {
 
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-validation")
-    implementation(rootProject.libs.springdoc.openapi)
-    implementation(rootProject.libs.resilience4j.spring.boot3)
-    implementation(rootProject.libs.bucket4j.core)
+    implementation(libs.springdoc.openapi)
+    implementation(libs.resilience4j.spring.boot3)
+    implementation(libs.bucket4j.core)
 }

@@ -1,0 +1,75 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/codepilot/codepilot-backend
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: api.codepilot.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  minAvailable: 1
+
+terminationGracePeriodSeconds: 60
+
+env:
+  CODEPILOT_DB_URL: ""
+  CODEPILOT_DB_USER: ""
+  CODEPILOT_DB_PASSWORD: ""
+  CODEPILOT_REDIS_URL: ""
+  CODEPILOT_LLM_BASE_URL: ""
+  CODEPILOT_LLM_API_KEY: ""
+  CODEPILOT_LLM_DEFAULT_MODEL: "gpt-4o-mini"
+  CODEPILOT_JWT_SECRET: ""
+  CODEPILOT_HMAC_SECRET: ""
+
+probes:
+  liveness:
+    path: /actuator/health/liveness
+    initialDelaySeconds: 20
+    periodSeconds: 10
+  readiness:
+    path: /actuator/health/readiness
+    initialDelaySeconds: 10
+    periodSeconds: 5
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: "25%"
+    maxUnavailable: 0
+
+serviceAccount:
+  create: true
+  name: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -35,6 +35,9 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var keepRecentMessages: Int = 6,
         var autoApplyLowRiskPatches: Boolean = false,
         var allowDevSso: Boolean = false,
+        var registries: List<RegistryEntry> = listOf(
+            RegistryEntry("Official", "https://marketplace.codepilot.io", "")
+        ),
     )
 
     private var state: State = State()
