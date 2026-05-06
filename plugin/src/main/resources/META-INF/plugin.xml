@@ -1,0 +1,83 @@
+<idea-plugin>
+  <id>io.codepilot.intellij</id>
+  <name>CodePilot</name>
+  <vendor>CodePilot</vendor>
+
+  <depends>com.intellij.modules.platform</depends>
+
+  <extensions defaultExtensionNs="com.intellij">
+    <applicationService serviceImplementation="io.codepilot.plugin.settings.CodePilotSettings"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.transport.HttpClientService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.auth.AuthService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.session.SessionStore"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.update.UpdateService"/>
+
+    <applicationConfigurable
+        parentId="tools"
+        id="io.codepilot.settings"
+        instance="io.codepilot.plugin.settings.CodePilotConfigurable"
+        displayName="CodePilot"/>
+
+    <toolWindow id="CodePilot"
+                anchor="right"
+                icon="AllIcons.Toolwindows.ToolWindowMessages"
+                factoryClass="io.codepilot.plugin.toolwindow.CodePilotToolWindowFactory"/>
+
+    <postStartupActivity implementation="io.codepilot.plugin.startup.CodePilotStartupActivity"/>
+    <notificationGroup id="CodePilot" displayType="BALLOON"/>
+  </extensions>
+
+  <actions>
+    <group id="CodePilot.ContextActions" text="CodePilot" popup="true">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+    </group>
+
+    <action id="CodePilot.Refactor"
+            class="io.codepilot.plugin.actions.RefactorAction"
+            text="CodePilot: Refactor selection"
+            description="Refactor the selection or file with CodePilot">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control alt R" keymap="$default"/>
+      <keyboard-shortcut first-keystroke="meta alt R" keymap="Mac OS X 10.5+"/>
+    </action>
+    <action id="CodePilot.Review"
+            class="io.codepilot.plugin.actions.ReviewAction"
+            text="CodePilot: Review code">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control alt V" keymap="$default"/>
+    </action>
+    <action id="CodePilot.Comment"
+            class="io.codepilot.plugin.actions.CommentAction"
+            text="CodePilot: Generate comments">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+    </action>
+    <action id="CodePilot.GenTest"
+            class="io.codepilot.plugin.actions.GenTestAction"
+            text="CodePilot: Generate tests">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control alt T" keymap="$default"/>
+    </action>
+    <action id="CodePilot.GenDoc"
+            class="io.codepilot.plugin.actions.GenDocAction"
+            text="CodePilot: Generate documentation">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+    </action>
+    <action id="CodePilot.AddToChat"
+            class="io.codepilot.plugin.actions.AddToChatAction"
+            text="CodePilot: Add to chat">
+      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control L" keymap="$default"/>
+    </action>
+    <action id="CodePilot.OpenChat"
+            class="io.codepilot.plugin.actions.OpenChatAction"
+            text="Open CodePilot chat">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control shift L" keymap="$default"/>
+    </action>
+
+    <action id="CodePilot.Reset.Soft"  class="io.codepilot.plugin.reset.SoftResetAction"  text="CodePilot: Reset (soft)"/>
+    <action id="CodePilot.Reset.Hard"  class="io.codepilot.plugin.reset.HardResetAction"  text="CodePilot: Reset (hard, restart)"/>
+    <action id="CodePilot.CheckUpdate" class="io.codepilot.plugin.update.CheckUpdateAction" text="CodePilot: Check for updates"/>
+  </actions>
+</idea-plugin>
