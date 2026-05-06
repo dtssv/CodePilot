@@ -27,12 +27,12 @@ import java.util.concurrent.ConcurrentHashMap
  * IDs so we don't have to scan the directory every request.
  */
 @Service(Service.Level.APP)
-class LocalMarketplaceStore {
+open class LocalMarketplaceStore {
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val cache = ConcurrentHashMap<String, IndexFile>()
 
-    fun globalRoot(): Path = osConfigRoot().resolve("CodePilot")
+    open fun globalRoot(): Path = osConfigRoot().resolve("CodePilot")
 
     fun projectRoot(project: Project): Path =
         Path.of(project.basePath ?: error("no project base path"), ".codePilot")

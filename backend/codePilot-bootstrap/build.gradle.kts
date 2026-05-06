@@ -1,6 +1,7 @@
 plugins {
     alias(rootProject.libs.plugins.spring.boot)
     java
+    id("org.cyclonedx.bom")
 }
 
 dependencies {

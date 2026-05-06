@@ -1,5 +1,6 @@
 plugins {
     java
+    id("org.cyclonedx.bom") version "1.9.0" apply false
     alias(libs.plugins.spring.boot) apply false
     alias(libs.plugins.spring.dependency.mgmt) apply false
     alias(libs.plugins.spotless) apply false
