@@ -155,6 +155,33 @@ public class ToolSchemaRegistry {
     return List.copyOf(tools.keySet());
   }
 
+  /**
+   * Dynamically register MCP tools for a session. Called when the plugin sends {@code userMcps[]}
+   * in the request. These tools are added to the session-level schema and evicted at session end.
+   *
+   * @param mcpTools list of MCP tool definitions (name, description, parameters as JSON Schema)
+   */
+  public void registerSessionMcpTools(List<Map<String, Object>> mcpTools) {
+    if (mcpTools == null) return;
+    for (Map<String, Object> tool : mcpTools) {
+      String name = (String) tool.get("name");
+      String desc = (String) tool.getOrDefault("description", "");
+      if (name == null || tools.containsKey(name)) continue;
+      ObjectNode node = mapper.createObjectNode();
+      node.put("name", name);
+      node.put("description", desc);
+      node.set("parameters", mapper.valueToTree(tool.getOrDefault("parameters", Collections.emptyMap())));
+      node.put("executor", "client");
+      node.put("risk", (String) tool.getOrDefault("risk", "medium"));
+      tools.put(name, node);
+    }
+  }
+
+  /** Remove all dynamically registered MCP tools (keyed by prefix). */
+  public void unregisterMcpTools(String prefix) {
+    tools.keySet().removeIf(k -> k.startsWith(prefix));
+  }
+
   private void add(String name, String desc, String executor, String risk, ObjectNode params) {
     ObjectNode node = mapper.createObjectNode();
     node.put("name", name);

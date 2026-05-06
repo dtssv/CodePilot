@@ -12,6 +12,8 @@
     <applicationService serviceImplementation="io.codepilot.plugin.auth.LoginService"/>
     <applicationService serviceImplementation="io.codepilot.plugin.session.SessionStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.update.UpdateService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.update.HotPatchService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.update.RuntimeResourceRegistry"/>
     <applicationService serviceImplementation="io.codepilot.plugin.marketplace.LocalMarketplaceStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.mcp.McpProcessManager"/>
 
@@ -85,5 +87,6 @@
     <action id="CodePilot.Reset.Soft"  class="io.codepilot.plugin.reset.SoftResetAction"  text="CodePilot: Reset (soft)"/>
     <action id="CodePilot.Reset.Hard"  class="io.codepilot.plugin.reset.HardResetAction"  text="CodePilot: Reset (hard, restart)"/>
     <action id="CodePilot.CheckUpdate" class="io.codepilot.plugin.update.CheckUpdateAction" text="CodePilot: Check for updates"/>
+    <action id="CodePilot.RollbackToPreviousVersion" class="io.codepilot.plugin.update.RollbackAction" text="CodePilot: Rollback to previous version"/>
   </actions>
 </idea-plugin>

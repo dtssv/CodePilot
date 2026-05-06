@@ -8,9 +8,12 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import io.codepilot.plugin.settings.CodePilotSettings
+import io.codepilot.plugin.settings.RegistryEntry
 import java.awt.BorderLayout
 import javax.swing.DefaultListModel
 import javax.swing.JButton
+import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -24,6 +27,13 @@ class MarketplacePanel(private val project: Project) {
 
     private val client = MarketplaceClient()
     private val store = LocalMarketplaceStore.getInstance()
+    private val settings = CodePilotSettings.getInstance()
+
+    /** Registry selector for switching between official and third-party registries. */
+    private val registrySelector = JComboBox<String>().apply {
+        settings.state.registries.forEach { addItem(it.name) }
+        addActionListener { refreshOfficial() }
+    }
 
     private val officialListModel = DefaultListModel<MarketplaceClient.Package>()
     private val officialList = JBList(officialListModel).apply {
@@ -53,12 +63,17 @@ class MarketplacePanel(private val project: Project) {
         }
 
     private fun buildOfficialPane(): JComponent {
+        val north = JPanel().apply {
+            add(JLabel("Registry: "))
+            add(registrySelector)
+        }
         val south = JPanel().apply {
             add(JButton("Refresh").apply { addActionListener { refresh() } })
             add(JButton("Install to project").apply { addActionListener { install(LocalMarketplaceStore.Scope.PROJECT) } })
             add(JButton("Install to global").apply { addActionListener { install(LocalMarketplaceStore.Scope.GLOBAL) } })
         }
         return JPanel(BorderLayout()).apply {
+            add(north, BorderLayout.NORTH)
             add(JBScrollPane(officialList), BorderLayout.CENTER)
             add(south, BorderLayout.SOUTH)
         }
@@ -83,7 +98,11 @@ class MarketplacePanel(private val project: Project) {
 
     private fun refreshOfficial() {
         status.text = "Loading marketplace…"
-        client.listPackages(type = "skill").whenComplete { list, err ->
+        val selectedIdx = registrySelector.selectedIndex.coerceAtLeast(0)
+        val registries = settings.state.registries
+        val registryUrl = if (selectedIdx < registries.size) registries[selectedIdx].url else null
+
+        client.listPackages(type = "skill", registryUrl = registryUrl).whenComplete { list, err ->
             SwingUtilities.invokeLater {
                 officialListModel.clear()
                 if (err != null) {
@@ -91,7 +110,8 @@ class MarketplacePanel(private val project: Project) {
                     return@invokeLater
                 }
                 list.forEach(officialListModel::addElement)
-                status.text = "${list.size} packages from official registry"
+                val regName = registrySelector.selectedItem ?: "official"
+                status.text = "${list.size} packages from $regName"
             }
         }
     }
