@@ -39,6 +39,7 @@ class HttpClientService {
             .pingInterval(20, TimeUnit.SECONDS)
             .addInterceptor(::traceHeader)
             .addInterceptor(::authAndSignature)
+            .addInterceptor(RefreshOn401Interceptor())
             .build()
 
     fun client(): OkHttpClient = baseClient

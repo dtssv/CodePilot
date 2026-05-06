@@ -9,6 +9,7 @@
     <applicationService serviceImplementation="io.codepilot.plugin.settings.CodePilotSettings"/>
     <applicationService serviceImplementation="io.codepilot.plugin.transport.HttpClientService"/>
     <applicationService serviceImplementation="io.codepilot.plugin.auth.AuthService"/>
+    <applicationService serviceImplementation="io.codepilot.plugin.auth.LoginService"/>
     <applicationService serviceImplementation="io.codepilot.plugin.session.SessionStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.update.UpdateService"/>
 
@@ -76,6 +77,9 @@
       <keyboard-shortcut first-keystroke="control shift L" keymap="$default"/>
     </action>
 
+    <action id="CodePilot.SignIn" class="io.codepilot.plugin.auth.SignInAction" text="CodePilot: Sign in">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+    </action>
     <action id="CodePilot.Reset.Soft"  class="io.codepilot.plugin.reset.SoftResetAction"  text="CodePilot: Reset (soft)"/>
     <action id="CodePilot.Reset.Hard"  class="io.codepilot.plugin.reset.HardResetAction"  text="CodePilot: Reset (hard, restart)"/>
     <action id="CodePilot.CheckUpdate" class="io.codepilot.plugin.update.CheckUpdateAction" text="CodePilot: Check for updates"/>

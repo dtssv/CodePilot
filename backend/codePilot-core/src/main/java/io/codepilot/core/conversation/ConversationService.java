@@ -12,6 +12,7 @@ import io.codepilot.core.safety.SystemPromptLeakDetector;
 import io.codepilot.core.skill.ActivatedSkill;
 import io.codepilot.core.skill.UserSkillValidator;
 import io.codepilot.core.sse.SseEvents;
+import io.codepilot.core.tool.ToolSchemaRegistry;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,6 +42,7 @@ public class ConversationService {
   private final ToolResultBus bus;
   private final StopSignalBus stopBus;
   private final SseFactory sse;
+  private final ToolSchemaRegistry toolSchemas;
 
   public ConversationService(
       ChatClient.Builder chatClientBuilder,
@@ -53,7 +55,8 @@ public class ConversationService {
       EnvelopeStreamParser parser,
       ToolResultBus bus,
       StopSignalBus stopBus,
-      SseFactory sse) {
+      SseFactory sse,
+      ToolSchemaRegistry toolSchemas) {
     this.chatClient = chatClientBuilder.build();
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
@@ -65,6 +68,7 @@ public class ConversationService {
     this.bus = bus;
     this.stopBus = stopBus;
     this.sse = sse;
+    this.toolSchemas = toolSchemas;
   }
 
   public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
@@ -91,7 +95,7 @@ public class ConversationService {
           sse.event(SseEvents.DONE, Map.of("reason", "failed")));
     }
 
-    String toolsSchemaJson = renderToolsSchema(req.tools());
+    String toolsSchemaJson = toolSchemas.renderSchema(req.tools());
     PromptOrchestrator.Assembled assembled =
         orchestrator.assembleForRequest(req, activated, toolsSchemaJson);
     ContextBudgeter.Result shape = budgeter.shape(req, assembled.systemText());
@@ -146,13 +150,5 @@ public class ConversationService {
   private static String deltaFromChatResponse(ChatResponse r) {
     if (r == null || r.getResult() == null || r.getResult().getOutput() == null) return "";
     return r.getResult().getOutput().getText();
-  }
-
-  private String renderToolsSchema(List<String> tools) {
-    try {
-      return mapper.writeValueAsString(Map.of("tools", tools == null ? List.of() : tools));
-    } catch (Exception e) {
-      return "{}";
-    }
   }
 }

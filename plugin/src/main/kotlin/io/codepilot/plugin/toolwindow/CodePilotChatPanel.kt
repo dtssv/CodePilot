@@ -6,12 +6,19 @@ import com.intellij.openapi.project.Project
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import io.codepilot.plugin.actions.ClipboardBridge
+import io.codepilot.plugin.auth.LoginDialog
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.session.SessionStore
 import io.codepilot.plugin.settings.CodePilotSettings
+import io.codepilot.plugin.tools.PatchApplier
+import io.codepilot.plugin.tools.ToolDispatcher
+import io.codepilot.plugin.ui.NeedsInputDialog
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.event.ActionEvent
+import java.awt.event.FocusAdapter
+import java.awt.event.FocusEvent
 import javax.swing.AbstractAction
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -24,10 +31,7 @@ import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
 
-/**
- * Minimal but production-grade chat panel. UI is intentionally Swing-only in M5; a JCEF + React
- * front-end can be plugged in later without touching the conversation client.
- */
+/** Swing chat panel wiring the full SSE -> tool-dispatch -> patch-apply loop. */
 class CodePilotChatPanel(private val project: Project) {
 
     private val settings = CodePilotSettings.getInstance()
@@ -40,7 +44,11 @@ class CodePilotChatPanel(private val project: Project) {
     private val modeBox = JComboBox(arrayOf("agent", "chat"))
     private val sendButton = JButton("Send")
     private val stopButton = JButton("Stop").apply { isEnabled = false }
+    private val signInButton = JButton("Sign in")
+
     private val sessionHandle = sessionStore.newSession(workspaceHash(), modeBox.selectedItem as String, null)
+    private val dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
+    private val patcher = PatchApplier(project)
 
     init {
         listOf(transcript, planView, ledgerView).forEach {
@@ -50,6 +58,14 @@ class CodePilotChatPanel(private val project: Project) {
         }
         sendButton.action = SendAction()
         stopButton.action = StopAction()
+        signInButton.addActionListener { LoginDialog(project).showAndGet() }
+        inputArea.addFocusListener(object : FocusAdapter() {
+            override fun focusGained(e: FocusEvent?) {
+                ClipboardBridge.consume()?.let { prefilled ->
+                    if (inputArea.text.isBlank()) inputArea.text = prefilled
+                }
+            }
+        })
     }
 
     val component: JComponent =
@@ -67,6 +83,8 @@ class CodePilotChatPanel(private val project: Project) {
             add(Box.createHorizontalStrut(4))
             add(modeBox)
             add(Box.createHorizontalGlue())
+            add(signInButton)
+            add(Box.createHorizontalStrut(4))
             add(stopButton)
         }
 
@@ -113,6 +131,11 @@ class CodePilotChatPanel(private val project: Project) {
 
     private fun setLedger(text: String) = SwingUtilities.invokeLater { ledgerView.text = text }
 
+    private fun resetButtons() = SwingUtilities.invokeLater {
+        sendButton.isEnabled = true
+        stopButton.isEnabled = false
+    }
+
     private inner class SendAction : AbstractAction("Send") {
         override fun actionPerformed(e: ActionEvent?) {
             val text = inputArea.text.trim().ifEmpty { return }
@@ -122,64 +145,87 @@ class CodePilotChatPanel(private val project: Project) {
             sendButton.isEnabled = false
             stopButton.isEnabled = true
 
-            val payload = mutableMapOf<String, Any?>(
-                "sessionId" to sessionHandle.meta.id,
-                "mode" to modeBox.selectedItem,
-                "input" to text,
-                "intent" to "new",
-                "options" to mapOf("locale" to settings.state.preferredLocale),
-                "policy" to mapOf(
-                    "selfCheck" to true,
-                    "contextBudgetTokens" to settings.state.contextBudgetTokens,
-                    "keepRecentMessages" to settings.state.keepRecentMessages,
-                ),
-            )
-
-            client.run(payload, object : ConversationClient.Listener {
-                override fun onDelta(text: String) = appendTranscript(text)
-                override fun onPlan(payload: JsonNode) {
-                    setPlan(payload.toPrettyString())
-                    sessionStore.savePlan(sessionHandle, payload)
-                }
-                override fun onPlanDelta(payload: JsonNode) {
-                    appendTranscript("[plan_delta] " + payload.toPrettyString())
-                }
-                override fun onTaskLedger(payload: JsonNode) {
-                    setLedger(payload.toPrettyString())
-                    sessionStore.saveLedger(sessionHandle, payload)
-                }
-                override fun onSelfCheck(payload: JsonNode) =
-                    appendTranscript("[self_check] " + payload.path("nextAction").asText("?"))
-                override fun onNeedsInput(payload: JsonNode) =
-                    appendTranscript("[needs_input] " + payload.path("title").asText(""))
-                override fun onToolCall(payload: JsonNode) =
-                    appendTranscript("[tool_call] " + payload.path("name").asText(""))
-                override fun onError(code: Int, message: String) =
-                    appendTranscript("[error $code] $message")
-                override fun onDone(reason: String, payload: JsonNode) {
-                    appendTranscript("[done] $reason")
-                    SwingUtilities.invokeLater {
-                        sendButton.isEnabled = true
-                        stopButton.isEnabled = false
-                    }
-                }
-                override fun onClosed() {
-                    SwingUtilities.invokeLater {
-                        sendButton.isEnabled = true
-                        stopButton.isEnabled = false
-                    }
-                }
-            })
+            val payload = basePayload(text, intent = "new")
+            client.run(payload, panelListener(text))
         }
     }
 
     private inner class StopAction : AbstractAction("Stop") {
         override fun actionPerformed(e: ActionEvent?) {
             client.stop(sessionHandle.meta.id)
-            stopButton.isEnabled = false
-            sendButton.isEnabled = true
+            resetButtons()
         }
     }
+
+    private fun basePayload(input: String, intent: String, extras: Map<String, Any?> = emptyMap()): Map<String, Any?> {
+        val mode = modeBox.selectedItem as String
+        val base = mutableMapOf<String, Any?>(
+            "sessionId" to sessionHandle.meta.id,
+            "mode" to mode,
+            "input" to input,
+            "intent" to intent,
+            "options" to mapOf("locale" to settings.state.preferredLocale),
+            "policy" to mapOf(
+                "selfCheck" to true,
+                "contextBudgetTokens" to settings.state.contextBudgetTokens,
+                "keepRecentMessages" to settings.state.keepRecentMessages,
+            ),
+            "tools" to listOf(
+                "fs.read", "fs.list", "fs.search", "fs.outline",
+                "fs.create", "fs.write", "fs.replace", "fs.delete", "fs.move",
+                "shell.exec", "plan.show",
+            ),
+        )
+        base.putAll(extras)
+        return base
+    }
+
+    private fun panelListener(originalInput: String) =
+        object : ConversationClient.Listener {
+            override fun onDelta(text: String) = appendTranscript(text)
+            override fun onPlan(payload: JsonNode) {
+                setPlan(payload.toPrettyString())
+                sessionStore.savePlan(sessionHandle, payload)
+            }
+            override fun onPlanDelta(payload: JsonNode) {
+                appendTranscript("[plan_delta] " + payload.toPrettyString())
+            }
+            override fun onTaskLedger(payload: JsonNode) {
+                setLedger(payload.toPrettyString())
+                sessionStore.saveLedger(sessionHandle, payload)
+            }
+            override fun onSelfCheck(payload: JsonNode) =
+                appendTranscript("[self_check] nextAction=" + payload.path("nextAction").asText("?"))
+            override fun onToolCall(payload: JsonNode) {
+                appendTranscript("[tool_call] " + payload.path("name").asText())
+                dispatcher.dispatch(payload)
+            }
+            override fun onRiskNotice(payload: JsonNode) =
+                appendTranscript("[risk_notice] " + payload.path("headline").asText(""))
+            override fun onNeedsInput(payload: JsonNode) {
+                ApplicationManager.getApplication().invokeLater {
+                    val dialog = NeedsInputDialog(project, payload)
+                    if (dialog.showAndGet()) {
+                        val answers = dialog.answers()
+                        if (answers.isNotEmpty()) {
+                            val next = basePayload(originalInput, "answer", mapOf("answers" to answers))
+                            client.run(next, panelListener(originalInput))
+                        }
+                    }
+                }
+            }
+            override fun onPatch(payload: JsonNode) {
+                appendTranscript("[patch] preparing diff preview…")
+                patcher.applyAll(payload)
+            }
+            override fun onError(code: Int, message: String) =
+                appendTranscript("[error $code] $message")
+            override fun onDone(reason: String, payload: JsonNode) {
+                appendTranscript("[done] $reason")
+                resetButtons()
+            }
+            override fun onClosed() = resetButtons()
+        }
 
     private fun workspaceHash(): String =
         ApplicationManager.getApplication()
