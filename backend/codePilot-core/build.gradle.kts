@@ -6,7 +6,6 @@ dependencies {
     api(project(":codePilot-common"))
 
     api(libs.spring.ai.openai)
-    api(libs.spring.ai.pgvector)
     api(libs.spring.ai.mcp)
 
     api(libs.caffeine)

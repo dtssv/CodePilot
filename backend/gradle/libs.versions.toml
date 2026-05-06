@@ -12,7 +12,7 @@ caffeine         = "3.1.8"
 micrometer       = "1.13.4"
 otel             = "1.41.0"
 flyway           = "10.17.2"
-postgres-jdbc    = "42.7.4"
+mysql-connector  = "8.3.0"
 pgvector         = "0.1.6"
 resilience4j     = "2.2.0"
 bucket4j         = "8.10.1"
@@ -53,8 +53,8 @@ spring-ai-mcp                  = { module = "org.springframework.ai:spring-ai-mc
 
 springdoc-openapi              = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
 flyway-core                    = { module = "org.flywaydb:flyway-core",                version.ref = "flyway" }
-flyway-postgres                = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
-postgresql                     = { module = "org.postgresql:postgresql",               version.ref = "postgres-jdbc" }
+flyway-mysql                   = { module = "org.flywaydb:flyway-mysql",               version.ref = "flyway" }
+mysql-connector                = { module = "com.mysql:mysql-connector-j",             version.ref = "mysql-connector" }
 pgvector                       = { module = "com.pgvector:pgvector",                   version.ref = "pgvector" }
 hikari                         = { module = "com.zaxxer:HikariCP",                     version.ref = "hikari" }
 caffeine                       = { module = "com.github.ben-manes.caffeine:caffeine",  version.ref = "caffeine" }

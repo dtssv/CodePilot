@@ -29,7 +29,7 @@ public class SystemLeakRepository {
         """
         INSERT INTO system_leak_events(trace_id, user_id, model_name, phase, matched_rule,
                                         matched_hash, sample_excerpt)
-        VALUES (:trace_id, cast(:user_id as uuid), :model_name, :phase, :matched_rule,
+        VALUES (:trace_id, :user_id, :model_name, :phase, :matched_rule,
                  :matched_hash, :sample_excerpt)
         """;
     var params = new MapSqlParameterSource()

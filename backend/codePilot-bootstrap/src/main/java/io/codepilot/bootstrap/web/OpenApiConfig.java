@@ -53,4 +53,14 @@ public class OpenApiConfig {
   public GroupedOpenApi modelGroup() {
     return GroupedOpenApi.builder().group("model").pathsToMatch("/v1/models/**").build();
   }
+
+  @Bean
+  public GroupedOpenApi actionGroup() {
+    return GroupedOpenApi.builder().group("action").pathsToMatch("/v1/actions/**").build();
+  }
+
+  @Bean
+  public GroupedOpenApi auditGroup() {
+    return GroupedOpenApi.builder().group("audit").pathsToMatch("/v1/audit/**").build();
+  }
 }

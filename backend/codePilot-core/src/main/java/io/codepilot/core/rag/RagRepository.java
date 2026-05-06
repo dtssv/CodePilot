@@ -1,6 +1,5 @@
 package io.codepilot.core.rag;
 
-import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
@@ -30,8 +29,8 @@ public class RagRepository {
         """
         INSERT INTO rag_chunks(session_id, user_id, path, lang, start_line, end_line,
                                content_hash, snippet, embedding, expires_at)
-        VALUES (cast(:sessionId as uuid), cast(:userId as uuid), :path, :lang, :startLine,
-                :endLine, :contentHash, :snippet, cast(:embedding as vector), NOW() + INTERVAL '24 hours')
+        VALUES (:sessionId, :userId, :path, :lang, :startLine,
+                :endLine, :contentHash, :snippet, :embedding, DATE_ADD(NOW(3), INTERVAL 24 HOUR))
         """;
     MapSqlParameterSource[] batchParams =
         chunks.stream()
@@ -46,43 +45,50 @@ public class RagRepository {
                         .addValue("endLine", c.endLine())
                         .addValue("contentHash", c.contentHash())
                         .addValue("snippet", truncate(c.snippet(), 4096))
-                        .addValue("embedding", toVectorLiteral(c.embedding())))
+                        .addValue("embedding", toBytes(c.embedding())))
             .toArray(MapSqlParameterSource[]::new);
     jdbc.batchUpdate(sql, batchParams);
   }
 
-  // ------- Search by cosine similarity ------- //
+  // ------- Search by cosine similarity (app-layer computation for MySQL) ------- //
 
   public List<RagSearchHit> search(UUID sessionId, float[] queryEmbedding, int topK) {
+    // MySQL has no native vector ops; fetch all embeddings for the session and compute in Java
     String sql =
         """
-        SELECT path, lang, start_line, end_line, snippet,
-               1 - (embedding <=> cast(:embedding as vector)) AS score
+        SELECT path, lang, start_line, end_line, snippet, embedding
         FROM rag_chunks
-        WHERE session_id = cast(:sessionId as uuid)
-          AND expires_at > NOW()
-        ORDER BY embedding <=> cast(:embedding as vector)
-        LIMIT :topK
+        WHERE session_id = :sessionId
+          AND expires_at > NOW(3)
         """;
-    var params =
-        new MapSqlParameterSource()
-            .addValue("sessionId", sessionId.toString())
-            .addValue("embedding", toVectorLiteral(queryEmbedding))
-            .addValue("topK", topK);
-    return jdbc.query(sql, params, (rs, rowNum) -> mapSearchHit(rs));
+    var params = new MapSqlParameterSource().addValue("sessionId", sessionId.toString());
+    List<RagSearchHit> candidates = jdbc.query(sql, params, (rs, rowNum) -> {
+      float[] emb = fromBytes(rs.getBytes("embedding"));
+      double score = cosineSimilarity(queryEmbedding, emb);
+      return new RagSearchHit(
+          rs.getString("path"),
+          rs.getString("lang"),
+          rs.getObject("start_line") == null ? null : rs.getInt("start_line"),
+          rs.getObject("end_line") == null ? null : rs.getInt("end_line"),
+          rs.getString("snippet"),
+          score);
+    });
+    // Sort by score descending and return top-K
+    candidates.sort((a, b) -> Double.compare(b.score(), a.score()));
+    return candidates.stream().limit(topK).toList();
   }
 
   // ------- Delete by session ------- //
 
   public int deleteBySession(UUID sessionId) {
-    String sql = "DELETE FROM rag_chunks WHERE session_id = cast(:sessionId as uuid)";
+    String sql = "DELETE FROM rag_chunks WHERE session_id = :sessionId";
     return jdbc.update(sql, new MapSqlParameterSource("sessionId", sessionId.toString()));
   }
 
   // ------- Cleanup expired ------- //
 
   public int deleteExpired() {
-    String sql = "DELETE FROM rag_chunks WHERE expires_at < NOW()";
+    String sql = "DELETE FROM rag_chunks WHERE expires_at < NOW(3)";
     return jdbc.update(sql, new MapSqlParameterSource());
   }
 
@@ -90,7 +96,7 @@ public class RagRepository {
 
   public int countBySession(UUID sessionId) {
     String sql =
-        "SELECT COUNT(*) FROM rag_chunks WHERE session_id = cast(:sessionId as uuid) AND expires_at > NOW()";
+        "SELECT COUNT(*) FROM rag_chunks WHERE session_id = :sessionId AND expires_at > NOW(3)";
     Integer count =
         jdbc.queryForObject(
             sql, new MapSqlParameterSource("sessionId", sessionId.toString()), Integer.class);
@@ -109,15 +115,34 @@ public class RagRepository {
         rs.getDouble("score"));
   }
 
-  private static String toVectorLiteral(float[] embedding) {
-    if (embedding == null || embedding.length == 0) return "[0]";
-    StringBuilder sb = new StringBuilder("[");
-    for (int i = 0; i < embedding.length; i++) {
-      if (i > 0) sb.append(',');
-      sb.append(embedding[i]);
+  /** Convert float[] to byte[] (IEEE 754, big-endian) for BLOB storage. */
+  private static byte[] toBytes(float[] embedding) {
+    if (embedding == null) return new byte[0];
+    java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(embedding.length * 4);
+    for (float f : embedding) buf.putFloat(f);
+    return buf.array();
+  }
+
+  /** Convert byte[] back to float[] from BLOB storage. */
+  private static float[] fromBytes(byte[] data) {
+    if (data == null || data.length == 0) return new float[0];
+    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(data);
+    float[] result = new float[data.length / 4];
+    for (int i = 0; i < result.length; i++) result[i] = buf.getFloat();
+    return result;
+  }
+
+  /** Cosine similarity between two vectors. */
+  private static double cosineSimilarity(float[] a, float[] b) {
+    if (a.length != b.length || a.length == 0) return 0.0;
+    double dot = 0, normA = 0, normB = 0;
+    for (int i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
     }
-    sb.append(']');
-    return sb.toString();
+    double denom = Math.sqrt(normA) * Math.sqrt(normB);
+    return denom == 0 ? 0.0 : dot / denom;
   }
 
   private static String truncate(String s, int maxLen) {

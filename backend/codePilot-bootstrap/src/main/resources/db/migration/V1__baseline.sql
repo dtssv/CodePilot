@@ -1,107 +1,77 @@
 -- ============================================================================
 --  CodePilot — Flyway baseline
---  Target: PostgreSQL 16+
+--  Target: MySQL 8.0+
 --
 --  IMPORTANT: This is the ONLY authoritative way to evolve the CodePilot
 --  database schema. Do NOT modify existing V* files; add V2__*, V3__*, ...
---  See scripts/db/README.md for the full policy.
 -- ============================================================================
-
--- == Extensions =============================================================
-
-CREATE EXTENSION IF NOT EXISTS "pgcrypto"; -- gen_random_uuid(), digest()
-CREATE EXTENSION IF NOT EXISTS "citext";   -- case-insensitive user names
 
 -- == Users & tenants ========================================================
 
 CREATE TABLE IF NOT EXISTS tenants (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    slug          CITEXT      NOT NULL UNIQUE,
-    name          TEXT        NOT NULL,
-    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+    id            CHAR(36)     NOT NULL PRIMARY KEY,
+    slug          VARCHAR(128) NOT NULL UNIQUE,
+    name          VARCHAR(256) NOT NULL,
+    enabled       TINYINT(1)   NOT NULL DEFAULT 1,
+    created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS users (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id     UUID        NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-    sso_subject   TEXT        NOT NULL,
-    display_name  TEXT        NOT NULL,
-    email         CITEXT      NOT NULL,
-    status        TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, sso_subject)
-);
-
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
+    id            CHAR(36)     NOT NULL PRIMARY KEY,
+    tenant_id     CHAR(36)     NOT NULL,
+    sso_subject   VARCHAR(256) NOT NULL,
+    display_name  VARCHAR(256) NOT NULL,
+    email         VARCHAR(320) NOT NULL,
+    status        ENUM('active','suspended') NOT NULL DEFAULT 'active',
+    created_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_tenant_sso (tenant_id, sso_subject),
+    INDEX idx_users_email (email),
+    CONSTRAINT fk_users_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- == Devices (for HMAC signing) ============================================
 
 CREATE TABLE IF NOT EXISTS devices (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    device_id       TEXT        NOT NULL,
-    device_secret   BYTEA       NOT NULL, -- KMS-wrapped
-    os              TEXT        NOT NULL,
-    app_version     TEXT        NOT NULL,
-    revoked_at      TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, device_id)
-);
+    id              CHAR(36)       NOT NULL PRIMARY KEY,
+    user_id         CHAR(36)       NOT NULL,
+    device_id       VARCHAR(256)   NOT NULL,
+    device_secret   VARBINARY(4096) NOT NULL,
+    os              VARCHAR(32)    NOT NULL,
+    app_version     VARCHAR(32)    NOT NULL,
+    revoked_at      DATETIME(3)    DEFAULT NULL,
+    created_at      DATETIME(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    last_seen_at    DATETIME(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_user_device (user_id, device_id),
+    CONSTRAINT fk_devices_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- == Custom model providers (per-user, OpenAI-compatible) ==================
 
 CREATE TABLE IF NOT EXISTS custom_model_providers (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name          TEXT        NOT NULL,
-    protocol      TEXT        NOT NULL CHECK (protocol IN ('openai','azure-openai','ollama','anthropic')),
-    base_url      TEXT        NOT NULL,
-    api_key_cipher BYTEA      NOT NULL, -- KMS-wrapped
-    model         TEXT        NOT NULL,
-    headers_json  JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    timeout_ms    INTEGER     NOT NULL DEFAULT 60000,
-    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, name)
-);
+    id             CHAR(36)       NOT NULL PRIMARY KEY,
+    user_id        CHAR(36)       NOT NULL,
+    name           VARCHAR(128)   NOT NULL,
+    protocol       ENUM('openai','azure-openai','ollama','anthropic') NOT NULL,
+    base_url       VARCHAR(1024)  NOT NULL,
+    api_key_cipher VARBINARY(4096) NOT NULL,
+    model          VARCHAR(128)   NOT NULL,
+    headers_json   JSON           NOT NULL,
+    timeout_ms     INT            NOT NULL DEFAULT 60000,
+    enabled        TINYINT(1)     NOT NULL DEFAULT 1,
+    created_at     DATETIME(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at     DATETIME(3)    NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_user_model_name (user_id, name),
+    CONSTRAINT fk_models_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- == Idempotency keys (short-lived) ========================================
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
-    id          TEXT         PRIMARY KEY,
-    scope       TEXT         NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    expires_at  TIMESTAMPTZ  NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_idem_expires ON idempotency_keys (expires_at);
-
--- == Trigger: auto-update updated_at =======================================
-
-CREATE OR REPLACE FUNCTION trg_touch_updated_at() RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DO $$
-DECLARE t TEXT;
-BEGIN
-  FOR t IN
-    SELECT c.relname FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = current_schema() AND c.relkind='r'
-        AND c.relname IN ('tenants','users','custom_model_providers')
-  LOOP
-    EXECUTE format(
-      'DROP TRIGGER IF EXISTS %1$s_touch ON %1$s; '
-      'CREATE TRIGGER %1$s_touch BEFORE UPDATE ON %1$s '
-      'FOR EACH ROW EXECUTE PROCEDURE trg_touch_updated_at();', t);
-  END LOOP;
-END $$;
+    id          VARCHAR(128)  NOT NULL PRIMARY KEY,
+    scope       VARCHAR(64)   NOT NULL,
+    created_at  DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    expires_at  DATETIME(3)   NOT NULL,
+    INDEX idx_idem_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

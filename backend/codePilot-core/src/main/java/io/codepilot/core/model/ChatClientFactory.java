@@ -70,7 +70,7 @@ public class ChatClientFactory {
 
   private ChatClient buildCustomClient(UUID providerId) {
     String sql =
-        "SELECT base_url, api_key_cipher, model, timeout_ms FROM custom_model_providers WHERE id = cast(:id as uuid) AND enabled = true";
+        "SELECT base_url, api_key_cipher, model, timeout_ms FROM custom_model_providers WHERE id = :id AND enabled = true";
     var rows = jdbc.queryForList(sql, new MapSqlParameterSource("id", providerId.toString()));
     if (rows.isEmpty()) return defaultClient();
 

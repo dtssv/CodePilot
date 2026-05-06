@@ -1,65 +1,64 @@
 -- ============================================================================
---  MCP / Skill marketplace (system-signed only).
---  Note: ONLY user-installed records live on the client; the backend keeps
---        just enough metadata to support listing, updates, and re-install.
+--  MCP / Skill marketplace + Plugin update channels.
+--  Target: MySQL 8.0+
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS mcp_packages (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    slug          TEXT        NOT NULL UNIQUE,
-    name          TEXT        NOT NULL,
-    type          TEXT        NOT NULL CHECK (type IN ('mcp','skill')),
-    author        TEXT        NOT NULL,
-    latest_version TEXT       NOT NULL,
-    description   TEXT,
-    homepage_url  TEXT,
-    changelog_url TEXT,
-    deprecated    BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+    id             CHAR(36)     NOT NULL PRIMARY KEY,
+    slug           VARCHAR(256) NOT NULL UNIQUE,
+    name           VARCHAR(256) NOT NULL,
+    type           ENUM('mcp','skill') NOT NULL,
+    author         VARCHAR(128) NOT NULL,
+    latest_version VARCHAR(32)  NOT NULL,
+    description    TEXT,
+    homepage_url   VARCHAR(1024),
+    changelog_url  VARCHAR(1024),
+    deprecated     TINYINT(1)   NOT NULL DEFAULT 0,
+    created_at     DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at     DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mcp_versions (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    package_id    UUID        NOT NULL REFERENCES mcp_packages(id) ON DELETE CASCADE,
-    version       TEXT        NOT NULL,
-    manifest_json JSONB       NOT NULL,  -- safe subset; systemPrompt / examples excluded
-    download_url  TEXT        NOT NULL,
-    sha256        TEXT        NOT NULL,
-    signature     TEXT        NOT NULL,  -- base64
-    signed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (package_id, version)
-);
+    id             CHAR(36)     NOT NULL PRIMARY KEY,
+    package_id     CHAR(36)     NOT NULL,
+    version        VARCHAR(32)  NOT NULL,
+    manifest_json  JSON         NOT NULL COMMENT 'safe subset; systemPrompt/examples excluded',
+    download_url   VARCHAR(1024) NOT NULL,
+    sha256         VARCHAR(64)  NOT NULL,
+    signature      TEXT         NOT NULL COMMENT 'base64',
+    signed_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_pkg_version (package_id, version),
+    CONSTRAINT fk_version_pkg FOREIGN KEY (package_id) REFERENCES mcp_packages(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE INDEX IF NOT EXISTS idx_mcp_versions_pkg ON mcp_versions (package_id);
+CREATE INDEX idx_mcp_versions_pkg ON mcp_versions (package_id);
 
 CREATE TABLE IF NOT EXISTS install_records (
-    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    package_slug TEXT        NOT NULL,
-    version      TEXT        NOT NULL,
-    scope        TEXT        NOT NULL CHECK (scope IN ('project','global')),
-    source       TEXT        NOT NULL CHECK (source IN ('official','third-party','local','builtin-ide')),
-    installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    uninstalled_at TIMESTAMPTZ,
-    UNIQUE (user_id, package_slug, version, scope, source)
-);
-
-CREATE INDEX IF NOT EXISTS idx_install_records_user ON install_records (user_id);
+    id             CHAR(36)     NOT NULL PRIMARY KEY,
+    user_id        CHAR(36)     NOT NULL,
+    package_slug   VARCHAR(256) NOT NULL,
+    version        VARCHAR(32)  NOT NULL,
+    scope          ENUM('project','global') NOT NULL,
+    source         ENUM('official','third-party','local','builtin-ide') NOT NULL,
+    installed_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    uninstalled_at DATETIME(3)  DEFAULT NULL,
+    UNIQUE KEY uk_install (user_id, package_slug, version, scope, source),
+    INDEX idx_install_user (user_id),
+    CONSTRAINT fk_install_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- == Plugin update (release channel metadata) ==============================
 
 CREATE TABLE IF NOT EXISTS plugin_releases (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    channel         TEXT        NOT NULL CHECK (channel LIKE 'stable' OR channel LIKE 'beta' OR channel LIKE 'dev' OR channel LIKE 'corp.%'),
-    version         TEXT        NOT NULL,
-    min_ide_build   TEXT        NOT NULL,
-    max_ide_build   TEXT,
-    manifest_json   JSONB       NOT NULL,  -- artifacts[] kind/sha256/signature/downloadUrl
-    rollout_percent INTEGER     NOT NULL DEFAULT 100 CHECK (rollout_percent BETWEEN 0 AND 100),
-    pin_to          TEXT,
-    published_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (channel, version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_plugin_releases_channel ON plugin_releases (channel);
+    id              CHAR(36)     NOT NULL PRIMARY KEY,
+    channel         VARCHAR(64)  NOT NULL COMMENT 'stable|beta|dev|corp.*',
+    version         VARCHAR(32)  NOT NULL,
+    min_ide_build   VARCHAR(32)  NOT NULL,
+    max_ide_build   VARCHAR(32),
+    manifest_json   JSON         NOT NULL COMMENT 'artifacts[] kind/sha256/signature/downloadUrl',
+    rollout_percent TINYINT UNSIGNED NOT NULL DEFAULT 100,
+    pin_to          VARCHAR(32),
+    published_at    DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_channel_version (channel, version),
+    INDEX idx_plugin_rel_channel (channel)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

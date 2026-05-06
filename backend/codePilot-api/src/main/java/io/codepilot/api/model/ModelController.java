@@ -16,11 +16,13 @@ import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /** CRUD endpoints for custom model providers (per-user, OpenAI-compatible). */
@@ -33,6 +35,13 @@ public class ModelController {
 
   public ModelController(ModelService modelService) {
     this.modelService = modelService;
+  }
+
+  @Operation(summary = "List available models (builtin + custom for the user)")
+  @GetMapping
+  public ApiResponse<Map<String, Object>> list(@RequestHeader(value = "X-User-Id", required = false) String userId) {
+    Map<String, Object> result = modelService.listModels(userId);
+    return ApiResponse.ok(result);
   }
 
   @Operation(summary = "Create a custom model provider")

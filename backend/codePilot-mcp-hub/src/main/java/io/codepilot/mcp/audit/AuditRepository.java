@@ -38,8 +38,8 @@ public class AuditRepository {
         """
         INSERT INTO audit_events(trace_id, tenant_id, user_id, device_id, kind, severity, code,
                                   message, args_hash, duration_ms, extra_json)
-        VALUES (:trace_id, cast(:tenant_id as uuid), cast(:user_id as uuid), :device_id, :kind,
-                 :severity, :code, :message, :args_hash, :duration_ms, cast(:extra as jsonb))
+        VALUES (:trace_id, :tenant_id, :user_id, :device_id, :kind,
+                 :severity, :code, :message, :args_hash, :duration_ms, :extra)
         """;
     var params = new MapSqlParameterSource()
         .addValue("trace_id", traceId)

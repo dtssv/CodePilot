@@ -57,8 +57,8 @@ public class ModelService {
         """
         INSERT INTO custom_model_providers(id, user_id, name, protocol, base_url, api_key_cipher,
                                            model, headers_json, timeout_ms)
-        VALUES (cast(:id as uuid), cast(:userId as uuid), :name, :protocol, :baseUrl,
-                :apiKeyCipher, :model, cast(:headers as jsonb), :timeout)
+        VALUES (:id, :userId, :name, :protocol, :baseUrl,
+                :apiKeyCipher, :model, :headers, :timeout)
         """;
     jdbc.update(
         sql,
@@ -88,7 +88,7 @@ public class ModelService {
     if (req.baseUrl() != null) { set.append("base_url = :baseUrl, "); params.addValue("baseUrl", req.baseUrl()); }
     if (req.apiKey() != null) { set.append("api_key_cipher = :cipher, "); params.addValue("cipher", encrypt(req.apiKey())); }
     if (req.model() != null) { set.append("model = :model, "); params.addValue("model", req.model()); }
-    if (req.headers() != null) { set.append("headers_json = cast(:headers as jsonb), "); params.addValue("headers", toJson(req.headers())); }
+    if (req.headers() != null) { set.append("headers_json = :headers, "); params.addValue("headers", toJson(req.headers())); }
     if (req.timeoutMs() != null) { set.append("timeout_ms = :timeout, "); params.addValue("timeout", req.timeoutMs()); }
     if (req.enabled() != null) { set.append("enabled = :enabled, "); params.addValue("enabled", req.enabled()); }
 
@@ -97,7 +97,7 @@ public class ModelService {
     }
     set.setLength(set.length() - 2); // remove trailing comma
 
-    String sql = "UPDATE custom_model_providers SET " + set + " WHERE id = cast(:id as uuid)";
+    String sql = "UPDATE custom_model_providers SET " + set + " WHERE id = :id";
     int rows = jdbc.update(sql, params);
     if (rows == 0) throw new CodePilotException(ErrorCodes.NOT_FOUND, "Model not found: " + id);
 
@@ -107,9 +107,31 @@ public class ModelService {
 
   @Transactional
   public void delete(UUID id) {
-    String sql = "DELETE FROM custom_model_providers WHERE id = cast(:id as uuid)";
+    String sql = "DELETE FROM custom_model_providers WHERE id = :id";
     int rows = jdbc.update(sql, new MapSqlParameterSource("id", id.toString()));
     if (rows == 0) throw new CodePilotException(ErrorCodes.NOT_FOUND, "Model not found: " + id);
+  }
+
+  /** List all models available to a user (builtin + custom). */
+  public Map<String, Object> listModels(String userId) {
+    List<Map<String, Object>> builtin = List.of(
+        Map.of("id", "codePilot-default", "name", "CodePilot Default", "caps", List.of("tools", "stream"), "maxTokens", 128000),
+        Map.of("id", "codePilot-pro", "name", "CodePilot Pro", "caps", List.of("tools", "stream", "vision"), "maxTokens", 200000));
+    List<CustomModelProvider> custom = userId != null ? listCustomByUser(userId) : List.of();
+    return Map.of("builtin", builtin, "custom", custom);
+  }
+
+  private List<CustomModelProvider> listCustomByUser(String userId) {
+    String sql = """
+        SELECT id, user_id, name, protocol, base_url, model, headers_json, timeout_ms,
+               enabled, created_at, updated_at
+        FROM custom_model_providers WHERE user_id = :userId AND enabled = true""";
+    return jdbc.query(sql, new MapSqlParameterSource("userId", userId), (rs, i) ->
+        new CustomModelProvider(
+            UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("user_id")),
+            rs.getString("name"), rs.getString("protocol"), rs.getString("base_url"),
+            rs.getString("model"), Map.of(), rs.getInt("timeout_ms"), rs.getBoolean("enabled"),
+            rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant()));
   }
 
   public Map<String, Object> testConnection(TestModelCommand req) {
@@ -129,7 +151,7 @@ public class ModelService {
         """
         SELECT id, user_id, name, protocol, base_url, model, headers_json, timeout_ms,
                enabled, created_at, updated_at
-        FROM custom_model_providers WHERE id = cast(:id as uuid)""";
+        FROM custom_model_providers WHERE id = :id""";
     return jdbc.queryForObject(sql, new MapSqlParameterSource("id", id.toString()), (rs, i) ->
         new CustomModelProvider(
             UUID.fromString(rs.getString("id")),

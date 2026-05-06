@@ -1,0 +1,89 @@
+package io.codepilot.api.action;
+
+import io.codepilot.core.conversation.ConversationService;
+import io.codepilot.core.dto.ConversationMode;
+import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.safety.SystemPromptLeakOutputFilter;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import java.util.List;
+import java.util.Map;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+
+/**
+ * One-click action endpoints (refactor, review, comment, gentest, gendoc). These are shortcuts that
+ * wrap /conversation/run with a fixed mode and action-specific prompt assembly.
+ */
+@Tag(name = "action", description = "One-click actions (refactor, review, comment, gentest, gendoc)")
+@RestController
+@RequestMapping(value = "/v1/actions", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public class ActionController {
+
+  private final ConversationService service;
+  private final SystemPromptLeakOutputFilter leakFilter;
+
+  public ActionController(ConversationService service, SystemPromptLeakOutputFilter leakFilter) {
+    this.service = service;
+    this.leakFilter = leakFilter;
+  }
+
+  @Operation(summary = "Refactor selection")
+  @PostMapping(value = "/refactor", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> refactor(@RequestBody @Valid ActionRequest req) {
+    return runAction(req, "refactor");
+  }
+
+  @Operation(summary = "Review code")
+  @PostMapping(value = "/review", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> review(@RequestBody @Valid ActionRequest req) {
+    return runAction(req, "review");
+  }
+
+  @Operation(summary = "Generate comments")
+  @PostMapping(value = "/comment", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> comment(@RequestBody @Valid ActionRequest req) {
+    return runAction(req, "comment");
+  }
+
+  @Operation(summary = "Generate tests")
+  @PostMapping(value = "/gentest", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> gentest(@RequestBody @Valid ActionRequest req) {
+    return runAction(req, "gentest");
+  }
+
+  @Operation(summary = "Generate documentation")
+  @PostMapping(value = "/gendoc", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> gendoc(@RequestBody @Valid ActionRequest req) {
+    return runAction(req, "gendoc");
+  }
+
+  private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action) {
+    // Build a ConversationRunRequest with mode=chat (actions are single-turn, no tools)
+    // The action type is passed via the input prefix for PromptOrchestrator to pick the right Skill
+    String input = "[action:" + action + "] " + (req.instruction() != null ? req.instruction() : "") + "\n\n" + req.context();
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
+  public record ActionRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String context,
+      String instruction,
+      String language,
+      String filePath,
+      String testFramework,
+      String docTarget,
+      String audience) {}
+}
