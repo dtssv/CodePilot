@@ -2,6 +2,7 @@ package io.codepilot.api.auth;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.net.URI;
 import java.time.Duration;
@@ -34,7 +35,7 @@ public record SsoProperties(@Valid Oidc oidc, @Valid HmacBridge hmacBridge, @Val
   /** Standard OpenID Connect provider. */
   public record Oidc(
       @NotBlank String issuer,
-      @NotBlank URI jwksUri,
+      @NotNull URI jwksUri,
       List<@NotBlank String> audiences,
       Duration jwksCacheTtl,
       DeviceFlow deviceFlow) {
@@ -45,8 +46,8 @@ public record SsoProperties(@Valid Oidc oidc, @Valid HmacBridge hmacBridge, @Val
 
     /** RFC 8628 Device Authorization endpoints (delegated by /v1/auth/device-code). */
     public record DeviceFlow(
-        @NotBlank URI authorizationEndpoint,
-        @NotBlank URI tokenEndpoint,
+        @NotNull URI authorizationEndpoint,
+        @NotNull URI tokenEndpoint,
         @NotBlank String clientId,
         String clientSecret,
         @NotBlank String scope) {}

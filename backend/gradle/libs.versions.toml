@@ -11,7 +11,6 @@ jackson          = "2.17.2"
 caffeine         = "3.1.8"
 micrometer       = "1.13.3"
 otel             = "1.41.0"
-flyway           = "10.17.2"
 mysql-connector  = "8.3.0"
 pgvector         = "0.1.6"
 resilience4j     = "2.2.0"
@@ -51,9 +50,7 @@ spring-ai-openai               = { module = "org.springframework.ai:spring-ai-op
 spring-ai-pgvector             = { module = "org.springframework.ai:spring-ai-pgvector-store-spring-boot-starter", version.ref = "spring-ai" }
 spring-ai-mcp                  = { module = "org.springframework.ai:spring-ai-mcp-client-spring-boot-starter",     version.ref = "spring-ai" }
 
-springdoc-openapi              = { module = "org.springdoc:springdoc-openapi-starter-webmvc-ui", version.ref = "springdoc" }
-flyway-core                    = { module = "org.flywaydb:flyway-core",                version.ref = "flyway" }
-flyway-mysql                   = { module = "org.flywaydb:flyway-mysql",               version.ref = "flyway" }
+springdoc-openapi              = { module = "org.springdoc:springdoc-openapi-starter-webflux-ui", version.ref = "springdoc" }
 mysql-connector                = { module = "com.mysql:mysql-connector-j",             version.ref = "mysql-connector" }
 pgvector                       = { module = "com.pgvector:pgvector",                   version.ref = "pgvector" }
 hikari                         = { module = "com.zaxxer:HikariCP",                     version.ref = "hikari" }

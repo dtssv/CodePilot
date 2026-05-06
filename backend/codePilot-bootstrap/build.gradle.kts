@@ -11,14 +11,13 @@ dependencies {
     implementation(project(":codePilot-gateway"))
     implementation(project(":codePilot-common"))
 
+    implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
 
-    implementation(libs.flyway.core)
-    implementation(libs.flyway.mysql)
     implementation(libs.mysql.connector)
     implementation(libs.hikari)
 

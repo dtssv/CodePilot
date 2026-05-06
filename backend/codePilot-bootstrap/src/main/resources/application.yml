@@ -10,15 +10,16 @@ spring:
     name: codePilot-backend
   main:
     banner-mode: off
+    web-application-type: reactive
   lifecycle:
     timeout-per-shutdown-phase: 20s
   threads:
     virtual:
       enabled: true
   datasource:
-    url: ${CODEPILOT_DB_URL:jdbc:mysql://localhost:3306/codepilot?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8mb4}
-    username: ${CODEPILOT_DB_USER:?env variable CODEPILOT_DB_USER is required}
-    password: ${CODEPILOT_DB_PASSWORD:?env variable CODEPILOT_DB_PASSWORD is required}
+    url: ${CODEPILOT_DB_URL:jdbc:mysql://localhost:3306/codepilot?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8}
+    username: ${CODEPILOT_DB_USER:root}
+    password: ${CODEPILOT_DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       pool-name: codePilotHikari
@@ -28,15 +29,9 @@ spring:
       max-lifetime: 1800000
       connection-timeout: 10000
       leak-detection-threshold: 10000
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
-    baseline-on-migrate: true
-    validate-on-migrate: true
-    out-of-order: false
   data:
     redis:
-      url: ${CODEPILOT_REDIS_URL:?env variable CODEPILOT_REDIS_URL is required}
+      url: ${CODEPILOT_REDIS_URL:redis://localhost:6379}
       timeout: 2s
       connect-timeout: 2s
       lettuce:
@@ -46,11 +41,11 @@ spring:
           min-idle: 4
   ai:
     openai:
-      base-url: ${CODEPILOT_LLM_BASE_URL:?env variable CODEPILOT_LLM_BASE_URL is required}
-      api-key: ${CODEPILOT_LLM_API_KEY:?env variable CODEPILOT_LLM_API_KEY is required}
+      base-url: ${CODEPILOT_LLM_BASE_URL:https://api.openai.com}
+      api-key: ${CODEPILOT_LLM_API_KEY:sk-xxx}
       chat:
         options:
-          model: ${CODEPILOT_LLM_DEFAULT_MODEL:?env variable CODEPILOT_LLM_DEFAULT_MODEL is required}
+          model: ${CODEPILOT_LLM_DEFAULT_MODEL:gpt-4o}
           temperature: 0.2
 
 management:
@@ -67,26 +62,26 @@ management:
 
 codepilot:
   security:
-    jwt-secret: ${CODEPILOT_JWT_SECRET:?env variable CODEPILOT_JWT_SECRET is required}
-    hmac-secret: ${CODEPILOT_HMAC_SECRET:?env variable CODEPILOT_HMAC_SECRET is required}
+    jwt-secret: ${CODEPILOT_JWT_SECRET:codepilot-dev-jwt-secret-at-least-32-chars!!}
+    hmac-secret: ${CODEPILOT_HMAC_SECRET:codepilot-dev-hmac-secret-at-least-32-chars!!}
     sso:
       oidc:
-        issuer: ${CODEPILOT_OIDC_ISSUER:}
-        jwks-uri: ${CODEPILOT_OIDC_JWKS_URI:}
+        issuer: ${CODEPILOT_OIDC_ISSUER:https://accounts.codepilot.local}
+        jwks-uri: ${CODEPILOT_OIDC_JWKS_URI:https://accounts.codepilot.local/.well-known/jwks.json}
         audiences:
           - ${CODEPILOT_OIDC_AUDIENCE:codepilot}
         jwks-cache-ttl: ${CODEPILOT_OIDC_JWKS_TTL:15m}
         device-flow:
-          authorization-endpoint: ${CODEPILOT_OIDC_DEVICE_AUTH_ENDPOINT:}
-          token-endpoint: ${CODEPILOT_OIDC_TOKEN_ENDPOINT:}
-          client-id: ${CODEPILOT_OIDC_CLIENT_ID:}
+          authorization-endpoint: ${CODEPILOT_OIDC_DEVICE_AUTH_ENDPOINT:https://accounts.codepilot.local/oauth/device/code}
+          token-endpoint: ${CODEPILOT_OIDC_TOKEN_ENDPOINT:https://accounts.codepilot.local/oauth/token}
+          client-id: ${CODEPILOT_OIDC_CLIENT_ID:codepilot-cli}
           client-secret: ${CODEPILOT_OIDC_CLIENT_SECRET:}
           scope: ${CODEPILOT_OIDC_SCOPE:openid profile email offline_access}
       hmac-bridge:
-        secret: ${CODEPILOT_SSO_BRIDGE_SECRET:}
+        secret: ${CODEPILOT_SSO_BRIDGE_SECRET:codepilot-dev-hmac-bridge-secret-32ch!!}
       dev:
-        enabled: ${CODEPILOT_SSO_DEV_ENABLED:false}
-        token: ${CODEPILOT_SSO_DEV_TOKEN:}
+        enabled: ${CODEPILOT_SSO_DEV_ENABLED:true}
+        token: ${CODEPILOT_SSO_DEV_TOKEN:codepilot-local-dev-token}
 
 springdoc:
   swagger-ui:
