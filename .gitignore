@@ -1,17 +1,38 @@
-# Compiled class file
-*.class
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
 
-# Log file
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Build outputs ----
+build/
+out/
+target/
+.gradle/
+.kotlin/
+**/bin/
+**/tmp/
+**/*.class
+
+# ---- Test reports ----
+*-reports/
+*test-output/
+**/jacoco.exec
+
+# ---- Logs ----
 *.log
+logs/
+hs_err_pid*
+replay_pid*
 
-# BlueJ files
-*.ctxt
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
+# ---- Packages ----
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.nar
 *.ear
@@ -19,6 +40,40 @@
 *.tar.gz
 *.rar
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
-hs_err_pid*
-replay_pid*
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+*.jks
+secrets/
+
+# ---- Local data ----
+data/
+**/runtime/
+**/data/
+
+# ---- IntelliJ Plugin runtime/sandbox ----
+**/sandbox/
+**/.intellijPlatform/
+
+# ---- Node (used by plugin webui) ----
+node_modules/
+**/dist/
+**/.cache/
+.npm/
+.pnpm-store/
+
+# ---- Python (auxiliary scripts only) ----
+__pycache__/
+*.pyc
+
+# ---- Frontend lockfiles allowed ----
+!**/package-lock.json
+!**/pnpm-lock.yaml
+
+# ---- Local CodePilot data (never commit) ----
+.codePilot/
+.codePilot.broken-*/
