@@ -9,7 +9,7 @@ spotless        = "6.25.0"
 # libraries
 jackson          = "2.17.2"
 caffeine         = "3.1.8"
-micrometer       = "1.13.4"
+micrometer       = "1.13.3"
 otel             = "1.41.0"
 flyway           = "10.17.2"
 mysql-connector  = "8.3.0"

@@ -22,7 +22,7 @@ dependencies {
     implementation(libs.mysql.connector)
     implementation(libs.hikari)
 
-    implementation(libs.micrometer.tracing.bridge.otel)
+    implementation("io.micrometer:micrometer-tracing-bridge-otel")
     implementation(libs.otel.exporter.otlp)
 
     implementation(libs.springdoc.openapi)
