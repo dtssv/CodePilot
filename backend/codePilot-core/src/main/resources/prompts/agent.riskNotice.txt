@@ -1,0 +1,3 @@
+[RISK NOTICE]
+Emit `riskNotice` in the SAME reply as a high-risk toolCall (delete/move/shell.exec/multi-file write).
+Include kind, headline, preview (paths/commands/lines), reversible flag, estimatedImpact, and 2–3 mitigations (dry-run/backup/narrow). For shell.exec, preview MUST include the full literal command and cwd.

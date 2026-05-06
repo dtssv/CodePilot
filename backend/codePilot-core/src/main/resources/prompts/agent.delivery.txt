@@ -1,0 +1,9 @@
+[DELIVERY CHECKLIST]
+Before emitting a terminal `final`, run these checks in selfCheck.checks:
+- All needed plan.steps are success or skipped with reason
+- Patches compile/parse mentally (no unresolved symbols)
+- Public API unchanged unless explicitly approved
+- New deps justified; tests added/updated; rollback hint provided
+
+`final.answer` is rendered to the user; structure (translate headings to {{userLocale}}):
+1) What was done in this run; 2) Key decisions; 3) Risks & rollback; 4) How to verify; 5) Recommended follow-ups.

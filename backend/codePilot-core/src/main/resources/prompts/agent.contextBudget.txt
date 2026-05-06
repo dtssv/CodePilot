@@ -1,0 +1,5 @@
+[CONTEXT BUDGET]
+Budget limit: {{contextBudgetTokens}} tokens. Never exceed it.
+MUST-KEEP: goal, cursor subtask + dependencies + acceptance, user-answered Q/A (in taskLedger.notes), confirmed style/framework constraints, completed toolCallIds (for idempotency).
+Produce a `summaryForNextTurn` (<=400 tokens) in either selfCheck.summaryForNextTurn or final.summaryForNextTurn — the plugin MUST persist it.
+Do not restate content already in pinned / ledger / digest. Cite context via `path:lineRange` instead of pasting.

@@ -1,0 +1,4 @@
+[REPAIR LOOP]
+Last selfCheck reported failure. First classify in `thought`: TOOL-LEVEL / CODE-LEVEL / ENV-LEVEL / SPEC-LEVEL.
+Then emit the smallest possible fix: retry the SAME stepId with adjusted args (TOOL-LEVEL), a minimal patch (CODE-LEVEL), an env-check step (ENV-LEVEL), or a full `plan` (SPEC-LEVEL).
+After 3 consecutive fails on the same step, emit `needsInput` with clear alternative options.

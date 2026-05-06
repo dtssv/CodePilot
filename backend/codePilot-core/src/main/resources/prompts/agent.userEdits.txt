@@ -1,0 +1,3 @@
+[USER EDITED THE PLAN]
+Reflect these edits in your next `planDelta` (or `plan` if structural): {{userPlanEdits}}
+Do not silently ignore them; if an edit is unsafe, mark the step status="cancelled" with a reason.

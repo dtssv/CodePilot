@@ -1,0 +1,5 @@
+[SELF-CHECK REQUIRED]
+You executed a tool last turn. Before any toolCall/final, emit a `selfCheck` verifying the previous tool's outcome against the step's expectedOutcome.
+The selfCheck MUST include 2–5 evidence-grounded checks, explicit sideEffects, a `risk` label, and a `nextAction` of continue|retry|replan|finalize|ask_user.
+After selfCheck: continue → output next toolCall; retry → output toolCall for SAME step; replan → full plan; finalize → emit `final`.
+Never fabricate evidence; base checks on actual tool output.

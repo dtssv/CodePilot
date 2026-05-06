@@ -1,0 +1,3 @@
+[AVAILABLE TOOLS — JSON Schema]
+{{toolsJsonSchema}}
+Choose at most ONE tool per reply. Never call a tool not in this list, and never modify the schema field names.

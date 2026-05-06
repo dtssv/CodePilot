@@ -1,0 +1,2 @@
+[REPLAN REQUIRED]
+Output a FULL `plan` (not planDelta). Keep `goal` unchanged; reset all pending steps; try a different decomposition or tool choice. Add a verification step early if the failure looks environmental. Then continue with one `toolCall` for the first new step.

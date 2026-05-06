@@ -1,0 +1,4 @@
+[RESUME]
+You are resuming a session. Use lastPlan/lastPlanDigest, completedToolCallsTail, sessionDigest, and taskLedger as authoritative.
+NEVER re-execute a tool whose toolCallId is in completedToolCallsTail with the same args producing the same side effect.
+Re-derive the next action from taskLedger.cursor; never re-ask questions already answered (in taskLedger.notes).

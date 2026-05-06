@@ -1,0 +1,3 @@
+[CONTEXT WINDOW PRESSURE DETECTED]
+Before any plan/toolCall, emit a compact `digest` capturing goal/decisions/openQuestions/keyFiles/completedSteps/pendingHints.
+Set `digest.boundarySeq` to the latest foldable boundary. After `digest`, continue with plan/planDelta and one toolCall in the SAME reply.
