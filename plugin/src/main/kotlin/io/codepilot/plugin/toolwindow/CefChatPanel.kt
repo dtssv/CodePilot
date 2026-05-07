@@ -10,6 +10,7 @@ import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.session.SessionStore
+import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.tools.ToolDispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.cef.browser.CefBrowser
@@ -21,6 +22,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import javax.swing.JComponent
 import javax.swing.JPanel
+import javax.swing.SwingUtilities
 
 /**
  * JCEF-based chat panel that loads the React WebUI and bridges bidirectional
@@ -29,24 +31,32 @@ import javax.swing.JPanel
  * Plugin → Web: executeJavaScript("window.__codepilot_dispatch('eventType', payload)")
  * Web → Plugin: cefQuery({ request: JSON.stringify({type, payload}) })
  */
-class CefChatPanel(private val project: Project) : Disposable {
+class CefChatPanel(val project: Project) : Disposable {
 
     private val log = logger<CefChatPanel>()
     private val mapper = ObjectMapper()
+    private val settings = CodePilotSettings.getInstance()
     private val browser: JBCefBrowser
     private val queryHandler: JBCefJSQuery
     private val sessionStore = SessionStore.getInstance()
     private val client = ConversationClient()
     private val workspaceHash = (project.basePath ?: project.name).hashCode().toString(16)
 
-    /** Current active session; mutable to support session switching. */
-    private var sessionHandle: SessionStore.SessionHandle
+    /** Current active session; nullable — only created on first message. */
+    private var sessionHandle: SessionStore.SessionHandle? = null
+
+    /**
+     * Stores full code for context references. Key = contextId, Value = full code text.
+     * This avoids embedding full code in messages, keeping messages compact and
+     * allowing the code to be re-read from disk if needed.
+     */
+    private val contextStore = mutableMapOf<String, String>()
 
     private val panel = JPanel(BorderLayout())
 
     init {
-        // Create or reuse the initial session
-        sessionHandle = sessionStore.newSession(workspaceHash, "agent", null)
+        // Start with no session — will be created on first message
+        sessionHandle = null
 
         browser = JBCefBrowser.createBuilder()
             .setEnableOpenDevToolsMenuItem(true)
@@ -90,6 +100,11 @@ class CefChatPanel(private val project: Project) : Disposable {
         }
     }
 
+    /** Store context fullCode by ID — avoids embedding code in messages. */
+    fun storeContext(id: String, fullCode: String) {
+        contextStore[id] = fullCode
+    }
+
     override fun dispose() {
         // browser is disposed via Disposer.register
     }
@@ -119,7 +134,16 @@ class CefChatPanel(private val project: Project) : Disposable {
                 "user_message" -> handleUserMessage(
                     payload["text"]?.asText() ?: "",
                     payload["mode"]?.asText() ?: "agent",
-                    payload["modelId"]?.asText()
+                    payload["modelId"]?.asText(),
+                    payload["contextRefs"]?.takeIf { it.isArray }?.map { ref ->
+                        mapOf(
+                            "id" to ref["id"].asText(),
+                            "display" to ref["display"].asText(),
+                            "language" to ref["language"].asText("text"),
+                            "startLine" to ref["startLine"].asInt(-1).let { if (it < 0) null else it },
+                            "endLine" to ref["endLine"].asInt(-1).let { if (it < 0) null else it },
+                        )
+                    } ?: emptyList()
                 )
                 "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
@@ -129,6 +153,16 @@ class CefChatPanel(private val project: Project) : Disposable {
                 "list_sessions" -> handleListSessions()
                 "switch_session" -> handleSwitchSession(payload["sessionId"]?.asText() ?: return)
                 "delete_session" -> handleDeleteSession(payload["sessionId"]?.asText() ?: return)
+                // Auth messages from login page
+                "check_auth" -> handleCheckAuth()
+                "auth_discover" -> handleAuthDiscover()
+                "auth_login_bridge" -> handleAuthLoginBridge(payload["token"]?.asText() ?: return)
+                "auth_login_dev" -> handleAuthLoginDev(
+                    payload["token"]?.asText() ?: return,
+                    payload["userId"]?.asText() ?: return,
+                    payload["tenantId"]?.asText() ?: return,
+                )
+                "auth_login_oidc" -> handleAuthLoginOidc()
                 else -> log.warn("Unknown message type from web: $type")
             }
         } catch (e: Exception) {
@@ -136,26 +170,69 @@ class CefChatPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun handleUserMessage(text: String, mode: String, modelId: String? = null) {
-        // Persist user message locally
-        sessionStore.appendMessage(sessionHandle, "user", text)
+    private fun handleUserMessage(text: String, mode: String, modelId: String? = null, contextRefs: List<Map<String, Any?>> = emptyList()) {
+        // Ensure a session exists (lazy creation on first message)
+        if (sessionHandle == null) {
+            sessionHandle = sessionStore.newSession(workspaceHash, mode, modelId)
+        }
+        val handle = sessionHandle!!
+
+        // Display text is just the user's text — context refs are shown as chips via contextRefs field
+        val displayText = text
+
+        // Persist the compact display message locally
+        sessionStore.appendMessage(handle, "user", displayText)
         // Auto-derive title from first user message
-        if (sessionHandle.meta.title.isNullOrBlank()) {
-            sessionStore.updateMeta(sessionHandle) { meta ->
+        if (handle.meta.title.isNullOrBlank()) {
+            sessionStore.updateMeta(handle) { meta ->
                 meta.title = text.take(50)
             }
         }
-        sessionStore.touchLastMessage(sessionHandle)
-        // Notify WebUI that user message was persisted
-        dispatchToWeb("user_message_saved", mapOf("role" to "user", "content" to text))
+        sessionStore.touchLastMessage(handle)
+        // Notify WebUI with compact display message
+        dispatchToWeb("user_message_saved", mapOf(
+            "role" to "user",
+            "content" to displayText,
+            "contextRefs" to contextRefs,
+        ))
 
-        val dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
+        // Build the full message for backend (replace inline placeholders with actual code)
+        val fullText = buildString {
+            var remaining = text
+            while (true) {
+                val start = remaining.indexOf('\u0001')
+                if (start < 0) {
+                    append(remaining)
+                    break
+                }
+                append(remaining.substring(0, start))
+                val end = remaining.indexOf('\u0001', start + 1)
+                if (end < 0) {
+                    append(remaining.substring(start))
+                    break
+                }
+                val ctxId = remaining.substring(start + 1, end)
+                val fullCode = contextStore[ctxId]
+                if (fullCode != null) {
+                    val ref = contextRefs.find { it["id"] == ctxId }
+                    val lang = ref?.get("language") as? String ?: "text"
+                    val display = ref?.get("display") as? String ?: "context"
+                    val loc = if (ref?.get("startLine") != null) " :${ref["startLine"]}-${ref["endLine"]}" else ""
+                    appendLine("Context: $display$loc")
+                    appendLine("```$lang")
+                    appendLine(fullCode)
+                    appendLine("```")
+                }
+                remaining = remaining.substring(end + 1)
+            }
+        }
+        val dispatcher = ToolDispatcher(project, client, handle.meta.id)
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val payload = mutableMapOf<String, Any?>(
-                "sessionId" to sessionHandle.meta.id,
+                "sessionId" to handle.meta.id,
                 "mode" to mode,
-                "input" to text,
+                "input" to fullText,
                 "intent" to "new",
             )
             if (modelId != null) payload["modelId"] = modelId
@@ -180,14 +257,14 @@ class CefChatPanel(private val project: Project) : Disposable {
                 override fun onPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
                     val data = mapper.treeToValue(payload, Map::class.java)
                     dispatchToWeb("plan", data)
-                    sessionStore.savePlan(sessionHandle, data)
+                    sessionStore.savePlan(handle, data)
                 }
                 override fun onPlanDelta(payload: com.fasterxml.jackson.databind.JsonNode) =
                     dispatchToWeb("plan_delta", mapper.treeToValue(payload, Map::class.java))
                 override fun onTaskLedger(payload: com.fasterxml.jackson.databind.JsonNode) {
                     val data = mapper.treeToValue(payload, Map::class.java)
                     dispatchToWeb("task_ledger", data)
-                    sessionStore.saveLedger(sessionHandle, data)
+                    sessionStore.saveLedger(handle, data)
                 }
                 override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
                     dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
@@ -200,9 +277,9 @@ class CefChatPanel(private val project: Project) : Disposable {
                     // Persist the full assistant response and update session metadata
                     val fullResponse = assistantBuilder.toString()
                     if (fullResponse.isNotEmpty()) {
-                        sessionStore.appendMessage(sessionHandle, "assistant", fullResponse)
+                        sessionStore.appendMessage(handle, "assistant", fullResponse)
                     }
-                    sessionStore.touchLastMessage(sessionHandle)
+                    sessionStore.touchLastMessage(handle)
                     dispatchSessionList() // refresh sidebar timestamps
                 }
                 override fun onClosed() {}
@@ -214,35 +291,54 @@ class CefChatPanel(private val project: Project) : Disposable {
     private fun handleFetchModels() {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
-                val request = okhttp3.Request.Builder()
-                    .url(
-                        (io.codepilot.plugin.settings.CodePilotSettings.getInstance()
-                            .state.backendBaseUrl.trimEnd('/') + "/v1/models")
-                            .toHttpUrl()
-                    )
-                    .get()
-                    .header("Accept", "application/json")
-                    .build()
-                val response = http.client().newCall(request).execute()
-                response.use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: return@use
-                        val node = mapper.readTree(body)
-                        val data = node.path("data")
-                        dispatchToWeb("models_loaded", mapper.treeToValue(data, Map::class.java))
-                    } else {
-                        log.warn("Failed to fetch models: ${resp.code}")
-                    }
-                }
+                doFetchModels()
             } catch (e: Exception) {
                 log.error("Failed to fetch models", e)
             }
         }
     }
 
+    private fun doFetchModels(retries: Int = 1) {
+        val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+        val baseUrl = io.codepilot.plugin.settings.CodePilotSettings.getInstance().state.backendBaseUrl.trimEnd('/')
+        val url = baseUrl + "/v1/models"
+        log.info("[Models] Fetching models from: $url")
+        val request = okhttp3.Request.Builder()
+            .url(url.toHttpUrl())
+            .get()
+            .header("Accept", "application/json")
+            .build()
+        val response = http.client().newCall(request).execute()
+        response.use { resp ->
+            log.info("[Models] Response: code=${resp.code}, message=${resp.message}, protocol=${resp.protocol}, headers=${resp.headers}")
+            if (resp.isSuccessful) {
+                val body = resp.body?.string() ?: return
+                log.info("[Models] Body length: ${body.length}")
+                val node = mapper.readTree(body)
+                val data = node.path("data")
+                dispatchToWeb("models_loaded", mapper.treeToValue(data, Map::class.java))
+            } else if (resp.code == 401 && retries > 0) {
+                log.warn("[Models] Got 401, prompting login (retries=$retries)")
+                SwingUtilities.invokeLater {
+                    val loggedIn = io.codepilot.plugin.auth.LoginDialog(project).showAndGet()
+                    if (loggedIn) {
+                        ApplicationManager.getApplication().executeOnPooledThread {
+                            try { doFetchModels(retries - 1) } catch (e: Exception) {
+                                log.error("[Models] Failed after login", e)
+                            }
+                        }
+                    }
+                }
+            } else {
+                val errorBody = runCatching { resp.body?.string()?.take(500) }.getOrNull()
+                log.warn("[Models] Failed: code=${resp.code}, body=$errorBody")
+            }
+        }
+    }
+
     private fun handleStop() {
-        client.stop(sessionHandle.meta.id)
+        val sid = sessionHandle?.meta?.id ?: return
+        client.stop(sid)
     }
 
     private fun handleRiskApproval(approved: Boolean) {
@@ -250,13 +346,21 @@ class CefChatPanel(private val project: Project) : Disposable {
     }
 
     private fun handleNeedsInputResponse(answer: String) {
-        client.submitToolResult(sessionHandle.meta.id, "needs_input", answer, true)
+        val sid = sessionHandle?.meta?.id ?: return
+        client.submitToolResult(sid, "needs_input", answer, true)
     }
 
     // ---- Session management ---- //
 
+    fun handleNewSessionFromAction() {
+        sessionHandle = null
+        dispatchSessionList()
+        dispatchCurrentSessionInfo()
+        dispatchCurrentSessionMessages()
+    }
+
     private fun handleNewSession() {
-        sessionHandle = sessionStore.newSession(workspaceHash, "agent", null)
+        sessionHandle = null
         dispatchSessionList()
         dispatchCurrentSessionInfo()
         dispatchCurrentSessionMessages()
@@ -278,10 +382,11 @@ class CefChatPanel(private val project: Project) : Disposable {
     }
 
     private fun handleDeleteSession(sessionId: String) {
-        if (sessionId == sessionHandle.meta.id) {
-            // Deleting current session → switch to a new one
+        val currentId = sessionHandle?.meta?.id
+        if (currentId != null && sessionId == currentId) {
+            // Deleting current session → reset to new (no disk session)
             sessionStore.delete(workspaceHash, sessionId)
-            sessionHandle = sessionStore.newSession(workspaceHash, "agent", null)
+            sessionHandle = null
         } else {
             sessionStore.delete(workspaceHash, sessionId)
         }
@@ -303,30 +408,46 @@ class CefChatPanel(private val project: Project) : Disposable {
                     "lastMessageAt" to meta.lastMessageAt,
                 )
             }
-        dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to sessionHandle.meta.id))
+        dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to (sessionHandle?.meta?.id ?: "")))
     }
 
     /** Push current session metadata. */
     private fun dispatchCurrentSessionInfo() {
-        val meta = sessionHandle.meta
-        dispatchToWeb("session_switched", mapOf(
-            "id" to meta.id,
-            "title" to (meta.title ?: "New Chat"),
-            "mode" to meta.mode,
-            "createdAt" to meta.createdAt,
-            "lastMessageAt" to meta.lastMessageAt,
-        ))
+        val meta = sessionHandle?.meta
+        if (meta != null) {
+            dispatchToWeb("session_switched", mapOf(
+                "id" to meta.id,
+                "title" to (meta.title ?: "New Chat"),
+                "mode" to meta.mode,
+                "createdAt" to meta.createdAt,
+                "lastMessageAt" to meta.lastMessageAt,
+            ))
+        } else {
+            // No active session — inform WebUI it's a fresh new chat
+            dispatchToWeb("session_switched", mapOf(
+                "id" to "",
+                "title" to "New Chat",
+                "mode" to "agent",
+                "createdAt" to "",
+                "lastMessageAt" to null as Any?,
+            ))
+        }
     }
 
     /** Push all messages of the current session so the WebUI can restore the chat view. */
     private fun dispatchCurrentSessionMessages() {
-        val messages = sessionStore.readMessages(sessionHandle).map { msg ->
-            mapOf(
-                "role" to (msg["role"] ?: "unknown"),
-                "content" to (msg["content"] ?: ""),
-            )
+        val handle = sessionHandle
+        if (handle != null) {
+            val messages = sessionStore.readMessages(handle).map { msg ->
+                mapOf(
+                    "role" to (msg["role"] ?: "unknown"),
+                    "content" to (msg["content"] ?: ""),
+                )
+            }
+            dispatchToWeb("session_messages", mapOf("sessionId" to handle.meta.id, "messages" to messages))
+        } else {
+            dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, String>>()))
         }
-        dispatchToWeb("session_messages", mapOf("sessionId" to sessionHandle.meta.id, "messages" to messages))
     }
 
     private fun resolveWebUiPath(): String {
@@ -396,5 +517,117 @@ class CefChatPanel(private val project: Project) : Disposable {
         val input = classLoader.getResourceAsStream(resourcePath.removePrefix("/")) ?: return
         java.nio.file.Files.createDirectories(target.parent)
         input.use { java.nio.file.Files.copy(it, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
+    }
+
+    // ---- Auth handlers for login page ----
+
+    private fun handleCheckAuth() {
+        val hasToken = settings.accessToken() != null
+        val hasDevToken = settings.state.devToken.isNotBlank()
+        val authenticated = hasToken || hasDevToken
+        log.info("[Auth] checkAuth: hasToken=$hasToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) settings.state.devToken.take(8) + "..." else "null"}, baseUrl=${settings.state.backendBaseUrl}")
+        dispatchToWeb("auth_state", mapOf("authenticated" to authenticated))
+        // If authenticated, also trigger model fetch
+        if (authenticated) {
+            handleFetchModels()
+        }
+    }
+
+    private fun handleAuthDiscover() {
+        val baseUrl = settings.state.backendBaseUrl.trimEnd('/')
+        log.info("[Auth] Discover: baseUrl=$baseUrl")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val auth = io.codepilot.plugin.auth.AuthService.getInstance()
+                auth.fetchMethods().whenComplete { result, err ->
+                    if (err != null) {
+                        log.error("[Auth] Discover failed", err)
+                        dispatchToWeb("auth_methods", mapOf(
+                            "oidc" to false, "hmacBridge" to false, "dev" to false, "deviceFlow" to false,
+                        ))
+                    } else {
+                        val m = result.data ?: io.codepilot.plugin.auth.AuthService.Methods()
+                        log.info("[Auth] Discover success: oidc=${m.oidc}, hmacBridge=${m.hmacBridge}, dev=${m.dev}, deviceFlow=${m.deviceFlow}")
+                        dispatchToWeb("auth_methods", mapOf(
+                            "oidc" to m.oidc, "hmacBridge" to m.hmacBridge,
+                            "dev" to m.dev, "deviceFlow" to m.deviceFlow,
+                        ))
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("[Auth] Discover exception", e)
+                dispatchToWeb("auth_methods", mapOf(
+                    "oidc" to false, "hmacBridge" to false, "dev" to false, "deviceFlow" to false,
+                ))
+            }
+        }
+    }
+
+    private fun handleAuthLoginBridge(token: String) {
+        log.info("[Auth] Bridge login attempt, token length=${token.length}")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val auth = io.codepilot.plugin.auth.AuthService.getInstance()
+                auth.login(token).whenComplete { _, err ->
+                    if (err != null) {
+                        log.error("[Auth] Bridge login failed", err)
+                        dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (err.message ?: "unknown")))
+                    } else {
+                        log.info("[Auth] Bridge login success")
+                        dispatchToWeb("auth_login_result", mapOf("success" to true))
+                        dispatchToWeb("auth_state", mapOf("authenticated" to true))
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("[Auth] Bridge login exception", e)
+                dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (e.message ?: "unknown")))
+            }
+        }
+    }
+
+    private fun handleAuthLoginDev(token: String, userId: String, tenantId: String) {
+        log.info("[Auth] Dev login attempt: userId=$userId, tenantId=$tenantId")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val loginService = io.codepilot.plugin.auth.LoginService.getInstance()
+                val deviceId = settings.state.deviceId
+                loginService.devLogin(token, userId, tenantId, deviceId).whenComplete { _, err ->
+                    if (err != null) {
+                        log.error("[Auth] Dev login failed", err)
+                        dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (err.message ?: "unknown")))
+                    } else {
+                        log.info("[Auth] Dev login success")
+                        dispatchToWeb("auth_login_result", mapOf("success" to true))
+                        dispatchToWeb("auth_state", mapOf("authenticated" to true))
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("[Auth] Dev login exception", e)
+                dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (e.message ?: "unknown")))
+            }
+        }
+    }
+
+    private fun handleAuthLoginOidc() {
+        log.info("[Auth] OIDC login attempt")
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val loginService = io.codepilot.plugin.auth.LoginService.getInstance()
+                val flow = loginService.startOidc()
+                flow.asFuture().whenComplete { _, err ->
+                    if (err != null) {
+                        log.error("[Auth] OIDC login failed", err)
+                        dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (err.message ?: "unknown")))
+                    } else {
+                        log.info("[Auth] OIDC login success")
+                        dispatchToWeb("auth_login_result", mapOf("success" to true))
+                        dispatchToWeb("auth_state", mapOf("authenticated" to true))
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("[Auth] OIDC login exception", e)
+                dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (e.message ?: "unknown")))
+            }
+        }
     }
 }

@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit
 class HttpClientService {
 
     val mapper: ObjectMapper = jacksonObjectMapper()
+        .disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
 
     private val baseClient: OkHttpClient =
         OkHttpClient.Builder()
@@ -37,6 +38,8 @@ class HttpClientService {
             .readTimeout(Duration.ofMinutes(10)) // SSE streams may be long
             .writeTimeout(Duration.ofSeconds(30))
             .pingInterval(20, TimeUnit.SECONDS)
+            .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS)) // No connection reuse
+            .retryOnConnectionFailure(true)
             .addInterceptor(::traceHeader)
             .addInterceptor(::authAndSignature)
             .addInterceptor(RefreshOn401Interceptor())
@@ -49,8 +52,11 @@ class HttpClientService {
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
         val payload = mapper.writeValueAsBytes(body)
-        val rb: RequestBody = payload.toRequestBody("application/json".toMediaType())
-        return Request.Builder().url(url).post(rb).header("Accept", "application/json").build()
+        val rb: RequestBody = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
+        return Request.Builder().url(url).post(rb)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json; charset=utf-8")
+            .build()
     }
 
     /** Same as [postJson] but the response is expected to be Server-Sent Events. */
@@ -84,6 +90,12 @@ class HttpClientService {
         settings.accessToken()?.let { builder.header("Authorization", "Bearer $it") }
         builder.header("X-CodePilot-Device-Id", settings.state.deviceId)
 
+        // Dev token: if set, add as header for gateway to bypass JWT verification
+        val devToken = settings.state.devToken
+        if (!devToken.isNullOrBlank()) {
+            builder.header("X-CodePilot-Dev-Token", devToken)
+        }
+
         val ts = System.currentTimeMillis().toString()
         val nonce = UUID.randomUUID().toString()
         val bodyBytes = readBody(req)
@@ -95,12 +107,23 @@ class HttpClientService {
                 .header("X-CodePilot-Nonce", nonce)
                 .header("X-CodePilot-Signature", signature)
         }
-        return chain.proceed(builder.build())
+
+        val builtReq = builder.build()
+        com.intellij.openapi.diagnostic.Logger.getInstance("HttpClientService").info(
+            "[HTTP] ${builtReq.method} ${builtReq.url} | " +
+            "auth=${settings.accessToken() != null} devToken=${!devToken.isNullOrBlank()} " +
+            "deviceSecret=${secret != null} " +
+            "headers=[${builtReq.headers.filter { it.first.startsWith("X-CodePilot") || it.first == "Authorization" || it.first == "Connection" }.joinToString(", ") { "${it.first}=${it.second.take(30)}" }}]"
+        )
+
+        return chain.proceed(builtReq)
     }
 
     private fun readBody(req: Request): String {
         val body = req.body ?: return ""
-        return okio.Buffer().also(body::writeTo).readUtf8()
+        val buffer = okio.Buffer()
+        body.writeTo(buffer)
+        return buffer.readUtf8()
     }
 
     companion object {

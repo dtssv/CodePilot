@@ -44,6 +44,7 @@ import reactor.core.publisher.Mono;
 public class AuthController {
 
   private static final SecureRandom RANDOM = new SecureRandom();
+  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthController.class);
 
   private final List<SsoVerifier> verifiers;
   private final JwtService jwt;
@@ -178,7 +179,14 @@ public class AuthController {
           chain.switchIfEmpty(
               v.verify(ssoToken)
                   .onErrorResume(
-                      IllegalArgumentException.class, ex -> Mono.empty())); // fall through
+                      ex -> {
+                        // Log the failure for diagnostics, then fall through to the next verifier.
+                        // We must catch ALL exception types here because verifiers may throw
+                        // network-related exceptions (e.g. JWKs endpoint unreachable) that are
+                        // not IllegalArgumentException.
+                        log.debug("Verifier {} rejected token: {}", v.getClass().getSimpleName(), ex.getMessage());
+                        return Mono.empty();
+                      }));
     }
     return chain.switchIfEmpty(
         Mono.error(new CodePilotException(ErrorCodes.UNAUTHORIZED, "Invalid SSO token")));

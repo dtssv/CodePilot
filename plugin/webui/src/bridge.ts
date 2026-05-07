@@ -30,7 +30,14 @@ export type PluginEventType =
     | 'user_message_saved'
     | 'session_list'
     | 'session_switched'
-    | 'session_messages';
+    | 'session_messages'
+    | 'action_start'
+    | 'action_done'
+    | 'context_added'
+    | 'patch'
+    | 'auth_state'
+    | 'auth_methods'
+    | 'auth_login_result';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

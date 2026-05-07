@@ -1,5 +1,3 @@
-// Types exported for parent components
-
 export interface SessionInfo {
     id: string;
     title: string;
@@ -29,34 +27,31 @@ function formatTime(iso: string | null): string {
     }
 }
 
-export function SessionSidebar({ sessions, activeSessionId, onSelect, onNew, onDelete }: SessionSidebarProps) {
+export function SessionSidebar({ sessions, activeSessionId, onSelect, onDelete }: SessionSidebarProps) {
     return (
-        <div className="session-sidebar">
-            <div className="sidebar-header">
-                <span className="sidebar-title">Chats</span>
-                <button className="new-chat-btn" onClick={onNew} title="New Chat">+</button>
-            </div>
-            <div className="session-list">
-                {sessions.map((s) => (
-                    <div
-                        key={s.id}
-                        className={`session-item ${s.id === activeSessionId ? 'active' : ''}`}
-                        onClick={() => onSelect(s.id)}
-                    >
-                        <div className="session-item-title">{s.title}</div>
-                        <div className="session-item-meta">
-                            <span className="session-time">{formatTime(s.lastMessageAt || s.createdAt)}</span>
-                            <button
-                                className="session-delete-btn"
-                                onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
-                                title="Delete"
-                            >
-                                ×
-                            </button>
-                        </div>
+        <div className="session-popup-list">
+            {sessions.length === 0 && (
+                <div className="session-empty">No chat history</div>
+            )}
+            {sessions.map((s) => (
+                <div
+                    key={s.id}
+                    className={`session-item ${s.id === activeSessionId ? 'active' : ''}`}
+                    onClick={() => onSelect(s.id)}
+                >
+                    <div className="session-item-title">{s.title}</div>
+                    <div className="session-item-meta">
+                        <span className="session-time">{formatTime(s.lastMessageAt || s.createdAt)}</span>
+                        <button
+                            className="session-delete-btn"
+                            onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                            title="Delete"
+                        >
+                            ×
+                        </button>
                     </div>
-                ))}
-            </div>
+                </div>
+            ))}
         </div>
     );
 }

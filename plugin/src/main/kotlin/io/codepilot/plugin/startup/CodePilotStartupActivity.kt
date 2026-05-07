@@ -2,8 +2,12 @@ package io.codepilot.plugin.startup
 
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.event.EditorFactoryAdapter
+import com.intellij.openapi.editor.event.EditorFactoryEvent
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
+import io.codepilot.plugin.actions.CodePilotSelectionHint
 import io.codepilot.plugin.reset.ResetEngine
 import io.codepilot.plugin.update.UpdateService
 
@@ -20,5 +24,18 @@ class CodePilotStartupActivity : ProjectActivity {
                 .notify(project)
         }
         UpdateService.getInstance().checkInBackground(project)
+
+        // Install selection hint on all future editors
+        EditorFactory.getInstance().addEditorFactoryListener(object : EditorFactoryAdapter() {
+            override fun editorCreated(event: EditorFactoryEvent) {
+                val editor = event.editor
+                val proj = editor.project ?: return
+                CodePilotSelectionHint.install(editor, proj)
+            }
+
+            override fun editorReleased(event: EditorFactoryEvent) {
+                CodePilotSelectionHint.uninstall()
+            }
+        }, project)
     }
 }

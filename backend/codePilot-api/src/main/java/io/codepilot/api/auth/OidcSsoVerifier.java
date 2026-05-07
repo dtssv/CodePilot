@@ -9,8 +9,7 @@ import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import com.nimbusds.jose.jwk.source.JWKSource;
-import com.nimbusds.jose.jwk.source.RemoteJWKSet;
-import com.nimbusds.jose.util.DefaultResourceRetriever;
+import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.text.ParseException;
@@ -58,11 +57,11 @@ public class OidcSsoVerifier implements SsoVerifier {
     } catch (MalformedURLException e) {
       throw new IllegalStateException("Invalid jwks-uri", e);
     }
-    DefaultResourceRetriever retriever =
-        new DefaultResourceRetriever(2_000, 2_000, 50_000);
 
     JWKSource<SecurityContext> jwkSource =
-        new RemoteJWKSet<>(jwksUrl, retriever);
+        JWKSourceBuilder.create(jwksUrl)
+            .retrying(true)
+            .build();
 
     JWSKeySelector<SecurityContext> keySelector =
         new JWSVerificationKeySelector<>(
@@ -73,6 +72,8 @@ public class OidcSsoVerifier implements SsoVerifier {
     proc.setJWSKeySelector(keySelector);
     this.processor = proc;
   }
+
+  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OidcSsoVerifier.class);
 
   @Override
   public Mono<VerifiedIdentity> verify(String idToken) {
@@ -88,6 +89,7 @@ public class OidcSsoVerifier implements SsoVerifier {
               try {
                 claims = processor.process(jwt, null);
               } catch (Exception e) {
+                log.warn("OIDC verification failed for token: {}", e.getMessage());
                 throw new IllegalArgumentException("id-token rejected: " + e.getMessage());
               }
               if (!issuer.equals(claims.getIssuer())) {

@@ -166,5 +166,4 @@ class SessionStore {
     companion object {
         @JvmStatic fun getInstance(): SessionStore = service()
     }
-}   }
 }

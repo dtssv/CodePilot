@@ -56,10 +56,15 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
   private final HmacSigner signer;
   private final Clock clock = Clock.systemUTC();
 
-  public HmacSignatureWebFilter(SecurityProperties props, ReactiveStringRedisTemplate redis) {
+  /** Dev token for bypassing HMAC+JWT in development builds. Set via codepilot.security.dev-token. */
+  private final String devToken;
+
+  public HmacSignatureWebFilter(SecurityProperties props, ReactiveStringRedisTemplate redis,
+      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}") String devToken) {
     this.props = props;
     this.redis = redis;
     this.signer = new HmacSigner(props.hmacSecret());
+    this.devToken = devToken.isBlank() ? null : devToken;
   }
 
   @Override
@@ -67,11 +72,19 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
     return ORDER;
   }
 
+  private static final String DEV_TOKEN_HEADER = "X-CodePilot-Dev-Token";
+
   @Override
   public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
     ServerHttpRequest req = exchange.getRequest();
     String path = req.getPath().pathWithinApplication().value();
     if (isPublic(path)) {
+      return chain.filter(exchange);
+    }
+
+    // Dev token bypass: if a valid dev token header is present, skip HMAC verification
+    String devToken = req.getHeaders().getFirst(DEV_TOKEN_HEADER);
+    if (devToken != null && !devToken.isBlank() && isValidDevToken(devToken)) {
       return chain.filter(exchange);
     }
 
@@ -131,5 +144,16 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
       }
     }
     return false;
+  }
+
+  /**
+   * Checks if the provided dev token matches the configured dev token.
+   * Uses constant-time comparison to prevent timing attacks.
+   */
+  private boolean isValidDevToken(String token) {
+    if (devToken == null || devToken.isEmpty()) return false;
+    return java.security.MessageDigest.isEqual(
+        token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+        devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 }

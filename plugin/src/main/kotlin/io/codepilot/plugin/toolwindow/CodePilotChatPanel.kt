@@ -268,44 +268,58 @@ class CodePilotChatPanel(private val project: Project) {
     private fun fetchModels() {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
-                val url = (settings.state.backendBaseUrl.trimEnd('/') + "/v1/models")
-                val request = okhttp3.Request.Builder()
-                    .url(url)
-                    .get()
-                    .header("Accept", "application/json")
-                    .build()
-                val response = http.client().newCall(request).execute()
-                response.use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: return@use
-                        val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
-                        val data = node.path("data")
-                        val items = mutableListOf<ModelItem>()
-                        // Parse system models
-                        data.path("system").forEach { m ->
-                            items.add(ModelItem(
-                                id = m.path("id").asText(),
-                                name = m.path("name").asText(),
-                                type = "system"
-                            ))
-                        }
-                        // Parse custom models
-                        data.path("custom").forEach { m ->
-                            items.add(ModelItem(
-                                id = m.path("id").asText(),
-                                name = m.path("name").asText(),
-                                type = "custom"
-                            ))
-                        }
-                        SwingUtilities.invokeLater {
-                            modelBox.removeAllItems()
-                            items.forEach { modelBox.addItem(it) }
+                doFetchModels()
+            } catch (_: Exception) {
+                // Silently ignore — models will be empty, user can still type
+            }
+        }
+    }
+
+    private fun doFetchModels(retries: Int = 1) {
+        val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+        val url = (settings.state.backendBaseUrl.trimEnd('/') + "/v1/models")
+        val request = okhttp3.Request.Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .build()
+        val response = http.client().newCall(request).execute()
+        response.use { resp ->
+            if (resp.isSuccessful) {
+                val body = resp.body?.string() ?: return
+                val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+                val data = node.path("data")
+                val items = mutableListOf<ModelItem>()
+                // Parse system models
+                data.path("system").forEach { m ->
+                    items.add(ModelItem(
+                        id = m.path("id").asText(),
+                        name = m.path("name").asText(),
+                        type = "system"
+                    ))
+                }
+                // Parse custom models
+                data.path("custom").forEach { m ->
+                    items.add(ModelItem(
+                        id = m.path("id").asText(),
+                        name = m.path("name").asText(),
+                        type = "custom"
+                    ))
+                }
+                SwingUtilities.invokeLater {
+                    modelBox.removeAllItems()
+                    items.forEach { modelBox.addItem(it) }
+                }
+            } else if (resp.code == 401 && retries > 0) {
+                // Prompt login on 401, then retry once
+                SwingUtilities.invokeLater {
+                    val loggedIn = LoginDialog(project).showAndGet()
+                    if (loggedIn) {
+                        ApplicationManager.getApplication().executeOnPooledThread {
+                            try { doFetchModels(retries - 1) } catch (_: Exception) {}
                         }
                     }
                 }
-            } catch (e: Exception) {
-                // Silently ignore — models will be empty, user can still type
             }
         }
     }

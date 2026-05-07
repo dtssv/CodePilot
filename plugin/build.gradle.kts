@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import java.util.Properties
 
 plugins {
     kotlin("jvm") version "2.0.21"
@@ -8,6 +9,10 @@ plugins {
 
 group = "io.codepilot"
 version = providers.gradleProperty("codePilotVersion").getOrElse("1.0.0-SNAPSHOT")
+
+// Dev token: set CODEPILOT_DEV_TOKEN env var to embed a dev bypass token in the build.
+// Empty string (default) means production build with no dev bypass.
+val codePilotDevToken = providers.environmentVariable("CODEPILOT_DEV_TOKEN").getOrElse("")
 
 kotlin {
     jvmToolchain(21)
@@ -55,7 +60,6 @@ intellijPlatform {
     buildSearchableOptions = false
 
     signing {
-        // Set CODEPILOT_PLUGIN_CERT_CHAIN / KEY / PASSWORD to enable signing.
         certificateChainFile = providers.environmentVariable("CODEPILOT_PLUGIN_CERT_CHAIN").map { file(it) }
         privateKeyFile = providers.environmentVariable("CODEPILOT_PLUGIN_CERT_KEY").map { file(it) }
         password = providers.environmentVariable("CODEPILOT_PLUGIN_CERT_PASSWORD")
@@ -102,9 +106,35 @@ val copyWebUi by tasks.registering(Copy::class) {
     into(webUiResourceDir)
 }
 
+// Generate codepilot-dev.properties with devToken (if set) during build
+val generateDevProps by tasks.registering {
+    val outDir = layout.buildDirectory.dir("generated-resources")
+    outputs.dir(outDir)
+    doLast {
+        val dir = outDir.get().asFile
+        dir.mkdirs()
+        val file = File(dir, "codepilot-dev.properties")
+        if (codePilotDevToken.isNotEmpty()) {
+            file.writeText("devToken=$codePilotDevToken\n")
+        } else {
+            file.writeText("")
+        }
+    }
+}
+
 // Wire WebUI build into the plugin lifecycle
 tasks.named("processResources") {
     dependsOn(copyWebUi)
+    dependsOn(generateDevProps)
+}
+
+// Include generated resources in the main sourceSet output
+sourceSets {
+    getByName("main") {
+        resources {
+            srcDir(layout.buildDirectory.dir("generated-resources"))
+        }
+    }
 }
 
 tasks {

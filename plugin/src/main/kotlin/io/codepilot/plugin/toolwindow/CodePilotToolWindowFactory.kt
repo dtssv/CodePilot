@@ -1,5 +1,6 @@
 package io.codepilot.plugin.toolwindow
 
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
@@ -23,6 +24,7 @@ class CodePilotToolWindowFactory : ToolWindowFactory {
         if (useJcef) {
             try {
                 val cefPanel = CefChatPanel(project)
+                project.service<CefChatPanelRegistry>().register(cefPanel)
                 val content = factory.createContent(cefPanel.component, "Chat", false)
                 toolWindow.contentManager.addContent(content)
                 Disposer.register(toolWindow.disposable, cefPanel)

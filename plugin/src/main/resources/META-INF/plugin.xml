@@ -18,6 +18,9 @@
     <applicationService serviceImplementation="io.codepilot.plugin.marketplace.LocalMarketplaceStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.mcp.McpProcessManager"/>
 
+    <!-- Project-level service to allow actions to reach the CefChatPanel -->
+    <projectService serviceImplementation="io.codepilot.plugin.toolwindow.CefChatPanelRegistry"/>
+
     <applicationConfigurable
         parentId="tools"
         id="io.codepilot.settings"
@@ -36,47 +39,84 @@
   </extensions>
 
   <actions>
-    <group id="CodePilot.ContextActions" text="CodePilot" popup="true">
+    <!-- ===== Unified CodePilot group — registered in all right-click menus ===== -->
+    <group id="CodePilot.MainGroup" text="CodePilot" popup="true">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
       <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
     </group>
 
+    <!-- Add to Chat / Add to New Chat — top-level (not inside popup, always visible) -->
+    <action id="CodePilot.AddToChat"
+            class="io.codepilot.plugin.actions.AddToChatAction"
+            text="Add to CodePilot Chat">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+      <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+      <keyboard-shortcut first-keystroke="control L" keymap="$default"/>
+    </action>
+
+    <action id="CodePilot.AddToNewChat"
+            class="io.codepilot.plugin.actions.AddToNewChatAction"
+            text="Add to New CodePilot Chat">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+      <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+    </action>
+
+    <!-- Actions inside the CodePilot popup group -->
     <action id="CodePilot.Refactor"
             class="io.codepilot.plugin.actions.RefactorAction"
-            text="CodePilot: Refactor selection"
+            text="Refactor selection"
             description="Refactor the selection or file with CodePilot">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+      <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt R" keymap="$default"/>
       <keyboard-shortcut first-keystroke="meta alt R" keymap="Mac OS X 10.5+"/>
     </action>
     <action id="CodePilot.Review"
             class="io.codepilot.plugin.actions.ReviewAction"
-            text="CodePilot: Review code">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+            text="Review code">
+      <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt V" keymap="$default"/>
     </action>
     <action id="CodePilot.Comment"
             class="io.codepilot.plugin.actions.CommentAction"
-            text="CodePilot: Generate comments">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+            text="Generate comments">
+      <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
     </action>
     <action id="CodePilot.GenTest"
             class="io.codepilot.plugin.actions.GenTestAction"
-            text="CodePilot: Generate tests">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+            text="Generate tests">
+      <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt T" keymap="$default"/>
     </action>
     <action id="CodePilot.GenDoc"
             class="io.codepilot.plugin.actions.GenDocAction"
-            text="CodePilot: Generate documentation">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
+            text="Generate documentation">
+      <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
     </action>
-    <action id="CodePilot.AddToChat"
-            class="io.codepilot.plugin.actions.AddToChatAction"
-            text="CodePilot: Add to chat">
-      <add-to-group group-id="CodePilot.ContextActions" anchor="last"/>
-      <keyboard-shortcut first-keystroke="control L" keymap="$default"/>
+
+    <!-- PSI element (class/method) right-click -->
+    <group id="CodePilot.PsiElementActions" text="CodePilot" popup="true">
+      <add-to-group group-id="PsiElementPopupMenu" anchor="last"/>
+    </group>
+
+    <action id="CodePilot.PsiGenTest"
+            class="io.codepilot.plugin.actions.PsiGenTestAction"
+            text="Generate Tests">
+      <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
     </action>
+    <action id="CodePilot.PsiGenDoc"
+            class="io.codepilot.plugin.actions.PsiGenDocAction"
+            text="Generate Documentation">
+      <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
+    </action>
+    <action id="CodePilot.PsiComment"
+            class="io.codepilot.plugin.actions.PsiCommentAction"
+            text="Generate Comments">
+      <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
+    </action>
+
     <action id="CodePilot.OpenChat"
             class="io.codepilot.plugin.actions.OpenChatAction"
             text="Open CodePilot chat">

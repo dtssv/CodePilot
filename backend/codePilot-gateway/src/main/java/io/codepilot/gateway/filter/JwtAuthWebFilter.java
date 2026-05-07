@@ -40,10 +40,17 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
           "/v1/auth/device-code",
           "/v1/auth/device-token");
 
+  private static final String DEV_TOKEN_HEADER = "X-CodePilot-Dev-Token";
+
   private final JwtService jwt;
 
-  public JwtAuthWebFilter(JwtService jwt) {
+  /** Dev token for bypassing JWT in development builds. Set via codepilot.security.dev-token. */
+  private final String devToken;
+
+  public JwtAuthWebFilter(JwtService jwt,
+      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}") String devToken) {
     this.jwt = jwt;
+    this.devToken = devToken.isBlank() ? null : devToken;
   }
 
   @Override
@@ -57,6 +64,18 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
     if (isPublic(path)) {
       return chain.filter(exchange);
     }
+
+    // Dev token bypass: if a valid dev token header is present, create a dev principal and skip JWT
+    String reqDevToken = exchange.getRequest().getHeaders().getFirst(DEV_TOKEN_HEADER);
+    if (reqDevToken != null && !reqDevToken.isBlank() && isValidDevToken(reqDevToken)) {
+      String deviceId = exchange.getRequest().getHeaders().getFirst("X-CodePilot-Device-Id");
+      if (deviceId == null || deviceId.isBlank()) deviceId = "dev-device";
+      AuthPrincipal devPrincipal = new AuthPrincipal(
+          "dev-user", "dev-tenant", deviceId,
+          java.util.Set.of("user", "dev"), Long.MAX_VALUE);
+      return chain.filter(exchange).contextWrite(Context.of(AuthPrincipal.CTX_KEY, devPrincipal));
+    }
+
     String header = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
     if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) {
       return WebErrors.write(exchange, ErrorCodes.UNAUTHORIZED, "Missing bearer token", 401);
@@ -76,5 +95,16 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
       if (path.equals(p) || path.startsWith(p + "/") || path.startsWith(p)) return true;
     }
     return false;
+  }
+
+  /**
+   * Checks if the provided dev token matches the configured dev token.
+   * Uses constant-time comparison to prevent timing attacks.
+   */
+  private boolean isValidDevToken(String token) {
+    if (devToken == null || devToken.isEmpty()) return false;
+    return java.security.MessageDigest.isEqual(
+        token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+        devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 }

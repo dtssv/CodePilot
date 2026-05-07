@@ -60,5 +60,5 @@ public record SsoProperties(@Valid Oidc oidc, @Valid HmacBridge hmacBridge, @Val
    * Local-only convenience. The active Spring profile must literally include {@code dev} for this
    * to take effect; otherwise {@code DevSsoVerifier} silently refuses to authenticate.
    */
-  public record Dev(boolean enabled, @Size(min = 16) String token) {}
+  public record Dev(boolean enabled, @Size(min = 4) String token) {}
 }

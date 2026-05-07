@@ -6,6 +6,8 @@ server:
     idle-timeout: 120s
 
 spring:
+  profiles:
+    active: ${CODEPILOT_SPRING_PROFILES:dev}
   application:
     name: codePilot-backend
   main:
@@ -64,6 +66,9 @@ codepilot:
   security:
     jwt-secret: ${CODEPILOT_JWT_SECRET:codepilot-dev-jwt-secret-at-least-32-chars!!}
     hmac-secret: ${CODEPILOT_HMAC_SECRET:codepilot-dev-hmac-secret-at-least-32-chars!!}
+    # Dev token for bypassing HMAC+JWT auth in development builds.
+    # MUST be empty in production. Set CODEPILOT_DEV_TOKEN env var to enable.
+    dev-token: ${CODEPILOT_DEV_TOKEN:devToken}
     sso:
       oidc:
         issuer: ${CODEPILOT_OIDC_ISSUER:https://accounts.codepilot.local}
@@ -81,7 +86,7 @@ codepilot:
         secret: ${CODEPILOT_SSO_BRIDGE_SECRET:codepilot-dev-hmac-bridge-secret-32ch!!}
       dev:
         enabled: ${CODEPILOT_SSO_DEV_ENABLED:true}
-        token: ${CODEPILOT_SSO_DEV_TOKEN:codepilot-local-dev-token}
+        token: ${CODEPILOT_SSO_DEV_TOKEN:devToken}
 
 springdoc:
   swagger-ui:

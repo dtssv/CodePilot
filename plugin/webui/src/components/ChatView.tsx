@@ -9,6 +9,7 @@ import { RiskNoticeCard } from './RiskNoticeCard';
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
+    contextRefs?: { id?: string; display: string; type?: string }[];
     toolCall?: { id: string; name: string; args: unknown };
     riskNotice?: { level: string; message: string; filesPaths: string[] };
     needsInput?: { question: string; options: string[] };
@@ -18,6 +19,50 @@ export interface ChatMessage {
 
 interface ChatViewProps {
     messages: ChatMessage[];
+}
+
+const refTypeIcons: Record<string, string> = {
+    code: '{ }',
+    file: '📄',
+    package: '📦',
+};
+
+function parseInlineRefs(content: string, contextRefs?: { id?: string; display: string; type?: string }[]): React.ReactNode[] {
+    if (!contextRefs || contextRefs.length === 0) {
+        return [content];
+    }
+    const refMap = new Map<string, { display: string; type?: string }>();
+    for (const ref of contextRefs) {
+        if (ref.id) refMap.set(ref.id, ref);
+    }
+    const segments: React.ReactNode[] = [];
+    let remaining = content;
+    let keyIdx = 0;
+    while (remaining.length > 0) {
+        const start = remaining.indexOf('\x01');
+        if (start < 0) {
+            if (remaining) segments.push(remaining);
+            break;
+        }
+        if (start > 0) segments.push(remaining.substring(0, start));
+        const end = remaining.indexOf('\x01', start + 1);
+        if (end < 0) {
+            segments.push(remaining.substring(start));
+            break;
+        }
+        const id = remaining.substring(start + 1, end);
+        const ref = refMap.get(id);
+        if (ref) {
+            segments.push(
+                <span key={`r${keyIdx++}`} className={`msg-ref-chip ref-${ref.type || 'code'}`}>
+                    <span className="ref-icon">{refTypeIcons[ref.type || 'code'] || '📎'}</span>
+                    <span className="ref-label">{ref.display}</span>
+                </span>
+            );
+        }
+        remaining = remaining.substring(end + 1);
+    }
+    return segments;
 }
 
 export function ChatView({ messages }: ChatViewProps) {
@@ -44,6 +89,10 @@ export function ChatView({ messages }: ChatViewProps) {
                         <NeedsInputCard question={msg.needsInput.question} options={msg.needsInput.options} />
                     ) : msg.diff ? (
                         <DiffCard path={msg.diff.path} hunks={msg.diff.hunks} />
+                    ) : msg.role === 'user' && msg.contextRefs && msg.contextRefs.length > 0 ? (
+                        <div className="msg-inline-refs">
+                            {parseInlineRefs(msg.content, msg.contextRefs).map((seg) => seg)}
+                        </div>
                     ) : (
                         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
                             {msg.content}

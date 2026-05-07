@@ -38,6 +38,8 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var keepRecentMessages: Int = 6,
         var autoApplyLowRiskPatches: Boolean = false,
         var allowDevSso: Boolean = false,
+        /** Dev token for bypassing JWT auth in development builds. Empty in production. */
+        var devToken: String = "",
         var registries: List<RegistryEntry> = listOf(
             RegistryEntry("Official", "https://marketplace.codepilot.io", "")
         ),
@@ -49,6 +51,39 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
 
     override fun loadState(state: State) {
         XmlSerializerUtil.copyBean(state, this.state)
+        // Load devToken from bundled properties file (injected at build time)
+        if (this.state.devToken.isEmpty()) {
+            this.state.devToken = loadBundledDevToken()
+        }
+    }
+
+    /** Try to load devToken from: 1) bundled properties, 2) env var CODEPILOT_DEV_TOKEN */
+    private fun loadBundledDevToken(): String {
+        val log = com.intellij.openapi.diagnostic.Logger.getInstance("CodePilotSettings")
+        // 1) Try bundled properties file
+        try {
+            val stream = javaClass.getResourceAsStream("/codepilot-dev.properties")
+            if (stream != null) {
+                val props = java.util.Properties()
+                stream.use { props.load(it) }
+                val token = props.getProperty("devToken", "")
+                if (token.isNotEmpty()) {
+                    log.info("[Settings] devToken loaded from bundled properties (length=${token.length})")
+                    return token
+                }
+                log.info("[Settings] codepilot-dev.properties found but devToken is empty")
+            } else {
+                log.info("[Settings] codepilot-dev.properties not found in classpath")
+            }
+        } catch (e: Exception) {
+            log.warn("[Settings] Failed to read codepilot-dev.properties", e)
+        }
+        // 2) Fallback: try env var directly
+        val envToken = System.getenv("CODEPILOT_DEV_TOKEN") ?: ""
+        if (envToken.isNotEmpty()) {
+            log.info("[Settings] devToken loaded from env var CODEPILOT_DEV_TOKEN (length=${envToken.length})")
+        }
+        return envToken
     }
 
     fun update(mutator: (State) -> Unit) {

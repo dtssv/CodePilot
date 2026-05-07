@@ -11,6 +11,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
+import io.codepilot.plugin.auth.LoginDialog
 import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
 import okhttp3.MediaType.Companion.toMediaType
@@ -45,6 +46,7 @@ class ModelsPanel(private val project: Project) {
     private val mapper = jacksonObjectMapper()
     private val settings = CodePilotSettings.getInstance()
     private val http = HttpClientService.getInstance()
+    private val log = com.intellij.openapi.diagnostic.logger<ModelsPanel>()
 
     private val systemModel = DefaultListModel<ModelItem>()
     private val systemList = JBList(systemModel).apply {
@@ -103,48 +105,69 @@ class ModelsPanel(private val project: Project) {
         status.text = "Loading models..."
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val url = settings.state.backendBaseUrl.trimEnd('/') + "/v1/models"
-                val request = okhttp3.Request.Builder().url(url).get()
-                    .header("Accept", "application/json").build()
-                val response = http.client().newCall(request).execute()
-                response.use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: return@use
-                        val node = mapper.readTree(body)
-                        val data = node.path("data")
-                        val sysItems = mutableListOf<ModelItem>()
-                        data.path("system").forEach { m ->
-                            sysItems.add(ModelItem(
-                                id = m.path("id").asText(),
-                                name = m.path("name").asText(),
-                                protocol = m.path("protocol").asText("openai"),
-                                baseUrl = m.path("baseUrl").asText(""),
-                                model = m.path("model").asText(""),
-                                type = "system"
-                            ))
-                        }
-                        val custItems = mutableListOf<ModelItem>()
-                        data.path("custom").forEach { m ->
-                            custItems.add(ModelItem(
-                                id = m.path("id").asText(),
-                                name = m.path("name").asText(),
-                                protocol = m.path("protocol").asText("openai"),
-                                baseUrl = m.path("baseUrl").asText(""),
-                                model = m.path("model").asText(""),
-                                type = "custom"
-                            ))
-                        }
-                        SwingUtilities.invokeLater {
-                            systemModel.clear(); sysItems.forEach { systemModel.addElement(it) }
-                            customModel.clear(); custItems.forEach { customModel.addElement(it) }
-                            status.text = "${sysItems.size} system + ${custItems.size} custom models."
-                        }
-                    } else {
-                        SwingUtilities.invokeLater { status.text = "Failed to load models (HTTP ${resp.code})" }
-                    }
-                }
+                doFetchModels()
             } catch (e: Exception) {
                 SwingUtilities.invokeLater { status.text = "Error: ${e.message}" }
+            }
+        }
+    }
+
+    private fun doFetchModels(retries: Int = 1) {
+        val url = settings.state.backendBaseUrl.trimEnd('/') + "/v1/models"
+        log.info("[ModelsPanel] Fetching models from: $url, devToken=${settings.state.devToken.takeIf { it.isNotBlank() }?.take(8) ?: "null"}")
+        val request = okhttp3.Request.Builder().url(url).get()
+            .header("Accept", "application/json").build()
+        val response = http.client().newCall(request).execute()
+        response.use { resp ->
+            log.info("[ModelsPanel] Response: code=${resp.code}, message=${resp.message}")
+            if (resp.isSuccessful) {
+                val body = resp.body?.string() ?: return
+                val node = mapper.readTree(body)
+                val data = node.path("data")
+                val sysItems = mutableListOf<ModelItem>()
+                data.path("system").forEach { m ->
+                    sysItems.add(ModelItem(
+                        id = m.path("id").asText(),
+                        name = m.path("name").asText(),
+                        protocol = m.path("protocol").asText("openai"),
+                        baseUrl = m.path("baseUrl").asText(""),
+                        model = m.path("model").asText(""),
+                        type = "system"
+                    ))
+                }
+                val custItems = mutableListOf<ModelItem>()
+                data.path("custom").forEach { m ->
+                    custItems.add(ModelItem(
+                        id = m.path("id").asText(),
+                        name = m.path("name").asText(),
+                        protocol = m.path("protocol").asText("openai"),
+                        baseUrl = m.path("baseUrl").asText(""),
+                        model = m.path("model").asText(""),
+                        type = "custom"
+                    ))
+                }
+                SwingUtilities.invokeLater {
+                    systemModel.clear(); sysItems.forEach { systemModel.addElement(it) }
+                    customModel.clear(); custItems.forEach { customModel.addElement(it) }
+                    status.text = "${sysItems.size} system + ${custItems.size} custom models."
+                }
+            } else if (resp.code == 401 && retries > 0) {
+                // Prompt login on 401, then retry once
+                SwingUtilities.invokeLater {
+                    status.text = "Authentication required. Please sign in."
+                    val loggedIn = LoginDialog(project).showAndGet()
+                    if (loggedIn) {
+                        status.text = "Retrying after login..."
+                        ApplicationManager.getApplication().executeOnPooledThread {
+                            try { doFetchModels(retries - 1) } catch (e: Exception) {
+                                SwingUtilities.invokeLater { status.text = "Error: ${e.message}" }
+                            }
+                        }
+                    }
+                }
+            } else {
+                val hint = if (resp.code == 401) " (authentication required — please sign in)" else ""
+                SwingUtilities.invokeLater { status.text = "Failed to load models (HTTP ${resp.code})$hint" }
             }
         }
     }

@@ -1,5 +1,6 @@
 package io.codepilot.plugin.auth
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -77,22 +78,29 @@ class AuthService {
         return Request.Builder().url(url).get().header("Accept", "application/json").build()
     }
 
+    private val log = com.intellij.openapi.diagnostic.logger<AuthService>()
+
     private fun <T> execute(request: Request, type: Class<T>): CompletableFuture<T> {
         val future = CompletableFuture<T>()
         val client = HttpClientService.getInstance()
+        log.info("[Auth] HTTP ${request.method} ${request.url}")
         client.client().newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                log.error("[Auth] HTTP request failed: ${request.method} ${request.url}", e)
                 future.completeExceptionally(e)
             }
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                log.info("[Auth] HTTP response: ${request.method} ${request.url} -> ${response.code} ${response.message}")
                 response.use {
                     if (!it.isSuccessful) {
-                        future.completeExceptionally(IllegalStateException("HTTP ${it.code}"))
+                        val errBody = runCatching { it.body?.string()?.take(500) }.getOrNull()
+                        log.warn("[Auth] HTTP error body: $errBody")
+                        future.completeExceptionally(IllegalStateException("HTTP ${it.code}: $errBody"))
                         return
                     }
                     runCatching { client.parse(it, type) }
                         .onSuccess(future::complete)
-                        .onFailure(future::completeExceptionally)
+                        .onFailure { e -> log.error("[Auth] Parse failed", e); future.completeExceptionally(e) }
                 }
             }
         })
@@ -101,12 +109,16 @@ class AuthService {
 
     // -------------------- DTOs --------------------
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class MethodsResponse(
         val code: Int,
         val message: String?,
         val data: Methods?,
+        val traceId: String? = null,
+        val ts: String? = null,
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class Methods(
         val oidc: Boolean = false,
         val hmacBridge: Boolean = false,
@@ -114,6 +126,7 @@ class AuthService {
         val deviceFlow: Boolean = false,
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class LoginResult(
         @JsonProperty("accessToken") val accessToken: String,
         @JsonProperty("accessExpiresAt") val accessExpiresAt: String?,
@@ -122,12 +135,28 @@ class AuthService {
         @JsonProperty("deviceSecret") val deviceSecret: String,
     )
 
-    data class LoginEnvelope(val code: Int, val message: String?, val data: LoginResult?)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class LoginEnvelope(
+        val code: Int,
+        val message: String?,
+        val data: LoginResult?,
+        val traceId: String? = null,
+        val ts: String? = null,
+    )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class RefreshResult(val accessToken: String, val accessExpiresAt: String?)
 
-    data class RefreshEnvelope(val code: Int, val message: String?, val data: RefreshResult?)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class RefreshEnvelope(
+        val code: Int,
+        val message: String?,
+        val data: RefreshResult?,
+        val traceId: String? = null,
+        val ts: String? = null,
+    )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class DeviceCode(
         val deviceCode: String,
         val userCode: String?,
@@ -137,8 +166,16 @@ class AuthService {
         val interval: Long?,
     )
 
-    data class DeviceCodeEnvelope(val code: Int, val message: String?, val data: DeviceCode?)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class DeviceCodeEnvelope(
+        val code: Int,
+        val message: String?,
+        val data: DeviceCode?,
+        val traceId: String? = null,
+        val ts: String? = null,
+    )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class DeviceToken(
         val accessToken: String?,
         val idToken: String?,
@@ -147,7 +184,14 @@ class AuthService {
         val tokenType: String?,
     )
 
-    data class DeviceTokenEnvelope(val code: Int, val message: String?, val data: DeviceToken?)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class DeviceTokenEnvelope(
+        val code: Int,
+        val message: String?,
+        val data: DeviceToken?,
+        val traceId: String? = null,
+        val ts: String? = null,
+    )
 
     companion object {
         @JvmStatic fun getInstance(): AuthService = service()
