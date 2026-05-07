@@ -38,6 +38,7 @@ class SessionStore {
                 workspaceHash = workspaceHash,
                 createdAt = Instant.now().toString(),
                 updatedAt = Instant.now().toString(),
+                lastMessageAt = null,
                 mode = mode,
                 modelId = modelId,
                 title = null,
@@ -94,6 +95,35 @@ class SessionStore {
         return SessionHandle(dir, meta)
     }
 
+    /** Update session metadata in place and persist. */
+    fun updateMeta(handle: SessionHandle, block: (SessionMeta) -> Unit) {
+        block(handle.meta)
+        handle.meta.updatedAt = Instant.now().toString()
+        writeJson(handle.dir.resolve("meta.json"), handle.meta)
+    }
+
+    /** Touch the lastMessageAt timestamp. */
+    fun touchLastMessage(handle: SessionHandle) {
+        handle.meta.lastMessageAt = Instant.now().toString()
+        handle.meta.updatedAt = Instant.now().toString()
+        writeJson(handle.dir.resolve("meta.json"), handle.meta)
+    }
+
+    /** Read all messages from messages.ndjson for session recovery. */
+    fun readMessages(handle: SessionHandle): List<Map<String, Any>> {
+        val file = handle.dir.resolve("messages.ndjson")
+        if (!Files.exists(file)) return emptyList()
+        return Files.readAllLines(file).filter { it.isNotBlank() }.map { line ->
+            mapper.readValue(line, Map::class.java) as Map<String, Any>
+        }
+    }
+
+    /** Delete a session directory. */
+    fun delete(workspaceHash: String, sessionId: String) {
+        val dir = sessionDir(workspaceHash, sessionId)
+        if (Files.exists(dir)) dir.toFile().deleteRecursively()
+    }
+
     private fun sessionDir(workspaceHash: String, sessionId: String): Path =
         settingsRoot().resolve(workspaceHash).resolve(sessionId)
 
@@ -127,6 +157,7 @@ class SessionStore {
         val workspaceHash: String,
         var createdAt: String,
         var updatedAt: String,
+        var lastMessageAt: String?,
         val mode: String,
         val modelId: String?,
         var title: String?,
@@ -135,4 +166,5 @@ class SessionStore {
     companion object {
         @JvmStatic fun getInstance(): SessionStore = service()
     }
+}   }
 }

@@ -26,7 +26,10 @@ import java.util.UUID
 class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
 
     data class State(
-        var backendBaseUrl: String = "https://api.codepilot.local",
+        //prd
+        //var backendBaseUrl: String = "https://api.codepilot.local",
+        //dev
+        var backendBaseUrl: String = "http://localhost:8080",
         var deviceId: String = UUID.randomUUID().toString(),
         var preferredLocale: String = "zh-CN",
         var sessionRoot: String = defaultSessionRoot(),

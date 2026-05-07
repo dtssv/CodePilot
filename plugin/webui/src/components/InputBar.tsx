@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { onPluginEvent } from '../bridge';
 
 interface InputBarProps {
     onSend: (text: string) => void;
@@ -9,6 +10,11 @@ export function InputBar({ onSend, onStop }: InputBarProps) {
     const [text, setText] = useState('');
     const [running, setRunning] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    useEffect(() => {
+        const unsub = onPluginEvent('done', () => setRunning(false));
+        return unsub;
+    }, []);
 
     const handleSubmit = useCallback(() => {
         const trimmed = text.trim();
@@ -38,16 +44,14 @@ export function InputBar({ onSend, onStop }: InputBarProps) {
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask CodePilot..."
-                rows={3}
+                placeholder="Ask CodePilot... (Enter to send, Shift+Enter for newline)"
+                rows={2}
             />
-            <div className="input-actions">
+            <div className="input-send-area">
                 {running ? (
                     <button className="stop-btn" onClick={handleStop}>Stop</button>
                 ) : (
-                    <button className="primary send-btn" onClick={handleSubmit} disabled={!text.trim()}>
-                        Send
-                    </button>
+                    <button className="send-btn" onClick={handleSubmit} disabled={!text.trim()}>↑</button>
                 )}
             </div>
         </div>

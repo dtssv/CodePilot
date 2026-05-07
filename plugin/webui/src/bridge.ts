@@ -26,7 +26,11 @@ export type PluginEventType =
     | 'done'
     | 'error'
     | 'skills_activated'
-    | 'models_loaded';
+    | 'models_loaded'
+    | 'user_message_saved'
+    | 'session_list'
+    | 'session_switched'
+    | 'session_messages';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();
