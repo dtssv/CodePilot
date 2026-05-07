@@ -11,6 +11,7 @@ import com.intellij.ui.jcef.JBCefJSQuery
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.session.SessionStore
 import io.codepilot.plugin.tools.ToolDispatcher
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.cef.browser.CefBrowser
 import org.cef.handler.CefLoadHandlerAdapter
 import java.awt.BorderLayout
@@ -104,8 +105,10 @@ class CefChatPanel(private val project: Project) : Disposable {
             when (type) {
                 "user_message" -> handleUserMessage(
                     payload["text"]?.asText() ?: "",
-                    payload["mode"]?.asText() ?: "agent"
+                    payload["mode"]?.asText() ?: "agent",
+                    payload["modelId"]?.asText()
                 )
+                "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
                 "risk_approved" -> handleRiskApproval(payload["approved"]?.asBoolean() ?: false)
                 "needs_input_response" -> handleNeedsInputResponse(payload["answer"]?.asText() ?: "")
@@ -116,38 +119,88 @@ class CefChatPanel(private val project: Project) : Disposable {
         }
     }
 
-    private fun handleUserMessage(text: String, mode: String) {
-        
+    private fun handleUserMessage(text: String, mode: String, modelId: String? = null) {
         val dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            client.run(sessionHandle.meta.id, text, mode) { eventType, data ->
-                dispatchToWeb(eventType, data)
-                // Handle tool calls via dispatcher
-                if (eventType == "tool_call") {
-                    val toolName = (data as? Map<*, *>)?.get("name") as? String
-                    val toolArgs = (data as? Map<*, *>)?.get("args")
-                    val toolCallId = (data as? Map<*, *>)?.get("id") as? String
+            val payload = mutableMapOf<String, Any?>(
+                "sessionId" to sessionHandle.meta.id,
+                "mode" to mode,
+                "input" to text,
+                "intent" to "new",
+            )
+            if (modelId != null) payload["modelId"] = modelId
+
+            client.run(payload.toMap(), object : ConversationClient.Listener {
+                override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
+                override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    val data = mapper.treeToValue(payload, Map::class.java)
+                    dispatchToWeb("tool_call", data)
+                    val toolName = payload.path("name").asText(null)
+                    val toolCallId = payload.path("id").asText(null)
                     if (toolName != null && toolCallId != null) {
-                        dispatcher.dispatch(toolName, toolArgs, toolCallId)
+                        dispatcher.dispatch(payload)
                     }
                 }
+                override fun onPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("plan", mapper.treeToValue(payload, Map::class.java))
+                override fun onPlanDelta(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("plan_delta", mapper.treeToValue(payload, Map::class.java))
+                override fun onTaskLedger(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("task_ledger", mapper.treeToValue(payload, Map::class.java))
+                override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
+                override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+                override fun onError(code: Int, message: String) =
+                    dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("done", mapOf("reason" to reason))
+                override fun onClosed() {}
+            })
+        }
+    }
+
+    /** Fetches available models from backend and dispatches to web UI. */
+    private fun handleFetchModels() {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+                val request = okhttp3.Request.Builder()
+                    .url(
+                        (io.codepilot.plugin.settings.CodePilotSettings.getInstance()
+                            .state.backendBaseUrl.trimEnd('/') + "/v1/models")
+                            .toHttpUrl()
+                    )
+                    .get()
+                    .header("Accept", "application/json")
+                    .build()
+                val response = http.client().newCall(request).execute()
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: return@use
+                        val node = mapper.readTree(body)
+                        val data = node.path("data")
+                        dispatchToWeb("models_loaded", mapper.treeToValue(data, Map::class.java))
+                    } else {
+                        log.warn("Failed to fetch models: ${resp.code}")
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("Failed to fetch models", e)
             }
         }
     }
 
     private fun handleStop() {
-        
         client.stop(sessionHandle.meta.id)
     }
 
     private fun handleRiskApproval(approved: Boolean) {
-        // Forward risk approval to the conversation client
         log.info("Risk approval: $approved")
     }
 
     private fun handleNeedsInputResponse(answer: String) {
-        
         client.submitToolResult(sessionHandle.meta.id, "needs_input", answer, true)
     }
 
@@ -159,10 +212,10 @@ class CefChatPanel(private val project: Project) : Disposable {
         }
         // Dev fallback: load from the source directory
         val devPath = Path.of(project.basePath ?: ".", "plugin", "webui", "dist", "index.html")
-        return if (devPath.toFile().exists()) {
-            devPath.toUri().toString()
-        } else {
-            "about:blank"
+        if (devPath.toFile().exists()) {
+            return devPath.toUri().toString()
         }
+        // WebUI not built — throw to signal fallback to Swing panel
+        throw IllegalStateException("WebUI not found. Run 'cd plugin/webui && npm run build' first, or use Swing panel fallback.")
     }
 }

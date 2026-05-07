@@ -7,6 +7,7 @@ import io.codepilot.core.audit.AuditInterceptor;
 import io.codepilot.core.context.ContextBudgeter;
 import io.codepilot.core.dto.ConversationMode;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.prompt.PromptOrchestrator;
 import io.codepilot.core.rag.ServerToolExecutor;
 import io.codepilot.core.safety.RedactionService;
@@ -34,7 +35,7 @@ public class ConversationService {
 
   private static final Logger log = LoggerFactory.getLogger(ConversationService.class);
 
-  private final ChatClient chatClient;
+  private final ChatClientFactory chatClientFactory;
   private final PromptOrchestrator orchestrator;
   private final ContextBudgeter budgeter;
   private final UserSkillValidator userSkillValidator;
@@ -51,7 +52,7 @@ public class ConversationService {
   private final AuditInterceptor audit;
 
   public ConversationService(
-      ChatClient.Builder chatClientBuilder,
+      ChatClientFactory chatClientFactory,
       PromptOrchestrator orchestrator,
       ContextBudgeter budgeter,
       UserSkillValidator userSkillValidator,
@@ -66,7 +67,7 @@ public class ConversationService {
       SkillRouter skillRouter,
       ServerToolExecutor serverToolExecutor,
       AuditInterceptor audit) {
-    this.chatClient = chatClientBuilder.build();
+    this.chatClientFactory = chatClientFactory;
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
     this.userSkillValidator = userSkillValidator;
@@ -127,8 +128,11 @@ public class ConversationService {
                                     "tokens", a.tokens()))
                         .toList())));
 
+    // Resolve the ChatClient based on modelId (system model or user's custom model)
+    ChatClient resolvedClient = chatClientFactory.resolve(req.modelId());
+
     if (req.mode() == ConversationMode.AGENT) {
-      AgentLoop loop = new AgentLoop(chatClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
+      AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
       return head.concatWith(loop.run(req, assembled.systemText(), redactedInput));
     }
 
@@ -141,7 +145,7 @@ public class ConversationService {
     final String finalChatInput = chatInput;
 
     Flux<ServerSentEvent<String>> body =
-        chatClient
+        resolvedClient
             .prompt()
             .system(assembled.systemText())
             .user(finalChatInput)

@@ -42,6 +42,7 @@ class CodePilotChatPanel(private val project: Project) {
     private val ledgerView = JBTextArea(6, 40)
     private val inputArea = JBTextArea(4, 80)
     private val modeBox = JComboBox(arrayOf("agent", "chat"))
+    private val modelBox = JComboBox<ModelItem>()
     private val sendButton = JButton("Send")
     private val stopButton = JButton("Stop").apply { isEnabled = false }
     private val signInButton = JButton("Sign in")
@@ -66,6 +67,13 @@ class CodePilotChatPanel(private val project: Project) {
                 }
             }
         })
+        // Load models from backend
+        fetchModels()
+    }
+
+    /** Data class for model dropdown items. */
+    private data class ModelItem(val id: String, val name: String, val type: String) {
+        override fun toString(): String = if (type == "custom") "$name (custom)" else name
     }
 
     val component: JComponent =
@@ -82,6 +90,10 @@ class CodePilotChatPanel(private val project: Project) {
             add(JLabel("Mode:"))
             add(Box.createHorizontalStrut(4))
             add(modeBox)
+            add(Box.createHorizontalStrut(8))
+            add(JLabel("Model:"))
+            add(Box.createHorizontalStrut(4))
+            add(modelBox)
             add(Box.createHorizontalGlue())
             add(signInButton)
             add(Box.createHorizontalStrut(4))
@@ -159,9 +171,11 @@ class CodePilotChatPanel(private val project: Project) {
 
     private fun basePayload(input: String, intent: String, extras: Map<String, Any?> = emptyMap()): Map<String, Any?> {
         val mode = modeBox.selectedItem as String
+        val selectedModel = modelBox.selectedItem as? ModelItem
         val base = mutableMapOf<String, Any?>(
             "sessionId" to sessionHandle.meta.id,
             "mode" to mode,
+            "modelId" to selectedModel?.id,
             "input" to input,
             "intent" to intent,
             "options" to mapOf("locale" to settings.state.preferredLocale),
@@ -249,6 +263,52 @@ class CodePilotChatPanel(private val project: Project) {
             }
             override fun onClosed() = resetButtons()
         }
+
+    /** Fetches model list from backend and populates the model dropdown. */
+    private fun fetchModels() {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+                val url = (settings.state.backendBaseUrl.trimEnd('/') + "/v1/models")
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .get()
+                    .header("Accept", "application/json")
+                    .build()
+                val response = http.client().newCall(request).execute()
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: return@use
+                        val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+                        val data = node.path("data")
+                        val items = mutableListOf<ModelItem>()
+                        // Parse system models
+                        data.path("system").forEach { m ->
+                            items.add(ModelItem(
+                                id = m.path("id").asText(),
+                                name = m.path("name").asText(),
+                                type = "system"
+                            ))
+                        }
+                        // Parse custom models
+                        data.path("custom").forEach { m ->
+                            items.add(ModelItem(
+                                id = m.path("id").asText(),
+                                name = m.path("name").asText(),
+                                type = "custom"
+                            ))
+                        }
+                        SwingUtilities.invokeLater {
+                            modelBox.removeAllItems()
+                            items.forEach { modelBox.addItem(it) }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Silently ignore — models will be empty, user can still type
+            }
+        }
+    }
 
     private fun workspaceHash(): String =
         ApplicationManager.getApplication()

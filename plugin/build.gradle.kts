@@ -66,11 +66,56 @@ ktlint {
     version.set("1.3.1")
 }
 
+// ---- WebUI build integration ----
+
+val webUiDir = project.file("webui")
+val webUiDist = webUiDir.resolve("dist")
+val webUiResourceDir = project.file("src/main/resources/webui/dist")
+
+val webUiInstall by tasks.registering(Exec::class) {
+    group = "webui"
+    description = "Install WebUI npm dependencies"
+    workingDir = webUiDir
+    commandLine("npm", "install")
+    inputs.file(webUiDir.resolve("package.json"))
+    outputs.dir(webUiDir.resolve("node_modules"))
+}
+
+val webUiBuild by tasks.registering(Exec::class) {
+    group = "webui"
+    description = "Build WebUI (vite)"
+    dependsOn(webUiInstall)
+    workingDir = webUiDir
+    commandLine("npm", "run", "build")
+    inputs.dir(webUiDir.resolve("src"))
+    inputs.file(webUiDir.resolve("index.html"))
+    inputs.file(webUiDir.resolve("vite.config.ts"))
+    inputs.file(webUiDir.resolve("tsconfig.json"))
+    outputs.dir(webUiDist)
+}
+
+val copyWebUi by tasks.registering(Copy::class) {
+    group = "webui"
+    description = "Copy WebUI dist to plugin resources"
+    dependsOn(webUiBuild)
+    from(webUiDist)
+    into(webUiResourceDir)
+}
+
+// Wire WebUI build into the plugin lifecycle
+tasks.named("processResources") {
+    dependsOn(copyWebUi)
+}
+
 tasks {
     runIde {
         jvmArgs("-Xmx2g")
+        dependsOn(copyWebUi)
     }
     test {
         useJUnitPlatform()
+    }
+    clean {
+        delete(webUiResourceDir)
     }
 }

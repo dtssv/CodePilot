@@ -25,7 +25,8 @@ export type PluginEventType =
     | 'self_check'
     | 'done'
     | 'error'
-    | 'skills_activated';
+    | 'skills_activated'
+    | 'models_loaded';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

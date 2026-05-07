@@ -1,12 +1,13 @@
 package io.codepilot.core.model;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.common.api.CodePilotException;
+import io.codepilot.common.api.ErrorCodes;
 import io.codepilot.core.model.dto.CreateModelCommand;
 import io.codepilot.core.model.dto.TestModelCommand;
 import io.codepilot.core.model.dto.UpdateModelCommand;
-import io.codepilot.common.api.ErrorCodes;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -26,8 +27,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * CRUD for custom model providers. API keys are encrypted using AES-256-GCM with the configured
- * KMS key before storage.
+ * CRUD for model providers. Supports two categories:
+ * <ul>
+ *   <li><b>System models</b> — configured by administrators in {@code system_model_providers},
+ *       available to all users. These have their own base_url, model name, and api_key.</li>
+ *   <li><b>Custom models</b> — per-user models in {@code custom_model_providers},
+ *       only the owning user can view/update/delete.</li>
+ * </ul>
+ * API keys are encrypted using AES-256-GCM with the configured KMS key before storage.
  */
 @Service
 public class ModelService {
@@ -44,7 +51,6 @@ public class ModelService {
       @Value("${codepilot.security.hmac-secret}") String hmacSecret) {
     this.jdbc = jdbc;
     this.mapper = mapper;
-    // Derive a 256-bit key from the HMAC secret for API key encryption
     this.kmsKey = deriveKey(hmacSecret);
   }
 
@@ -81,7 +87,10 @@ public class ModelService {
   }
 
   @Transactional
-  public CustomModelProvider update(UUID id, UpdateModelCommand req) {
+  public CustomModelProvider update(UUID id, String userId, UpdateModelCommand req) {
+    // Verify ownership: only the owning user can update their custom model
+    verifyOwnership(id, userId);
+
     var params = new MapSqlParameterSource().addValue("id", id.toString());
     StringBuilder set = new StringBuilder();
     if (req.name() != null) { set.append("name = :name, "); params.addValue("name", req.name()); }
@@ -102,31 +111,65 @@ public class ModelService {
     int rows = jdbc.update(sql, params);
     if (rows == 0) throw new CodePilotException(ErrorCodes.NOT_FOUND, "Model not found: " + id);
 
-    // Return a simplified view (re-query)
     return findById(id);
   }
 
   @Transactional
-  public void delete(UUID id) {
-    String sql = "DELETE FROM custom_model_providers WHERE id = :id";
-    int rows = jdbc.update(sql, new MapSqlParameterSource("id", id.toString()));
+  public void delete(UUID id, String userId) {
+    // Verify ownership: only the owning user can delete their custom model
+    verifyOwnership(id, userId);
+
+    String sql = "DELETE FROM custom_model_providers WHERE id = :id AND user_id = :userId";
+    int rows = jdbc.update(sql, new MapSqlParameterSource()
+        .addValue("id", id.toString())
+        .addValue("userId", userId));
     if (rows == 0) throw new CodePilotException(ErrorCodes.NOT_FOUND, "Model not found: " + id);
   }
 
-  /** List all models available to a user (builtin + custom). */
+  /**
+   * List all models available to a user: system models (from DB) + user's custom models.
+   */
   public Map<String, Object> listModels(String userId) {
-    List<Map<String, Object>> builtin = List.of(
-        Map.of("id", "codePilot-default", "name", "CodePilot Default", "caps", List.of("tools", "stream"), "maxTokens", 128000),
-        Map.of("id", "codePilot-pro", "name", "CodePilot Pro", "caps", List.of("tools", "stream", "vision"), "maxTokens", 200000));
+    List<SystemModelProvider> systemModels = listSystemModels();
     List<CustomModelProvider> custom = userId != null ? listCustomByUser(userId) : List.of();
-    return Map.of("builtin", builtin, "custom", custom);
+    return Map.of("system", systemModels, "custom", custom);
+  }
+
+  /**
+   * Query all enabled system models from the system_model_providers table.
+   * Ordered by sort_order ascending.
+   */
+  private List<SystemModelProvider> listSystemModels() {
+    String sql = """
+        SELECT id, name, protocol, base_url, model, capabilities, max_tokens,
+               timeout_ms, enabled, sort_order, created_at, updated_at
+        FROM system_model_providers
+        WHERE enabled = 1
+        ORDER BY sort_order ASC""";
+    return jdbc.query(sql, new MapSqlParameterSource(), (rs, i) -> {
+      String capsJson = rs.getString("capabilities");
+      List<String> caps = parseCapabilities(capsJson);
+      return new SystemModelProvider(
+          UUID.fromString(rs.getString("id")),
+          rs.getString("name"),
+          rs.getString("protocol"),
+          rs.getString("base_url"),
+          rs.getString("model"),
+          caps,
+          rs.getInt("max_tokens"),
+          rs.getInt("timeout_ms"),
+          rs.getBoolean("enabled"),
+          rs.getInt("sort_order"),
+          rs.getTimestamp("created_at").toInstant(),
+          rs.getTimestamp("updated_at").toInstant());
+    });
   }
 
   private List<CustomModelProvider> listCustomByUser(String userId) {
     String sql = """
         SELECT id, user_id, name, protocol, base_url, model, headers_json, timeout_ms,
                enabled, created_at, updated_at
-        FROM custom_model_providers WHERE user_id = :userId AND enabled = true""";
+        FROM custom_model_providers WHERE user_id = :userId AND enabled = 1""";
     return jdbc.query(sql, new MapSqlParameterSource("userId", userId), (rs, i) ->
         new CustomModelProvider(
             UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("user_id")),
@@ -135,8 +178,28 @@ public class ModelService {
             rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant()));
   }
 
+  /**
+   * Find a system model by ID. Returns null if not found or disabled.
+   */
+  public SystemModelProvider findSystemModelById(UUID id) {
+    String sql = """
+        SELECT id, name, protocol, base_url, model, capabilities, max_tokens,
+               timeout_ms, enabled, sort_order, created_at, updated_at
+        FROM system_model_providers WHERE id = :id AND enabled = 1""";
+    var rows = jdbc.query(sql, new MapSqlParameterSource("id", id.toString()), (rs, i) -> {
+      String capsJson = rs.getString("capabilities");
+      List<String> caps = parseCapabilities(capsJson);
+      return new SystemModelProvider(
+          UUID.fromString(rs.getString("id")),
+          rs.getString("name"), rs.getString("protocol"), rs.getString("base_url"),
+          rs.getString("model"), caps, rs.getInt("max_tokens"), rs.getInt("timeout_ms"),
+          rs.getBoolean("enabled"), rs.getInt("sort_order"),
+          rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
+    });
+    return rows.isEmpty() ? null : rows.getFirst();
+  }
+
   public Map<String, Object> testConnection(TestModelCommand req) {
-    // Simple connectivity test: attempt a lightweight call to the provider's models endpoint
     Map<String, Object> result = new HashMap<>();
     result.put("protocol", req.protocol());
     result.put("baseUrl", req.baseUrl());
@@ -145,6 +208,20 @@ public class ModelService {
     result.put("latencyMs", 0);
     // Real implementation would make an HTTP call here
     return result;
+  }
+
+  // ---- Ownership verification ---- //
+
+  private void verifyOwnership(UUID modelId, String userId) {
+    String sql = "SELECT user_id FROM custom_model_providers WHERE id = :id";
+    var rows = jdbc.queryForList(sql, new MapSqlParameterSource("id", modelId.toString()));
+    if (rows.isEmpty()) {
+      throw new CodePilotException(ErrorCodes.NOT_FOUND, "Model not found: " + modelId);
+    }
+    String ownerId = (String) rows.getFirst().get("user_id");
+    if (!ownerId.equals(userId)) {
+      throw new CodePilotException(ErrorCodes.FORBIDDEN, "Cannot modify model owned by another user");
+    }
   }
 
   private CustomModelProvider findById(UUID id) {
@@ -157,20 +234,25 @@ public class ModelService {
         new CustomModelProvider(
             UUID.fromString(rs.getString("id")),
             UUID.fromString(rs.getString("user_id")),
-            rs.getString("name"),
-            rs.getString("protocol"),
-            rs.getString("base_url"),
-            rs.getString("model"),
-            Map.of(),
-            rs.getInt("timeout_ms"),
-            rs.getBoolean("enabled"),
-            rs.getTimestamp("created_at").toInstant(),
-            rs.getTimestamp("updated_at").toInstant()));
+            rs.getString("name"), rs.getString("protocol"), rs.getString("base_url"),
+            rs.getString("model"), Map.of(), rs.getInt("timeout_ms"), rs.getBoolean("enabled"),
+            rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant()));
+  }
+
+  // ---- Helpers ---- //
+
+  private List<String> parseCapabilities(String json) {
+    if (json == null || json.isBlank()) return List.of();
+    try {
+      return mapper.readValue(json, new TypeReference<>() {});
+    } catch (JsonProcessingException e) {
+      return List.of();
+    }
   }
 
   // ---- Encryption helpers ---- //
 
-  private byte[] encrypt(String plaintext) {
+  byte[] encrypt(String plaintext) {
     try {
       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
       byte[] iv = new byte[12];

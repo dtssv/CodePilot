@@ -2,6 +2,7 @@ package io.codepilot.plugin.marketplace
 
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
@@ -14,7 +15,6 @@ import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
-import javax.swing.JScrollPane
 
 /** In-IDE Skill authoring panel; writes a fresh user Skill yaml under the chosen scope. */
 class NewSkillPanel(
@@ -27,10 +27,12 @@ class NewSkillPanel(
     private val versionField = JBTextField("0.1.0")
     private val titleField = JBTextField("My local skill")
     private val scopeBox = JComboBox(arrayOf("project", "global"))
-    private val languageField = JBTextField("java")
+    private val languageField = JBTextField("")
     private val actionField = JBTextField("")
-    private val promptArea = JBTextArea(10, 40).apply {
+    private val promptArea = JBTextArea(12, 50).apply {
         text = "Your instructions to the model go here. Keep under ~500 tokens."
+        lineWrap = true
+        wrapStyleWord = true
     }
     private val save = JButton("Create")
 
@@ -41,15 +43,31 @@ class NewSkillPanel(
             addRow(this, 1, "Version:", versionField)
             addRow(this, 2, "Title:", titleField)
             addRow(this, 3, "Scope:", scopeBox)
-            addRow(this, 4, "language (optional):", languageField)
-            addRow(this, 5, "action (optional):", actionField)
-            addRow(this, 6, "Prompt:", JScrollPane(promptArea))
-            val gbc = GridBagConstraints().apply {
+            addRow(this, 4, "Language (optional):", languageField)
+            addRow(this, 5, "Action (optional):", actionField)
+
+            // Prompt label
+            val promptLabelGbc = GridBagConstraints().apply {
+                gridx = 0; gridy = 6; anchor = GridBagConstraints.NORTHWEST
+                insets = Insets(4, 4, 4, 4)
+            }
+            add(JLabel("Prompt:"), promptLabelGbc)
+
+            // Prompt text area with scroll pane — fill both directions
+            val promptGbc = GridBagConstraints().apply {
+                gridx = 1; gridy = 6; weightx = 1.0; weighty = 1.0
+                fill = GridBagConstraints.BOTH
+                insets = Insets(4, 4, 4, 4)
+            }
+            add(JBScrollPane(promptArea), promptGbc)
+
+            // Create button
+            val btnGbc = GridBagConstraints().apply {
                 gridx = 1; gridy = 7; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL
                 insets = Insets(8, 4, 4, 4)
             }
             save.addActionListener { save() }
-            add(save, gbc)
+            add(save, btnGbc)
         }
 
     private fun save() {
@@ -92,7 +110,7 @@ class NewSkillPanel(
 
     private fun addRow(parent: JPanel, row: Int, label: String, component: JComponent) {
         val lbl = JLabel(label)
-        val gL = GridBagConstraints().apply { gridx = 0; gridy = row; insets = Insets(4, 4, 4, 4) }
+        val gL = GridBagConstraints().apply { gridx = 0; gridy = row; anchor = GridBagConstraints.WEST; insets = Insets(4, 4, 4, 4) }
         val gR = GridBagConstraints().apply { gridx = 1; gridy = row; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(4, 4, 4, 4) }
         parent.add(lbl, gL)
         parent.add(component, gR)
