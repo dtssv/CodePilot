@@ -145,6 +145,16 @@ class ConversationClient(
         fun onError(code: Int, message: String) {}
         fun onDone(reason: String, payload: JsonNode) {}
         fun onClosed() {}
+
+        // ── Graph engine events ──
+        fun onGraphPlan(payload: JsonNode) {}
+        fun onGraphTransition(payload: JsonNode) {}
+        fun onGraphInfoRequest(payload: JsonNode) {}
+        fun onGraphInfoResult(payload: JsonNode) {}
+        fun onGraphVerify(payload: JsonNode) {}
+        fun onGraphRepairPlan(payload: JsonNode) {}
+        fun onGraphPhaseDone(payload: JsonNode) {}
+        fun onGraphBudgetAlert(payload: JsonNode) {}
     }
 
     private class EventSourceAdapter(
@@ -175,6 +185,15 @@ class ConversationClient(
                 "error" ->
                     listener.onError(node.path("code").asInt(50001), node.path("message").asText(""))
                 "done" -> listener.onDone(node.path("reason").asText("final"), node)
+                // ── Graph engine events ──
+                "graph_plan" -> listener.onGraphPlan(node)
+                "graph_transition" -> listener.onGraphTransition(node)
+                "graph_info_request" -> listener.onGraphInfoRequest(node)
+                "graph_info_result" -> listener.onGraphInfoResult(node)
+                "graph_verify" -> listener.onGraphVerify(node)
+                "graph_repair_plan" -> listener.onGraphRepairPlan(node)
+                "graph_phase_done" -> listener.onGraphPhaseDone(node)
+                "graph_budget_alert" -> listener.onGraphBudgetAlert(node)
                 else -> {} // ignore comments / unknown events
             }
         }

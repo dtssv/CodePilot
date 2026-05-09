@@ -29,6 +29,9 @@ class ToolDispatcher(
 ) {
 
     private val patchApplier = PatchApplier(project)
+    private val fileReader = FileReader(project)
+    private val codeInspector = CodeInspector(project)
+    private val grepTool = GrepSearchTool(project)
 
     fun dispatch(toolCall: JsonNode) {
         val name = toolCall.path("name").asText()
@@ -38,10 +41,14 @@ class ToolDispatcher(
             val started = System.nanoTime()
             try {
                 val result = when {
-                    name == "fs.read" -> readFile(args)
+                    name == "fs.read" -> fileReader.read(args)
                     name == "fs.list" -> listDir(args)
                     name == "fs.search" -> searchProject(args)
+                    name == "fs.grep" -> grepTool.grep(args)
                     name == "fs.outline" -> fileOutline(args)
+                    name == "code.outline" -> codeInspector.outline(args)
+                    name == "code.symbol" -> codeInspector.findSymbol(args)
+                    name == "code.usages" -> codeInspector.findUsages(args)
                     name == "fs.create" -> createFile(args)
                     name == "fs.write" -> dispatchViaPatchApplier(name, args)
                     name == "fs.replace" -> dispatchViaPatchApplier(name, args)

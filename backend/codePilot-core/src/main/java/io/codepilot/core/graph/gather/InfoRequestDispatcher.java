@@ -1,0 +1,75 @@
+package io.codepilot.core.graph.gather;
+
+import io.codepilot.core.rag.ServerToolExecutor;
+import org.springframework.stereotype.Component;
+
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * Dispatches info requests to either client-side (via tool_call SSE) or
+ * server-side (RAG, HTTP fetch, MCP read-only) executors.
+ *
+ * Client-side requests are sent via SSE and awaited via ToolResultBus.
+ * Server-side requests are executed in parallel on the backend.
+ */
+@Component
+public class InfoRequestDispatcher {
+
+    private static final Set<String> CLIENT_SIDE_KINDS = Set.of(
+            "fs.read", "fs.list", "fs.grep",
+            "code.outline", "code.symbol", "code.usages",
+            "shell.exec"
+    );
+
+    private static final Set<String> SERVER_SIDE_KINDS = Set.of(
+            "rag.search", "mcp.call", "http.fetch"
+    );
+
+    private final ServerToolExecutor serverToolExecutor;
+
+    public InfoRequestDispatcher(ServerToolExecutor serverToolExecutor) {
+        this.serverToolExecutor = serverToolExecutor;
+    }
+
+    /**
+     * Classifies requests into client-side and server-side groups.
+     */
+    public DispatchResult classify(List<Map<String, Object>> requests) {
+        List<Map<String, Object>> clientRequests = new ArrayList<>();
+        List<Map<String, Object>> serverRequests = new ArrayList<>();
+
+        for (Map<String, Object> req : requests) {
+            String kind = (String) req.get("kind");
+            if (CLIENT_SIDE_KINDS.contains(kind)) {
+                clientRequests.add(req);
+            } else if (SERVER_SIDE_KINDS.contains(kind)) {
+                serverRequests.add(req);
+            }
+        }
+        return new DispatchResult(clientRequests, serverRequests);
+    }
+
+    /**
+     * Executes server-side requests in parallel and returns results.
+     */
+    public List<Map<String, Object>> executeServerSide(List<Map<String, Object>> requests) {
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (Map<String, Object> req : requests) {
+            String id = (String) req.get("id");
+            String kind = (String) req.get("kind");
+            try {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> args = (Map<String, Object>) req.getOrDefault("args", Map.of());
+                Map<String, Object> result = serverToolExecutor.execute(kind, args);
+                results.add(Map.of("id", id, "kind", kind, "ok", true, "result", result));
+            } catch (Exception e) {
+                results.add(Map.of("id", id, "kind", kind, "ok", false,
+                        "errorCode", "server_error", "errorMessage", e.getMessage()));
+            }
+        }
+        return results;
+    }
+
+    public record DispatchResult(List<Map<String, Object>> clientSide, List<Map<String, Object>> serverSide) {}
+}

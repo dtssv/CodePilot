@@ -73,7 +73,11 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
       AuthPrincipal devPrincipal = new AuthPrincipal(
           "dev-user", "dev-tenant", deviceId,
           java.util.Set.of("user", "dev"), Long.MAX_VALUE);
-      return chain.filter(exchange).contextWrite(Context.of(AuthPrincipal.CTX_KEY, devPrincipal));
+      ServerWebExchange mutated = exchange.mutate()
+          .request(builder -> builder.header("X-User-Id", devPrincipal.userId())
+              .header("X-Tenant-Id", devPrincipal.tenantId()))
+          .build();
+      return chain.filter(mutated).contextWrite(Context.of(AuthPrincipal.CTX_KEY, devPrincipal));
     }
 
     String header = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
@@ -87,7 +91,11 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
     } catch (IllegalArgumentException ex) {
       return WebErrors.write(exchange, ErrorCodes.UNAUTHORIZED, "Invalid or expired token", 401);
     }
-    return chain.filter(exchange).contextWrite(Context.of(AuthPrincipal.CTX_KEY, principal));
+    ServerWebExchange mutated = exchange.mutate()
+        .request(builder -> builder.header("X-User-Id", principal.userId())
+            .header("X-Tenant-Id", principal.tenantId()))
+        .build();
+    return chain.filter(mutated).contextWrite(Context.of(AuthPrincipal.CTX_KEY, principal));
   }
 
   private boolean isPublic(String path) {
@@ -104,6 +112,10 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
   private boolean isValidDevToken(String token) {
     if (devToken == null || devToken.isEmpty()) return false;
     return java.security.MessageDigest.isEqual(
+        token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+        devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  }
+}
         token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
         devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
