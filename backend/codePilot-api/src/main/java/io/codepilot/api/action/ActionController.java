@@ -105,10 +105,23 @@ public class ActionController {
     // Build a ConversationRunRequest with mode=chat (actions are single-turn, no tools)
     // The action type is passed via the input prefix for PromptOrchestrator to pick the right Skill
     String input = "[action:" + action + "] " + (req.instruction() != null ? req.instruction() : "") + "\n\n" + req.context();
+
+    // Determine engine: refactor and gentest benefit from graph (generate→verify→repair loop)
+    var useGraph = "refactor".equals(action) || "gentest".equals(action);
+    var mode = useGraph ? ConversationMode.AGENT : ConversationMode.CHAT;
+    var policy = useGraph
+        ? new ConversationRunRequest.Policy(
+            8, null, null, null, null, true, null, null, null, null,
+            "graph", action, // engine=graph, graphTemplate=action
+            new ConversationRunRequest.GraphVerifyPolicy(true, true, true, null),
+            new ConversationRunRequest.GraphRepairPolicy(2, List.of("compile-error", "test-fail")),
+            null, true, true)
+        : null;
+
     ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
+        req.sessionId(), mode, req.modelId(), input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null);
+        List.of(), null, null, null, null, null, null, null, policy, null);
     return leakFilter.guard(service.run(runReq));
   }
 

@@ -227,6 +227,8 @@ class CefChatPanel(val project: Project) : Disposable {
             }
         }
         val dispatcher = ToolDispatcher(project, client, handle.meta.id)
+        val gatherDispatcher = io.codepilot.plugin.tools.GatherDispatcher(project, client, handle.meta.id)
+        val graphStateStore = io.codepilot.plugin.tools.GraphStateStore(project, handle.dir)
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val payload = mutableMapOf<String, Any?>(
@@ -236,6 +238,24 @@ class CefChatPanel(val project: Project) : Disposable {
                 "intent" to "new",
             )
             if (modelId != null) payload["modelId"] = modelId
+
+            // Enable graph engine for agent mode by default
+            if (mode == "agent") {
+                payload["policy"] = mapOf(
+                    "engine" to "graph",
+                    "graphTemplate" to "default",
+                    "selfCheck" to true,
+                    "verify" to mapOf("compile" to true, "test" to true, "lint" to true),
+                    "repair" to mapOf("maxAttempts" to 3),
+                    "gather" to mapOf("gatherLoopMax" to 3, "gatherBudgetTokens" to 12000),
+                )
+                // If resuming, attach graphState
+                graphStateStore.loadLatest()
+                if (graphStateStore.isAwaiting()) {
+                    payload["intent"] = "continue"
+                    payload["graphState"] = graphStateStore.snapshot()
+                }
+            }
 
             // Collect full assistant response for local persistence
             val assistantBuilder = StringBuilder()
@@ -270,10 +290,54 @@ class CefChatPanel(val project: Project) : Disposable {
                     dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
                 override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
                     dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+
+                // ── Graph engine events ──
+                override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    val data = mapper.treeToValue(payload, Map::class.java)
+                    dispatchToWeb("graph_plan", data)
+                    graphStateStore.applyGraphPlan(payload)
+                }
+                override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    val data = mapper.treeToValue(payload, Map::class.java)
+                    dispatchToWeb("graph_transition", data)
+                    graphStateStore.applyTransition(payload)
+                }
+                override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    dispatchToWeb("graph_info_request", mapper.treeToValue(payload, Map::class.java))
+                    // Execute client-side gather requests
+                    gatherDispatcher.dispatchBatch(payload.path("requests"))
+                }
+                override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    dispatchToWeb("graph_info_result", mapper.treeToValue(payload, Map::class.java))
+                    graphStateStore.applyInfoResult(payload)
+                }
+                override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    dispatchToWeb("graph_verify", mapper.treeToValue(payload, Map::class.java))
+                    graphStateStore.applyVerify(payload)
+                }
+                override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("graph_repair_plan", mapper.treeToValue(payload, Map::class.java))
+                override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    dispatchToWeb("graph_phase_done", mapper.treeToValue(payload, Map::class.java))
+                    graphStateStore.applyPhaseDone(payload)
+                }
+                override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("graph_budget_alert", mapper.treeToValue(payload, Map::class.java))
+
+                // ── Dual-layer plan events ──
+                override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
+                override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
+
                 override fun onError(code: Int, message: String) =
                     dispatchToWeb("error", mapOf("code" to code, "message" to message))
                 override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
                     dispatchToWeb("done", mapOf("reason" to reason))
+                    // Persist graph awaiting state for resume
+                    if (reason == "awaiting_user_input" || reason == "phase_done") {
+                        graphStateStore.applyAwaiting(payload)
+                    }
                     // Persist the full assistant response and update session metadata
                     val fullResponse = assistantBuilder.toString()
                     if (fullResponse.isNotEmpty()) {

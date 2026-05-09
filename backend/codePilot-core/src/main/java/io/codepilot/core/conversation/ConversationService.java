@@ -10,6 +10,7 @@ import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.prompt.PromptOrchestrator;
 import io.codepilot.core.rag.ServerToolExecutor;
+import io.codepilot.core.graph.GraphEngineService;
 import io.codepilot.core.safety.RedactionService;
 import io.codepilot.core.safety.SystemPromptLeakDetector;
 import io.codepilot.core.skill.ActivatedSkill;
@@ -50,6 +51,7 @@ public class ConversationService {
   private final SkillRouter skillRouter;
   private final ServerToolExecutor serverToolExecutor;
   private final AuditInterceptor audit;
+  private final GraphEngineService graphEngine;
 
   public ConversationService(
       ChatClientFactory chatClientFactory,
@@ -66,7 +68,8 @@ public class ConversationService {
       ToolSchemaRegistry toolSchemas,
       SkillRouter skillRouter,
       ServerToolExecutor serverToolExecutor,
-      AuditInterceptor audit) {
+      AuditInterceptor audit,
+      GraphEngineService graphEngine) {
     this.chatClientFactory = chatClientFactory;
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
@@ -82,6 +85,7 @@ public class ConversationService {
     this.skillRouter = skillRouter;
     this.serverToolExecutor = serverToolExecutor;
     this.audit = audit;
+    this.graphEngine = graphEngine;
   }
 
   public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
@@ -130,6 +134,11 @@ public class ConversationService {
 
     // Resolve the ChatClient based on modelId (system model or user's custom model)
     ChatClient resolvedClient = chatClientFactory.resolve(req.modelId());
+
+    // ── Graph engine routing ──
+    if (req.policy() != null && "graph".equals(req.policy().engine())) {
+      return head.concatWith(graphEngine.run(req));
+    }
 
     if (req.mode() == ConversationMode.AGENT) {
       AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);

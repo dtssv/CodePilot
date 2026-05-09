@@ -6,6 +6,7 @@ dependencies {
     api(project(":codePilot-common"))
 
     api(libs.spring.ai.openai)
+    api(libs.spring.ai.alibaba.graph)
     // api(libs.spring.ai.mcp)  // TODO: verify artifact coordinates for Spring AI MCP
 
     api(libs.caffeine)

@@ -93,7 +93,34 @@ public record ConversationRunRequest(
       List<String> stopOn,
       String askPolicy,
       Integer contextBudgetTokens,
-      Integer keepRecentMessages) {}
+      Integer keepRecentMessages,
+      // ── Graph engine fields ──
+      String engine,              // "graph" | "legacy" (default: legacy)
+      String graphTemplate,       // "default" | "refactor" | "migrate" | "bugfix"
+      GraphVerifyPolicy verify,
+      GraphRepairPolicy repair,
+      GraphGatherPolicy gather,
+      Boolean autoContinue,
+      Boolean askOnUncertain) {}
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public record GraphVerifyPolicy(
+      Boolean compile, Boolean test, Boolean lint,
+      List<CustomCommand> customCommands) {
+    public record CustomCommand(String name, String cmd, Integer timeoutMs) {}
+  }
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public record GraphRepairPolicy(Integer maxAttempts, List<String> escalateOn) {}
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public record GraphGatherPolicy(Integer gatherLoopMax, Integer gatherBudgetTokens) {}
+
+  /** Graph state uploaded from plugin for resume. */
+  public Map<String, Object> graphState() {
+    // Accessed via reflection by ObjectMapper; field stored in the JSON body
+    return null;
+  }
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Skills(List<String> requested, List<String> disabled) {}

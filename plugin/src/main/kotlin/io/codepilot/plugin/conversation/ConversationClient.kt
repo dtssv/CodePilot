@@ -155,6 +155,10 @@ class ConversationClient(
         fun onGraphRepairPlan(payload: JsonNode) {}
         fun onGraphPhaseDone(payload: JsonNode) {}
         fun onGraphBudgetAlert(payload: JsonNode) {}
+
+        // ── Dual-layer plan events ──
+        fun onUserPlan(payload: JsonNode) {}
+        fun onUserPlanProgress(payload: JsonNode) {}
     }
 
     private class EventSourceAdapter(
@@ -194,6 +198,8 @@ class ConversationClient(
                 "graph_repair_plan" -> listener.onGraphRepairPlan(node)
                 "graph_phase_done" -> listener.onGraphPhaseDone(node)
                 "graph_budget_alert" -> listener.onGraphBudgetAlert(node)
+                "user_plan" -> listener.onUserPlan(node)
+                "user_plan_progress" -> listener.onUserPlanProgress(node)
                 else -> {} // ignore comments / unknown events
             }
         }
