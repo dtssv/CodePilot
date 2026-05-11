@@ -8,6 +8,7 @@ import com.intellij.openapi.editor.event.EditorFactoryEvent
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import io.codepilot.plugin.actions.CodePilotSelectionHint
+import io.codepilot.plugin.indexer.IndexScheduler
 import io.codepilot.plugin.reset.ResetEngine
 import io.codepilot.plugin.update.UpdateService
 
@@ -24,6 +25,9 @@ class CodePilotStartupActivity : ProjectActivity {
                 .notify(project)
         }
         UpdateService.getInstance().checkInBackground(project)
+
+        // Start background codebase indexing
+        IndexScheduler.getInstance(project).start()
 
         // Install selection hint on all future editors
         EditorFactory.getInstance().addEditorFactoryListener(object : EditorFactoryAdapter() {

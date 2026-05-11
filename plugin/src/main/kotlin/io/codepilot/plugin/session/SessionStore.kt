@@ -76,6 +76,78 @@ class SessionStore {
         writeJson(handle.dir.resolve("checkpoint.json"), checkpoint)
     }
 
+    /** Load the last saved checkpoint for session recovery. */
+    fun loadCheckpoint(handle: SessionHandle): Map<String, Any>? {
+        val file = handle.dir.resolve("checkpoint.json")
+        if (!Files.exists(file)) return null
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            mapper.readValue(Files.readAllBytes(file), Map::class.java) as Map<String, Any>
+        }.getOrNull()
+    }
+
+    /** Load the last saved plan. */
+    fun loadPlan(handle: SessionHandle): Map<String, Any>? {
+        val file = handle.dir.resolve("plan.json")
+        if (!Files.exists(file)) return null
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            mapper.readValue(Files.readAllBytes(file), Map::class.java) as Map<String, Any>
+        }.getOrNull()
+    }
+
+    /** Load the last saved task ledger. */
+    fun loadLedger(handle: SessionHandle): Map<String, Any>? {
+        val file = handle.dir.resolve("ledger.json")
+        if (!Files.exists(file)) return null
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            mapper.readValue(Files.readAllBytes(file), Map::class.java) as Map<String, Any>
+        }.getOrNull()
+    }
+
+    /** Append an Agent step record (for replay and checkpoint recovery). */
+    fun appendStep(handle: SessionHandle, step: Map<String, Any?>) {
+        appendNdjson(handle.dir.resolve("steps.ndjson"), step)
+    }
+
+    /** Read all completed steps (for resume: determines which tool calls to skip). */
+    fun readSteps(handle: SessionHandle): List<Map<String, Any>> {
+        val file = handle.dir.resolve("steps.ndjson")
+        if (!Files.exists(file)) return emptyList()
+        return Files.readAllLines(file).filter { it.isNotBlank() }.mapNotNull { line ->
+            @Suppress("UNCHECKED_CAST")
+            runCatching { mapper.readValue(line, Map::class.java) as Map<String, Any> }.getOrNull()
+        }
+    }
+
+    /** Get completed tool call IDs (for idempotency check on resume). */
+    fun completedToolCallIds(handle: SessionHandle): Set<String> {
+        return readSteps(handle)
+            .mapNotNull { it["toolCallId"] as? String }
+            .toSet()
+    }
+
+    /** Save a session digest (context compression result). */
+    fun saveDigest(handle: SessionHandle, digest: Any) {
+        writeJson(handle.dir.resolve("digest.json"), digest)
+    }
+
+    /** Load the last session digest. */
+    fun loadDigest(handle: SessionHandle): Map<String, Any>? {
+        val file = handle.dir.resolve("digest.json")
+        if (!Files.exists(file)) return null
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            mapper.readValue(Files.readAllBytes(file), Map::class.java) as Map<String, Any>
+        }.getOrNull()
+    }
+
+    /** Check if a session has a recoverable checkpoint. */
+    fun hasCheckpoint(handle: SessionHandle): Boolean {
+        return Files.exists(handle.dir.resolve("checkpoint.json"))
+    }
+
     fun list(workspaceHash: String): List<SessionMeta> {
         val parent = settingsRoot().resolve(workspaceHash)
         if (!Files.isDirectory(parent)) return emptyList()

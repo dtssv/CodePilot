@@ -18,8 +18,13 @@
     <applicationService serviceImplementation="io.codepilot.plugin.marketplace.LocalMarketplaceStore"/>
     <applicationService serviceImplementation="io.codepilot.plugin.mcp.McpProcessManager"/>
 
-    <!-- Project-level service to allow actions to reach the CefChatPanel -->
+    <!-- Project-level services -->
     <projectService serviceImplementation="io.codepilot.plugin.toolwindow.CefChatPanelRegistry"/>
+    <projectService serviceImplementation="io.codepilot.plugin.indexer.IndexWatcher"/>
+    <projectService serviceImplementation="io.codepilot.plugin.indexer.IndexScheduler"/>
+    <projectService serviceImplementation="io.codepilot.plugin.context.AtReferenceProvider"/>
+    <projectService serviceImplementation="io.codepilot.plugin.context.ProjectRulesLoader"/>
+    <projectService serviceImplementation="io.codepilot.plugin.tools.TerminalSessionManager"/>
 
     <applicationConfigurable
         parentId="tools"
