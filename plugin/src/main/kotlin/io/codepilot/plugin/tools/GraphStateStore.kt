@@ -20,8 +20,10 @@ import java.nio.file.Path
  *   - Provide the graphState payload for /conversation/run and /conversation/resume
  *   - Track phase progress for UI display
  */
-class GraphStateStore(private val project: Project, private val sessionDir: Path) {
-
+class GraphStateStore(
+    private val project: Project,
+    private val sessionDir: Path,
+) {
     private val log = Logger.getInstance(GraphStateStore::class.java)
     private val mapper = ObjectMapper()
     private var state: ObjectNode = mapper.createObjectNode()
@@ -31,11 +33,13 @@ class GraphStateStore(private val project: Project, private val sessionDir: Path
     fun loadLatest() {
         val plansDir = sessionDir.resolve("plans")
         if (!Files.isDirectory(plansDir)) return
-        val latest = Files.list(plansDir)
-            .filter { it.fileName.toString().startsWith("graph-") && it.fileName.toString().endsWith(".json") }
-            .sorted(Comparator.reverseOrder())
-            .findFirst()
-            .orElse(null) ?: return
+        val latest =
+            Files
+                .list(plansDir)
+                .filter { it.fileName.toString().startsWith("graph-") && it.fileName.toString().endsWith(".json") }
+                .sorted(Comparator.reverseOrder())
+                .findFirst()
+                .orElse(null) ?: return
         try {
             state = mapper.readTree(Files.readString(latest)) as ObjectNode
             version = state.path("_version").asInt(0)

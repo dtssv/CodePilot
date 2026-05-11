@@ -49,59 +49,71 @@ class GatherDispatcher(
                 val startMs = System.currentTimeMillis()
                 try {
                     val result = dispatchSingle(kind, args)
-                    results.add(mapOf(
-                        "id" to id,
-                        "kind" to kind,
-                        "ok" to true,
-                        "result" to result,
-                        "durationMs" to (System.currentTimeMillis() - startMs),
-                    ))
+                    results.add(
+                        mapOf(
+                            "id" to id,
+                            "kind" to kind,
+                            "ok" to true,
+                            "result" to result,
+                            "durationMs" to (System.currentTimeMillis() - startMs),
+                        ),
+                    )
                 } catch (v: ToolViolation) {
                     log.warn("Gather request $id ($kind) blocked: ${v.message}")
-                    results.add(mapOf(
-                        "id" to id,
-                        "kind" to kind,
-                        "ok" to false,
-                        "errorCode" to "gather_write_blocked",
-                        "errorMessage" to v.message,
-                        "durationMs" to (System.currentTimeMillis() - startMs),
-                    ))
+                    results.add(
+                        mapOf(
+                            "id" to id,
+                            "kind" to kind,
+                            "ok" to false,
+                            "errorCode" to "gather_write_blocked",
+                            "errorMessage" to v.message,
+                            "durationMs" to (System.currentTimeMillis() - startMs),
+                        ),
+                    )
                 } catch (t: Throwable) {
                     log.warn("Gather request $id ($kind) failed", t)
-                    results.add(mapOf(
-                        "id" to id,
-                        "kind" to kind,
-                        "ok" to false,
-                        "errorCode" to "gather_error",
-                        "errorMessage" to (t.message ?: t.javaClass.simpleName),
-                        "durationMs" to (System.currentTimeMillis() - startMs),
-                    ))
+                    results.add(
+                        mapOf(
+                            "id" to id,
+                            "kind" to kind,
+                            "ok" to false,
+                            "errorCode" to "gather_error",
+                            "errorMessage" to (t.message ?: t.javaClass.simpleName),
+                            "durationMs" to (System.currentTimeMillis() - startMs),
+                        ),
+                    )
                 }
             }
             // Submit all results back as a single batch tool-result
-            client.submitToolResult(mapOf(
-                "sessionId" to sessionId,
-                "toolCallId" to "gather-batch",
-                "ok" to results.all { it["ok"] == true },
-                "result" to mapOf("gathered" to results),
-            ))
+            client.submitToolResult(
+                mapOf(
+                    "sessionId" to sessionId,
+                    "toolCallId" to "gather-batch",
+                    "ok" to results.all { it["ok"] == true },
+                    "result" to mapOf("gathered" to results),
+                ),
+            )
         }
     }
 
-    private fun dispatchSingle(kind: String, args: JsonNode): Map<String, Any?> {
-        return when (kind) {
+    private fun dispatchSingle(
+        kind: String,
+        args: JsonNode,
+    ): Map<String, Any?> =
+        when (kind) {
             "fs.read" -> fileReader.read(args)
             "fs.list" -> {
                 val path = args.path("path").asText(".")
                 val vf = PathGuard.resolve(project, path)
                 if (!vf.isDirectory) throw ToolViolation("not a directory: $path")
-                val entries = vf.children.take(500).map { f ->
-                    mapOf(
-                        "name" to f.name,
-                        "type" to if (f.isDirectory) "dir" else "file",
-                        "size" to f.length,
-                    )
-                }
+                val entries =
+                    vf.children.take(500).map { f ->
+                        mapOf(
+                            "name" to f.name,
+                            "type" to if (f.isDirectory) "dir" else "file",
+                            "size" to f.length,
+                        )
+                    }
                 mapOf("path" to path, "entries" to entries)
             }
             "fs.grep" -> grepTool.grep(args)
@@ -114,5 +126,4 @@ class GatherDispatcher(
             }
             else -> throw ToolViolation("unsupported gather kind: $kind (only client-side tools)")
         }
-    }
 }

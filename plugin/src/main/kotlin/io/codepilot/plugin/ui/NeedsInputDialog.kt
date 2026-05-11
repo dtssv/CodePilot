@@ -8,12 +8,10 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.panel
 import com.intellij.util.ui.JBUI
-import javax.swing.AbstractButton
 import javax.swing.BoxLayout
 import javax.swing.ButtonGroup
 import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.JRadioButton
 
 /**
  * Renders a `needs_input` payload as a stack of question cards. Returns the user's answers as an
@@ -24,7 +22,6 @@ class NeedsInputDialog(
     project: Project?,
     private val payload: JsonNode,
 ) : DialogWrapper(project, true) {
-
     private val perQuestionState = mutableListOf<Question>()
     private val freeformField = JBTextField()
     private var freeformParsed: List<Map<String, Any?>> = emptyList()
@@ -60,43 +57,47 @@ class NeedsInputDialog(
     }
 
     private fun buildQuestion(q: JsonNode): JComponent {
-        val box = panel {
-            val title = "Q${q.path("index").asInt(perQuestionState.size + 1)}: ${q.path("prompt").asText("")}"
-            row { label(title) }
-            val state = Question(q.path("id").asText(""), null, null)
-            perQuestionState.add(state)
-            val kind = q.path("kind").asText("single-choice")
-            val options = q.path("options")
-            if (options.isArray && (kind == "single-choice" || kind == "yes-no")) {
-                val group = ButtonGroup()
-                val def = q.path("defaultOptionId").asText(null)
-                options.forEach { opt ->
-                    val id = opt.path("id").asText()
-                    val label = opt.path("label").asText(id) +
-                        if (opt.path("impact").asText().isNotBlank())
-                            " [impact: ${opt.path("impact").asText()}]"
-                        else ""
+        val box =
+            panel {
+                val title = "Q${q.path("index").asInt(perQuestionState.size + 1)}: ${q.path("prompt").asText("")}"
+                row { label(title) }
+                val state = Question(q.path("id").asText(""), null, null)
+                perQuestionState.add(state)
+                val kind = q.path("kind").asText("single-choice")
+                val options = q.path("options")
+                if (options.isArray && (kind == "single-choice" || kind == "yes-no")) {
+                    val group = ButtonGroup()
+                    val def = q.path("defaultOptionId").asText(null)
+                    options.forEach { opt ->
+                        val id = opt.path("id").asText()
+                        val label =
+                            opt.path("label").asText(id) +
+                                if (opt.path("impact").asText().isNotBlank()) {
+                                    " [impact: ${opt.path("impact").asText()}]"
+                                } else {
+                                    ""
+                                }
+                        row {
+                            radioButton(label).apply {
+                                component.isSelected = id == def
+                                if (component.isSelected) state.optionId = id
+                                component.actionListeners // no-op
+                                component.addActionListener { state.optionId = id }
+                                group.add(component)
+                            }
+                        }
+                    }
+                } else {
+                    // freeform / multi-choice fall back to a textarea per question
                     row {
-                        radioButton(label).apply {
-                            component.isSelected = id == def
-                            if (component.isSelected) state.optionId = id
-                            component.actionListeners // no-op
-                            component.addActionListener { state.optionId = id }
-                            group.add(component)
+                        val ta = JBTextArea(2, 40)
+                        cell(ta).component.let { area ->
+                            area.lineWrap = true
+                            area.addCaretListener { state.freeform = area.text }
                         }
                     }
                 }
-            } else {
-                // freeform / multi-choice fall back to a textarea per question
-                row {
-                    val ta = JBTextArea(2, 40)
-                    cell(ta).component.let { area ->
-                        area.lineWrap = true
-                        area.addCaretListener { state.freeform = area.text }
-                    }
-                }
             }
-        }
         return box
     }
 
@@ -149,7 +150,10 @@ class NeedsInputDialog(
         return out
     }
 
-    private fun matchOption(questionId: String?, candidate: String): String? {
+    private fun matchOption(
+        questionId: String?,
+        candidate: String,
+    ): String? {
         if (questionId == null) return null
         val q = payload.path("questions").firstOrNull { it.path("id").asText() == questionId } ?: return null
         val options = q.path("options")

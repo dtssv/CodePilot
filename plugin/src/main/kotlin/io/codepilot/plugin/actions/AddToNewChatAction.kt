@@ -4,12 +4,8 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindowManager
-import com.intellij.psi.PsiDirectory
-import com.intellij.psi.PsiFile
 import io.codepilot.plugin.toolwindow.CefChatPanelRegistry
 
 /**
@@ -17,7 +13,6 @@ import io.codepilot.plugin.toolwindow.CefChatPanelRegistry
  * Equivalent to "Add to Chat" but always starts a fresh conversation.
  */
 class AddToNewChatAction : AnAction() {
-
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.getData(CommonDataKeys.PROJECT) ?: return
         val editor = e.getData(CommonDataKeys.EDITOR)
@@ -38,17 +33,23 @@ class AddToNewChatAction : AnAction() {
                     // First create a new session
                     panel.handleNewSessionFromAction()
                     // Store fullCode in contextStore, send compact ref to WebUI
-                    val ctxId = java.util.UUID.randomUUID().toString()
+                    val ctxId =
+                        java.util.UUID
+                            .randomUUID()
+                            .toString()
                     panel.storeContext(ctxId, contextItem.fullCode)
-                    panel.dispatchToWeb("context_added", mapOf(
-                        "id" to ctxId,
-                        "type" to contextItem.type,
-                        "display" to contextItem.display,
-                        "filePath" to contextItem.filePath,
-                        "language" to contextItem.language,
-                        "startLine" to contextItem.startLine,
-                        "endLine" to contextItem.endLine,
-                    ))
+                    panel.dispatchToWeb(
+                        "context_added",
+                        mapOf(
+                            "id" to ctxId,
+                            "type" to contextItem.type,
+                            "display" to contextItem.display,
+                            "filePath" to contextItem.filePath,
+                            "language" to contextItem.language,
+                            "startLine" to contextItem.startLine,
+                            "endLine" to contextItem.endLine,
+                        ),
+                    )
                 } else {
                     ClipboardBridge.push(contextItem.fullCode, null)
                 }

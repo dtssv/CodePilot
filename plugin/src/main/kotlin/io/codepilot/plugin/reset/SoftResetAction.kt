@@ -8,7 +8,8 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 class SoftResetAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         ResetEngine.softReset()
-        NotificationGroupManager.getInstance()
+        NotificationGroupManager
+            .getInstance()
             .getNotificationGroup("CodePilot")
             .createNotification("CodePilot soft-reset complete.", NotificationType.INFORMATION)
             .notify(e.project)

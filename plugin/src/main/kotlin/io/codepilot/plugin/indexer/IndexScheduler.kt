@@ -26,8 +26,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * 3. Chunks fed to LocalSearchEngine for in-memory inverted index
  */
 @Service(Service.Level.PROJECT)
-class IndexScheduler(private val project: Project) : Disposable {
-
+class IndexScheduler(
+    private val project: Project,
+) : Disposable {
     private val log = Logger.getInstance(IndexScheduler::class.java)
 
     private val indexStore = LocalIndexStore(project)
@@ -35,9 +36,13 @@ class IndexScheduler(private val project: Project) : Disposable {
     private val watcher = IndexWatcher.getInstance(project)
     val searchEngine = LocalSearchEngine(project)
 
-    private val executor: ScheduledExecutorService = Executors.newScheduledThreadPool(2) { r ->
-        Thread(r, "CodePilot-Indexer").also { it.isDaemon = true; it.priority = Thread.MIN_PRIORITY }
-    }
+    private val executor: ScheduledExecutorService =
+        Executors.newScheduledThreadPool(2) { r ->
+            Thread(r, "CodePilot-Indexer").also {
+                it.isDaemon = true
+                it.priority = Thread.MIN_PRIORITY
+            }
+        }
 
     private val running = AtomicBoolean(false)
     private val fullScanInProgress = AtomicBoolean(false)
@@ -80,9 +85,11 @@ class IndexScheduler(private val project: Project) : Disposable {
     }
 
     /** Search the local index. Delegates to LocalSearchEngine. */
-    fun search(query: String, topK: Int = 20, language: String? = null): List<LocalSearchEngine.SearchHit> {
-        return searchEngine.search(query, topK, language)
-    }
+    fun search(
+        query: String,
+        topK: Int = 20,
+        language: String? = null,
+    ): List<LocalSearchEngine.SearchHit> = searchEngine.search(query, topK, language)
 
     // ─── Internal ───────────────────────────────────────────────────
 
@@ -91,9 +98,10 @@ class IndexScheduler(private val project: Project) : Disposable {
         log.info("Starting full local codebase index for: ${project.name}")
 
         try {
-            val files = ReadAction.compute<List<com.intellij.openapi.vfs.VirtualFile>, Throwable> {
-                watcher.collectAllFiles()
-            }
+            val files =
+                ReadAction.compute<List<com.intellij.openapi.vfs.VirtualFile>, Throwable> {
+                    watcher.collectAllFiles()
+                }
             totalFilesToIndex.set(files.size)
             indexedFileCount.set(0)
 
@@ -107,9 +115,14 @@ class IndexScheduler(private val project: Project) : Disposable {
 
                 for (vf in batch) {
                     try {
-                        val raw = ReadAction.compute<ByteArray?, Throwable> {
-                            try { vf.contentsToByteArray() } catch (_: Exception) { null }
-                        } ?: continue
+                        val raw =
+                            ReadAction.compute<ByteArray?, Throwable> {
+                                try {
+                                    vf.contentsToByteArray()
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            } ?: continue
 
                         val fileHash = ChunkBuilder.sha256Hex(raw)
                         val relativePath = vf.path.removePrefix(project.basePath ?: "").trimStart('/')
@@ -119,9 +132,10 @@ class IndexScheduler(private val project: Project) : Disposable {
                             continue
                         }
 
-                        val chunks = ReadAction.compute<List<ChunkBuilder.Chunk>, Throwable> {
-                            chunkBuilder.buildChunks(vf)
-                        }
+                        val chunks =
+                            ReadAction.compute<List<ChunkBuilder.Chunk>, Throwable> {
+                                chunkBuilder.buildChunks(vf)
+                            }
 
                         if (chunks.isNotEmpty()) {
                             allChunks.addAll(chunks)
@@ -172,21 +186,29 @@ class IndexScheduler(private val project: Project) : Disposable {
                     searchEngine.removeFile(change.path)
                 }
                 IndexWatcher.ChangeKind.CREATED, IndexWatcher.ChangeKind.MODIFIED -> {
-                    val vf = VirtualFileManager.getInstance()
-                        .findFileByUrl("file://${project.basePath}/${change.path}") ?: continue
+                    val vf =
+                        VirtualFileManager
+                            .getInstance()
+                            .findFileByUrl("file://${project.basePath}/${change.path}") ?: continue
                     try {
-                        val raw = ReadAction.compute<ByteArray?, Throwable> {
-                            try { vf.contentsToByteArray() } catch (_: Exception) { null }
-                        } ?: continue
+                        val raw =
+                            ReadAction.compute<ByteArray?, Throwable> {
+                                try {
+                                    vf.contentsToByteArray()
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            } ?: continue
                         val fileHash = ChunkBuilder.sha256Hex(raw)
 
                         if (indexStore.needsReindex(change.path, fileHash)) {
                             // Remove old entries first
                             searchEngine.removeFile(change.path)
 
-                            val chunks = ReadAction.compute<List<ChunkBuilder.Chunk>, Throwable> {
-                                chunkBuilder.buildChunks(vf)
-                            }
+                            val chunks =
+                                ReadAction.compute<List<ChunkBuilder.Chunk>, Throwable> {
+                                    chunkBuilder.buildChunks(vf)
+                                }
                             if (chunks.isNotEmpty()) {
                                 chunksToIndex.addAll(chunks)
                                 val symbols = chunks.flatMap { it.symbols }.distinct()

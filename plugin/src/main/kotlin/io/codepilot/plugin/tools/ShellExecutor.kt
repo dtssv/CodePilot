@@ -15,8 +15,9 @@ import java.util.regex.Pattern
  * The caller is expected to have already prompted the user for risk-confirmation (the tool is
  * declared `risk=high` in the server-side schema).
  */
-class ShellExecutor(private val project: Project) {
-
+class ShellExecutor(
+    private val project: Project,
+) {
     fun execute(args: JsonNode): Map<String, Any?> {
         val command = args.path("command").asText("")
         if (command.isBlank()) throw ToolViolation("empty command")
@@ -30,11 +31,13 @@ class ShellExecutor(private val project: Project) {
         val cmdLine = buildCommandLine(command, cwd, osHint)
         val startMs = System.currentTimeMillis()
         val handler = CapturingProcessHandler(cmdLine)
-        val output = handler.runProcessWithProgressIndicator(
-            com.intellij.openapi.progress.EmptyProgressIndicator(),
-            timeoutMs,
-            false,
-        )
+        val output =
+            handler.runProcessWithProgressIndicator(
+                com.intellij.openapi.progress
+                    .EmptyProgressIndicator(),
+                timeoutMs,
+                false,
+            )
         val stdout = truncate(output.stdout, 64 * 1024)
         val stderr = truncate(output.stderr, 16 * 1024)
         return mapOf(
@@ -48,7 +51,11 @@ class ShellExecutor(private val project: Project) {
         )
     }
 
-    private fun buildCommandLine(command: String, cwd: String, os: String): GeneralCommandLine {
+    private fun buildCommandLine(
+        command: String,
+        cwd: String,
+        os: String,
+    ): GeneralCommandLine {
         val line = GeneralCommandLine()
         line.setWorkDirectory(cwd)
         line.charset = Charsets.UTF_8
@@ -72,21 +79,69 @@ class ShellExecutor(private val project: Project) {
             else -> "linux"
         }
 
-    private fun truncate(text: String, maxBytes: Int): String {
+    private fun truncate(
+        text: String,
+        maxBytes: Int,
+    ): String {
         val bytes = text.toByteArray()
         if (bytes.size <= maxBytes) return text
         return String(bytes, 0, maxBytes, Charsets.UTF_8) + "\n[...truncated...]"
     }
 
     companion object {
-        private val DENY = listOf(
-            Pattern.compile("""rm\s+-rf\s+/(\s|$)"""),
-            Pattern.compile("""mkfs\.\w+"""),
-            Pattern.compile("""(?i)\bshutdown\b"""),
-            Pattern.compile("""(?i)\breboot\b"""),
-            Pattern.compile("""(?i)\bformat\s+[a-z]:"""),
-            Pattern.compile("""dd\s+if=\S+\s+of=/dev/"""),
-            Pattern.compile(""":\(\)\s*\{\s*:\|:&\s*};:"""), // fork bomb
+        private val DENY =
+            listOf(
+                Pattern.compile("""rm\s+-rf\s+/(\s|$)"""),
+                Pattern.compile("""mkfs\.\w+"""),
+                Pattern.compile("""(?i)\bshutdown\b"""),
+                Pattern.compile("""(?i)\breboot\b"""),
+                Pattern.compile("""(?i)\bformat\s+[a-z]:"""),
+                Pattern.compile("""dd\s+if=\S+\s+of=/dev/"""),
+                Pattern.compile(""":\(\)\s*\{\s*:\|:&\s*};:"""), // fork bomb
+            )
+
+        data class ExecuteResult(
+            val exitCode: Int,
+            val stdout: String,
+            val stderr: String,
+            val timedOut: Boolean,
         )
+
+        /**
+         * Convenience method to execute a shell command without JsonNode args.
+         */
+        fun execute(project: Project, command: String, cwd: String? = null, timeoutMs: Int = 60_000): ExecuteResult {
+            val workDir = cwd ?: project.basePath ?: "."
+            val os = when {
+                SystemInfo.isWindows -> "windows"
+                SystemInfo.isMac -> "macos"
+                else -> "linux"
+            }
+            val cmdLine = GeneralCommandLine()
+            cmdLine.setWorkDirectory(workDir)
+            cmdLine.charset = Charsets.UTF_8
+            when (os) {
+                "windows" -> {
+                    cmdLine.exePath = "powershell.exe"
+                    cmdLine.addParameters("-NoProfile", "-NonInteractive", "-Command", command)
+                }
+                else -> {
+                    cmdLine.exePath = "/bin/bash"
+                    cmdLine.addParameters("-lc", command)
+                }
+            }
+            val handler = CapturingProcessHandler(cmdLine)
+            val output = handler.runProcessWithProgressIndicator(
+                com.intellij.openapi.progress.EmptyProgressIndicator(),
+                timeoutMs,
+                false,
+            )
+            return ExecuteResult(
+                exitCode = output.exitCode,
+                stdout = output.stdout,
+                stderr = output.stderr,
+                timedOut = output.isTimeout,
+            )
+        }
     }
 }

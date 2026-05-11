@@ -14,7 +14,6 @@ import java.time.Instant
  *    asked to restart so the plugin reloads against the freshly-empty folder.
  */
 object ResetEngine {
-
     private fun root(): Path = Path.of(System.getProperty("user.home"), ".codePilot")
 
     fun softReset() {

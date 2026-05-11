@@ -16,6 +16,13 @@ export interface ChatMessage {
     needsInput?: { question: string; options: string[] };
     diff?: { path: string; hunks: string };
     _streaming?: boolean;
+    tokenMeta?: {
+        inputTokens: number;
+        outputTokens: number;
+        modelId?: string;
+        costUsd?: number;
+        latencyMs?: number;
+    };
 }
 
 interface ChatViewProps {
@@ -120,6 +127,37 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                         >
                             ↗ Fork
                         </button>
+                    )}
+                    {msg.tokenMeta && !msg._streaming && (
+                        <div className="msg-token-meta">
+                            {msg.tokenMeta.inputTokens > 0 && (
+                                <span className="token-badge input" title="Input tokens">
+                                    ↑{msg.tokenMeta.inputTokens}
+                                </span>
+                            )}
+                            {msg.tokenMeta.outputTokens > 0 && (
+                                <span className="token-badge output" title="Output tokens">
+                                    ↓{msg.tokenMeta.outputTokens}
+                                </span>
+                            )}
+                            {msg.tokenMeta.latencyMs != null && (
+                                <span className="token-badge latency" title="Latency">
+                                    {msg.tokenMeta.latencyMs < 1000
+                                        ? `${msg.tokenMeta.latencyMs}ms`
+                                        : `${(msg.tokenMeta.latencyMs / 1000).toFixed(1)}s`}
+                                </span>
+                            )}
+                            {msg.tokenMeta.costUsd != null && msg.tokenMeta.costUsd > 0 && (
+                                <span className="token-badge cost" title="Estimated cost">
+                                    ${msg.tokenMeta.costUsd < 0.01 ? '<0.01' : msg.tokenMeta.costUsd.toFixed(3)}
+                                </span>
+                            )}
+                            {msg.tokenMeta.modelId && (
+                                <span className="token-badge model" title="Model">
+                                    {msg.tokenMeta.modelId.split('/').pop()}
+                                </span>
+                            )}
+                        </div>
                     )}
                 </div>
             ))}

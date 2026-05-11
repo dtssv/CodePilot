@@ -24,30 +24,85 @@ import java.util.concurrent.atomic.AtomicBoolean
  * This is a project-level service — one instance per open IDEA project.
  */
 @Service(Service.Level.PROJECT)
-class IndexWatcher(private val project: Project) : Disposable {
-
+class IndexWatcher(
+    private val project: Project,
+) : Disposable {
     private val log = Logger.getInstance(IndexWatcher::class.java)
     private val pendingChanges = ConcurrentLinkedQueue<FileChange>()
     private val initialized = AtomicBoolean(false)
 
     /** Directories that should never be indexed. */
-    private val excludedDirs = setOf(
-        ".git", ".svn", ".hg", ".idea", ".gradle", ".kotlin",
-        "node_modules", "build", "dist", "out", "target", ".next",
-        "__pycache__", ".mypy_cache", ".pytest_cache", "venv", ".venv",
-        ".codePilot", ".intellijPlatform",
-    )
+    private val excludedDirs =
+        setOf(
+            ".git",
+            ".svn",
+            ".hg",
+            ".idea",
+            ".gradle",
+            ".kotlin",
+            "node_modules",
+            "build",
+            "dist",
+            "out",
+            "target",
+            ".next",
+            "__pycache__",
+            ".mypy_cache",
+            ".pytest_cache",
+            "venv",
+            ".venv",
+            ".codePilot",
+            ".intellijPlatform",
+        )
 
     /** File extensions to skip (binary / generated). */
-    private val excludedExtensions = setOf(
-        "class", "jar", "war", "ear", "zip", "tar", "gz", "7z", "rar",
-        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp",
-        "mp3", "mp4", "avi", "mov", "wav", "flac",
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-        "exe", "dll", "so", "dylib", "o", "a",
-        "woff", "woff2", "ttf", "eot", "otf",
-        "lock", "min.js", "min.css",
-    )
+    private val excludedExtensions =
+        setOf(
+            "class",
+            "jar",
+            "war",
+            "ear",
+            "zip",
+            "tar",
+            "gz",
+            "7z",
+            "rar",
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "bmp",
+            "ico",
+            "svg",
+            "webp",
+            "mp3",
+            "mp4",
+            "avi",
+            "mov",
+            "wav",
+            "flac",
+            "pdf",
+            "doc",
+            "docx",
+            "xls",
+            "xlsx",
+            "ppt",
+            "pptx",
+            "exe",
+            "dll",
+            "so",
+            "dylib",
+            "o",
+            "a",
+            "woff",
+            "woff2",
+            "ttf",
+            "eot",
+            "otf",
+            "lock",
+            "min.js",
+            "min.css",
+        )
 
     data class FileChange(
         val path: String,
@@ -67,7 +122,7 @@ class IndexWatcher(private val project: Project) : Disposable {
                         processEvent(event)
                     }
                 }
-            }
+            },
         )
         log.info("IndexWatcher initialized for project: ${project.name}")
     }
@@ -80,7 +135,8 @@ class IndexWatcher(private val project: Project) : Disposable {
             changes.add(change)
         }
         // Deduplicate by path, keeping the latest change kind
-        return changes.groupBy { it.path }
+        return changes
+            .groupBy { it.path }
             .map { (_, entries) -> entries.last() }
     }
 
@@ -111,8 +167,9 @@ class IndexWatcher(private val project: Project) : Disposable {
     /** Collect all indexable files in the project (for full scan). */
     fun collectAllFiles(): List<VirtualFile> {
         val files = mutableListOf<VirtualFile>()
-        val projectRoot = project.basePath?.let { VirtualFileManager.getInstance().findFileByUrl("file://$it") }
-            ?: return emptyList()
+        val projectRoot =
+            project.basePath?.let { VirtualFileManager.getInstance().findFileByUrl("file://$it") }
+                ?: return emptyList()
 
         VfsUtilCore.iterateChildrenRecursively(projectRoot, { dir ->
             dir.name !in excludedDirs
@@ -160,7 +217,11 @@ class IndexWatcher(private val project: Project) : Disposable {
                 if (event.propertyName == VirtualFile.PROP_NAME) {
                     // Rename: treat as delete old + create new
                     val oldName = event.oldValue as? String ?: return
-                    val parentPath = vf.parent?.path?.removePrefix(projectBase)?.trimStart('/') ?: ""
+                    val parentPath =
+                        vf.parent
+                            ?.path
+                            ?.removePrefix(projectBase)
+                            ?.trimStart('/') ?: ""
                     val oldRelativePath = if (parentPath.isEmpty()) oldName else "$parentPath/$oldName"
                     pendingChanges.add(FileChange(oldRelativePath, ChangeKind.DELETED))
                     if (shouldIndex(vf)) {

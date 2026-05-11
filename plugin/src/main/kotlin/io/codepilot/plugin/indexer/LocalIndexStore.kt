@@ -17,8 +17,9 @@ import java.security.MessageDigest
  * This is intentionally simple (JSON file) rather than SQLite to minimize dependencies.
  * For projects with >10k files, consider migrating to SQLite.
  */
-class LocalIndexStore(private val project: Project) {
-
+class LocalIndexStore(
+    private val project: Project,
+) {
     private val log = Logger.getInstance(LocalIndexStore::class.java)
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -64,10 +65,11 @@ class LocalIndexStore(private val project: Project) {
                 metadata = loaded
                 loaded
             } else {
-                val fresh = IndexMetadata(
-                    workspaceHash = workspaceHash,
-                    projectName = project.name,
-                )
+                val fresh =
+                    IndexMetadata(
+                        workspaceHash = workspaceHash,
+                        projectName = project.name,
+                    )
                 metadata = fresh
                 fresh
             }
@@ -91,22 +93,31 @@ class LocalIndexStore(private val project: Project) {
     }
 
     /** Check if a file needs re-indexing based on content hash. */
-    fun needsReindex(path: String, currentHash: String): Boolean {
+    fun needsReindex(
+        path: String,
+        currentHash: String,
+    ): Boolean {
         val meta = load()
         val entry = meta.entries[path] ?: return true
         return entry.contentHash != currentHash
     }
 
     /** Update the index entry for a file after successful indexing. */
-    fun updateEntry(path: String, contentHash: String, chunkCount: Int, symbols: List<String>) {
+    fun updateEntry(
+        path: String,
+        contentHash: String,
+        chunkCount: Int,
+        symbols: List<String>,
+    ) {
         val meta = load()
-        meta.entries[path] = FileEntry(
-            path = path,
-            contentHash = contentHash,
-            chunkCount = chunkCount,
-            indexedAtMs = System.currentTimeMillis(),
-            symbols = symbols,
-        )
+        meta.entries[path] =
+            FileEntry(
+                path = path,
+                contentHash = contentHash,
+                chunkCount = chunkCount,
+                indexedAtMs = System.currentTimeMillis(),
+                symbols = symbols,
+            )
     }
 
     /** Remove a file entry (e.g., after file deletion). */
@@ -116,13 +127,17 @@ class LocalIndexStore(private val project: Project) {
     }
 
     /** Mark a full scan as completed. */
-    fun markFullScanCompleted(totalFiles: Int, totalChunks: Int) {
+    fun markFullScanCompleted(
+        totalFiles: Int,
+        totalChunks: Int,
+    ) {
         val meta = load()
-        metadata = meta.copy(
-            lastFullScanMs = System.currentTimeMillis(),
-            totalFiles = totalFiles,
-            totalChunks = totalChunks,
-        )
+        metadata =
+            meta.copy(
+                lastFullScanMs = System.currentTimeMillis(),
+                totalFiles = totalFiles,
+                totalChunks = totalChunks,
+            )
     }
 
     /** Get all known file paths in the index. */
@@ -149,11 +164,15 @@ class LocalIndexStore(private val project: Project) {
         metadata = IndexMetadata(workspaceHash = workspaceHash, projectName = project.name)
         try {
             indexFile.delete()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     /** Search local symbol index (fast, no backend call). */
-    fun searchSymbols(query: String, limit: Int = 20): List<SymbolHit> {
+    fun searchSymbols(
+        query: String,
+        limit: Int = 20,
+    ): List<SymbolHit> {
         val meta = load()
         val queryLower = query.lowercase()
         return meta.entries.values
@@ -161,9 +180,11 @@ class LocalIndexStore(private val project: Project) {
                 entry.symbols
                     .filter { it.lowercase().contains(queryLower) }
                     .map { SymbolHit(entry.path, it) }
-            }
-            .take(limit)
+            }.take(limit)
     }
 
-    data class SymbolHit(val path: String, val symbol: String)
+    data class SymbolHit(
+        val path: String,
+        val symbol: String,
+    )
 }

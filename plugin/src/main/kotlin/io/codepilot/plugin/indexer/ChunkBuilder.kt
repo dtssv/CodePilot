@@ -19,8 +19,9 @@ import java.security.MessageDigest
  *
  * Each chunk carries metadata: path, language, range, symbols, imports, content hash.
  */
-class ChunkBuilder(private val project: Project) {
-
+class ChunkBuilder(
+    private val project: Project,
+) {
     companion object {
         const val MAX_CHUNK_LINES = 150
         const val OVERLAP_LINES = 30
@@ -49,11 +50,12 @@ class ChunkBuilder(private val project: Project) {
         if (vf.length > MAX_FILE_SIZE_BYTES) return emptyList()
         if (vf.fileType.isBinary) return emptyList()
 
-        val raw = try {
-            vf.contentsToByteArray()
-        } catch (_: Exception) {
-            return emptyList()
-        }
+        val raw =
+            try {
+                vf.contentsToByteArray()
+            } catch (_: Exception) {
+                return emptyList()
+            }
         val text = String(raw, StandardCharsets.UTF_8)
         if (text.isBlank()) return emptyList()
 
@@ -73,35 +75,43 @@ class ChunkBuilder(private val project: Project) {
         return slidingWindowSplit(relativePath, language, lines, text)
     }
 
-    private fun tryPsiSplit(vf: VirtualFile, path: String, language: String, lines: List<String>): List<Chunk> {
-        val psiFile = ReadAction.compute<PsiFile?, Throwable> {
-            PsiManager.getInstance(project).findFile(vf)
-        } ?: return emptyList()
+    private fun tryPsiSplit(
+        vf: VirtualFile,
+        path: String,
+        language: String,
+        lines: List<String>,
+    ): List<Chunk> {
+        val psiFile =
+            ReadAction.compute<PsiFile?, Throwable> {
+                PsiManager.getInstance(project).findFile(vf)
+            } ?: return emptyList()
 
-        val boundaries = ReadAction.compute<List<PsiBoundary>, Throwable> {
-            val doc = PsiDocumentManager.getInstance(project).getDocument(psiFile) ?: return@compute emptyList()
-            val result = mutableListOf<PsiBoundary>()
+        val boundaries =
+            ReadAction.compute<List<PsiBoundary>, Throwable> {
+                val doc = PsiDocumentManager.getInstance(project).getDocument(psiFile) ?: return@compute emptyList()
+                val result = mutableListOf<PsiBoundary>()
 
-            PsiTreeUtil.processElements(psiFile) { element ->
-                val (isTarget, symbolName) = when (element) {
-                    is PsiClass -> true to (element.qualifiedName ?: element.name ?: "AnonymousClass")
-                    is PsiMethod -> true to "${element.containingClass?.name ?: ""}.${element.name}"
-                    is PsiField -> false to null // fields are too small for standalone chunks
-                    else -> false to null
-                }
-                if (isTarget && symbolName != null) {
-                    val startOffset = element.textRange.startOffset
-                    val endOffset = element.textRange.endOffset
-                    val startLine = doc.getLineNumber(startOffset) + 1
-                    val endLine = doc.getLineNumber(endOffset) + 1
-                    if (endLine - startLine + 1 >= MIN_CHUNK_LINES) {
-                        result.add(PsiBoundary(startLine, endLine, symbolName))
+                PsiTreeUtil.processElements(psiFile) { element ->
+                    val (isTarget, symbolName) =
+                        when (element) {
+                            is PsiClass -> true to (element.qualifiedName ?: element.name ?: "AnonymousClass")
+                            is PsiMethod -> true to "${element.containingClass?.name ?: ""}.${element.name}"
+                            is PsiField -> false to null // fields are too small for standalone chunks
+                            else -> false to null
+                        }
+                    if (isTarget && symbolName != null) {
+                        val startOffset = element.textRange.startOffset
+                        val endOffset = element.textRange.endOffset
+                        val startLine = doc.getLineNumber(startOffset) + 1
+                        val endLine = doc.getLineNumber(endOffset) + 1
+                        if (endLine - startLine + 1 >= MIN_CHUNK_LINES) {
+                            result.add(PsiBoundary(startLine, endLine, symbolName))
+                        }
                     }
+                    true
                 }
-                true
+                result
             }
-            result
-        }
 
         if (boundaries.isEmpty()) return emptyList()
 
@@ -109,10 +119,11 @@ class ChunkBuilder(private val project: Project) {
         val chunks = mutableListOf<Chunk>()
 
         for (boundary in boundaries) {
-            val chunkLines = lines.subList(
-                (boundary.startLine - 1).coerceIn(0, lines.size),
-                boundary.endLine.coerceIn(0, lines.size),
-            )
+            val chunkLines =
+                lines.subList(
+                    (boundary.startLine - 1).coerceIn(0, lines.size),
+                    boundary.endLine.coerceIn(0, lines.size),
+                )
             val content = chunkLines.joinToString("\n")
             if (content.isBlank()) continue
 
@@ -126,7 +137,7 @@ class ChunkBuilder(private val project: Project) {
                     symbols = listOf(boundary.symbolName),
                     imports = imports,
                     contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
-                )
+                ),
             )
         }
 
@@ -136,7 +147,10 @@ class ChunkBuilder(private val project: Project) {
     }
 
     private fun slidingWindowSplit(
-        path: String, language: String, lines: List<String>, fullText: String
+        path: String,
+        language: String,
+        lines: List<String>,
+        fullText: String,
     ): List<Chunk> {
         val imports = extractImports(lines)
         val chunks = mutableListOf<Chunk>()
@@ -160,7 +174,7 @@ class ChunkBuilder(private val project: Project) {
                         symbols = symbols,
                         imports = imports,
                         contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
-                    )
+                    ),
                 )
             }
 
@@ -183,17 +197,25 @@ class ChunkBuilder(private val project: Project) {
      * 4. Sections smaller than [MIN_CHUNK_LINES] are merged with the previous
      * 5. Sections larger than [MAX_CHUNK_LINES] are further split by paragraph
      */
-    private fun tryMarkdownSplit(path: String, language: String, lines: List<String>, fullText: String): List<Chunk> {
+    private fun tryMarkdownSplit(
+        path: String,
+        language: String,
+        lines: List<String>,
+        fullText: String,
+    ): List<Chunk> {
         val ext = path.substringAfterLast('.', "")
         if (ext !in setOf("md", "mdx", "rst", "markdown")) return emptyList()
 
         // 1. Extract frontmatter metadata
         val frontmatter = extractFrontmatter(lines)
-        val contentStartLine = if (frontmatter != null) {
-            // Find the second --- delimiter
-            val secondDelim = lines.drop(1).indexOfFirst { it.trim() == "---" }
-            if (secondDelim >= 0) secondDelim + 2 else 0
-        } else 0
+        val contentStartLine =
+            if (frontmatter != null) {
+                // Find the second --- delimiter
+                val secondDelim = lines.drop(1).indexOfFirst { it.trim() == "---" }
+                if (secondDelim >= 0) secondDelim + 2 else 0
+            } else {
+                0
+            }
 
         val contentLines = lines.drop(contentStartLine)
 
@@ -227,14 +249,15 @@ class ChunkBuilder(private val project: Project) {
                 val content = contentLines.joinToString("\n")
                 chunks.add(
                     Chunk(
-                        path = path, language = language,
+                        path = path,
+                        language = language,
                         startLine = contentStartLine + 1,
                         endLine = lines.size,
                         content = content,
                         symbols = extractMdSymbols(content),
                         imports = fmImports,
                         contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
-                    )
+                    ),
                 )
             }
             return chunks
@@ -251,12 +274,13 @@ class ChunkBuilder(private val project: Project) {
                 // Merge small section into previous chunk
                 val prev = chunks.last()
                 val mergedContent = prev.content + "\n" + sectionLines.joinToString("\n")
-                chunks[chunks.lastIndex] = prev.copy(
-                    endLine = contentStartLine + start + sectionLines.size,
-                    content = mergedContent,
-                    symbols = prev.symbols + listOf(allBoundaries[i].title),
-                    contentHash = sha256Hex(mergedContent.toByteArray(StandardCharsets.UTF_8)),
-                )
+                chunks[chunks.lastIndex] =
+                    prev.copy(
+                        endLine = contentStartLine + start + sectionLines.size,
+                        content = mergedContent,
+                        symbols = prev.symbols + listOf(allBoundaries[i].title),
+                        contentHash = sha256Hex(mergedContent.toByteArray(StandardCharsets.UTF_8)),
+                    )
                 continue
             }
 
@@ -265,21 +289,27 @@ class ChunkBuilder(private val project: Project) {
 
             // If section exceeds max chunk size, split by paragraph
             if (sectionLines.size > MAX_CHUNK_LINES) {
-                val subChunks = splitMarkdownByParagraph(
-                    path, language, contentStartLine + start + 1, sectionLines, fmImports
-                )
+                val subChunks =
+                    splitMarkdownByParagraph(
+                        path,
+                        language,
+                        contentStartLine + start + 1,
+                        sectionLines,
+                        fmImports,
+                    )
                 chunks.addAll(subChunks)
             } else {
                 chunks.add(
                     Chunk(
-                        path = path, language = language,
+                        path = path,
+                        language = language,
                         startLine = contentStartLine + start + 1,
                         endLine = contentStartLine + start + sectionLines.size,
                         content = content,
                         symbols = listOf(allBoundaries[i].title) + extractMdSymbols(content),
                         imports = fmImports,
                         contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
-                    )
+                    ),
                 )
             }
         }
@@ -320,8 +350,11 @@ class ChunkBuilder(private val project: Project) {
      * Split a large Markdown section by paragraph boundaries (blank lines).
      */
     private fun splitMarkdownByParagraph(
-        path: String, language: String, startLine: Int,
-        lines: List<String>, imports: List<String>
+        path: String,
+        language: String,
+        startLine: Int,
+        lines: List<String>,
+        imports: List<String>,
     ): List<Chunk> {
         val chunks = mutableListOf<Chunk>()
         var currentStart = 0
@@ -332,14 +365,15 @@ class ChunkBuilder(private val project: Project) {
                 if (currentContent.lines().size >= MIN_CHUNK_LINES) {
                     chunks.add(
                         Chunk(
-                            path = path, language = language,
+                            path = path,
+                            language = language,
                             startLine = startLine + currentStart,
                             endLine = startLine + i,
                             content = currentContent,
                             symbols = extractMdSymbols(currentContent),
                             imports = imports,
                             contentHash = sha256Hex(currentContent.toByteArray(StandardCharsets.UTF_8)),
-                        )
+                        ),
                     )
                 }
                 currentStart = i + 1
@@ -348,25 +382,37 @@ class ChunkBuilder(private val project: Project) {
         return chunks
     }
 
-    private data class HeadingBoundary(val lineIndex: Int, val level: Int, val title: String)
+    private data class HeadingBoundary(
+        val lineIndex: Int,
+        val level: Int,
+        val title: String,
+    )
 
     private fun extractImports(lines: List<String>): List<String> =
-        lines.take(60)
+        lines
+            .take(60)
             .filter { it.trimStart().startsWith("import ") || it.trimStart().startsWith("from ") || it.trimStart().startsWith("require(") }
             .map { it.trim() }
             .take(20)
 
     private fun extractSimpleSymbols(content: String): List<String> {
-        val patterns = listOf(
-            Regex("""(?:public|private|protected|internal)?\s*(?:static\s+)?(?:class|interface|enum|object)\s+(\w+)"""),
-            Regex("""(?:public|private|protected|internal)?\s*(?:static\s+)?(?:fun|def|function)\s+(\w+)"""),
-            Regex("""(?:export\s+)?(?:const|let|var|function)\s+(\w+)"""),
-            Regex("""func\s+(\w+)"""),
-        )
-        return patterns.flatMap { pattern ->
-            pattern.findAll(content).map { it.groupValues[1] }.toList()
-        }.distinct().take(10)
+        val patterns =
+            listOf(
+                Regex("""(?:public|private|protected|internal)?\s*(?:static\s+)?(?:class|interface|enum|object)\s+(\w+)"""),
+                Regex("""(?:public|private|protected|internal)?\s*(?:static\s+)?(?:fun|def|function)\s+(\w+)"""),
+                Regex("""(?:export\s+)?(?:const|let|var|function)\s+(\w+)"""),
+                Regex("""func\s+(\w+)"""),
+            )
+        return patterns
+            .flatMap { pattern ->
+                pattern.findAll(content).map { it.groupValues[1] }.toList()
+            }.distinct()
+            .take(10)
     }
 
-    private data class PsiBoundary(val startLine: Int, val endLine: Int, val symbolName: String)
+    private data class PsiBoundary(
+        val startLine: Int,
+        val endLine: Int,
+        val symbolName: String,
+    )
 }

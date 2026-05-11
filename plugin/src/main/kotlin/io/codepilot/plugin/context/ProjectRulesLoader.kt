@@ -23,17 +23,18 @@ import java.nio.charset.StandardCharsets
  *   (rule content in English for model consumption)
  */
 @Service(Service.Level.PROJECT)
-class ProjectRulesLoader(private val project: Project) {
-
+class ProjectRulesLoader(
+    private val project: Project,
+) {
     private val log = Logger.getInstance(ProjectRulesLoader::class.java)
 
     data class RuleItem(
-        val id: String,           // filename without extension
-        val content: String,      // rule text (after frontmatter)
-        val appliesTo: String?,   // glob pattern for file matching
-        val priority: Int,        // higher = loaded first
-        val always: Boolean,      // always load?
-        val path: String,         // relative path to rule file
+        val id: String, // filename without extension
+        val content: String, // rule text (after frontmatter)
+        val appliesTo: String?, // glob pattern for file matching
+        val priority: Int, // higher = loaded first
+        val always: Boolean, // always load?
+        val path: String, // relative path to rule file
     )
 
     /**
@@ -43,8 +44,10 @@ class ProjectRulesLoader(private val project: Project) {
      */
     fun loadRules(currentFilePath: String? = null): List<RuleItem> {
         val projectBase = project.basePath ?: return emptyList()
-        val rulesDir = VirtualFileManager.getInstance()
-            .findFileByUrl("file://$projectBase/.codepilot/rules") ?: return emptyList()
+        val rulesDir =
+            VirtualFileManager
+                .getInstance()
+                .findFileByUrl("file://$projectBase/.codepilot/rules") ?: return emptyList()
 
         if (!rulesDir.isDirectory) return emptyList()
 
@@ -70,14 +73,16 @@ class ProjectRulesLoader(private val project: Project) {
                 val id = file.nameWithoutExtension
                 val relativePath = ".codepilot/rules/${file.name}"
 
-                rules.add(RuleItem(
-                    id = id,
-                    content = content.trim(),
-                    appliesTo = appliesTo,
-                    priority = priority,
-                    always = always,
-                    path = relativePath,
-                ))
+                rules.add(
+                    RuleItem(
+                        id = id,
+                        content = content.trim(),
+                        appliesTo = appliesTo,
+                        priority = priority,
+                        always = always,
+                        path = relativePath,
+                    ),
+                )
             } catch (e: Exception) {
                 log.warn("Failed to load rule file: ${file.name}", e)
             }
@@ -117,19 +122,28 @@ class ProjectRulesLoader(private val project: Project) {
             val colonIdx = line.indexOf(':')
             if (colonIdx > 0) {
                 val key = line.substring(0, colonIdx).trim()
-                val value = line.substring(colonIdx + 1).trim().removeSurrounding("\"").removeSurrounding("'")
+                val value =
+                    line
+                        .substring(colonIdx + 1)
+                        .trim()
+                        .removeSurrounding("\"")
+                        .removeSurrounding("'")
                 map[key] = value
             }
         }
         return map to content
     }
 
-    private fun matchGlob(filePath: String, glob: String): Boolean {
-        val regex = glob
-            .replace(".", "\\.")
-            .replace("**", "§§")
-            .replace("*", "[^/]*")
-            .replace("§§", ".*")
+    private fun matchGlob(
+        filePath: String,
+        glob: String,
+    ): Boolean {
+        val regex =
+            glob
+                .replace(".", "\\.")
+                .replace("**", "§§")
+                .replace("*", "[^/]*")
+                .replace("§§", ".*")
         return filePath.matches(Regex(regex))
     }
 

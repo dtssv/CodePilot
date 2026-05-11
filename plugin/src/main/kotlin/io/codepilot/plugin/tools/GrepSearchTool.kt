@@ -13,8 +13,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * Used by Gather nodes (kind=fs.grep). Unlike the basic fs.search in
  * ToolDispatcher, this returns structured hit objects with context lines.
  */
-class GrepSearchTool(private val project: Project) {
-
+class GrepSearchTool(
+    private val project: Project,
+) {
     fun grep(args: JsonNode): Map<String, Any?> {
         val pattern = args.path("pattern").asText("")
         if (pattern.isBlank()) throw ToolViolation("empty grep pattern")
@@ -33,8 +34,9 @@ class GrepSearchTool(private val project: Project) {
             if (vf.isDirectory || vf.length > 1_048_576) return@processFilesRecursively true
             if (fileGlob.isNotEmpty() && !matchGlob(vf.name, fileGlob)) return@processFilesRecursively true
 
-            val text = runCatching { String(vf.contentsToByteArray(), StandardCharsets.UTF_8) }
-                .getOrNull() ?: return@processFilesRecursively true
+            val text =
+                runCatching { String(vf.contentsToByteArray(), StandardCharsets.UTF_8) }
+                    .getOrNull() ?: return@processFilesRecursively true
             val lines = text.lines()
             for ((idx, line) in lines.withIndex()) {
                 if (hitCount.get() >= maxHits) break
@@ -42,12 +44,14 @@ class GrepSearchTool(private val project: Project) {
                     hitCount.incrementAndGet()
                     val from = (idx - contextLines).coerceAtLeast(0)
                     val to = (idx + contextLines + 1).coerceAtMost(lines.size)
-                    hits.add(mapOf(
-                        "path" to vf.path.removePrefix(root.path).trimStart('/'),
-                        "line" to (idx + 1),
-                        "matchLine" to line.take(200),
-                        "context" to lines.subList(from, to).joinToString("\n"),
-                    ))
+                    hits.add(
+                        mapOf(
+                            "path" to vf.path.removePrefix(root.path).trimStart('/'),
+                            "line" to (idx + 1),
+                            "matchLine" to line.take(200),
+                            "context" to lines.subList(from, to).joinToString("\n"),
+                        ),
+                    )
                 }
             }
             true
@@ -56,7 +60,10 @@ class GrepSearchTool(private val project: Project) {
         return mapOf("pattern" to pattern, "totalHits" to hits.size, "hits" to hits)
     }
 
-    private fun matchGlob(fileName: String, glob: String): Boolean {
+    private fun matchGlob(
+        fileName: String,
+        glob: String,
+    ): Boolean {
         // Simple glob: *.java → endsWith(.java)
         if (glob.startsWith("*.")) return fileName.endsWith(glob.removePrefix("*"))
         return fileName == glob

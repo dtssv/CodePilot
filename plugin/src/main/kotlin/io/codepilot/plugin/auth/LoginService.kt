@@ -2,8 +2,6 @@ package io.codepilot.plugin.auth
 
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
-import io.codepilot.plugin.settings.CodePilotSettings
-import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 
@@ -16,7 +14,6 @@ import java.util.concurrent.CompletableFuture
  */
 @Service(Service.Level.APP)
 class LoginService {
-
     fun discover(): CompletableFuture<AuthService.Methods> =
         AuthService.getInstance().fetchMethods().thenApply { r ->
             r.data ?: AuthService.Methods()
@@ -26,7 +23,8 @@ class LoginService {
     fun startOidc(): OidcFlow {
         val auth = AuthService.getInstance()
         val flow = OidcFlow()
-        auth.startDeviceFlow()
+        auth
+            .startDeviceFlow()
             .whenComplete { code, error ->
                 if (error != null) {
                     flow.failed(error.message ?: "device-code failed")
@@ -40,22 +38,30 @@ class LoginService {
         return flow
     }
 
-    fun bridgeLogin(ssoToken: String): CompletableFuture<Unit> =
-        AuthService.getInstance().login(ssoToken).thenApply { }
+    fun bridgeLogin(ssoToken: String): CompletableFuture<Unit> = AuthService.getInstance().login(ssoToken).thenApply { }
 
-    fun devLogin(token: String, userId: String, tenantId: String, deviceId: String): CompletableFuture<Unit> {
+    fun devLogin(
+        token: String,
+        userId: String,
+        tenantId: String,
+        deviceId: String,
+    ): CompletableFuture<Unit> {
         val packed = "$token:$userId:$tenantId:$deviceId"
         return AuthService.getInstance().login(packed).thenApply { }
     }
 
-    private fun scheduleOidcPoll(flow: OidcFlow, code: AuthService.DeviceCode) {
+    private fun scheduleOidcPoll(
+        flow: OidcFlow,
+        code: AuthService.DeviceCode,
+    ) {
         val pollMillis =
             (code.interval ?: AuthService.DEFAULT_DEVICE_POLL_INTERVAL.seconds) * 1_000L
         val deadline = Instant.now().plusSeconds(code.expiresIn ?: 600L)
         val auth = AuthService.getInstance()
-        val loop = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "codepilot-device-poll").apply { isDaemon = true }
-        }
+        val loop =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "codepilot-device-poll").apply { isDaemon = true }
+            }
         loop.schedule(
             object : Runnable {
                 override fun run() {
@@ -64,7 +70,8 @@ class LoginService {
                         loop.shutdown()
                         return
                     }
-                    auth.pollDeviceToken(code.deviceCode)
+                    auth
+                        .pollDeviceToken(code.deviceCode)
                         .whenComplete { tok, err ->
                             if (err != null && err.message?.contains("authorization_pending", ignoreCase = true) == true) {
                                 loop.schedule(this, pollMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -80,10 +87,14 @@ class LoginService {
                                 loop.schedule(this, pollMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
                                 return@whenComplete
                             }
-                            auth.login(idToken)
+                            auth
+                                .login(idToken)
                                 .whenComplete { _, loginErr ->
-                                    if (loginErr != null) flow.failed(loginErr.message ?: "login failed")
-                                    else flow.succeeded()
+                                    if (loginErr != null) {
+                                        flow.failed(loginErr.message ?: "login failed")
+                                    } else {
+                                        flow.succeeded()
+                                    }
                                     loop.shutdown()
                                 }
                         }
@@ -101,10 +112,12 @@ class LoginService {
     private fun openVerificationUri(code: AuthService.DeviceCode) {
         val uri = code.verificationUriComplete ?: code.verificationUri ?: return
         try {
-            com.intellij.ide.BrowserUtil.browse(uri)
+            com.intellij.ide.BrowserUtil
+                .browse(uri)
         } catch (e: Exception) {
             // Silent fallback: user can still manually navigate
-            com.intellij.openapi.diagnostic.Logger.getInstance("LoginService")
+            com.intellij.openapi.diagnostic.Logger
+                .getInstance("LoginService")
                 .info("Could not auto-open browser for device flow: ${e.message}")
         }
     }
@@ -113,13 +126,27 @@ class LoginService {
     class OidcFlow {
         @Volatile var code: AuthService.DeviceCode? = null
         private val future = CompletableFuture<Unit>()
+
         @Volatile var isCancelled = false
             private set
 
-        fun begin(code: AuthService.DeviceCode) { this.code = code }
-        fun succeeded() { future.complete(Unit) }
-        fun failed(reason: String) { future.completeExceptionally(IllegalStateException(reason)) }
-        fun cancel() { isCancelled = true; future.completeExceptionally(IllegalStateException("cancelled")) }
+        fun begin(code: AuthService.DeviceCode) {
+            this.code = code
+        }
+
+        fun succeeded() {
+            future.complete(Unit)
+        }
+
+        fun failed(reason: String) {
+            future.completeExceptionally(IllegalStateException(reason))
+        }
+
+        fun cancel() {
+            isCancelled = true
+            future.completeExceptionally(IllegalStateException("cancelled"))
+        }
+
         fun asFuture(): CompletableFuture<Unit> = future
     }
 

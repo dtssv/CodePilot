@@ -10,21 +10,21 @@ import java.nio.file.Path
  * logic directly.
  */
 class LocalMarketplaceStoreTest {
-
     @TempDir
     lateinit var tmp: Path
 
     @Test
     fun installAndList() {
         val store = createStore(tmp)
-        val yaml = """
+        val yaml =
+            """
             id: skill.user.test
             version: 0.1.0
             source: user
             scope: global
             systemPrompt: |
               Test prompt
-        """.trimIndent()
+            """.trimIndent()
         store.installSkill(
             LocalMarketplaceStore.Scope.GLOBAL,
             null,

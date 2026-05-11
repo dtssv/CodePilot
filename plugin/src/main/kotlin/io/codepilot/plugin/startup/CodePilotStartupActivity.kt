@@ -16,13 +16,13 @@ import io.codepilot.plugin.update.UpdateService
 class CodePilotStartupActivity : ProjectActivity {
     override suspend fun execute(project: Project) {
         if (ResetEngine.consumeExternalSentinels()) {
-            NotificationGroupManager.getInstance()
+            NotificationGroupManager
+                .getInstance()
                 .getNotificationGroup("CodePilot")
                 .createNotification(
                     "CodePilot: external reset sentinel consumed. Earlier data was moved to ~/.codePilot.broken-*.",
                     NotificationType.INFORMATION,
-                )
-                .notify(project)
+                ).notify(project)
         }
         UpdateService.getInstance().checkInBackground(project)
 
@@ -30,16 +30,19 @@ class CodePilotStartupActivity : ProjectActivity {
         IndexScheduler.getInstance(project).start()
 
         // Install selection hint on all future editors
-        EditorFactory.getInstance().addEditorFactoryListener(object : EditorFactoryAdapter() {
-            override fun editorCreated(event: EditorFactoryEvent) {
-                val editor = event.editor
-                val proj = editor.project ?: return
-                CodePilotSelectionHint.install(editor, proj)
-            }
+        EditorFactory.getInstance().addEditorFactoryListener(
+            object : EditorFactoryAdapter() {
+                override fun editorCreated(event: EditorFactoryEvent) {
+                    val editor = event.editor
+                    val proj = editor.project ?: return
+                    CodePilotSelectionHint.install(editor, proj)
+                }
 
-            override fun editorReleased(event: EditorFactoryEvent) {
-                CodePilotSelectionHint.uninstall()
-            }
-        }, project)
+                override fun editorReleased(event: EditorFactoryEvent) {
+                    CodePilotSelectionHint.uninstall()
+                }
+            },
+            project,
+        )
     }
 }

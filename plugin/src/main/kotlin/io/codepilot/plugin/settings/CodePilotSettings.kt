@@ -3,7 +3,6 @@ package io.codepilot.plugin.settings
 import com.intellij.credentialStore.CredentialAttributes
 import com.intellij.credentialStore.Credentials
 import com.intellij.ide.passwordSafe.PasswordSafe
-import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
@@ -24,11 +23,10 @@ import java.util.UUID
 )
 @Service(Service.Level.APP)
 class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
-
     data class State(
-        //prd
-        //var backendBaseUrl: String = "https://api.codepilot.local",
-        //dev
+        // prd
+        // var backendBaseUrl: String = "https://api.codepilot.local",
+        // dev
         var backendBaseUrl: String = "http://localhost:8080",
         var deviceId: String = UUID.randomUUID().toString(),
         var preferredLocale: String = "zh-CN",
@@ -46,9 +44,10 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var localEncryption: Boolean = false,
         /** ★ Anonymous telemetry mode: sends usage stats without PII. */
         var anonymousMode: Boolean = false,
-        var registries: List<RegistryEntry> = listOf(
-            RegistryEntry("Official", "https://marketplace.codepilot.io", "")
-        ),
+        var registries: List<RegistryEntry> =
+            listOf(
+                RegistryEntry("Official", "https://marketplace.codepilot.io", ""),
+            ),
     )
 
     private var state: State = State()
@@ -65,7 +64,9 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
 
     /** Try to load devToken from: 1) bundled properties, 2) env var CODEPILOT_DEV_TOKEN */
     private fun loadBundledDevToken(): String {
-        val log = com.intellij.openapi.diagnostic.Logger.getInstance("CodePilotSettings")
+        val log =
+            com.intellij.openapi.diagnostic.Logger
+                .getInstance("CodePilotSettings")
         // 1) Try bundled properties file
         try {
             val stream = javaClass.getResourceAsStream("/codepilot-dev.properties")
@@ -113,9 +114,15 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
 
     private fun read(attr: CredentialAttributes): String? = PasswordSafe.instance.getPassword(attr)
 
-    private fun write(attr: CredentialAttributes, value: String?) {
-        if (value == null) PasswordSafe.instance.set(attr, null)
-        else PasswordSafe.instance.set(attr, Credentials("codepilot", value))
+    private fun write(
+        attr: CredentialAttributes,
+        value: String?,
+    ) {
+        if (value == null) {
+            PasswordSafe.instance.set(attr, null)
+        } else {
+            PasswordSafe.instance.set(attr, Credentials("codepilot", value))
+        }
     }
 
     private object CredAttr {
@@ -125,9 +132,10 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
     }
 
     companion object {
-        fun defaultSessionRoot(): String =
-            Path.of(System.getProperty("user.home"), ".codePilot", "sessions").toString()
+        fun defaultSessionRoot(): String = Path.of(System.getProperty("user.home"), ".codePilot", "sessions").toString()
 
-        @JvmStatic fun getInstance(): CodePilotSettings = com.intellij.openapi.components.service()
+        @JvmStatic fun getInstance(): CodePilotSettings =
+            com.intellij.openapi.components
+                .service()
     }
 }

@@ -22,10 +22,7 @@ import java.util.concurrent.CompletableFuture
  */
 @Service(Service.Level.APP)
 class AuthService {
-
-    fun fetchMethods(): CompletableFuture<MethodsResponse> {
-        return execute(buildGet("/v1/auth/methods"), MethodsResponse::class.java)
-    }
+    fun fetchMethods(): CompletableFuture<MethodsResponse> = execute(buildGet("/v1/auth/methods"), MethodsResponse::class.java)
 
     fun login(ssoToken: String): CompletableFuture<LoginResult> {
         val client = HttpClientService.getInstance()
@@ -75,35 +72,57 @@ class AuthService {
     private fun buildGet(path: String): Request {
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
-        return Request.Builder().url(url).get().header("Accept", "application/json").build()
+        return Request
+            .Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .build()
     }
 
-    private val log = com.intellij.openapi.diagnostic.logger<AuthService>()
+    private val log =
+        com.intellij.openapi.diagnostic
+            .logger<AuthService>()
 
-    private fun <T> execute(request: Request, type: Class<T>): CompletableFuture<T> {
+    private fun <T> execute(
+        request: Request,
+        type: Class<T>,
+    ): CompletableFuture<T> {
         val future = CompletableFuture<T>()
         val client = HttpClientService.getInstance()
         log.info("[Auth] HTTP ${request.method} ${request.url}")
-        client.client().newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                log.error("[Auth] HTTP request failed: ${request.method} ${request.url}", e)
-                future.completeExceptionally(e)
-            }
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                log.info("[Auth] HTTP response: ${request.method} ${request.url} -> ${response.code} ${response.message}")
-                response.use {
-                    if (!it.isSuccessful) {
-                        val errBody = runCatching { it.body?.string()?.take(500) }.getOrNull()
-                        log.warn("[Auth] HTTP error body: $errBody")
-                        future.completeExceptionally(IllegalStateException("HTTP ${it.code}: $errBody"))
-                        return
-                    }
-                    runCatching { client.parse(it, type) }
-                        .onSuccess(future::complete)
-                        .onFailure { e -> log.error("[Auth] Parse failed", e); future.completeExceptionally(e) }
+        client.client().newCall(request).enqueue(
+            object : okhttp3.Callback {
+                override fun onFailure(
+                    call: okhttp3.Call,
+                    e: java.io.IOException,
+                ) {
+                    log.error("[Auth] HTTP request failed: ${request.method} ${request.url}", e)
+                    future.completeExceptionally(e)
                 }
-            }
-        })
+
+                override fun onResponse(
+                    call: okhttp3.Call,
+                    response: okhttp3.Response,
+                ) {
+                    log.info("[Auth] HTTP response: ${request.method} ${request.url} -> ${response.code} ${response.message}")
+                    response.use {
+                        if (!it.isSuccessful) {
+                            val errBody = runCatching { it.body?.string()?.take(500) }.getOrNull()
+                            log.warn("[Auth] HTTP error body: $errBody")
+                            future.completeExceptionally(IllegalStateException("HTTP ${it.code}: $errBody"))
+                            return
+                        }
+                        runCatching { client.parse(it, type) }
+                            .onSuccess(future::complete)
+                            .onFailure { e ->
+                                log.error("[Auth] Parse failed", e)
+                                future.completeExceptionally(e)
+                            }
+                    }
+                }
+            },
+        )
         return future
     }
 
@@ -145,7 +164,10 @@ class AuthService {
     )
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    data class RefreshResult(val accessToken: String, val accessExpiresAt: String?)
+    data class RefreshResult(
+        val accessToken: String,
+        val accessExpiresAt: String?,
+    )
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class RefreshEnvelope(
@@ -195,6 +217,7 @@ class AuthService {
 
     companion object {
         @JvmStatic fun getInstance(): AuthService = service()
+
         val DEFAULT_DEVICE_POLL_INTERVAL: Duration = Duration.ofSeconds(5)
     }
 }

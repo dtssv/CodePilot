@@ -17,51 +17,58 @@ import com.intellij.psi.util.PsiTreeUtil
  *
  * All operations are read-only and run inside [ReadAction].
  */
-class CodeInspector(private val project: Project) {
-
+class CodeInspector(
+    private val project: Project,
+) {
     /**
      * code.outline: returns structured outline (classes, methods, fields) with line numbers.
      */
     fun outline(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val vf = PathGuard.resolve(project, path)
-        val psiFile = ReadAction.compute<PsiFile?, Throwable> {
-            PsiManager.getInstance(project).findFile(vf)
-        } ?: return mapOf("path" to path, "items" to emptyList<Any>())
+        val psiFile =
+            ReadAction.compute<PsiFile?, Throwable> {
+                PsiManager.getInstance(project).findFile(vf)
+            } ?: return mapOf("path" to path, "items" to emptyList<Any>())
 
-        val items = ReadAction.compute<List<Map<String, Any?>>, Throwable> {
-            val doc = PsiDocumentManager.getInstance(project).getDocument(psiFile)
-            val result = mutableListOf<Map<String, Any?>>()
-            PsiTreeUtil.processElements(psiFile) { element ->
-                val entry = when (element) {
-                    is PsiClass -> mapOf(
-                        "kind" to "class",
-                        "name" to (element.qualifiedName ?: element.name ?: ""),
-                        "line" to lineOf(doc, element),
-                        "modifiers" to modifiersOf(element),
-                    )
-                    is PsiMethod -> mapOf(
-                        "kind" to "method",
-                        "name" to element.name,
-                        "signature" to methodSignature(element),
-                        "line" to lineOf(doc, element),
-                        "returnType" to (element.returnType?.presentableText ?: "void"),
-                        "containingClass" to (element.containingClass?.name ?: ""),
-                    )
-                    is PsiField -> mapOf(
-                        "kind" to "field",
-                        "name" to element.name,
-                        "type" to (element.type.presentableText),
-                        "line" to lineOf(doc, element),
-                        "containingClass" to (element.containingClass?.name ?: ""),
-                    )
-                    else -> null
+        val items =
+            ReadAction.compute<List<Map<String, Any?>>, Throwable> {
+                val doc = PsiDocumentManager.getInstance(project).getDocument(psiFile)
+                val result = mutableListOf<Map<String, Any?>>()
+                PsiTreeUtil.processElements(psiFile) { element ->
+                    val entry =
+                        when (element) {
+                            is PsiClass ->
+                                mapOf(
+                                    "kind" to "class",
+                                    "name" to (element.qualifiedName ?: element.name ?: ""),
+                                    "line" to lineOf(doc, element),
+                                    "modifiers" to modifiersOf(element),
+                                )
+                            is PsiMethod ->
+                                mapOf(
+                                    "kind" to "method",
+                                    "name" to element.name,
+                                    "signature" to methodSignature(element),
+                                    "line" to lineOf(doc, element),
+                                    "returnType" to (element.returnType?.presentableText ?: "void"),
+                                    "containingClass" to (element.containingClass?.name ?: ""),
+                                )
+                            is PsiField ->
+                                mapOf(
+                                    "kind" to "field",
+                                    "name" to element.name,
+                                    "type" to (element.type.presentableText),
+                                    "line" to lineOf(doc, element),
+                                    "containingClass" to (element.containingClass?.name ?: ""),
+                                )
+                            else -> null
+                        }
+                    if (entry != null) result.add(entry)
+                    true
                 }
-                if (entry != null) result.add(entry)
-                true
+                result
             }
-            result
-        }
 
         return mapOf(
             "path" to path,
@@ -80,16 +87,20 @@ class CodeInspector(private val project: Project) {
 
         return ReadAction.compute<Map<String, Any?>, Throwable> {
             // Try class first
-            val classes = JavaPsiFacade.getInstance(project)
-                .findClasses(symbol, scope)
+            val classes =
+                JavaPsiFacade
+                    .getInstance(project)
+                    .findClasses(symbol, scope)
             if (classes.isNotEmpty()) {
                 val c = classes.first()
                 val vf = c.containingFile?.virtualFile
                 val doc = c.containingFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
                 return@compute mapOf(
-                    "found" to true, "kind" to "class",
+                    "found" to true,
+                    "kind" to "class",
                     "name" to (c.qualifiedName ?: c.name),
-                    "path" to relPath(vf), "line" to lineOf(doc, c),
+                    "path" to relPath(vf),
+                    "line" to lineOf(doc, c),
                 )
             }
             // Try method: "ClassName.methodName" or "ClassName#methodName"
@@ -102,10 +113,12 @@ class CodeInspector(private val project: Project) {
                         val vf = method.containingFile?.virtualFile
                         val doc = method.containingFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
                         return@compute mapOf(
-                            "found" to true, "kind" to "method",
+                            "found" to true,
+                            "kind" to "method",
                             "name" to "${cls.qualifiedName}#${method.name}",
                             "signature" to methodSignature(method),
-                            "path" to relPath(vf), "line" to lineOf(doc, method),
+                            "path" to relPath(vf),
+                            "line" to lineOf(doc, method),
                         )
                     }
                 }
@@ -125,15 +138,16 @@ class CodeInspector(private val project: Project) {
         return ReadAction.compute<Map<String, Any?>, Throwable> {
             val target = resolveElement(symbol) ?: return@compute mapOf("found" to false, "symbol" to symbol)
             val refs = ReferencesSearch.search(target, GlobalSearchScope.projectScope(project), false)
-            val usages = refs.findAll().take(maxResults).map { ref ->
-                val el = ref.element
-                val doc = el.containingFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
-                mapOf(
-                    "path" to relPath(el.containingFile?.virtualFile),
-                    "line" to lineOf(doc, el),
-                    "snippet" to el.text.take(120),
-                )
-            }
+            val usages =
+                refs.findAll().take(maxResults).map { ref ->
+                    val el = ref.element
+                    val doc = el.containingFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
+                    mapOf(
+                        "path" to relPath(el.containingFile?.virtualFile),
+                        "line" to lineOf(doc, el),
+                        "snippet" to el.text.take(120),
+                    )
+                }
             mapOf("found" to true, "symbol" to symbol, "totalUsages" to usages.size, "usages" to usages)
         }
     }
@@ -152,11 +166,12 @@ class CodeInspector(private val project: Project) {
         return null
     }
 
-    private fun lineOf(doc: com.intellij.openapi.editor.Document?, element: PsiElement): Int =
-        doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
+    private fun lineOf(
+        doc: com.intellij.openapi.editor.Document?,
+        element: PsiElement,
+    ): Int = doc?.getLineNumber(element.textOffset)?.plus(1) ?: 0
 
-    private fun modifiersOf(cls: PsiClass): String =
-        cls.modifierList?.text?.trim() ?: ""
+    private fun modifiersOf(cls: PsiClass): String = cls.modifierList?.text?.trim() ?: ""
 
     private fun methodSignature(m: PsiMethod): String {
         val params = m.parameterList.parameters.joinToString(", ") { "${it.type.presentableText} ${it.name}" }

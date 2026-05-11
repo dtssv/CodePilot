@@ -5,10 +5,9 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtil
-import com.intellij.openapi.vfs.VirtualFile
 import io.codepilot.plugin.conversation.ConversationClient
-import io.codepilot.plugin.mcp.McpProcessManager
 import io.codepilot.plugin.marketplace.LocalMarketplaceStore
+import io.codepilot.plugin.mcp.McpProcessManager
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicLong
@@ -27,43 +26,102 @@ class ToolDispatcher(
     private val client: ConversationClient,
     private val sessionId: String,
 ) {
-
     private val patchApplier = PatchApplier(project)
     private val fileReader = FileReader(project)
     private val codeInspector = CodeInspector(project)
     private val grepTool = GrepSearchTool(project)
 
+    // ─── Tool Result Cache ─────────────────────────────────────────────
+    // Caches read-only tool results to avoid redundant file reads and searches
+    private val toolResultCache = java.util.concurrent.ConcurrentHashMap<String, CachedToolResult>()
+    private val CACHE_TTL_MS = 30_000L // 30 seconds TTL for tool results
+
+    data class CachedToolResult(
+        val result: String,
+        val timestamp: Long = System.currentTimeMillis(),
+    ) {
+        fun isExpired(): Boolean = System.currentTimeMillis() - timestamp > 30_000L
+    }
+
+    // ─── Parallel Dispatch ─────────────────────────────────────────────
+    /**
+     * Dispatch multiple independent tool calls in parallel.
+     * Read-only tools (fs.read, fs.list, fs.search, fs.grep, fs.outline, code.*, ide.diagnostics)
+     * can be safely parallelized. Write tools are always sequential.
+     */
+    fun dispatchParallel(toolCalls: List<JsonNode>) {
+        val (readOnly, writeOps) = toolCalls.partition { isReadOnlyTool(it.path("name").asText()) }
+
+        // Execute read-only tools in parallel
+        readOnly.map { call ->
+            java.util.concurrent.CompletableFuture.runAsync {
+                dispatch(call)
+            }
+        }.forEach { it.join() }
+
+        // Execute write operations sequentially
+        writeOps.forEach { dispatch(it) }
+    }
+
+    private fun isReadOnlyTool(name: String): Boolean = when {
+        name.startsWith("fs.read") || name.startsWith("fs.list") || name.startsWith("fs.search") -> true
+        name.startsWith("fs.grep") || name.startsWith("fs.outline") -> true
+        name.startsWith("code.") -> true
+        name.startsWith("ide.diagnostics") || name.startsWith("ide.openFile") -> true
+        name.startsWith("ide.shadowValidate") -> true
+        else -> false
+    }
+
     fun dispatch(toolCall: JsonNode) {
         val name = toolCall.path("name").asText()
         val id = toolCall.path("id").asText()
         val args = toolCall.path("args")
+
+        // Check cache for read-only tools
+        if (isReadOnlyTool(name)) {
+            val cacheKey = buildCacheKey(name, args)
+            val cached = toolResultCache[cacheKey]
+            if (cached != null && !cached.isExpired()) {
+                respond(id, true, cached.result, null, null, System.nanoTime())
+                return
+            }
+        }
+
         ApplicationManager.getApplication().executeOnPooledThread {
             val started = System.nanoTime()
             try {
-                val result = when {
-                    name == "fs.read" -> fileReader.read(args)
-                    name == "fs.list" -> listDir(args)
-                    name == "fs.search" -> searchProject(args)
-                    name == "fs.grep" -> grepTool.grep(args)
-                    name == "fs.outline" -> fileOutline(args)
-                    name == "code.outline" -> codeInspector.outline(args)
-                    name == "code.symbol" -> codeInspector.findSymbol(args)
-                    name == "code.usages" -> codeInspector.findUsages(args)
-                    name == "fs.create" -> createFile(args)
-                    name == "fs.write" -> dispatchViaPatchApplier(name, args)
-                    name == "fs.replace" -> dispatchViaPatchApplier(name, args)
-                    name == "fs.delete" -> dispatchViaPatchApplier(name, args)
-                    name == "fs.move" -> dispatchViaPatchApplier(name, args)
-                    name == "shell.exec" -> ShellExecutor(project).execute(args)
-                    name == "shell.session" -> dispatchShellSession(args)
-                    name == "plan.show" -> planShow(args)
-                    name == "ide.openFile" -> ideOpenFile(args)
-                    name == "ide.diagnostics" -> ideDiagnostics(args)
-                    name == "ide.applyPatch" -> ideApplyPatch(args)
-                    name == "ide.shadowValidate" -> ideShadowValidate(args)
-                    name.startsWith("mcp.") -> dispatchMcp(name, args)
-                    else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
+                val result =
+                    when {
+                        name == "fs.read" -> fileReader.read(args)
+                        name == "fs.list" -> listDir(args)
+                        name == "fs.search" -> searchProject(args)
+                        name == "fs.grep" -> grepTool.grep(args)
+                        name == "fs.outline" -> fileOutline(args)
+                        name == "code.outline" -> codeInspector.outline(args)
+                        name == "code.symbol" -> codeInspector.findSymbol(args)
+                        name == "code.usages" -> codeInspector.findUsages(args)
+                        name == "fs.create" -> createFile(args)
+                        name == "fs.write" -> dispatchViaPatchApplier(name, args)
+                        name == "fs.replace" -> dispatchViaPatchApplier(name, args)
+                        name == "fs.delete" -> dispatchViaPatchApplier(name, args)
+                        name == "fs.move" -> dispatchViaPatchApplier(name, args)
+                        name == "shell.exec" -> ShellExecutor(project).execute(args)
+                        name == "shell.session" -> dispatchShellSession(args)
+                        name == "plan.show" -> planShow(args)
+                        name == "ide.openFile" -> ideOpenFile(args)
+                        name == "ide.diagnostics" -> ideDiagnostics(args)
+                        name == "ide.applyPatch" -> ideApplyPatch(args)
+                        name == "ide.shadowValidate" -> ideShadowValidate(args)
+                        name.startsWith("mcp.") -> dispatchMcp(name, args)
+                        else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
+                    }
+
+                // Cache read-only tool results
+                if (isReadOnlyTool(name)) {
+                    val cacheKey = buildCacheKey(name, args)
+                    toolResultCache[cacheKey] = CachedToolResult(result)
                 }
+
                 respond(id, true, result, null, null, started)
             } catch (v: ToolViolation) {
                 respond(id, false, null, "path_violation", v.message, started)
@@ -74,8 +132,14 @@ class ToolDispatcher(
     }
 
     /** Convenience overload for direct dispatch from CefChatPanel. */
-    fun dispatch(toolName: String, toolArgs: Any?, toolCallId: String) {
-        val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+    fun dispatch(
+        toolName: String,
+        toolArgs: Any?,
+        toolCallId: String,
+    ) {
+        val mapper =
+            com.fasterxml.jackson.databind
+                .ObjectMapper()
         val node = mapper.createObjectNode()
         node.put("name", toolName)
         node.put("id", toolCallId)
@@ -96,26 +160,32 @@ class ToolDispatcher(
         for (server in installed) {
             try {
                 if (!mcpManager.isRunning(server.id)) {
-                    mcpManager.start(server.id, McpProcessManager.McpLaunchSpec(
-                        id = server.id,
-                        argv = server.argv,
-                        cwd = server.cwd,
-                        env = server.env,
-                    ))
+                    mcpManager.start(
+                        server.id,
+                        McpProcessManager.McpLaunchSpec(
+                            id = server.id,
+                            argv = server.argv,
+                            cwd = server.cwd,
+                            env = server.env,
+                        ),
+                    )
                 }
                 // Fetch tools/list from the running server
                 val toolsResult = mcpManager.call(server.id, "tools/list", null)
                 if (toolsResult.isArray) {
                     toolsResult.forEach { tool ->
-                        allTools.add(mapOf(
-                            "name" to "mcp.${server.id}.${tool.path("name").asText()}",
-                            "description" to tool.path("description").asText(""),
-                            "parameters" to tool.path("inputSchema"),
-                        ))
+                        allTools.add(
+                            mapOf(
+                                "name" to "mcp.${server.id}.${tool.path("name").asText()}",
+                                "description" to tool.path("description").asText(""),
+                                "parameters" to tool.path("inputSchema"),
+                            ),
+                        )
                     }
                 }
             } catch (e: Exception) {
-                com.intellij.openapi.diagnostic.Logger.getInstance("ToolDispatcher")
+                com.intellij.openapi.diagnostic.Logger
+                    .getInstance("ToolDispatcher")
                     .warn("Failed to start MCP server ${server.id}", e)
             }
         }
@@ -161,7 +231,10 @@ class ToolDispatcher(
 
     // ---------- MCP routing (original) ----------
 
-    private fun dispatchMcp(fullName: String, args: JsonNode): Map<String, Any?> {
+    private fun dispatchMcp(
+        fullName: String,
+        args: JsonNode,
+    ): Map<String, Any?> {
         // Parse: mcp.<serverId>.<toolName>
         val parts = fullName.removePrefix("mcp.").split(".", limit = 2)
         if (parts.size < 2) throw ToolViolation("Invalid MCP tool name: $fullName")
@@ -179,7 +252,10 @@ class ToolDispatcher(
 
     // ---------- PatchApplier routing ----------
 
-    private fun dispatchViaPatchApplier(name: String, args: JsonNode): Map<String, Any?> {
+    private fun dispatchViaPatchApplier(
+        name: String,
+        args: JsonNode,
+    ): Map<String, Any?> {
         patchApplier.apply(name, args)
         return mapOf("ack" to true, "appliedVia" to "DiffManager")
     }
@@ -191,12 +267,16 @@ class ToolDispatcher(
         val line = args.path("line").asInt(1)
         val vf = PathGuard.resolve(project, path)
         ApplicationManager.getApplication().invokeLater {
-            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+            com.intellij.openapi.fileEditor.FileEditorManager
+                .getInstance(project)
                 .openFile(vf, true)
-            val editor = com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
-                .selectedTextEditor
+            val editor =
+                com.intellij.openapi.fileEditor.FileEditorManager
+                    .getInstance(project)
+                    .selectedTextEditor
             editor?.caretModel?.moveToLogicalPosition(
-                com.intellij.openapi.editor.LogicalPosition(line - 1, 0)
+                com.intellij.openapi.editor
+                    .LogicalPosition(line - 1, 0),
             )
         }
         return mapOf("opened" to path, "line" to line)
@@ -205,23 +285,30 @@ class ToolDispatcher(
     private fun ideDiagnostics(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val vf = PathGuard.resolve(project, path)
-        val psiFile = com.intellij.psi.PsiManager.getInstance(project).findFile(vf)
-            ?: return mapOf("diagnostics" to emptyList<Any>())
-        val diagnostics = com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx
-            .getInstanceEx(project).let { analyzer ->
-                // Get highlights from the document
-                val doc = com.intellij.openapi.fileEditor.FileDocumentManager.getInstance()
-                    .getDocument(vf) ?: return mapOf("diagnostics" to emptyList<Any>())
-                com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
-                    .getHighlights(doc, null, project)
-                    .map { h ->
-                        mapOf(
-                            "line" to doc.getLineNumber(h.startOffset) + 1,
-                            "severity" to h.severity.name,
-                            "message" to (h.description ?: ""),
-                        )
-                    }
-            }
+        val psiFile =
+            com.intellij.psi.PsiManager
+                .getInstance(project)
+                .findFile(vf)
+                ?: return mapOf("diagnostics" to emptyList<Any>())
+        val diagnostics =
+            com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx
+                .getInstanceEx(project)
+                .let { analyzer ->
+                    // Get highlights from the document
+                    val doc =
+                        com.intellij.openapi.fileEditor.FileDocumentManager
+                            .getInstance()
+                            .getDocument(vf) ?: return mapOf("diagnostics" to emptyList<Any>())
+                    com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
+                        .getHighlights(doc, null, project)
+                        .map { h ->
+                            mapOf(
+                                "line" to doc.getLineNumber(h.startOffset) + 1,
+                                "severity" to h.severity.name,
+                                "message" to (h.description ?: ""),
+                            )
+                        }
+                }
         return mapOf("path" to path, "diagnostics" to diagnostics)
     }
 
@@ -270,15 +357,24 @@ class ToolDispatcher(
         val result = shadowWorkspace.validate(patchOps)
         return mapOf(
             "passed" to result.passed,
-            "errors" to result.errors.map { e ->
-                mapOf("file" to e.file, "line" to e.line, "message" to e.message, "severity" to e.severity)
-            },
-            "durationMs" to result.durationMs
+            "errors" to
+                result.errors.map { e ->
+                    mapOf("file" to e.file, "line" to e.line, "message" to e.message, "severity" to e.severity)
+                },
+            "durationMs" to result.durationMs,
         )
     }
 
-    private fun refuse(toolCallId: String, reason: String, startedNs: Long) {
+    private fun refuse(
+        toolCallId: String,
+        reason: String,
+        startedNs: Long,
+    ) {
         respond(toolCallId, false, null, "unsupported", reason, startedNs)
+    }
+
+    private fun buildCacheKey(name: String, args: JsonNode): String {
+        return "$name:${args.hashCode().toString(16)}"
     }
 
     private fun respond(
@@ -324,12 +420,26 @@ class ToolDispatcher(
     }
 
     private fun readRange(args: JsonNode): Pair<Int?, Int?> {
-        val s = args.path("range").path("startLine").asInt(0).takeIf { it > 0 }
-        val e = args.path("range").path("endLine").asInt(0).takeIf { it > 0 }
+        val s =
+            args
+                .path("range")
+                .path("startLine")
+                .asInt(0)
+                .takeIf { it > 0 }
+        val e =
+            args
+                .path("range")
+                .path("endLine")
+                .asInt(0)
+                .takeIf { it > 0 }
         return s to e
     }
 
-    private fun sliceLines(text: String, start: Int, end: Int): String {
+    private fun sliceLines(
+        text: String,
+        start: Int,
+        end: Int,
+    ): String {
         val lines = text.lines()
         val from = (start - 1).coerceIn(0, lines.size)
         val to = end.coerceIn(from, lines.size)
@@ -368,13 +478,155 @@ class ToolDispatcher(
         VfsUtil.processFilesRecursively(root) { f ->
             if (limit.get() <= 0) return@processFilesRecursively false
             if (!f.isDirectory && f.length < 1_048_576) {
-                val text = runCatching { String(f.contentsToByteArray(), StandardCharsets.UTF_8) }
-                    .getOrNull() ?: return@processFilesRecursively true
+                val text =
+                    runCatching { String(f.contentsToByteArray(), StandardCharsets.UTF_8) }
+                        .getOrNull() ?: return@processFilesRecursively true
                 pattern.findAll(text).take(5).forEach { m ->
                     if (limit.decrementAndGet() < 0) return@forEach
                     val before = text.substring(0, m.range.first).count { it == '\n' } + 1
                     hits.add(
                         mapOf(
+                            "path" to f.path.removePrefix(root.path).trimStart('/'),
+                            "line" to before,
+                            "snippet" to m.value.take(120),
+                        ),
+                    )
+                }
+            }
+            true
+        }
+        return mapOf("hits" to hits)
+    }
+
+    private fun fileOutline(args: JsonNode): Map<String, Any?> {
+        val vf = PathGuard.resolve(project, args.path("path").asText())
+        val text = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+        val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }
+        return mapOf(
+            "path" to vf.path,
+            "lines" to text.count { it == '\n' } + 1,
+            "firstNonEmptyLine" to (firstLine ?: ""),
+        )
+    }
+
+    // ---------- mutating: fs.create only (others go through PatchApplier) ----------
+
+    private fun createFile(args: JsonNode): Map<String, Any?> {
+        val rel = args.path("path").asText()
+        val content = args.path("content").asText("")
+        val overwrite = args.path("overwrite").asBoolean(false)
+        val target = PathGuard.resolveOrCreate(project, rel)
+        if (Files.exists(target) && !overwrite) {
+            throw ToolViolation("already exists: $rel (set overwrite=true to replace)")
+        }
+        WriteCommandAction.runWriteCommandAction(project) {
+            Files.createDirectories(target.parent)
+            Files.writeString(target, content)
+            PathGuard.projectRoot(project).refresh(false, true)
+        }
+        return mapOf("path" to target.toString(), "bytes" to (content.toByteArray().size))
+    }
+}
+                            "path" to f.path.removePrefix(root.path).trimStart('/'),
+                            "line" to before,
+                            "snippet" to m.value.take(120),
+                        ),
+                    )
+                }
+            }
+            true
+        }
+        return mapOf("hits" to hits)
+    }
+
+    private fun fileOutline(args: JsonNode): Map<String, Any?> {
+        val vf = PathGuard.resolve(project, args.path("path").asText())
+        val text = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+        val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }
+        return mapOf(
+            "path" to vf.path,
+            "lines" to text.count { it == '\n' } + 1,
+            "firstNonEmptyLine" to (firstLine ?: ""),
+        )
+    }
+
+    // ---------- mutating: fs.create only (others go through PatchApplier) ----------
+
+    private fun createFile(args: JsonNode): Map<String, Any?> {
+        val rel = args.path("path").asText()
+        val content = args.path("content").asText("")
+        val overwrite = args.path("overwrite").asBoolean(false)
+        val target = PathGuard.resolveOrCreate(project, rel)
+        if (Files.exists(target) && !overwrite) {
+            throw ToolViolation("already exists: $rel (set overwrite=true to replace)")
+        }
+        WriteCommandAction.runWriteCommandAction(project) {
+            Files.createDirectories(target.parent)
+            Files.writeString(target, content)
+            PathGuard.projectRoot(project).refresh(false, true)
+        }
+        return mapOf("path" to target.toString(), "bytes" to (content.toByteArray().size))
+    }
+}
+        val query = args.path("query").asText()
+        if (query.isBlank()) throw ToolViolation("empty query")
+        val regex = args.path("regex").asBoolean(false)
+        val pattern = if (regex) Regex(query) else Regex(Regex.escape(query))
+        val hits = mutableListOf<Map<String, Any?>>()
+        val root = PathGuard.projectRoot(project)
+        val limit = AtomicLong(50)
+        VfsUtil.processFilesRecursively(root) { f ->
+            if (limit.get() <= 0) return@processFilesRecursively false
+            if (!f.isDirectory && f.length < 1_048_576) {
+                val text =
+                    runCatching { String(f.contentsToByteArray(), StandardCharsets.UTF_8) }
+                        .getOrNull() ?: return@processFilesRecursively true
+                pattern.findAll(text).take(5).forEach { m ->
+                    if (limit.decrementAndGet() < 0) return@forEach
+                    val before = text.substring(0, m.range.first).count { it == '\n' } + 1
+                    hits.add(
+                        mapOf(
+                            "path" to f.path.removePrefix(root.path).trimStart('/'),
+                            "line" to before,
+                            "snippet" to m.value.take(120),
+                        ),
+                    )
+                }
+            }
+            true
+        }
+        return mapOf("hits" to hits)
+    }
+
+    private fun fileOutline(args: JsonNode): Map<String, Any?> {
+        val vf = PathGuard.resolve(project, args.path("path").asText())
+        val text = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+        val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }
+        return mapOf(
+            "path" to vf.path,
+            "lines" to text.count { it == '\n' } + 1,
+            "firstNonEmptyLine" to (firstLine ?: ""),
+        )
+    }
+
+    // ---------- mutating: fs.create only (others go through PatchApplier) ----------
+
+    private fun createFile(args: JsonNode): Map<String, Any?> {
+        val rel = args.path("path").asText()
+        val content = args.path("content").asText("")
+        val overwrite = args.path("overwrite").asBoolean(false)
+        val target = PathGuard.resolveOrCreate(project, rel)
+        if (Files.exists(target) && !overwrite) {
+            throw ToolViolation("already exists: $rel (set overwrite=true to replace)")
+        }
+        WriteCommandAction.runWriteCommandAction(project) {
+            Files.createDirectories(target.parent)
+            Files.writeString(target, content)
+            PathGuard.projectRoot(project).refresh(false, true)
+        }
+        return mapOf("path" to target.toString(), "bytes" to (content.toByteArray().size))
+    }
+}
                             "path" to f.path.removePrefix(root.path).trimStart('/'),
                             "line" to before,
                             "snippet" to m.value.take(120),

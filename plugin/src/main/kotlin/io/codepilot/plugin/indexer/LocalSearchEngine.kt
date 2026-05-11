@@ -1,13 +1,7 @@
 package io.codepilot.plugin.indexer
 
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFileManager
-import com.intellij.psi.PsiManager
-import com.intellij.psi.search.FilenameIndex
-import com.intellij.psi.search.GlobalSearchScope
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -29,8 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
  * For true semantic search with embeddings, the model call itself already
  * provides context retrieval via ContextBudgeter sending relevant refs.
  */
-class LocalSearchEngine(private val project: Project) {
-
+class LocalSearchEngine(
+    private val project: Project,
+) {
     private val log = Logger.getInstance(LocalSearchEngine::class.java)
 
     /** Inverted index: term → set of (path, chunkIndex) */
@@ -43,11 +38,19 @@ class LocalSearchEngine(private val project: Project) {
     private val embeddingVectors = ConcurrentHashMap<ChunkRef, SparseVector>()
 
     /** BM25 parameters */
-    private val avgDocLen = java.util.concurrent.atomic.AtomicReference(0.0)
-    private val docCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val avgDocLen =
+        java.util.concurrent.atomic
+            .AtomicReference(0.0)
+    private val docCount =
+        java.util.concurrent.atomic
+            .AtomicInteger(0)
     private val docLenMap = ConcurrentHashMap<ChunkRef, Int>()
 
-    data class ChunkRef(val path: String, val startLine: Int, val endLine: Int)
+    data class ChunkRef(
+        val path: String,
+        val startLine: Int,
+        val endLine: Int,
+    )
 
     data class SearchHit(
         val path: String,
@@ -60,7 +63,9 @@ class LocalSearchEngine(private val project: Project) {
     )
 
     /** Lightweight sparse vector for local semantic similarity. */
-    data class SparseVector(val terms: Map<String, Double>) {
+    data class SparseVector(
+        val terms: Map<String, Double>,
+    ) {
         fun cosine(other: SparseVector): Double {
             var dot = 0.0
             var normA = 0.0
@@ -142,10 +147,46 @@ class LocalSearchEngine(private val project: Project) {
     }
 
     /**
+     * Incremental re-index: remove old chunks for a path and index new ones.
+     * This avoids full re-index by only updating the affected file's entries
+     * and recomputing embeddings for changed chunks only.
+     */
+    fun reindexFile(path: String, newChunks: List<ChunkBuilder.Chunk>) {
+        removeFile(path)
+        indexChunks(newChunks)
+        log.info("Incremental re-index: $path (${newChunks.size} chunks)")
+    }
+
+    /**
+     * Get index statistics for diagnostics.
+     */
+    fun indexStats(): IndexStats {
+        return IndexStats(
+            totalChunks = forwardIndex.values.sumOf { it.size },
+            totalFiles = forwardIndex.size,
+            totalTerms = invertedIndex.size,
+            totalEmbeddings = embeddingVectors.size,
+            avgDocLen = avgDocLen.get(),
+        )
+    }
+
+    data class IndexStats(
+        val totalChunks: Int,
+        val totalFiles: Int,
+        val totalTerms: Int,
+        val totalEmbeddings: Int,
+        val avgDocLen: Double,
+    )
+
+    /**
      * Search the local index. Combines multiple strategies for best results.
      * Hybrid scoring: BM25 (40%) + semantic cosine (30%) + symbol boost (20%) + path boost (10%)
      */
-    fun search(query: String, topK: Int = 20, language: String? = null): List<SearchHit> {
+    fun search(
+        query: String,
+        topK: Int = 20,
+        language: String? = null,
+    ): List<SearchHit> {
         val queryTerms = tokenize(query)
         if (queryTerms.isEmpty()) return emptyList()
 
@@ -218,11 +259,13 @@ class LocalSearchEngine(private val project: Project) {
 
         // ─── Strategy 5: Symbol boost for exact symbol matches ───
         for (ref in hybridScored.keys.toList()) {
-            val chunk = forwardIndex[ref.path]
-                ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine } ?: continue
-            val symbolMatch = chunk.symbols.any { sym ->
-                queryTerms.any { qt -> sym.lowercase().contains(qt) }
-            }
+            val chunk =
+                forwardIndex[ref.path]
+                    ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine } ?: continue
+            val symbolMatch =
+                chunk.symbols.any { sym ->
+                    queryTerms.any { qt -> sym.lowercase().contains(qt) }
+                }
             if (symbolMatch) {
                 hybridScored[ref] = (hybridScored[ref] ?: 0.0) + 0.20
             }
@@ -236,28 +279,33 @@ class LocalSearchEngine(private val project: Project) {
         }
 
         // Filter by language if specified
-        val filtered = if (language != null) {
-            hybridScored.filter { (ref, _) ->
-                forwardIndex[ref.path]?.any { it.language.equals(language, ignoreCase = true) } == true
+        val filtered =
+            if (language != null) {
+                hybridScored.filter { (ref, _) ->
+                    forwardIndex[ref.path]?.any { it.language.equals(language, ignoreCase = true) } == true
+                }
+            } else {
+                hybridScored
             }
-        } else hybridScored
 
         // Sort by hybrid score, take topK, build results
         return filtered.entries
             .sortedByDescending { it.value }
             .take(topK)
             .mapNotNull { (ref, score) ->
-                val chunk = forwardIndex[ref.path]
-                    ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
-                    ?: return@mapNotNull null
+                val chunk =
+                    forwardIndex[ref.path]
+                        ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
+                        ?: return@mapNotNull null
 
                 val snippet = chunk.content.take(500)
-                val matchType = when {
-                    chunk.symbols.any { it.lowercase().contains(queryLower) } -> "symbol"
-                    ref.path.lowercase().contains(queryLower) -> "path"
-                    (semanticScores[ref] ?: 0.0) / maxSemantic > 0.3 -> "semantic"
-                    else -> "hybrid"
-                }
+                val matchType =
+                    when {
+                        chunk.symbols.any { it.lowercase().contains(queryLower) } -> "symbol"
+                        ref.path.lowercase().contains(queryLower) -> "path"
+                        (semanticScores[ref] ?: 0.0) / maxSemantic > 0.3 -> "semantic"
+                        else -> "hybrid"
+                    }
 
                 SearchHit(
                     path = ref.path,
@@ -275,7 +323,10 @@ class LocalSearchEngine(private val project: Project) {
      * Deep semantic search for @codebase — returns broader, conceptually related results.
      * Uses lower thresholds and considers structural similarity (shared symbols, import patterns).
      */
-    fun semanticSearch(query: String, topK: Int = 30): List<SearchHit> {
+    fun semanticSearch(
+        query: String,
+        topK: Int = 30,
+    ): List<SearchHit> {
         val queryTerms = tokenize(query)
         if (queryTerms.isEmpty()) return emptyList()
 
@@ -293,13 +344,17 @@ class LocalSearchEngine(private val project: Project) {
 
         // Boost chunks that share symbols with top candidates (structural relatedness)
         val topCandidates = scored.entries.sortedByDescending { it.value }.take(10)
-        val topSymbols = topCandidates.mapNotNull { (ref, _) ->
-            forwardIndex[ref.path]?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
-        }.flatMap { it.symbols }.toSet()
+        val topSymbols =
+            topCandidates
+                .mapNotNull { (ref, _) ->
+                    forwardIndex[ref.path]?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
+                }.flatMap { it.symbols }
+                .toSet()
 
         for ((ref, score) in scored.entries.toList()) {
-            val chunk = forwardIndex[ref.path]
-                ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine } ?: continue
+            val chunk =
+                forwardIndex[ref.path]
+                    ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine } ?: continue
             val sharedSymbolCount = chunk.symbols.count { it in topSymbols }
             if (sharedSymbolCount > 0) {
                 scored[ref] = score + 0.1 * sharedSymbolCount
@@ -310,9 +365,10 @@ class LocalSearchEngine(private val project: Project) {
             .sortedByDescending { it.value }
             .take(topK)
             .mapNotNull { (ref, score) ->
-                val chunk = forwardIndex[ref.path]
-                    ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
-                    ?: return@mapNotNull null
+                val chunk =
+                    forwardIndex[ref.path]
+                        ?.find { it.startLine == ref.startLine && it.endLine == ref.endLine }
+                        ?: return@mapNotNull null
                 SearchHit(
                     path = ref.path,
                     startLine = ref.startLine,
@@ -326,7 +382,10 @@ class LocalSearchEngine(private val project: Project) {
     }
 
     /** Quick file path search (for @file autocomplete). */
-    fun searchFilePaths(query: String, limit: Int = 20): List<String> {
+    fun searchFilePaths(
+        query: String,
+        limit: Int = 20,
+    ): List<String> {
         val queryLower = query.lowercase()
         return forwardIndex.keys
             .filter { it.lowercase().contains(queryLower) }
@@ -335,7 +394,10 @@ class LocalSearchEngine(private val project: Project) {
     }
 
     /** Get all symbols across the index (for @symbol autocomplete). */
-    fun searchSymbols(query: String, limit: Int = 20): List<Pair<String, String>> {
+    fun searchSymbols(
+        query: String,
+        limit: Int = 20,
+    ): List<Pair<String, String>> {
         val queryLower = query.lowercase()
         val results = mutableListOf<Pair<String, String>>() // (symbol, path)
         for ((path, chunks) in forwardIndex) {
@@ -352,15 +414,18 @@ class LocalSearchEngine(private val project: Project) {
     }
 
     /** Get stats for display. */
-    fun stats(): IndexStats {
-        return IndexStats(
+    fun stats(): IndexStats =
+        IndexStats(
             totalFiles = forwardIndex.size,
             totalChunks = forwardIndex.values.sumOf { it.size },
             totalTerms = invertedIndex.size,
         )
-    }
 
-    data class IndexStats(val totalFiles: Int, val totalChunks: Int, val totalTerms: Int)
+    data class IndexStats(
+        val totalFiles: Int,
+        val totalChunks: Int,
+        val totalTerms: Int,
+    )
 
     // ─── Adaptive Context Depth ─────────────────────────────────────
 
@@ -378,32 +443,39 @@ class LocalSearchEngine(private val project: Project) {
      *
      * Returns results with matchType="adaptive" to distinguish from fixed-depth calls.
      */
-    fun adaptiveSearch(query: String, language: String? = null): List<SearchHit> {
+    fun adaptiveSearch(
+        query: String,
+        language: String? = null,
+    ): List<SearchHit> {
         val complexity = assessQueryComplexity(query)
 
-        val topK = when {
-            complexity.termCount <= 2 -> 10
-            complexity.termCount <= 5 -> 20
-            else -> 50
-        }
+        val topK =
+            when {
+                complexity.termCount <= 2 -> 10
+                complexity.termCount <= 5 -> 20
+                else -> 50
+            }
 
         // For structural queries, boost symbol search weight
-        val results = if (complexity.isStructural) {
-            val hits = search(query, topK = topK, language = language)
-            // Re-boost symbol matches for structural queries
-            hits.map { hit ->
-                if (hit.matchType == "symbol") {
-                    hit.copy(score = hit.score * 1.5)
-                } else hit
+        val results =
+            if (complexity.isStructural) {
+                val hits = search(query, topK = topK, language = language)
+                // Re-boost symbol matches for structural queries
+                hits.map { hit ->
+                    if (hit.matchType == "symbol") {
+                        hit.copy(score = hit.score * 1.5)
+                    } else {
+                        hit
+                    }
+                }
+            } else if (complexity.isConceptual) {
+                // For conceptual queries, merge keyword + semantic results
+                val keywordHits = search(query, topK = topK / 2, language = language)
+                val semanticHits = semanticSearch(query, topK = topK / 2)
+                mergeAndDeduplicate(keywordHits, semanticHits, topK)
+            } else {
+                search(query, topK = topK, language = language)
             }
-        } else if (complexity.isConceptual) {
-            // For conceptual queries, merge keyword + semantic results
-            val keywordHits = search(query, topK = topK / 2, language = language)
-            val semanticHits = semanticSearch(query, topK = topK / 2)
-            mergeAndDeduplicate(keywordHits, semanticHits, topK)
-        } else {
-            search(query, topK = topK, language = language)
-        }
 
         // Tag results as adaptive for observability
         return results.map { it.copy(matchType = "adaptive") }
@@ -424,33 +496,58 @@ class LocalSearchEngine(private val project: Project) {
         val termCount = terms.size
 
         // Structural terms suggest the user is looking for specific code constructs
-        val structuralKeywords = setOf(
-            "class", "interface", "enum", "object", "struct", "type",
-            "function", "method", "fun", "def", "func", "fn",
-            "variable", "field", "property", "const", "val", "var",
-            "implement", "extend", "inherit", "override", "abstract",
-            "import", "module", "package", "namespace",
-        )
+        val structuralKeywords =
+            setOf(
+                "class",
+                "interface",
+                "enum",
+                "object",
+                "struct",
+                "type",
+                "function",
+                "method",
+                "fun",
+                "def",
+                "func",
+                "fn",
+                "variable",
+                "field",
+                "property",
+                "const",
+                "val",
+                "var",
+                "implement",
+                "extend",
+                "inherit",
+                "override",
+                "abstract",
+                "import",
+                "module",
+                "package",
+                "namespace",
+            )
         val isStructural = terms.any { it in structuralKeywords }
 
         // Conceptual patterns suggest the user wants understanding, not specific symbols
-        val conceptualPatterns = listOf(
-            Regex("\\bhow\\s+to\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bexplain\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bwhy\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bwhat\\s+is\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bdifference\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bpattern\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bapproach\\b", RegexOption.IGNORE_CASE),
-            Regex("\\bbest\\s+practice\\b", RegexOption.IGNORE_CASE),
-        )
+        val conceptualPatterns =
+            listOf(
+                Regex("\\bhow\\s+to\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bexplain\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bwhy\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bwhat\\s+is\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bdifference\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bpattern\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bapproach\\b", RegexOption.IGNORE_CASE),
+                Regex("\\bbest\\s+practice\\b", RegexOption.IGNORE_CASE),
+            )
         val isConceptual = conceptualPatterns.any { it.containsMatchIn(query) }
 
-        val depth = when {
-            termCount <= 2 -> "shallow"
-            termCount <= 5 -> "medium"
-            else -> "deep"
-        }
+        val depth =
+            when {
+                termCount <= 2 -> "shallow"
+                termCount <= 5 -> "medium"
+                else -> "deep"
+            }
 
         return QueryComplexity(
             termCount = termCount,
@@ -467,7 +564,7 @@ class LocalSearchEngine(private val project: Project) {
     private fun mergeAndDeduplicate(
         keywordHits: List<SearchHit>,
         semanticHits: List<SearchHit>,
-        topK: Int
+        topK: Int,
     ): List<SearchHit> {
         val merged = mutableMapOf<Pair<String, Int>, SearchHit>()
 
@@ -514,7 +611,10 @@ class LocalSearchEngine(private val project: Project) {
         }
     }
 
-    private fun buildQueryVector(queryTerms: List<String>, totalDocs: Double): SparseVector {
+    private fun buildQueryVector(
+        queryTerms: List<String>,
+        totalDocs: Double,
+    ): SparseVector {
         val termFreqs = mutableMapOf<String, Int>()
         for (term in queryTerms) {
             termFreqs[term] = (termFreqs[term] ?: 0) + 1
@@ -532,12 +632,11 @@ class LocalSearchEngine(private val project: Project) {
 
     // ─── Tokenization ───────────────────────────────────────────────
 
-    private fun tokenize(text: String): List<String> {
-        return text
+    private fun tokenize(text: String): List<String> =
+        text
             .replace(Regex("([a-z])([A-Z])"), "$1 $2")
             .replace(Regex("([A-Z]+)([A-Z][a-z])"), "$1 $2")
             .split(Regex("[^a-zA-Z0-9]+"))
             .map { it.lowercase() }
             .filter { it.length >= 2 }
-    }
 }

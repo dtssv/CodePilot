@@ -6,7 +6,6 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
-import java.awt.BorderLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -22,18 +21,18 @@ class NewSkillPanel(
     private val store: LocalMarketplaceStore,
     private val onChanged: () -> Unit,
 ) {
-
     private val idField = JBTextField("skill.user.my-skill")
     private val versionField = JBTextField("0.1.0")
     private val titleField = JBTextField("My local skill")
     private val scopeBox = JComboBox(arrayOf("project", "global"))
     private val languageField = JBTextField("")
     private val actionField = JBTextField("")
-    private val promptArea = JBTextArea(12, 50).apply {
-        text = "Your instructions to the model go here. Keep under ~500 tokens."
-        lineWrap = true
-        wrapStyleWord = true
-    }
+    private val promptArea =
+        JBTextArea(12, 50).apply {
+            text = "Your instructions to the model go here. Keep under ~500 tokens."
+            lineWrap = true
+            wrapStyleWord = true
+        }
     private val save = JButton("Create")
 
     val component: JComponent =
@@ -47,25 +46,36 @@ class NewSkillPanel(
             addRow(this, 5, "Action (optional):", actionField)
 
             // Prompt label
-            val promptLabelGbc = GridBagConstraints().apply {
-                gridx = 0; gridy = 6; anchor = GridBagConstraints.NORTHWEST
-                insets = Insets(4, 4, 4, 4)
-            }
+            val promptLabelGbc =
+                GridBagConstraints().apply {
+                    gridx = 0
+                    gridy = 6
+                    anchor = GridBagConstraints.NORTHWEST
+                    insets = Insets(4, 4, 4, 4)
+                }
             add(JLabel("Prompt:"), promptLabelGbc)
 
             // Prompt text area with scroll pane — fill both directions
-            val promptGbc = GridBagConstraints().apply {
-                gridx = 1; gridy = 6; weightx = 1.0; weighty = 1.0
-                fill = GridBagConstraints.BOTH
-                insets = Insets(4, 4, 4, 4)
-            }
+            val promptGbc =
+                GridBagConstraints().apply {
+                    gridx = 1
+                    gridy = 6
+                    weightx = 1.0
+                    weighty = 1.0
+                    fill = GridBagConstraints.BOTH
+                    insets = Insets(4, 4, 4, 4)
+                }
             add(JBScrollPane(promptArea), promptGbc)
 
             // Create button
-            val btnGbc = GridBagConstraints().apply {
-                gridx = 1; gridy = 7; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL
-                insets = Insets(8, 4, 4, 4)
-            }
+            val btnGbc =
+                GridBagConstraints().apply {
+                    gridx = 1
+                    gridy = 7
+                    weightx = 1.0
+                    fill = GridBagConstraints.HORIZONTAL
+                    insets = Insets(8, 4, 4, 4)
+                }
             save.addActionListener { save() }
             add(save, btnGbc)
         }
@@ -79,19 +89,35 @@ class NewSkillPanel(
             return
         }
         val scope = if (scopeBox.selectedItem == "global") LocalMarketplaceStore.Scope.GLOBAL else LocalMarketplaceStore.Scope.PROJECT
-        val yaml = buildYaml(id, version, titleField.text.trim().ifEmpty { id }, scope.value, prompt,
-            languageField.text.trim().ifEmpty { null }, actionField.text.trim().ifEmpty { null })
+        val yaml =
+            buildYaml(
+                id,
+                version,
+                titleField.text.trim().ifEmpty { id },
+                scope.value,
+                prompt,
+                languageField.text.trim().ifEmpty { null },
+                actionField.text.trim().ifEmpty { null },
+            )
         runCatching {
             store.installSkill(scope, project, id, version, LocalMarketplaceStore.Source.BUILTIN_IDE, yaml)
         }.onSuccess {
-            Messages.showInfoMessage(project, "Created ${id}@${version} under ${scope.value}.", "CodePilot")
+            Messages.showInfoMessage(project, "Created $id@$version under ${scope.value}.", "CodePilot")
             onChanged()
         }.onFailure {
             Messages.showErrorDialog(project, it.message ?: "create failed", "CodePilot")
         }
     }
 
-    private fun buildYaml(id: String, version: String, title: String, scope: String, prompt: String, language: String?, action: String?): String =
+    private fun buildYaml(
+        id: String,
+        version: String,
+        title: String,
+        scope: String,
+        prompt: String,
+        language: String?,
+        action: String?,
+    ): String =
         buildString {
             appendLine("id: $id")
             appendLine("version: $version")
@@ -108,10 +134,29 @@ class NewSkillPanel(
             prompt.lineSequence().forEach { appendLine("  $it") }
         }
 
-    private fun addRow(parent: JPanel, row: Int, label: String, component: JComponent) {
+    private fun addRow(
+        parent: JPanel,
+        row: Int,
+        label: String,
+        component: JComponent,
+    ) {
         val lbl = JLabel(label)
-        val gL = GridBagConstraints().apply { gridx = 0; gridy = row; anchor = GridBagConstraints.WEST; insets = Insets(4, 4, 4, 4) }
-        val gR = GridBagConstraints().apply { gridx = 1; gridy = row; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(4, 4, 4, 4) }
+        val gL =
+            GridBagConstraints().apply {
+                gridx = 0
+                gridy = row
+                anchor = GridBagConstraints.WEST
+                insets = Insets(4, 4, 4, 4)
+            }
+        val gR =
+            GridBagConstraints().apply {
+                gridx = 1
+                gridy = row
+                weightx = 1.0
+                fill = GridBagConstraints.HORIZONTAL
+                insets =
+                    Insets(4, 4, 4, 4)
+            }
         parent.add(lbl, gL)
         parent.add(component, gR)
     }

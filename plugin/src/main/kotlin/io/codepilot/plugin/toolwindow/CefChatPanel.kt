@@ -31,8 +31,9 @@ import javax.swing.SwingUtilities
  * Plugin → Web: executeJavaScript("window.__codepilot_dispatch('eventType', payload)")
  * Web → Plugin: cefQuery({ request: JSON.stringify({type, payload}) })
  */
-class CefChatPanel(val project: Project) : Disposable {
-
+class CefChatPanel(
+    val project: Project,
+) : Disposable {
     private val log = logger<CefChatPanel>()
     private val mapper = ObjectMapper()
     private val settings = CodePilotSettings.getInstance()
@@ -58,9 +59,11 @@ class CefChatPanel(val project: Project) : Disposable {
         // Start with no session — will be created on first message
         sessionHandle = null
 
-        browser = JBCefBrowser.createBuilder()
-            .setEnableOpenDevToolsMenuItem(true)
-            .build()
+        browser =
+            JBCefBrowser
+                .createBuilder()
+                .setEnableOpenDevToolsMenuItem(true)
+                .build()
 
         queryHandler = JBCefJSQuery.create(browser)
         queryHandler.addHandler { request ->
@@ -69,17 +72,24 @@ class CefChatPanel(val project: Project) : Disposable {
         }
 
         // Inject the cefQuery bridge function after page load
-        browser.jbCefClient.addLoadHandler(object : CefLoadHandlerAdapter() {
-            override fun onLoadEnd(cefBrowser: CefBrowser?, frame: org.cef.browser.CefFrame?, httpStatusCode: Int) {
-                if (frame?.isMain == true) {
-                    injectBridge(cefBrowser!!)
-                    // Push session list and current session messages to the WebUI
-                    dispatchSessionList()
-                    dispatchCurrentSessionInfo()
-                    dispatchCurrentSessionMessages()
+        browser.jbCefClient.addLoadHandler(
+            object : CefLoadHandlerAdapter() {
+                override fun onLoadEnd(
+                    cefBrowser: CefBrowser?,
+                    frame: org.cef.browser.CefFrame?,
+                    httpStatusCode: Int,
+                ) {
+                    if (frame?.isMain == true) {
+                        injectBridge(cefBrowser!!)
+                        // Push session list and current session messages to the WebUI
+                        dispatchSessionList()
+                        dispatchCurrentSessionInfo()
+                        dispatchCurrentSessionMessages()
+                    }
                 }
-            }
-        }, browser.cefBrowser)
+            },
+            browser.cefBrowser,
+        )
 
         // Load the WebUI
         val webUiPath = resolveWebUiPath()
@@ -92,7 +102,10 @@ class CefChatPanel(val project: Project) : Disposable {
     val component: JComponent get() = panel
 
     /** Dispatch an SSE event to the web UI. */
-    fun dispatchToWeb(eventType: String, payload: Any?) {
+    fun dispatchToWeb(
+        eventType: String,
+        payload: Any?,
+    ) {
         val json = mapper.writeValueAsString(payload)
         val script = "window.__codepilot_dispatch && window.__codepilot_dispatch('$eventType', $json);"
         ApplicationManager.getApplication().invokeLater {
@@ -101,7 +114,10 @@ class CefChatPanel(val project: Project) : Disposable {
     }
 
     /** Store context fullCode by ID — avoids embedding code in messages. */
-    fun storeContext(id: String, fullCode: String) {
+    fun storeContext(
+        id: String,
+        fullCode: String,
+    ) {
         contextStore[id] = fullCode
     }
 
@@ -112,7 +128,8 @@ class CefChatPanel(val project: Project) : Disposable {
     // ---- Private ---- //
 
     private fun injectBridge(cefBrowser: CefBrowser) {
-        val injection = """
+        val injection =
+            """
             (function() {
                 if (window.__cefBridgeInjected) return;
                 window.__cefBridgeInjected = true;
@@ -120,7 +137,7 @@ class CefChatPanel(val project: Project) : Disposable {
                     ${queryHandler.inject("args.request", "args.onSuccess", "args.onFailure")}
                 };
             })();
-        """.trimIndent()
+            """.trimIndent()
         cefBrowser.executeJavaScript(injection, "", 0)
     }
 
@@ -131,20 +148,21 @@ class CefChatPanel(val project: Project) : Disposable {
             val payload = node["payload"]
 
             when (type) {
-                "user_message" -> handleUserMessage(
-                    payload["text"]?.asText() ?: "",
-                    payload["mode"]?.asText() ?: "agent",
-                    payload["modelId"]?.asText(),
-                    payload["contextRefs"]?.takeIf { it.isArray }?.map { ref ->
-                        mapOf(
-                            "id" to ref["id"].asText(),
-                            "display" to ref["display"].asText(),
-                            "language" to ref["language"].asText("text"),
-                            "startLine" to ref["startLine"].asInt(-1).let { if (it < 0) null else it },
-                            "endLine" to ref["endLine"].asInt(-1).let { if (it < 0) null else it },
-                        )
-                    } ?: emptyList()
-                )
+                "user_message" ->
+                    handleUserMessage(
+                        payload["text"]?.asText() ?: "",
+                        payload["mode"]?.asText() ?: "agent",
+                        payload["modelId"]?.asText(),
+                        payload["contextRefs"]?.takeIf { it.isArray }?.map { ref ->
+                            mapOf(
+                                "id" to ref["id"].asText(),
+                                "display" to ref["display"].asText(),
+                                "language" to ref["language"].asText("text"),
+                                "startLine" to ref["startLine"].asInt(-1).let { if (it < 0) null else it },
+                                "endLine" to ref["endLine"].asInt(-1).let { if (it < 0) null else it },
+                            )
+                        } ?: emptyList(),
+                    )
                 "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
                 "risk_approved" -> handleRiskApproval(payload["approved"]?.asBoolean() ?: false)
@@ -157,11 +175,12 @@ class CefChatPanel(val project: Project) : Disposable {
                 "check_auth" -> handleCheckAuth()
                 "auth_discover" -> handleAuthDiscover()
                 "auth_login_bridge" -> handleAuthLoginBridge(payload["token"]?.asText() ?: return)
-                "auth_login_dev" -> handleAuthLoginDev(
-                    payload["token"]?.asText() ?: return,
-                    payload["userId"]?.asText() ?: return,
-                    payload["tenantId"]?.asText() ?: return,
-                )
+                "auth_login_dev" ->
+                    handleAuthLoginDev(
+                        payload["token"]?.asText() ?: return,
+                        payload["userId"]?.asText() ?: return,
+                        payload["tenantId"]?.asText() ?: return,
+                    )
                 "auth_login_oidc" -> handleAuthLoginOidc()
                 // ★ @-reference resolution and patch events
                 "at_suggest" -> handleAtSuggest(payload["query"]?.asText() ?: "")
@@ -179,7 +198,12 @@ class CefChatPanel(val project: Project) : Disposable {
         }
     }
 
-    private fun handleUserMessage(text: String, mode: String, modelId: String? = null, contextRefs: List<Map<String, Any?>> = emptyList()) {
+    private fun handleUserMessage(
+        text: String,
+        mode: String,
+        modelId: String? = null,
+        contextRefs: List<Map<String, Any?>> = emptyList(),
+    ) {
         // Ensure a session exists (lazy creation on first message)
         if (sessionHandle == null) {
             sessionHandle = sessionStore.newSession(workspaceHash, mode, modelId)
@@ -199,53 +223,62 @@ class CefChatPanel(val project: Project) : Disposable {
         }
         sessionStore.touchLastMessage(handle)
         // Notify WebUI with compact display message
-        dispatchToWeb("user_message_saved", mapOf(
-            "role" to "user",
-            "content" to displayText,
-            "contextRefs" to contextRefs,
-        ))
+        dispatchToWeb(
+            "user_message_saved",
+            mapOf(
+                "role" to "user",
+                "content" to displayText,
+                "contextRefs" to contextRefs,
+            ),
+        )
 
         // Build the full message for backend (replace inline placeholders with actual code)
-        val fullText = buildString {
-            var remaining = text
-            while (true) {
-                val start = remaining.indexOf('\u0001')
-                if (start < 0) {
-                    append(remaining)
-                    break
+        val fullText =
+            buildString {
+                var remaining = text
+                while (true) {
+                    val start = remaining.indexOf('\u0001')
+                    if (start < 0) {
+                        append(remaining)
+                        break
+                    }
+                    append(remaining.substring(0, start))
+                    val end = remaining.indexOf('\u0001', start + 1)
+                    if (end < 0) {
+                        append(remaining.substring(start))
+                        break
+                    }
+                    val ctxId = remaining.substring(start + 1, end)
+                    val fullCode = contextStore[ctxId]
+                    if (fullCode != null) {
+                        val ref = contextRefs.find { it["id"] == ctxId }
+                        val lang = ref?.get("language") as? String ?: "text"
+                        val display = ref?.get("display") as? String ?: "context"
+                        val loc = if (ref?.get("startLine") != null) " :${ref["startLine"]}-${ref["endLine"]}" else ""
+                        appendLine("Context: $display$loc")
+                        appendLine("```$lang")
+                        appendLine(fullCode)
+                        appendLine("```")
+                    }
+                    remaining = remaining.substring(end + 1)
                 }
-                append(remaining.substring(0, start))
-                val end = remaining.indexOf('\u0001', start + 1)
-                if (end < 0) {
-                    append(remaining.substring(start))
-                    break
-                }
-                val ctxId = remaining.substring(start + 1, end)
-                val fullCode = contextStore[ctxId]
-                if (fullCode != null) {
-                    val ref = contextRefs.find { it["id"] == ctxId }
-                    val lang = ref?.get("language") as? String ?: "text"
-                    val display = ref?.get("display") as? String ?: "context"
-                    val loc = if (ref?.get("startLine") != null) " :${ref["startLine"]}-${ref["endLine"]}" else ""
-                    appendLine("Context: $display$loc")
-                    appendLine("```$lang")
-                    appendLine(fullCode)
-                    appendLine("```")
-                }
-                remaining = remaining.substring(end + 1)
             }
-        }
         val dispatcher = ToolDispatcher(project, client, handle.meta.id)
-        val gatherDispatcher = io.codepilot.plugin.tools.GatherDispatcher(project, client, handle.meta.id)
-        val graphStateStore = io.codepilot.plugin.tools.GraphStateStore(project, handle.dir)
+        val gatherDispatcher =
+            io.codepilot.plugin.tools
+                .GatherDispatcher(project, client, handle.meta.id)
+        val graphStateStore =
+            io.codepilot.plugin.tools
+                .GraphStateStore(project, handle.dir)
 
         ApplicationManager.getApplication().executeOnPooledThread {
-            val payload = mutableMapOf<String, Any?>(
-                "sessionId" to handle.meta.id,
-                "mode" to mode,
-                "input" to fullText,
-                "intent" to "new",
-            )
+            val payload =
+                mutableMapOf<String, Any?>(
+                    "sessionId" to handle.meta.id,
+                    "mode" to mode,
+                    "input" to fullText,
+                    "intent" to "new",
+                )
             if (modelId != null) payload["modelId"] = modelId
 
             // Resume from graph awaiting state if applicable
@@ -262,11 +295,17 @@ class CefChatPanel(val project: Project) : Disposable {
             val plan = sessionStore.loadPlan(handle)
             val ledger = sessionStore.loadLedger(handle)
             val digest = sessionStore.loadDigest(handle)
-            val completedToolCalls = sessionStore.completedToolCallIds(handle)
-                .toList().takeLast(5).map { id -> mapOf("toolCallId" to id, "ok" to true) }
+            val completedToolCalls =
+                sessionStore
+                    .completedToolCallIds(handle)
+                    .toList()
+                    .takeLast(5)
+                    .map { id -> mapOf("toolCallId" to id, "ok" to true) }
             val lastMessages = sessionStore.readMessages(handle).takeLast(6)
-            val lastAssistantSummary = lastMessages.lastOrNull { it["role"] == "assistant" }
-                ?.let { (it["content"] as? String)?.takeLast(1600) }
+            val lastAssistantSummary =
+                lastMessages
+                    .lastOrNull { it["role"] == "assistant" }
+                    ?.let { (it["content"] as? String)?.takeLast(1600) }
 
             // Inject MNI fields into payload
             if (plan != null) payload["lastPlanDigest"] = plan
@@ -274,109 +313,136 @@ class CefChatPanel(val project: Project) : Disposable {
             if (digest != null) payload["sessionDigest"] = digest
             if (completedToolCalls.size > 0) payload["completedToolCallsTail"] = completedToolCalls
             if (lastAssistantSummary != null) payload["lastAssistantTurnSummary"] = lastAssistantSummary
-            payload["contexts"] = mapOf(
-                "pinned" to emptyList<Any>(),
-                "recent" to lastMessages.takeLast(6).map { msg ->
-                    mapOf("role" to msg["role"], "content" to (msg["content"] as? String)?.take(2000))
-                },
-                "refs" to contextRefs,
-            )
+            payload["contexts"] =
+                mapOf(
+                    "pinned" to emptyList<Any>(),
+                    "recent" to
+                        lastMessages.takeLast(6).map { msg ->
+                            mapOf("role" to msg["role"], "content" to (msg["content"] as? String)?.take(2000))
+                        },
+                    "refs" to contextRefs,
+                )
             // Estimate and report context usage
             val estimatedTokens = sessionStore.estimateTokenCount(handle)
-            payload["policy"] = mapOf(
-                "requestCompact" to "auto",
-                "selfCheck" to true,
-                "askPolicy" to "prefer-ask",
-                "contextBudgetTokens" to 24000,
-                "keepRecentMessages" to 6,
-                "maxSteps" to 25,
-            )
+            payload["policy"] =
+                mapOf(
+                    "requestCompact" to "auto",
+                    "selfCheck" to true,
+                    "askPolicy" to "prefer-ask",
+                    "contextBudgetTokens" to 24000,
+                    "keepRecentMessages" to 6,
+                    "maxSteps" to 25,
+                )
 
             // Collect full assistant response for local persistence
             val assistantBuilder = StringBuilder()
 
-            client.run(payload.toMap(), object : ConversationClient.Listener {
-                override fun onDelta(text: String) {
-                    assistantBuilder.append(text)
-                    dispatchToWeb("delta", mapOf("text" to text))
-                }
-                override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(payload, Map::class.java)
-                    dispatchToWeb("tool_call", data)
-                    val toolName = payload.path("name").asText(null)
-                    val toolCallId = payload.path("id").asText(null)
-                    if (toolName != null && toolCallId != null) {
-                        dispatcher.dispatch(payload)
+            client.run(
+                payload.toMap(),
+                object : ConversationClient.Listener {
+                    override fun onDelta(text: String) {
+                        assistantBuilder.append(text)
+                        dispatchToWeb("delta", mapOf("text" to text))
                     }
-                }
-                override fun onPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(payload, Map::class.java)
-                    dispatchToWeb("plan", data)
-                    sessionStore.savePlan(handle, data)
-                }
-                override fun onPlanDelta(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("plan_delta", mapper.treeToValue(payload, Map::class.java))
-                override fun onTaskLedger(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(payload, Map::class.java)
-                    dispatchToWeb("task_ledger", data)
-                    sessionStore.saveLedger(handle, data)
-                }
-                override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
-                override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
 
-                // ── Graph engine events (internal, not shown to user) ──
-                override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    graphStateStore.applyGraphPlan(payload)
-                }
-                override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    graphStateStore.applyTransition(payload)
-                }
-                override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    // Execute client-side gather requests silently
-                    gatherDispatcher.dispatchBatch(payload.path("requests"))
-                }
-                override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    graphStateStore.applyInfoResult(payload)
-                }
-                override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    graphStateStore.applyVerify(payload)
-                }
-                override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    // internal only, no UI dispatch
-                }
-                override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    graphStateStore.applyPhaseDone(payload)
-                }
-                override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    // internal only, no UI dispatch
-                }
-
-                // ── User-facing plan events (shown in Plan panel) ──
-                override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
-                override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
-
-                override fun onError(code: Int, message: String) =
-                    dispatchToWeb("error", mapOf("code" to code, "message" to message))
-                override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("done", mapOf("reason" to reason))
-                    // Persist graph awaiting state for resume
-                    if (reason == "awaiting_user_input" || reason == "phase_done") {
-                        graphStateStore.applyAwaiting(payload)
+                    override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("tool_call", data)
+                        val toolName = payload.path("name").asText(null)
+                        val toolCallId = payload.path("id").asText(null)
+                        if (toolName != null && toolCallId != null) {
+                            dispatcher.dispatch(payload)
+                        }
                     }
-                    // Persist the full assistant response and update session metadata
-                    val fullResponse = assistantBuilder.toString()
-                    if (fullResponse.isNotEmpty()) {
-                        sessionStore.appendMessage(handle, "assistant", fullResponse)
+
+                    override fun onPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("plan", data)
+                        sessionStore.savePlan(handle, data)
                     }
-                    sessionStore.touchLastMessage(handle)
-                    dispatchSessionList() // refresh sidebar timestamps
-                }
-                override fun onClosed() {}
-            })
+
+                    override fun onPlanDelta(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("plan_delta", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onTaskLedger(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("task_ledger", data)
+                        sessionStore.saveLedger(handle, data)
+                    }
+
+                    override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+
+                    // ── Graph engine events (internal, not shown to user) ──
+                    override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        graphStateStore.applyGraphPlan(payload)
+                    }
+
+                    override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        graphStateStore.applyTransition(payload)
+                    }
+
+                    override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        // Execute client-side gather requests silently
+                        gatherDispatcher.dispatchBatch(payload.path("requests"))
+                    }
+
+                    override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        graphStateStore.applyInfoResult(payload)
+                    }
+
+                    override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        graphStateStore.applyVerify(payload)
+                    }
+
+                    override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        // internal only, no UI dispatch
+                    }
+
+                    override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        graphStateStore.applyPhaseDone(payload)
+                    }
+
+                    override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        // internal only, no UI dispatch
+                    }
+
+                    // ── User-facing plan events (shown in Plan panel) ──
+                    override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onError(
+                        code: Int,
+                        message: String,
+                    ) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+
+                    override fun onDone(
+                        reason: String,
+                        payload: com.fasterxml.jackson.databind.JsonNode,
+                    ) {
+                        dispatchToWeb("done", mapOf("reason" to reason))
+                        // Persist graph awaiting state for resume
+                        if (reason == "awaiting_user_input" || reason == "phase_done") {
+                            graphStateStore.applyAwaiting(payload)
+                        }
+                        // Persist the full assistant response and update session metadata
+                        val fullResponse = assistantBuilder.toString()
+                        if (fullResponse.isNotEmpty()) {
+                            sessionStore.appendMessage(handle, "assistant", fullResponse)
+                        }
+                        sessionStore.touchLastMessage(handle)
+                        dispatchSessionList() // refresh sidebar timestamps
+                    }
+
+                    override fun onClosed() {}
+                },
+            )
         }
     }
 
@@ -392,15 +458,23 @@ class CefChatPanel(val project: Project) : Disposable {
     }
 
     private fun doFetchModels(retries: Int = 1) {
-        val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
-        val baseUrl = io.codepilot.plugin.settings.CodePilotSettings.getInstance().state.backendBaseUrl.trimEnd('/')
+        val http =
+            io.codepilot.plugin.transport.HttpClientService
+                .getInstance()
+        val baseUrl =
+            io.codepilot.plugin.settings.CodePilotSettings
+                .getInstance()
+                .state.backendBaseUrl
+                .trimEnd('/')
         val url = baseUrl + "/v1/models"
         log.info("[Models] Fetching models from: $url")
-        val request = okhttp3.Request.Builder()
-            .url(url.toHttpUrl())
-            .get()
-            .header("Accept", "application/json")
-            .build()
+        val request =
+            okhttp3.Request
+                .Builder()
+                .url(url.toHttpUrl())
+                .get()
+                .header("Accept", "application/json")
+                .build()
         val response = http.client().newCall(request).execute()
         response.use { resp ->
             log.info("[Models] Response: code=${resp.code}, message=${resp.message}, protocol=${resp.protocol}, headers=${resp.headers}")
@@ -413,10 +487,15 @@ class CefChatPanel(val project: Project) : Disposable {
             } else if (resp.code == 401 && retries > 0) {
                 log.warn("[Models] Got 401, prompting login (retries=$retries)")
                 SwingUtilities.invokeLater {
-                    val loggedIn = io.codepilot.plugin.auth.LoginDialog(project).showAndGet()
+                    val loggedIn =
+                        io.codepilot.plugin.auth
+                            .LoginDialog(project)
+                            .showAndGet()
                     if (loggedIn) {
                         ApplicationManager.getApplication().executeOnPooledThread {
-                            try { doFetchModels(retries - 1) } catch (e: Exception) {
+                            try {
+                                doFetchModels(retries - 1)
+                            } catch (e: Exception) {
                                 log.error("[Models] Failed after login", e)
                             }
                         }
@@ -464,10 +543,11 @@ class CefChatPanel(val project: Project) : Disposable {
     }
 
     private fun handleSwitchSession(sessionId: String) {
-        val handle = sessionStore.resolve(workspaceHash, sessionId) ?: run {
-            log.warn("Session not found: $sessionId")
-            return
-        }
+        val handle =
+            sessionStore.resolve(workspaceHash, sessionId) ?: run {
+                log.warn("Session not found: $sessionId")
+                return
+            }
         sessionHandle = handle
         dispatchSessionList()
         dispatchCurrentSessionInfo()
@@ -490,17 +570,19 @@ class CefChatPanel(val project: Project) : Disposable {
 
     /** Push the full session list (sorted by lastMessageAt desc) to the WebUI. */
     private fun dispatchSessionList() {
-        val sessions = sessionStore.list(workspaceHash)
-            .sortedByDescending { it.lastMessageAt ?: it.createdAt }
-            .map { meta ->
-                mapOf(
-                    "id" to meta.id,
-                    "title" to (meta.title ?: "New Chat"),
-                    "mode" to meta.mode,
-                    "createdAt" to meta.createdAt,
-                    "lastMessageAt" to meta.lastMessageAt,
-                )
-            }
+        val sessions =
+            sessionStore
+                .list(workspaceHash)
+                .sortedByDescending { it.lastMessageAt ?: it.createdAt }
+                .map { meta ->
+                    mapOf(
+                        "id" to meta.id,
+                        "title" to (meta.title ?: "New Chat"),
+                        "mode" to meta.mode,
+                        "createdAt" to meta.createdAt,
+                        "lastMessageAt" to meta.lastMessageAt,
+                    )
+                }
         dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to (sessionHandle?.meta?.id ?: "")))
     }
 
@@ -508,22 +590,28 @@ class CefChatPanel(val project: Project) : Disposable {
     private fun dispatchCurrentSessionInfo() {
         val meta = sessionHandle?.meta
         if (meta != null) {
-            dispatchToWeb("session_switched", mapOf(
-                "id" to meta.id,
-                "title" to (meta.title ?: "New Chat"),
-                "mode" to meta.mode,
-                "createdAt" to meta.createdAt,
-                "lastMessageAt" to meta.lastMessageAt,
-            ))
+            dispatchToWeb(
+                "session_switched",
+                mapOf(
+                    "id" to meta.id,
+                    "title" to (meta.title ?: "New Chat"),
+                    "mode" to meta.mode,
+                    "createdAt" to meta.createdAt,
+                    "lastMessageAt" to meta.lastMessageAt,
+                ),
+            )
         } else {
             // No active session — inform WebUI it's a fresh new chat
-            dispatchToWeb("session_switched", mapOf(
-                "id" to "",
-                "title" to "New Chat",
-                "mode" to "agent",
-                "createdAt" to "",
-                "lastMessageAt" to null as Any?,
-            ))
+            dispatchToWeb(
+                "session_switched",
+                mapOf(
+                    "id" to "",
+                    "title" to "New Chat",
+                    "mode" to "agent",
+                    "createdAt" to "",
+                    "lastMessageAt" to null as Any?,
+                ),
+            )
         }
     }
 
@@ -531,12 +619,13 @@ class CefChatPanel(val project: Project) : Disposable {
     private fun dispatchCurrentSessionMessages() {
         val handle = sessionHandle
         if (handle != null) {
-            val messages = sessionStore.readMessages(handle).map { msg ->
-                mapOf(
-                    "role" to (msg["role"] ?: "unknown"),
-                    "content" to (msg["content"] ?: ""),
-                )
-            }
+            val messages =
+                sessionStore.readMessages(handle).map { msg ->
+                    mapOf(
+                        "role" to (msg["role"] ?: "unknown"),
+                        "content" to (msg["content"] ?: ""),
+                    )
+                }
             dispatchToWeb("session_messages", mapOf("sessionId" to handle.meta.id, "messages" to messages))
         } else {
             dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, String>>()))
@@ -565,11 +654,15 @@ class CefChatPanel(val project: Project) : Disposable {
      * so JCEF can load them via file:// protocol.
      */
     private fun extractWebUiToTemp(): Path {
-        val tempDir = java.nio.file.Files.createTempDirectory("codepilot-webui")
+        val tempDir =
+            java.nio.file.Files
+                .createTempDirectory("codepilot-webui")
         // Register cleanup on JVM exit
-        Runtime.getRuntime().addShutdownHook(Thread {
-            tempDir.toFile().deleteRecursively()
-        })
+        Runtime.getRuntime().addShutdownHook(
+            Thread {
+                tempDir.toFile().deleteRecursively()
+            },
+        )
 
         val classLoader = javaClass.classLoader
         // Walk known resource paths — enumerate from the index.html and assets
@@ -582,14 +675,18 @@ class CefChatPanel(val project: Project) : Disposable {
             val jarPath = jarUrl.path.substringBefore("!")
             val jarFile = java.util.jar.JarFile(java.io.File(java.net.URI(jarPath)))
             jarFile.use { jar ->
-                jar.entries().asSequence()
+                jar
+                    .entries()
+                    .asSequence()
                     .filter { it.name.startsWith("webui/dist/") && !it.isDirectory }
                     .forEach { entry ->
                         val relativePath = entry.name.removePrefix("webui/dist/")
                         val targetFile = tempDir.resolve(relativePath)
-                        java.nio.file.Files.createDirectories(targetFile.parent)
+                        java.nio.file.Files
+                            .createDirectories(targetFile.parent)
                         jar.getInputStream(entry).use { input ->
-                            java.nio.file.Files.copy(input, targetFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                            java.nio.file.Files
+                                .copy(input, targetFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                         }
                     }
             }
@@ -599,17 +696,27 @@ class CefChatPanel(val project: Project) : Disposable {
             baseDir.toFile().walkTopDown().filter { it.isFile }.forEach { file ->
                 val rel = baseDir.relativize(file.toPath())
                 val target = tempDir.resolve(rel)
-                java.nio.file.Files.createDirectories(target.parent)
-                java.nio.file.Files.copy(file.toPath(), target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                java.nio.file.Files
+                    .createDirectories(target.parent)
+                java.nio.file.Files
+                    .copy(file.toPath(), target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             }
         }
         return tempDir
     }
 
-    private fun copyResourceToTemp(classLoader: ClassLoader, resourcePath: String, target: Path) {
+    private fun copyResourceToTemp(
+        classLoader: ClassLoader,
+        resourcePath: String,
+        target: Path,
+    ) {
         val input = classLoader.getResourceAsStream(resourcePath.removePrefix("/")) ?: return
-        java.nio.file.Files.createDirectories(target.parent)
-        input.use { java.nio.file.Files.copy(it, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
+        java.nio.file.Files
+            .createDirectories(target.parent)
+        input.use {
+            java.nio.file.Files
+                .copy(it, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     // ---- Auth handlers for login page ----
@@ -618,7 +725,15 @@ class CefChatPanel(val project: Project) : Disposable {
         val hasToken = settings.accessToken() != null
         val hasDevToken = settings.state.devToken.isNotBlank()
         val authenticated = hasToken || hasDevToken
-        log.info("[Auth] checkAuth: hasToken=$hasToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) settings.state.devToken.take(8) + "..." else "null"}, baseUrl=${settings.state.backendBaseUrl}")
+        log.info(
+            "[Auth] checkAuth: hasToken=$hasToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) {
+                settings.state.devToken.take(
+                    8,
+                ) + "..."
+            } else {
+                "null"
+            }}, baseUrl=${settings.state.backendBaseUrl}",
+        )
         dispatchToWeb("auth_state", mapOf("authenticated" to authenticated))
         // If authenticated, also trigger model fetch
         if (authenticated) {
@@ -631,27 +746,50 @@ class CefChatPanel(val project: Project) : Disposable {
         log.info("[Auth] Discover: baseUrl=$baseUrl")
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val auth = io.codepilot.plugin.auth.AuthService.getInstance()
+                val auth =
+                    io.codepilot.plugin.auth.AuthService
+                        .getInstance()
                 auth.fetchMethods().whenComplete { result, err ->
                     if (err != null) {
                         log.error("[Auth] Discover failed", err)
-                        dispatchToWeb("auth_methods", mapOf(
-                            "oidc" to false, "hmacBridge" to false, "dev" to false, "deviceFlow" to false,
-                        ))
+                        dispatchToWeb(
+                            "auth_methods",
+                            mapOf(
+                                "oidc" to false,
+                                "hmacBridge" to false,
+                                "dev" to false,
+                                "deviceFlow" to false,
+                            ),
+                        )
                     } else {
-                        val m = result.data ?: io.codepilot.plugin.auth.AuthService.Methods()
-                        log.info("[Auth] Discover success: oidc=${m.oidc}, hmacBridge=${m.hmacBridge}, dev=${m.dev}, deviceFlow=${m.deviceFlow}")
-                        dispatchToWeb("auth_methods", mapOf(
-                            "oidc" to m.oidc, "hmacBridge" to m.hmacBridge,
-                            "dev" to m.dev, "deviceFlow" to m.deviceFlow,
-                        ))
+                        val m =
+                            result.data ?: io.codepilot.plugin.auth.AuthService
+                                .Methods()
+                        log.info(
+                            "[Auth] Discover success: oidc=${m.oidc}, hmacBridge=${m.hmacBridge}, dev=${m.dev}, deviceFlow=${m.deviceFlow}",
+                        )
+                        dispatchToWeb(
+                            "auth_methods",
+                            mapOf(
+                                "oidc" to m.oidc,
+                                "hmacBridge" to m.hmacBridge,
+                                "dev" to m.dev,
+                                "deviceFlow" to m.deviceFlow,
+                            ),
+                        )
                     }
                 }
             } catch (e: Exception) {
                 log.error("[Auth] Discover exception", e)
-                dispatchToWeb("auth_methods", mapOf(
-                    "oidc" to false, "hmacBridge" to false, "dev" to false, "deviceFlow" to false,
-                ))
+                dispatchToWeb(
+                    "auth_methods",
+                    mapOf(
+                        "oidc" to false,
+                        "hmacBridge" to false,
+                        "dev" to false,
+                        "deviceFlow" to false,
+                    ),
+                )
             }
         }
     }
@@ -660,7 +798,9 @@ class CefChatPanel(val project: Project) : Disposable {
         log.info("[Auth] Bridge login attempt, token length=${token.length}")
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val auth = io.codepilot.plugin.auth.AuthService.getInstance()
+                val auth =
+                    io.codepilot.plugin.auth.AuthService
+                        .getInstance()
                 auth.login(token).whenComplete { _, err ->
                     if (err != null) {
                         log.error("[Auth] Bridge login failed", err)
@@ -678,11 +818,17 @@ class CefChatPanel(val project: Project) : Disposable {
         }
     }
 
-    private fun handleAuthLoginDev(token: String, userId: String, tenantId: String) {
+    private fun handleAuthLoginDev(
+        token: String,
+        userId: String,
+        tenantId: String,
+    ) {
         log.info("[Auth] Dev login attempt: userId=$userId, tenantId=$tenantId")
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val loginService = io.codepilot.plugin.auth.LoginService.getInstance()
+                val loginService =
+                    io.codepilot.plugin.auth.LoginService
+                        .getInstance()
                 val deviceId = settings.state.deviceId
                 loginService.devLogin(token, userId, tenantId, deviceId).whenComplete { _, err ->
                     if (err != null) {
@@ -705,7 +851,9 @@ class CefChatPanel(val project: Project) : Disposable {
         log.info("[Auth] OIDC login attempt")
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val loginService = io.codepilot.plugin.auth.LoginService.getInstance()
+                val loginService =
+                    io.codepilot.plugin.auth.LoginService
+                        .getInstance()
                 val flow = loginService.startOidc()
                 flow.asFuture().whenComplete { _, err ->
                     if (err != null) {
@@ -737,10 +885,16 @@ class CefChatPanel(val project: Project) : Disposable {
             // @file — list files matching the query
             if (lower.isEmpty() || lower.startsWith("file") || lower.startsWith("f")) {
                 val root = project.basePath ?: return@executeOnPooledThread
-                java.nio.file.Files.walk(java.nio.file.Path.of(root))
-                    .limit(50)
-                    .filter { java.nio.file.Files.isRegularFile(it) && !it.toString().contains("/.git/") }
-                    .forEach { path ->
+                java.nio.file.Files
+                    .walk(
+                        java.nio.file.Path
+                            .of(root),
+                    ).limit(50)
+                    .filter {
+                        java.nio.file.Files
+                            .isRegularFile(it) &&
+                            !it.toString().contains("/.git/")
+                    }.forEach { path ->
                         val rel = path.toString().removePrefix(root).trimStart('/')
                         if (lower.isEmpty() || rel.lowercase().contains(lower.removePrefix("file").removePrefix("f"))) {
                             suggestions.add(mapOf("id" to "file:$rel", "display" to rel, "type" to "file"))
@@ -749,7 +903,9 @@ class CefChatPanel(val project: Project) : Disposable {
             }
             // @terminal — suggest active terminal sessions
             if (lower.isEmpty() || lower.startsWith("terminal") || lower.startsWith("t")) {
-                val sessionManager = io.codepilot.plugin.tools.TerminalSessionManager.getInstance(project)
+                val sessionManager =
+                    io.codepilot.plugin.tools.TerminalSessionManager
+                        .getInstance(project)
                 suggestions.add(mapOf("id" to "terminal:default", "display" to "Terminal output", "type" to "terminal"))
             }
             // @git — suggest git context
@@ -772,30 +928,43 @@ class CefChatPanel(val project: Project) : Disposable {
                 return@executeOnPooledThread
             }
             val (type, ref) = parts[0] to parts[1]
-            val content = when (type) {
-                "file" -> {
-                    try {
-                        val vf = io.codepilot.plugin.tools.PathGuard.resolve(project, ref)
-                        String(vf.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8)
-                    } catch (e: Exception) { "Error reading file: ${e.message}" }
-                }
-                "terminal" -> {
-                    val sessionManager = io.codepilot.plugin.tools.TerminalSessionManager.getInstance(project)
-                    sessionManager.getRecentOutput(ref, 5000) ?: "(no terminal output)"
-                }
-                "git" -> {
-                    try {
-                        val cmd = when (ref) {
-                            "diff" -> listOf("git", "diff", "--cached")
-                            "log" -> listOf("git", "log", "--oneline", "-20")
-                            else -> listOf("git", "status", "--short")
+            val content =
+                when (type) {
+                    "file" -> {
+                        try {
+                            val vf =
+                                io.codepilot.plugin.tools.PathGuard
+                                    .resolve(project, ref)
+                            String(vf.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8)
+                        } catch (e: Exception) {
+                            "Error reading file: ${e.message}"
                         }
-                        val proc = ProcessBuilder(cmd).directory(java.io.File(project.basePath)).start()
-                        proc.inputStream.bufferedReader().readText().take(8000)
-                    } catch (e: Exception) { "Error running git: ${e.message}" }
+                    }
+                    "terminal" -> {
+                        val sessionManager =
+                            io.codepilot.plugin.tools.TerminalSessionManager
+                                .getInstance(project)
+                        sessionManager.getRecentOutput(ref, 5000) ?: "(no terminal output)"
+                    }
+                    "git" -> {
+                        try {
+                            val cmd =
+                                when (ref) {
+                                    "diff" -> listOf("git", "diff", "--cached")
+                                    "log" -> listOf("git", "log", "--oneline", "-20")
+                                    else -> listOf("git", "status", "--short")
+                                }
+                            val proc = ProcessBuilder(cmd).directory(java.io.File(project.basePath)).start()
+                            proc.inputStream
+                                .bufferedReader()
+                                .readText()
+                                .take(8000)
+                        } catch (e: Exception) {
+                            "Error running git: ${e.message}"
+                        }
+                    }
+                    else -> "Unknown reference type: $type"
                 }
-                else -> "Unknown reference type: $type"
-            }
             dispatchToWeb("at_resolved", mapOf("id" to id, "content" to content))
         }
     }
@@ -804,7 +973,9 @@ class CefChatPanel(val project: Project) : Disposable {
      * ★ apply_patches: Apply all patches from the SSE stream (full-file diff approval).
      */
     private fun handleApplyPatches(payload: com.fasterxml.jackson.databind.JsonNode) {
-        val patchApplier = io.codepilot.plugin.tools.PatchApplier(project)
+        val patchApplier =
+            io.codepilot.plugin.tools
+                .PatchApplier(project)
         val patches = payload.path("patches")
         if (patches.isArray && patches.size() > 0) {
             patchApplier.applyAll(patches)
@@ -821,13 +992,17 @@ class CefChatPanel(val project: Project) : Disposable {
      */
     private fun handleApplySelectedHunks(payload: com.fasterxml.jackson.databind.JsonNode) {
         val patchText = payload.path("patch").asText("")
-        val selectedHunks = payload.path("selectedHunks")
-            .takeIf { it.isArray }
-            ?.map { it.asInt() }
-            ?.toSet()
-            ?: emptySet()
+        val selectedHunks =
+            payload
+                .path("selectedHunks")
+                .takeIf { it.isArray }
+                ?.map { it.asInt() }
+                ?.toSet()
+                ?: emptySet()
         if (patchText.isNotBlank() && selectedHunks.isNotEmpty()) {
-            val patchApplier = io.codepilot.plugin.tools.PatchApplier(project)
+            val patchApplier =
+                io.codepilot.plugin.tools
+                    .PatchApplier(project)
             patchApplier.applySelectedHunks(patchText, selectedHunks)
         }
     }
@@ -846,9 +1021,12 @@ class CefChatPanel(val project: Project) : Disposable {
         when (op) {
             "skip" -> {
                 // Mark step as skipped via plan_delta dispatch
-                dispatchToWeb("plan_delta", mapOf(
-                    "ops" to listOf(mapOf("op" to "skip", "stepId" to stepId))
-                ))
+                dispatchToWeb(
+                    "plan_delta",
+                    mapOf(
+                        "ops" to listOf(mapOf("op" to "skip", "stepId" to stepId)),
+                    ),
+                )
                 sessionStore.savePlanDelta(handle, mapOf("ops" to listOf(mapOf("op" to "skip", "stepId" to stepId))))
             }
             "edit" -> {
@@ -864,13 +1042,14 @@ class CefChatPanel(val project: Project) : Disposable {
             "add" -> {
                 val title = payload.path("title").asText("New step")
                 val intent = payload.path("intent").asText("")
-                val newStep = mapOf(
-                    "op" to "add",
-                    "id" to stepId,
-                    "title" to title,
-                    "intent" to intent,
-                    "status" to "pending",
-                )
+                val newStep =
+                    mapOf(
+                        "op" to "add",
+                        "id" to stepId,
+                        "title" to title,
+                        "intent" to intent,
+                        "status" to "pending",
+                    )
                 dispatchToWeb("plan_delta", mapOf("ops" to listOf(newStep)))
                 sessionStore.savePlanDelta(handle, mapOf("ops" to listOf(newStep)))
             }
@@ -886,54 +1065,91 @@ class CefChatPanel(val project: Project) : Disposable {
         log.info("[Plan] continue_run: resuming agent loop for session $sid")
         // Resume the conversation with intent=continue
         val handle = sessionHandle ?: return
-        val graphStateStore = io.codepilot.plugin.tools.GraphStateStore(project, handle.dir)
+        val graphStateStore =
+            io.codepilot.plugin.tools
+                .GraphStateStore(project, handle.dir)
         graphStateStore.loadLatest()
         if (graphStateStore.isAwaiting()) {
-            val payload = mapOf(
-                "sessionId" to sid,
-                "mode" to (handle.meta.mode ?: "agent"),
-                "input" to "",
-                "intent" to "continue",
-                "graphState" to graphStateStore.snapshot(),
-            )
+            val payload =
+                mapOf(
+                    "sessionId" to sid,
+                    "mode" to (handle.meta.mode ?: "agent"),
+                    "input" to "",
+                    "intent" to "continue",
+                    "graphState" to graphStateStore.snapshot(),
+                )
             ApplicationManager.getApplication().executeOnPooledThread {
-                client.run(payload, object : ConversationClient.Listener {
-                    override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
-                    override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
-                    override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
-                        val data = mapper.treeToValue(p, Map::class.java)
-                        dispatchToWeb("plan", data)
-                        sessionStore.savePlan(handle, data)
-                    }
-                    override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
-                    override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
-                        val data = mapper.treeToValue(p, Map::class.java)
-                        dispatchToWeb("task_ledger", data)
-                        sessionStore.saveLedger(handle, data)
-                    }
-                    override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
-                    override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
-                    override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyGraphPlan(p)
-                    override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyTransition(p)
-                    override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
-                    override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyInfoResult(p)
-                    override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyVerify(p)
-                    override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
-                    override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyPhaseDone(p)
-                    override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
-                    override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
-                    override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
-                    override fun onError(code: Int, message: String) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
-                    override fun onDone(reason: String, p: com.fasterxml.jackson.databind.JsonNode) {
-                        dispatchToWeb("done", mapOf("reason" to reason))
-                        if (reason == "awaiting_user_input" || reason == "phase_done") {
-                            graphStateStore.applyAwaiting(p)
+                client.run(
+                    payload,
+                    object : ConversationClient.Listener {
+                        override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
+
+                        override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
+                            val data = mapper.treeToValue(p, Map::class.java)
+                            dispatchToWeb("plan", data)
+                            sessionStore.savePlan(handle, data)
                         }
-                        sessionStore.touchLastMessage(handle)
-                        dispatchSessionList()
-                    }
-                    override fun onClosed() {}
-                })
+
+                        override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
+                            val data = mapper.treeToValue(p, Map::class.java)
+                            dispatchToWeb("task_ledger", data)
+                            sessionStore.saveLedger(handle, data)
+                        }
+
+                        override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyGraphPlan(p)
+
+                        override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyTransition(p)
+
+                        override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                        override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyInfoResult(p)
+
+                        override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyVerify(p)
+
+                        override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                        override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyPhaseDone(p)
+
+                        override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                        override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) =
+                            dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
+
+                        override fun onError(
+                            code: Int,
+                            message: String,
+                        ) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+
+                        override fun onDone(
+                            reason: String,
+                            p: com.fasterxml.jackson.databind.JsonNode,
+                        ) {
+                            dispatchToWeb("done", mapOf("reason" to reason))
+                            if (reason == "awaiting_user_input" || reason == "phase_done") {
+                                graphStateStore.applyAwaiting(p)
+                            }
+                            sessionStore.touchLastMessage(handle)
+                            dispatchSessionList()
+                        }
+
+                        override fun onClosed() {}
+                    },
+                )
             }
         } else {
             log.warn("[Plan] continue_run: no awaiting graph state, nothing to resume")
@@ -947,47 +1163,82 @@ class CefChatPanel(val project: Project) : Disposable {
         val sid = sessionHandle?.meta?.id ?: return
         log.info("[Plan] replan: triggering re-plan for session $sid")
         val handle = sessionHandle ?: return
-        val payload = mapOf(
-            "sessionId" to sid,
-            "mode" to (handle.meta.mode ?: "agent"),
-            "input" to "replan",
-            "intent" to "replan",
-        )
+        val payload =
+            mapOf(
+                "sessionId" to sid,
+                "mode" to (handle.meta.mode ?: "agent"),
+                "input" to "replan",
+                "intent" to "replan",
+            )
         ApplicationManager.getApplication().executeOnPooledThread {
-            client.run(payload, object : ConversationClient.Listener {
-                override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
-                override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
-                override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(p, Map::class.java)
-                    dispatchToWeb("plan", data)
-                    sessionStore.savePlan(handle, data)
-                }
-                override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
-                override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(p, Map::class.java)
-                    dispatchToWeb("task_ledger", data)
-                    sessionStore.saveLedger(handle, data)
-                }
-                override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
-                override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
-                override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
-                override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
-                override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
-                override fun onError(code: Int, message: String) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
-                override fun onDone(reason: String, p: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("done", mapOf("reason" to reason))
-                    sessionStore.touchLastMessage(handle)
-                    dispatchSessionList()
-                }
-                override fun onClosed() {}
-            })
+            client.run(
+                payload,
+                object : ConversationClient.Listener {
+                    override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
+
+                    override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(p, Map::class.java)
+                        dispatchToWeb("plan", data)
+                        sessionStore.savePlan(handle, data)
+                    }
+
+                    override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(p, Map::class.java)
+                        dispatchToWeb("task_ledger", data)
+                        sessionStore.saveLedger(handle, data)
+                    }
+
+                    override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
+
+                    override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
+
+                    override fun onError(
+                        code: Int,
+                        message: String,
+                    ) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+
+                    override fun onDone(
+                        reason: String,
+                        p: com.fasterxml.jackson.databind.JsonNode,
+                    ) {
+                        dispatchToWeb("done", mapOf("reason" to reason))
+                        sessionStore.touchLastMessage(handle)
+                        dispatchSessionList()
+                    }
+
+                    override fun onClosed() {}
+                },
+            )
         }
     }
 }

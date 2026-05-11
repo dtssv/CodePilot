@@ -16,7 +16,6 @@ import java.util.concurrent.atomic.AtomicReference
  */
 @Service(Service.Level.APP)
 class RuntimeResourceRegistry {
-
     private val log = logger<RuntimeResourceRegistry>()
     private val currentDir = AtomicReference<Path>()
     private val previousDir = AtomicReference<Path>()

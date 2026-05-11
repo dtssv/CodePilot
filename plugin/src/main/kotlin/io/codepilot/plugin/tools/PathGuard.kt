@@ -10,15 +10,20 @@ import java.nio.file.Path
  * via `..`, absolute paths, or sensitive directories (e.g. `.git/objects`, `node_modules`).
  */
 object PathGuard {
-
     private val DENY_DIRS = listOf(".git/objects", ".idea", "node_modules", "target", "build")
 
-    fun resolve(project: Project, rawPath: String): VirtualFile {
+    fun resolve(
+        project: Project,
+        rawPath: String,
+    ): VirtualFile {
         val root = projectRoot(project)
         val normalized = Path.of(rawPath).normalize()
         val candidate =
-            if (normalized.isAbsolute) normalized
-            else Path.of(root.path).resolve(normalized).normalize()
+            if (normalized.isAbsolute) {
+                normalized
+            } else {
+                Path.of(root.path).resolve(normalized).normalize()
+            }
         if (!candidate.startsWith(Path.of(root.path))) {
             throw ToolViolation("path escapes workspace: $rawPath")
         }
@@ -32,12 +37,18 @@ object PathGuard {
             ?: throw ToolViolation("file does not exist: $rawPath")
     }
 
-    fun resolveOrCreate(project: Project, rawPath: String): Path {
+    fun resolveOrCreate(
+        project: Project,
+        rawPath: String,
+    ): Path {
         val root = projectRoot(project)
         val normalized = Path.of(rawPath).normalize()
         val target =
-            if (normalized.isAbsolute) normalized
-            else Path.of(root.path).resolve(normalized).normalize()
+            if (normalized.isAbsolute) {
+                normalized
+            } else {
+                Path.of(root.path).resolve(normalized).normalize()
+            }
         if (!target.startsWith(Path.of(root.path))) {
             throw ToolViolation("path escapes workspace: $rawPath")
         }
@@ -51,4 +62,6 @@ object PathGuard {
     }
 }
 
-class ToolViolation(message: String) : RuntimeException(message)
+class ToolViolation(
+    message: String,
+) : RuntimeException(message)

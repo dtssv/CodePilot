@@ -13,10 +13,12 @@ import io.codepilot.plugin.mcp.McpPanel
 import java.nio.file.Path
 
 class CodePilotToolWindowFactory : ToolWindowFactory {
-
     private val log = logger<CodePilotToolWindowFactory>()
 
-    override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+    override fun createToolWindowContent(
+        project: Project,
+        toolWindow: ToolWindow,
+    ) {
         val factory = ContentFactory.getInstance()
 
         // Chat tab: use JCEF only if WebUI is available, otherwise always use Swing panel
@@ -49,7 +51,11 @@ class CodePilotToolWindowFactory : ToolWindowFactory {
         toolWindow.contentManager.addContent(factory.createContent(market.component, "Marketplace", false))
     }
 
-    private fun addSwingChatPanel(factory: ContentFactory, toolWindow: ToolWindow, project: Project) {
+    private fun addSwingChatPanel(
+        factory: ContentFactory,
+        toolWindow: ToolWindow,
+        project: Project,
+    ) {
         val chat = CodePilotChatPanel(project)
         toolWindow.contentManager.addContent(factory.createContent(chat.component, "Chat", false))
     }

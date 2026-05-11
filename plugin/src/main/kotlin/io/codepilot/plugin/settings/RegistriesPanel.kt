@@ -1,7 +1,6 @@
 package io.codepilot.plugin.settings
 
 import com.intellij.openapi.ui.DialogWrapper
-import com.intellij.openapi.ui.Messages
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.table.JBTable
@@ -17,7 +16,6 @@ import javax.swing.table.DefaultTableModel
  * Allows users to add/edit/delete registry URLs and their public keys.
  */
 class RegistriesPanel {
-
     private val columnNames = arrayOf("Name", "URL", "Public Key (SHA256)")
     private val tableModel = DefaultTableModel(columnNames, 0)
     private val table = JBTable(tableModel)
@@ -28,16 +26,19 @@ class RegistriesPanel {
         table.setShowGrid(true)
         table.preferredScrollableViewportSize = Dimension(600, 200)
 
-        val decorator = ToolbarDecorator.createDecorator(table)
-            .setAddAction { addRegistry() }
-            .setEditAction { editRegistry() }
-            .setRemoveAction { removeRegistry() }
-            .createPanel()
+        val decorator =
+            ToolbarDecorator
+                .createDecorator(table)
+                .setAddAction { addRegistry() }
+                .setEditAction { editRegistry() }
+                .setRemoveAction { removeRegistry() }
+                .createPanel()
 
-        component = JPanel(BorderLayout()).apply {
-            add(JLabel("Marketplace Registries:"), BorderLayout.NORTH)
-            add(decorator, BorderLayout.CENTER)
-        }
+        component =
+            JPanel(BorderLayout()).apply {
+                add(JLabel("Marketplace Registries:"), BorderLayout.NORTH)
+                add(decorator, BorderLayout.CENTER)
+            }
 
         loadFromSettings()
     }
@@ -67,11 +68,13 @@ class RegistriesPanel {
     private fun getCurrentRegistries(): List<RegistryEntry> {
         val result = mutableListOf<RegistryEntry>()
         for (i in 0 until tableModel.rowCount) {
-            result.add(RegistryEntry(
-                name = tableModel.getValueAt(i, 0) as String,
-                url = tableModel.getValueAt(i, 1) as String,
-                publicKeyHash = tableModel.getValueAt(i, 2) as String,
-            ))
+            result.add(
+                RegistryEntry(
+                    name = tableModel.getValueAt(i, 0) as String,
+                    url = tableModel.getValueAt(i, 1) as String,
+                    publicKeyHash = tableModel.getValueAt(i, 2) as String,
+                ),
+            )
         }
         return result
     }
@@ -87,11 +90,12 @@ class RegistriesPanel {
     private fun editRegistry() {
         val row = table.selectedRow
         if (row < 0) return
-        val existing = RegistryEntry(
-            name = tableModel.getValueAt(row, 0) as String,
-            url = tableModel.getValueAt(row, 1) as String,
-            publicKeyHash = tableModel.getValueAt(row, 2) as String,
-        )
+        val existing =
+            RegistryEntry(
+                name = tableModel.getValueAt(row, 0) as String,
+                url = tableModel.getValueAt(row, 1) as String,
+                publicKeyHash = tableModel.getValueAt(row, 2) as String,
+            )
         val dialog = RegistryEditDialog(existing)
         if (dialog.showAndGet()) {
             val entry = dialog.getEntry()
@@ -108,10 +112,15 @@ class RegistriesPanel {
     }
 }
 
-data class RegistryEntry(val name: String, val url: String, val publicKeyHash: String)
+data class RegistryEntry(
+    val name: String,
+    val url: String,
+    val publicKeyHash: String,
+)
 
-private class RegistryEditDialog(private val existing: RegistryEntry?) : DialogWrapper(true) {
-
+private class RegistryEditDialog(
+    private val existing: RegistryEntry?,
+) : DialogWrapper(true) {
     private val nameField = JBTextField(existing?.name ?: "")
     private val urlField = JBTextField(existing?.url ?: "")
     private val keyField = JBTextField(existing?.publicKeyHash ?: "")
@@ -122,22 +131,24 @@ private class RegistryEditDialog(private val existing: RegistryEntry?) : DialogW
     }
 
     override fun createCenterPanel(): JComponent {
-        val panel = JPanel().apply {
-            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS)
-            add(JLabel("Name:"))
-            add(nameField)
-            add(JLabel("URL:"))
-            add(urlField)
-            add(JLabel("Public Key (Base64 or SHA256 fingerprint):"))
-            add(keyField)
-        }
+        val panel =
+            JPanel().apply {
+                layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS)
+                add(JLabel("Name:"))
+                add(nameField)
+                add(JLabel("URL:"))
+                add(urlField)
+                add(JLabel("Public Key (Base64 or SHA256 fingerprint):"))
+                add(keyField)
+            }
         panel.preferredSize = Dimension(450, 180)
         return panel
     }
 
-    fun getEntry() = RegistryEntry(
-        name = nameField.text.trim(),
-        url = urlField.text.trim(),
-        publicKeyHash = keyField.text.trim(),
-    )
+    fun getEntry() =
+        RegistryEntry(
+            name = nameField.text.trim(),
+            url = urlField.text.trim(),
+            publicKeyHash = keyField.text.trim(),
+        )
 }

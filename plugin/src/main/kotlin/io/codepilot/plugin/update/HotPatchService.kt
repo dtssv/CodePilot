@@ -2,17 +2,13 @@ package io.codepilot.plugin.update
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
-import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
 import okhttp3.Request
 import java.io.InputStream
@@ -35,20 +31,26 @@ import java.util.zip.ZipInputStream
  */
 @Service(Service.Level.APP)
 class HotPatchService {
-
     private val log = logger<HotPatchService>()
     private val mapper = ObjectMapper()
 
     /** Resources that can be hot-patched without restart. */
-    private val hotPatchWhitelist = setOf(
-        "webui/", "prompts/", "tool-schemas/", "skills/builtin/"
-    )
+    private val hotPatchWhitelist =
+        setOf(
+            "webui/",
+            "prompts/",
+            "tool-schemas/",
+            "skills/builtin/",
+        )
 
     /**
      * Apply a hot-patch: download, verify, extract whitelisted resources, atomic switch.
      * Returns true if hot-patch was applied successfully.
      */
-    fun applyHotPatch(manifest: JsonNode, project: Project?): Boolean {
+    fun applyHotPatch(
+        manifest: JsonNode,
+        project: Project?,
+    ): Boolean {
         val downloadUrl = manifest.path("hotPatchUrl").asText(null) ?: return false
         val expectedSha256 = manifest.path("sha256").asText(null) ?: return false
         val signatureB64 = manifest.path("signature").asText(null) ?: return false
@@ -91,7 +93,10 @@ class HotPatchService {
      * Full update: write zip to pluginsTemp/ for install on next restart.
      * Notifies user to restart.
      */
-    fun scheduleFullUpdate(manifest: JsonNode, project: Project?): Boolean {
+    fun scheduleFullUpdate(
+        manifest: JsonNode,
+        project: Project?,
+    ): Boolean {
         val downloadUrl = manifest.path("fullZipUrl").asText(null) ?: return false
         val expectedSha256 = manifest.path("sha256").asText(null) ?: return false
         val signatureB64 = manifest.path("signature").asText(null) ?: return false
@@ -129,7 +134,12 @@ class HotPatchService {
 
     private fun downloadZip(url: String): ByteArray? {
         val http = HttpClientService.getInstance()
-        val request = Request.Builder().url(url).get().build()
+        val request =
+            Request
+                .Builder()
+                .url(url)
+                .get()
+                .build()
         val response = http.client().newCall(request).execute()
         return response.use {
             if (!it.isSuccessful) {
@@ -147,21 +157,31 @@ class HotPatchService {
         return hash.joinToString("") { "%02x".format(it) }
     }
 
-    private fun verifySignature(data: ByteArray, signatureB64: String): Boolean {
-        val certStream: InputStream = javaClass.getResourceAsStream("/codepilot-signing.crt")
-            ?: run {
-                log.warn("Signing certificate not found in resources")
-                return false
-            }
+    private fun verifySignature(
+        data: ByteArray,
+        signatureB64: String,
+    ): Boolean {
+        val certStream: InputStream =
+            javaClass.getResourceAsStream("/codepilot-signing.crt")
+                ?: run {
+                    log.warn("Signing certificate not found in resources")
+                    return false
+                }
         val cert = CertificateFactory.getInstance("X.509").generateCertificate(certStream) as X509Certificate
         val sig = Signature.getInstance("SHA256withRSA")
         sig.initVerify(cert.publicKey)
         sig.update(data)
-        val signatureBytes = java.util.Base64.getDecoder().decode(signatureB64)
+        val signatureBytes =
+            java.util.Base64
+                .getDecoder()
+                .decode(signatureB64)
         return sig.verify(signatureBytes)
     }
 
-    private fun extractWhitelisted(zipBytes: ByteArray, targetDir: Path) {
+    private fun extractWhitelisted(
+        zipBytes: ByteArray,
+        targetDir: Path,
+    ) {
         ZipInputStream(zipBytes.inputStream()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
@@ -178,22 +198,30 @@ class HotPatchService {
         }
     }
 
-    private fun notifySuccess(project: Project?, version: String) {
+    private fun notifySuccess(
+        project: Project?,
+        version: String,
+    ) {
         val group = NotificationGroupManager.getInstance().getNotificationGroup("CodePilot")
-        group.createNotification(
-            "CodePilot hot-patch applied",
-            "Updated to $version without restart.",
-            NotificationType.INFORMATION,
-        ).notify(project)
+        group
+            .createNotification(
+                "CodePilot hot-patch applied",
+                "Updated to $version without restart.",
+                NotificationType.INFORMATION,
+            ).notify(project)
     }
 
-    private fun notifyRestart(project: Project?, version: String) {
+    private fun notifyRestart(
+        project: Project?,
+        version: String,
+    ) {
         val group = NotificationGroupManager.getInstance().getNotificationGroup("CodePilot")
-        group.createNotification(
-            "CodePilot $version ready to install",
-            "Please restart your IDE to complete the update.",
-            NotificationType.WARNING,
-        ).notify(project)
+        group
+            .createNotification(
+                "CodePilot $version ready to install",
+                "Please restart your IDE to complete the update.",
+                NotificationType.WARNING,
+            ).notify(project)
     }
 
     companion object {

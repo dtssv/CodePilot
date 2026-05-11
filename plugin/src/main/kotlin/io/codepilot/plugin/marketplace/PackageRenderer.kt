@@ -11,7 +11,6 @@ import javax.swing.ListCellRenderer
 
 /** One-line package row with name + author + description. */
 class PackageRenderer : ListCellRenderer<MarketplaceClient.Package> {
-
     override fun getListCellRendererComponent(
         list: JList<out MarketplaceClient.Package>,
         value: MarketplaceClient.Package,
@@ -23,10 +22,11 @@ class PackageRenderer : ListCellRenderer<MarketplaceClient.Package> {
         panel.layout = BoxLayout(panel, BoxLayout.Y_AXIS)
         panel.isOpaque = true
         panel.background = if (isSelected) list.selectionBackground else list.background
-        panel.border = BorderFactory.createCompoundBorder(
-            BorderFactory.createMatteBorder(0, 0, 1, 0, JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground()),
-            JBUI.Borders.empty(4, 6),
-        )
+        panel.border =
+            BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground()),
+                JBUI.Borders.empty(4, 6),
+            )
         val title = JLabel("${value.name}  (${value.slug} ${value.latestVersion ?: ""})")
         val subtitle = JLabel("by ${value.author ?: "—"} · ${value.type}")
         val desc = JLabel(value.description ?: "")
@@ -39,7 +39,6 @@ class PackageRenderer : ListCellRenderer<MarketplaceClient.Package> {
 
 /** Installed row: shows id@version + scope. */
 class InstalledRenderer : ListCellRenderer<LocalMarketplaceStore.ActiveSkill> {
-
     override fun getListCellRendererComponent(
         list: JList<out LocalMarketplaceStore.ActiveSkill>,
         value: LocalMarketplaceStore.ActiveSkill,
@@ -47,8 +46,11 @@ class InstalledRenderer : ListCellRenderer<LocalMarketplaceStore.ActiveSkill> {
         isSelected: Boolean,
         cellHasFocus: Boolean,
     ): Component {
-        val label = JLabel("${value.entry.id}@${value.entry.version}  [${value.scope}]  " +
-            if (value.entry.disabled) "(disabled)" else "")
+        val label =
+            JLabel(
+                "${value.entry.id}@${value.entry.version}  [${value.scope}]  " +
+                    if (value.entry.disabled) "(disabled)" else "",
+            )
         label.isOpaque = true
         label.background = if (isSelected) list.selectionBackground else list.background
         label.foreground = if (isSelected) list.selectionForeground else list.foreground

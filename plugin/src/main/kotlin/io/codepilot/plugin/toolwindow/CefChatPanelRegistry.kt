@@ -11,7 +11,6 @@ import com.intellij.openapi.project.Project
  */
 @Service(Service.Level.PROJECT)
 class CefChatPanelRegistry {
-
     @Volatile
     private var panel: CefChatPanel? = null
 
@@ -23,7 +22,6 @@ class CefChatPanelRegistry {
 
     companion object {
         @JvmStatic
-        fun getInstance(project: Project): CefChatPanel? =
-            project.service<CefChatPanelRegistry>().get()
+        fun getInstance(project: Project): CefChatPanel? = project.service<CefChatPanelRegistry>().get()
     }
 }

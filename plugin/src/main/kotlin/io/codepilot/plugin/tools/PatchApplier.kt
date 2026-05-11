@@ -9,7 +9,6 @@ import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.openapi.vfs.VirtualFile
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -20,8 +19,9 @@ import java.nio.file.Path
  * shown in the IntelliJ diff viewer for explicit user approval before being written via
  * [WriteCommandAction], unless the edit is low-risk and `auto-apply` is enabled in settings.
  */
-class PatchApplier(private val project: Project) {
-
+class PatchApplier(
+    private val project: Project,
+) {
     private val auto = CodePilotSettings.getInstance().state.autoApplyLowRiskPatches
 
     fun applyAll(patches: JsonNode) {
@@ -30,8 +30,11 @@ class PatchApplier(private val project: Project) {
             patches.forEach { p ->
                 runCatching { p.path("patches") }
                     .onSuccess { edits ->
-                        if (edits.isArray) edits.forEach { applyEdit(it) }
-                        else applyEdit(p)
+                        if (edits.isArray) {
+                            edits.forEach { applyEdit(it) }
+                        } else {
+                            applyEdit(p)
+                        }
                     }
             }
         }
@@ -41,41 +44,56 @@ class PatchApplier(private val project: Project) {
      * Dispatch a named tool operation (fs.write, fs.replace, fs.delete, fs.move) through the
      * PatchApplier with DiffManager approval. Called from ToolDispatcher for mutating tools.
      */
-    fun apply(toolName: String, args: JsonNode) {
+    fun apply(
+        toolName: String,
+        args: JsonNode,
+    ) {
         ApplicationManager.getApplication().invokeLater {
             when (toolName) {
                 "fs.write" -> {
                     val rel = args.path("path").asText()
                     val content = args.path("content").asText("")
-                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
-                        .put("op", "write")
-                        .put("path", rel)
-                        .put("newContent", content)
+                    val edit =
+                        com.fasterxml.jackson.databind
+                            .ObjectMapper()
+                            .createObjectNode()
+                            .put("op", "write")
+                            .put("path", rel)
+                            .put("newContent", content)
                     applyEdit(edit)
                 }
                 "fs.replace" -> {
-                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
-                        .put("op", "replace")
-                        .put("path", args.path("path").asText())
-                        .put("search", args.path("search").asText())
-                        .put("replace", args.path("replace").asText(""))
-                        .put("regex", args.path("regex").asBoolean(false))
-                        .put("ignoreCase", args.path("ignoreCase").asBoolean(false))
+                    val edit =
+                        com.fasterxml.jackson.databind
+                            .ObjectMapper()
+                            .createObjectNode()
+                            .put("op", "replace")
+                            .put("path", args.path("path").asText())
+                            .put("search", args.path("search").asText())
+                            .put("replace", args.path("replace").asText(""))
+                            .put("regex", args.path("regex").asBoolean(false))
+                            .put("ignoreCase", args.path("ignoreCase").asBoolean(false))
                     if (args.has("expectMatches")) edit.put("expectMatches", args.path("expectMatches").asInt())
                     applyEdit(edit)
                 }
                 "fs.delete" -> {
                     val rel = args.path("path").asText()
-                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
-                        .put("op", "delete")
-                        .put("path", rel)
+                    val edit =
+                        com.fasterxml.jackson.databind
+                            .ObjectMapper()
+                            .createObjectNode()
+                            .put("op", "delete")
+                            .put("path", rel)
                     applyEdit(edit)
                 }
                 "fs.move" -> {
-                    val edit = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
-                        .put("op", "move")
-                        .put("path", args.path("from").asText())
-                        .put("to", args.path("to").asText())
+                    val edit =
+                        com.fasterxml.jackson.databind
+                            .ObjectMapper()
+                            .createObjectNode()
+                            .put("op", "move")
+                            .put("path", args.path("from").asText())
+                            .put("to", args.path("to").asText())
                     applyEdit(edit)
                 }
                 else -> throw ToolViolation("PatchApplier: unsupported tool $toolName")
@@ -116,7 +134,10 @@ class PatchApplier(private val project: Project) {
         }
     }
 
-    private fun applyHunkToFile(rel: String, patchContent: String) {
+    private fun applyHunkToFile(
+        rel: String,
+        patchContent: String,
+    ) {
         try {
             val vf = PathGuard.resolve(project, rel)
             val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
@@ -131,7 +152,10 @@ class PatchApplier(private val project: Project) {
         }
     }
 
-    private fun applyUnifiedHunks(original: String, hunkText: String): String {
+    private fun applyUnifiedHunks(
+        original: String,
+        hunkText: String,
+    ): String {
         // Simple hunk applier: process +/- lines relative to original
         val origLines = original.lines().toMutableList()
         val hunkLines = hunkText.lines()
@@ -151,7 +175,10 @@ class PatchApplier(private val project: Project) {
                 }
                 line.startsWith("-") -> origIdx++ // skip removed line
                 line.startsWith("+") -> result.add(line.substring(1)) // add new line
-                line.startsWith(" ") -> { result.add(origLines.getOrElse(origIdx) { line.substring(1) }); origIdx++ }
+                line.startsWith(" ") -> {
+                    result.add(origLines.getOrElse(origIdx) { line.substring(1) })
+                    origIdx++
+                }
             }
         }
         // Copy remaining lines
@@ -189,7 +216,10 @@ class PatchApplier(private val project: Project) {
      * @param patchText   Full unified diff text
      * @param selectedHunks  0-based indices of hunks to apply (within each file)
      */
-    fun applySelectedHunks(patchText: String, selectedHunks: Set<Int>) {
+    fun applySelectedHunks(
+        patchText: String,
+        selectedHunks: Set<Int>,
+    ) {
         if (patchText.isBlank() || selectedHunks.isEmpty()) return
         ApplicationManager.getApplication().invokeLater {
             val lines = patchText.lines()
@@ -226,7 +256,10 @@ class PatchApplier(private val project: Project) {
 
     // ----- per-op implementations (each performs guard + diff preview when applicable) -----
 
-    private fun createFile(rel: String, edit: JsonNode) {
+    private fun createFile(
+        rel: String,
+        edit: JsonNode,
+    ) {
         val target = PathGuard.resolveOrCreate(project, rel)
         if (Files.exists(target) && !edit.path("overwrite").asBoolean(false)) {
             throw ToolViolation("create rejected; file already exists: $rel")
@@ -240,7 +273,10 @@ class PatchApplier(private val project: Project) {
         }
     }
 
-    private fun writeFile(rel: String, edit: JsonNode) {
+    private fun writeFile(
+        rel: String,
+        edit: JsonNode,
+    ) {
         val vf = PathGuard.resolve(project, rel)
         val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
         val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
@@ -250,7 +286,10 @@ class PatchApplier(private val project: Project) {
         }
     }
 
-    private fun replaceFile(rel: String, edit: JsonNode) {
+    private fun replaceFile(
+        rel: String,
+        edit: JsonNode,
+    ) {
         val vf = PathGuard.resolve(project, rel)
         val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         val regex = edit.path("regex").asBoolean(false)
@@ -262,7 +301,7 @@ class PatchApplier(private val project: Project) {
 
         val result = applyReplace(original, search, replace, regex, ignoreCase)
         if (expectMatches >= 0 && result.matches != expectMatches) {
-            throw ToolViolation("expectMatches=${expectMatches} but found ${result.matches}")
+            throw ToolViolation("expectMatches=$expectMatches but found ${result.matches}")
         }
         if (result.text == original) {
             Messages.showInfoMessage(project, "No occurrences of search pattern in $rel", "CodePilot")
@@ -276,31 +315,36 @@ class PatchApplier(private val project: Project) {
 
     private fun deleteFile(rel: String) {
         val vf = PathGuard.resolve(project, rel)
-        val ok = Messages.showOkCancelDialog(
-            project,
-            "Delete $rel? This moves the file to system Trash.",
-            "CodePilot: Delete",
-            "Delete",
-            "Cancel",
-            Messages.getWarningIcon(),
-        )
+        val ok =
+            Messages.showOkCancelDialog(
+                project,
+                "Delete $rel? This moves the file to system Trash.",
+                "CodePilot: Delete",
+                "Delete",
+                "Cancel",
+                Messages.getWarningIcon(),
+            )
         if (ok != Messages.OK) return
         WriteCommandAction.runWriteCommandAction(project) { vf.delete(this) }
     }
 
-    private fun moveFile(rel: String, edit: JsonNode) {
+    private fun moveFile(
+        rel: String,
+        edit: JsonNode,
+    ) {
         val src = PathGuard.resolve(project, rel)
         val to = edit.path("to").asText()
         if (to.isBlank()) throw ToolViolation("missing 'to' for move")
         val target = PathGuard.resolveOrCreate(project, to)
-        val confirm = Messages.showOkCancelDialog(
-            project,
-            "Move $rel → $to ?",
-            "CodePilot: Move",
-            "Move",
-            "Cancel",
-            Messages.getQuestionIcon(),
-        )
+        val confirm =
+            Messages.showOkCancelDialog(
+                project,
+                "Move $rel → $to ?",
+                "CodePilot: Move",
+                "Move",
+                "Cancel",
+                Messages.getQuestionIcon(),
+            )
         if (confirm != Messages.OK) return
         WriteCommandAction.runWriteCommandAction(project) {
             Files.createDirectories(target.parent)
@@ -322,7 +366,12 @@ class PatchApplier(private val project: Project) {
         return showDiff(rel, before, after, title)
     }
 
-    private fun showDiff(rel: String, before: String, after: String, title: String): Boolean {
+    private fun showDiff(
+        rel: String,
+        before: String,
+        after: String,
+        title: String,
+    ): Boolean {
         val factory = DiffContentFactory.getInstance()
         val left = factory.create(before)
         val right = factory.create(after)
@@ -330,14 +379,15 @@ class PatchApplier(private val project: Project) {
         DiffManager.getInstance().showDiff(project, request)
         // showDiff is non-blocking; we ask the user explicitly with a follow-up dialog so that
         // the apply action remains under their control.
-        val confirm = Messages.showOkCancelDialog(
-            project,
-            "Apply CodePilot's change to $rel?",
-            "CodePilot",
-            "Apply",
-            "Reject",
-            Messages.getQuestionIcon(),
-        )
+        val confirm =
+            Messages.showOkCancelDialog(
+                project,
+                "Apply CodePilot's change to $rel?",
+                "CodePilot",
+                "Apply",
+                "Reject",
+                Messages.getQuestionIcon(),
+            )
         return confirm == Messages.OK
     }
 
@@ -345,7 +395,10 @@ class PatchApplier(private val project: Project) {
         LocalFileSystem.getInstance().refreshAndFindFileByPath(p.toString())
     }
 
-    private data class ReplaceResult(val text: String, val matches: Int)
+    private data class ReplaceResult(
+        val text: String,
+        val matches: Int,
+    )
 
     private fun applyReplace(
         original: String,
@@ -354,13 +407,18 @@ class PatchApplier(private val project: Project) {
         regex: Boolean,
         ignoreCase: Boolean,
     ): ReplaceResult {
-        val pattern = if (regex) {
-            Regex(search, if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
-        } else {
-            Regex(Regex.escape(search), if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
-        }
+        val pattern =
+            if (regex) {
+                Regex(search, if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
+            } else {
+                Regex(Regex.escape(search), if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
+            }
         var count = 0
-        val replaced = pattern.replace(original) { _ -> count++; replace }
+        val replaced =
+            pattern.replace(original) { _ ->
+                count++
+                replace
+            }
         return ReplaceResult(replaced, count)
     }
 
@@ -386,9 +444,15 @@ class PatchApplier(private val project: Project) {
      * Per 01-§3.21: "Agent 产出多文件 Patch 时，以统一的 Changes 面板展示，
      * 支持 per-hunk Accept/Reject，Accept 后走统一 WriteCommandAction 可一键撤销。"
      */
-    fun applyAtomicBatch(edits: List<JsonNode>, onProgress: ((Int, Int) -> Unit)? = null) {
+    fun applyAtomicBatch(
+        edits: List<JsonNode>,
+        onProgress: ((Int, Int) -> Unit)? = null,
+    ) {
         if (edits.isEmpty()) return
-        val batchId = java.util.UUID.randomUUID().toString()
+        val batchId =
+            java.util.UUID
+                .randomUUID()
+                .toString()
 
         ApplicationManager.getApplication().invokeLater {
             // Phase 1: Snapshot all original file contents
@@ -396,12 +460,13 @@ class PatchApplier(private val project: Project) {
             for (edit in edits) {
                 val rel = edit.path("path").asText()
                 if (rel.isBlank()) continue
-                val originalContent = try {
-                    val vf = PathGuard.resolve(project, rel)
-                    String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
-                } catch (_: Exception) {
-                    null // File doesn't exist yet (create operation)
-                }
+                val originalContent =
+                    try {
+                        val vf = PathGuard.resolve(project, rel)
+                        String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+                    } catch (_: Exception) {
+                        null // File doesn't exist yet (create operation)
+                    }
                 snapshots.add(BatchSnapshot(batchId, rel, originalContent))
             }
 
@@ -434,14 +499,15 @@ class PatchApplier(private val project: Project) {
         val toUndo = batchSnapshots.filter { it.batchId == lastBatchId }
 
         ApplicationManager.getApplication().invokeLater {
-            val confirm = Messages.showOkCancelDialog(
-                project,
-                "Undo last batch (${toUndo.size} file(s))? This will restore all files to their state before the batch apply.",
-                "CodePilot: Undo Batch",
-                "Undo",
-                "Cancel",
-                Messages.getQuestionIcon(),
-            )
+            val confirm =
+                Messages.showOkCancelDialog(
+                    project,
+                    "Undo last batch (${toUndo.size} file(s))? This will restore all files to their state before the batch apply.",
+                    "CodePilot: Undo Batch",
+                    "Undo",
+                    "Cancel",
+                    Messages.getQuestionIcon(),
+                )
             if (confirm != Messages.OK) return@invokeLater
 
             WriteCommandAction.runWriteCommandAction(project, "CodePilot: Undo Batch", null, {
@@ -538,15 +604,17 @@ class PatchApplier(private val project: Project) {
         applyAtomicBatch(edits, onProgress)
 
         // Build patch operations for Shadow Workspace validation
-        val patchOps = edits.mapNotNull { edit ->
-            val path = edit.path("path").asText().ifBlank { return@mapNotNull null }
-            val op = when (edit.path("op").asText("write")) {
-                "delete" -> "delete"
-                else -> if (edit.has("search")) "replace" else "create"
+        val patchOps =
+            edits.mapNotNull { edit ->
+                val path = edit.path("path").asText().ifBlank { return@mapNotNull null }
+                val op =
+                    when (edit.path("op").asText("write")) {
+                        "delete" -> "delete"
+                        else -> if (edit.has("search")) "replace" else "create"
+                    }
+                val content = edit.path("newContent").asText(edit.path("content").asText(""))
+                ShadowWorkspace.PatchOperation(path, op, content)
             }
-            val content = edit.path("newContent").asText(edit.path("content").asText(""))
-            ShadowWorkspace.PatchOperation(path, op, content)
-        }
 
         if (patchOps.isEmpty()) return null
 

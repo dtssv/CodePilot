@@ -1,15 +1,15 @@
 package io.codepilot.plugin.conversation
 
 import com.fasterxml.jackson.databind.JsonNode
+import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import io.codepilot.plugin.settings.CodePilotSettings
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -24,15 +24,20 @@ import java.util.concurrent.atomic.AtomicReference
 class ConversationClient(
     private val http: HttpClientService = HttpClientService.getInstance(),
 ) {
-
     private val source = AtomicReference<EventSource>()
 
-    fun run(payload: Map<String, Any?>, listener: Listener): EventSource {
+    fun run(
+        payload: Map<String, Any?>,
+        listener: Listener,
+    ): EventSource {
         val request = sseRequest("/v1/conversation/run", payload)
         return open(request, listener)
     }
 
-    fun resume(payload: Map<String, Any?>, listener: Listener): EventSource {
+    fun resume(
+        payload: Map<String, Any?>,
+        listener: Listener,
+    ): EventSource {
         val request = sseRequest("/v1/conversation/resume", payload)
         return open(request, listener)
     }
@@ -49,22 +54,37 @@ class ConversationClient(
     }
 
     /** Convenience overload for submitting a tool result by individual fields. */
-    fun submitToolResult(sessionId: String, toolCallId: String, result: Any?, ok: Boolean) {
-        submitToolResult(mapOf(
-            "sessionId" to sessionId,
-            "toolCallId" to toolCallId,
-            "ok" to ok,
-            "result" to result,
-        ))
+    fun submitToolResult(
+        sessionId: String,
+        toolCallId: String,
+        result: Any?,
+        ok: Boolean,
+    ) {
+        submitToolResult(
+            mapOf(
+                "sessionId" to sessionId,
+                "toolCallId" to toolCallId,
+                "ok" to ok,
+                "result" to result,
+            ),
+        )
     }
 
     /** Submit plan data for display. */
-    fun submitPlanData(sessionId: String, planJson: String, ledgerJson: String) {
-        val req = http.postJson("/v1/conversation/plan-data", mapOf(
-            "sessionId" to sessionId,
-            "plan" to planJson,
-            "ledger" to ledgerJson,
-        ))
+    fun submitPlanData(
+        sessionId: String,
+        planJson: String,
+        ledgerJson: String,
+    ) {
+        val req =
+            http.postJson(
+                "/v1/conversation/plan-data",
+                mapOf(
+                    "sessionId" to sessionId,
+                    "plan" to planJson,
+                    "ledger" to ledgerJson,
+                ),
+            )
         http.client().newCall(req).enqueue(noOpCallback)
     }
 
@@ -79,12 +99,13 @@ class ConversationClient(
         maxReconnects: Int = 3,
         onEvent: (eventType: String, data: Any?) -> Unit,
     ) {
-        val payload = mutableMapOf<String, Any?>(
-            "sessionId" to sessionId,
-            "mode" to mode,
-            "input" to text,
-            "intent" to "new",
-        )
+        val payload =
+            mutableMapOf<String, Any?>(
+                "sessionId" to sessionId,
+                "mode" to mode,
+                "input" to text,
+                "intent" to "new",
+            )
         runWithReconnect(payload, maxReconnects, onEvent)
     }
 
@@ -93,36 +114,66 @@ class ConversationClient(
         retriesLeft: Int,
         onEvent: (eventType: String, data: Any?) -> Unit,
     ) {
-        run(payload.toMap(), object : Listener {
-            override fun onDelta(text: String) = onEvent("delta", mapOf("text" to text))
-            override fun onToolCall(payload: JsonNode) = onEvent("tool_call", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onToolResultAck(payload: JsonNode) = onEvent("tool_result_ack", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onPlan(payload: JsonNode) = onEvent("plan", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onPlanDelta(payload: JsonNode) = onEvent("plan_delta", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onTaskLedger(payload: JsonNode) = onEvent("task_ledger", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onRiskNotice(payload: JsonNode) = onEvent("risk_notice", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onNeedsInput(payload: JsonNode) = onEvent("needs_input", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onDigest(payload: JsonNode) = onEvent("digest", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onSelfCheck(payload: JsonNode) = onEvent("self_check", http.mapper.treeToValue(payload, Map::class.java))
-            override fun onError(code: Int, message: String) = onEvent("error", mapOf("code" to code, "message" to message))
-            override fun onDone(reason: String, payload: JsonNode) = onEvent("done", mapOf("reason" to reason))
-            override fun onClosed() {
-                // Auto-reconnect: if the stream was dropped unexpectedly (not a clean done),
-                // retry with intent=continue
-                if (retriesLeft > 0) {
-                    val retryPayload = payload.toMutableMap().apply { put("intent", "continue") }
-                    Thread.sleep(1000L * (4 - retriesLeft)) // exponential-ish backoff
-                    runWithReconnect(retryPayload, retriesLeft - 1, onEvent)
+        run(
+            payload.toMap(),
+            object : Listener {
+                override fun onDelta(text: String) = onEvent("delta", mapOf("text" to text))
+
+                override fun onToolCall(payload: JsonNode) = onEvent("tool_call", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onToolResultAck(payload: JsonNode) =
+                    onEvent("tool_result_ack", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onPlan(payload: JsonNode) = onEvent("plan", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onPlanDelta(payload: JsonNode) = onEvent("plan_delta", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onTaskLedger(payload: JsonNode) = onEvent("task_ledger", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onRiskNotice(payload: JsonNode) = onEvent("risk_notice", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onNeedsInput(payload: JsonNode) = onEvent("needs_input", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onDigest(payload: JsonNode) = onEvent("digest", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onSelfCheck(payload: JsonNode) = onEvent("self_check", http.mapper.treeToValue(payload, Map::class.java))
+
+                override fun onError(
+                    code: Int,
+                    message: String,
+                ) = onEvent("error", mapOf("code" to code, "message" to message))
+
+                override fun onDone(
+                    reason: String,
+                    payload: JsonNode,
+                ) = onEvent("done", mapOf("reason" to reason))
+
+                override fun onClosed() {
+                    // Auto-reconnect: if the stream was dropped unexpectedly (not a clean done),
+                    // retry with intent=continue
+                    if (retriesLeft > 0) {
+                        val retryPayload = payload.toMutableMap().apply { put("intent", "continue") }
+                        Thread.sleep(1000L * (4 - retriesLeft)) // exponential-ish backoff
+                        runWithReconnect(retryPayload, retriesLeft - 1, onEvent)
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
-    private fun sseRequest(path: String, body: Any): Request {
+    private fun sseRequest(
+        path: String,
+        body: Any,
+    ): Request {
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
         val payload = http.mapper.writeValueAsBytes(body).toRequestBody("application/json".toMediaType())
-        val builder = Request.Builder().url(url).post(payload).header("Accept", "text/event-stream")
+        val builder =
+            Request
+                .Builder()
+                .url(url)
+                .post(payload)
+                .header("Accept", "text/event-stream")
         // ★ Privacy Mode header: inform backend to skip telemetry/logging
         if (settings.state.privacyMode) {
             builder.header("X-Privacy-Mode", "true")
@@ -134,7 +185,10 @@ class ConversationClient(
         return builder.build()
     }
 
-    private fun open(request: Request, listener: Listener): EventSource {
+    private fun open(
+        request: Request,
+        listener: Listener,
+    ): EventSource {
         val es = http.openSse(request, EventSourceAdapter(listener, http))
         source.set(es)
         return es
@@ -142,41 +196,77 @@ class ConversationClient(
 
     private val noOpCallback =
         object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) = response.close()
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException,
+            ) {}
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: okhttp3.Response,
+            ) = response.close()
         }
 
     /** Listener interface returned to UI. */
     interface Listener {
         fun onSkillsActivated(payload: JsonNode) {}
+
         fun onTaskLedger(payload: JsonNode) {}
+
         fun onPlan(payload: JsonNode) {}
+
         fun onPlanDelta(payload: JsonNode) {}
+
         fun onSelfCheck(payload: JsonNode) {}
+
         fun onRiskNotice(payload: JsonNode) {}
+
         fun onNeedsInput(payload: JsonNode) {}
+
         fun onToolCall(payload: JsonNode) {}
+
         fun onToolResultAck(payload: JsonNode) {}
+
         fun onDelta(text: String) {}
+
         fun onDigest(payload: JsonNode) {}
+
         fun onPatch(payload: JsonNode) {}
+
         fun onUsage(payload: JsonNode) {}
-        fun onError(code: Int, message: String) {}
-        fun onDone(reason: String, payload: JsonNode) {}
+
+        fun onError(
+            code: Int,
+            message: String,
+        ) {}
+
+        fun onDone(
+            reason: String,
+            payload: JsonNode,
+        ) {}
+
         fun onClosed() {}
 
         // ── Graph engine events ──
         fun onGraphPlan(payload: JsonNode) {}
+
         fun onGraphTransition(payload: JsonNode) {}
+
         fun onGraphInfoRequest(payload: JsonNode) {}
+
         fun onGraphInfoResult(payload: JsonNode) {}
+
         fun onGraphVerify(payload: JsonNode) {}
+
         fun onGraphRepairPlan(payload: JsonNode) {}
+
         fun onGraphPhaseDone(payload: JsonNode) {}
+
         fun onGraphBudgetAlert(payload: JsonNode) {}
 
         // ── Dual-layer plan events ──
         fun onUserPlan(payload: JsonNode) {}
+
         fun onUserPlanProgress(payload: JsonNode) {}
     }
 
@@ -184,12 +274,19 @@ class ConversationClient(
         private val listener: Listener,
         private val http: HttpClientService,
     ) : EventSourceListener() {
-
-        override fun onOpen(eventSource: EventSource, response: Response) {
+        override fun onOpen(
+            eventSource: EventSource,
+            response: Response,
+        ) {
             response.close()
         }
 
-        override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+        override fun onEvent(
+            eventSource: EventSource,
+            id: String?,
+            type: String?,
+            data: String,
+        ) {
             val node: JsonNode = http.mapper.readTree(data.ifEmpty { "{}" })
             when (type) {
                 "skills_activated" -> listener.onSkillsActivated(node)
@@ -227,7 +324,11 @@ class ConversationClient(
             listener.onClosed()
         }
 
-        override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+        override fun onFailure(
+            eventSource: EventSource,
+            t: Throwable?,
+            response: Response?,
+        ) {
             response?.close()
             listener.onError(50002, t?.message ?: "stream failed")
             listener.onClosed()

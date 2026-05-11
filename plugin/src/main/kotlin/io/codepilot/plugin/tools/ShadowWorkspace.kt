@@ -1,13 +1,11 @@
 package io.codepilot.plugin.tools
 
-import com.fasterxml.jackson.databind.JsonNode
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
 /**
@@ -29,8 +27,9 @@ import java.nio.file.StandardCopyOption
  * - Go: go build ./...
  * - Generic: syntax check via file extension heuristics
  */
-class ShadowWorkspace(private val project: Project) {
-
+class ShadowWorkspace(
+    private val project: Project,
+) {
     private val log = Logger.getInstance(ShadowWorkspace::class.java)
 
     data class ValidationResult(
@@ -53,7 +52,8 @@ class ShadowWorkspace(private val project: Project) {
      */
     fun validate(patches: List<PatchOperation>): ValidationResult {
         val startTime = System.currentTimeMillis()
-        val projectBase = project.basePath ?: return ValidationResult(false, listOf(ValidationError("", 0, "No project base path", "error")), 0)
+        val projectBase =
+            project.basePath ?: return ValidationResult(false, listOf(ValidationError("", 0, "No project base path", "error")), 0)
 
         // Create temp directory
         val shadowDir = Files.createTempDirectory("codepilot-shadow-").toFile()
@@ -97,24 +97,40 @@ class ShadowWorkspace(private val project: Project) {
             )
         } catch (e: Exception) {
             log.warn("Shadow workspace validation failed", e)
-            return ValidationResult(false, listOf(ValidationError("", 0, "Validation error: ${e.message}", "error")), System.currentTimeMillis() - startTime)
+            return ValidationResult(
+                false,
+                listOf(ValidationError("", 0, "Validation error: ${e.message}", "error")),
+                System.currentTimeMillis() - startTime,
+            )
         } finally {
             // Cleanup shadow directory
-            try { shadowDir.deleteRecursively() } catch (_: Exception) {}
+            try {
+                shadowDir.deleteRecursively()
+            } catch (_: Exception) {
+            }
         }
     }
 
-    data class PatchOperation(val path: String, val op: String, val newContent: String)
+    data class PatchOperation(
+        val path: String,
+        val op: String,
+        val newContent: String,
+    )
 
     // ─── Internal ───────────────────────────────────────────────────
 
-    private fun collectFilesForValidation(projectBase: String, affectedPaths: Set<String>): Set<String> {
+    private fun collectFilesForValidation(
+        projectBase: String,
+        affectedPaths: Set<String>,
+    ): Set<String> {
         val result = affectedPaths.toMutableSet()
         // For each affected file, also copy sibling files in same directory (needed for compilation)
         for (path in affectedPaths) {
             val parentDir = File(projectBase, path).parentFile ?: continue
             if (parentDir.isDirectory) {
-                parentDir.listFiles()?.filter { it.isFile && it.length() < 200_000 }
+                parentDir
+                    .listFiles()
+                    ?.filter { it.isFile && it.length() < 200_000 }
                     ?.map { it.path.removePrefix(projectBase).trimStart('/') }
                     ?.forEach { result.add(it) }
             }
@@ -138,50 +154,75 @@ class ShadowWorkspace(private val project: Project) {
         }
     }
 
-    private fun runValidation(shadowDir: File, language: String, affectedPaths: Set<String>): List<ValidationError> {
-        val command = when (language) {
-            "jvm" -> {
-                // Try gradle/maven compile
-                if (File(shadowDir, "build.gradle.kts").exists() || File(shadowDir, "build.gradle").exists()) {
-                    null // Skip for now: full Gradle build is too heavy for shadow validation
-                } else null
+    private fun runValidation(
+        shadowDir: File,
+        language: String,
+        affectedPaths: Set<String>,
+    ): List<ValidationError> {
+        val command =
+            when (language) {
+                "jvm" -> {
+                    // Try gradle/maven compile
+                    if (File(shadowDir, "build.gradle.kts").exists() || File(shadowDir, "build.gradle").exists()) {
+                        null // Skip for now: full Gradle build is too heavy for shadow validation
+                    } else {
+                        null
+                    }
+                }
+                "typescript" -> "npx tsc --noEmit --pretty false 2>&1"
+                "python" -> "python -m py_compile ${affectedPaths.joinToString(" ")}"
+                "go" -> "go build ./... 2>&1"
+                else -> null
             }
-            "typescript" -> "npx tsc --noEmit --pretty false 2>&1"
-            "python" -> "python -m py_compile ${affectedPaths.joinToString(" ")}"
-            "go" -> "go build ./... 2>&1"
-            else -> null
-        }
 
         if (command == null) return emptyList() // Can't validate this language easily
 
         return try {
-            val shell = if (SystemInfo.isWindows) listOf("cmd", "/c", command)
-            else listOf("/bin/bash", "-c", command)
+            val shell =
+                if (SystemInfo.isWindows) {
+                    listOf("cmd", "/c", command)
+                } else {
+                    listOf("/bin/bash", "-c", command)
+                }
 
-            val process = ProcessBuilder(shell)
-                .directory(shadowDir)
-                .redirectErrorStream(true)
-                .start()
+            val process =
+                ProcessBuilder(shell)
+                    .directory(shadowDir)
+                    .redirectErrorStream(true)
+                    .start()
 
             val output = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
 
-            if (exitCode == 0) emptyList()
-            else parseValidationErrors(output, language)
+            if (exitCode == 0) {
+                emptyList()
+            } else {
+                parseValidationErrors(output, language)
+            }
         } catch (e: Exception) {
             log.debug("Shadow validation command failed: $command", e)
             emptyList() // Don't block on validation failures
         }
     }
 
-    private fun parseValidationErrors(output: String, language: String): List<ValidationError> {
+    private fun parseValidationErrors(
+        output: String,
+        language: String,
+    ): List<ValidationError> {
         val errors = mutableListOf<ValidationError>()
         for (line in output.lines().take(20)) { // Limit to first 20 errors
             // Generic pattern: file:line:col: message
             val match = Regex("""(.+?):(\d+)(?::\d+)?:\s*(.+)""").find(line)
             if (match != null) {
                 val (file, lineNum, msg) = match.destructured
-                errors.add(ValidationError(file = file, line = lineNum.toIntOrNull() ?: 0, message = msg.trim(), severity = if (msg.contains("error", ignoreCase = true)) "error" else "warning"))
+                errors.add(
+                    ValidationError(
+                        file = file,
+                        line = lineNum.toIntOrNull() ?: 0,
+                        message = msg.trim(),
+                        severity = if (msg.contains("error", ignoreCase = true)) "error" else "warning",
+                    ),
+                )
             }
         }
         return errors

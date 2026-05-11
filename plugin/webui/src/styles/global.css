@@ -1085,3 +1085,223 @@ button:disabled {
 .budget-compress-btn:hover {
     opacity: 0.8;
 }
+
+/* ─── Branch Timeline ────────────────────────────────── */
+
+.branch-timeline {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.branch-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.15s;
+}
+
+.branch-toggle:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.branch-icon {
+    font-size: 14px;
+    color: var(--accent);
+}
+
+.branch-count {
+    font-weight: 600;
+    font-size: 11px;
+}
+
+.branch-panel {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    min-width: 240px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    overflow: hidden;
+}
+
+.branch-header {
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+.branch-list {
+    padding: 4px 0;
+}
+
+.branch-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.branch-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.branch-item.active {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.branch-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.branch-dot.main {
+    background: var(--accent);
+}
+
+.branch-dot.fork {
+    background: var(--success);
+}
+
+.branch-connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 16px;
+    position: relative;
+}
+
+.connector-line {
+    width: 1px;
+    height: 12px;
+    background: var(--border);
+}
+
+.branch-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.branch-name {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.branch-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.branch-time {
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+
+.branch-active-indicator {
+    color: var(--accent);
+    font-size: 10px;
+}
+
+/* ─── Message Token Meta ──────────────────────────────── */
+
+.msg-token-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    flex-wrap: wrap;
+}
+
+.token-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    line-height: 1.6;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.token-badge.input { color: #569cd6; }
+.token-badge.output { color: #4ec9b0; }
+.token-badge.latency { color: #d7ba7d; }
+.token-badge.cost { color: #ce9178; }
+.token-badge.model { color: var(--text-secondary); font-family: var(--font-sans); }
+
+/* ─── Session Cost Panel ──────────────────────────────── */
+
+.session-cost-panel {
+    position: relative;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.cost-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 12px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    transition: color 0.15s;
+}
+
+.cost-toggle:hover { color: var(--text-primary); }
+
+.cost-label { font-weight: 600; }
+.cost-value { font-family: var(--font-mono); color: var(--text-primary); }
+.cost-amount { color: #ce9178; font-family: var(--font-mono); }
+.cost-chevron { margin-left: auto; font-size: 10px; }
+
+.cost-detail {
+    padding: 4px 12px 8px;
+    border-top: 1px solid var(--border);
+}
+
+.cost-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    font-size: 11px;
+}
+
+.cost-key { color: var(--text-secondary); }
+.cost-val { color: var(--text-primary); font-family: var(--font-mono); }
+.cost-val.model { font-family: var(--font-sans); }
+
+.cost-row.total {
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 6px;
+    font-weight: 600;
+}

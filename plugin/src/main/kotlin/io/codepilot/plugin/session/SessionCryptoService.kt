@@ -27,7 +27,6 @@ import javax.crypto.spec.SecretKeySpec
  */
 @Service(Service.Level.APP)
 class SessionCryptoService {
-
     companion object {
         private const val ALGORITHM = "AES/GCM/NoPadding"
         private const val GCM_TAG_LENGTH = 128
@@ -41,9 +40,7 @@ class SessionCryptoService {
     private val secureRandom = SecureRandom()
 
     /** Check if encryption is enabled via settings. */
-    fun isEncryptionEnabled(): Boolean {
-        return CodePilotSettings.getInstance().state.localEncryption
-    }
+    fun isEncryptionEnabled(): Boolean = CodePilotSettings.getInstance().state.localEncryption
 
     /**
      * Encrypt bytes using AES-GCM. Output format: [12-byte IV][ciphertext+tag].

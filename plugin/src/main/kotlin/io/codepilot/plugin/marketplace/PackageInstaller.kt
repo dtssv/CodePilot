@@ -27,7 +27,11 @@ class PackageInstaller(
         val error: String? = null,
     )
 
-    fun install(slug: String, version: String, scope: LocalMarketplaceStore.Scope): InstallResult {
+    fun install(
+        slug: String,
+        version: String,
+        scope: LocalMarketplaceStore.Scope,
+    ): InstallResult {
         return try {
             // Step 1: Resolve
             val manifest = client.skillManifest(slug, version).get()
@@ -108,14 +112,20 @@ class PackageInstaller(
         return null
     }
 
-    private fun verifySha256(expected: String, data: ByteArray): Boolean {
+    private fun verifySha256(
+        expected: String,
+        data: ByteArray,
+    ): Boolean {
         val digest = MessageDigest.getInstance("SHA-256")
         val hash = digest.digest(data)
         val actual = hash.joinToString("") { "%02x".format(it) }
         return expected.equals(actual, ignoreCase = true)
     }
 
-    private fun extractZip(data: ByteArray, targetDir: Path) {
+    private fun extractZip(
+        data: ByteArray,
+        targetDir: Path,
+    ) {
         Files.createDirectories(targetDir)
         ZipInputStream(data.inputStream()).use { zis ->
             var entry = zis.nextEntry
@@ -137,26 +147,55 @@ class PackageInstaller(
     }
 
     private fun downloadFile(url: String): ByteArray {
-        val request = okhttp3.Request.Builder().url(url).get().build()
-        val response = HttpClientService.getInstance().client().newCall(request).execute()
+        val request =
+            okhttp3.Request
+                .Builder()
+                .url(url)
+                .get()
+                .build()
+        val response =
+            HttpClientService
+                .getInstance()
+                .client()
+                .newCall(request)
+                .execute()
         if (!response.isSuccessful) throw IllegalStateException("Download failed: HTTP ${response.code}")
         return response.body?.bytes() ?: throw IllegalStateException("Empty response")
     }
 
-    private fun getAllowedTools(): Set<String> = setOf(
-        "fs.read", "fs.list", "fs.search", "fs.grep", "fs.outline",
-        "code.outline", "code.symbol", "code.usages",
-        "fs.create", "fs.write", "fs.replace", "fs.delete", "fs.move",
-        "shell.exec", "shell.session",
-        "ide.openFile", "ide.diagnostics", "ide.applyPatch",
-        "plan.show", "plan.update"
-    )
+    private fun getAllowedTools(): Set<String> =
+        setOf(
+            "fs.read",
+            "fs.list",
+            "fs.search",
+            "fs.grep",
+            "fs.outline",
+            "code.outline",
+            "code.symbol",
+            "code.usages",
+            "fs.create",
+            "fs.write",
+            "fs.replace",
+            "fs.delete",
+            "fs.move",
+            "shell.exec",
+            "shell.session",
+            "ide.openFile",
+            "ide.diagnostics",
+            "ide.applyPatch",
+            "plan.show",
+            "plan.update",
+        )
 
     /**
      * Show the consent confirmation dialog (Step 4).
      * Returns true if user agrees, false if declined.
      */
-    private fun showConsentDialog(manifest: Map<String, Any?>, slug: String, version: String): Boolean {
+    private fun showConsentDialog(
+        manifest: Map<String, Any?>,
+        slug: String,
+        version: String,
+    ): Boolean {
         if (project == null) {
             // Non-UI context (tests, headless) — skip consent
             log.warn("No project context available, skipping consent dialog for $slug")
@@ -164,6 +203,7 @@ class PackageInstaller(
         }
 
         val description = manifest["description"] as? String ?: "No description available"
+
         @Suppress("UNCHECKED_CAST")
         val permissions = manifest["permissions"] as? Map<String, Any?> ?: emptyMap()
 
@@ -174,24 +214,25 @@ class PackageInstaller(
         // Determine risk level
         val riskLevel = determineRiskLevel(permissions, signatureValid)
 
-        val dialog = PackageConsentDialog(
-            project = project,
-            packageName = slug,
-            version = version,
-            description = description,
-            permissions = permissions,
-            signatureSubject = signatureSubject,
-            signatureValid = signatureValid,
-            license = license,
-            riskLevel = riskLevel,
-        )
+        val dialog =
+            PackageConsentDialog(
+                project = project,
+                packageName = slug,
+                version = version,
+                description = description,
+                permissions = permissions,
+                signatureSubject = signatureSubject,
+                signatureValid = signatureValid,
+                license = license,
+                riskLevel = riskLevel,
+            )
 
         return dialog.showAndGet()
     }
 
     private fun determineRiskLevel(
         permissions: Map<String, Any?>,
-        signatureValid: Boolean
+        signatureValid: Boolean,
     ): PackageConsentDialog.RiskLevel {
         if (!signatureValid) return PackageConsentDialog.RiskLevel.HIGH
 
@@ -202,8 +243,9 @@ class PackageInstaller(
         val hasFsWrite = permissions["fsWrite"] as? Boolean == true
         val hasEnvAccess = permissions["env"] as? Boolean == true
 
-        val dangerousCount = listOf(hasDangerousTool, hasNetworkAccess, hasFsWrite, hasEnvAccess)
-            .count { it }
+        val dangerousCount =
+            listOf(hasDangerousTool, hasNetworkAccess, hasFsWrite, hasEnvAccess)
+                .count { it }
 
         return when {
             dangerousCount >= 3 -> PackageConsentDialog.RiskLevel.HIGH

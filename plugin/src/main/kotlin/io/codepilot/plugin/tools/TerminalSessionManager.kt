@@ -24,8 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Sessions are automatically cleaned up when the project closes.
  */
 @Service(Service.Level.PROJECT)
-class TerminalSessionManager(private val project: Project) : Disposable {
-
+class TerminalSessionManager(
+    private val project: Project,
+) : Disposable {
     private val log = Logger.getInstance(TerminalSessionManager::class.java)
     private val sessions = ConcurrentHashMap<String, TerminalSession>()
 
@@ -48,14 +49,18 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         env: Map<String, String> = emptyMap(),
     ): CommandResult {
         val sid = sessionId ?: UUID.randomUUID().toString()
-        val session = sessions.computeIfAbsent(sid) {
-            createSession(cwd ?: project.basePath ?: ".", env)
-        }
+        val session =
+            sessions.computeIfAbsent(sid) {
+                createSession(cwd ?: project.basePath ?: ".", env)
+            }
         return session.execute(command, timeoutMs)
     }
 
     /** Get or create a session, returning its ID. */
-    fun getOrCreateSession(sessionId: String? = null, cwd: String? = null): String {
+    fun getOrCreateSession(
+        sessionId: String? = null,
+        cwd: String? = null,
+    ): String {
         val sid = sessionId ?: UUID.randomUUID().toString()
         sessions.computeIfAbsent(sid) {
             createSession(cwd ?: project.basePath ?: ".", emptyMap())
@@ -64,12 +69,16 @@ class TerminalSessionManager(private val project: Project) : Disposable {
     }
 
     /** Get recent output from a session (for @terminal reference). */
-    fun getRecentOutput(sessionId: String, maxChars: Int = 5000): String? {
-        return sessions[sessionId]?.getRecentOutput(maxChars)
-    }
+    fun getRecentOutput(
+        sessionId: String,
+        maxChars: Int = 5000,
+    ): String? = sessions[sessionId]?.getRecentOutput(maxChars)
 
     /** Get last output from any active session (for @terminal reference). */
-    fun getLastOutput(project: Project, maxLines: Int = 100): String {
+    fun getLastOutput(
+        project: Project,
+        maxLines: Int = 100,
+    ): String {
         val instance = getInstance(project)
         // Find the most recently used session
         val lastSession = instance.sessions.values.maxByOrNull { it.lastUsedAt }
@@ -87,9 +96,10 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         sessions.clear()
     }
 
-    private fun createSession(cwd: String, env: Map<String, String>): TerminalSession {
-        return TerminalSession(cwd, env)
-    }
+    private fun createSession(
+        cwd: String,
+        env: Map<String, String>,
+    ): TerminalSession = TerminalSession(cwd, env)
 
     companion object {
         @JvmStatic
@@ -99,7 +109,10 @@ class TerminalSessionManager(private val project: Project) : Disposable {
     /**
      * A single persistent terminal session backed by a shell process.
      */
-    inner class TerminalSession(cwd: String, env: Map<String, String>) {
+    inner class TerminalSession(
+        cwd: String,
+        env: Map<String, String>,
+    ) {
         private val id = UUID.randomUUID().toString()
         private val process: Process
         private val writer: BufferedWriter
@@ -107,17 +120,19 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         private val outputLock = Object()
         private val readerThread: Thread
         private val alive = AtomicBoolean(true)
+
         @Volatile var lastUsedAt: Long = System.currentTimeMillis()
 
         // Marker used to detect command completion
         private val endMarker = "___CODEPILOT_CMD_DONE_${System.nanoTime()}___"
 
         init {
-            val shell = if (SystemInfo.isWindows) {
-                listOf("powershell.exe", "-NoProfile", "-NoLogo")
-            } else {
-                listOf("/bin/bash", "--norc", "--noprofile", "-i")
-            }
+            val shell =
+                if (SystemInfo.isWindows) {
+                    listOf("powershell.exe", "-NoProfile", "-NoLogo")
+                } else {
+                    listOf("/bin/bash", "--norc", "--noprofile", "-i")
+                }
 
             val pb = ProcessBuilder(shell)
             pb.directory(File(cwd))
@@ -133,30 +148,34 @@ class TerminalSessionManager(private val project: Project) : Disposable {
             writer = BufferedWriter(OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8))
 
             // Background reader thread
-            readerThread = Thread({
-                val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
-                try {
-                    val buffer = CharArray(4096)
-                    while (alive.get()) {
-                        val n = reader.read(buffer)
-                        if (n == -1) break
-                        synchronized(outputLock) {
-                            outputBuffer.append(buffer, 0, n)
-                            outputLock.notifyAll()
+            readerThread =
+                Thread({
+                    val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
+                    try {
+                        val buffer = CharArray(4096)
+                        while (alive.get()) {
+                            val n = reader.read(buffer)
+                            if (n == -1) break
+                            synchronized(outputLock) {
+                                outputBuffer.append(buffer, 0, n)
+                                outputLock.notifyAll()
+                            }
                         }
+                    } catch (_: IOException) {
+                    } finally {
+                        alive.set(false)
                     }
-                } catch (_: IOException) {
-                } finally {
-                    alive.set(false)
-                }
-            }, "CodePilot-Terminal-$id")
+                }, "CodePilot-Terminal-$id")
             readerThread.isDaemon = true
             readerThread.start()
 
             log.info("Terminal session created: $id in $cwd")
         }
 
-        fun execute(command: String, timeoutMs: Long): CommandResult {
+        fun execute(
+            command: String,
+            timeoutMs: Long,
+        ): CommandResult {
             if (!alive.get()) throw IllegalStateException("Terminal session is dead")
 
             lastUsedAt = System.currentTimeMillis()
@@ -165,11 +184,12 @@ class TerminalSessionManager(private val project: Project) : Disposable {
             // Clear buffer and send command with end marker
             synchronized(outputLock) { outputBuffer.setLength(0) }
 
-            val wrappedCommand = if (SystemInfo.isWindows) {
-                "$command; echo $endMarker `\$LASTEXITCODE`\r\n"
-            } else {
-                "$command; echo \"$endMarker \$?\"\n"
-            }
+            val wrappedCommand =
+                if (SystemInfo.isWindows) {
+                    "$command; echo $endMarker `\$LASTEXITCODE`\r\n"
+                } else {
+                    "$command; echo \"$endMarker \$?\"\n"
+                }
 
             writer.write(wrappedCommand)
             writer.flush()
@@ -218,8 +238,14 @@ class TerminalSessionManager(private val project: Project) : Disposable {
 
         fun close() {
             alive.set(false)
-            try { writer.close() } catch (_: Exception) {}
-            try { process.destroyForcibly() } catch (_: Exception) {}
+            try {
+                writer.close()
+            } catch (_: Exception) {
+            }
+            try {
+                process.destroyForcibly()
+            } catch (_: Exception) {
+            }
             log.info("Terminal session closed: $id")
         }
     }

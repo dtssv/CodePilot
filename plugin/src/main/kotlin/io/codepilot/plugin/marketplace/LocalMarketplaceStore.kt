@@ -10,7 +10,6 @@ import com.intellij.openapi.util.SystemInfo
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
@@ -28,17 +27,18 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @Service(Service.Level.APP)
 open class LocalMarketplaceStore {
-
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val cache = ConcurrentHashMap<String, IndexFile>()
 
     open fun globalRoot(): Path = osConfigRoot().resolve("CodePilot")
 
-    fun projectRoot(project: Project): Path =
-        Path.of(project.basePath ?: error("no project base path"), ".codePilot")
+    fun projectRoot(project: Project): Path = Path.of(project.basePath ?: error("no project base path"), ".codePilot")
 
     /** Returns the matching root for a given scope. */
-    fun root(scope: Scope, project: Project?): Path =
+    fun root(
+        scope: Scope,
+        project: Project?,
+    ): Path =
         when (scope) {
             Scope.PROJECT -> projectRoot(project ?: error("project required for project-scoped install"))
             Scope.GLOBAL -> globalRoot()
@@ -66,7 +66,10 @@ open class LocalMarketplaceStore {
                 scope = scope.value,
                 source = source.value,
                 sha256 = sha256(yaml),
-                installedAt = java.time.Instant.now().toString(),
+                installedAt =
+                    java.time.Instant
+                        .now()
+                        .toString(),
                 disabled = false,
             ),
         )
@@ -74,11 +77,20 @@ open class LocalMarketplaceStore {
         return target
     }
 
-    fun uninstallSkill(scope: Scope, project: Project?, slug: String, version: String): Boolean {
+    fun uninstallSkill(
+        scope: Scope,
+        project: Project?,
+        slug: String,
+        version: String,
+    ): Boolean {
         val skillDir = root(scope, project).resolve("skills/installed/$slug@$version")
-        val removed = if (Files.exists(skillDir)) {
-            deleteRecursively(skillDir); true
-        } else false
+        val removed =
+            if (Files.exists(skillDir)) {
+                deleteRecursively(skillDir)
+                true
+            } else {
+                false
+            }
         val index = readIndex(skillsIndex(scope, project))
         val before = index.skills.size
         index.skills.removeAll { it.id == slug && it.version == version }
@@ -86,11 +98,19 @@ open class LocalMarketplaceStore {
         return removed || (index.skills.size < before)
     }
 
-    fun setSkillEnabled(scope: Scope, project: Project?, slug: String, version: String, enabled: Boolean) {
+    fun setSkillEnabled(
+        scope: Scope,
+        project: Project?,
+        slug: String,
+        version: String,
+        enabled: Boolean,
+    ) {
         val index = readIndex(skillsIndex(scope, project))
-        val updated = index.skills.map {
-            if (it.id == slug && it.version == version) it.copy(disabled = !enabled) else it
-        }.toMutableList()
+        val updated =
+            index.skills
+                .map {
+                    if (it.id == slug && it.version == version) it.copy(disabled = !enabled) else it
+                }.toMutableList()
         writeIndex(skillsIndex(scope, project), index.copy(skills = updated))
     }
 
@@ -98,11 +118,16 @@ open class LocalMarketplaceStore {
     fun activeSkills(project: Project?): List<ActiveSkill> {
         val merged = LinkedHashMap<String, ActiveSkill>()
         if (project != null) {
-            readIndex(skillsIndex(Scope.PROJECT, project)).skills
+            readIndex(skillsIndex(Scope.PROJECT, project))
+                .skills
                 .filter { !it.disabled }
-                .forEach { merged[it.id] = ActiveSkill(it, "project", projectRoot(project).resolve("skills/installed/${it.id}@${it.version}/skill.yaml")) }
+                .forEach {
+                    merged[it.id] =
+                        ActiveSkill(it, "project", projectRoot(project).resolve("skills/installed/${it.id}@${it.version}/skill.yaml"))
+                }
         }
-        readIndex(skillsIndex(Scope.GLOBAL, null)).skills
+        readIndex(skillsIndex(Scope.GLOBAL, null))
+            .skills
             .filter { !it.disabled }
             .forEach { entry ->
                 merged.putIfAbsent(
@@ -113,11 +138,12 @@ open class LocalMarketplaceStore {
         return merged.values.toList()
     }
 
-    fun readSkillBody(handle: ActiveSkill): String =
-        Files.readString(handle.path, StandardCharsets.UTF_8)
+    fun readSkillBody(handle: ActiveSkill): String = Files.readString(handle.path, StandardCharsets.UTF_8)
 
-    private fun skillsIndex(scope: Scope, project: Project?): Path =
-        root(scope, project).resolve("skills/index.json")
+    private fun skillsIndex(
+        scope: Scope,
+        project: Project?,
+    ): Path = root(scope, project).resolve("skills/index.json")
 
     private fun readIndex(file: Path): IndexFile {
         val key = file.toAbsolutePath().toString()
@@ -128,7 +154,10 @@ open class LocalMarketplaceStore {
         return parsed.copy()
     }
 
-    private fun writeIndex(file: Path, index: IndexFile) {
+    private fun writeIndex(
+        file: Path,
+        index: IndexFile,
+    ) {
         Files.createDirectories(file.parent)
         Files.writeString(file, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(index))
         cache[file.toAbsolutePath().toString()] = index
@@ -157,9 +186,16 @@ open class LocalMarketplaceStore {
         }
     }
 
-    enum class Scope(val value: String) { PROJECT("project"), GLOBAL("global") }
+    enum class Scope(
+        val value: String,
+    ) {
+        PROJECT("project"),
+        GLOBAL("global"),
+    }
 
-    enum class Source(val value: String) {
+    enum class Source(
+        val value: String,
+    ) {
         OFFICIAL("official"),
         THIRD_PARTY("third-party"),
         LOCAL("local"),
@@ -176,9 +212,16 @@ open class LocalMarketplaceStore {
         val disabled: Boolean = false,
     )
 
-    data class IndexFile(val skills: MutableList<Entry> = mutableListOf(), val mcps: MutableList<McpEntry> = mutableListOf())
+    data class IndexFile(
+        val skills: MutableList<Entry> = mutableListOf(),
+        val mcps: MutableList<McpEntry> = mutableListOf(),
+    )
 
-    data class ActiveSkill(val entry: Entry, val scope: String, val path: Path)
+    data class ActiveSkill(
+        val entry: Entry,
+        val scope: String,
+        val path: Path,
+    )
 
     /** Represents an installed MCP server. */
     data class McpEntry(
@@ -217,7 +260,13 @@ open class LocalMarketplaceStore {
     private fun mcpIndex(): Path = globalRoot().resolve("mcps/index.json")
 
     /** Record a skill install in the index (alias for installSkill that also records manifest). */
-    fun recordInstall(slug: String, version: String, scope: Scope, source: Source, manifest: Map<String, Any?>) {
+    fun recordInstall(
+        slug: String,
+        version: String,
+        scope: Scope,
+        source: Source,
+        manifest: Map<String, Any?>,
+    ) {
         val yaml = manifest["yaml"] as? String ?: ""
         installSkill(scope, null, slug, version, source, yaml)
     }
@@ -234,9 +283,11 @@ open class LocalMarketplaceStore {
     }
 
     /** Get the install directory for a skill. */
-    fun getInstallDir(slug: String, version: String, scope: Scope): Path {
-        return root(scope, null).resolve("skills/installed/$slug@$version")
-    }
+    fun getInstallDir(
+        slug: String,
+        version: String,
+        scope: Scope,
+    ): Path = root(scope, null).resolve("skills/installed/$slug@$version")
 
     companion object {
         @JvmStatic fun getInstance(): LocalMarketplaceStore = service()

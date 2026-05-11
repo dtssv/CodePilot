@@ -32,8 +32,9 @@ import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
 
 /** Swing chat panel wiring the full SSE -> tool-dispatch -> patch-apply loop. */
-class CodePilotChatPanel(private val project: Project) {
-
+class CodePilotChatPanel(
+    private val project: Project,
+) {
     private val settings = CodePilotSettings.getInstance()
     private val sessionStore = SessionStore.getInstance()
     private val client = ConversationClient()
@@ -60,19 +61,25 @@ class CodePilotChatPanel(private val project: Project) {
         sendButton.action = SendAction()
         stopButton.action = StopAction()
         signInButton.addActionListener { LoginDialog(project).showAndGet() }
-        inputArea.addFocusListener(object : FocusAdapter() {
-            override fun focusGained(e: FocusEvent?) {
-                ClipboardBridge.consume()?.let { prefilled ->
-                    if (inputArea.text.isBlank()) inputArea.text = prefilled
+        inputArea.addFocusListener(
+            object : FocusAdapter() {
+                override fun focusGained(e: FocusEvent?) {
+                    ClipboardBridge.consume()?.let { prefilled ->
+                        if (inputArea.text.isBlank()) inputArea.text = prefilled
+                    }
                 }
-            }
-        })
+            },
+        )
         // Load models from backend
         fetchModels()
     }
 
     /** Data class for model dropdown items. */
-    private data class ModelItem(val id: String, val name: String, val type: String) {
+    private data class ModelItem(
+        val id: String,
+        val name: String,
+        val type: String,
+    ) {
         override fun toString(): String = if (type == "custom") "$name (custom)" else name
     }
 
@@ -143,10 +150,11 @@ class CodePilotChatPanel(private val project: Project) {
 
     private fun setLedger(text: String) = SwingUtilities.invokeLater { ledgerView.text = text }
 
-    private fun resetButtons() = SwingUtilities.invokeLater {
-        sendButton.isEnabled = true
-        stopButton.isEnabled = false
-    }
+    private fun resetButtons() =
+        SwingUtilities.invokeLater {
+            sendButton.isEnabled = true
+            stopButton.isEnabled = false
+        }
 
     private inner class SendAction : AbstractAction("Send") {
         override fun actionPerformed(e: ActionEvent?) {
@@ -169,27 +177,42 @@ class CodePilotChatPanel(private val project: Project) {
         }
     }
 
-    private fun basePayload(input: String, intent: String, extras: Map<String, Any?> = emptyMap()): Map<String, Any?> {
+    private fun basePayload(
+        input: String,
+        intent: String,
+        extras: Map<String, Any?> = emptyMap(),
+    ): Map<String, Any?> {
         val mode = modeBox.selectedItem as String
         val selectedModel = modelBox.selectedItem as? ModelItem
-        val base = mutableMapOf<String, Any?>(
-            "sessionId" to sessionHandle.meta.id,
-            "mode" to mode,
-            "modelId" to selectedModel?.id,
-            "input" to input,
-            "intent" to intent,
-            "options" to mapOf("locale" to settings.state.preferredLocale),
-            "policy" to mapOf(
-                "selfCheck" to true,
-                "contextBudgetTokens" to settings.state.contextBudgetTokens,
-                "keepRecentMessages" to settings.state.keepRecentMessages,
-            ),
-            "tools" to listOf(
-                "fs.read", "fs.list", "fs.search", "fs.outline",
-                "fs.create", "fs.write", "fs.replace", "fs.delete", "fs.move",
-                "shell.exec", "plan.show",
-            ),
-        )
+        val base =
+            mutableMapOf<String, Any?>(
+                "sessionId" to sessionHandle.meta.id,
+                "mode" to mode,
+                "modelId" to selectedModel?.id,
+                "input" to input,
+                "intent" to intent,
+                "options" to mapOf("locale" to settings.state.preferredLocale),
+                "policy" to
+                    mapOf(
+                        "selfCheck" to true,
+                        "contextBudgetTokens" to settings.state.contextBudgetTokens,
+                        "keepRecentMessages" to settings.state.keepRecentMessages,
+                    ),
+                "tools" to
+                    listOf(
+                        "fs.read",
+                        "fs.list",
+                        "fs.search",
+                        "fs.outline",
+                        "fs.create",
+                        "fs.write",
+                        "fs.replace",
+                        "fs.delete",
+                        "fs.move",
+                        "shell.exec",
+                        "plan.show",
+                    ),
+            )
         base.putAll(extras)
         base["userSkills"] = collectUserSkills()
         base["projectRootHash"] = projectRootHash()
@@ -197,7 +220,9 @@ class CodePilotChatPanel(private val project: Project) {
     }
 
     private fun collectUserSkills(): List<Map<String, Any?>> {
-        val store = io.codepilot.plugin.marketplace.LocalMarketplaceStore.getInstance()
+        val store =
+            io.codepilot.plugin.marketplace.LocalMarketplaceStore
+                .getInstance()
         return store.activeSkills(project).map { active ->
             mapOf(
                 "id" to active.entry.id,
@@ -213,32 +238,43 @@ class CodePilotChatPanel(private val project: Project) {
 
     private fun projectRootHash(): String {
         val base = project.basePath ?: project.name
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(base.toByteArray())
-        return java.util.HexFormat.of().formatHex(digest)
+        val digest =
+            java.security.MessageDigest
+                .getInstance("SHA-256")
+                .digest(base.toByteArray())
+        return java.util.HexFormat
+            .of()
+            .formatHex(digest)
     }
 
     private fun panelListener(originalInput: String): ConversationClient.Listener =
         object : ConversationClient.Listener {
             override fun onDelta(text: String) = appendTranscript(text)
+
             override fun onPlan(payload: JsonNode) {
                 setPlan(payload.toPrettyString())
                 sessionStore.savePlan(sessionHandle, payload)
             }
+
             override fun onPlanDelta(payload: JsonNode) {
                 appendTranscript("[plan_delta] " + payload.toPrettyString())
             }
+
             override fun onTaskLedger(payload: JsonNode) {
                 setLedger(payload.toPrettyString())
                 sessionStore.saveLedger(sessionHandle, payload)
             }
+
             override fun onSelfCheck(payload: JsonNode) =
                 appendTranscript("[self_check] nextAction=" + payload.path("nextAction").asText("?"))
+
             override fun onToolCall(payload: JsonNode) {
                 appendTranscript("[tool_call] " + payload.path("name").asText())
                 dispatcher.dispatch(payload)
             }
-            override fun onRiskNotice(payload: JsonNode) =
-                appendTranscript("[risk_notice] " + payload.path("headline").asText(""))
+
+            override fun onRiskNotice(payload: JsonNode) = appendTranscript("[risk_notice] " + payload.path("headline").asText(""))
+
             override fun onNeedsInput(payload: JsonNode) {
                 ApplicationManager.getApplication().invokeLater {
                     val dialog = NeedsInputDialog(project, payload)
@@ -251,16 +287,25 @@ class CodePilotChatPanel(private val project: Project) {
                     }
                 }
             }
+
             override fun onPatch(payload: JsonNode) {
                 appendTranscript("[patch] preparing diff preview…")
                 patcher.applyAll(payload)
             }
-            override fun onError(code: Int, message: String) =
-                appendTranscript("[error $code] $message")
-            override fun onDone(reason: String, payload: JsonNode) {
+
+            override fun onError(
+                code: Int,
+                message: String,
+            ) = appendTranscript("[error $code] $message")
+
+            override fun onDone(
+                reason: String,
+                payload: JsonNode,
+            ) {
                 appendTranscript("[done] $reason")
                 resetButtons()
             }
+
             override fun onClosed() = resetButtons()
         }
 
@@ -276,35 +321,46 @@ class CodePilotChatPanel(private val project: Project) {
     }
 
     private fun doFetchModels(retries: Int = 1) {
-        val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+        val http =
+            io.codepilot.plugin.transport.HttpClientService
+                .getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + "/v1/models")
-        val request = okhttp3.Request.Builder()
-            .url(url)
-            .get()
-            .header("Accept", "application/json")
-            .build()
+        val request =
+            okhttp3.Request
+                .Builder()
+                .url(url)
+                .get()
+                .header("Accept", "application/json")
+                .build()
         val response = http.client().newCall(request).execute()
         response.use { resp ->
             if (resp.isSuccessful) {
                 val body = resp.body?.string() ?: return
-                val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(body)
+                val node =
+                    com.fasterxml.jackson.databind
+                        .ObjectMapper()
+                        .readTree(body)
                 val data = node.path("data")
                 val items = mutableListOf<ModelItem>()
                 // Parse system models
                 data.path("system").forEach { m ->
-                    items.add(ModelItem(
-                        id = m.path("id").asText(),
-                        name = m.path("name").asText(),
-                        type = "system"
-                    ))
+                    items.add(
+                        ModelItem(
+                            id = m.path("id").asText(),
+                            name = m.path("name").asText(),
+                            type = "system",
+                        ),
+                    )
                 }
                 // Parse custom models
                 data.path("custom").forEach { m ->
-                    items.add(ModelItem(
-                        id = m.path("id").asText(),
-                        name = m.path("name").asText(),
-                        type = "custom"
-                    ))
+                    items.add(
+                        ModelItem(
+                            id = m.path("id").asText(),
+                            name = m.path("name").asText(),
+                            type = "custom",
+                        ),
+                    )
                 }
                 SwingUtilities.invokeLater {
                     modelBox.removeAllItems()
@@ -316,7 +372,10 @@ class CodePilotChatPanel(private val project: Project) {
                     val loggedIn = LoginDialog(project).showAndGet()
                     if (loggedIn) {
                         ApplicationManager.getApplication().executeOnPooledThread {
-                            try { doFetchModels(retries - 1) } catch (_: Exception) {}
+                            try {
+                                doFetchModels(retries - 1)
+                            } catch (_: Exception) {
+                            }
                         }
                     }
                 }
@@ -325,6 +384,7 @@ class CodePilotChatPanel(private val project: Project) {
     }
 
     private fun workspaceHash(): String =
-        ApplicationManager.getApplication()
+        ApplicationManager
+            .getApplication()
             .runReadAction<String> { (project.basePath ?: project.name).hashCode().toString(16) }
 }

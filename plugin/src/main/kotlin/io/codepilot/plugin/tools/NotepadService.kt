@@ -23,8 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
  * - Accessible via the `notepad.read` / `notepad.write` tool
  */
 @Service(Service.Level.PROJECT)
-class NotepadService(private val project: Project) : Disposable {
-
+class NotepadService(
+    private val project: Project,
+) : Disposable {
     private val log = Logger.getInstance(NotepadService::class.java)
     private val sessionNotepads = ConcurrentHashMap<String, MutableMap<String, NotepadEntry>>()
 
@@ -39,21 +40,26 @@ class NotepadService(private val project: Project) : Disposable {
     /**
      * Write or update a notepad entry.
      */
-    fun write(sessionId: String, name: String, content: String): NotepadEntry {
+    fun write(
+        sessionId: String,
+        name: String,
+        content: String,
+    ): NotepadEntry {
         val notepads = sessionNotepads.computeIfAbsent(sessionId) { ConcurrentHashMap() }
         val existing = notepads[name]
         val now = Instant.now().toString()
-        val entry = if (existing != null) {
-            existing.copy(content = content, updatedAt = now)
-        } else {
-            NotepadEntry(
-                id = UUID.randomUUID().toString().take(8),
-                name = name,
-                content = content,
-                createdAt = now,
-                updatedAt = now,
-            )
-        }
+        val entry =
+            if (existing != null) {
+                existing.copy(content = content, updatedAt = now)
+            } else {
+                NotepadEntry(
+                    id = UUID.randomUUID().toString().take(8),
+                    name = name,
+                    content = content,
+                    createdAt = now,
+                    updatedAt = now,
+                )
+            }
         notepads[name] = entry
         log.info("Notepad write: session=$sessionId name=$name chars=${content.length}")
         return entry
@@ -62,23 +68,23 @@ class NotepadService(private val project: Project) : Disposable {
     /**
      * Read a notepad entry by name.
      */
-    fun read(sessionId: String, name: String): NotepadEntry? {
-        return sessionNotepads[sessionId]?.get(name)
-    }
+    fun read(
+        sessionId: String,
+        name: String,
+    ): NotepadEntry? = sessionNotepads[sessionId]?.get(name)
 
     /**
      * List all notepad entries for a session.
      */
-    fun list(sessionId: String): List<NotepadEntry> {
-        return sessionNotepads[sessionId]?.values?.toList() ?: emptyList()
-    }
+    fun list(sessionId: String): List<NotepadEntry> = sessionNotepads[sessionId]?.values?.toList() ?: emptyList()
 
     /**
      * Delete a notepad entry.
      */
-    fun delete(sessionId: String, name: String): Boolean {
-        return sessionNotepads[sessionId]?.remove(name) != null
-    }
+    fun delete(
+        sessionId: String,
+        name: String,
+    ): Boolean = sessionNotepads[sessionId]?.remove(name) != null
 
     /**
      * Clear all notepads for a session (called when session closes).
@@ -91,7 +97,10 @@ class NotepadService(private val project: Project) : Disposable {
     /**
      * Get the combined content of all notepads for a session (for prompt injection).
      */
-    fun getCombinedContext(sessionId: String, maxChars: Int = 4000): String {
+    fun getCombinedContext(
+        sessionId: String,
+        maxChars: Int = 4000,
+    ): String {
         val entries = list(sessionId)
         if (entries.isEmpty()) return ""
         val sb = StringBuilder("[NOTEPAD_CONTEXT_BEGIN]\n")

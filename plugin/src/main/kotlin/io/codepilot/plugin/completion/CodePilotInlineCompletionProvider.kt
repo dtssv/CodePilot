@@ -5,9 +5,9 @@ import com.intellij.codeInsight.inline.completion.elements.InlineCompletionGrayT
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
+import io.codepilot.plugin.settings.CodePilotSettings
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
-import io.codepilot.plugin.settings.CodePilotSettings
 
 /**
  * IntelliJ InlineCompletionProvider implementation for CodePilot.
@@ -15,44 +15,46 @@ import io.codepilot.plugin.settings.CodePilotSettings
  * suggestions that the user can accept with Tab.
  */
 class CodePilotInlineCompletionProvider : InlineCompletionProvider {
-
     override val id: InlineCompletionProviderID
         get() = InlineCompletionProviderID("CodePilot")
 
-    override fun isEnabled(event: InlineCompletionEvent): Boolean {
-        return CodePilotSettings.getInstance().accessToken() != null
-    }
+    override fun isEnabled(event: InlineCompletionEvent): Boolean = CodePilotSettings.getInstance().accessToken() != null
 
-    override suspend fun getSuggestion(request: InlineCompletionRequest): InlineCompletionSuggestion {
-        return InlineCompletionSuggestion.Default(createElement(request))
-    }
+    override suspend fun getSuggestion(request: InlineCompletionRequest): InlineCompletionSuggestion =
+        InlineCompletionSuggestion.Default(createElement(request))
 
-    private fun createElement(request: InlineCompletionRequest): Flow<InlineCompletionGrayTextElement> = channelFlow {
-        val editor = request.editor
-        val project = editor.project ?: return@channelFlow
+    private fun createElement(request: InlineCompletionRequest): Flow<InlineCompletionGrayTextElement> =
+        channelFlow {
+            val editor = request.editor
+            val project = editor.project ?: return@channelFlow
 
-        val (prefix, suffix, language, filePath) = readAction {
-            extractContext(editor, project)
-        } ?: return@channelFlow
+            val (prefix, suffix, language, filePath) =
+                readAction {
+                    extractContext(editor, project)
+                } ?: return@channelFlow
 
-        // Skip very short prefixes (less than 3 chars on current line)
-        val lastLine = prefix.substringAfterLast('\n', prefix)
-        if (lastLine.trimStart().length < 3) return@channelFlow
+            // Skip very short prefixes (less than 3 chars on current line)
+            val lastLine = prefix.substringAfterLast('\n', prefix)
+            if (lastLine.trimStart().length < 3) return@channelFlow
 
-        val completionRequest = InlineCompletionService.CompletionRequest(
-            prefix = prefix,
-            suffix = suffix,
-            language = language,
-            filePath = filePath,
-        )
+            val completionRequest =
+                InlineCompletionService.CompletionRequest(
+                    prefix = prefix,
+                    suffix = suffix,
+                    language = language,
+                    filePath = filePath,
+                )
 
-        val result = InlineCompletionService.complete(completionRequest)
-        if (result != null) {
-            send(InlineCompletionGrayTextElement(result))
+            val result = InlineCompletionService.complete(completionRequest)
+            if (result != null) {
+                send(InlineCompletionGrayTextElement(result))
+            }
         }
-    }
 
-    private fun extractContext(editor: Editor, project: Project): CompletionContext? {
+    private fun extractContext(
+        editor: Editor,
+        project: Project,
+    ): CompletionContext? {
         val document = editor.document
         val offset = editor.caretModel.offset
         val text = document.text

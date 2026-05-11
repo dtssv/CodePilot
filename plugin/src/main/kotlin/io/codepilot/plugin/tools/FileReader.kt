@@ -11,8 +11,9 @@ import java.security.MessageDigest
  * everything the Graph Orchestrator needs for cache invalidation and
  * context budget control.
  */
-class FileReader(private val project: Project) {
-
+class FileReader(
+    private val project: Project,
+) {
     fun read(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val maxBytes = args.path("maxBytes").asInt(262_144).coerceAtMost(1_048_576)
@@ -51,7 +52,11 @@ class FileReader(private val project: Project) {
         )
     }
 
-    private fun sliceLines(lines: List<String>, start: Int, end: Int): String {
+    private fun sliceLines(
+        lines: List<String>,
+        start: Int,
+        end: Int,
+    ): String {
         val from = (start - 1).coerceIn(0, lines.size)
         val to = end.coerceIn(from, lines.size)
         return lines.subList(from, to).joinToString("\n")

@@ -16,15 +16,15 @@ import java.awt.Desktop
 import java.net.URI
 import javax.swing.JButton
 import javax.swing.JComponent
-import javax.swing.JLabel
 import javax.swing.JPanel
 
 /**
  * Modal login dialog. Displays the login methods enabled by the backend (`/v1/auth/methods`) on
  * separate tabs, lets the user pick a flow, and persists the resulting token via [AuthService].
  */
-class LoginDialog(project: Project?) : DialogWrapper(project, true) {
-
+class LoginDialog(
+    project: Project?,
+) : DialogWrapper(project, true) {
     private val tabs = JBTabbedPane()
     private val statusLabel = JBLabel(" ")
     private val ssoTokenField = JBPasswordField()
@@ -75,7 +75,10 @@ class LoginDialog(project: Project?) : DialogWrapper(project, true) {
             row { label("Click 'Start' to open your browser. The IDE will sign in once you finish there.") }
             row {
                 button("Start") { startOidc() }
-                button("Cancel polling") { oidcFlow?.cancel(); oidcStatus.text = "Cancelled." }
+                button("Cancel polling") {
+                    oidcFlow?.cancel()
+                    oidcStatus.text = "Cancelled."
+                }
                 cell(verifyLink)
             }
             row { cell(oidcStatus) }
@@ -133,7 +136,9 @@ class LoginDialog(project: Project?) : DialogWrapper(project, true) {
                 if (err == null) {
                     statusLabel.text = "Signed in."
                     close(OK_EXIT_CODE)
-                } else statusLabel.text = "Login failed: ${err.message}"
+                } else {
+                    statusLabel.text = "Login failed: ${err.message}"
+                }
             }
         }
     }
@@ -167,7 +172,9 @@ class LoginDialog(project: Project?) : DialogWrapper(project, true) {
                 if (err == null) {
                     statusLabel.text = "Signed in."
                     close(OK_EXIT_CODE)
-                } else statusLabel.text = "Login failed: ${err.message}"
+                } else {
+                    statusLabel.text = "Login failed: ${err.message}"
+                }
             }
         }
     }

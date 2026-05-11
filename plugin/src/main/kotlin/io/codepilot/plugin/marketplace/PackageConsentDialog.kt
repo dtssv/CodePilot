@@ -6,13 +6,11 @@ import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.FormBuilder
-import com.intellij.util.ui.UIUtil
 import java.awt.BorderLayout
 import java.awt.Dimension
 import javax.swing.DefaultListModel
 import javax.swing.JList
 import javax.swing.JPanel
-import javax.swing.JTextArea
 
 /**
  * Consent confirmation dialog shown before installing a third-party Skill/MCP package.
@@ -38,12 +36,12 @@ class PackageConsentDialog(
     private val license: String?,
     private val riskLevel: RiskLevel,
 ) : DialogWrapper(project) {
-
     enum class RiskLevel { LOW, MEDIUM, HIGH }
 
-    private val agreeCheckBox = JBCheckBox("I understand the risks and agree to install this package").apply {
-        isSelected = false
-    }
+    private val agreeCheckBox =
+        JBCheckBox("I understand the risks and agree to install this package").apply {
+            isSelected = false
+        }
 
     init {
         title = "Install Package: $packageName"
@@ -60,30 +58,35 @@ class PackageConsentDialog(
 
         // ─── Header ───
         val headerPanel = JPanel(BorderLayout())
-        val riskIcon = when (riskLevel) {
-            RiskLevel.LOW -> "🟢"
-            RiskLevel.MEDIUM -> "🟡"
-            RiskLevel.HIGH -> "🔴"
-        }
-        val riskText = when (riskLevel) {
-            RiskLevel.LOW -> "Low Risk"
-            RiskLevel.MEDIUM -> "Medium Risk — review permissions carefully"
-            RiskLevel.HIGH -> "High Risk — unsigned or dangerous permissions"
-        }
+        val riskIcon =
+            when (riskLevel) {
+                RiskLevel.LOW -> "🟢"
+                RiskLevel.MEDIUM -> "🟡"
+                RiskLevel.HIGH -> "🔴"
+            }
+        val riskText =
+            when (riskLevel) {
+                RiskLevel.LOW -> "Low Risk"
+                RiskLevel.MEDIUM -> "Medium Risk — review permissions carefully"
+                RiskLevel.HIGH -> "High Risk — unsigned or dangerous permissions"
+            }
         headerPanel.add(JBLabel("<html><b>$riskIcon $riskText</b></html>"), BorderLayout.NORTH)
         panel.add(headerPanel, BorderLayout.NORTH)
 
         // ─── Details form ───
-        val formBuilder = FormBuilder.createFormBuilder()
-            .addLabeledComponent("Package:", JBLabel("<html><b>$packageName</b> v$version</html>"))
-            .addLabeledComponent("Description:", createWrappedLabel(description))
+        val formBuilder =
+            FormBuilder
+                .createFormBuilder()
+                .addLabeledComponent("Package:", JBLabel("<html><b>$packageName</b> v$version</html>"))
+                .addLabeledComponent("Description:", createWrappedLabel(description))
 
         // Signature status
-        val sigText = if (signatureValid && signatureSubject != null) {
-            "<html><span style='color:green'>✓ Signed by: <b>$signatureSubject</b></span></html>"
-        } else {
-            "<html><span style='color:red'>✗ Not signed or signature invalid</span></html>"
-        }
+        val sigText =
+            if (signatureValid && signatureSubject != null) {
+                "<html><span style='color:green'>✓ Signed by: <b>$signatureSubject</b></span></html>"
+            } else {
+                "<html><span style='color:red'>✗ Not signed or signature invalid</span></html>"
+            }
         formBuilder.addLabeledComponent("Signature:", JBLabel(sigText))
 
         // License
@@ -157,15 +160,18 @@ class PackageConsentDialog(
         return JBScrollPane(list)
     }
 
-    private fun createWrappedLabel(text: String): JBLabel {
-        return JBLabel("<html><div style='width:360px'>$text</div></html>")
-    }
+    private fun createWrappedLabel(text: String): JBLabel = JBLabel("<html><div style='width:360px'>$text</div></html>")
 
     companion object {
         /** Tools that are considered dangerous and require extra scrutiny. */
-        internal val DANGEROUS_TOOLS = setOf(
-            "shell.exec", "fs.delete", "fs.write", "fs.replace",
-            "ide.applyPatch", "network.fetch",
-        )
+        internal val DANGEROUS_TOOLS =
+            setOf(
+                "shell.exec",
+                "fs.delete",
+                "fs.write",
+                "fs.replace",
+                "ide.applyPatch",
+                "network.fetch",
+            )
     }
 }

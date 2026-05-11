@@ -1,10 +1,9 @@
 package io.codepilot.core.conversation;
 
 import io.codepilot.core.context.TokenMeter;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-import java.util.UUID;
+
+import java.util.*;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -82,7 +81,8 @@ public class ContextWindowManager {
             evictionOrder.add(i);
         }
         // Sort by importance ascending (lowest evicted first)
-        evictionOrder.sort(Comparator.comparingDouble(i -> working.get(i).meta().importance()));
+        List<WindowMessage> finalWorking = working;
+        evictionOrder.sort(Comparator.comparingDouble(i -> finalWorking.get(i).meta().importance()));
 
         for (int idx : evictionOrder) {
             if (countTokens(working) <= budget) break;
@@ -94,7 +94,7 @@ public class ContextWindowManager {
         }
 
         // Remove nulls
-        working.removeIf(m -> m == null);
+        working.removeIf(Objects::isNull);
 
         // Phase 2: Compact older messages if still over budget
         boolean compacted = false;

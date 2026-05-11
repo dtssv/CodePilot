@@ -10,9 +10,7 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.awt.BorderLayout
-import java.awt.CardLayout
 import java.awt.FlowLayout
-import javax.swing.BorderFactory
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComboBox
@@ -28,34 +26,39 @@ import javax.swing.SwingUtilities
  *   - Viewing installed Skills with empty-state feedback
  *   - Creating new user Skills locally
  */
-class MarketplacePanel(private val project: Project) {
-
+class MarketplacePanel(
+    private val project: Project,
+) {
     private val client = MarketplaceClient()
     private val store = LocalMarketplaceStore.getInstance()
     private val settings = CodePilotSettings.getInstance()
 
     /** Registry selector for switching between official and third-party registries. */
-    private val registrySelector = JComboBox<String>().apply {
-        settings.state.registries.forEach { addItem(it.name) }
-        addActionListener { refreshMarketplace() }
-    }
+    private val registrySelector =
+        JComboBox<String>().apply {
+            settings.state.registries.forEach { addItem(it.name) }
+            addActionListener { refreshMarketplace() }
+        }
 
     /** Search field for filtering packages. */
-    private val searchField = JBTextField(20).apply {
-        emptyText.text = "Search skills..."
-    }
+    private val searchField =
+        JBTextField(20).apply {
+            emptyText.text = "Search skills..."
+        }
 
     private val officialListModel = DefaultListModel<MarketplaceClient.Package>()
-    private val officialList = JBList(officialListModel).apply {
-        cellRenderer = PackageRenderer()
-        emptyText.text = "No packages found. Try a different registry or search."
-    }
+    private val officialList =
+        JBList(officialListModel).apply {
+            cellRenderer = PackageRenderer()
+            emptyText.text = "No packages found. Try a different registry or search."
+        }
 
     private val installedListModel = DefaultListModel<LocalMarketplaceStore.ActiveSkill>()
-    private val installedList = JBList(installedListModel).apply {
-        cellRenderer = InstalledRenderer()
-        emptyText.text = "No skills installed yet. Browse Marketplace or create a new Skill."
-    }
+    private val installedList =
+        JBList(installedListModel).apply {
+            cellRenderer = InstalledRenderer()
+            emptyText.text = "No skills installed yet. Browse Marketplace or create a new Skill."
+        }
 
     private val status = JLabel(" ")
 
@@ -75,26 +78,33 @@ class MarketplacePanel(private val project: Project) {
         }
 
     private fun buildMarketplacePane(): JComponent {
-        val north = JPanel(BorderLayout()).apply {
-            border = JBUI.Borders.emptyBottom(4)
-            val registryRow = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
-                add(JLabel("Registry:"))
-                add(registrySelector)
+        val north =
+            JPanel(BorderLayout()).apply {
+                border = JBUI.Borders.emptyBottom(4)
+                val registryRow =
+                    JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                        add(JLabel("Registry:"))
+                        add(registrySelector)
+                    }
+                val searchRow =
+                    JPanel(BorderLayout(4, 0)).apply {
+                        add(searchField, BorderLayout.CENTER)
+                        add(
+                            JButton("Search").apply {
+                                addActionListener { refreshMarketplace() }
+                            },
+                            BorderLayout.EAST,
+                        )
+                    }
+                add(registryRow, BorderLayout.WEST)
+                add(searchRow, BorderLayout.CENTER)
             }
-            val searchRow = JPanel(BorderLayout(4, 0)).apply {
-                add(searchField, BorderLayout.CENTER)
-                add(JButton("Search").apply {
-                    addActionListener { refreshMarketplace() }
-                }, BorderLayout.EAST)
+        val south =
+            JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
+                add(JButton("Refresh").apply { addActionListener { refresh() } })
+                add(JButton("Install to Project").apply { addActionListener { install(LocalMarketplaceStore.Scope.PROJECT) } })
+                add(JButton("Install to Global").apply { addActionListener { install(LocalMarketplaceStore.Scope.GLOBAL) } })
             }
-            add(registryRow, BorderLayout.WEST)
-            add(searchRow, BorderLayout.CENTER)
-        }
-        val south = JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
-            add(JButton("Refresh").apply { addActionListener { refresh() } })
-            add(JButton("Install to Project").apply { addActionListener { install(LocalMarketplaceStore.Scope.PROJECT) } })
-            add(JButton("Install to Global").apply { addActionListener { install(LocalMarketplaceStore.Scope.GLOBAL) } })
-        }
         return JPanel(BorderLayout()).apply {
             add(north, BorderLayout.NORTH)
             add(JBScrollPane(officialList), BorderLayout.CENTER)
@@ -103,12 +113,13 @@ class MarketplacePanel(private val project: Project) {
     }
 
     private fun buildInstalledPane(): JComponent {
-        val north = JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
-            add(JButton("Refresh").apply { addActionListener { refreshInstalled() } })
-            add(JButton("Enable").apply { addActionListener { toggle(true) } })
-            add(JButton("Disable").apply { addActionListener { toggle(false) } })
-            add(JButton("Uninstall").apply { addActionListener { uninstall() } })
-        }
+        val north =
+            JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
+                add(JButton("Refresh").apply { addActionListener { refreshInstalled() } })
+                add(JButton("Enable").apply { addActionListener { toggle(true) } })
+                add(JButton("Disable").apply { addActionListener { toggle(false) } })
+                add(JButton("Uninstall").apply { addActionListener { uninstall() } })
+            }
         return JPanel(BorderLayout()).apply {
             add(north, BorderLayout.NORTH)
             add(JBScrollPane(installedList), BorderLayout.CENTER)
@@ -179,7 +190,8 @@ class MarketplacePanel(private val project: Project) {
                 }
                 return@whenComplete
             }
-            client.reportInstall(selected.slug, version, scope, LocalMarketplaceStore.Source.OFFICIAL)
+            client
+                .reportInstall(selected.slug, version, scope, LocalMarketplaceStore.Source.OFFICIAL)
                 .whenComplete { _, _ ->
                     ApplicationManager.getApplication().invokeLater {
                         status.text = "Installed ${selected.slug}@$version into ${scope.value}."
@@ -216,7 +228,9 @@ class MarketplacePanel(private val project: Project) {
                 "Cancel",
                 Messages.getWarningIcon(),
             ) != Messages.OK
-        ) return
+        ) {
+            return
+        }
         store.uninstallSkill(scope, project, selected.entry.id, selected.entry.version)
         client.reportUninstall(
             selected.entry.id,
@@ -232,8 +246,12 @@ class MarketplacePanel(private val project: Project) {
      * Builds a minimal Skill yaml from the marketplace metadata. In production the real payload
      * is downloaded from the signed artifact URL.
      */
-    private fun buildYaml(pkg: MarketplaceClient.Package, version: String, manifest: Map<String, Any?>): String {
-        return buildString {
+    private fun buildYaml(
+        pkg: MarketplaceClient.Package,
+        version: String,
+        manifest: Map<String, Any?>,
+    ): String =
+        buildString {
             appendLine("id: ${pkg.slug}")
             appendLine("version: $version")
             appendLine("title: ${pkg.name.replace("\"", "\\\"")}")
@@ -244,5 +262,4 @@ class MarketplacePanel(private val project: Project) {
             val body = preview ?: "Behavioural cues for ${pkg.name}."
             body.lineSequence().forEach { appendLine("  $it") }
         }
-    }
 }
