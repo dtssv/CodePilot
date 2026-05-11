@@ -257,6 +257,41 @@ class CefChatPanel(val project: Project) : Disposable {
                 }
             }
 
+            // ★ MNI (Minimum Necessary Information) assembly for context budget
+            // Load local state for context optimization
+            val plan = sessionStore.loadPlan(handle)
+            val ledger = sessionStore.loadLedger(handle)
+            val digest = sessionStore.loadDigest(handle)
+            val completedToolCalls = sessionStore.completedToolCallIds(handle)
+                .toList().takeLast(5).map { id -> mapOf("toolCallId" to id, "ok" to true) }
+            val lastMessages = sessionStore.readMessages(handle).takeLast(6)
+            val lastAssistantSummary = lastMessages.lastOrNull { it["role"] == "assistant" }
+                ?.let { (it["content"] as? String)?.takeLast(1600) }
+
+            // Inject MNI fields into payload
+            if (plan != null) payload["lastPlanDigest"] = plan
+            if (ledger != null) payload["taskLedger"] = ledger
+            if (digest != null) payload["sessionDigest"] = digest
+            if (completedToolCalls.size > 0) payload["completedToolCallsTail"] = completedToolCalls
+            if (lastAssistantSummary != null) payload["lastAssistantTurnSummary"] = lastAssistantSummary
+            payload["contexts"] = mapOf(
+                "pinned" to emptyList<Any>(),
+                "recent" to lastMessages.takeLast(6).map { msg ->
+                    mapOf("role" to msg["role"], "content" to (msg["content"] as? String)?.take(2000))
+                },
+                "refs" to contextRefs,
+            )
+            // Estimate and report context usage
+            val estimatedTokens = sessionStore.estimateTokenCount(handle)
+            payload["policy"] = mapOf(
+                "requestCompact" to "auto",
+                "selfCheck" to true,
+                "askPolicy" to "prefer-ask",
+                "contextBudgetTokens" to 24000,
+                "keepRecentMessages" to 6,
+                "maxSteps" to 25,
+            )
+
             // Collect full assistant response for local persistence
             val assistantBuilder = StringBuilder()
 

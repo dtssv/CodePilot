@@ -363,4 +363,195 @@ class PatchApplier(private val project: Project) {
         val replaced = pattern.replace(original) { _ -> count++; replace }
         return ReplaceResult(replaced, count)
     }
+
+    // ─── Atomic Batch Apply + One-Click Undo (01-§3.21) ─────────────
+
+    /**
+     * Tracks all file snapshots before a batch apply, enabling one-click undo.
+     * Key: relative file path, Value: original file content (null = file didn't exist)
+     */
+    private val batchSnapshots = mutableListOf<BatchSnapshot>()
+
+    data class BatchSnapshot(
+        val batchId: String,
+        val path: String,
+        val originalContent: String?,
+        val timestamp: Long = System.currentTimeMillis(),
+    )
+
+    /**
+     * Atomically apply a batch of edits in a single WriteCommandAction.
+     * All edits are captured as snapshots for one-click undo via [undoLastBatch].
+     *
+     * Per 01-§3.21: "Agent 产出多文件 Patch 时，以统一的 Changes 面板展示，
+     * 支持 per-hunk Accept/Reject，Accept 后走统一 WriteCommandAction 可一键撤销。"
+     */
+    fun applyAtomicBatch(edits: List<JsonNode>, onProgress: ((Int, Int) -> Unit)? = null) {
+        if (edits.isEmpty()) return
+        val batchId = java.util.UUID.randomUUID().toString()
+
+        ApplicationManager.getApplication().invokeLater {
+            // Phase 1: Snapshot all original file contents
+            val snapshots = mutableListOf<BatchSnapshot>()
+            for (edit in edits) {
+                val rel = edit.path("path").asText()
+                if (rel.isBlank()) continue
+                val originalContent = try {
+                    val vf = PathGuard.resolve(project, rel)
+                    String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+                } catch (_: Exception) {
+                    null // File doesn't exist yet (create operation)
+                }
+                snapshots.add(BatchSnapshot(batchId, rel, originalContent))
+            }
+
+            // Phase 2: Apply all edits in a single WriteCommandAction (atomic)
+            WriteCommandAction.runWriteCommandAction(project, "CodePilot: Apply Batch", null, {
+                for ((index, edit) in edits.withIndex()) {
+                    try {
+                        applyEditSilent(edit) // Apply without individual confirm dialogs
+                        onProgress?.invoke(index + 1, edits.size)
+                    } catch (e: Exception) {
+                        // Roll back already-applied edits on failure
+                        rollbackSnapshots(snapshots.subList(0, index))
+                        Messages.showErrorDialog(project, "Batch apply failed at edit ${index + 1}: ${e.message}", "CodePilot")
+                        return@runWriteCommandAction
+                    }
+                }
+                // Phase 3: Store snapshots for undo
+                batchSnapshots.addAll(snapshots)
+            })
+        }
+    }
+
+    /**
+     * One-click undo for the last batch of changes.
+     * Restores all files to their pre-batch state.
+     */
+    fun undoLastBatch() {
+        if (batchSnapshots.isEmpty()) return
+        val lastBatchId = batchSnapshots.last().batchId
+        val toUndo = batchSnapshots.filter { it.batchId == lastBatchId }
+
+        ApplicationManager.getApplication().invokeLater {
+            val confirm = Messages.showOkCancelDialog(
+                project,
+                "Undo last batch (${toUndo.size} file(s))? This will restore all files to their state before the batch apply.",
+                "CodePilot: Undo Batch",
+                "Undo",
+                "Cancel",
+                Messages.getQuestionIcon(),
+            )
+            if (confirm != Messages.OK) return@invokeLater
+
+            WriteCommandAction.runWriteCommandAction(project, "CodePilot: Undo Batch", null, {
+                rollbackSnapshots(toUndo)
+            })
+
+            // Remove undone snapshots
+            batchSnapshots.removeAll { it.batchId == lastBatchId }
+        }
+    }
+
+    /** Check if there's a batch that can be undone. */
+    fun hasUndoableBatch(): Boolean = batchSnapshots.isNotEmpty()
+
+    /** Get the count of files in the last undoable batch. */
+    fun lastBatchFileCount(): Int {
+        if (batchSnapshots.isEmpty()) return 0
+        val lastBatchId = batchSnapshots.last().batchId
+        return batchSnapshots.count { it.batchId == lastBatchId }
+    }
+
+    private fun rollbackSnapshots(snapshots: List<BatchSnapshot>) {
+        for (snapshot in snapshots.reversed()) {
+            try {
+                if (snapshot.originalContent == null) {
+                    // File was created by the batch → delete it
+                    val vf = PathGuard.resolve(project, snapshot.path)
+                    vf.delete(this)
+                } else {
+                    // File was modified → restore original content
+                    val vf = PathGuard.resolve(project, snapshot.path)
+                    vf.setBinaryContent(snapshot.originalContent.toByteArray(StandardCharsets.UTF_8))
+                }
+            } catch (e: Exception) {
+                // Best-effort rollback
+            }
+        }
+    }
+
+    /**
+     * Apply a single edit without showing confirmation dialog.
+     * Used by atomic batch apply where confirmation is done at the batch level.
+     */
+    private fun applyEditSilent(edit: JsonNode) {
+        val op = edit.path("op").asText()
+        val rel = edit.path("path").asText()
+        if (rel.isBlank()) return
+
+        when (op) {
+            "create" -> {
+                val target = PathGuard.resolveOrCreate(project, rel)
+                val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
+                Files.createDirectories(target.parent)
+                Files.writeString(target, newContent)
+                refreshAt(target)
+            }
+            "write" -> {
+                val vf = PathGuard.resolve(project, rel)
+                val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
+                vf.setBinaryContent(newContent.toByteArray(StandardCharsets.UTF_8))
+            }
+            "replace" -> {
+                val vf = PathGuard.resolve(project, rel)
+                val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+                val search = edit.path("search").asText()
+                val replace = edit.path("replace").asText("")
+                val regex = edit.path("regex").asBoolean(false)
+                val ignoreCase = edit.path("ignoreCase").asBoolean(false)
+                val result = applyReplace(original, search, replace, regex, ignoreCase)
+                vf.setBinaryContent(result.text.toByteArray(StandardCharsets.UTF_8))
+            }
+            "delete" -> {
+                val vf = PathGuard.resolve(project, rel)
+                vf.delete(this)
+            }
+        }
+    }
+
+    // ─── Post-Apply Compilation Feedback ──────────────────────────────
+
+    /**
+     * Apply a batch of edits and then automatically trigger a Shadow Workspace
+     * compilation check. Returns validation result with any compilation errors.
+     *
+     * This provides immediate feedback after Diff application: if the applied
+     * patches cause compilation errors, the user sees them right away and can
+     * choose to undo the batch.
+     */
+    fun applyAndValidate(
+        edits: List<JsonNode>,
+        onProgress: ((Int, Int) -> Unit)? = null,
+    ): ShadowWorkspace.ValidationResult? {
+        // Apply the batch first
+        applyAtomicBatch(edits, onProgress)
+
+        // Build patch operations for Shadow Workspace validation
+        val patchOps = edits.mapNotNull { edit ->
+            val path = edit.path("path").asText().ifBlank { return@mapNotNull null }
+            val op = when (edit.path("op").asText("write")) {
+                "delete" -> "delete"
+                else -> if (edit.has("search")) "replace" else "create"
+            }
+            val content = edit.path("newContent").asText(edit.path("content").asText(""))
+            ShadowWorkspace.PatchOperation(path, op, content)
+        }
+
+        if (patchOps.isEmpty()) return null
+
+        // Run Shadow Workspace validation
+        val shadowWorkspace = ShadowWorkspace(project)
+        return shadowWorkspace.validate(patchOps)
+    }
 }

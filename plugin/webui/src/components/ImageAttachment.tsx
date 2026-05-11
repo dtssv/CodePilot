@@ -86,6 +86,7 @@ export function ImageAttachment({ onAttach }: ImageAttachmentProps) {
                 onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
                 onDragLeave={() => setDragging(false)}
                 onDrop={handleDrop}
+                onPaste={handlePaste}
                 title="添加图片 (拖拽/粘贴/点击)"
                 style={{
                     background: dragging ? 'var(--accent-bg, #58a6ff22)' : 'none',

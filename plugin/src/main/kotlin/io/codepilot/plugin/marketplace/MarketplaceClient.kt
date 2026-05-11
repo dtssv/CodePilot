@@ -51,6 +51,52 @@ class MarketplaceClient(
         return executeBool(req)
     }
 
+    // ── Skill API ──────────────────────────────────────────────────────
+
+    /** List available Skills from the marketplace. */
+    fun listSkills(query: String? = null, page: Int = 1, size: Int = 50): CompletableFuture<List<Package>> {
+        val url = base()
+            .newBuilder()
+            .addPathSegments("v1/skills/packages")
+            .apply {
+                if (!query.isNullOrBlank()) addQueryParameter("q", query)
+                addQueryParameter("page", page.toString())
+                addQueryParameter("size", size.toString())
+            }
+            .build()
+        return execute(Request.Builder().url(url).get().build(), PageEnvelope::class.java).thenApply { it.data?.items.orEmpty() }
+    }
+
+    /** Get Skill manifest (redacted for system Skills). */
+    fun skillManifest(slug: String, version: String): CompletableFuture<Map<String, Any?>> {
+        val url = base()
+            .newBuilder()
+            .addPathSegments("v1/skills/packages/$slug/versions/$version/manifest")
+            .build()
+        return executeMap(Request.Builder().url(url).get().build())
+    }
+
+    /**
+     * Get download info for a Skill package.
+     * Returns: downloadUrl, sha256, signature, signedAtMs.
+     * The caller must verify sha256 after downloading.
+     */
+    fun skillDownload(slug: String, version: String): CompletableFuture<DownloadInfo> {
+        val url = base()
+            .newBuilder()
+            .addPathSegments("v1/skills/packages/$slug/versions/$version/download")
+            .build()
+        return execute(Request.Builder().url(url).get().build(), DownloadInfo::class.java)
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    data class DownloadInfo(
+        val url: String,
+        val sha256: String,
+        val signature: String?,
+        val signedAtMs: Long?,
+    )
+
     private fun base() = CodePilotSettings.getInstance().state.backendBaseUrl.trimEnd('/').toHttpUrl()
 
     private fun <T> execute(request: Request, type: Class<T>): CompletableFuture<T> {

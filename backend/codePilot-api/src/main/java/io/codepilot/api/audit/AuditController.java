@@ -39,7 +39,10 @@ public class AuditController {
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestHeader(value = "X-CodePilot-Device-Id", required = false) String deviceId,
       @RequestBody @Valid AuditEventRequest req) {
-    auditRepo.insert(null, null, userId, deviceId, req.type(), "info", null, null, req.argsHash(), req.durationMs(), req.extra());
+    var extra = req.extra() != null ? new java.util.LinkedHashMap<>(req.extra()) : new java.util.LinkedHashMap<String, Object>();
+    if (req.argsHash() != null) extra.put("argsHash", req.argsHash());
+    if (req.durationMs() != null) extra.put("durationMs", req.durationMs());
+    auditRepo.insert(null, null, userId, deviceId, req.type(), "info", null, null, null, null, extra);
     return ApiResponse.ok(Map.of("accepted", true));
   }
 

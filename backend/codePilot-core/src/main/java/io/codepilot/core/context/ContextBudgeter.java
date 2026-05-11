@@ -135,7 +135,7 @@ public class ContextBudgeter {
     return List.of();
   }
 
-  private List<ConversationRunRequest.Contexts.RefItem> extractRefs(ConversationRunRequest req) {
+  private List<ConversationRunRequest.Contexts.Ref> extractRefs(ConversationRunRequest req) {
     if (req.contexts() != null && req.contexts().refs() != null) {
       return new ArrayList<>(req.contexts().refs());
     }
@@ -163,11 +163,11 @@ public class ContextBudgeter {
     return n;
   }
 
-  private int countRefs(List<ConversationRunRequest.Contexts.RefItem> refs) {
+  private int countRefs(List<ConversationRunRequest.Contexts.Ref> refs) {
     int n = 0;
     for (var r : refs) {
       n += meter.count(r.path());
-      if (r.content() != null) n += meter.count(r.content());
+      if (r.range() != null) n += meter.count(r.range());
     }
     return n;
   }
@@ -195,7 +195,7 @@ public class ContextBudgeter {
     }
     // Pinned items are MUST-KEEP
     for (var p : pinned) {
-      n += meter.count(p.content() != null ? p.content() : p.path());
+      n += meter.count(p.path());
     }
     // Tool call tail
     for (var tc : toolCallsTail) {
@@ -212,11 +212,11 @@ public class ContextBudgeter {
 
   // ─── Transform helpers ────────────────────────────────────────────
 
-  /** Downgrade refs to path+range only, removing content. */
-  private List<ConversationRunRequest.Contexts.RefItem> downgradeRefs(
-      List<ConversationRunRequest.Contexts.RefItem> refs) {
+  /** Downgrade refs to path+range only, setting outlineOnly=true. */
+  private List<ConversationRunRequest.Contexts.Ref> downgradeRefs(
+      List<ConversationRunRequest.Contexts.Ref> refs) {
     return refs.stream()
-        .map(r -> new ConversationRunRequest.Contexts.RefItem(r.path(), r.range(), r.sha1(), null))
+        .map(r -> new ConversationRunRequest.Contexts.Ref(r.path(), true, r.range(), r.sha1()))
         .toList();
   }
 
@@ -237,7 +237,7 @@ public class ContextBudgeter {
   /** Shaped context result. PromptOrchestrator uses this for message assembly. */
   public record Result(
       List<ConversationRunRequest.Contexts.RecentMessage> trimmedRecent,
-      List<ConversationRunRequest.Contexts.RefItem> trimmedRefs,
+      List<ConversationRunRequest.Contexts.Ref> trimmedRefs,
       List<ConversationRunRequest.Contexts.PinnedItem> pinned,
       List<ConversationRunRequest.CompletedToolCall> toolCallsTail,
       String localDigest,

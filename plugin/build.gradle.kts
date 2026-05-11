@@ -1,5 +1,4 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
-import java.util.Properties
 
 plugins {
     kotlin("jvm") version "2.0.21"

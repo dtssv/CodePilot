@@ -58,6 +58,16 @@ class ConversationClient(
         ))
     }
 
+    /** Submit plan data for display. */
+    fun submitPlanData(sessionId: String, planJson: String, ledgerJson: String) {
+        val req = http.postJson("/v1/conversation/plan-data", mapOf(
+            "sessionId" to sessionId,
+            "plan" to planJson,
+            "ledger" to ledgerJson,
+        ))
+        http.client().newCall(req).enqueue(noOpCallback)
+    }
+
     /**
      * Convenience: run a conversation with a simple callback for each SSE event.
      * Supports automatic SSE reconnection with intent=continue on disconnect.

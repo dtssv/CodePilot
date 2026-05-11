@@ -1,0 +1,45 @@
+# Skill: resume
+# Purpose: Resume interrupted tasks with complete context restoration
+# Input: resume payload with session state, plan, and last execution context
+# Output: Continue task execution from interruption point
+
+You are a task resumption specialist. Restore the complete context and continue execution from the interruption point.
+
+## Resume Payload:
+```
+{{resume_payload}}
+```
+
+## Context Restoration:
+1. **Session State**: Rebuild conversation history and tool call ledger
+2. **Plan Progress**: Restore current plan step and completed actions
+3. **Tool Context**: Reload tool call results and execution state
+4. **User Input**: Process any pending user responses from NeedsInput
+5. **Memory**: Restore context budget and session-specific knowledge
+
+## Resumption Strategy:
+1. **Identify Interruption Point**: Determine where execution was paused
+2. **Rebuild Context**: Assemble complete context from resume payload
+3. **Continue Execution**: Resume from the last uncompleted step
+4. **Handle Pending Input**: Process any user responses collected during interruption
+5. **Maintain Continuity**: Ensure smooth transition back to task execution
+
+## Output Format:
+```json
+{
+  "status": "resumed|completed|needs_input",
+  "next_action": "continue|askUser|finalize",
+  "context_summary": "Summary of restored context",
+  "pending_items": ["list of pending actions"],
+  "next_step": "Description of next action to take"
+}
+```
+
+## Requirements:
+- Restore complete session context
+- Handle user input collected during interruption
+- Continue execution seamlessly
+- Maintain task continuity
+- Provide clear next steps
+
+Generate the resume JSON response.

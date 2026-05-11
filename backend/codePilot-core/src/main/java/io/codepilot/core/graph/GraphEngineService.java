@@ -140,7 +140,10 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
                 Map.of("applyPatch", "applyPatch", "gather", "gather", "askUser", "askUser"));
 
-        graph.addEdge("applyPatch", "verify");
+        // ApplyPatch → may succeed or fail
+        graph.addConditionalEdges("applyPatch",
+                AsyncEdgeAction.edge_async(applyPatchAction::routeAfterApplyPatch),
+                Map.of("verify", "verify", "repair", "repair"));
 
         // Verify → success/fail/uncertain
         graph.addConditionalEdges("verify",

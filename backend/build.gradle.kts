@@ -41,6 +41,7 @@ subprojects {
             mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
             mavenBom("com.fasterxml.jackson:jackson-bom:$jacksonVersion")
             mavenBom("io.opentelemetry:opentelemetry-bom:$otelVersion")
+            mavenBom("org.springframework.cloud:spring-cloud-dependencies:${catalog.findVersion("spring-cloud").get().requiredVersion}")
         }
     }
 

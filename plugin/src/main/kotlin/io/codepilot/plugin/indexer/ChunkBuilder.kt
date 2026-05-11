@@ -61,6 +61,10 @@ class ChunkBuilder(private val project: Project) {
         val language = vf.fileType.name.lowercase()
         val lines = text.lines()
 
+        // Try Markdown-based splitting for .md/.rst/.mdx files
+        val mdChunks = tryMarkdownSplit(relativePath, language, lines, text)
+        if (mdChunks.isNotEmpty()) return mdChunks
+
         // Try PSI-based splitting first
         val psiChunks = tryPsiSplit(vf, relativePath, language, lines)
         if (psiChunks.isNotEmpty()) return psiChunks
@@ -166,6 +170,185 @@ class ChunkBuilder(private val project: Project) {
 
         return chunks
     }
+
+    // ─── Markdown Splitting ────────────────────────────────────────────
+
+    /**
+     * Split Markdown / reStructuredText / MDX files by heading boundaries.
+     *
+     * Strategy:
+     * 1. Extract frontmatter (YAML between --- delimiters) as metadata
+     * 2. Split by ATX headings (# ## ### etc.) or RST section markers
+     * 3. Each section becomes a chunk with heading as primary symbol
+     * 4. Sections smaller than [MIN_CHUNK_LINES] are merged with the previous
+     * 5. Sections larger than [MAX_CHUNK_LINES] are further split by paragraph
+     */
+    private fun tryMarkdownSplit(path: String, language: String, lines: List<String>, fullText: String): List<Chunk> {
+        val ext = path.substringAfterLast('.', "")
+        if (ext !in setOf("md", "mdx", "rst", "markdown")) return emptyList()
+
+        // 1. Extract frontmatter metadata
+        val frontmatter = extractFrontmatter(lines)
+        val contentStartLine = if (frontmatter != null) {
+            // Find the second --- delimiter
+            val secondDelim = lines.drop(1).indexOfFirst { it.trim() == "---" }
+            if (secondDelim >= 0) secondDelim + 2 else 0
+        } else 0
+
+        val contentLines = lines.drop(contentStartLine)
+
+        // 2. Find heading boundaries
+        val headingBoundaries = mutableListOf<HeadingBoundary>()
+        for ((i, line) in contentLines.withIndex()) {
+            val atxMatch = Regex("^(#{1,6})\\s+(.+)$").find(line)
+            if (atxMatch != null) {
+                val level = atxMatch.groupValues[1].length
+                val title = atxMatch.groupValues[2].trim()
+                headingBoundaries.add(HeadingBoundary(i, level, title))
+                continue
+            }
+            // RST section detection: next line is === or --- underline
+            if (i + 1 < contentLines.size) {
+                val nextLine = contentLines[i + 1].trim()
+                if (nextLine.isNotEmpty() && nextLine.all { it == '=' || it == '-' }) {
+                    val level = if (nextLine.all { it == '=' }) 1 else 2
+                    headingBoundaries.add(HeadingBoundary(i, level, line.trim()))
+                }
+            }
+        }
+
+        // 3. Build chunks from heading sections
+        val chunks = mutableListOf<Chunk>()
+        val fmImports = frontmatter?.let { listOf("frontmatter:$it") } ?: emptyList()
+
+        if (headingBoundaries.isEmpty()) {
+            // No headings — treat entire file as one chunk
+            if (contentLines.size >= MIN_CHUNK_LINES) {
+                val content = contentLines.joinToString("\n")
+                chunks.add(
+                    Chunk(
+                        path = path, language = language,
+                        startLine = contentStartLine + 1,
+                        endLine = lines.size,
+                        content = content,
+                        symbols = extractMdSymbols(content),
+                        imports = fmImports,
+                        contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
+                    )
+                )
+            }
+            return chunks
+        }
+
+        // Add a virtual boundary at the end
+        val allBoundaries = headingBoundaries + HeadingBoundary(contentLines.size, 0, "")
+
+        for (i in 0 until allBoundaries.size - 1) {
+            val start = allBoundaries[i].lineIndex
+            val end = allBoundaries[i + 1].lineIndex
+            val sectionLines = contentLines.subList(start, end.coerceAtMost(contentLines.size))
+            if (sectionLines.size < MIN_CHUNK_LINES && chunks.isNotEmpty()) {
+                // Merge small section into previous chunk
+                val prev = chunks.last()
+                val mergedContent = prev.content + "\n" + sectionLines.joinToString("\n")
+                chunks[chunks.lastIndex] = prev.copy(
+                    endLine = contentStartLine + start + sectionLines.size,
+                    content = mergedContent,
+                    symbols = prev.symbols + listOf(allBoundaries[i].title),
+                    contentHash = sha256Hex(mergedContent.toByteArray(StandardCharsets.UTF_8)),
+                )
+                continue
+            }
+
+            val content = sectionLines.joinToString("\n")
+            if (content.isBlank()) continue
+
+            // If section exceeds max chunk size, split by paragraph
+            if (sectionLines.size > MAX_CHUNK_LINES) {
+                val subChunks = splitMarkdownByParagraph(
+                    path, language, contentStartLine + start + 1, sectionLines, fmImports
+                )
+                chunks.addAll(subChunks)
+            } else {
+                chunks.add(
+                    Chunk(
+                        path = path, language = language,
+                        startLine = contentStartLine + start + 1,
+                        endLine = contentStartLine + start + sectionLines.size,
+                        content = content,
+                        symbols = listOf(allBoundaries[i].title) + extractMdSymbols(content),
+                        imports = fmImports,
+                        contentHash = sha256Hex(content.toByteArray(StandardCharsets.UTF_8)),
+                    )
+                )
+            }
+        }
+
+        return chunks
+    }
+
+    /**
+     * Extract YAML frontmatter (content between opening --- delimiters).
+     */
+    private fun extractFrontmatter(lines: List<String>): String? {
+        if (lines.isEmpty() || lines[0].trim() != "---") return null
+        val endIdx = lines.drop(1).indexOfFirst { it.trim() == "---" }
+        if (endIdx < 0) return null
+        return lines.subList(1, endIdx + 1).joinToString("\n")
+    }
+
+    /**
+     * Extract symbol-like references from Markdown content:
+     * - Code block language tags (```java → symbol:code:java)
+     * - Link references ([label]: url)
+     * - Inline code (`symbol`)
+     */
+    private fun extractMdSymbols(content: String): List<String> {
+        val symbols = mutableListOf<String>()
+        // Code block language tags
+        Regex("```(\\w+)").findAll(content).forEach { m ->
+            symbols.add("code:${m.groupValues[1]}")
+        }
+        // Link references
+        Regex("^\\[(.+?)\\]:", RegexOption.MULTILINE).findAll(content).forEach { m ->
+            symbols.add("ref:${m.groupValues[1]}")
+        }
+        return symbols.distinct().take(10)
+    }
+
+    /**
+     * Split a large Markdown section by paragraph boundaries (blank lines).
+     */
+    private fun splitMarkdownByParagraph(
+        path: String, language: String, startLine: Int,
+        lines: List<String>, imports: List<String>
+    ): List<Chunk> {
+        val chunks = mutableListOf<Chunk>()
+        var currentStart = 0
+
+        for (i in lines.indices) {
+            val currentContent = lines.subList(currentStart, i + 1).joinToString("\n")
+            if (i + 1 == lines.size || (lines[i].isBlank() && currentContent.lines().size >= MIN_CHUNK_LINES)) {
+                if (currentContent.lines().size >= MIN_CHUNK_LINES) {
+                    chunks.add(
+                        Chunk(
+                            path = path, language = language,
+                            startLine = startLine + currentStart,
+                            endLine = startLine + i,
+                            content = currentContent,
+                            symbols = extractMdSymbols(currentContent),
+                            imports = imports,
+                            contentHash = sha256Hex(currentContent.toByteArray(StandardCharsets.UTF_8)),
+                        )
+                    )
+                }
+                currentStart = i + 1
+            }
+        }
+        return chunks
+    }
+
+    private data class HeadingBoundary(val lineIndex: Int, val level: Int, val title: String)
 
     private fun extractImports(lines: List<String>): List<String> =
         lines.take(60)

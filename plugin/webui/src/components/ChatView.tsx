@@ -3,9 +3,9 @@ import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { DiffCard } from './DiffCard';
+import { IncrementalMarkdown } from './IncrementalMarkdown';
 import { NeedsInputCard } from './NeedsInputCard';
 import { RiskNoticeCard } from './RiskNoticeCard';
-import { IncrementalMarkdown } from './IncrementalMarkdown';
 
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -20,6 +20,7 @@ export interface ChatMessage {
 
 interface ChatViewProps {
     messages: ChatMessage[];
+    onForkFromMessage?: (messageIndex: number) => void;
 }
 
 const refTypeIcons: Record<string, string> = {
@@ -66,7 +67,7 @@ function parseInlineRefs(content: string, contextRefs?: { id?: string; display: 
     return segments;
 }
 
-export function ChatView({ messages }: ChatViewProps) {
+export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -83,11 +84,19 @@ export function ChatView({ messages }: ChatViewProps) {
                 </div>
             )}
             {messages.map((msg, i) => (
-                <div key={i} className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}>
+                <div key={i} className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}
+                     onMouseEnter={(e) => {
+                         const btn = e.currentTarget.querySelector('.msg-fork-btn') as HTMLElement;
+                         if (btn) btn.style.opacity = '1';
+                     }}
+                     onMouseLeave={(e) => {
+                         const btn = e.currentTarget.querySelector('.msg-fork-btn') as HTMLElement;
+                         if (btn) btn.style.opacity = '0';
+                     }}>
                     {msg.riskNotice ? (
                         <RiskNoticeCard {...msg.riskNotice} />
                     ) : msg.needsInput ? (
-                        <NeedsInputCard question={msg.needsInput.question} options={msg.needsInput.options} />
+                        <NeedsInputCard payload={msg.needsInput as any} />
                     ) : msg.diff ? (
                         <DiffCard path={msg.diff.path} hunks={msg.diff.hunks} />
                     ) : msg.role === 'user' && msg.contextRefs && msg.contextRefs.length > 0 ? (
@@ -103,9 +112,17 @@ export function ChatView({ messages }: ChatViewProps) {
                             </ReactMarkdown>
                         )
                     )}
+                    {onForkFromMessage && !msg._streaming && (
+                        <button
+                            className="msg-fork-btn"
+                            title="Fork conversation from this message"
+                            onClick={() => onForkFromMessage(i)}
+                        >
+                            ↗ Fork
+                        </button>
+                    )}
                 </div>
             ))}
         </div>
     );
-}   );
 }

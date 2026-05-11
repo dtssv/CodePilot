@@ -257,11 +257,4 @@ function applyPlanDelta(plan: Plan, delta: unknown): Plan {
         }
     }
     return { ...plan, steps };
-}           steps.push(op as unknown as PlanStep);
-        } else if (op.op === 'skip' && op.stepId) {
-            const idx = steps.findIndex(s => s.id === op.stepId);
-            if (idx >= 0) steps[idx] = { ...steps[idx], status: 'skipped' };
-        }
-    }
-    return { ...plan, steps };
 }

@@ -652,13 +652,21 @@ sequenceDiagram
 
 ## 11. 落地路径（分期）
 
-1. **Phase 1 — 骨架**：`GraphOrchestrator` + `Intake/Planning/Generate/ApplyPatch/Finalize`；`policy.engine=graph` 默认关闭，仅灰度开。
-2. **Phase 2 — 信息收集**：`Gather/Reenter` 节点 + `infoRequests` 协议 + `graph_info_request/result` 事件。
-3. **Phase 3 — 校验**：Verify 节点 + 预置 compile/test/lint 模板（Java/Kotlin/TS/Python/Go）。
-4. **Phase 4 — 修复**：Repair 节点 + `repair.maxAttempts`；升格为 `askUser`。
-5. **Phase 5 — 恢复**：`awaitUserInput / graphState` 落地 + 插件 Graph 面板。
-6. **Phase 6 — 模板化**：`graphTemplate=refactor/migrate/bugfix`；允许 user Skill 提供自定义 Graph 定义。
-7. **Phase 7 — 灰度转正**：默认 `engine=graph`，保留 `legacy` 一个版本作回退。
+1. **Phase 1 — 骨架** ✅：`GraphOrchestrator` + `Intake/Planning/Generate/ApplyPatch/Finalize`；`policy.engine=graph` 默认关闭，仅灰度开。 → GraphEngineService+14个NodeAction已实现，IntakeAction/PlanningAction/GenerateAction/CommitAction/SearchEvaluateAction/SynthesizeAction核心逻辑已完成
+2. **Phase 2 — 信息收集** ⚠️：`Gather/Reenter` 节点 + `infoRequests` 协议 + `graph_info_request/result` 事件。 → GatherAction骨架已实现(缺InfoRequestDispatcher分类+服务端工具执行+结果聚合)，ReenterAction骨架已实现
+3. **Phase 3 — 校验** ✅：Verify 节点 + 预置 compile/test/lint 模板（Java/Kotlin/TS/Python/Go）。 → VerifyAction完整实现(VerifyReport+compileErrors/testFailures/lintWarnings+3路路由success→commit/fail→repair/uncertain→askUser)
+4. **Phase 4 — 修复** ✅：Repair 节点 + `repair.maxAttempts`；升格为 `askUser`。 → RepairAction完整实现(结构化修复提示+LLM调用+attempt budget管理+AskUser升级)
+5. **Phase 5 — 恢复** ⚠️：`awaitUserInput / graphState` 落地 + 插件 Graph 面板。 → AskUserAction骨架(仅emit简单needs_input)，SessionStore.buildResumePayload+checkpoint已实现
+6. **Phase 6 — 模板化** ⬜：`graphTemplate=refactor/migrate/bugfix`；允许 user Skill 提供自定义 Graph 定义。
+7. **Phase 7 — 灰度转正** ⬜：默认 `engine=graph`，保留 `legacy` 一个版本作回退。
+
+### 关键待完善项
+| 节点 | 当前状态 | 缺失内容 |
+|---|---|---|
+| ApplyPatchAction | 骨架 | 缺SSE emit tool_call+ToolResultBus等待+ShadowWorkspace串联 |
+| GatherAction | 骨架 | 缺InfoRequestDispatcher分类+服务端工具执行+结果聚合 |
+| FinalizeAction | 骨架 | 缺任务总结生成+sessionDigest写入+completedToolCalls归档 |
+| AskUserAction | 骨架 | 缺结构化问题构建(从state提取questions+options+kind)+已回答过滤 |
 
 ---
 

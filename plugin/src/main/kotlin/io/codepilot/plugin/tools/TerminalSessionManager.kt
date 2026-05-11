@@ -68,6 +68,15 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         return sessions[sessionId]?.getRecentOutput(maxChars)
     }
 
+    /** Get last output from any active session (for @terminal reference). */
+    fun getLastOutput(project: Project, maxLines: Int = 100): String {
+        val instance = getInstance(project)
+        // Find the most recently used session
+        val lastSession = instance.sessions.values.maxByOrNull { it.lastUsedAt }
+        val output = lastSession?.getRecentOutput(maxLines * 200) ?: return ""
+        return output.lines().takeLast(maxLines).joinToString("\n")
+    }
+
     /** Close a specific session. */
     fun closeSession(sessionId: String) {
         sessions.remove(sessionId)?.close()
@@ -98,6 +107,7 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         private val outputLock = Object()
         private val readerThread: Thread
         private val alive = AtomicBoolean(true)
+        @Volatile var lastUsedAt: Long = System.currentTimeMillis()
 
         // Marker used to detect command completion
         private val endMarker = "___CODEPILOT_CMD_DONE_${System.nanoTime()}___"
@@ -149,6 +159,7 @@ class TerminalSessionManager(private val project: Project) : Disposable {
         fun execute(command: String, timeoutMs: Long): CommandResult {
             if (!alive.get()) throw IllegalStateException("Terminal session is dead")
 
+            lastUsedAt = System.currentTimeMillis()
             val startTime = System.currentTimeMillis()
 
             // Clear buffer and send command with end marker

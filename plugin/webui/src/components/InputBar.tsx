@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
-import { ContextChipData } from './ContextChip';
 import { AtReferencePopup } from './AtReferencePopup';
+import { ContextChipData } from './ContextChip';
 
 interface AtSuggestion {
     type: string;
@@ -32,7 +32,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
 
     // @-reference popup state
     const [atPopupVisible, setAtPopupVisible] = useState(false);
-    const [atQuery, setAtQuery] = useState('');
+    const [_atQuery, setAtQuery] = useState('');
     const [atAnchorRect, setAtAnchorRect] = useState<DOMRect | undefined>();
 
     // Keep chipsMapRef in sync
@@ -189,7 +189,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         }
 
         // Send at_resolve to plugin to get the full reference data
-        sendToPlugin('at_resolve', { type: suggestion.type, value: suggestion.path || suggestion.label }).catch(() => {});
+        sendToPlugin('at_resolve', { type: suggestion.type, value: suggestion.path || suggestion.label }).catch(() => { });
 
         setAtPopupVisible(false);
     }, []);

@@ -76,7 +76,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null);
+        List.of(), null, null, null, null, null, null, null, null, null,
+        null, null);
     return leakFilter.guard(service.run(runReq));
   }
 
@@ -114,7 +115,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null);
+        List.of(), null, null, null, null, null, null, null, null, null,
+        null, null);
     return leakFilter.guard(service.run(runReq));
   }
 
@@ -138,7 +140,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), mode, req.modelId(), input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, policy, null);
+        List.of(), null, null, null, null, null, null, null, policy, null,
+        null, null);
     return leakFilter.guard(service.run(runReq));
   }
 
@@ -189,24 +192,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null);
-    return leakFilter.guard(service.run(runReq));
-  }
-
-  public record BugScanRequest(
-      @NotBlank String sessionId,
-      String modelId,
-      @NotBlank String code,
-      @NotBlank String language,
-      @NotBlank String filePath,
-      List<String> diagnostics) {}
-}       + "\n```" + req.language() + "\n" + req.code() + "\n```"
-        + "\n\nAnalyze the above code for bugs, vulnerabilities, and code smells. "
-        + "For each finding, provide: severity (critical/high/medium/low), line range, description, and suggested fix.";
-    ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
-        null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null);
+        List.of(), null, null, null, null, null, null, null, null, null,
+        null, null);
     return leakFilter.guard(service.run(runReq));
   }
 

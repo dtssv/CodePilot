@@ -1,8 +1,10 @@
 package io.codepilot.plugin.session
 
+import com.intellij.credentialStore.CredentialAttributes
+import com.intellij.credentialStore.Credentials
+import com.intellij.ide.passwordSafe.PasswordSafe
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
-import com.intellij.openapi.application.ApplicationNamesInfo
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -40,7 +42,7 @@ class SessionCryptoService {
 
     /** Check if encryption is enabled via settings. */
     fun isEncryptionEnabled(): Boolean {
-        return CodePilotSettings.getInstance().localEncryption
+        return CodePilotSettings.getInstance().state.localEncryption
     }
 
     /**
@@ -119,10 +121,25 @@ class SessionCryptoService {
         return key
     }
 
+    /**
+     * Read the encryption key from IntelliJ PasswordSafe.
+     * PasswordSafe uses the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+     * Falls back to a protected file if PasswordSafe is unavailable.
+     */
     private fun readKeyFromPasswordSafe(): ByteArray? {
+        // Primary: try IntelliJ PasswordSafe (uses OS keychain)
+        try {
+            val credAttrs = CredentialAttributes(KEY_SERVICE_NAME, KEY_ACCOUNT_NAME)
+            val stored = PasswordSafe.instance.getPassword(credAttrs)
+            if (stored != null && stored.isNotEmpty()) {
+                return Base64.getDecoder().decode(stored)
+            }
+        } catch (_: Exception) {
+            // PasswordSafe unavailable, fall through to file-based storage
+        }
+
+        // Fallback: read from protected file with owner-only permissions
         return try {
-            val attributes = com.intellij.openapi.keymap.KeymapManager.getInstance()
-            // Use a simpler approach: store in a protected file within the IDE config
             val keyFile = getKeyFilePath()
             if (!Files.exists(keyFile)) return null
             val encoded = String(Files.readAllBytes(keyFile), StandardCharsets.UTF_8).trim()
@@ -132,12 +149,26 @@ class SessionCryptoService {
         }
     }
 
+    /**
+     * Save the encryption key to IntelliJ PasswordSafe.
+     * Falls back to a protected file if PasswordSafe is unavailable.
+     */
     private fun saveKeyToPasswordSafe(key: ByteArray) {
+        val encoded = Base64.getEncoder().encodeToString(key)
+
+        // Primary: try IntelliJ PasswordSafe
+        try {
+            val credAttrs = CredentialAttributes(KEY_SERVICE_NAME, KEY_ACCOUNT_NAME)
+            PasswordSafe.instance.set(credAttrs, Credentials(KEY_ACCOUNT_NAME, encoded))
+            return // Successfully stored in PasswordSafe, no need for file fallback
+        } catch (_: Exception) {
+            // PasswordSafe unavailable, fall through to file-based storage
+        }
+
+        // Fallback: write to protected file with owner-only permissions
         try {
             val keyFile = getKeyFilePath()
             Files.createDirectories(keyFile.parent)
-            // Write with owner-only permissions
-            val encoded = Base64.getEncoder().encodeToString(key)
             Files.writeString(keyFile, encoded, StandardCharsets.UTF_8)
             // Set file permissions to owner-only on supported platforms
             try {
@@ -147,7 +178,7 @@ class SessionCryptoService {
                 // Best effort on non-POSIX platforms
             }
         } catch (_: Exception) {
-            // Key persistence failed; will regenerate next time
+            // Key persistence failed; will regenerate next time (session data from previous runs will be unreadable)
         }
     }
 

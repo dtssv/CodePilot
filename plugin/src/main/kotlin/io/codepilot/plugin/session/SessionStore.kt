@@ -69,6 +69,29 @@ class SessionStore {
         if (plan != null) writeJson(handle.dir.resolve("plan.json"), plan)
     }
 
+    fun savePlanDelta(handle: SessionHandle, delta: Any?) {
+        if (delta == null) return
+        // Merge delta ops into existing plan, or persist as a new plan if none exists
+        val planFile = handle.dir.resolve("plan.json")
+        if (Files.exists(planFile)) {
+            @Suppress("UNCHECKED_CAST")
+            val existing = runCatching {
+                mapper.readValue(Files.readAllBytes(planFile), Map::class.java) as Map<String, Any>
+            }.getOrNull()
+            if (existing != null) {
+                val mutablePlan = existing.toMutableMap()
+                val existingOps = (existing["ops"] as? List<Any>)?.toMutableList() ?: mutableListOf()
+                val deltaOps = (delta as? Map<String, Any>)?.get("ops") as? List<Any> ?: emptyList()
+                existingOps.addAll(deltaOps)
+                mutablePlan["ops"] = existingOps
+                writeJson(planFile, mutablePlan)
+                return
+            }
+        }
+        // No existing plan — write delta as the initial plan
+        writeJson(planFile, delta)
+    }
+
     fun saveLedger(handle: SessionHandle, ledger: Any?) {
         if (ledger != null) writeJson(handle.dir.resolve("ledger.json"), ledger)
     }
@@ -149,6 +172,125 @@ class SessionStore {
         return Files.exists(handle.dir.resolve("checkpoint.json"))
     }
 
+    /**
+     * Build a complete resume payload for /v1/conversation/resume.
+     * Includes: lastPlan, completedToolCalls, sessionDigest, taskLedger, lastAssistantTurnSummary.
+     * This is the core of the checkpoint recovery mechanism.
+     */
+    fun buildResumePayload(
+        handle: SessionHandle,
+        userInput: String,
+        modelId: String,
+    ): Map<String, Any?> {
+        val plan = loadPlan(handle)
+        val ledger = loadLedger(handle)
+        val digest = loadDigest(handle)
+        val checkpoint = loadCheckpoint(handle)
+        val completedSteps = readSteps(handle).filter { (it["ok"] as? Boolean) == true }
+
+        // Build completedToolCalls list for idempotency
+        val completedToolCalls = completedSteps.mapNotNull { step ->
+            val toolCallId = step["toolCallId"] as? String ?: return@mapNotNull null
+            mapOf(
+                "toolCallId" to toolCallId,
+                "name" to (step["toolName"] ?: ""),
+                "ok" to true,
+                "stepId" to (step["stepId"] ?: ""),
+            )
+        }
+
+        // Extract last assistant turn summary (last 400 tokens worth)
+        val messages = readMessages(handle)
+        val lastAssistantMsg = messages.lastOrNull { it["role"] == "assistant" }
+        val lastAssistantTurnSummary = lastAssistantMsg?.let { msg ->
+            val content = msg["content"] as? String ?: ""
+            if (content.length > 1600) content.takeLast(1600) else content
+        }
+
+        // Build the resume payload matching /v1/conversation/resume schema
+        return mapOf(
+            "sessionId" to handle.meta.id,
+            "mode" to handle.meta.mode,
+            "modelId" to modelId,
+            "input" to userInput,
+            "intent" to "continue",
+            "lastPlan" to plan,
+            "completedToolCalls" to completedToolCalls,
+            "sessionDigest" to digest,
+            "taskLedger" to ledger,
+            "lastAssistantTurnSummary" to lastAssistantTurnSummary,
+            "checkpoint" to checkpoint,
+            "policy" to mapOf(
+                "requestCompact" to "auto",
+                "replanHint" to false,
+                "selfCheck" to true,
+                "askPolicy" to "prefer-ask",
+                "maxSteps" to 25,
+            ),
+        )
+    }
+
+    /**
+     * Save a complete checkpoint snapshot after each Agent step.
+     * The checkpoint contains everything needed to resume from this point.
+     */
+    fun saveStepCheckpoint(
+        handle: SessionHandle,
+        toolCallId: String,
+        toolName: String,
+        stepId: String,
+        ok: Boolean,
+        result: Any?,
+    ) {
+        // Append to steps.ndjson
+        appendStep(handle, mapOf(
+            "toolCallId" to toolCallId,
+            "toolName" to toolName,
+            "stepId" to stepId,
+            "ok" to ok,
+            "ts" to Instant.now().toString(),
+        ))
+
+        // Update checkpoint.json with the latest recovery state
+        val plan = loadPlan(handle)
+        val ledger = loadLedger(handle)
+        val digest = loadDigest(handle)
+        val completedIds = completedToolCallIds(handle)
+
+        saveCheckpoint(handle, mapOf(
+            "lastToolCallId" to toolCallId,
+            "lastToolName" to toolName,
+            "lastStepOk" to ok,
+            "completedToolCallIds" to completedIds.toList(),
+            "planVersion" to plan?.get("version"),
+            "ledgerCursor" to ledger?.get("cursor"),
+            "hasDigest" to (digest != null),
+            "ts" to Instant.now().toString(),
+        ))
+    }
+
+    /**
+     * Estimate the current context token count for the session.
+     * Used by the UI to display the context usage bar and trigger compression.
+     */
+    fun estimateTokenCount(handle: SessionHandle): Int {
+        val messages = readMessages(handle)
+        // Rough estimate: 1 token ≈ 4 characters for English, ≈ 2 characters for CJK
+        var totalChars = 0
+        for (msg in messages) {
+            val content = msg["content"] as? String ?: continue
+            totalChars += content.length
+        }
+        // Add plan and digest overhead
+        val plan = loadPlan(handle)
+        if (plan != null) totalChars += mapper.writeValueAsString(plan).length
+        val digest = loadDigest(handle)
+        if (digest != null) totalChars += mapper.writeValueAsString(digest).length
+
+        // Conservative estimate: 1 token per 3 characters
+        return totalChars / 3
+    }
+
     fun list(workspaceHash: String): List<SessionMeta> {
         val parent = settingsRoot().resolve(workspaceHash)
         if (!Files.isDirectory(parent)) return emptyList()
@@ -190,6 +332,112 @@ class SessionStore {
             mapper.readValue(line, Map::class.java) as Map<String, Any>
         }
     }
+
+    /**
+     * Fork a new conversation branch from a specific message in the current session.
+     * This creates a new session handle with:
+     * - A new branchId
+     * - A reference to the parent branch and the fork point message index
+     * - Messages copied up to and including the fork point
+     *
+     * The new branch can then diverge from the original conversation independently.
+     */
+    fun forkFromMessage(
+        handle: SessionHandle,
+        messageIndex: Int,
+    ): SessionHandle {
+        val currentMessages = readMessages(handle)
+        require(messageIndex in currentMessages.indices) {
+            "Message index $messageIndex out of range (0..${currentMessages.size - 1})"
+        }
+
+        val newBranchId = "branch-${UUID.randomUUID().toString().take(8)}"
+        val workspaceHash = handle.meta.workspaceHash
+        val newHandle = newSession(workspaceHash, handle.meta.mode, handle.meta.modelId)
+
+        // Copy messages up to and including the fork point
+        val forkMessages = currentMessages.subList(0, messageIndex + 1)
+        for (msg in forkMessages) {
+            val role = msg["role"] as? String ?: "user"
+            val content = msg["content"] as? String ?: ""
+            appendMessage(newHandle, role, content)
+        }
+
+        // Update the new session's meta with branch info
+        updateMeta(newHandle) { meta ->
+            meta.title = "${handle.meta.title ?: "Session"} (fork at msg #$messageIndex)"
+            // Use reflection or direct field set since branchId is val in data class
+        }
+
+        // Write branch metadata to the new session's meta
+        val updatedMeta = newHandle.meta.copy(
+            branchId = newBranchId,
+            parentBranchId = handle.meta.branchId,
+            parentMsgIndex = messageIndex,
+        )
+        newHandle.meta = updatedMeta
+        writeJson(newHandle.dir.resolve("meta.json"), updatedMeta)
+
+        // Save a branch map file for tracking all branches of the original session
+        val branchMapFile = handle.dir.resolve("branches.json")
+        val branches = if (Files.exists(branchMapFile)) {
+            @Suppress("UNCHECKED_CAST")
+            runCatching {
+                mapper.readValue(Files.readAllBytes(branchMapFile), Map::class.java) as Map<String, Any>
+            }.getOrNull() ?: emptyMap()
+        } else emptyMap()
+
+        val mutableBranches = branches.toMutableMap()
+        @Suppress("UNCHECKED_CAST")
+        val branchList = (mutableBranches["branches"] as? List<Map<String, Any?>>)?.toMutableList()
+            ?: mutableListOf()
+        branchList.add(mapOf(
+            "branchId" to newBranchId,
+            "sessionId" to newHandle.meta.id,
+            "parentBranchId" to handle.meta.branchId,
+            "forkMsgIndex" to messageIndex,
+            "createdAt" to Instant.now().toString(),
+        ))
+        mutableBranches["branches"] = branchList
+        writeJson(branchMapFile, mutableBranches)
+
+        return newHandle
+    }
+
+    /**
+     * List all branches of a session (including the main branch).
+     */
+    fun listBranches(handle: SessionHandle): List<BranchInfo> {
+        val branchMapFile = handle.dir.resolve("branches.json")
+        if (!Files.exists(branchMapFile)) {
+            return listOf(BranchInfo("main", handle.meta.id, null, null))
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val branches = runCatching {
+            mapper.readValue(Files.readAllBytes(branchMapFile), Map::class.java) as Map<String, Any>
+        }.getOrNull() ?: return listOf(BranchInfo("main", handle.meta.id, null, null))
+
+        val result = mutableListOf(BranchInfo("main", handle.meta.id, null, null))
+        @Suppress("UNCHECKED_CAST")
+        val branchList = branches["branches"] as? List<Map<String, Any?>> ?: return result
+        for (branch in branchList) {
+            result.add(BranchInfo(
+                branchId = branch["branchId"] as? String ?: "unknown",
+                sessionId = branch["sessionId"] as? String ?: "",
+                parentBranchId = branch["parentBranchId"] as? String,
+                forkMsgIndex = branch["forkMsgIndex"] as? Int,
+            ))
+        }
+        return result
+    }
+
+    data class BranchInfo(
+        val branchId: String,
+        val sessionId: String,
+        val parentBranchId: String?,
+        val forkMsgIndex: Int?,
+    )
 
     /** Delete a session directory. */
     fun delete(workspaceHash: String, sessionId: String) {
@@ -241,10 +489,12 @@ class SessionStore {
         val mode: String,
         val modelId: String?,
         var title: String?,
+        val branchId: String = "main",
+        val parentBranchId: String? = null,
+        val parentMsgIndex: Int? = null,
     )
 
     companion object {
         @JvmStatic fun getInstance(): SessionStore = service()
     }
-}   }
 }

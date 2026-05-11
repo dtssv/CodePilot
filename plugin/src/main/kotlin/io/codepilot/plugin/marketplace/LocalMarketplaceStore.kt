@@ -216,6 +216,28 @@ open class LocalMarketplaceStore {
 
     private fun mcpIndex(): Path = globalRoot().resolve("mcps/index.json")
 
+    /** Record a skill install in the index (alias for installSkill that also records manifest). */
+    fun recordInstall(slug: String, version: String, scope: Scope, source: Source, manifest: Map<String, Any?>) {
+        val yaml = manifest["yaml"] as? String ?: ""
+        installSkill(scope, null, slug, version, source, yaml)
+    }
+
+    /** Reload the index from disk (clears cache). */
+    fun reloadIndex() {
+        cache.clear()
+    }
+
+    /** Check if a skill is installed by its slug. */
+    fun isInstalled(slug: String): Boolean {
+        val globalIndex = readIndex(skillsIndex(Scope.GLOBAL, null))
+        return globalIndex.skills.any { it.id == slug }
+    }
+
+    /** Get the install directory for a skill. */
+    fun getInstallDir(slug: String, version: String, scope: Scope): Path {
+        return root(scope, null).resolve("skills/installed/$slug@$version")
+    }
+
     companion object {
         @JvmStatic fun getInstance(): LocalMarketplaceStore = service()
     }

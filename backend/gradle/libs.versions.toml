@@ -71,6 +71,7 @@ bouncycastle-bcpkix            = { module = "org.bouncycastle:bcpkix-jdk18on",  
 guava                          = { module = "com.google.guava:guava",                  version.ref = "guava" }
 micrometer-tracing-bridge-otel = { module = "io.micrometer:micrometer-tracing-bridge-otel", version.ref = "micrometer" }
 otel-exporter-otlp             = { module = "io.opentelemetry:opentelemetry-exporter-otlp",  version.ref = "otel" }
+otel-semconv-incubating        = { module = "io.opentelemetry.semconv:opentelemetry-semconv-incubating", version = "1.41.0-alpha" }
 
 # test
 spring-boot-starter-test       = { module = "org.springframework.boot:spring-boot-starter-test" }

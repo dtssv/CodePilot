@@ -13,6 +13,9 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 /**
  * Minimal JSON-RPC 2.0 manager for MCP servers launched as stdio children.
@@ -25,6 +28,15 @@ class McpProcessManager : Disposable {
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val procs = ConcurrentHashMap<String, Handle>()
+    private val specs = ConcurrentHashMap<String, McpLaunchSpec>()
+    private val healthScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val maxRestartAttempts = 3
+    private val restartAttempts = ConcurrentHashMap<String, AtomicInteger>()
+
+    init {
+        // Schedule periodic health checks every 30 seconds
+        healthScheduler.scheduleAtFixedRate({ runHealthChecks() }, 30, 30, TimeUnit.SECONDS)
+    }
 
     /** Call {@code method} with {@code params} on the named MCP child and return the parsed result. */
     fun call(serverId: String, method: String, params: Any?): JsonNode {
@@ -50,14 +62,85 @@ class McpProcessManager : Disposable {
     }
 
     fun start(serverId: String, spec: McpLaunchSpec) {
+        specs[serverId] = spec
+        restartAttempts.remove(serverId)
         procs.computeIfAbsent(serverId) { launch(spec) }
     }
 
     fun stop(serverId: String) {
+        specs.remove(serverId)
+        restartAttempts.remove(serverId)
         procs.remove(serverId)?.close()
     }
 
     fun isRunning(serverId: String): Boolean = procs[serverId]?.process?.isAlive == true
+
+    /** Get health status for all running MCP servers. */
+    fun healthStatus(): Map<String, HealthStatus> {
+        return procs.mapValues { (id, handle) ->
+            val alive = handle.process.isAlive
+            val attempts = restartAttempts[id]?.get() ?: 0
+            HealthStatus(
+                alive = alive,
+                restartAttempts = attempts,
+                serverId = id,
+            )
+        }
+    }
+
+    data class HealthStatus(
+        val alive: Boolean,
+        val restartAttempts: Int,
+        val serverId: String,
+    )
+
+    /** Periodic health check: detect dead processes and attempt auto-restart. */
+    private fun runHealthChecks() {
+        for ((serverId, handle) in procs) {
+            if (!handle.process.isAlive) {
+                val attempts = restartAttempts.computeIfAbsent(serverId) { AtomicInteger(0) }
+                if (attempts.get() < maxRestartAttempts) {
+                    val attempt = attempts.incrementAndGet()
+                    com.intellij.openapi.diagnostic.Logger.getInstance("McpProcessManager")
+                        .warn("[MCP Health] $serverId is dead, auto-restart attempt $attempt/$maxRestartAttempts")
+                    try {
+                        val spec = specs[serverId]
+                        if (spec != null) {
+                            handle.close()
+                            val newHandle = launch(spec)
+                            procs[serverId] = newHandle
+                            // Verify the new process is alive
+                            Thread.sleep(1000)
+                            if (newHandle.process.isAlive) {
+                                attempts.set(0) // Reset on successful restart
+                                com.intellij.openapi.diagnostic.Logger.getInstance("McpProcessManager")
+                                    .info("[MCP Health] $serverId restarted successfully")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        com.intellij.openapi.diagnostic.Logger.getInstance("McpProcessManager")
+                            .warn("[MCP Health] Failed to restart $serverId: ${e.message}")
+                    }
+                } else {
+                    com.intellij.openapi.diagnostic.Logger.getInstance("McpProcessManager")
+                        .warn("[MCP Health] $serverId exceeded max restart attempts ($maxRestartAttempts), giving up")
+                }
+            }
+        }
+    }
+
+    /** Send a ping request to verify the MCP server is responsive. */
+    fun ping(serverId: String): Boolean {
+        if (!isRunning(serverId)) return false
+        return try {
+            val result = call(serverId, "ping", emptyMap<String, Any>())
+            !result.isNull
+        } catch (e: Exception) {
+            com.intellij.openapi.diagnostic.Logger.getInstance("McpProcessManager")
+                .warn("[MCP Health] Ping failed for $serverId: ${e.message}")
+            false
+        }
+    }
 
     private fun launch(spec: McpLaunchSpec): Handle {
         val pb = ProcessBuilder(spec.argv).redirectErrorStream(false)
@@ -100,8 +183,14 @@ class McpProcessManager : Disposable {
     }
 
     override fun dispose() {
+        healthScheduler.shutdown()
+        try {
+            healthScheduler.awaitTermination(5, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {}
         procs.values.forEach { it.close() }
         procs.clear()
+        specs.clear()
+        restartAttempts.clear()
     }
 
     data class McpLaunchSpec(

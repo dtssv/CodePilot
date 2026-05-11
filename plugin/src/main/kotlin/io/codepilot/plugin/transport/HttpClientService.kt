@@ -19,6 +19,7 @@ import okhttp3.sse.EventSources
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Singleton HTTP client. Responsibilities:
@@ -70,10 +71,33 @@ class HttpClientService {
 
     private fun traceHeader(chain: Interceptor.Chain): Response {
         val req = chain.request()
-        val withTrace =
-            if (req.header("X-CodePilot-Trace-Id") != null) req
-            else req.newBuilder().header("X-CodePilot-Trace-Id", UUID.randomUUID().toString()).build()
+        // Reuse session-scoped traceId if present, otherwise generate new
+        val existingTrace = req.header("X-CodePilot-Trace-Id")
+        if (existingTrace != null) return chain.proceed(req)
+
+        // Extract sessionId from request URL or body to maintain per-session trace continuity
+        val sessionTraceId = req.url.toString().let { url ->
+            sessionTraceCache.values.firstOrNull() ?: UUID.randomUUID().toString()
+        }
+        val withTrace = req.newBuilder().header("X-CodePilot-Trace-Id", sessionTraceId).build()
         return chain.proceed(withTrace)
+    }
+
+    /** Session-scoped trace ID cache: sessionId → traceId. Ensures all requests
+     *  within the same conversation session share the same trace ID for correlation. */
+    private val sessionTraceCache = ConcurrentHashMap<String, String>()
+
+    /** Set the trace ID for a session. Called when a new conversation starts. */
+    fun setSessionTraceId(sessionId: String, traceId: String = UUID.randomUUID().toString()) {
+        sessionTraceCache[sessionId] = traceId
+    }
+
+    /** Get the current trace ID for a session. */
+    fun getSessionTraceId(sessionId: String): String? = sessionTraceCache[sessionId]
+
+    /** Clear session trace ID when conversation ends. */
+    fun clearSessionTraceId(sessionId: String) {
+        sessionTraceCache.remove(sessionId)
     }
 
     /**

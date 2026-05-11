@@ -8,6 +8,7 @@ import { ContextChipData } from './components/ContextChip';
 import { MarketplacePanel } from './components/MarketplacePanel';
 import { NotepadsPanel } from './components/NotepadsPanel';
 import { ComposerPanel } from './components/ComposerPanel';
+import ContextBudgetBar from './components/ContextBudgetBar';
 
 interface ModelOption {
     id: string;
@@ -26,6 +27,13 @@ interface ChatMessage {
     _streaming?: boolean;
 }
 
+interface BranchInfo {
+    branchId: string;
+    sessionId: string;
+    parentBranchId: string | null;
+    forkMsgIndex: number | null;
+}
+
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
@@ -37,7 +45,29 @@ export function App() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [contextChips, setContextChips] = useState<ContextChipData[]>([]);
+    const [contextTokens, setContextTokens] = useState(0);
+    const [totalTokens, setTotalTokens] = useState(128000); // Default to 128k
+    const [estimatedTokens, setEstimatedTokens] = useState(0);
+    const [theme, setTheme] = useState<'dark' | 'light' | 'high-contrast'>('dark');
+    const [branches, setBranches] = useState<BranchInfo[]>([]);
+    const [activeBranchId, setActiveBranchId] = useState<string>('main');
     const historyBtnRef = useRef<HTMLButtonElement>(null);
+
+    // Apply theme to document root
+    useEffect(() => {
+        document.documentElement.setAttribute('data-theme', theme);
+    }, [theme]);
+
+    // Listen for IDE theme changes via plugin
+    useEffect(() => {
+        const unsub = onPluginEvent('ide_theme', (payload) => {
+            const ideTheme = (payload as { theme: string }).theme;
+            if (ideTheme === 'light') setTheme('light');
+            else if (ideTheme === 'high-contrast') setTheme('high-contrast');
+            else setTheme('dark');
+        });
+        return unsub;
+    }, []);
 
     // Check auth state on mount and listen for changes
     useEffect(() => {
@@ -89,6 +119,12 @@ export function App() {
                 setActiveSessionId(data.id);
                 setMessages([]);
                 setContextChips([]);
+            }),
+            // Branch list update
+            onPluginEvent('branch_list', (payload) => {
+                const data = payload as { branches: BranchInfo[]; activeBranchId: string };
+                setBranches(data.branches);
+                setActiveBranchId(data.activeBranchId);
             }),
             // Restore messages from local store
             onPluginEvent('session_messages', (payload) => {
@@ -192,6 +228,13 @@ export function App() {
                     endLine: data.endLine,
                 };
                 setContextChips((prev) => [...prev, chip]);
+            }),
+            // Context budget updates
+            onPluginEvent('context_budget', (p) => {
+                const data = p as { current: number; total: number; estimated: number };
+                setContextTokens(data.current);
+                setTotalTokens(data.total);
+                setEstimatedTokens(data.estimated);
             }),
             // Patch from actions
             onPluginEvent('patch', (p) => {
@@ -301,7 +344,7 @@ export function App() {
                 )}
 
                 <div className="chat-area">
-                    {activeTab === 'chat' && <ChatView messages={messages} />}
+                    {activeTab === 'chat' && <ChatView messages={messages} onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })} />}
                     {activeTab === 'composer' && <ComposerPanel />}
                     {activeTab === 'marketplace' && <MarketplacePanel />}
                     {activeTab === 'notepads' && <NotepadsPanel />}
@@ -309,6 +352,12 @@ export function App() {
                 <div className="input-section">
                     {activeTab === 'chat' && (
                         <>
+                            <ContextBudgetBar 
+                                currentTokens={contextTokens}
+                                totalTokens={totalTokens}
+                                estimatedTokens={estimatedTokens}
+                                onCompress={() => sendToPlugin('compress_context', {})}
+                            />
                             <InputBar onSend={handleSend} onStop={handleStop} contextChips={contextChips} onRemoveChip={handleRemoveChip} />
                             <div className="input-bottom-row">
                                 <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>
@@ -322,6 +371,23 @@ export function App() {
                                     ))}
                                 </select>
                             </div>
+                            {branches.length > 1 && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>分支:</span>
+                                    <select className="opt-select" value={activeBranchId}
+                                        onChange={(e) => {
+                                            setActiveBranchId(e.target.value);
+                                            const branch = branches.find(b => b.branchId === e.target.value);
+                                            if (branch) sendToPlugin('switch_branch', { sessionId: branch.sessionId });
+                                        }}>
+                                        {branches.map(b => (
+                                            <option key={b.branchId} value={b.branchId}>
+                                                {b.branchId}{b.parentBranchId ? ` (fork from ${b.parentBranchId})` : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
                         </>
                     )}
                     <div className="tab-bar">
@@ -329,6 +395,9 @@ export function App() {
                         <button className={activeTab === 'composer' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('composer')}>Composer</button>
                         <button className={activeTab === 'marketplace' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('marketplace')}>Marketplace</button>
                         <button className={activeTab === 'notepads' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('notepads')}>Notepads</button>
+                        <button className="tab-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark')} title="切换主题">
+                            {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '◐'}
+                        </button>
                     </div>
                 </div>
             </div>

@@ -56,10 +56,11 @@ class ToolDispatcher(
                     name == "fs.move" -> dispatchViaPatchApplier(name, args)
                     name == "shell.exec" -> ShellExecutor(project).execute(args)
                     name == "shell.session" -> dispatchShellSession(args)
-                    name == "plan.show" -> mapOf("ack" to true)
+                    name == "plan.show" -> planShow(args)
                     name == "ide.openFile" -> ideOpenFile(args)
                     name == "ide.diagnostics" -> ideDiagnostics(args)
                     name == "ide.applyPatch" -> ideApplyPatch(args)
+                    name == "ide.shadowValidate" -> ideShadowValidate(args)
                     name.startsWith("mcp.") -> dispatchMcp(name, args)
                     else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
                 }
@@ -224,10 +225,56 @@ class ToolDispatcher(
         return mapOf("path" to path, "diagnostics" to diagnostics)
     }
 
+    /**
+     * plan.show: Send plan data to the PlanPanel UI for display.
+     * Also accepts userPlanEdits from the UI back to the backend.
+     * Per 01-§6.1: "用户可在 Plan / Ledger 面板里勾选/编辑/暂停/追问"
+     */
+    private fun planShow(args: JsonNode): Map<String, Any?> {
+        val planJson = args.path("plan").toString()
+        val ledgerJson = args.path("ledger").toString()
+        // Emit plan data to the UI via session event
+        client.submitPlanData(sessionId, planJson, ledgerJson)
+        return mapOf("ack" to true, "planDisplayed" to true)
+    }
+
     private fun ideApplyPatch(args: JsonNode): Map<String, Any?> {
         val patchText = args.path("patch").asText()
         patchApplier.applyUnifiedPatch(patchText)
         return mapOf("applied" to true)
+    }
+
+    /**
+     * Shadow Workspace validation: applies patches in a temporary shadow copy,
+     * runs compile/lint checks, and reports errors back without touching real files.
+     * Per 01-§3.22: "Agent 写操作可选经 Shadow Workspace 先验证编译通过"
+     */
+    private fun ideShadowValidate(args: JsonNode): Map<String, Any?> {
+        val patches = args.path("patches")
+        if (patches.isMissingNode || !patches.isArray) {
+            return mapOf("passed" to true, "errors" to emptyList<Any>())
+        }
+
+        val shadowWorkspace = ShadowWorkspace(project)
+        val patchOps = mutableListOf<ShadowWorkspace.PatchOperation>()
+
+        for (patch in patches) {
+            val path = patch.path("path").asText()
+            val op = patch.path("op").asText("replace")
+            val content = patch.path("content").asText("")
+            if (path.isNotBlank()) {
+                patchOps.add(ShadowWorkspace.PatchOperation(path, op, content))
+            }
+        }
+
+        val result = shadowWorkspace.validate(patchOps)
+        return mapOf(
+            "passed" to result.passed,
+            "errors" to result.errors.map { e ->
+                mapOf("file" to e.file, "line" to e.line, "message" to e.message, "severity" to e.severity)
+            },
+            "durationMs" to result.durationMs
+        )
     }
 
     private fun refuse(toolCallId: String, reason: String, startedNs: Long) {
@@ -368,5 +415,4 @@ class ToolDispatcher(
         }
         return mapOf("path" to target.toString(), "bytes" to (content.toByteArray().size))
     }
-}   }
 }

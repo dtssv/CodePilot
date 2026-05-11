@@ -9,6 +9,6 @@ public class AuditRepository extends io.codepilot.core.audit.AuditRepository {
   public AuditRepository(
       org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate jdbc,
       com.fasterxml.jackson.databind.ObjectMapper mapper) {
-    super(jdbc, mapper);
+    super(jdbc.getJdbcTemplate());
   }
 }

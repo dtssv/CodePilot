@@ -14,6 +14,7 @@ import com.intellij.psi.search.FilenameIndex
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.PsiShortNamesCache
 import io.codepilot.plugin.indexer.IndexScheduler
+import io.codepilot.plugin.indexer.LocalSearchEngine
 import io.codepilot.plugin.tools.ShellExecutor
 import java.nio.charset.StandardCharsets
 
@@ -106,8 +107,8 @@ class AtReferenceProvider(private val project: Project) {
             "git" -> resolveGit(value)
             "codebase" -> resolveCodebase(value)
             "docs" -> resolveDocs(value)
-            "web" -> ReferenceResult(type = "web", display = "@web $value", content = value)
-            "terminal" -> ReferenceResult(type = "terminal", display = "@terminal", content = "(terminal output placeholder)")
+            "web" -> resolveWeb(value)
+            "terminal" -> resolveTerminal(value)
             else -> null
         }
     }
@@ -315,6 +316,74 @@ class AtReferenceProvider(private val project: Project) {
             String(vf.contentsToByteArray(), StandardCharsets.UTF_8).take(20000)
         } catch (_: Exception) { return null }
         return ReferenceResult(type = "docs", display = "@docs $path", path = path, content = content)
+    }
+
+    // ─── Web ───────────────────────────────────────────────────────
+
+    /**
+     * Resolve @web reference by fetching URL content through the backend proxy.
+     * The backend handles the actual HTTP fetch to avoid CORS and security issues.
+     * Returns cleaned text content (stripped of HTML tags) limited to 15KB.
+     */
+    private fun resolveWeb(url: String): ReferenceResult? {
+        if (url.isBlank()) return null
+
+        // Validate URL format
+        val normalizedUrl = when {
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            else -> "https://$url"
+        }
+
+        return try {
+            val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+            val request = okhttp3.Request.Builder()
+                .url(http.client().let { client ->
+                    val settings = io.codepilot.plugin.settings.CodePilotSettings.getInstance()
+                    val baseUrl = settings.state.backendBaseUrl.trimEnd('/')
+                    "$baseUrl/v1/tools/web-fetch?url=${java.net.URLEncoder.encode(normalizedUrl, "UTF-8")}"
+                })
+                .get()
+                .header("Accept", "application/json")
+                .build()
+
+            val response = http.client().newCall(request).execute()
+            if (!response.isSuccessful) {
+                log.warn("@web fetch failed for $normalizedUrl: HTTP ${response.code}")
+                return ReferenceResult(type = "web", display = "@web $url", content = "(Failed to fetch: HTTP ${response.code})")
+            }
+
+            val body = response.body?.string() ?: return null
+            val mapper = com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
+            val tree = mapper.readTree(body)
+            val title = tree.path("title").asText(url)
+            val content = tree.path("content").asText("").take(15000)
+
+            if (content.isBlank()) {
+                return ReferenceResult(type = "web", display = "@web $url", content = "(No content retrieved from $normalizedUrl)")
+            }
+
+            val header = "--- @web: $title ($normalizedUrl) ---\n"
+            ReferenceResult(type = "web", display = "@web $title", content = header + content)
+        } catch (e: Exception) {
+            log.warn("@web fetch error for $normalizedUrl: ${e.message}")
+            ReferenceResult(type = "web", display = "@web $url", content = "(Error fetching $normalizedUrl: ${e.message})")
+        }
+    }
+
+    // ─── Terminal ──────────────────────────────────────────────────
+
+    /**
+     * Resolve @terminal reference by capturing recent terminal output.
+     * Returns the last N lines from the persistent terminal session.
+     */
+    private fun resolveTerminal(value: String): ReferenceResult? {
+        val terminalManager = io.codepilot.plugin.tools.TerminalSessionManager.getInstance(project)
+        val output = terminalManager.getLastOutput(project, maxLines = 100)
+        if (output.isBlank()) {
+            return ReferenceResult(type = "terminal", display = "@terminal", content = "(No recent terminal output available)")
+        }
+        val header = "--- @terminal: recent output ---\n"
+        return ReferenceResult(type = "terminal", display = "@terminal", content = header + output.take(10000))
     }
 
     companion object {

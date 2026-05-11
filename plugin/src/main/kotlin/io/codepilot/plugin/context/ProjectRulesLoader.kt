@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets
  *
  * Rules are .md files with optional YAML frontmatter:
  *   ---
- *   applies_to: "**\\/*.java"    # only apply to matching files
+ *   applies_to: glob pattern    # only apply to matching files
  *   priority: 60               # higher = loaded earlier
  *   always: true               # always load regardless of file match
  *   ---

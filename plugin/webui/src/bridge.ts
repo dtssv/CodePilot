@@ -44,7 +44,12 @@ export type PluginEventType =
     | 'user_plan_progress'
     | 'multi_file_patches'
     | 'patches_applied'
-    | 'notepad_list_result';
+    | 'notepad_list_result'
+    | 'context_budget'
+    | 'skill_list_result'
+    | 'composer_result'
+    | 'ide_theme'
+    | 'branch_list';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

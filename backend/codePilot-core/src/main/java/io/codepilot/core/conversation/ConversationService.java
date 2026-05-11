@@ -153,23 +153,68 @@ public class ConversationService {
     if (shape.localDigest() != null) {
       chatInput = shape.localDigest() + "\n\n" + redactedInput;
     }
-    final String finalChatInput = chatInput;
 
-    Flux<ServerSentEvent<String>> body =
-        resolvedClient
-            .prompt()
-            .system(assembled.systemText())
-            .user(finalChatInput)
-            .stream()
-            .chatResponse()
-            .map(ConversationService::deltaFromChatResponse)
-            .filter(s -> !s.isBlank())
-            .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
-            .onErrorResume(
-                ex -> {
-                  log.warn("LLM stream error", ex);
-                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
-                });
+    // Auto-trigger digest compression when context exceeds threshold
+    // (01-§4.4: context budget signals compact → auto-append compact instruction)
+    if (shape.needCompact() && assembled.systemText() != null) {
+      // Compact instruction will be appended by PromptOrchestrator
+      log.info("Auto-triggering digest compression (needCompact flag set)");
+    }
+
+    // Build user prompt with optional multi-modal content (01-§3.23)
+    // If request has images, inject as multi-modal content
+    final String finalChatInput = chatInput;
+    boolean hasAttachments = req.images() != null && !req.images().isEmpty();
+
+    Flux<ServerSentEvent<String>> body;
+    if (hasAttachments) {
+      // Multi-modal: build content with text + image parts
+      var mediaList = req.images().stream()
+          .filter(img -> img.mimeType() != null && img.mimeType().startsWith("image/"))
+          .map(img -> new org.springframework.ai.content.Media(
+              org.springframework.util.MimeTypeUtils.parseMimeType(img.mimeType()),
+              java.net.URI.create("data:" + img.mimeType() + ";base64," + img.data())))
+          .toList();
+      
+      var userMessage = org.springframework.ai.chat.messages.UserMessage.builder()
+          .text(finalChatInput)
+          .media(mediaList)
+          .build();
+      var userPrompt = org.springframework.ai.chat.prompt.Prompt.builder()
+          .messages(userMessage)
+          .build();
+
+      body = resolvedClient
+          .prompt(userPrompt)
+          .system(assembled.systemText())
+          .stream()
+          .chatResponse()
+          .map(ConversationService::deltaFromChatResponse)
+          .filter(s -> !s.isBlank())
+          .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
+          .onErrorResume(
+              ex -> {
+                log.warn("LLM stream error", ex);
+                return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+              });
+    } else {
+      // Text-only mode (standard path)
+      body = resolvedClient
+          .prompt()
+          .system(assembled.systemText())
+          .user(finalChatInput)
+          .stream()
+          .chatResponse()
+          .map(ConversationService::deltaFromChatResponse)
+          .filter(s -> !s.isBlank())
+          .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
+          .onErrorResume(
+              ex -> {
+                log.warn("LLM stream error", ex);
+                return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+              });
+    }
+
 
     return head.concatWith(body)
         .concatWith(

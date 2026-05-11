@@ -16,9 +16,18 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 /**
- * Per-user, fixed-window request limiter (60 req/min by default). Uses an atomic Redis script so
- * counters are correct under concurrent traffic. Reads {@link AuthPrincipal} from the reactor
- * context.
+ * Fine-grained rate limiter with per-user + per-operation-type quotas.
+ *
+ * <p>Quota tiers:
+ * <ul>
+ *   <li><b>chat</b> — /v1/conversation/* — 30 req/min (LLM calls are expensive)</li>
+ *   <li><b>completion</b> — /v1/actions/inline-completion — 60 req/min (frequent, cheap)</li>
+ *   <li><b>agent</b> — /v1/conversation (agent mode) — 10 req/min (long-running, expensive)</li>
+ *   <li><b>default</b> — all other endpoints — 60 req/min</li>
+ * </ul>
+ *
+ * <p>Uses an atomic Redis script for correct concurrent counters.
+ * Reads {@link AuthPrincipal} from the reactor context.
  */
 @Component
 public class RateLimitWebFilter implements WebFilter, Ordered {
@@ -50,19 +59,46 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
     return ORDER;
   }
 
+  /** Classify the request path into an operation type for per-type rate limiting. */
+  private String classifyOperation(String path) {
+    if (path.startsWith("/v1/actions/inline-completion")) return "completion";
+    if (path.startsWith("/v1/conversation")) {
+      // Agent mode uses SSE streams that are more expensive
+      return "agent";
+    }
+    if (path.startsWith("/v1/skills/") || path.startsWith("/v1/mcp/")) return "tools";
+    if (path.startsWith("/v1/models")) return "default";
+    return "default";
+  }
+
+  /** Get the rate limit for an operation type. */
+  private int getLimitForOperation(String opType) {
+    int baseLimit = props.rateLimit().userPerMinute();
+    return switch (opType) {
+      case "agent" -> Math.min(baseLimit / 6, 10);      // 10 req/min for agent (expensive)
+      case "chat" -> Math.min(baseLimit / 2, 30);        // 30 req/min for chat
+      case "completion" -> Math.min(baseLimit * 2, 120); // 120 req/min for completions (cheap)
+      case "tools" -> Math.min(baseLimit, 60);            // 60 req/min for tools
+      default -> baseLimit;                                // Default from config
+    };
+  }
+
   @Override
   public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
     return Mono.deferContextual(
         ctx -> {
           AuthPrincipal principal = ctx.getOrDefault(AuthPrincipal.CTX_KEY, null);
           if (principal == null) {
-            // Public endpoints don't go through rate limiting; the JWT filter already enforced it.
             return chain.filter(exchange);
           }
+
+          String path = exchange.getRequest().getPath().value();
+          String opType = classifyOperation(path);
+          int limit = getLimitForOperation(opType);
+
           long minute = System.currentTimeMillis() / 60_000L;
-          String key = "codepilot:rl:user:" + principal.userId() + ":" + minute;
+          String key = "codepilot:rl:user:" + principal.userId() + ":" + opType + ":" + minute;
           Duration ttl = Duration.ofSeconds(70);
-          int limit = props.rateLimit().userPerMinute();
 
           return redis
               .execute(SCRIPT, List.of(key), List.of(String.valueOf(ttl.toSeconds())))
@@ -71,12 +107,18 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
                   count -> {
                     if (count > limit) {
                       exchange.getResponse().getHeaders().add("Retry-After", "60");
+                      exchange.getResponse().getHeaders().add("X-RateLimit-Type", opType);
+                      exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(limit));
                       return WebErrors.write(
                           exchange,
                           ErrorCodes.RATE_LIMITED,
-                          "Too many requests, please slow down",
+                          "Rate limit exceeded for " + opType + " operations (" + limit + "/min)",
                           429);
                     }
+                    // Add rate limit headers for client awareness
+                    exchange.getResponse().getHeaders().add("X-RateLimit-Type", opType);
+                    exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(limit));
+                    exchange.getResponse().getHeaders().add("X-RateLimit-Remaining", String.valueOf(limit - count));
                     return chain.filter(exchange);
                   });
         });

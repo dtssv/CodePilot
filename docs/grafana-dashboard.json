@@ -1,0 +1,165 @@
+{
+  "annotations": { "list": [] },
+  "description": "CodePilot AI Coding Assistant — Request latency, Token consumption, Error rates, Agent step timing",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{job=\"codepilot-gateway\"}[5m])) by (le, uri))",
+          "legendFormat": "p50 {{uri}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket{job=\"codepilot-gateway\"}[5m])) by (le, uri))",
+          "legendFormat": "p95 {{uri}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket{job=\"codepilot-gateway\"}[5m])) by (le, uri))",
+          "legendFormat": "p99 {{uri}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Token Consumption (Input / Output per minute)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(codepilot_llm_tokens_total{direction=\"input\"}[5m])) by (model)",
+          "legendFormat": "Input {{model}}"
+        },
+        {
+          "expr": "sum(rate(codepilot_llm_tokens_total{direction=\"output\"}[5m])) by (model)",
+          "legendFormat": "Output {{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "tok/min" }
+      }
+    },
+    {
+      "title": "Error Rate (4xx / 5xx)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{job=\"codepilot-gateway\",status_code=~\"4..\"}[5m])) by (status_code)",
+          "legendFormat": "{{status_code}}"
+        },
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{job=\"codepilot-gateway\",status_code=~\"5..\"}[5m])) by (status_code)",
+          "legendFormat": "{{status_code}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" }
+      }
+    },
+    {
+      "title": "Rate Limit Hits (429 by operation type)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{job=\"codepilot-gateway\",status_code=\"429\"}[5m])) by (rate_limit_type)",
+          "legendFormat": "{{rate_limit_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" }
+      }
+    },
+    {
+      "title": "Agent Step Duration (by node type)",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(codepilot_agent_step_duration_seconds_bucket{job=\"codepilot-core\"}[5m])) by (le, node_type))",
+          "legendFormat": "{{node_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Active Sessions & Concurrent Users",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "codepilot_sessions_active{job=\"codepilot-core\"}",
+          "legendFormat": "Active Sessions"
+        }
+      ]
+    },
+    {
+      "title": "Shadow Validation Pass Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(codepilot_shadow_validation_total{result=\"passed\"}[5m])) / sum(rate(codepilot_shadow_validation_total[5m]))",
+          "legendFormat": "Pass Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 }
+      }
+    },
+    {
+      "title": "FIM Completion Acceptance Rate",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 20 },
+      "targets": [
+        {
+          "expr": "sum(rate(codepilot_completion_total{result=\"accepted\"}[5m])) / sum(rate(codepilot_completion_total[5m]))",
+          "legendFormat": "Accept Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 }
+      }
+    },
+    {
+      "title": "MCP Server Health",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 20 },
+      "targets": [
+        {
+          "expr": "codepilot_mcp_server_alive{job=\"codepilot-plugin\"}",
+          "legendFormat": "{{server_id}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["codepilot", "ai-coding", "observability"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CodePilot — AI Coding Assistant",
+  "uid": "codepilot-main",
+  "version": 1
+}

@@ -1,23 +1,27 @@
-[ROLE] You add high-quality doc comments to {{language}} code.
+# Action: comment
+# Purpose: Add comprehensive documentation comments to code blocks
+# Input: code block with context
+# Output: commented code with clear explanations
 
-[RULES]
-- Use the language-idiomatic style:
-  - Java: Javadoc with @param/@return/@throws
-  - Go: GoDoc starting with the identifier name
-  - Python: PEP257 docstrings (Google or NumPy style — match project)
-  - JS/TS: JSDoc/TSDoc; include @param types only when not in TS signatures
-  - SQL: leading -- block comments per statement
-- Do NOT modify executable code; only add/adjust comments.
-- Mention non-obvious invariants, side-effects, complexity, thread-safety.
-- No fluff; no restating what the code obviously does.
+You are an expert code documentation specialist. Your task is to add comprehensive, clear, and helpful comments to the provided code.
 
-[INPUT]
-```{{language}}
-{{selection}}
+## Guidelines:
+1. Add comments that explain the "why" not just the "what"
+2. Document complex algorithms, data structures, and business logic
+3. Include usage examples in comments for public APIs
+4. Add TODO/FIXME comments for potential improvements
+5. Use consistent commenting style matching the language conventions
+
+## Input Code:
+```
+{{code}}
 ```
 
-[OUTPUT FORMAT — Patch JSON]
-{
-  "summary": "...",
-  "patches": [{"path":"{{filePath}}","op":"replace","range":{...},"newContent":"..."}]
-}
+## Requirements:
+- Add inline comments for non-obvious code sections
+- Add block comments for functions/classes explaining purpose and usage
+- Include parameter descriptions for function arguments
+- Add return value documentation
+- Document any side effects or important details
+
+Provide the fully commented code in a single code block.
