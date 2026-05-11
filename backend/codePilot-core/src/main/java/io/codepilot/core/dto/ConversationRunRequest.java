@@ -31,7 +31,11 @@ public record ConversationRunRequest(
     List<PlanEdit> userPlanEdits,
     Options options,
     Policy policy,
-    Skills skills) {
+    Skills skills,
+    // ★ 新增：来自 .codepilot/rules/ 的项目规则文本列表
+    List<String> projectRules,
+    // ★ 新增：多模态图片输入
+    List<Image> images) {
 
   public enum Intent {
     @JsonProperty("new") NEW,
@@ -124,4 +128,8 @@ public record ConversationRunRequest(
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Skills(List<String> requested, List<String> disabled) {}
+
+  /** Multi-modal image input. */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public record Image(String data, String mimeType, String description) {}
 }

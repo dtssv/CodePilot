@@ -34,6 +34,28 @@ public class PromptOrchestrator {
 
     if (req.mode() == ConversationMode.AGENT) {
       segments.add(registry.get("agent.system"));
+      // ★ 注入 projectRules（来自 .codepilot/rules/ 的项目规则）
+      if (req.projectRules() != null && !req.projectRules().isEmpty()) {
+        segments.add("[PROJECT_RULES_BEGIN]\n"
+            + String.join("\n\n", req.projectRules())
+            + "\n[PROJECT_RULES_END]");
+      }
+      // ★ 注入 images 多模态描述（图片本体由调用方放入 LLM API 的 content[]）
+      if (req.images() != null && !req.images().isEmpty()) {
+        StringBuilder imgSb = new StringBuilder("[USER_IMAGES_BEGIN]\n");
+        for (int i = 0; i < req.images().size(); i++) {
+          var img = req.images().get(i);
+          imgSb.append("Image ").append(i + 1).append(": ");
+          if (img.description() != null && !img.description().isBlank()) {
+            imgSb.append(img.description());
+          } else {
+            imgSb.append("(").append(img.mimeType()).append(")");
+          }
+          imgSb.append("\n");
+        }
+        imgSb.append("[USER_IMAGES_END]");
+        segments.add(imgSb.toString());
+      }
       segments.add(renderTools(req.toolsSchemaJson()));
       if (req.requestCompact()) segments.add(registry.get("agent.compact"));
       if (req.replanHint()) segments.add(registry.get("agent.replan"));
@@ -125,7 +147,9 @@ public class PromptOrchestrator {
             resuming,
             false,
             activated,
-            locale));
+            locale,
+            req.projectRules(),
+            req.images()));
   }
 
   private String editsJson(ConversationRunRequest req) {
@@ -151,7 +175,9 @@ public class PromptOrchestrator {
       boolean resuming,
       boolean approachingDelivery,
       List<ActivatedSkill> activatedSkills,
-      String userLocale) {}
+      String userLocale,
+      List<String> projectRules,
+      List<ConversationRunRequest.Image> images) {}
 
   /** Assembled result; the body is internal and never written to logs verbatim. */
   public record Assembled(String systemText, List<ActivatedSkill> activatedSkills) {}

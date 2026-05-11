@@ -112,7 +112,16 @@ class ConversationClient(
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
         val payload = http.mapper.writeValueAsBytes(body).toRequestBody("application/json".toMediaType())
-        return Request.Builder().url(url).post(payload).header("Accept", "text/event-stream").build()
+        val builder = Request.Builder().url(url).post(payload).header("Accept", "text/event-stream")
+        // ★ Privacy Mode header: inform backend to skip telemetry/logging
+        if (settings.state.privacyMode) {
+            builder.header("X-Privacy-Mode", "true")
+        }
+        // ★ Anonymous mode header
+        if (settings.state.anonymousMode) {
+            builder.header("X-Anonymous-Mode", "true")
+        }
+        return builder.build()
     }
 
     private fun open(request: Request, listener: Listener): EventSource {

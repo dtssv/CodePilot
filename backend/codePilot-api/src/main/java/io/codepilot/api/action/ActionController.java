@@ -152,4 +152,34 @@ public class ActionController {
       @NotBlank String filePath,
       String fileOutline,
       Integer maxTokens) {}
+
+  /** ★ Bug Scan: scan code for potential bugs, vulnerabilities, and code smells. */
+  @Operation(summary = "Bug scan — find potential bugs, vulnerabilities, and code smells")
+  @PostMapping(value = "/bug-scan", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> bugScan(@RequestBody @Valid BugScanRequest req) {
+    String input = "[action:bug-scan]\n"
+        + "Language: " + req.language() + "\n"
+        + "File: " + req.filePath() + "\n"
+        + (req.diagnostics() != null && !req.diagnostics().isEmpty()
+            ? "IDE Diagnostics:\n" + req.diagnostics().stream()
+                .map(d -> "  - " + d)
+                .reduce((a, b) -> a + "\n" + b).orElse("") + "\n"
+            : "")
+        + "\n```" + req.language() + "\n" + req.code() + "\n```"
+        + "\n\nAnalyze the above code for bugs, vulnerabilities, and code smells. "
+        + "For each finding, provide: severity (critical/high/medium/low), line range, description, and suggested fix.";
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
+  public record BugScanRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String code,
+      @NotBlank String language,
+      @NotBlank String filePath,
+      List<String> diagnostics) {}
 }

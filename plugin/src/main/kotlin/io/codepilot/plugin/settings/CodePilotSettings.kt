@@ -40,6 +40,12 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var allowDevSso: Boolean = false,
         /** Dev token for bypassing JWT auth in development builds. Empty in production. */
         var devToken: String = "",
+        /** ★ Privacy Mode: when true, no code/text is sent to the cloud; local-only. */
+        var privacyMode: Boolean = false,
+        /** ★ Local encryption for stored sessions when privacyMode is on. */
+        var localEncryption: Boolean = false,
+        /** ★ Anonymous telemetry mode: sends usage stats without PII. */
+        var anonymousMode: Boolean = false,
         var registries: List<RegistryEntry> = listOf(
             RegistryEntry("Official", "https://marketplace.codepilot.io", "")
         ),

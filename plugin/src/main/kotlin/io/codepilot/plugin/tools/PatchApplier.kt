@@ -182,6 +182,48 @@ class PatchApplier(private val project: Project) {
         }
     }
 
+    /**
+     * ★ Per-hunk selective apply: applies only the selected hunk indices from a unified diff.
+     * Called from CefChatPanel when the user clicks "Apply" on individual hunks in the diff viewer.
+     *
+     * @param patchText   Full unified diff text
+     * @param selectedHunks  0-based indices of hunks to apply (within each file)
+     */
+    fun applySelectedHunks(patchText: String, selectedHunks: Set<Int>) {
+        if (patchText.isBlank() || selectedHunks.isEmpty()) return
+        ApplicationManager.getApplication().invokeLater {
+            val lines = patchText.lines()
+            var currentFile: String? = null
+            val hunksByFile = mutableMapOf<String, MutableList<String>>()
+            var hunkIndex = -1
+
+            for (line in lines) {
+                when {
+                    line.startsWith("+++ b/") || line.startsWith("+++ ") -> {
+                        currentFile = line.removePrefix("+++ b/").removePrefix("+++ ").trim()
+                        hunksByFile.getOrPut(currentFile!!) { mutableListOf() }
+                    }
+                    line.startsWith("--- ") -> { /* skip --- lines */ }
+                    line.startsWith("@@") -> {
+                        hunkIndex++
+                        if (currentFile != null && hunkIndex in selectedHunks) {
+                            hunksByFile[currentFile!!]!!.add(line)
+                        }
+                    }
+                    currentFile != null && hunkIndex in selectedHunks -> {
+                        hunksByFile[currentFile!!]!!.add(line)
+                    }
+                }
+            }
+
+            // Apply selected hunks per file
+            for ((file, hunkLines) in hunksByFile) {
+                if (hunkLines.isEmpty()) continue
+                applyHunkToFile(file, hunkLines.joinToString("\n"))
+            }
+        }
+    }
+
     // ----- per-op implementations (each performs guard + diff preview when applicable) -----
 
     private fun createFile(rel: String, edit: JsonNode) {

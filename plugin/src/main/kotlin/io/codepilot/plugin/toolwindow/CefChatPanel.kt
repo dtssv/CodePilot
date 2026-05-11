@@ -163,6 +163,11 @@ class CefChatPanel(val project: Project) : Disposable {
                     payload["tenantId"]?.asText() ?: return,
                 )
                 "auth_login_oidc" -> handleAuthLoginOidc()
+                // ★ @-reference resolution and patch events
+                "at_suggest" -> handleAtSuggest(payload["query"]?.asText() ?: "")
+                "at_resolve" -> handleAtResolve(payload["id"]?.asText() ?: return)
+                "apply_patches" -> handleApplyPatches(payload)
+                "apply_selected_hunks" -> handleApplySelectedHunks(payload)
                 else -> log.warn("Unknown message type from web: $type")
             }
         } catch (e: Exception) {
@@ -677,6 +682,114 @@ class CefChatPanel(val project: Project) : Disposable {
                 log.error("[Auth] OIDC login exception", e)
                 dispatchToWeb("auth_login_result", mapOf("success" to false, "error" to (e.message ?: "unknown")))
             }
+        }
+    }
+
+    // ---- @-reference and patch event handlers ----
+
+    /**
+     * ★ at_suggest: Returns a list of @-reference candidates for the given query.
+     * Supports @file, @symbol, @terminal, @git, @web patterns.
+     */
+    private fun handleAtSuggest(query: String) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val suggestions = mutableListOf<Map<String, String>>()
+            val lower = query.lowercase()
+            // @file — list files matching the query
+            if (lower.isEmpty() || lower.startsWith("file") || lower.startsWith("f")) {
+                val root = project.basePath ?: return@executeOnPooledThread
+                java.nio.file.Files.walk(java.nio.file.Path.of(root))
+                    .limit(50)
+                    .filter { java.nio.file.Files.isRegularFile(it) && !it.toString().contains("/.git/") }
+                    .forEach { path ->
+                        val rel = path.toString().removePrefix(root).trimStart('/')
+                        if (lower.isEmpty() || rel.lowercase().contains(lower.removePrefix("file").removePrefix("f"))) {
+                            suggestions.add(mapOf("id" to "file:$rel", "display" to rel, "type" to "file"))
+                        }
+                    }
+            }
+            // @terminal — suggest active terminal sessions
+            if (lower.isEmpty() || lower.startsWith("terminal") || lower.startsWith("t")) {
+                val sessionManager = io.codepilot.plugin.tools.TerminalSessionManager.getInstance(project)
+                suggestions.add(mapOf("id" to "terminal:default", "display" to "Terminal output", "type" to "terminal"))
+            }
+            // @git — suggest git context
+            if (lower.isEmpty() || lower.startsWith("git") || lower.startsWith("g")) {
+                suggestions.add(mapOf("id" to "git:diff", "display" to "Git diff (staged)", "type" to "git"))
+                suggestions.add(mapOf("id" to "git:log", "display" to "Git recent log", "type" to "git"))
+            }
+            dispatchToWeb("at_suggestions", mapOf("query" to query, "suggestions" to suggestions.take(20)))
+        }
+    }
+
+    /**
+     * ★ at_resolve: Resolves an @-reference ID to its full content.
+     */
+    private fun handleAtResolve(id: String) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val parts = id.split(":", limit = 2)
+            if (parts.size < 2) {
+                dispatchToWeb("at_resolved", mapOf("id" to id, "content" to "", "error" to "invalid reference"))
+                return@executeOnPooledThread
+            }
+            val (type, ref) = parts[0] to parts[1]
+            val content = when (type) {
+                "file" -> {
+                    try {
+                        val vf = io.codepilot.plugin.tools.PathGuard.resolve(project, ref)
+                        String(vf.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8)
+                    } catch (e: Exception) { "Error reading file: ${e.message}" }
+                }
+                "terminal" -> {
+                    val sessionManager = io.codepilot.plugin.tools.TerminalSessionManager.getInstance(project)
+                    sessionManager.getRecentOutput(ref, 5000) ?: "(no terminal output)"
+                }
+                "git" -> {
+                    try {
+                        val cmd = when (ref) {
+                            "diff" -> listOf("git", "diff", "--cached")
+                            "log" -> listOf("git", "log", "--oneline", "-20")
+                            else -> listOf("git", "status", "--short")
+                        }
+                        val proc = ProcessBuilder(cmd).directory(java.io.File(project.basePath)).start()
+                        proc.inputStream.bufferedReader().readText().take(8000)
+                    } catch (e: Exception) { "Error running git: ${e.message}" }
+                }
+                else -> "Unknown reference type: $type"
+            }
+            dispatchToWeb("at_resolved", mapOf("id" to id, "content" to content))
+        }
+    }
+
+    /**
+     * ★ apply_patches: Apply all patches from the SSE stream (full-file diff approval).
+     */
+    private fun handleApplyPatches(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val patchApplier = io.codepilot.plugin.tools.PatchApplier(project)
+        val patches = payload.path("patches")
+        if (patches.isArray && patches.size() > 0) {
+            patchApplier.applyAll(patches)
+        } else {
+            val patchText = payload.path("patch").asText("")
+            if (patchText.isNotBlank()) {
+                patchApplier.applyUnifiedPatch(patchText)
+            }
+        }
+    }
+
+    /**
+     * ★ apply_selected_hunks: Apply only selected hunks from a unified diff.
+     */
+    private fun handleApplySelectedHunks(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val patchText = payload.path("patch").asText("")
+        val selectedHunks = payload.path("selectedHunks")
+            .takeIf { it.isArray }
+            ?.map { it.asInt() }
+            ?.toSet()
+            ?: emptySet()
+        if (patchText.isNotBlank() && selectedHunks.isNotEmpty()) {
+            val patchApplier = io.codepilot.plugin.tools.PatchApplier(project)
+            patchApplier.applySelectedHunks(patchText, selectedHunks)
         }
     }
 }

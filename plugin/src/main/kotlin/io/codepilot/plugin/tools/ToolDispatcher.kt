@@ -55,6 +55,7 @@ class ToolDispatcher(
                     name == "fs.delete" -> dispatchViaPatchApplier(name, args)
                     name == "fs.move" -> dispatchViaPatchApplier(name, args)
                     name == "shell.exec" -> ShellExecutor(project).execute(args)
+                    name == "shell.session" -> dispatchShellSession(args)
                     name == "plan.show" -> mapOf("ack" to true)
                     name == "ide.openFile" -> ideOpenFile(args)
                     name == "ide.diagnostics" -> ideDiagnostics(args)
@@ -121,6 +122,43 @@ class ToolDispatcher(
     }
 
     // ---------- MCP routing ----------
+
+    private fun dispatchShellSession(args: JsonNode): Map<String, Any?> {
+        val sessionManager = TerminalSessionManager.getInstance(project)
+        val action = args.path("action").asText("exec")
+        return when (action) {
+            "exec" -> {
+                val command = args.path("command").asText()
+                if (command.isBlank()) throw ToolViolation("shell.session: missing command")
+                val sessionId = args.path("sessionId").asText(null)
+                val cwd = args.path("cwd").asText(null)
+                val timeoutMs = args.path("timeoutMs").asLong(60_000)
+                val result = sessionManager.execute(command, sessionId, cwd, timeoutMs)
+                mapOf(
+                    "stdout" to result.stdout,
+                    "exitCode" to result.exitCode,
+                    "durationMs" to result.durationMs,
+                    "sessionId" to result.sessionId,
+                )
+            }
+            "getOutput" -> {
+                val sid = args.path("sessionId").asText()
+                if (sid.isBlank()) throw ToolViolation("shell.session: missing sessionId for getOutput")
+                val maxChars = args.path("maxChars").asInt(5000)
+                val output = sessionManager.getRecentOutput(sid, maxChars)
+                mapOf("output" to (output ?: ""), "sessionId" to sid)
+            }
+            "close" -> {
+                val sid = args.path("sessionId").asText()
+                if (sid.isBlank()) throw ToolViolation("shell.session: missing sessionId for close")
+                sessionManager.closeSession(sid)
+                mapOf("closed" to true, "sessionId" to sid)
+            }
+            else -> throw ToolViolation("shell.session: unknown action '$action'")
+        }
+    }
+
+    // ---------- MCP routing (original) ----------
 
     private fun dispatchMcp(fullName: String, args: JsonNode): Map<String, Any?> {
         // Parse: mcp.<serverId>.<toolName>
@@ -330,4 +368,5 @@ class ToolDispatcher(
         }
         return mapOf("path" to target.toString(), "bytes" to (content.toByteArray().size))
     }
+}   }
 }
