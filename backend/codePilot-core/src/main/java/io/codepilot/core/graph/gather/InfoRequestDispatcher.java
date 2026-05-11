@@ -1,5 +1,6 @@
 package io.codepilot.core.graph.gather;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.rag.ServerToolExecutor;
 import org.springframework.stereotype.Component;
 
@@ -27,9 +28,11 @@ public class InfoRequestDispatcher {
     );
 
     private final ServerToolExecutor serverToolExecutor;
+    private final ObjectMapper mapper;
 
-    public InfoRequestDispatcher(ServerToolExecutor serverToolExecutor) {
+    public InfoRequestDispatcher(ServerToolExecutor serverToolExecutor, ObjectMapper mapper) {
         this.serverToolExecutor = serverToolExecutor;
+        this.mapper = mapper;
     }
 
     /**
@@ -61,8 +64,12 @@ public class InfoRequestDispatcher {
             try {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> args = (Map<String, Object>) req.getOrDefault("args", Map.of());
-                Map<String, Object> result = serverToolExecutor.execute(kind, args);
-                results.add(Map.of("id", id, "kind", kind, "ok", true, "result", result));
+                String sessionId = (String) req.getOrDefault("sessionId", "");
+                var argsNode = mapper.valueToTree(args);
+                String result = serverToolExecutor.execute(kind, argsNode, sessionId);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> resultMap = mapper.readValue(result, Map.class);
+                results.add(Map.of("id", id, "kind", kind, "ok", true, "result", resultMap));
             } catch (Exception e) {
                 results.add(Map.of("id", id, "kind", kind, "ok", false,
                         "errorCode", "server_error", "errorMessage", e.getMessage()));

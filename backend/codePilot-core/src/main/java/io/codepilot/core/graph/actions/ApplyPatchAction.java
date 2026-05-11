@@ -7,7 +7,7 @@ import java.util.*;
 
 /** ApplyPatch node: emits tool_call SSE for client-side execution, awaits result via ToolResultBus. */
 @Component
-public class ApplyPatchAction implements NodeAction<OverAllState> {
+public class ApplyPatchAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

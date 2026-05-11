@@ -9,7 +9,7 @@ import java.util.*;
 
 /** Generate node: LLM produces toolCalls/patches for the current phase, or infoRequests. */
 @Component
-public class GenerateAction implements NodeAction<OverAllState> {
+public class GenerateAction implements NodeAction {
 
     private final ChatClient chatClient;
 

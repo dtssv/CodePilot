@@ -20,7 +20,7 @@ import java.util.*;
  * sees it being generated in real-time, just like a normal chat response.
  */
 @Component
-public class SynthesizeAction implements NodeAction<OverAllState> {
+public class SynthesizeAction implements NodeAction {
 
     private final ChatClient chatClient;
 

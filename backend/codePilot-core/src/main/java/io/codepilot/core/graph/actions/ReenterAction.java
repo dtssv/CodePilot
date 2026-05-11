@@ -8,7 +8,7 @@ import java.util.*;
 
 /** Reenter node: merges gathered info into state, jumps back to resumeTo node. */
 @Component
-public class ReenterAction implements NodeAction<OverAllState> {
+public class ReenterAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

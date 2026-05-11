@@ -240,7 +240,7 @@ public final class AgentLoop {
         .filter(r -> r != null && r.getOutput() != null)
         .map(r -> {
           var msg = r.getOutput();
-          return msg.getContent() == null ? "" : msg.getContent();
+          return msg.getText() == null ? "" : msg.getText();
         })
         .reduce(new StringBuilder(), StringBuilder::append)
         .map(StringBuilder::toString);

@@ -8,7 +8,7 @@ import java.util.*;
 
 /** Verify node: runs compile/test/lint assertions. No LLM call — deterministic scripts only. */
 @Component
-public class VerifyAction implements NodeAction<OverAllState> {
+public class VerifyAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

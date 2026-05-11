@@ -12,7 +12,7 @@ import java.util.*;
  * Normalizes answers, loads lastPlan/ledger, sets up session context.
  */
 @Component
-public class IntakeAction implements NodeAction<OverAllState> {
+public class IntakeAction implements NodeAction {
 
     @Override
     public Map<String, Object> apply(OverAllState state) {

@@ -23,7 +23,7 @@ import java.util.*;
  * </ul>
  */
 @Component
-public class SearchEvaluateAction implements NodeAction<OverAllState> {
+public class SearchEvaluateAction implements NodeAction {
 
     private static final int MAX_SEARCH_ROUNDS = 5;
     private final ChatClient chatClient;

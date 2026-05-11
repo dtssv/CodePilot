@@ -2,10 +2,11 @@ package io.codepilot.core.graph;
 
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
+import com.alibaba.cloud.ai.graph.CompiledGraph;
+import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
+import com.alibaba.cloud.ai.graph.action.AsyncEdgeAction;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
-import com.alibaba.cloud.ai.graph.node.Node;
-import com.alibaba.cloud.ai.graph.edge.Edge;
-import com.alibaba.cloud.ai.graph.checkpoint.config.CheckpointConfig;
+import com.alibaba.cloud.ai.graph.action.EdgeAction;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.graph.actions.*;
 import io.codepilot.core.sse.SseEvents;
@@ -96,8 +97,8 @@ public class GraphEngineService {
             var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
             var initialState = intakeAction.buildInitialState(req);
 
-            var resultState = graph.invoke(initialState);
-            return buildSseFromResult(resultState);
+            var resultState = graph.invoke(initialState.data());
+            return buildSseFromResult(resultState.orElse(null));
         } catch (Exception e) {
             log.error("Graph engine execution failed", e);
             return Flux.just(
@@ -106,62 +107,68 @@ public class GraphEngineService {
         }
     }
 
-    private StateGraph<OverAllState> buildGraph() throws Exception {
-        var graph = new StateGraph<>(OverAllState::new);
+    private CompiledGraph buildGraph() throws Exception {
+        var graph = new StateGraph(OverAllState::new);
 
         // ── Define Nodes ──
-        graph.addNode("intake", intakeAction);
-        graph.addNode("planning", planningAction);
-        graph.addNode("preCheck", preCheckAction);
-        graph.addNode("generate", generateAction);
-        graph.addNode("applyPatch", applyPatchAction);
-        graph.addNode("verify", verifyAction);
-        graph.addNode("repair", repairAction);
-        graph.addNode("gather", gatherAction);
-        graph.addNode("reenter", reenterAction);
-        graph.addNode("commit", commitAction);
-        graph.addNode("askUser", askUserAction);
-        graph.addNode("finalize", finalizeAction);
+        graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
+        graph.addNode("planning", AsyncNodeAction.node_async(planningAction));
+        graph.addNode("preCheck", AsyncNodeAction.node_async(preCheckAction));
+        graph.addNode("generate", AsyncNodeAction.node_async(generateAction));
+        graph.addNode("applyPatch", AsyncNodeAction.node_async(applyPatchAction));
+        graph.addNode("verify", AsyncNodeAction.node_async(verifyAction));
+        graph.addNode("repair", AsyncNodeAction.node_async(repairAction));
+        graph.addNode("gather", AsyncNodeAction.node_async(gatherAction));
+        graph.addNode("reenter", AsyncNodeAction.node_async(reenterAction));
+        graph.addNode("commit", AsyncNodeAction.node_async(commitAction));
+        graph.addNode("askUser", AsyncNodeAction.node_async(askUserAction));
+        graph.addNode("finalize", AsyncNodeAction.node_async(finalizeAction));
 
         // ── Define Edges ──
-        graph.setEntryPoint("intake");
+        graph.addEdge(StateGraph.START, "intake");
         graph.addEdge("intake", "planning");
 
         // Planning → may need info or proceed to phase loop
-        graph.addConditionalEdges("planning", planningAction::routeAfterPlanning,
+        graph.addConditionalEdges("planning",
+                AsyncEdgeAction.edge_async(planningAction::routeAfterPlanning),
                 Map.of("preCheck", "preCheck", "gather", "gather", "finalize", "finalize"));
 
         graph.addEdge("preCheck", "generate");
 
         // Generate → may need info, or produce toolCalls
-        graph.addConditionalEdges("generate", generateAction::routeAfterGenerate,
+        graph.addConditionalEdges("generate",
+                AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
                 Map.of("applyPatch", "applyPatch", "gather", "gather", "askUser", "askUser"));
 
         graph.addEdge("applyPatch", "verify");
 
         // Verify → success/fail/uncertain
-        graph.addConditionalEdges("verify", verifyAction::routeAfterVerify,
+        graph.addConditionalEdges("verify",
+                AsyncEdgeAction.edge_async(verifyAction::routeAfterVerify),
                 Map.of("commit", "commit", "repair", "repair", "askUser", "askUser"));
 
         // Repair → may need info, or retry verify
-        graph.addConditionalEdges("repair", repairAction::routeAfterRepair,
+        graph.addConditionalEdges("repair",
+                AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
                 Map.of("applyPatch", "applyPatch", "gather", "gather", "askUser", "askUser"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
 
         // Reenter → back to the originating node
-        graph.addConditionalEdges("reenter", reenterAction::routeAfterReenter,
+        graph.addConditionalEdges("reenter",
+                AsyncEdgeAction.edge_async(reenterAction::routeAfterReenter),
                 Map.of("planning", "planning", "preCheck", "preCheck",
                         "generate", "generate", "repair", "repair"));
 
         // Commit → next phase or finalize
-        graph.addConditionalEdges("commit", commitAction::routeAfterCommit,
+        graph.addConditionalEdges("commit",
+                AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
                 Map.of("preCheck", "preCheck", "finalize", "finalize"));
 
         // AskUser and Finalize are terminal
-        graph.setFinishPoint("askUser");
-        graph.setFinishPoint("finalize");
+        graph.addEdge("askUser", StateGraph.END);
+        graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();
     }
@@ -174,31 +181,33 @@ public class GraphEngineService {
      *    → sufficient: commit / insufficient: 回到 generate]
      * → synthesize(汇总生成报告) → finalize
      */
-    private StateGraph<OverAllState> buildDeepResearchGraph() throws Exception {
-        var graph = new StateGraph<>(OverAllState::new);
+    private CompiledGraph buildDeepResearchGraph() throws Exception {
+        var graph = new StateGraph(OverAllState::new);
 
         // Nodes
-        graph.addNode("intake", intakeAction);
-        graph.addNode("planning", planningAction);
-        graph.addNode("generate", generateAction);
-        graph.addNode("gather", gatherAction);
-        graph.addNode("reenter", reenterAction);
-        graph.addNode("searchEvaluate", searchEvaluateAction);
-        graph.addNode("commit", commitAction);
-        graph.addNode("synthesize", synthesizeAction);
-        graph.addNode("askUser", askUserAction);
-        graph.addNode("finalize", finalizeAction);
+        graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
+        graph.addNode("planning", AsyncNodeAction.node_async(planningAction));
+        graph.addNode("generate", AsyncNodeAction.node_async(generateAction));
+        graph.addNode("gather", AsyncNodeAction.node_async(gatherAction));
+        graph.addNode("reenter", AsyncNodeAction.node_async(reenterAction));
+        graph.addNode("searchEvaluate", AsyncNodeAction.node_async(searchEvaluateAction));
+        graph.addNode("commit", AsyncNodeAction.node_async(commitAction));
+        graph.addNode("synthesize", AsyncNodeAction.node_async(synthesizeAction));
+        graph.addNode("askUser", AsyncNodeAction.node_async(askUserAction));
+        graph.addNode("finalize", AsyncNodeAction.node_async(finalizeAction));
 
         // Edges
-        graph.setEntryPoint("intake");
+        graph.addEdge(StateGraph.START, "intake");
         graph.addEdge("intake", "planning");
 
         // Planning → generate first sub-question's search queries, or gather if need info first
-        graph.addConditionalEdges("planning", planningAction::routeAfterPlanning,
+        graph.addConditionalEdges("planning",
+                AsyncEdgeAction.edge_async(planningAction::routeAfterPlanning),
                 Map.of("preCheck", "generate", "gather", "gather", "finalize", "finalize"));
 
         // Generate → produce search queries, then gather
-        graph.addConditionalEdges("generate", generateAction::routeAfterGenerate,
+        graph.addConditionalEdges("generate",
+                AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
                 Map.of("applyPatch", "gather", "gather", "gather", "askUser", "askUser"));
 
         // Gather → Reenter
@@ -208,24 +217,29 @@ public class GraphEngineService {
         graph.addEdge("reenter", "searchEvaluate");
 
         // SearchEvaluate → sufficient: commit / insufficient: generate more / askUser
-        graph.addConditionalEdges("searchEvaluate", searchEvaluateAction::routeAfterEvaluate,
+        graph.addConditionalEdges("searchEvaluate",
+                AsyncEdgeAction.edge_async(searchEvaluateAction::routeAfterEvaluate),
                 Map.of("commit", "commit", "generate", "generate", "askUser", "askUser"));
 
         // Commit → next sub-question (generate) or all done (synthesize)
-        graph.addConditionalEdges("commit", commitAction::routeAfterCommit,
+        graph.addConditionalEdges("commit",
+                AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
                 Map.of("preCheck", "generate", "finalize", "synthesize"));
 
         // Synthesize → finalize
         graph.addEdge("synthesize", "finalize");
 
         // Terminals
-        graph.setFinishPoint("askUser");
-        graph.setFinishPoint("finalize");
+        graph.addEdge("askUser", StateGraph.END);
+        graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();
     }
 
     private Flux<ServerSentEvent<String>> buildSseFromResult(OverAllState state) {
+        if (state == null) {
+            return Flux.just(sse.event(SseEvents.DONE, Map.of("reason", "error")));
+        }
         // Extract SSE events accumulated during graph execution
         @SuppressWarnings("unchecked")
         var events = (java.util.List<Map<String, Object>>) state.value("sseEvents").orElse(java.util.List.of());

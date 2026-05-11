@@ -2,8 +2,8 @@
 java            = "21"
 spring-boot     = "3.3.4"
 spring-cloud    = "2023.0.3"
-spring-ai       = "1.0.0-M2"
-spring-ai-alibaba = "1.0.0-M3"
+spring-ai       = "1.0.0"
+spring-ai-alibaba = "1.0.0.2"
 spring-dep-mgmt = "1.1.6"
 spotless        = "6.25.0"
 
@@ -47,10 +47,10 @@ spring-boot-starter-jdbc       = { module = "org.springframework.boot:spring-boo
 spring-boot-starter-cache      = { module = "org.springframework.boot:spring-boot-starter-cache" }
 spring-boot-configuration-processor = { module = "org.springframework.boot:spring-boot-configuration-processor" }
 
-spring-ai-openai               = { module = "org.springframework.ai:spring-ai-openai-spring-boot-starter",   version.ref = "spring-ai" }
+spring-ai-openai               = { module = "org.springframework.ai:spring-ai-starter-model-openai",            version.ref = "spring-ai" }
 spring-ai-pgvector             = { module = "org.springframework.ai:spring-ai-pgvector-store-spring-boot-starter", version.ref = "spring-ai" }
-spring-ai-mcp                  = { module = "org.springframework.ai:spring-ai-mcp-client-spring-boot-starter",     version.ref = "spring-ai" }
-spring-ai-alibaba-graph        = { module = "com.alibaba.cloud.ai:spring-ai-alibaba-graph",                         version.ref = "spring-ai-alibaba" }
+spring-ai-mcp                  = { module = "org.springframework.ai:spring-ai-mcp",                                   version.ref = "spring-ai" }
+spring-ai-alibaba-graph        = { module = "com.alibaba.cloud.ai:spring-ai-alibaba-graph-core",                    version.ref = "spring-ai-alibaba" }
 
 springdoc-openapi              = { module = "org.springdoc:springdoc-openapi-starter-webflux-ui", version.ref = "springdoc" }
 mysql-connector                = { module = "com.mysql:mysql-connector-j",             version.ref = "mysql-connector" }

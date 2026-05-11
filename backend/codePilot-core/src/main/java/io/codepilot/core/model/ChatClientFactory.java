@@ -122,9 +122,9 @@ public class ChatClientFactory {
     String model = (String) row.get("model");
 
     String apiKey = decrypt(cipher);
-    OpenAiApi api = new OpenAiApi(baseUrl, apiKey);
-    OpenAiChatOptions opts = OpenAiChatOptions.builder().withModel(model).build();
-    OpenAiChatModel chatModel = new OpenAiChatModel(api, opts);
+    OpenAiApi api = OpenAiApi.builder().baseUrl(baseUrl).apiKey(apiKey).build();
+    OpenAiChatOptions opts = OpenAiChatOptions.builder().model(model).build();
+    OpenAiChatModel chatModel = OpenAiChatModel.builder().openAiApi(api).defaultOptions(opts).build();
 
     log.info("Built ChatClient [{}] for provider={} model={}", source, providerId, model);
     return ChatClient.builder(chatModel).build();

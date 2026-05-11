@@ -7,7 +7,7 @@ import java.util.*;
 
 /** PreCheck node: validates phase entry conditions (file exists, tools available). */
 @Component
-public class PreCheckAction implements NodeAction<OverAllState> {
+public class PreCheckAction implements NodeAction {
 
     @Override
     public Map<String, Object> apply(OverAllState state) {

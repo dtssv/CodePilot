@@ -27,7 +27,7 @@ import java.util.*;
  * instead, triggering a Gather→Reenter→Planning loop.</p>
  */
 @Component
-public class PlanningAction implements NodeAction<OverAllState> {
+public class PlanningAction implements NodeAction {
 
     private final ChatClient chatClient;
 

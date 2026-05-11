@@ -7,7 +7,7 @@ import java.util.*;
 
 /** Finalize node (terminal): summarizes results, sets done reason to final. */
 @Component
-public class FinalizeAction implements NodeAction<OverAllState> {
+public class FinalizeAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

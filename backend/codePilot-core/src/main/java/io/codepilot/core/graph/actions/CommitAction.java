@@ -12,7 +12,7 @@ import java.util.*;
  * emits user_plan_progress to update the user-facing plan step status.
  */
 @Component
-public class CommitAction implements NodeAction<OverAllState> {
+public class CommitAction implements NodeAction {
     @Override
     @SuppressWarnings("unchecked")
     public Map<String, Object> apply(OverAllState state) {

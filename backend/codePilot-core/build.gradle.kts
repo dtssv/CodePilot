@@ -7,7 +7,7 @@ dependencies {
 
     api(libs.spring.ai.openai)
     api(libs.spring.ai.alibaba.graph)
-    // api(libs.spring.ai.mcp)  // TODO: verify artifact coordinates for Spring AI MCP
+    // api(libs.spring.ai.mcp)  // TODO: MCP client starter not yet available at spring-ai 1.0.0
 
     api(libs.caffeine)
     api(libs.json.schema.validator)

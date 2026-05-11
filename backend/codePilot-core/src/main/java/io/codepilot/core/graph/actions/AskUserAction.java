@@ -8,7 +8,7 @@ import java.util.*;
 
 /** AskUser node (terminal): emits needs_input SSE, sets done reason to awaiting_user_input. */
 @Component
-public class AskUserAction implements NodeAction<OverAllState> {
+public class AskUserAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

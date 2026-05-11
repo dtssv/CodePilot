@@ -41,7 +41,7 @@ public class SessionService {
   public String generateTitle(UUID sessionId, String firstMessage) {
     String prompt = String.format(TITLE_PROMPT, firstMessage.substring(0, Math.min(500, firstMessage.length())));
     String title =
-        chatClient.prompt().user(prompt).call().chatResponse().getResult().getOutput().getContent();
+        chatClient.prompt().user(prompt).call().chatResponse().getResult().getOutput().getText();
     log.debug("Generated title for session {}: {}", sessionId, title);
     return title == null ? "New conversation" : title.trim();
   }
@@ -50,7 +50,7 @@ public class SessionService {
   public String generateDigest(UUID sessionId, String history) {
     String prompt = String.format(DIGEST_PROMPT, history.substring(0, Math.min(4000, history.length())));
     String digest =
-        chatClient.prompt().user(prompt).call().chatResponse().getResult().getOutput().getContent();
+        chatClient.prompt().user(prompt).call().chatResponse().getResult().getOutput().getText();
     log.debug("Generated digest for session {}", sessionId);
     return digest == null ? "" : digest.trim();
   }

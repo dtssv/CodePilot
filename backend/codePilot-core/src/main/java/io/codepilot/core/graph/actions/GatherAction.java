@@ -8,7 +8,7 @@ import java.util.*;
 
 /** Gather node: executes read-only info requests (server-side), emits graph_info_request for client-side. */
 @Component
-public class GatherAction implements NodeAction<OverAllState> {
+public class GatherAction implements NodeAction {
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();

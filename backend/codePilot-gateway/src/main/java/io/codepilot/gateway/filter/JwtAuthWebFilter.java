@@ -116,7 +116,4 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
         devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 }
-        token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-        devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-  }
-}
+

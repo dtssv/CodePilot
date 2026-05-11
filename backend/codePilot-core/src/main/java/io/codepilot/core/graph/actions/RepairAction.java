@@ -14,7 +14,7 @@ import java.util.*;
  * and escalates to AskUser.
  */
 @Component
-public class RepairAction implements NodeAction<OverAllState> {
+public class RepairAction implements NodeAction {
 
     private static final int DEFAULT_MAX_ATTEMPTS = 3;
     private final ChatClient chatClient;
