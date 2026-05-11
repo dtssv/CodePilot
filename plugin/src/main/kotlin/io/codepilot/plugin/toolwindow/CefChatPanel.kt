@@ -239,17 +239,8 @@ class CefChatPanel(val project: Project) : Disposable {
             )
             if (modelId != null) payload["modelId"] = modelId
 
-            // Enable graph engine for agent mode by default
+            // Resume from graph awaiting state if applicable
             if (mode == "agent") {
-                payload["policy"] = mapOf(
-                    "engine" to "graph",
-                    "graphTemplate" to "default",
-                    "selfCheck" to true,
-                    "verify" to mapOf("compile" to true, "test" to true, "lint" to true),
-                    "repair" to mapOf("maxAttempts" to 3),
-                    "gather" to mapOf("gatherLoopMax" to 3, "gatherBudgetTokens" to 12000),
-                )
-                // If resuming, attach graphState
                 graphStateStore.loadLatest()
                 if (graphStateStore.isAwaiting()) {
                     payload["intent"] = "continue"
@@ -291,40 +282,34 @@ class CefChatPanel(val project: Project) : Disposable {
                 override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
                     dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
 
-                // ── Graph engine events ──
+                // ── Graph engine events (internal, not shown to user) ──
                 override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(payload, Map::class.java)
-                    dispatchToWeb("graph_plan", data)
                     graphStateStore.applyGraphPlan(payload)
                 }
                 override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    val data = mapper.treeToValue(payload, Map::class.java)
-                    dispatchToWeb("graph_transition", data)
                     graphStateStore.applyTransition(payload)
                 }
                 override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("graph_info_request", mapper.treeToValue(payload, Map::class.java))
-                    // Execute client-side gather requests
+                    // Execute client-side gather requests silently
                     gatherDispatcher.dispatchBatch(payload.path("requests"))
                 }
                 override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("graph_info_result", mapper.treeToValue(payload, Map::class.java))
                     graphStateStore.applyInfoResult(payload)
                 }
                 override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("graph_verify", mapper.treeToValue(payload, Map::class.java))
                     graphStateStore.applyVerify(payload)
                 }
-                override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("graph_repair_plan", mapper.treeToValue(payload, Map::class.java))
+                override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    // internal only, no UI dispatch
+                }
                 override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) {
-                    dispatchToWeb("graph_phase_done", mapper.treeToValue(payload, Map::class.java))
                     graphStateStore.applyPhaseDone(payload)
                 }
-                override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) =
-                    dispatchToWeb("graph_budget_alert", mapper.treeToValue(payload, Map::class.java))
+                override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    // internal only, no UI dispatch
+                }
 
-                // ── Dual-layer plan events ──
+                // ── User-facing plan events (shown in Plan panel) ──
                 override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
                     dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
                 override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) =

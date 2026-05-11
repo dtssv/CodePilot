@@ -135,14 +135,16 @@ public class ConversationService {
     // Resolve the ChatClient based on modelId (system model or user's custom model)
     ChatClient resolvedClient = chatClientFactory.resolve(req.modelId());
 
-    // ── Graph engine routing ──
-    if (req.policy() != null && "graph".equals(req.policy().engine())) {
-      return head.concatWith(graphEngine.run(req));
-    }
-
+    // ── Agent mode: always use Graph engine ──
+    // Graph engine handles planning, generate→verify→repair loop, gather, etc.
+    // Legacy AgentLoop is kept only when explicitly requested via policy.engine=legacy
     if (req.mode() == ConversationMode.AGENT) {
-      AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
-      return head.concatWith(loop.run(req, assembled.systemText(), redactedInput));
+      boolean useLegacy = req.policy() != null && "legacy".equals(req.policy().engine());
+      if (useLegacy) {
+        AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
+        return head.concatWith(loop.run(req, assembled.systemText(), redactedInput));
+      }
+      return head.concatWith(graphEngine.run(req));
     }
 
     // chat mode: single streaming turn.
