@@ -48,6 +48,8 @@ public class GraphEngineService {
     private final CommitAction commitAction;
     private final AskUserAction askUserAction;
     private final FinalizeAction finalizeAction;
+    private final SearchEvaluateAction searchEvaluateAction;
+    private final SynthesizeAction synthesizeAction;
     private final SseFactory sse;
 
     public GraphEngineService(
@@ -63,6 +65,8 @@ public class GraphEngineService {
             CommitAction commitAction,
             AskUserAction askUserAction,
             FinalizeAction finalizeAction,
+            SearchEvaluateAction searchEvaluateAction,
+            SynthesizeAction synthesizeAction,
             SseFactory sse) {
         this.intakeAction = intakeAction;
         this.planningAction = planningAction;
@@ -76,6 +80,8 @@ public class GraphEngineService {
         this.commitAction = commitAction;
         this.askUserAction = askUserAction;
         this.finalizeAction = finalizeAction;
+        this.searchEvaluateAction = searchEvaluateAction;
+        this.synthesizeAction = synthesizeAction;
         this.sse = sse;
     }
 
@@ -85,13 +91,12 @@ public class GraphEngineService {
      */
     public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
         try {
-            var graph = buildGraph();
+            String template = req.policy() != null && req.policy().graphTemplate() != null
+                    ? req.policy().graphTemplate() : "default";
+            var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
             var initialState = intakeAction.buildInitialState(req);
 
-            // Execute graph - Spring AI Alibaba Graph returns the final state after traversal
             var resultState = graph.invoke(initialState);
-
-            // Convert graph execution results to SSE events
             return buildSseFromResult(resultState);
         } catch (Exception e) {
             log.error("Graph engine execution failed", e);
@@ -155,6 +160,65 @@ public class GraphEngineService {
                 Map.of("preCheck", "preCheck", "finalize", "finalize"));
 
         // AskUser and Finalize are terminal
+        graph.setFinishPoint("askUser");
+        graph.setFinishPoint("finalize");
+
+        return graph.compile();
+    }
+
+    /**
+     * Deep Research graph topology:
+     *
+     * intake → planning(拆分研究子问题)
+     * → [generate(产出搜索查询) → gather(执行搜索) → reenter → searchEvaluate
+     *    → sufficient: commit / insufficient: 回到 generate]
+     * → synthesize(汇总生成报告) → finalize
+     */
+    private StateGraph<OverAllState> buildDeepResearchGraph() throws Exception {
+        var graph = new StateGraph<>(OverAllState::new);
+
+        // Nodes
+        graph.addNode("intake", intakeAction);
+        graph.addNode("planning", planningAction);
+        graph.addNode("generate", generateAction);
+        graph.addNode("gather", gatherAction);
+        graph.addNode("reenter", reenterAction);
+        graph.addNode("searchEvaluate", searchEvaluateAction);
+        graph.addNode("commit", commitAction);
+        graph.addNode("synthesize", synthesizeAction);
+        graph.addNode("askUser", askUserAction);
+        graph.addNode("finalize", finalizeAction);
+
+        // Edges
+        graph.setEntryPoint("intake");
+        graph.addEdge("intake", "planning");
+
+        // Planning → generate first sub-question's search queries, or gather if need info first
+        graph.addConditionalEdges("planning", planningAction::routeAfterPlanning,
+                Map.of("preCheck", "generate", "gather", "gather", "finalize", "finalize"));
+
+        // Generate → produce search queries, then gather
+        graph.addConditionalEdges("generate", generateAction::routeAfterGenerate,
+                Map.of("applyPatch", "gather", "gather", "gather", "askUser", "askUser"));
+
+        // Gather → Reenter
+        graph.addEdge("gather", "reenter");
+
+        // Reenter → always go to searchEvaluate in deep-research mode
+        graph.addEdge("reenter", "searchEvaluate");
+
+        // SearchEvaluate → sufficient: commit / insufficient: generate more / askUser
+        graph.addConditionalEdges("searchEvaluate", searchEvaluateAction::routeAfterEvaluate,
+                Map.of("commit", "commit", "generate", "generate", "askUser", "askUser"));
+
+        // Commit → next sub-question (generate) or all done (synthesize)
+        graph.addConditionalEdges("commit", commitAction::routeAfterCommit,
+                Map.of("preCheck", "generate", "finalize", "synthesize"));
+
+        // Synthesize → finalize
+        graph.addEdge("synthesize", "finalize");
+
+        // Terminals
         graph.setFinishPoint("askUser");
         graph.setFinishPoint("finalize");
 

@@ -51,27 +51,56 @@ public class PlanningAction implements NodeAction<OverAllState> {
         // ── Placeholder: simulate LLM producing both plans ──
 
         // Layer 1: User Plan (stable, shown to user)
-        var userSteps = List.of(
-            Map.of("id", "s1", "index", 1, "title", "Planning complete", "description", "Analyzing requirements", "status", "in_progress")
-        );
+        // For deep-research: steps are sub-questions + final synthesis
+        // For code-gen: steps are implementation phases
+        String mode = (String) state.value("mode").orElse("AGENT");
+        String input = (String) state.value("input").orElse("");
+
+        // TODO: invoke chatClient — LLM returns both userPlan and phases
+        // Placeholder below simulates different plans per template
+
+        List<Map<String, Object>> userSteps;
+        List<Map<String, Object>> phases;
+
+        // Detect deep-research (either via graphTemplate in state, or input pattern)
+        boolean isDeepResearch = "deep-research".equals(state.value("graphTemplate").orElse(""));
+
+        if (isDeepResearch) {
+            // Deep Research: sub-questions as steps + final synthesis
+            userSteps = List.of(
+                Map.of("id", "q1", "index", 1, "title", "Researching sub-question 1", "description", "Searching and analyzing", "status", "in_progress"),
+                Map.of("id", "q2", "index", 2, "title", "Researching sub-question 2", "description", "Searching and analyzing", "status", "pending"),
+                Map.of("id", "synthesize", "index", 3, "title", "Generating research report", "description", "Synthesizing findings", "status", "pending")
+            );
+            phases = List.of(
+                Map.of("id", "q1", "title", "Research sub-question 1", "intent", "search", "budget", Map.of("searchRounds", 5)),
+                Map.of("id", "q2", "title", "Research sub-question 2", "intent", "search", "budget", Map.of("searchRounds", 5))
+            );
+        } else {
+            // Default code-gen template
+            userSteps = List.of(
+                Map.of("id", "s1", "index", 1, "title", "Implementing changes", "description", "Code generation", "status", "in_progress")
+            );
+            phases = List.of(
+                Map.of("id", "p1", "title", "Implementation", "intent", "code-change",
+                       "entry", List.of(), "exit", List.of(), "budget", Map.of("attempts", 3))
+            );
+        }
+
         var userPlan = Map.of(
-            "goal", state.value("input").orElse(""),
-            "summary", "Executing your request in phases",
+            "goal", input,
+            "summary", isDeepResearch ? "Researching your question in depth" : "Executing your request in phases",
             "steps", userSteps,
             "status", "in_progress"
         );
         GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN, userPlan);
         updates.put("userPlan", userPlan);
 
-        // Layer 2: Execution Phases (internal, drives graph engine)
-        var phases = List.of(
-            Map.of("id", "p1", "title", "Implementation", "intent", "code-change",
-                   "entry", List.of(), "exit", List.of(), "budget", Map.of("attempts", 3))
-        );
+        // Layer 2: Execution Phases
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PLAN,
             Map.of("phases", phases, "graphId", "gph-" + UUID.randomUUID().toString().substring(0, 8)));
         updates.put("phases", phases);
-        updates.put("phaseCursor", "p1");
+        updates.put("phaseCursor", (String) phases.get(0).get("id"));
 
         // Route decision
         updates.put("planningResult", "phases");  // or "infoRequests" or "error"

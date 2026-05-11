@@ -681,3 +681,70 @@ A：不会。`gatherLoopMax=3`（单阶段）、全 run 上限 10 次；连续 2
 
 **Q6：信息收集的结果在哪里持久化？**
 A：插件端的 `gathered/` 目录（`contentRef` 引用）；`state.gathered[]` 仅存元数据+摘要。后端 Redis 仅短期缓存 24h，不落库。
+
+---
+
+## 13. Deep Research（深度研究模式）
+
+### 13.1 概述
+
+Deep Research 是基于 Graph 引擎的**另一种图拓扑模板**（`graphTemplate=deep-research`），复用现有全部基础设施（StateGraph、Gather/Reenter、UserPlan），仅新增 2 个节点 Action + 1 个图构建分支。
+
+用户侧体验：输入研究问题 → 看到 Plan（"正在研究子问题 1… 子问题 2… 汇总报告"）→ 最终收到完整研究报告。内部搜索循环对用户透明。
+
+### 13.2 图拓扑
+
+```
+intake → planning（拆分研究子问题为 phases）
+  → [SearchLoop per phase:
+       generate（产出搜索查询/关键词）
+       → gather（执行 rag.search + http.fetch + mcp.call）
+       → reenter（回灌结果）
+       → searchEvaluate（LLM 判断信息是否充分）
+           → sufficient: commit（推进下一子问题）
+           → insufficient: 回到 generate（继续搜索）
+           → askUser（需要澄清）
+     ]
+  → synthesize（汇总所有 gathered 信息，生成完整研究报告）
+  → finalize
+```
+
+### 13.3 新增节点
+
+| 节点 | 文件 | 职责 |
+|---|---|---|
+| `searchEvaluate` | `SearchEvaluateAction.java` | 每轮 Gather 后由 LLM 判断信息是否充分；最多 5 轮强制推进 |
+| `synthesize` | `SynthesizeAction.java` | 所有子问题研究完毕后，将 gathered[] 汇总为最终研究报告（流式输出） |
+
+### 13.4 与默认 Code-Gen 模板的差异
+
+| 维度 | 默认模板 (code-gen) | Deep Research |
+|---|---|---|
+| phases 含义 | 代码实现阶段 | 研究子问题 |
+| Generate 产出 | toolCalls（Patch） | infoRequests（搜索查询） |
+| Verify 节点 | 编译/测试/lint | 不使用 |
+| SearchEvaluate | 不使用 | 判断信息充分度 |
+| Synthesize | 不使用 | 汇总生成报告 |
+| ApplyPatch | 写文件 | 不使用 |
+| 最终输出 | 代码已写入 + done | 研究报告（delta 流式）+ done |
+
+### 13.5 UserPlan 展示（用户视角）
+
+```
+Plan 面板:
+  1. 研究：XXX 的技术选型  [✓ 已完成]
+  2. 研究：YYY 的最佳实践  [● 进行中，第 3 轮搜索]
+  3. 生成研究报告          [○ 待处理]
+```
+
+### 13.6 触发方式
+
+- 插件端可在输入框旁提供"深度研究"按钮，发送时 `policy.graphTemplate=deep-research`
+- 或由后端 PlanningAction 根据用户输入自动识别（TODO：未来可通过 intent 分类模型判断）
+- ActionController 中可新增 `/v1/actions/research` 端点作为快捷入口
+
+### 13.7 预算控制
+
+- 单子问题最多 5 轮搜索（`SearchEvaluateAction.MAX_SEARCH_ROUNDS=5`）
+- 总 Gather 次数仍受全局上限（默认 10）约束
+- Token 预算：synthesize 阶段可能消耗较大 token，建议 `gatherBudgetTokens=16k`
