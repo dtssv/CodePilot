@@ -1069,4 +1069,76 @@ object InlineCompletionService {
      * Get fallback chain status for diagnostics.
      */
     fun fallbackStatus(): Map<String, Int> = modelFailCounts.toMap()
+
+    // ─── Phase 3: LLM-as-Judge ────────────────────────────────────────
+
+    /**
+     * Use a lightweight LLM call to rank ambiguous candidates.
+     * Only invoked when Phase 2 heuristic scores are close (gap < 0.15).
+     *
+     * The judge prompt asks: "Which completion is most likely correct?"
+     * This is a lightweight single-token classification (A/B/C) — very fast.
+     */
+    private fun llmJudgeRank(
+        candidates: List<ScoredCandidate>,
+        request: CompletionRequest,
+    ): List<ScoredCandidate> {
+        if (candidates.size < 2) return candidates
+
+        return try {
+            val http = HttpClientService.getInstance()
+            val prompt = buildJudgePrompt(candidates, request)
+            val payload = mapOf(
+                "prompt" to prompt,
+                "maxTokens" to 5,
+                "temperature" to 0.0f,
+            )
+            val httpReq = http.postJson("/v1/actions/judge-completion", payload)
+            val call = http.client().newCall(httpReq)
+            val response = call.execute()
+
+            response.use { resp ->
+                if (!resp.isSuccessful) return candidates
+                val body = resp.body?.string() ?: return candidates
+                val choice = body.trim().uppercase().firstOrNull()
+
+                // Parse choice: "A"=0, "B"=1, "C"=2
+                if (choice != null && choice in 'A'..'Z') {
+                    val idx = choice - 'A'
+                    if (idx in candidates.indices) {
+                        // Promote the chosen candidate to top
+                        val chosen = candidates[idx]
+                        val rest = candidates.filterIndexed { i, _ -> i != idx }
+                        return listOf(chosen.copy(score = chosen.score + 0.2)) + rest
+                    }
+                }
+                candidates
+            }
+        } catch (_: Exception) {
+            candidates // Fallback to Phase 2 ranking
+        }
+    }
+
+    /**
+     * Build the judge prompt for LLM-as-judge ranking.
+     * Asks the model to pick the best completion with a single letter response.
+     */
+    private fun buildJudgePrompt(candidates: List<ScoredCandidate>, request: CompletionRequest): String {
+        val sb = StringBuilder()
+        sb.append("Given this code context:\n")
+        sb.append("```${request.language}\n")
+        sb.append(request.prefix.takeLast(200))
+        sb.append("<CURSOR>")
+        sb.append(request.suffix.take(100))
+        sb.append("\n```\n\n")
+        sb.append("Which completion is most likely correct? Reply with ONLY the letter (A, B, or C).\n\n")
+
+        for ((i, candidate) in candidates.take(3).withIndex()) {
+            val letter = 'A' + i
+            val preview = candidate.text.lines().take(5).joinToString("\n")
+            sb.append("$letter: $preview\n\n")
+        }
+
+        return sb.toString()
+    }
 }

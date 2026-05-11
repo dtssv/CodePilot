@@ -1305,3 +1305,139 @@ button:disabled {
     padding-top: 6px;
     font-weight: 600;
 }
+
+/* ─── Transitions & Animations ────────────────────────── */
+
+/* Message appear animation */
+.msg {
+    animation: msgAppear 0.2s ease-out;
+}
+
+@keyframes msgAppear {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Streaming indicator pulse */
+.msg.streaming::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 14px;
+    background: var(--accent);
+    margin-left: 2px;
+    animation: cursorBlink 1s step-end infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes cursorBlink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+/* Diff card transition */
+.diff-card {
+    transition: all 0.2s ease;
+}
+
+.diff-card:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Plan step status transition */
+.plan-step {
+    transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.plan-step.completed {
+    opacity: 0.7;
+}
+
+.plan-step.active {
+    border-left: 3px solid var(--accent);
+}
+
+/* Loading spinner */
+.loading-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Tool call progress bar */
+.tool-progress {
+    height: 2px;
+    background: var(--accent);
+    animation: toolProgress 2s ease-in-out;
+}
+
+@keyframes toolProgress {
+    from { width: 0%; }
+    to { width: 100%; }
+}
+
+/* Branch panel slide-in */
+.branch-panel {
+    animation: slideDown 0.15s ease-out;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Cost panel expand */
+.cost-detail {
+    animation: expandDown 0.15s ease-out;
+}
+
+@keyframes expandDown {
+    from {
+        opacity: 0;
+        max-height: 0;
+    }
+    to {
+        opacity: 1;
+        max-height: 200px;
+    }
+}
+
+/* NeedsInput card highlight */
+.needs-input-card {
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.needs-input-card:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Context chip hover */
+.context-chip {
+    transition: all 0.15s ease;
+}
+
+.context-chip:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
