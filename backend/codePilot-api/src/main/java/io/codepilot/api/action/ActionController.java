@@ -80,22 +80,39 @@ public class ActionController {
     return leakFilter.guard(service.run(runReq));
   }
 
-  @Operation(summary = "Inline code completion")
+  @Operation(summary = "Inline code completion (supports FIM mode)")
   @PostMapping(value = "/inline-completion", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> inlineCompletion(
       @RequestBody @Valid InlineCompletionRequest req) {
-    var sb = new StringBuilder();
-    sb.append("[action:inline-completion]\n");
-    sb.append("Language: ").append(req.language()).append('\n');
-    sb.append("File: ").append(req.filePath()).append('\n');
-    if (req.fileOutline() != null) {
-      sb.append("File outline:\n").append(req.fileOutline()).append('\n');
+
+    // ★ FIM (Fill-In-the-Middle) mode: use native FIM format for models that support it
+    // When mode=fim, the prompt uses <PRE>prefix<SUF>suffix<MID> format
+    // which is more efficient than chat-based completion for code infilling
+    String input;
+    if ("fim".equalsIgnoreCase(req.mode())) {
+      // FIM format: the model natively supports infilling
+      // The prefix/suffix are passed directly; PromptOrchestrator will format as <PRE>/<SUF>/<MID>
+      input = "[action:inline-completion-fim]\n"
+          + "Language: " + req.language() + '\n'
+          + "File: " + req.filePath() + '\n'
+          + "\n<PRE>\n" + req.prefix() + "\n<SUF>\n" + req.suffix() + "\n<MID>";
+    } else {
+      // Standard chat-based completion (default)
+      var sb = new StringBuilder();
+      sb.append("[action:inline-completion]\n");
+      sb.append("Language: ").append(req.language()).append('\n');
+      sb.append("File: ").append(req.filePath()).append('\n');
+      if (req.fileOutline() != null) {
+        sb.append("File outline:\n").append(req.fileOutline()).append('\n');
+      }
+      sb.append("\n[PREFIX]\n").append(req.prefix()).append('\n');
+      sb.append("[SUFFIX]\n").append(req.suffix()).append('\n');
+      sb.append("\nComplete the code at the cursor (between PREFIX and SUFFIX):");
+      input = sb.toString();
     }
-    sb.append("\n[PREFIX]\n").append(req.prefix()).append('\n');
-    sb.append("[SUFFIX]\n").append(req.suffix()).append('\n');
-    sb.append("\nComplete the code at the cursor (between PREFIX and SUFFIX):");
+
     ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), sb.toString(),
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
         null, null, null, null, null, null, null, null,
         List.of(), null, null, null, null, null, null, null, null, null);
     return leakFilter.guard(service.run(runReq));
@@ -151,7 +168,8 @@ public class ActionController {
       @NotBlank String language,
       @NotBlank String filePath,
       String fileOutline,
-      Integer maxTokens) {}
+      Integer maxTokens,
+      String mode) {}
 
   /** ★ Bug Scan: scan code for potential bugs, vulnerabilities, and code smells. */
   @Operation(summary = "Bug scan — find potential bugs, vulnerabilities, and code smells")
@@ -166,6 +184,23 @@ public class ActionController {
                 .reduce((a, b) -> a + "\n" + b).orElse("") + "\n"
             : "")
         + "\n```" + req.language() + "\n" + req.code() + "\n```"
+        + "\n\nAnalyze the above code for bugs, vulnerabilities, and code smells. "
+        + "For each finding, provide: severity (critical/high/medium/low), line range, description, and suggested fix.";
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
+  public record BugScanRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String code,
+      @NotBlank String language,
+      @NotBlank String filePath,
+      List<String> diagnostics) {}
+}       + "\n```" + req.language() + "\n" + req.code() + "\n```"
         + "\n\nAnalyze the above code for bugs, vulnerabilities, and code smells. "
         + "For each finding, provide: severity (critical/high/medium/low), line range, description, and suggested fix.";
     ConversationRunRequest runReq = new ConversationRunRequest(

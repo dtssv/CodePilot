@@ -141,7 +141,14 @@ export function PlanPanel() {
                                     )}
                                     {/* Action buttons for pending steps */}
                                     {step.status === 'pending' && (
-                                        <div style={{ display: 'flex', gap: '4px', marginTop: '6px' }}>
+                                        <div style={{ display: 'flex', gap: '4px', marginTop: '6px', flexWrap: 'wrap' }}>
+                                            <button onClick={() => {
+                                                const newTitle = prompt('编辑步骤标题:', step.title);
+                                                if (newTitle !== null) {
+                                                    const newIntent = prompt('编辑步骤意图:', step.intent || '');
+                                                    sendToPlugin('plan_edit', { op: 'edit', stepId: step.id, title: newTitle, intent: newIntent });
+                                                }
+                                            }} style={btnStyle('#58a6ff')}>编辑</button>
                                             <button onClick={() => sendToPlugin('plan_edit', { op: 'skip', stepId: step.id })}
                                                 style={btnStyle('#8b949e')}>跳过</button>
                                         </div>
@@ -153,6 +160,14 @@ export function PlanPanel() {
 
                     {/* Plan actions */}
                     <div style={{ display: 'flex', gap: '6px', marginTop: '12px', paddingTop: '8px', borderTop: '1px solid #333' }}>
+                        <button onClick={() => {
+                            const title = prompt('新步骤标题:');
+                            if (title) {
+                                const intent = prompt('新步骤意图:', '');
+                                const stepId = `step_${Date.now()}`;
+                                sendToPlugin('plan_edit', { op: 'add', stepId, title, intent });
+                            }
+                        }} style={btnStyle('#3fb950')}>添加步骤</button>
                         <button onClick={() => sendToPlugin('continue_run', {})} style={btnStyle('#58a6ff')}>继续</button>
                         <button onClick={() => sendToPlugin('replan', {})} style={btnStyle('#d29922')}>重新规划</button>
                     </div>
@@ -236,6 +251,13 @@ function applyPlanDelta(plan: Plan, delta: unknown): Plan {
             if (idx >= 0 && op.status) steps[idx] = { ...steps[idx], status: op.status as PlanStep['status'] };
         } else if (op.op === 'add') {
             steps.push(op as unknown as PlanStep);
+        } else if (op.op === 'skip' && op.stepId) {
+            const idx = steps.findIndex(s => s.id === op.stepId);
+            if (idx >= 0) steps[idx] = { ...steps[idx], status: 'skipped' };
+        }
+    }
+    return { ...plan, steps };
+}           steps.push(op as unknown as PlanStep);
         } else if (op.op === 'skip' && op.stepId) {
             const idx = steps.findIndex(s => s.id === op.stepId);
             if (idx >= 0) steps[idx] = { ...steps[idx], status: 'skipped' };

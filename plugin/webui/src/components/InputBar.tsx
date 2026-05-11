@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { onPluginEvent } from '../bridge';
+import { onPluginEvent, sendToPlugin } from '../bridge';
 import { ContextChipData } from './ContextChip';
+import { AtReferencePopup } from './AtReferencePopup';
+
+interface AtSuggestion {
+    type: string;
+    label: string;
+    detail: string;
+    path?: string;
+}
 
 interface InputBarProps {
     onSend: (text: string, chips: ContextChipData[]) => void;
@@ -12,14 +20,20 @@ interface InputBarProps {
 const CHIP_DATA_ATTR = 'data-chip-id';
 
 /**
- * Input bar with contentEditable div that supports inline chips.
+ * Input bar with contentEditable div that supports inline chips and @-references.
  * Chips are inserted at cursor position as non-editable spans,
  * so text and chips are naturally interleaved.
+ * Typing '@' triggers the AtReferencePopup for file/symbol/codebase references.
  */
 export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBarProps) {
     const [running, setRunning] = useState(false);
     const editorRef = useRef<HTMLDivElement>(null);
     const chipsMapRef = useRef<Map<string, ContextChipData>>(new Map());
+
+    // @-reference popup state
+    const [atPopupVisible, setAtPopupVisible] = useState(false);
+    const [atQuery, setAtQuery] = useState('');
+    const [atAnchorRect, setAtAnchorRect] = useState<DOMRect | undefined>();
 
     // Keep chipsMapRef in sync
     useEffect(() => {
@@ -64,10 +78,15 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         onSend(text, chips);
         // Clear editor
         editor.innerHTML = '';
+        setAtPopupVisible(false);
         setRunning(true);
     }, [onSend]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        // If @-popup is visible, let it handle navigation keys
+        if (atPopupVisible && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+            return; // AtReferencePopup handles these via its own listener
+        }
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSubmit();
@@ -95,6 +114,90 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         }
     };
 
+    // Detect '@' character input to trigger AtReferencePopup
+    const handleEditorInput = useCallback(() => {
+        const editor = editorRef.current;
+        if (!editor) return;
+
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+
+        const range = sel.getRangeAt(0);
+        const node = range.startContainer;
+        if (node.nodeType !== Node.TEXT_NODE) return;
+
+        const text = node.textContent || '';
+        const cursorOffset = range.startOffset;
+
+        // Look backwards from cursor for '@' that isn't part of a chip
+        let atIndex = -1;
+        for (let i = cursorOffset - 1; i >= 0; i--) {
+            const ch = text[i];
+            if (ch === '@') {
+                atIndex = i;
+                break;
+            }
+            // Stop if we hit whitespace — @ must be at start or after space
+            if (/\s/.test(ch)) break;
+        }
+
+        if (atIndex >= 0) {
+            const query = text.substring(atIndex + 1, cursorOffset);
+            setAtQuery(query);
+            setAtPopupVisible(true);
+
+            // Get anchor rect for popup positioning
+            const rect = range.getBoundingClientRect();
+            setAtAnchorRect(new DOMRect(rect.left, rect.bottom, rect.width, rect.height));
+        } else {
+            setAtPopupVisible(false);
+        }
+    }, []);
+
+    // Handle @-suggestion selection: replace @query with a context chip
+    const handleAtSelect = useCallback((suggestion: AtSuggestion) => {
+        const editor = editorRef.current;
+        if (!editor) return;
+
+        // Remove the @query text from the editor
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+            const range = sel.getRangeAt(0);
+            const node = range.startContainer;
+            if (node.nodeType === Node.TEXT_NODE) {
+                const text = node.textContent || '';
+                const cursorOffset = range.startOffset;
+                // Find the @ position
+                let atIndex = -1;
+                for (let i = cursorOffset - 1; i >= 0; i--) {
+                    if (text[i] === '@') { atIndex = i; break; }
+                    if (/\s/.test(text[i])) break;
+                }
+                if (atIndex >= 0) {
+                    // Replace @query with empty text (chip will be added separately)
+                    const before = text.substring(0, atIndex);
+                    const after = text.substring(cursorOffset);
+                    node.textContent = before + after;
+                    // Position cursor
+                    const newRange = document.createRange();
+                    newRange.setStart(node, atIndex);
+                    newRange.collapse(true);
+                    sel.removeAllRanges();
+                    sel.addRange(newRange);
+                }
+            }
+        }
+
+        // Send at_resolve to plugin to get the full reference data
+        sendToPlugin('at_resolve', { type: suggestion.type, value: suggestion.path || suggestion.label }).catch(() => {});
+
+        setAtPopupVisible(false);
+    }, []);
+
+    const handleAtClose = useCallback(() => {
+        setAtPopupVisible(false);
+    }, []);
+
     return (
         <div className="input-bar">
             <div
@@ -104,8 +207,19 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                 suppressContentEditableWarning
                 onKeyDown={handleKeyDown}
                 onClick={handleEditorClick}
-                data-placeholder={contextChips.length > 0 ? "Add a message about this context..." : "Ask CodePilot... (Enter to send, Shift+Enter for newline)"}
+                onInput={handleEditorInput}
+                data-placeholder={contextChips.length > 0 ? "Add a message about this context... (type @ to reference)" : "Ask CodePilot... (type @ for references, Enter to send)"}
             />
+            {atPopupVisible && (
+                <AtReferencePopup
+                    inputValue={editorRef.current?.textContent || ''}
+                    cursorPosition={getCursorTextOffset(editorRef.current)}
+                    visible={atPopupVisible}
+                    onSelect={handleAtSelect}
+                    onClose={handleAtClose}
+                    anchorRect={atAnchorRect}
+                />
+            )}
             <div className="input-send-area">
                 {running ? (
                     <button className="stop-btn" onClick={handleStop}>Stop</button>
@@ -115,6 +229,19 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
             </div>
         </div>
     );
+}
+
+/** Get the text offset of the cursor within the editor */
+function getCursorTextOffset(editor: HTMLDivElement | null): number {
+    if (!editor) return 0;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return 0;
+
+    const range = sel.getRangeAt(0);
+    const preRange = document.createRange();
+    preRange.setStart(editor, 0);
+    preRange.setEnd(range.startContainer, range.startOffset);
+    return preRange.toString().length;
 }
 
 /** Create a chip span element for insertion into contentEditable */

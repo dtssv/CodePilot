@@ -89,15 +89,14 @@ export function MultiFileDiffPanel() {
     };
 
     const acceptAll = () => {
-        sendToPlugin('apply_patches', { patches, mode: 'all' });
+        sendToPlugin('apply_patches', {});
     };
 
     const acceptSelected = () => {
-        const selected = patches.map(fp => ({
-            ...fp,
-            hunks: fp.hunks.filter(h => h.accepted === true),
-        })).filter(fp => fp.hunks.length > 0);
-        sendToPlugin('apply_patches', { patches: selected, mode: 'selected' });
+        const selectedHunks = patches.flatMap(fp =>
+            fp.hunks.filter(h => h.accepted === true).map(h => ({ id: h.id, path: fp.path }))
+        );
+        sendToPlugin('apply_selected_hunks', { hunks: selectedHunks });
     };
 
     const rejectAll = () => {

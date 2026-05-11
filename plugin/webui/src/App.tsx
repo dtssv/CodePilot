@@ -5,6 +5,9 @@ import { InputBar } from './components/InputBar';
 import { LoginPage } from './components/LoginPage';
 import { SessionSidebar, SessionInfo } from './components/SessionSidebar';
 import { ContextChipData } from './components/ContextChip';
+import { MarketplacePanel } from './components/MarketplacePanel';
+import { NotepadsPanel } from './components/NotepadsPanel';
+import { ComposerPanel } from './components/ComposerPanel';
 
 interface ModelOption {
     id: string;
@@ -26,6 +29,7 @@ interface ChatMessage {
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
+    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads'>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
     const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -297,21 +301,34 @@ export function App() {
                 )}
 
                 <div className="chat-area">
-                    <ChatView messages={messages} />
+                    {activeTab === 'chat' && <ChatView messages={messages} />}
+                    {activeTab === 'composer' && <ComposerPanel />}
+                    {activeTab === 'marketplace' && <MarketplacePanel />}
+                    {activeTab === 'notepads' && <NotepadsPanel />}
                 </div>
                 <div className="input-section">
-                    <InputBar onSend={handleSend} onStop={handleStop} contextChips={contextChips} onRemoveChip={handleRemoveChip} />
-                    <div className="input-bottom-row">
-                        <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>
-                            <option value="agent">Agent</option>
-                            <option value="chat">Chat</option>
-                        </select>
-                        <select className="opt-select" value={selectedModelId} onChange={(e) => setSelectedModelId(e.target.value)}>
-                            {models.length === 0 && <option value="">Default</option>}
-                            {models.map((m) => (
-                                <option key={m.id} value={m.id}>{m.name}{m.type === 'custom' ? ' (custom)' : ''}</option>
-                            ))}
-                        </select>
+                    {activeTab === 'chat' && (
+                        <>
+                            <InputBar onSend={handleSend} onStop={handleStop} contextChips={contextChips} onRemoveChip={handleRemoveChip} />
+                            <div className="input-bottom-row">
+                                <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>
+                                    <option value="agent">Agent</option>
+                                    <option value="chat">Chat</option>
+                                </select>
+                                <select className="opt-select" value={selectedModelId} onChange={(e) => setSelectedModelId(e.target.value)}>
+                                    {models.length === 0 && <option value="">Default</option>}
+                                    {models.map((m) => (
+                                        <option key={m.id} value={m.id}>{m.name}{m.type === 'custom' ? ' (custom)' : ''}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </>
+                    )}
+                    <div className="tab-bar">
+                        <button className={activeTab === 'chat' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('chat')}>Chat</button>
+                        <button className={activeTab === 'composer' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('composer')}>Composer</button>
+                        <button className={activeTab === 'marketplace' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('marketplace')}>Marketplace</button>
+                        <button className={activeTab === 'notepads' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('notepads')}>Notepads</button>
                     </div>
                 </div>
             </div>

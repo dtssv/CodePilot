@@ -28,6 +28,7 @@ import java.util.UUID
 class SessionStore {
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
+    private val crypto: SessionCryptoService = SessionCryptoService.getInstance()
 
     fun newSession(workspaceHash: String, mode: String, modelId: String?): SessionHandle {
         val id = UUID.randomUUID().toString()
@@ -203,17 +204,24 @@ class SessionStore {
 
     private fun appendNdjson(file: Path, payload: Any) {
         Files.createDirectories(file.parent)
-        Files.write(
-            file,
-            (mapper.writeValueAsString(payload) + "\n").toByteArray(StandardCharsets.UTF_8),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.APPEND,
-        )
+        val line = mapper.writeValueAsString(payload) + "\n"
+        val bytes = if (crypto.isEncryptionEnabled()) {
+            // For encrypted NDJSON, each line is individually encrypted and Base64-encoded
+            (crypto.encryptText(line) + "\n").toByteArray(StandardCharsets.UTF_8)
+        } else {
+            line.toByteArray(StandardCharsets.UTF_8)
+        }
+        Files.write(file, bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     }
 
     private fun writeJson(file: Path, payload: Any) {
         Files.createDirectories(file.parent)
-        Files.writeString(file, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload))
+        val content = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(payload)
+        if (crypto.isEncryptionEnabled()) {
+            Files.writeString(file, crypto.encryptText(content))
+        } else {
+            Files.writeString(file, content)
+        }
     }
 
     private fun readMeta(dir: Path): SessionMeta? {
@@ -238,4 +246,5 @@ class SessionStore {
     companion object {
         @JvmStatic fun getInstance(): SessionStore = service()
     }
+}   }
 }

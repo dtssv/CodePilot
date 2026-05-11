@@ -37,7 +37,14 @@ export type PluginEventType =
     | 'patch'
     | 'auth_state'
     | 'auth_methods'
-    | 'auth_login_result';
+    | 'auth_login_result'
+    | 'at_suggestions'
+    | 'at_resolved'
+    | 'user_plan'
+    | 'user_plan_progress'
+    | 'multi_file_patches'
+    | 'patches_applied'
+    | 'notepad_list_result';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

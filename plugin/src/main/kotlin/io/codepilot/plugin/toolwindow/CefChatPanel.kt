@@ -168,6 +168,10 @@ class CefChatPanel(val project: Project) : Disposable {
                 "at_resolve" -> handleAtResolve(payload["id"]?.asText() ?: return)
                 "apply_patches" -> handleApplyPatches(payload)
                 "apply_selected_hunks" -> handleApplySelectedHunks(payload)
+                // ★ Plan edit handlers for Agent mode
+                "plan_edit" -> handlePlanEdit(payload)
+                "continue_run" -> handleContinueRun()
+                "replan" -> handleReplan()
                 else -> log.warn("Unknown message type from web: $type")
             }
         } catch (e: Exception) {
@@ -790,6 +794,165 @@ class CefChatPanel(val project: Project) : Disposable {
         if (patchText.isNotBlank() && selectedHunks.isNotEmpty()) {
             val patchApplier = io.codepilot.plugin.tools.PatchApplier(project)
             patchApplier.applySelectedHunks(patchText, selectedHunks)
+        }
+    }
+
+    // ---- Plan edit handlers for Agent mode ----
+
+    /**
+     * ★ plan_edit: Edit a plan step (skip/edit/add).
+     * Payload: { op: 'skip'|'edit'|'add', stepId, title?, intent? }
+     */
+    private fun handlePlanEdit(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val op = payload.path("op").asText("") ?: return
+        val stepId = payload.path("stepId").asText("") ?: return
+        val handle = sessionHandle ?: return
+
+        when (op) {
+            "skip" -> {
+                // Mark step as skipped via plan_delta dispatch
+                dispatchToWeb("plan_delta", mapOf(
+                    "ops" to listOf(mapOf("op" to "skip", "stepId" to stepId))
+                ))
+                sessionStore.savePlanDelta(handle, mapOf("ops" to listOf(mapOf("op" to "skip", "stepId" to stepId))))
+            }
+            "edit" -> {
+                val title = payload.path("title").asText(null)
+                val intent = payload.path("intent").asText(null)
+                // Dispatch edit delta to update the step
+                val editOp = mutableMapOf<String, Any?>("op" to "edit", "stepId" to stepId)
+                if (title != null) editOp["title"] = title
+                if (intent != null) editOp["intent"] = intent
+                dispatchToWeb("plan_delta", mapOf("ops" to listOf(editOp)))
+                sessionStore.savePlanDelta(handle, mapOf("ops" to listOf(editOp)))
+            }
+            "add" -> {
+                val title = payload.path("title").asText("New step")
+                val intent = payload.path("intent").asText("")
+                val newStep = mapOf(
+                    "op" to "add",
+                    "id" to stepId,
+                    "title" to title,
+                    "intent" to intent,
+                    "status" to "pending",
+                )
+                dispatchToWeb("plan_delta", mapOf("ops" to listOf(newStep)))
+                sessionStore.savePlanDelta(handle, mapOf("ops" to listOf(newStep)))
+            }
+            else -> log.warn("Unknown plan_edit op: $op")
+        }
+    }
+
+    /**
+     * ★ continue_run: Resume AgentLoop execution after user edit/approval.
+     */
+    private fun handleContinueRun() {
+        val sid = sessionHandle?.meta?.id ?: return
+        log.info("[Plan] continue_run: resuming agent loop for session $sid")
+        // Resume the conversation with intent=continue
+        val handle = sessionHandle ?: return
+        val graphStateStore = io.codepilot.plugin.tools.GraphStateStore(project, handle.dir)
+        graphStateStore.loadLatest()
+        if (graphStateStore.isAwaiting()) {
+            val payload = mapOf(
+                "sessionId" to sid,
+                "mode" to (handle.meta.mode ?: "agent"),
+                "input" to "",
+                "intent" to "continue",
+                "graphState" to graphStateStore.snapshot(),
+            )
+            ApplicationManager.getApplication().executeOnPooledThread {
+                client.run(payload, object : ConversationClient.Listener {
+                    override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
+                    override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
+                    override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(p, Map::class.java)
+                        dispatchToWeb("plan", data)
+                        sessionStore.savePlan(handle, data)
+                    }
+                    override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
+                    override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(p, Map::class.java)
+                        dispatchToWeb("task_ledger", data)
+                        sessionStore.saveLedger(handle, data)
+                    }
+                    override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
+                    override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
+                    override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyGraphPlan(p)
+                    override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyTransition(p)
+                    override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
+                    override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyInfoResult(p)
+                    override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyVerify(p)
+                    override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+                    override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyPhaseDone(p)
+                    override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
+                    override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
+                    override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
+                    override fun onError(code: Int, message: String) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                    override fun onDone(reason: String, p: com.fasterxml.jackson.databind.JsonNode) {
+                        dispatchToWeb("done", mapOf("reason" to reason))
+                        if (reason == "awaiting_user_input" || reason == "phase_done") {
+                            graphStateStore.applyAwaiting(p)
+                        }
+                        sessionStore.touchLastMessage(handle)
+                        dispatchSessionList()
+                    }
+                    override fun onClosed() {}
+                })
+            }
+        } else {
+            log.warn("[Plan] continue_run: no awaiting graph state, nothing to resume")
+        }
+    }
+
+    /**
+     * ★ replan: Trigger re-planning from the current state.
+     */
+    private fun handleReplan() {
+        val sid = sessionHandle?.meta?.id ?: return
+        log.info("[Plan] replan: triggering re-plan for session $sid")
+        val handle = sessionHandle ?: return
+        val payload = mapOf(
+            "sessionId" to sid,
+            "mode" to (handle.meta.mode ?: "agent"),
+            "input" to "replan",
+            "intent" to "replan",
+        )
+        ApplicationManager.getApplication().executeOnPooledThread {
+            client.run(payload, object : ConversationClient.Listener {
+                override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
+                override fun onToolCall(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("tool_call", mapper.treeToValue(p, Map::class.java))
+                override fun onPlan(p: com.fasterxml.jackson.databind.JsonNode) {
+                    val data = mapper.treeToValue(p, Map::class.java)
+                    dispatchToWeb("plan", data)
+                    sessionStore.savePlan(handle, data)
+                }
+                override fun onPlanDelta(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("plan_delta", mapper.treeToValue(p, Map::class.java))
+                override fun onTaskLedger(p: com.fasterxml.jackson.databind.JsonNode) {
+                    val data = mapper.treeToValue(p, Map::class.java)
+                    dispatchToWeb("task_ledger", data)
+                    sessionStore.saveLedger(handle, data)
+                }
+                override fun onRiskNotice(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("risk_notice", mapper.treeToValue(p, Map::class.java))
+                override fun onNeedsInput(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("needs_input", mapper.treeToValue(p, Map::class.java))
+                override fun onGraphPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphTransition(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphInfoRequest(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphInfoResult(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphVerify(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphRepairPlan(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphPhaseDone(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onGraphBudgetAlert(p: com.fasterxml.jackson.databind.JsonNode) {}
+                override fun onUserPlan(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan", mapper.treeToValue(p, Map::class.java))
+                override fun onUserPlanProgress(p: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan_progress", mapper.treeToValue(p, Map::class.java))
+                override fun onError(code: Int, message: String) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                override fun onDone(reason: String, p: com.fasterxml.jackson.databind.JsonNode) {
+                    dispatchToWeb("done", mapOf("reason" to reason))
+                    sessionStore.touchLastMessage(handle)
+                    dispatchSessionList()
+                }
+                override fun onClosed() {}
+            })
         }
     }
 }

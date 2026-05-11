@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { DiffCard } from './DiffCard';
 import { NeedsInputCard } from './NeedsInputCard';
 import { RiskNoticeCard } from './RiskNoticeCard';
+import { IncrementalMarkdown } from './IncrementalMarkdown';
 
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -94,12 +95,17 @@ export function ChatView({ messages }: ChatViewProps) {
                             {parseInlineRefs(msg.content, msg.contextRefs).map((seg) => seg)}
                         </div>
                     ) : (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                            {msg.content}
-                        </ReactMarkdown>
+                        msg._streaming ? (
+                            <IncrementalMarkdown content={msg.content} isStreaming={true} />
+                        ) : (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                                {msg.content}
+                            </ReactMarkdown>
+                        )
                     )}
                 </div>
             ))}
         </div>
     );
+}   );
 }
