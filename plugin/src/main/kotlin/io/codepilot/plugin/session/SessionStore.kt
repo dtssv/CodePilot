@@ -34,6 +34,7 @@ class SessionStore {
         workspaceHash: String,
         mode: String,
         modelId: String?,
+        modelSource: String? = null,
     ): SessionHandle {
         val id = UUID.randomUUID().toString()
         val root = sessionDir(workspaceHash, id).also { Files.createDirectories(it) }
@@ -46,6 +47,7 @@ class SessionStore {
                 lastMessageAt = null,
                 mode = mode,
                 modelId = modelId,
+                modelSource = modelSource,
                 title = null,
             )
         writeJson(root.resolve("meta.json"), meta)
@@ -56,14 +58,16 @@ class SessionStore {
         handle: SessionHandle,
         role: String,
         content: String,
+        extra: Map<String, Any?> = emptyMap(),
     ) {
         val payload =
-            mapOf(
+            mutableMapOf<String, Any?>(
                 "role" to role,
                 "content" to content,
                 "ts" to Instant.now().toString(),
             )
-        appendNdjson(handle.dir.resolve("messages.ndjson"), payload)
+        payload.putAll(extra)
+        appendNdjson(handle.dir.resolve("messages.ndjson"), payload.toMap())
     }
 
     fun appendEvent(
@@ -278,6 +282,7 @@ class SessionStore {
             "sessionId" to handle.meta.id,
             "mode" to handle.meta.mode,
             "modelId" to modelId,
+            "modelSource" to handle.meta.modelSource,
             "input" to userInput,
             "intent" to "continue",
             "lastPlan" to plan,
@@ -601,6 +606,7 @@ class SessionStore {
         var lastMessageAt: String?,
         val mode: String,
         val modelId: String?,
+        val modelSource: String? = null,
         var title: String?,
         val branchId: String = "main",
         val parentBranchId: String? = null,

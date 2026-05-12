@@ -39,11 +39,11 @@ public class McpRepository {
   public List<McpPackage> list(String type, String q, int limit, int offset) {
     String sql =
         """
-        SELECT id::text, slug, name, type, author, latest_version, description,
+        SELECT CAST(id AS CHAR) AS id, slug, name, type, author, latest_version, description,
                homepage_url, changelog_url, deprecated, updated_at
           FROM mcp_packages
          WHERE (:type IS NULL OR type = :type)
-           AND (:q IS NULL OR (name ILIKE :pattern OR description ILIKE :pattern))
+           AND (:q IS NULL OR (name LIKE :pattern OR description LIKE :pattern))
          ORDER BY name ASC
          LIMIT :limit OFFSET :offset
         """;
@@ -58,7 +58,7 @@ public class McpRepository {
 
   public Optional<McpPackage> findBySlug(String slug) {
     String sql =
-        "SELECT id::text, slug, name, type, author, latest_version, description, "
+        "SELECT CAST(id AS CHAR) AS id, slug, name, type, author, latest_version, description, "
             + "homepage_url, changelog_url, deprecated, updated_at "
             + "FROM mcp_packages WHERE slug = :slug";
     var params = new MapSqlParameterSource("slug", slug);

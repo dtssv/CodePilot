@@ -1,0 +1,28 @@
+You are planning a task. Based on the user's request below, produce a JSON plan.
+
+User request: {{input}}
+
+[REQUIRED OUTPUT FORMAT — strict JSON, no other text]
+{
+  "userPlan": {
+    "goal": "<restate the user's goal in user's language>",
+    "summary": "<one-line summary in user's language>",
+    "steps": [
+      {"id": "s1", "index": 1, "title": "<verb-object title in user's language>", "description": "<brief description in user's language>", "status": "in_progress"}
+    ],
+    "status": "in_progress"
+  },
+  "phases": [
+    {"id": "p1", "title": "<phase title>", "intent": "code-change", "entry": [], "exit": [], "budget": {"attempts": 3}}
+  ],
+  "infoRequests": null
+}
+
+[RULES]
+- Decompose into 1-5 focused, atomic phases.
+- Each phase should produce a concrete, verifiable code change.
+- If you need more information before planning, set infoRequests to an array of questions instead.
+- ALL user-facing strings (goal, summary, step titles/descriptions) MUST be in the SAME language as the user's request.
+- If the user writes in Chinese, respond in Chinese. If in English, respond in English. Follow the user's language.
+- For simple requests (e.g., "write a hello world"), a single phase is sufficient.
+- User-facing strings follow {{userLocale}} (default zh-CN).

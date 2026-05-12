@@ -278,7 +278,9 @@ class ConversationClient(
             eventSource: EventSource,
             response: Response,
         ) {
-            response.close()
+            // Do NOT close the response here — the SSE stream needs to remain open
+            // for OkHttp's EventSource to read events. The response body is consumed
+            // internally by EventSource and closed automatically when the stream ends.
         }
 
         override fun onEvent(

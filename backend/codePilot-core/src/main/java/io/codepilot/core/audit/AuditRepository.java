@@ -36,7 +36,7 @@ public class AuditRepository {
             String safeActor = privacyMode ? "anonymous" : actor;
             jdbc.update(
                 "INSERT INTO audit_events (id, trace_id, session_id, action, actor, payload, privacy_mode, created_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?::timestamptz)",
+                "VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, CAST(? AS DATETIME))",
                 id, traceId, sessionId, action, safeActor, safePayload, privacyMode, timestamp
             );
         } catch (Exception e) {
@@ -95,7 +95,7 @@ public class AuditRepository {
             String actor = userId != null ? userId : "system";
             jdbc.update(
                 "INSERT INTO audit_events (id, trace_id, session_id, action, actor, payload, privacy_mode, created_at) " +
-                "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?::timestamptz)",
+                "VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, CAST(? AS DATETIME))",
                 id, traceId, sessionId, action, actor, payload, false, timestamp
             );
         } catch (Exception e) {
@@ -112,9 +112,9 @@ public class AuditRepository {
                     session_id VARCHAR(64),
                     action VARCHAR(128) NOT NULL,
                     actor VARCHAR(128),
-                    payload JSONB,
+                    payload JSON,
                     privacy_mode BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMPTZ NOT NULL
+                    created_at DATETIME(3) NOT NULL
                 )
                 """);
             jdbc.execute("CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit_events (trace_id)");

@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.sse.SseEvents;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
@@ -26,10 +27,10 @@ import java.util.*;
 public class SearchEvaluateAction implements NodeAction {
 
     private static final int MAX_SEARCH_ROUNDS = 5;
-    private final ChatClient chatClient;
+    private final ChatClientFactory chatClientFactory;
 
-    public SearchEvaluateAction(ChatClient chatClient) {
-        this.chatClient = chatClient;
+    public SearchEvaluateAction(ChatClientFactory chatClientFactory) {
+        this.chatClientFactory = chatClientFactory;
     }
 
     @Override

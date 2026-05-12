@@ -1,0 +1,36 @@
+[GENERATE TASK]
+User goal: {{input}}
+Current phase: {{phaseId}}
+Phase title: {{phaseTitle}}
+Phase intent: {{phaseIntent}}
+{{gatheredContext}}
+
+[REQUIRED OUTPUT FORMAT — strict JSON, no other text]
+{
+  "thought": "<brief internal reasoning>",
+  "patches": [
+    {
+      "summary": "<what this patch does>",
+      "patches": [
+        {
+          "path": "<file path>",
+          "op": "create|write|replace",
+          "newContent": "<full file content for create/write, or replacement content for replace>",
+          "search": "<text to find, only for replace>",
+          "replace": "<replacement text, only for replace>"
+        }
+      ]
+    }
+  ],
+  "infoRequests": null,
+  "askUser": null
+}
+
+[RULES]
+- Produce actual, complete, working code. No placeholders, no TODOs, no "...".
+- For NEW files, use op="create" with full file content in newContent.
+- For modifying existing files, use op="replace" with search/replace pairs.
+- If you need more information to proceed, set infoRequests to an array of questions.
+- If you need user confirmation, set askUser to a question object.
+- Output must be in the SAME language as the user's request for any user-facing text.
+- User-facing strings follow {{userLocale}} (default zh-CN).

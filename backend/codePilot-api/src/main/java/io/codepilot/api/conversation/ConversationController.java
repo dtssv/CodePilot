@@ -9,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
@@ -36,8 +37,14 @@ public class ConversationController {
       value = "/run",
       consumes = MediaType.APPLICATION_JSON_VALUE,
       produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-  public Flux<ServerSentEvent<String>> run(@RequestBody @Valid ConversationRunRequest req) {
-    Flux<ServerSentEvent<String>> raw = service.run(req);
+  public Flux<ServerSentEvent<String>> run(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ConversationRunRequest req) {
+    // share() converts cold Flux to hot — multiple subscribers share one upstream subscription.
+    // This prevents double-execution of the LLM streaming pipeline caused by:
+    //   1) leakOutputFilter.guard(raw)  — first subscriber
+    //   2) raw.ignoreElements()         — second subscriber (heartbeat termination signal)
+    Flux<ServerSentEvent<String>> raw = service.run(req, userId).share();
     // Periodic heartbeats (SSE comment) keep long-lived proxies from idle-closing the stream.
     Flux<ServerSentEvent<String>> heartbeat =
         Flux.interval(Duration.ofSeconds(20))

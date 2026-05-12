@@ -4,6 +4,7 @@ import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ChatClientFactory.ResolvedClient;
 import io.codepilot.core.model.ModelGroup;
 import io.codepilot.core.model.ModelService;
+import io.codepilot.core.model.ModelSource;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -65,15 +66,15 @@ public class FimNativeController {
             .map(io.codepilot.core.model.ModelGroup::model)
             .findFirst()
             .orElse(modelService.listModelGroups().isEmpty() ? null : modelService.listModelGroups().getFirst().model());
-        return executeFimCompletion(modelId, req);
+        return executeFimCompletion(modelId, req.modelSource(), req);
     }
 
     /**
      * Execute FIM completion by detecting the model's native FIM format
      * and constructing the appropriate request.
      */
-    private Flux<ServerSentEvent<String>> executeFimCompletion(String modelId, FimRequest req) {
-        return Mono.fromCallable(() -> clientFactory.resolve(modelId))
+    private Flux<ServerSentEvent<String>> executeFimCompletion(String modelId, ModelSource modelSource, FimRequest req) {
+        return Mono.fromCallable(() -> clientFactory.resolve(modelId, modelSource))
             .flatMapMany(resolvedClient -> {
                 String fimFormat = detectFimFormat(modelId);
 
@@ -264,5 +265,7 @@ public class FimNativeController {
         // Extended fields for CodePilot
         String language,
         String filePath,
-        String fileOutline) {}
+        String fileOutline,
+        /** Indicates whether model refers to a system model group or a user custom model. */
+        ModelSource modelSource) {}
 }

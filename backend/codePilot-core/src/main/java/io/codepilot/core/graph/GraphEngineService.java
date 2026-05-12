@@ -90,14 +90,22 @@ public class GraphEngineService {
      * Builds and executes the Graph for a conversation run request.
      * Returns SSE events as a reactive stream.
      */
-    public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
+    public Flux<ServerSentEvent<String>> run(ConversationRunRequest req, String userId) {
         try {
             String template = req.policy() != null && req.policy().graphTemplate() != null
                     ? req.policy().graphTemplate() : "default";
             var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
-            var initialState = intakeAction.buildInitialState(req);
+            var initialState = intakeAction.buildInitialState(req, userId);
+            log.info("GraphEngine initial state: modelId={}, modelSource={}, userId={}, keys={}",
+                initialState.value("modelId").orElse(null),
+                initialState.value("modelSource").orElse(null),
+                initialState.value("userId").orElse(null),
+                initialState.keyStrategies().keySet());
 
             var resultState = graph.invoke(initialState.data());
+            log.info("GraphEngine result state keys={}, modelId={}", 
+                resultState.map(s -> s.data().keySet()).orElse(null),
+                resultState.flatMap(s -> s.value("modelId")).orElse(null));
             return buildSseFromResult(resultState.orElse(null));
         } catch (Exception e) {
             log.error("Graph engine execution failed", e);
@@ -108,7 +116,7 @@ public class GraphEngineService {
     }
 
     private CompiledGraph buildGraph() throws Exception {
-        var graph = new StateGraph(OverAllState::new);
+        var graph = new StateGraph(IntakeAction::createStateWithStrategies);
 
         // ── Define Nodes ──
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
@@ -185,7 +193,7 @@ public class GraphEngineService {
      * → synthesize(汇总生成报告) → finalize
      */
     private CompiledGraph buildDeepResearchGraph() throws Exception {
-        var graph = new StateGraph(OverAllState::new);
+        var graph = new StateGraph(IntakeAction::createStateWithStrategies);
 
         // Nodes
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));

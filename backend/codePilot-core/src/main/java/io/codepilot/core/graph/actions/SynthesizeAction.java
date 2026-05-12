@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.sse.SseEvents;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
@@ -22,10 +23,10 @@ import java.util.*;
 @Component
 public class SynthesizeAction implements NodeAction {
 
-    private final ChatClient chatClient;
+    private final ChatClientFactory chatClientFactory;
 
-    public SynthesizeAction(ChatClient chatClient) {
-        this.chatClient = chatClient;
+    public SynthesizeAction(ChatClientFactory chatClientFactory) {
+        this.chatClientFactory = chatClientFactory;
     }
 
     @Override

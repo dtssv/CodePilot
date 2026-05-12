@@ -5,6 +5,8 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.actions.VerifyAction.VerifyReport;
+import io.codepilot.core.model.ChatClientFactory;
+import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -41,12 +43,12 @@ public class RepairAction implements NodeAction {
     private static final int DEFAULT_MAX_ATTEMPTS = 3;
     private static final int REPAIR_TOKEN_BUDGET = 2000;
 
-    private final ChatClient chatClient;
+    private final ChatClientFactory chatClientFactory;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
 
-    public RepairAction(ChatClient chatClient, PromptRegistry promptRegistry, ObjectMapper mapper) {
-        this.chatClient = chatClient;
+    public RepairAction(ChatClientFactory chatClientFactory, PromptRegistry promptRegistry, ObjectMapper mapper) {
+        this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
     }
@@ -103,6 +105,12 @@ public class RepairAction implements NodeAction {
         // ── Call LLM for repair ──
         String repairResponse;
         try {
+            String modelId = (String) state.value("modelId").orElse(null);
+            String modelSourceName = (String) state.value("modelSource").orElse(null);
+            String userId = (String) state.value("userId").orElse(null);
+            ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
+            log.info("RepairAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
+            ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
             repairResponse = chatClient.prompt()
                     .system(promptRegistry.get("agent.system"))
                     .user(repairPrompt)

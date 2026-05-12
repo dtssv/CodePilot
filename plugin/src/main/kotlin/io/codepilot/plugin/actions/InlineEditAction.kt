@@ -98,6 +98,7 @@ class InlineEditAction : AnAction("Inline Edit", "Edit selected code with AI (Ct
                     mapOf(
                         "sessionId" to java.util.UUID.randomUUID().toString(),
                         "modelId" to null,
+                        "modelSource" to null,
                         "selection" to originalText,
                         "instruction" to instruction,
                         "filePath" to filePath,

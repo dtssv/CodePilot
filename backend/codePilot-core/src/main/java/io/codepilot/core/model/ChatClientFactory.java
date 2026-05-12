@@ -127,14 +127,24 @@ public class ChatClientFactory {
   // ========================================================================
 
   /**
-   * Resolves a model ID to a {@link ResolvedClient}.
+   * Resolves a model ID to a {@link ResolvedClient}, using the provided
+   * {@link ModelSource} to directly target the correct resolution path.
    *
-   * <p>Resolution order:
-   * 1. Model group (from model_groups + model_app_keys with load balancing)
-   * 2. Custom model (from custom_model_providers)
-   * 3. Fallback: first enabled model group by sort_order
+   * <p>When {@code modelSource} is specified:
+   * <ul>
+   *   <li>{@link ModelSource#GROUP} — only looks up model_groups</li>
+   *   <li>{@link ModelSource#CUSTOM} — only looks up custom_model_providers,
+   *       validated against {@code userId} for ownership</li>
+   * </ul>
+   *
+   * <p>When {@code modelSource} is {@code null}, falls back to auto-detection:
+   * model group → custom model → default.
+   *
+   * @param modelId    the model identifier (UUID string)
+   * @param modelSource the source category of the model, or null for auto-detection
+   * @param userId     the requesting user's ID, used to validate ownership of custom models
    */
-  public ResolvedClient resolve(String modelId) {
+  public ResolvedClient resolve(String modelId, ModelSource modelSource, String userId) {
     if (modelId == null || modelId.isBlank()) {
       return buildDefaultResolved();
     }
@@ -146,12 +156,28 @@ public class ChatClientFactory {
       return buildDefaultResolved();
     }
 
+    // If modelSource is specified, resolve directly to the target path
+    if (modelSource == ModelSource.GROUP) {
+      ResolvedClient groupClient = tryResolveModelGroup(id);
+      if (groupClient != null) return groupClient;
+      log.warn("Model group not found: {}, falling back to default model", id);
+      return buildDefaultResolved();
+    }
+
+    if (modelSource == ModelSource.CUSTOM) {
+      ChatClient customClient = tryBuildCustomClient(id, userId);
+      if (customClient != null) return new ResolvedClient(customClient, null, loadBalancer);
+      log.warn("Custom model not found or not owned by user: {}/{}, falling back to default model", id, userId);
+      return buildDefaultResolved();
+    }
+
+    // modelSource is null — auto-detect: model group → custom model → default
     // 1. Try model group
     ResolvedClient groupClient = tryResolveModelGroup(id);
     if (groupClient != null) return groupClient;
 
-    // 2. Try custom model
-    ChatClient customClient = tryBuildCustomClient(id);
+    // 2. Try custom model (with userId ownership check)
+    ChatClient customClient = tryBuildCustomClient(id, userId);
     if (customClient != null) return new ResolvedClient(customClient, null, loadBalancer);
 
     // 3. Fallback to default
@@ -160,8 +186,26 @@ public class ChatClientFactory {
   }
 
   /**
+   * Backward-compatible overload: resolves without specifying ModelSource or userId.
+   * Custom models resolved without userId will NOT be ownership-validated.
+   * Prefer {@link #resolve(String, ModelSource, String)} for proper user-scoped resolution.
+   */
+  public ResolvedClient resolve(String modelId, ModelSource modelSource) {
+    return resolve(modelId, modelSource, null);
+  }
+
+  /**
+   * Backward-compatible overload: resolves without specifying ModelSource
+   * (auto-detects model group → custom model → default).
+   * Prefer {@link #resolve(String, ModelSource, String)} for explicit source routing.
+   */
+  public ResolvedClient resolve(String modelId) {
+    return resolve(modelId, null, null);
+  }
+
+  /**
    * Backward-compatible convenience method: returns just the ChatClient.
-   * Prefer {@link #resolve(String)} for proper load tracking.
+   * Prefer {@link #resolve(String, ModelSource)} for proper load tracking.
    */
   public ChatClient resolveClient(String modelId) {
     return resolve(modelId).chatClient();
@@ -216,7 +260,7 @@ public class ChatClientFactory {
     OpenAiChatOptions opts = OpenAiChatOptions.builder().model(modelName).build();
     OpenAiChatModel chatModel = OpenAiChatModel.builder().openAiApi(api).defaultOptions(opts).build();
 
-    log.info("Built ChatClient [model-group] for groupId={} appKeyId={} model={}", groupId, appKeyId, modelName);
+    log.info("Built ChatClient [model-group] for groupId={} appKeyId={} model={} baseUrl={}", groupId, appKeyId, modelName, baseUrl);
     return ChatClient.builder(chatModel).build();
   }
 
@@ -224,9 +268,20 @@ public class ChatClientFactory {
   // Custom model resolution
   // ========================================================================
 
-  private ChatClient tryBuildCustomClient(UUID providerId) {
-    String sql = "SELECT base_url, api_key_cipher, model, timeout_ms FROM custom_model_providers WHERE id = :id AND enabled = 1";
-    var rows = jdbc.queryForList(sql, new MapSqlParameterSource("id", providerId.toString()));
+  private ChatClient tryBuildCustomClient(UUID providerId, String userId) {
+    String sql;
+    MapSqlParameterSource params;
+    if (userId != null && !userId.isBlank()) {
+      sql = "SELECT base_url, api_key_cipher, model, timeout_ms FROM custom_model_providers WHERE id = :id AND user_id = :userId AND enabled = 1";
+      params = new MapSqlParameterSource()
+          .addValue("id", providerId.toString())
+          .addValue("userId", userId);
+    } else {
+      // No userId provided — skip ownership check (backward-compatible path)
+      sql = "SELECT base_url, api_key_cipher, model, timeout_ms FROM custom_model_providers WHERE id = :id AND enabled = 1";
+      params = new MapSqlParameterSource("id", providerId.toString());
+    }
+    var rows = jdbc.queryForList(sql, params);
     if (rows.isEmpty()) return null;
 
     var row = rows.getFirst();
@@ -252,6 +307,7 @@ public class ChatClientFactory {
     String model = (String) row.get("model");
 
     String apiKey = decrypt(cipher);
+    log.info("Building ChatClient [{}] for provider={} model={} baseUrl={}", source, providerId, model, baseUrl);
     OpenAiApi api = OpenAiApi.builder().baseUrl(baseUrl).apiKey(apiKey).build();
     OpenAiChatOptions opts = OpenAiChatOptions.builder().model(model).build();
     OpenAiChatModel chatModel = OpenAiChatModel.builder().openAiApi(api).defaultOptions(opts).build();

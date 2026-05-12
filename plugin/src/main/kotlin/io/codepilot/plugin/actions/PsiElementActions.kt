@@ -99,6 +99,7 @@ abstract class PsiElementActionBase(
                         mapOf(
                             "sessionId" to sessionId,
                             "modelId" to null,
+                            "modelSource" to null,
                             "context" to input,
                             "instruction" to instruction,
                             "language" to lang,

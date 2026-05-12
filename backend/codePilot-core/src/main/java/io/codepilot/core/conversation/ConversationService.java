@@ -88,7 +88,7 @@ public class ConversationService {
     this.graphEngine = graphEngine;
   }
 
-  public Flux<ServerSentEvent<String>> run(ConversationRunRequest req) {
+  public Flux<ServerSentEvent<String>> run(ConversationRunRequest req, String userId) {
     SystemPromptLeakDetector.Verdict verdict = leakDetector.detect(req.input());
     if (verdict.blocked()) {
       audit.leakDetectedPre(null, verdict.matchedRule());
@@ -132,8 +132,10 @@ public class ConversationService {
                                     "tokens", a.tokens()))
                         .toList())));
 
-    // Resolve the ChatClient based on modelId (model group / system model / user's custom model)
-    ChatClientFactory.ResolvedClient resolved = chatClientFactory.resolve(req.modelId());
+    // Resolve the ChatClient based on modelId and modelSource (model group / system model / user's custom model)
+    log.info("ConversationService resolving model: modelId={}, modelSource={}, userId={}",
+        req.modelId(), req.modelSource(), userId);
+    ChatClientFactory.ResolvedClient resolved = chatClientFactory.resolve(req.modelId(), req.modelSource(), userId);
     ChatClient resolvedClient = resolved.chatClient();
     // Track request lifecycle for load balancing and circuit-breaker
     resolved.startRequest();
@@ -143,11 +145,20 @@ public class ConversationService {
     // Legacy AgentLoop is kept only when explicitly requested via policy.engine=legacy
     if (req.mode() == ConversationMode.AGENT) {
       boolean useLegacy = req.policy() != null && "legacy".equals(req.policy().engine());
+      Flux<ServerSentEvent<String>> agentBody;
       if (useLegacy) {
         AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
-        return head.concatWith(loop.run(req, assembled.systemText(), redactedInput));
+        agentBody = loop.run(req, assembled.systemText(), redactedInput);
+      } else {
+        agentBody = graphEngine.run(req, userId);
       }
-      return head.concatWith(graphEngine.run(req));
+      return head.concatWith(agentBody)
+          .doOnComplete(() -> safeEndRequest(resolved, true, 0))
+          .doOnError(e -> safeEndRequest(resolved, false, 0))
+          .concatWith(
+              Flux.just(
+                  sse.event(
+                      SseEvents.DONE, Map.of("reason", "final", "continuationToken", continuation))));
     }
 
     // chat mode: single streaming turn.
@@ -198,7 +209,7 @@ public class ConversationService {
           .onErrorResume(
               ex -> {
                 log.warn("LLM stream error", ex);
-                resolved.endRequest(false, 0);
+                safeEndRequest(resolved, false, 0);
                 return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
               });
     } else {
@@ -215,14 +226,14 @@ public class ConversationService {
           .onErrorResume(
               ex -> {
                 log.warn("LLM stream error", ex);
-                resolved.endRequest(false, 0);
+                safeEndRequest(resolved, false, 0);
                 return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
               });
     }
 
 
     return head.concatWith(body)
-        .doOnComplete(() -> resolved.endRequest(true, 0))
+        .doOnComplete(() -> safeEndRequest(resolved, true, 0))
         .concatWith(
             Flux.just(
                 sse.event(
@@ -231,6 +242,19 @@ public class ConversationService {
 
   private static String deltaFromChatResponse(ChatResponse r) {
     if (r == null || r.getResult() == null || r.getResult().getOutput() == null) return "";
-    return r.getResult().getOutput().getText();
+    String text = r.getResult().getOutput().getText();
+    return text != null ? text : "";
+  }
+
+  /**
+   * Safely calls {@link ChatClientFactory.ResolvedClient#endRequest(boolean, int)}
+   * swallowing any Redis / infrastructure exceptions so the reactive pipeline is never broken.
+   */
+  private void safeEndRequest(ChatClientFactory.ResolvedClient resolved, boolean success, int tokensUsed) {
+    try {
+      resolved.endRequest(success, tokensUsed);
+    } catch (Exception e) {
+      log.warn("Failed to end request (success={}, tokensUsed={}): {}", success, tokensUsed, e.getMessage());
+    }
   }
 }

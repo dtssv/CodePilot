@@ -12,7 +12,7 @@ interface LoginMethods {
 
 export function LoginPage() {
     const [tab, setTab] = useState<LoginMethod>('bridge');
-    const [status, setStatus] = useState('Discovering login methods...');
+    const [status, setStatus] = useState('Loading login options...');
     const [methods, setMethods] = useState<LoginMethods | null>(null);
     const [bridgeToken, setBridgeToken] = useState('');
     const [devToken, setDevToken] = useState('');

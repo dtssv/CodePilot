@@ -135,6 +135,7 @@ abstract class ActionBase(
                         mapOf(
                             "sessionId" to sessionId,
                             "modelId" to null,
+                            "modelSource" to null,
                             "context" to input,
                             "instruction" to presetInstruction,
                             "language" to (psiFile?.language?.id ?: "text"),

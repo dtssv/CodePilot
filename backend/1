@@ -1,0 +1,84 @@
+Note: Unnecessary use of -X or --request, POST is already inferred.
+Note: Unnecessary use of -X or --request, POST is already inferred.
+* Uses proxy env variable NO_PROXY == '*.jd.com'
+* Host localhost:8080 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                       * Uses proxy env variable NO_PROXY == '*.jd.com'
+* Host localhost:8080 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+          Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 -  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0-:--:-- --:--:-- --:--:--     0*   Trying [::1]:8080...
+*   Trying [::1]:8080...
+* Connected to localhost (::1) port 8080
+* using HTTP/1.x
+* Connected to localhost (::1) port 8080
+* using HTTP/1.x
+> POST /v1/conversation/run HTTP/1.1
+> Host: localhost:8080
+> User-Agent: curl/8.12.1
+> Content-Type: application/json
+> Accept: text/event-stream
+> > POST /v1/conversation/run HTTP/1.1
+> Host: localhost:8080
+> User-Agent: curl/8.12.1
+> Content-Type: application/json
+> Accept: text/event-stream
+> X-CodePilot-Dev-Token: devToken
+> X-Device-Id: postman-dev
+> Content-Length: 62
+> 
+} [62 bytes data]
+* upload completely sent off: 62 bytes
+X-CodePilot-Dev-Token: devToken
+> X-Device-Id: postman-dev
+> Content-Length: 62
+> 
+} [62 bytes data]
+* upload completely sent off: 62 bytes
+100    62  100    62    0     0  100    62      0     51  0:00:01  0:00:01 --:--:--    51  0     0  100    62      0     51  0:00:01  0:00:01 --:--:--    51100    62    0     0  100    62      0     100    62    0     0  100    62      0     28  0:00:02  0:00:02 --:--:--    2828  0:00:02  0:00:02 --:--:--    28100    62    100    62    0     0  100    62      0     19  0:00:03  0:00:03 --:--:--    190     0  100    62      0     19  0:00:03  0:00:03 --:--:--    19100    62    0     0 100    62    0     0  100    62      0     14  0:00:04  0:00:04 --:--:--    14 100    62      0     14  0:00:04  0:00:04 --:--:--    14< HTTP/1.1 200 OK
+< HTTP/1.1 200 OK
+< transfer-encoding: chunked
+< X-CodePilot-Trace-Id: 9fdb63aa0cf54097b58b1f626d4da395
+< transfer-encoding: chunked
+< X-CodePilot-Trace-Id: 9fdb63aa0cf54097b58b1f626d4da395
+< Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+< Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+< X-Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+< X-Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' ws: wss: https:; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+< X-Frame-Options: DENY
+< X-Frame-Options: DENY
+< X-Content-Type-Options: nosniff
+< X-Content-Type-Options: nosniff
+< Referrer-Policy: strict-origin-when-cross-origin
+< Permissions-Policy: camera=(), microphone=(), geolocation=()
+< X-RateLimit-Type: agent
+< X-RateLimit-Limit: 10
+< X-RateLimit-Remaining: 9
+< Referrer-Policy: strict-origin-when-cross-origin
+< Permissions-Policy: camera=(), microphone=(), geolocation=()
+< X-RateLimit-Type: agent
+< X-RateLimit-Limit: 10
+< X-RateLimit-Remaining: 9
+< Content-Type: text/event-stream;charset=UTF-8
+< Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+< Pragma: no-cache
+< < Content-Type: text/event-stream;charset=UTF-8
+< Cache-Control: no-cache, no-store, max-age=0, must-revalidate
+< Pragma: no-cache
+< Expires: 0
+< X-XSS-Protection: 0
+< 
+Expires: 0
+< X-XSS-Protection: 0
+< 
+{ [5 bytes data]
+{ [5 bytes data]
+100    62    0     0  100    62      0     13  0:00:04  0:00:04 --:--:--    13
+* Connection #0 to host localhost left intact
+100    62    0     0  100    62      0     13  0:00:04  0:00:04 --:--:--    13
+* Connection #0 to host localhost left intact

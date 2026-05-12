@@ -52,7 +52,7 @@ public class AuditController {
   public ApiResponse<Object> queryMine(
       @RequestHeader("X-User-Id") String userId,
       @RequestParam(defaultValue = "50") int limit) {
-    String sql = "SELECT ts, kind, severity, message, extra_json FROM audit_events WHERE user_id = cast(:uid as uuid) ORDER BY ts DESC LIMIT :limit";
+    String sql = "SELECT ts, kind, severity, message, extra_json FROM audit_events WHERE user_id = :uid ORDER BY ts DESC LIMIT :limit";
     var rows = jdbc.queryForList(sql, new MapSqlParameterSource().addValue("uid", userId).addValue("limit", limit));
     return ApiResponse.ok(rows);
   }

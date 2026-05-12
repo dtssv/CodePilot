@@ -59,6 +59,11 @@ class CefChatPanel(
         // Start with no session — will be created on first message
         sessionHandle = null
 
+        // Register logout callback so RefreshOn401Interceptor can notify WebUI
+        io.codepilot.plugin.transport.RefreshOn401Interceptor.onLogout = {
+            dispatchToWeb("auth_state", mapOf("authenticated" to false))
+        }
+
         browser =
             JBCefBrowser
                 .createBuilder()
@@ -153,6 +158,7 @@ class CefChatPanel(
                         payload["text"]?.asText() ?: "",
                         payload["mode"]?.asText() ?: "agent",
                         payload["modelId"]?.asText(),
+                        payload["modelSource"]?.asText(),
                         payload["contextRefs"]?.takeIf { it.isArray }?.map { ref ->
                             mapOf(
                                 "id" to ref["id"].asText(),
@@ -160,6 +166,13 @@ class CefChatPanel(
                                 "language" to ref["language"].asText("text"),
                                 "startLine" to ref["startLine"].asInt(-1).let { if (it < 0) null else it },
                                 "endLine" to ref["endLine"].asInt(-1).let { if (it < 0) null else it },
+                            )
+                        } ?: emptyList(),
+                        payload["images"]?.takeIf { it.isArray }?.map { img ->
+                            mapOf(
+                                "name" to img["name"].asText(""),
+                                "mimeType" to img["mimeType"].asText("image/png"),
+                                "base64" to img["base64"].asText(""),
                             )
                         } ?: emptyList(),
                     )
@@ -206,19 +219,23 @@ class CefChatPanel(
         text: String,
         mode: String,
         modelId: String? = null,
+        modelSource: String? = null,
         contextRefs: List<Map<String, Any?>> = emptyList(),
+        images: List<Map<String, String>> = emptyList(),
     ) {
         // Ensure a session exists (lazy creation on first message)
         if (sessionHandle == null) {
-            sessionHandle = sessionStore.newSession(workspaceHash, mode, modelId)
+            sessionHandle = sessionStore.newSession(workspaceHash, mode, modelId, modelSource)
         }
         val handle = sessionHandle!!
 
         // Display text is just the user's text — context refs are shown as chips via contextRefs field
         val displayText = text
 
-        // Persist the compact display message locally
-        sessionStore.appendMessage(handle, "user", displayText)
+        // Persist the compact display message locally (including contextRefs for session restore)
+        val userMsgExtra = mutableMapOf<String, Any?>()
+        if (contextRefs.isNotEmpty()) userMsgExtra["contextRefs"] = contextRefs
+        sessionStore.appendMessage(handle, "user", displayText, userMsgExtra.toMap())
         // Auto-derive title from first user message
         if (handle.meta.title.isNullOrBlank()) {
             sessionStore.updateMeta(handle) { meta ->
@@ -284,6 +301,16 @@ class CefChatPanel(
                     "intent" to "new",
                 )
             if (modelId != null) payload["modelId"] = modelId
+            if (modelSource != null) payload["modelSource"] = modelSource
+            if (images.isNotEmpty()) {
+                payload["images"] = images.map { img ->
+                    mapOf(
+                        "data" to "data:${img["mimeType"]};base64,${img["base64"]}",
+                        "mimeType" to (img["mimeType"] ?: "image/png"),
+                        "description" to (img["name"] ?: ""),
+                    )
+                }
+            }
 
             // Resume from graph awaiting state if applicable
             if (mode == "agent") {
@@ -577,6 +604,8 @@ class CefChatPanel(
 
     private fun handleListSessions() {
         dispatchSessionList()
+        // Also restore current session messages if a session is active
+        dispatchCurrentSessionMessages()
     }
 
     private fun handleSwitchSession(sessionId: String) {
@@ -658,14 +687,21 @@ class CefChatPanel(
         if (handle != null) {
             val messages =
                 sessionStore.readMessages(handle).map { msg ->
-                    mapOf(
+                    val m = mutableMapOf<String, Any?>(
                         "role" to (msg["role"] ?: "unknown"),
                         "content" to (msg["content"] ?: ""),
                     )
+                    // Preserve contextRefs if present
+                    if (msg["contextRefs"] != null) m["contextRefs"] = msg["contextRefs"]
+                    // Preserve toolCall info if present
+                    if (msg["toolCall"] != null) m["toolCall"] = msg["toolCall"]
+                    // Preserve ts (timestamp) for display
+                    if (msg["ts"] != null) m["ts"] = msg["ts"]
+                    m.toMap()
                 }
             dispatchToWeb("session_messages", mapOf("sessionId" to handle.meta.id, "messages" to messages))
         } else {
-            dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, String>>()))
+            dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, Any?>>()))
         }
     }
 
@@ -760,10 +796,11 @@ class CefChatPanel(
 
     private fun handleCheckAuth() {
         val hasToken = settings.accessToken() != null
+        val hasRefreshToken = settings.refreshToken() != null
         val hasDevToken = settings.state.devToken.isNotBlank()
-        val authenticated = hasToken || hasDevToken
+        val authenticated = hasToken || hasRefreshToken || hasDevToken
         log.info(
-            "[Auth] checkAuth: hasToken=$hasToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) {
+            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) {
                 settings.state.devToken.take(
                     8,
                 ) + "..."
@@ -772,7 +809,8 @@ class CefChatPanel(
             }}, baseUrl=${settings.state.backendBaseUrl}",
         )
         dispatchToWeb("auth_state", mapOf("authenticated" to authenticated))
-        // If authenticated, also trigger model fetch
+        // If authenticated, also trigger model fetch — RefreshOn401Interceptor
+        // will silently refresh the access token if it has expired.
         if (authenticated) {
             handleFetchModels()
         }

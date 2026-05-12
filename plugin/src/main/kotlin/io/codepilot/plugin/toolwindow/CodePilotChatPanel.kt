@@ -189,6 +189,10 @@ class CodePilotChatPanel(
                 "sessionId" to sessionHandle.meta.id,
                 "mode" to mode,
                 "modelId" to selectedModel?.id,
+                "modelSource" to when (selectedModel?.type) {
+                    "custom" -> "custom"
+                    else -> if (selectedModel != null) "group" else null
+                },
                 "input" to input,
                 "intent" to intent,
                 "options" to mapOf("locale" to settings.state.preferredLocale),

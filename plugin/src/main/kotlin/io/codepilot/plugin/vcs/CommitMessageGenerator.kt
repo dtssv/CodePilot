@@ -29,6 +29,7 @@ object CommitMessageGenerator {
         val payload =
             mapOf(
                 "sessionId" to sessionId,
+                "modelSource" to null,
                 "diff" to diff.take(MAX_DIFF_LENGTH),
                 "branchName" to (branchName ?: "unknown"),
                 "recentCommits" to recentCommits,

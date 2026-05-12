@@ -39,7 +39,6 @@ public class SystemPromptLeakOutputFilter {
 
   public Flux<ServerSentEvent<String>> guard(Flux<ServerSentEvent<String>> source) {
     return source
-        .takeUntilOther(Flux.empty()) // shape preservation
         .switchOnFirst(
             (signal, src) ->
                 src.concatMap(

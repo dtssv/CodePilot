@@ -30,6 +30,7 @@ object LlmContextCompressor {
         val messages: List<Map<String, Any>>,
         val targetTokens: Int,
         val modelId: String? = null,
+        val modelSource: String? = null,
         val preserveCodeBlocks: Boolean = true,
         val preserveDecisions: Boolean = true,
     )
@@ -114,13 +115,14 @@ Compressed summary:
 
         // Call LLM for compression
         val http = HttpClientService.getInstance()
-        val payload = mapOf(
+        val payload = mutableMapOf<String, Any?>(
             "sessionId" to "compression-${System.currentTimeMillis()}",
             "mode" to "chat",
             "modelId" to (request.modelId ?: ""),
             "input" to prompt,
             "maxTokens" to request.targetTokens,
         )
+        if (request.modelSource != null) payload["modelSource"] = request.modelSource
 
         val httpRequest = http.postJson("/v1/actions/inline-completion", payload)
         val response = http.client().newCall(httpRequest).execute()

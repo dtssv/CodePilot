@@ -16,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
@@ -51,50 +52,63 @@ public class ActionController {
 
   @Operation(summary = "Refactor selection")
   @PostMapping(value = "/refactor", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> refactor(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "refactor", true);
+  public Flux<ServerSentEvent<String>> refactor(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ActionRequest req) {
+    return runAction(req, "refactor", true, userId);
   }
 
   @Operation(summary = "Review code")
   @PostMapping(value = "/review", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> review(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "review", false);
+  public Flux<ServerSentEvent<String>> review(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ActionRequest req) {
+    return runAction(req, "review", false, userId);
   }
 
   @Operation(summary = "Generate comments")
   @PostMapping(value = "/comment", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> comment(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "comment", false);
+  public Flux<ServerSentEvent<String>> comment(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ActionRequest req) {
+    return runAction(req, "comment", false, userId);
   }
 
   @Operation(summary = "Generate tests")
   @PostMapping(value = "/gentest", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> gentest(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gentest", true);
+  public Flux<ServerSentEvent<String>> gentest(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ActionRequest req) {
+    return runAction(req, "gentest", true, userId);
   }
 
   @Operation(summary = "Generate documentation")
   @PostMapping(value = "/gendoc", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> gendoc(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gendoc", false);
+  public Flux<ServerSentEvent<String>> gendoc(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid ActionRequest req) {
+    return runAction(req, "gendoc", false, userId);
   }
 
   // ─── Custom-request actions ───────────────────────────────────────────
 
   @Operation(summary = "Generate git commit message from diff")
   @PostMapping(value = "/commit-message", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> commitMessage(@RequestBody @Valid CommitMessageRequest req) {
+  public Flux<ServerSentEvent<String>> commitMessage(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid CommitMessageRequest req) {
     Map<String, String> vars = new LinkedHashMap<>();
     vars.put("diff", req.diff());
     vars.put("branchName", req.branchName() != null ? req.branchName() : "unknown");
     vars.put("recentCommits", req.recentCommits() != null ? req.recentCommits() : "");
     String input = loadPrompt("commit-message", vars);
-    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+    return runActionWithInput(req.sessionId(), req.modelId(), req.modelSource(), input, false, userId);
   }
 
   @Operation(summary = "Inline code completion (supports FIM mode)")
   @PostMapping(value = "/inline-completion", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> inlineCompletion(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid InlineCompletionRequest req) {
 
     Map<String, String> vars = new LinkedHashMap<>();
@@ -125,12 +139,14 @@ public class ActionController {
       sb.append("\nComplete the code at the cursor (between PREFIX and SUFFIX):");
       input = sb.toString();
     }
-    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+    return runActionWithInput(req.sessionId(), req.modelId(), req.modelSource(), input, false, userId);
   }
 
   @Operation(summary = "Bug scan — find potential bugs, vulnerabilities, and code smells")
   @PostMapping(value = "/bug-scan", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> bugScan(@RequestBody @Valid BugScanRequest req) {
+  public Flux<ServerSentEvent<String>> bugScan(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid BugScanRequest req) {
     Map<String, String> vars = new LinkedHashMap<>();
     vars.put("language", req.language());
     vars.put("filePath", req.filePath());
@@ -139,19 +155,21 @@ public class ActionController {
         ? String.join("\n", req.diagnostics()) : "");
     vars.put("userLocale", "zh-CN");
     String input = loadPrompt("bug-scan", vars);
-    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+    return runActionWithInput(req.sessionId(), req.modelId(), req.modelSource(), input, false, userId);
   }
 
   @Operation(summary = "Inline edit (Ctrl+K) — edit selected code with natural language instruction")
   @PostMapping(value = "/inline-edit", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> inlineEdit(@RequestBody @Valid InlineEditRequest req) {
+  public Flux<ServerSentEvent<String>> inlineEdit(
+      @RequestHeader(value = "X-User-Id", required = false) String userId,
+      @RequestBody @Valid InlineEditRequest req) {
     Map<String, String> vars = new LinkedHashMap<>();
     vars.put("language", req.language());
     vars.put("filePath", req.filePath());
     vars.put("selection", req.selection());
     vars.put("instruction", req.instruction());
     String input = loadPrompt("inline-edit", vars);
-    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+    return runActionWithInput(req.sessionId(), req.modelId(), req.modelSource(), input, false, userId);
   }
 
   // ─── Core runAction method ────────────────────────────────────────────
@@ -162,7 +180,7 @@ public class ActionController {
    * determines engine mode (graph for refactor/gentest), and dispatches
    * to ConversationService.
    */
-  private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action, boolean useGraph) {
+  private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action, boolean useGraph, String userId) {
     Map<String, String> vars = new LinkedHashMap<>();
     vars.put("language", req.language() != null ? req.language() : "text");
     vars.put("filePath", req.filePath() != null ? req.filePath() : "<buffer>");
@@ -186,11 +204,11 @@ public class ActionController {
         : null;
 
     ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), mode, req.modelId(), input,
+        req.sessionId(), mode, req.modelId(), req.modelSource() != null ? io.codepilot.core.model.ModelSource.valueOf(req.modelSource().toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
         List.of(), null, null, null, null, null, null, null, policy, null,
         null, null);
-    return leakFilter.guard(service.run(runReq));
+    return leakFilter.guard(service.run(runReq, userId));
   }
 
   /**
@@ -198,14 +216,14 @@ public class ActionController {
    * Uses the already-assembled input string (from prompt template + custom vars).
    */
   private Flux<ServerSentEvent<String>> runActionWithInput(
-      String sessionId, String modelId, String input, boolean useGraph) {
+      String sessionId, String modelId, String modelSource, String input, boolean useGraph, String userId) {
     var mode = useGraph ? ConversationMode.AGENT : ConversationMode.CHAT;
     ConversationRunRequest runReq = new ConversationRunRequest(
-        sessionId, mode, modelId, input,
+        sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
         List.of(), null, null, null, null, null, null, null, null, null,
         null, null);
-    return leakFilter.guard(service.run(runReq));
+    return leakFilter.guard(service.run(runReq, userId));
   }
 
   /**
@@ -233,6 +251,7 @@ public class ActionController {
   public record ActionRequest(
       @NotBlank String sessionId,
       String modelId,
+      String modelSource,
       @NotBlank String context,
       String instruction,
       String language,
@@ -244,6 +263,7 @@ public class ActionController {
   public record CommitMessageRequest(
       @NotBlank String sessionId,
       String modelId,
+      String modelSource,
       @NotBlank String diff,
       String branchName,
       String recentCommits) {}
@@ -251,6 +271,7 @@ public class ActionController {
   public record InlineCompletionRequest(
       @NotBlank String sessionId,
       String modelId,
+      String modelSource,
       @NotBlank String prefix,
       @NotBlank String suffix,
       @NotBlank String language,
@@ -262,6 +283,7 @@ public class ActionController {
   public record BugScanRequest(
       @NotBlank String sessionId,
       String modelId,
+      String modelSource,
       @NotBlank String code,
       @NotBlank String language,
       @NotBlank String filePath,
@@ -270,6 +292,7 @@ public class ActionController {
   public record InlineEditRequest(
       @NotBlank String sessionId,
       String modelId,
+      String modelSource,
       @NotBlank String selection,
       @NotBlank String instruction,
       @NotBlank String language,

@@ -19,9 +19,8 @@ public class InstallRecordRepository {
     String sql =
         """
         INSERT INTO install_records(user_id, package_slug, version, scope, source)
-        VALUES (cast(:user_id as uuid), :slug, :version, :scope, :source)
-        ON CONFLICT (user_id, package_slug, version, scope, source)
-            DO UPDATE SET uninstalled_at = NULL
+        VALUES (:user_id, :slug, :version, :scope, :source)
+        ON DUPLICATE KEY UPDATE uninstalled_at = NULL
         """;
     return jdbc.update(sql, new MapSqlParameterSource()
         .addValue("user_id", userId)
@@ -37,7 +36,7 @@ public class InstallRecordRepository {
         """
         UPDATE install_records
            SET uninstalled_at = NOW()
-         WHERE user_id = cast(:user_id as uuid)
+         WHERE user_id = :user_id
            AND package_slug = :slug
            AND version = :version
            AND scope = :scope

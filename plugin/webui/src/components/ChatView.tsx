@@ -95,7 +95,7 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                 </div>
             )}
             {messages.map((msg, i) => (
-                <div key={i} className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}
+                <div key={i} className={`msg-row msg-row-${msg.role}`}
                      onMouseEnter={(e) => {
                          const btn = e.currentTarget.querySelector('.msg-fork-btn') as HTMLElement;
                          if (btn) btn.style.opacity = '1';
@@ -104,6 +104,12 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                          const btn = e.currentTarget.querySelector('.msg-fork-btn') as HTMLElement;
                          if (btn) btn.style.opacity = '0';
                      }}>
+                    {msg.role !== 'system' && (
+                        <div className={`msg-avatar msg-avatar-${msg.role}`}>
+                            {msg.role === 'user' ? 'U' : '✦'}
+                        </div>
+                    )}
+                    <div className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}>
                     {msg.riskNotice ? (
                         <RiskNoticeCard {...msg.riskNotice} />
                     ) : msg.needsInput ? (
@@ -204,6 +210,7 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             )}
                         </div>
                     )}
+                </div>
                 </div>
             ))}
         </div>

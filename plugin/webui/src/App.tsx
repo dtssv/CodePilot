@@ -4,15 +4,16 @@ import { ChatView } from './components/ChatView';
 import { ComposerPanel } from './components/ComposerPanel';
 import ContextBudgetBar from './components/ContextBudgetBar';
 import { ContextChipData } from './components/ContextChip';
+import { ImageData } from './components/ImageAttachment';
 import { InputBar } from './components/InputBar';
 import { LoginPage } from './components/LoginPage';
 import { MarketplacePanel } from './components/MarketplacePanel';
-import { NotepadsPanel } from './components/NotepadsPanel';
-import { SessionInfo, SessionSidebar } from './components/SessionSidebar';
-import { ImageData } from './components/ImageAttachment';
-import { SessionCostPanel, SessionCostInfo } from './components/SessionCostPanel';
+import { ModelSelector } from './components/ModelSelector';
 import { MultiFileDiffPanel } from './components/MultiFileDiffPanel';
+import { NotepadsPanel } from './components/NotepadsPanel';
 import { PlanPanel } from './components/PlanPanel';
+import { SessionCostInfo, SessionCostPanel } from './components/SessionCostPanel';
+import { SessionInfo, SessionSidebar } from './components/SessionSidebar';
 
 interface ModelOption {
     id: string;
@@ -93,8 +94,9 @@ export function App() {
                 const result = payload as { success: boolean };
                 if (result.success) {
                     setAuthenticated(true);
-                    // Fetch models after login
+                    // Fetch models and session list after login
                     sendToPlugin('fetch_models', {}).catch(() => { });
+                    sendToPlugin('list_sessions', {}).catch(() => { });
                 }
             }),
         ];
@@ -104,6 +106,7 @@ export function App() {
     useEffect(() => {
         if (!authenticated) return;
         sendToPlugin('fetch_models', {});
+        sendToPlugin('list_sessions', {});
 
         const unsubs = [
             onPluginEvent('models_loaded', (payload) => {
@@ -161,7 +164,7 @@ export function App() {
                     return [...prev, { role: 'assistant' as const, content: text, _streaming: true }];
                 });
             }),
-            // Done — finalize streaming message
+            // Done — finalize streaming message and refresh session list
             onPluginEvent('done', () => {
                 setMessages((prev) => {
                     const last = prev[prev.length - 1];
@@ -170,6 +173,8 @@ export function App() {
                     }
                     return prev;
                 });
+                // Refresh session list to update lastMessageAt timestamp
+                sendToPlugin('list_sessions', {}).catch(() => { });
             }),
             onPluginEvent('tool_call', (p) => {
                 const tc = p as { id: string; name: string; args: unknown };
@@ -277,6 +282,7 @@ export function App() {
             contextRefs,
             mode,
             modelId: selectedModelId || undefined,
+            modelSource: selectedModelId ? (models.find(m => m.id === selectedModelId)?.type === 'custom' ? 'custom' : 'group') : undefined,
             // ★ Pass image attachments to plugin for multi-modal processing
             images: images?.map(img => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
         });
@@ -391,12 +397,11 @@ export function App() {
                                     <option value="agent">Agent</option>
                                     <option value="chat">Chat</option>
                                 </select>
-                                <select className="opt-select" value={selectedModelId} onChange={(e) => setSelectedModelId(e.target.value)}>
-                                    {models.length === 0 && <option value="">Default</option>}
-                                    {models.map((m) => (
-                                        <option key={m.id} value={m.id}>{m.name}{m.type === 'custom' ? ' (custom)' : ''}</option>
-                                    ))}
-                                </select>
+                                <ModelSelector
+                                    models={models}
+                                    selectedModelId={selectedModelId}
+                                    onSelect={setSelectedModelId}
+                                />
                             </div>
                             {branches.length > 1 && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>

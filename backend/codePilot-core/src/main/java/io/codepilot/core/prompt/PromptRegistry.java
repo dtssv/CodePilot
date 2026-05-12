@@ -40,7 +40,9 @@ public class PromptRegistry {
           "agent.resume",
           "agent.delivery",
           "guard.system",
-          "chat.system");
+          "chat.system",
+          "graph.planning",
+          "graph.generate");
 
   private final Map<String, String> segments = new LinkedHashMap<>();
 
