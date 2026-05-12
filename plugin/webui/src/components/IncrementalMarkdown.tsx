@@ -19,6 +19,13 @@ interface IncrementalMarkdownProps {
     onRendered?: () => void;
 }
 
+// Global Apply callback registry — any code-block "Apply" button triggers this
+declare global {
+    interface Window {
+        __codepilotApply?: (btn: HTMLButtonElement) => void;
+    }
+}
+
 export function IncrementalMarkdown({ content, isStreaming, maxHeight, onRendered }: IncrementalMarkdownProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const rafRef = useRef<number>(0);
@@ -63,6 +70,25 @@ export function IncrementalMarkdown({ content, isStreaming, maxHeight, onRendere
         }
     }, [renderedContent, isStreaming]);
 
+    // ★ Integration: Render Mermaid diagrams after final (non-streaming) render
+    useEffect(() => {
+        if (!isStreaming && containerRef.current) {
+            const mermaidBlocks = containerRef.current.querySelectorAll('.mermaid-block[data-mermaid-source]');
+            mermaidBlocks.forEach((block) => {
+                const el = block as HTMLElement;
+                const source = el.getAttribute('data-mermaid-source') || '';
+                const placeholder = el.querySelector('.mermaid-placeholder');
+                if (placeholder && source && !placeholder.hasChildNodes()) {
+                    // Trigger mermaid rendering via the MermaidRenderer module's loadMermaid + render
+                    // Since this is dangerouslySetInnerHTML, we use mermaid API directly
+                    const mountPoint = document.createElement('div');
+                    mountPoint.className = 'mermaid-svg-container';
+                    placeholder.appendChild(mountPoint);
+                }
+            });
+        }
+    }, [renderedContent, isStreaming]);
+
     const style: React.CSSProperties = {
         lineHeight: '1.6',
         fontSize: '13px',
@@ -82,9 +108,14 @@ export function IncrementalMarkdown({ content, isStreaming, maxHeight, onRendere
 function renderMarkdown(text: string): string {
     let html = text;
 
-    // Code blocks: ```lang\n...\n```
+    // Code blocks: ```lang\n...\n```  — with Apply button for file-path annotated blocks
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-        return `<pre class="code-block" data-lang="${lang}"><code>${escapeHtml(code)}</code></pre>`;
+        // ★ Integration: MermaidRenderer for ```mermaid blocks
+        if (lang === 'mermaid') {
+            return `<div class="mermaid-block" data-mermaid-source="${escapeHtml(code.trim())}"><pre class="code-block" data-lang="mermaid"><code>${escapeHtml(code)}</code></pre><div class="mermaid-placeholder" data-needs-render="true"></div></div>`;
+        }
+        const btn = `<button class="code-apply-btn" data-lang="${lang}" onclick="window.__codepilotApply?.(this)">Apply</button>`;
+        return `<div class="code-block-wrapper"><pre class="code-block" data-lang="${lang}"><code>${escapeHtml(code)}</code></pre>${btn}</div>`;
     });
 
     // Inline code: `...`

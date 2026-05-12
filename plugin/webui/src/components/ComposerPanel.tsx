@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 
 interface FileEntry {
@@ -11,11 +11,13 @@ interface FileEntry {
 /**
  * ★ ComposerPanel: Specialized UI for creating a group of files from scratch.
  * Features (matching Cursor Composer):
+ * - Full-screen mode: Side-by-side layout with code preview on the left and chat on the right
  * - File tree preview with directory structure
  * - Per-file Accept/Reject buttons
  * - Batch Accept All / Reject All
  * - Content preview with syntax highlighting
  * - Two-step confirmation (Generate → Review → Apply)
+ * - Progress indicator during generation
  */
 export function ComposerPanel() {
     const [instruction, setInstruction] = useState('');
@@ -23,6 +25,9 @@ export function ComposerPanel() {
     const [selectedFile, setSelectedFile] = useState<string | null>(null);
     const [generating, setGenerating] = useState(false);
     const [step, setStep] = useState<'input' | 'preview' | 'confirm'>('input');
+    const [isFullscreen, setIsFullscreen] = useState(false);
+    const [_splitRatio, _setSplitRatio] = useState(0.5); // Left/right split ratio (reserved for future use)
+    const containerRef = useRef<HTMLDivElement>(null);
 
     // Listen for composer results from plugin
     useEffect(() => {
@@ -88,15 +93,34 @@ export function ComposerPanel() {
     const dirTree = buildDirTree(files.map(f => f.path));
 
     return (
-        <div className="composer-panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <div ref={containerRef} className="composer-panel" style={{
+            height: '100%', display: 'flex', flexDirection: 'column',
+            ...(isFullscreen ? { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 10000, background: 'var(--vscode-editor-background, #1e1e2e)' } : {}),
+        }}>
+            {/* Toolbar with fullscreen toggle */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px', borderBottom: '1px solid var(--vscode-editorWidget-border, #444)', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <h3 style={{ margin: 0, fontSize: '13px', fontWeight: 600 }}>Composer</h3>
+                    {generating && <span style={{ fontSize: '11px', opacity: 0.6 }}>Generating...</span>}
+                </div>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                    {step === 'preview' && (
+                        <button onClick={() => setIsFullscreen(!isFullscreen)}
+                            style={{ padding: '2px 8px', fontSize: '11px', background: 'transparent', border: '1px solid var(--vscode-editorWidget-border, #444)', borderRadius: '3px', color: 'inherit', cursor: 'pointer' }}
+                            title={isFullscreen ? 'Exit Full Screen' : 'Full Screen'}>
+                            {isFullscreen ? '⊘' : '⛶'} {isFullscreen ? 'Exit' : 'Full Screen'}
+                        </button>
+                    )}
+                </div>
+            </div>
+
             {step === 'input' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '12px' }}>
-                    <h3 style={{ margin: 0, fontSize: '14px' }}>Composer</h3>
                     <p style={{ margin: 0, fontSize: '12px', opacity: 0.7 }}>Create a group of files from scratch</p>
                     <textarea
                         value={instruction} onChange={e => setInstruction(e.target.value)}
                         placeholder="Describe what you want to create... (e.g., 'A React todo app with TypeScript')"
-                        style={{ width: '100%', minHeight: '120px', padding: '10px', fontSize: '13px', background: 'var(--vscode-input-background, #1e1e2e)', border: '1px solid var(--vscode-editorWidget-border, #444)', borderRadius: '6px', color: 'inherit', resize: 'vertical', boxSizing: 'border-box' }}
+                        style={{ width: '100%', minHeight: isFullscreen ? '400px' : '120px', padding: '10px', fontSize: '13px', background: 'var(--vscode-input-background, #1e1e2e)', border: '1px solid var(--vscode-editorWidget-border, #444)', borderRadius: '6px', color: 'inherit', resize: 'vertical', boxSizing: 'border-box' }}
                     />
                     <button onClick={handleGenerate} disabled={!instruction.trim()}
                         style={{ padding: '8px 20px', cursor: 'pointer', fontSize: '13px', background: 'var(--vscode-button-background, #0078d4)', border: 'none', color: '#fff', borderRadius: '4px', alignSelf: 'flex-end', opacity: instruction.trim() ? 1 : 0.5 }}>
@@ -105,47 +129,69 @@ export function ComposerPanel() {
                 </div>
             )}
             {step === 'preview' && (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                    {/* File tree + content preview */}
-                    <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-                        {/* Left: File tree with accept/reject per file */}
-                        <div style={{ width: '280px', borderRight: '1px solid var(--vscode-editorWidget-border, #444)', overflowY: 'auto', padding: '8px' }}>
-                            <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px', opacity: 0.7 }}>
-                                Files ({files.length})
-                                {acceptedCount > 0 && <span style={{ color: '#66bb6a', marginLeft: '8px' }}>✓{acceptedCount}</span>}
-                                {rejectedCount > 0 && <span style={{ color: '#ef5350', marginLeft: '4px' }}>✗{rejectedCount}</span>}
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                    {/* Full-screen: Side-by-side | Normal: Stacked */}
+                    <div style={{ flex: 1, display: 'flex', overflow: 'hidden', flexDirection: isFullscreen ? 'row' : 'row' }}>
+                        {/* Left: Code Preview (wider in fullscreen) */}
+                        <div style={{ flex: isFullscreen ? 3 : 1, display: 'flex', flexDirection: 'column', borderRight: isFullscreen ? '1px solid var(--vscode-editorWidget-border, #444)' : 'none' }}>
+                            {/* File tabs */}
+                            <div style={{ display: 'flex', overflowX: 'auto', borderBottom: '1px solid var(--vscode-editorWidget-border, #444)', background: 'var(--vscode-editorGroupHeader-tabsBackground, #252536)', flexShrink: 0 }}>
+                                {files.map(f => (
+                                    <div key={f.path} onClick={() => setSelectedFile(f.path)}
+                                        style={{ padding: '4px 12px', fontSize: '11px', cursor: 'pointer', whiteSpace: 'nowrap', borderBottom: selectedFile === f.path ? '2px solid var(--vscode-button-background, #0078d4)' : '2px solid transparent', background: selectedFile === f.path ? 'var(--vscode-editor-background, #1e1e2e)' : 'transparent', opacity: f.accepted === false ? 0.4 : 1 }}>
+                                        {f.path.split('/').pop()}
+                                        {f.accepted === true && <span style={{ color: '#66bb6a', marginLeft: '4px' }}>✓</span>}
+                                        {f.accepted === false && <span style={{ color: '#ef5350', marginLeft: '4px' }}>✗</span>}
+                                    </div>
+                                ))}
                             </div>
-                            {files.length === 0 && generating && <div style={{ fontSize: '12px', opacity: 0.5 }}>Generating...</div>}
-                            {/* Directory tree */}
-                            {dirTree.map(node => renderTreeNode(node, selectedFile, setSelectedFile, files, handleAcceptFile, handleRejectFile))}
+                            {/* Code content */}
+                            <div style={{ flex: 1, overflow: 'auto', padding: '8px' }}>
+                                {selectedFile ? (
+                                    <pre style={{ fontSize: isFullscreen ? '13px' : '12px', margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace', lineHeight: '1.5' }}>{selectedContent}</pre>
+                                ) : (
+                                    <div style={{ fontSize: '12px', opacity: 0.5, textAlign: 'center', padding: '20px' }}>Select a file to preview</div>
+                                )}
+                            </div>
                         </div>
-                        {/* Right: Content preview */}
-                        <div style={{ flex: 1, overflow: 'auto', padding: '8px' }}>
-                            {selectedFile ? (
-                                <pre style={{ fontSize: '12px', margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>{selectedContent}</pre>
-                            ) : (
-                                <div style={{ fontSize: '12px', opacity: 0.5, textAlign: 'center', padding: '20px' }}>Select a file to preview</div>
+                        {/* Right: Chat + File tree + Actions */}
+                        <div style={{ flex: isFullscreen ? 2 : 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                            {/* Instruction summary */}
+                            {isFullscreen && instruction && (
+                                <div style={{ padding: '8px', fontSize: '11px', opacity: 0.7, borderBottom: '1px solid var(--vscode-editorWidget-border, #444)', background: 'var(--vscode-editorGroupHeader-tabsBackground, #252536)', flexShrink: 0 }}>
+                                    <strong>Instruction:</strong> {instruction.slice(0, 200)}{instruction.length > 200 ? '...' : ''}
+                                </div>
                             )}
-                        </div>
-                    </div>
-                    {/* Bottom: Batch actions */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderTop: '1px solid var(--vscode-editorWidget-border, #444)' }}>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            <button onClick={handleAcceptAll} disabled={files.length === 0}
-                                style={{ padding: '4px 12px', cursor: 'pointer', fontSize: '11px', background: 'transparent', border: '1px solid #66bb6a', borderRadius: '3px', color: '#66bb6a' }}>
-                                Accept All
-                            </button>
-                            <button onClick={handleRejectAll} disabled={files.length === 0}
-                                style={{ padding: '4px 12px', cursor: 'pointer', fontSize: '11px', background: 'transparent', border: '1px solid #ef5350', borderRadius: '3px', color: '#ef5350' }}>
-                                Reject All
-                            </button>
-                        </div>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            <button onClick={handleCancel} style={{ padding: '6px 16px', cursor: 'pointer', fontSize: '12px', background: 'transparent', border: '1px solid var(--vscode-editorWidget-border, #444)', borderRadius: '4px', color: 'inherit' }}>Cancel</button>
-                            <button onClick={handleApply} disabled={pendingApplyCount === 0}
-                                style={{ padding: '6px 16px', cursor: 'pointer', fontSize: '12px', background: 'var(--vscode-button-background, #0078d4)', border: 'none', color: '#fff', borderRadius: '4px', opacity: pendingApplyCount > 0 ? 1 : 0.5 }}>
-                                Apply ({pendingApplyCount} files)
-                            </button>
+                            {/* File tree with accept/reject */}
+                            <div style={{ flex: 1, overflowY: 'auto', padding: '8px' }}>
+                                <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px', opacity: 0.7 }}>
+                                    Files ({files.length})
+                                    {acceptedCount > 0 && <span style={{ color: '#66bb6a', marginLeft: '8px' }}>✓{acceptedCount}</span>}
+                                    {rejectedCount > 0 && <span style={{ color: '#ef5350', marginLeft: '4px' }}>✗{rejectedCount}</span>}
+                                </div>
+                                {files.length === 0 && generating && <div style={{ fontSize: '12px', opacity: 0.5 }}>Generating...</div>}
+                                {dirTree.map(node => renderTreeNode(node, selectedFile, setSelectedFile, files, handleAcceptFile, handleRejectFile))}
+                            </div>
+                            {/* Actions */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderTop: '1px solid var(--vscode-editorWidget-border, #444)', flexShrink: 0 }}>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button onClick={handleAcceptAll} disabled={files.length === 0}
+                                        style={{ padding: '4px 12px', cursor: 'pointer', fontSize: '11px', background: 'transparent', border: '1px solid #66bb6a', borderRadius: '3px', color: '#66bb6a' }}>
+                                        Accept All
+                                    </button>
+                                    <button onClick={handleRejectAll} disabled={files.length === 0}
+                                        style={{ padding: '4px 12px', cursor: 'pointer', fontSize: '11px', background: 'transparent', border: '1px solid #ef5350', borderRadius: '3px', color: '#ef5350' }}>
+                                        Reject All
+                                    </button>
+                                </div>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button onClick={handleCancel} style={{ padding: '6px 16px', cursor: 'pointer', fontSize: '12px', background: 'transparent', border: '1px solid var(--vscode-editorWidget-border, #444)', borderRadius: '4px', color: 'inherit' }}>Cancel</button>
+                                    <button onClick={handleApply} disabled={pendingApplyCount === 0}
+                                        style={{ padding: '6px 16px', cursor: 'pointer', fontSize: '12px', background: 'var(--vscode-button-background, #0078d4)', border: 'none', color: '#fff', borderRadius: '4px', opacity: pendingApplyCount > 0 ? 1 : 0.5 }}>
+                                        Apply ({pendingApplyCount} files)
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

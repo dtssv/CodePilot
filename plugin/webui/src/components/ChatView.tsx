@@ -6,6 +6,7 @@ import { DiffCard } from './DiffCard';
 import { IncrementalMarkdown } from './IncrementalMarkdown';
 import { NeedsInputCard } from './NeedsInputCard';
 import { RiskNoticeCard } from './RiskNoticeCard';
+import { BranchTimeline } from './BranchTimeline';
 
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -15,6 +16,9 @@ export interface ChatMessage {
     riskNotice?: { level: string; message: string; filesPaths: string[] };
     needsInput?: { question: string; options: string[] };
     diff?: { path: string; hunks: string };
+    // ★ Integration: Image attachments and branch info
+    images?: { url: string; mimeType?: string; description?: string }[];
+    branches?: { branchId: string; sessionId: string; forkMsgIndex: number }[];
     _streaming?: boolean;
     tokenMeta?: {
         inputTokens: number;
@@ -118,6 +122,47 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                                 {msg.content}
                             </ReactMarkdown>
                         )
+                    )}
+                    {/* ★ Image attachments rendering */}
+                    {msg.images && msg.images.length > 0 && (
+                        <div className="msg-images">
+                            {msg.images.map((img, imgIdx) => (
+                                <div key={`img-${i}-${imgIdx}`} className="msg-image-item">
+                                    <img
+                                        src={img.url}
+                                        alt={img.description || `Image ${imgIdx + 1}`}
+                                        className="msg-image-preview"
+                                        style={{ maxWidth: '100%', maxHeight: '200px', borderRadius: '4px', margin: '4px 0' }}
+                                    />
+                                    {img.description && (
+                                        <div className="msg-image-desc" style={{ fontSize: '11px', opacity: 0.6, marginTop: '2px' }}>
+                                            {img.description}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {/* ★ Branch timeline rendering */}
+                    {msg.branches && msg.branches.length > 0 && (
+                        <BranchTimeline
+                            branches={msg.branches.map(b => ({
+                                branchId: b.branchId,
+                                parentBranchId: undefined,
+                                title: `Fork at msg #${b.forkMsgIndex}`,
+                                messageCount: 0,
+                            }))}
+                            activeBranchId={msg.branches[0]?.branchId || ''}
+                            onSwitchBranch={(branchId) => {
+                                const branch = msg.branches?.find(b => b.branchId === branchId);
+                                if (branch) {
+                                    // Dispatch branch switch via custom event
+                                    window.dispatchEvent(new CustomEvent('codepilot:switch_branch', {
+                                        detail: { sessionId: branch.sessionId, branchId }
+                                    }));
+                                }
+                            }}
+                        />
                     )}
                     {onForkFromMessage && !msg._streaming && (
                         <button

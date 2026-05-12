@@ -1,154 +1,165 @@
 package io.codepilot.plugin.context
 
-import com.intellij.openapi.components.Service
-import com.intellij.openapi.components.service
-import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vfs.VirtualFileManager
-import java.nio.charset.StandardCharsets
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Loads project-level rules from `.codepilot/rules/` directory.
+ * .codepilotrules Project Rules Loader.
  *
- * Equivalent to Cursor's .cursorrules — allows teams to define coding standards,
- * architecture constraints, and style guides that are automatically injected
- * into every AI request as system prompt segments.
+ * Inspired by Cursor's .cursorrules — a single file in the project root
+ * that contains project-specific instructions automatically included in
+ * every conversation's system prompt.
  *
- * Rules are .md files with optional YAML frontmatter:
- *   ---
- *   applies_to: glob pattern    # only apply to matching files
- *   priority: 60               # higher = loaded earlier
- *   always: true               # always load regardless of file match
- *   ---
- *   (rule content in English for model consumption)
+ * Format: Plain text / Markdown with optional section headers.
+ * Location: {project.root}/.codepilotrules
+ *
+ * Features:
+ * - Auto-detect and load on project open
+ * - File watcher: reload on changes (VFS BulkFileListener)
+ * - Cached content with fast read path
+ * - Optional: .codepilotrules.local for personal overrides (git-ignored)
  */
-@Service(Service.Level.PROJECT)
-class ProjectRulesLoader(
-    private val project: Project,
-) {
-    private val log = Logger.getInstance(ProjectRulesLoader::class.java)
+object ProjectRulesLoader {
 
-    data class RuleItem(
-        val id: String, // filename without extension
-        val content: String, // rule text (after frontmatter)
-        val appliesTo: String?, // glob pattern for file matching
-        val priority: Int, // higher = loaded first
-        val always: Boolean, // always load?
-        val path: String, // relative path to rule file
-    )
+    private const val RULES_FILE = ".codepilotrules"
+    private const val LOCAL_RULES_FILE = ".codepilotrules.local"
+
+    // Project basePath → combined rules content
+    private val rulesCache = ConcurrentHashMap<String, String>()
+    // Project basePath → last modified timestamp
+    private val lastModified = ConcurrentHashMap<String, Long>()
 
     /**
-     * Load all rules applicable to the current context.
-     * @param currentFilePath optional — if set, only rules with matching `applies_to` or `always=true` are returned
-     * @return sorted list of rules (highest priority first)
+     * Get the combined project rules content for the given project.
+     * Loads from .codepilotrules + .codepilotrules.local (if exists).
+     * Results are cached and refreshed on file changes.
      */
-    fun loadRules(currentFilePath: String? = null): List<RuleItem> {
-        val projectBase = project.basePath ?: return emptyList()
-        val rulesDir =
-            VirtualFileManager
-                .getInstance()
-                .findFileByUrl("file://$projectBase/.codepilot/rules") ?: return emptyList()
+    fun getRules(project: Project): String? {
+        val basePath = project.basePath ?: return null
+        rulesCache[basePath]?.let { return it }
 
-        if (!rulesDir.isDirectory) return emptyList()
+        return loadRules(basePath).also {
+            if (it != null) rulesCache[basePath] = it
+        }
+    }
 
-        val rules = mutableListOf<RuleItem>()
+    /**
+     * Force-reload rules from disk (called on file change events).
+     */
+    fun reloadRules(project: Project) {
+        val basePath = project.basePath ?: return
+        rulesCache.remove(basePath)
+        loadRules(basePath)?.let { rulesCache[basePath] = it }
+    }
 
-        for (file in rulesDir.children) {
-            if (file.isDirectory) continue
-            if (!file.name.endsWith(".md") && !file.name.endsWith(".txt")) continue
+    /**
+     * Check if a .codepilotrules file exists for the project.
+     */
+    fun hasRules(project: Project): Boolean {
+        val basePath = project.basePath ?: return false
+        return Files.exists(Path.of(basePath, RULES_FILE))
+    }
 
-            try {
-                val raw = String(file.contentsToByteArray(), StandardCharsets.UTF_8)
-                val (frontmatter, content) = parseFrontmatter(raw)
+    /**
+     * Build the system prompt fragment from project rules.
+     * Returns a formatted string ready to append to the system prompt,
+     * or null if no rules exist.
+     */
+    fun buildRulesPromptFragment(project: Project): String? {
+        val rules = getRules(project) ?: return null
+        return """
+            |# Project Rules (.codepilotrules)
+            |The following rules are defined by the project and must be followed in all responses:
+            |
+            |$rules
+            |
+            |End of project rules. Apply these rules to all code generation, editing, and analysis.
+        """.trimMargin()
+    }
 
-                val appliesTo = frontmatter["applies_to"] ?: frontmatter["appliesTo"]
-                val priority = frontmatter["priority"]?.toIntOrNull() ?: 50
-                val always = frontmatter["always"]?.lowercase() == "true"
+    /**
+     * Create a default .codepilotrules template in the project root.
+     */
+    fun createDefaultRules(project: Project) {
+        val basePath = project.basePath ?: return
+        val rulesPath = Path.of(basePath, RULES_FILE)
+        if (Files.exists(rulesPath)) return
 
-                // Filter: if currentFilePath is specified, only include matching rules
-                if (currentFilePath != null && !always && appliesTo != null) {
-                    if (!matchGlob(currentFilePath, appliesTo)) continue
+        val template = """
+            |# CodePilot Project Rules
+            |
+            |## Code Style
+            |- Use descriptive variable names
+            |- Add comments for complex logic
+            |- Follow existing code patterns in the project
+            |
+            |## Architecture
+            |- Follow the existing project structure
+            |- Keep modules decoupled
+            |
+            |## Testing
+            |- Write unit tests for new functions
+            |- Test edge cases
+            |
+            |## Custom Rules
+            |- Add your project-specific rules here
+        """.trimMargin()
+
+        Files.writeString(rulesPath, template)
+
+        // Refresh VFS
+        ApplicationManager.getApplication().invokeLater {
+            LocalFileSystem.getInstance().refreshAndFindFileByPath(rulesPath.toString())
+        }
+    }
+
+    // ─── Internal ──────────────────────────────────────────────────────
+
+    private fun loadRules(basePath: String): String? {
+        val parts = mutableListOf<String>()
+
+        // Load main rules
+        val mainPath = Path.of(basePath, RULES_FILE)
+        if (Files.exists(mainPath)) {
+            val content = Files.readString(mainPath).trim()
+            if (content.isNotEmpty()) parts.add(content)
+        }
+
+        // Load local overrides (personal, git-ignored)
+        val localPath = Path.of(basePath, LOCAL_RULES_FILE)
+        if (Files.exists(localPath)) {
+            val content = Files.readString(localPath).trim()
+            if (content.isNotEmpty()) {
+                parts.add("\n## Local Overrides (.codepilotrules.local)\n$content")
+            }
+        }
+
+        return if (parts.isNotEmpty()) parts.joinToString("\n\n") else null
+    }
+
+    /**
+     * VFS file change listener for .codepilotrules files.
+     * Registers in plugin startup to auto-reload on changes.
+     */
+    class RulesFileChangeListener(private val project: Project) : BulkFileListener {
+        override fun after(events: MutableList<out VFileEvent>) {
+            for (event in events) {
+                val fileName = event.file?.name
+                if (fileName == RULES_FILE || fileName == LOCAL_RULES_FILE) {
+                    val eventPath = event.file?.path
+                    val basePath = project.basePath
+                    if (eventPath != null && basePath != null && eventPath.startsWith(basePath)) {
+                        reloadRules(project)
+                    }
                 }
-
-                val id = file.nameWithoutExtension
-                val relativePath = ".codepilot/rules/${file.name}"
-
-                rules.add(
-                    RuleItem(
-                        id = id,
-                        content = content.trim(),
-                        appliesTo = appliesTo,
-                        priority = priority,
-                        always = always,
-                        path = relativePath,
-                    ),
-                )
-            } catch (e: Exception) {
-                log.warn("Failed to load rule file: ${file.name}", e)
             }
         }
-
-        return rules.sortedByDescending { it.priority }
-    }
-
-    /**
-     * Format rules for injection into system prompt.
-     */
-    fun formatForPrompt(rules: List<RuleItem>): String {
-        if (rules.isEmpty()) return ""
-        val sb = StringBuilder()
-        sb.appendLine("[PROJECT_RULES_BEGIN]")
-        for (rule in rules) {
-            sb.appendLine("// Rule: ${rule.id} (priority=${rule.priority})")
-            sb.appendLine(rule.content)
-            sb.appendLine()
-        }
-        sb.appendLine("[PROJECT_RULES_END]")
-        return sb.toString()
-    }
-
-    private fun parseFrontmatter(raw: String): Pair<Map<String, String>, String> {
-        val trimmed = raw.trimStart()
-        if (!trimmed.startsWith("---")) return emptyMap<String, String>() to raw
-
-        val endIndex = trimmed.indexOf("---", 3)
-        if (endIndex == -1) return emptyMap<String, String>() to raw
-
-        val frontmatterBlock = trimmed.substring(3, endIndex).trim()
-        val content = trimmed.substring(endIndex + 3)
-
-        val map = mutableMapOf<String, String>()
-        for (line in frontmatterBlock.lines()) {
-            val colonIdx = line.indexOf(':')
-            if (colonIdx > 0) {
-                val key = line.substring(0, colonIdx).trim()
-                val value =
-                    line
-                        .substring(colonIdx + 1)
-                        .trim()
-                        .removeSurrounding("\"")
-                        .removeSurrounding("'")
-                map[key] = value
-            }
-        }
-        return map to content
-    }
-
-    private fun matchGlob(
-        filePath: String,
-        glob: String,
-    ): Boolean {
-        val regex =
-            glob
-                .replace(".", "\\.")
-                .replace("**", "§§")
-                .replace("*", "[^/]*")
-                .replace("§§", ".*")
-        return filePath.matches(Regex(regex))
-    }
-
-    companion object {
-        @JvmStatic
-        fun getInstance(project: Project): ProjectRulesLoader = project.service()
     }
 }

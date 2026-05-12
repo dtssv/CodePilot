@@ -7,7 +7,7 @@ import java.util.UUID;
 /** Read-only projection of the custom_model_providers table (API key is never exposed). */
 public record CustomModelProvider(
     UUID id,
-    UUID userId,
+    String userId,
     String name,
     String protocol,
     String baseUrl,

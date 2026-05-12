@@ -8,9 +8,11 @@ import io.codepilot.plugin.settings.CodePilotSettings
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.sse.EventSource
@@ -49,6 +51,20 @@ class HttpClientService {
 
     fun client(): OkHttpClient = baseClient
 
+    /** Builds an authenticated GET request. */
+    fun get(
+        path: String,
+    ): Request {
+        val settings = CodePilotSettings.getInstance()
+        val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
+        return Request
+            .Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .build()
+    }
+
     /** Builds an authenticated POST request with a JSON body. */
     fun postJson(
         path: String,
@@ -64,6 +80,29 @@ class HttpClientService {
             .post(rb)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json; charset=utf-8")
+            .build()
+    }
+
+    /** Builds an authenticated multipart POST request with a file part. */
+    fun postMultipart(
+        path: String,
+        partName: String,
+        fileName: String,
+        contentType: String,
+        data: ByteArray,
+    ): Request {
+        val settings = CodePilotSettings.getInstance()
+        val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
+        val fileBody = data.toRequestBody(contentType.toMediaType())
+        val multipartBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(partName, fileName, fileBody)
+            .build()
+        return Request
+            .Builder()
+            .url(url)
+            .post(multipartBody)
+            .header("Accept", "application/json")
             .build()
     }
 

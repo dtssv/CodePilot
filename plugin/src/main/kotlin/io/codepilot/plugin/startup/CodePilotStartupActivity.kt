@@ -29,6 +29,25 @@ class CodePilotStartupActivity : ProjectActivity {
         // Start background codebase indexing
         IndexScheduler.getInstance(project).start()
 
+        // ★ Integration: Trigger conversation history sync on startup
+        // Downloads remote sessions to merge with local, enabling cross-device continuity
+        Thread({
+            try {
+                val syncResponse = io.codepilot.plugin.session.ConversationHistorySync.sync(project)
+                if (syncResponse != null && syncResponse.sessions.isNotEmpty()) {
+                    com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+                        com.intellij.notification.NotificationGroupManager
+                            .getInstance()
+                            .getNotificationGroup("CodePilot")
+                            .createNotification(
+                                "CodePilot: Synced ${syncResponse.sessions.size} session(s) from cloud.",
+                                com.intellij.notification.NotificationType.INFORMATION,
+                            ).notify(project)
+                    }
+                }
+            } catch (_: Exception) { /* Non-critical: sync failure should not block startup */ }
+        }, "codepilot-session-sync").apply { isDaemon = true; start() }
+
         // Install selection hint on all future editors
         EditorFactory.getInstance().addEditorFactoryListener(
             object : EditorFactoryAdapter() {

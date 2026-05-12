@@ -24,6 +24,12 @@ class PatchApplier(
 ) {
     private val auto = CodePilotSettings.getInstance().state.autoApplyLowRiskPatches
 
+    // ★ Integration: PatchRecorder for batch undo, SmartMatcher for fuzzy path resolution,
+    // ThreeWayMerger for conflict resolution
+    private val recorder = PatchRecorder(project)
+    private val matcher = SmartMatcher(project)
+    private val merger = ThreeWayMerger(project)
+
     fun applyAll(patches: JsonNode) {
         if (patches.isMissingNode || !patches.isArray) return
         ApplicationManager.getApplication().invokeLater {
@@ -51,7 +57,12 @@ class PatchApplier(
         ApplicationManager.getApplication().invokeLater {
             when (toolName) {
                 "fs.write" -> {
-                    val rel = args.path("path").asText()
+                    var rel = args.path("path").asText()
+                    // ★ Integration: Use SmartMatcher for fuzzy path resolution
+                    if (!resolveFile(rel)) {
+                        val matched = matcher.matchFile(rel).firstOrNull()
+                        if (matched != null && matched.score > 0.7) rel = matched.matched
+                    }
                     val content = args.path("content").asText("")
                     val edit =
                         com.fasterxml.jackson.databind
@@ -61,6 +72,8 @@ class PatchApplier(
                             .put("path", rel)
                             .put("newContent", content)
                     applyEdit(edit)
+                    // ★ Integration: Record patch for batch undo
+                    recorder.record("current", rel, "write", null, content)
                 }
                 "fs.replace" -> {
                     val edit =
@@ -87,14 +100,23 @@ class PatchApplier(
                     applyEdit(edit)
                 }
                 "fs.move" -> {
-                    val edit =
-                        com.fasterxml.jackson.databind
-                            .ObjectMapper()
-                            .createObjectNode()
-                            .put("op", "move")
-                            .put("path", args.path("from").asText())
-                            .put("to", args.path("to").asText())
-                    applyEdit(edit)
+                    val fromPath = args.path("from").asText()
+                    val toPath = args.path("to").asText()
+                    val updateRefs = args.path("updateReferences")?.asBoolean(true) ?: true
+                    // Use IDEA's RefactoringElementFactory for safe move with reference updates
+                    if (updateRefs) {
+                        moveWithRefactoring(fromPath, toPath)
+                    } else {
+                        // Simple file move without reference update
+                        val edit =
+                            com.fasterxml.jackson.databind
+                                .ObjectMapper()
+                                .createObjectNode()
+                                .put("op", "move")
+                                .put("path", fromPath)
+                                .put("to", toPath)
+                        applyEdit(edit)
+                    }
                 }
                 else -> throw ToolViolation("PatchApplier: unsupported tool $toolName")
             }
@@ -280,10 +302,38 @@ class PatchApplier(
         val vf = PathGuard.resolve(project, rel)
         val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
         val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
-        if (!confirmIfNeeded(rel, original, newContent, "Overwrite $rel")) return
-        WriteCommandAction.runWriteCommandAction(project) {
-            vf.setBinaryContent(newContent.toByteArray(StandardCharsets.UTF_8))
+
+        // ★ Integration: Use ThreeWayMerger if file was modified since Agent last saw it
+        val contentToApply = if (edit.has("baseContent")) {
+            val baseContent = edit.path("baseContent").asText("")
+            if (baseContent != original && baseContent.isNotBlank()) {
+                // File was modified by user since Agent's base snapshot → 3-way merge
+                val mergeResult = merger.merge(baseContent, original, newContent)
+                if (mergeResult.hasConflicts) {
+                    val proceed = Messages.showOkCancelDialog(
+                        project,
+                        "Merge conflict in $rel (${mergeResult.conflicts.size} conflict(s)). Apply with conflict markers?",
+                        "CodePilot: Merge Conflict",
+                        "Apply with Conflicts",
+                        "Cancel",
+                        Messages.getWarningIcon(),
+                    )
+                    if (proceed != Messages.OK) return
+                }
+                mergeResult.merged
+            } else {
+                newContent
+            }
+        } else {
+            newContent
         }
+
+        if (!confirmIfNeeded(rel, original, contentToApply, "Overwrite $rel")) return
+        WriteCommandAction.runWriteCommandAction(project) {
+            vf.setBinaryContent(contentToApply.toByteArray(StandardCharsets.UTF_8))
+        }
+        // ★ Integration: Record patch for batch undo via PatchRecorder
+        recorder.record("current", rel, "write", original, contentToApply)
     }
 
     private fun replaceFile(
@@ -393,6 +443,41 @@ class PatchApplier(
 
     private fun refreshAt(p: Path) {
         LocalFileSystem.getInstance().refreshAndFindFileByPath(p.toString())
+    }
+
+    /**
+     * ★ Integration: Check if a file path exists in the project.
+     * Used by SmartMatcher to determine if fuzzy matching is needed.
+     */
+    private fun resolveFile(rel: String): Boolean {
+        return try {
+            PathGuard.resolve(project, rel)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * ★ Integration: Undo all recorded patches via PatchRecorder.
+     * Replays inverse operations in reverse order.
+     */
+    fun undoAllRecorded(sessionId: String = "current") {
+        val patchCount = recorder.getPatchCount(sessionId)
+        if (patchCount == 0) return
+        ApplicationManager.getApplication().invokeLater {
+            val confirm = Messages.showOkCancelDialog(
+                project,
+                "Undo all $patchCount recorded change(s)?",
+                "CodePilot: Undo All",
+                "Undo All",
+                "Cancel",
+                Messages.getQuestionIcon(),
+            )
+            if (confirm != Messages.OK) return@invokeLater
+            val undone = recorder.undoAll(sessionId)
+            Messages.showInfoMessage(project, "Undid $undone change(s).", "CodePilot: Undo All")
+        }
     }
 
     private data class ReplaceResult(
@@ -621,5 +706,149 @@ class PatchApplier(
         // Run Shadow Workspace validation
         val shadowWorkspace = ShadowWorkspace(project)
         return shadowWorkspace.validate(patchOps)
+    }
+
+    // ─── Move with Refactoring (Reference Update) ─────────────────────────
+
+    /**
+     * Move a file using IDEA's built-in MoveRefactoring to update all references.
+     * Falls back to simple file move if refactoring is not available.
+     *
+     * This ensures that imports, usages, and other references to the moved file
+     * are automatically updated across the entire project, matching IDEA's standard
+     * refactoring behavior when a user manually moves a file.
+     */
+    private fun moveWithRefactoring(fromPath: String, toPath: String) {
+        val fromVFile = PathGuard.resolve(project, fromPath)
+        val fromPsi = com.intellij.psi.PsiManager.getInstance(project).findFile(fromVFile)
+        if (fromPsi == null) {
+            val edit = com.fasterxml.jackson.databind.ObjectMapper()
+                .createObjectNode()
+                .put("op", "move")
+                .put("path", fromPath)
+                .put("to", toPath)
+            applyEdit(edit)
+            return
+        }
+
+        // Resolve target directory path as java.nio.file.Path for filesystem operations
+        val toNioPath = PathGuard.resolveOrCreate(project, toPath)
+        val toDirNio = toNioPath.parent
+        val toDirVFile = com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+            .findFileByPath(toDirNio.toString())
+            ?: run {
+                java.nio.file.Files.createDirectories(toDirNio)
+                com.intellij.openapi.vfs.LocalFileSystem.getInstance()
+                    .refreshAndFindFileByPath(toDirNio.toString())
+            }
+
+        if (toDirVFile != null) {
+            val toDirPsi = com.intellij.psi.PsiManager.getInstance(project).findDirectory(toDirVFile)
+            if (toDirPsi != null) {
+                // Use IDEA's MoveFilesOrDirectoriesProcessor for safe move with reference updates
+                ApplicationManager.getApplication().invokeLater {
+                    val command = "CodePilot: Move $fromPath → $toPath"
+                    WriteCommandAction.runWriteCommandAction(project, command, null, {
+                        try {
+                            // Move the file using IntelliJ's refactoring processor
+                            // which automatically updates all references (imports, usages, etc.)
+                            val moveProcessor = com.intellij.refactoring.move.moveFilesOrDirectories.MoveFilesOrDirectoriesProcessor(
+                                project,
+                                arrayOf(fromPsi),
+                                toDirPsi,
+                                true,  // searchForComments
+                                true,  // searchInNonJavaFiles
+                                null,  // listener
+                                null,  // postProcessor
+                            )
+                            moveProcessor.run()
+
+                            // Rename if target filename differs from source
+                            val fromName = fromVFile.name
+                            val toName = toNioPath.fileName.toString()
+                            if (fromName != toName) {
+                                // Refresh to find the moved file in its new location
+                                LocalFileSystem.getInstance().refresh(true)
+                                val movedVFile = LocalFileSystem.getInstance()
+                                    .findFileByPath(toDirNio.resolve(fromName).toString())
+                                if (movedVFile != null) {
+                                    val movedPsi = com.intellij.psi.PsiManager.getInstance(project).findFile(movedVFile)
+                                    if (movedPsi != null) {
+                                        val renameProcessor = com.intellij.refactoring.rename.RenameProcessor(
+                                            project, movedPsi, toName, false, false
+                                        )
+                                        renameProcessor.run()
+                                    }
+                                }
+                            }
+
+                            refreshAt(toNioPath)
+                        } catch (e: Exception) {
+                            // Fallback: simple move with content copy + reference search
+                            performSimpleMoveWithReferenceUpdate(fromPath, toPath, fromPsi.text)
+                        }
+                    })
+                }
+                return
+            }
+        }
+
+        // Final fallback: simple move
+        val edit = com.fasterxml.jackson.databind.ObjectMapper()
+            .createObjectNode()
+            .put("op", "move")
+            .put("path", fromPath)
+            .put("to", toPath)
+        applyEdit(edit)
+    }
+
+    /**
+     * Fallback move: copy content to target, delete source, then update references
+     * by searching for old import statements across the project.
+     */
+    private fun performSimpleMoveWithReferenceUpdate(fromPath: String, toPath: String, content: String) {
+        // 1. Create target file with content
+        val targetNioPath = PathGuard.resolveOrCreate(project, toPath)
+        java.nio.file.Files.createDirectories(targetNioPath.parent)
+        java.nio.file.Files.writeString(targetNioPath, content)
+
+        // 2. Delete source file
+        val sourceNioPath = PathGuard.resolveOrCreate(project, fromPath)
+        java.nio.file.Files.deleteIfExists(sourceNioPath)
+
+        // 3. Refresh VFS
+        refreshAt(targetNioPath)
+        com.intellij.openapi.vfs.LocalFileSystem.getInstance().refresh(true)
+
+        // 4. Update references: search for old import statements and replace
+        val oldPkg = fromPath.replace('/', '.').removeSuffix(".java").removeSuffix(".kt")
+        val newPkg = toPath.replace('/', '.').removeSuffix(".java").removeSuffix(".kt")
+        val oldImport = "import $oldPkg"
+        val newImport = "import $newPkg"
+
+        // Update references: search for old import statements and replace
+        // Use simple file-based search approach to find and update import references
+        val scope = com.intellij.psi.search.GlobalSearchScope.projectScope(project)
+        val searchHelper = com.intellij.psi.search.PsiSearchHelper.getInstance(project)
+        val shortName = oldPkg.substringAfterLast('.')
+
+        // Search for files containing the old class name and update imports
+        val processor = com.intellij.util.Processor<com.intellij.psi.PsiFile> { psiFile ->
+            val text = psiFile.text
+            if (text.contains(oldImport)) {
+                val updated = text.replace(oldImport, newImport)
+                val vFile = psiFile.virtualFile
+                if (vFile != null) {
+                    ApplicationManager.getApplication().invokeLater {
+                        WriteCommandAction.runWriteCommandAction(project) {
+                            vFile.setBinaryContent(updated.toByteArray(StandardCharsets.UTF_8))
+                        }
+                    }
+                }
+            }
+            true
+        }
+        // processAllFilesWithWord(word, scope, processor, caseSensitive)
+        searchHelper.processAllFilesWithWord(shortName, scope, processor, true)
     }
 }

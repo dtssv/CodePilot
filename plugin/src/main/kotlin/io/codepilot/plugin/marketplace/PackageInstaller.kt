@@ -86,6 +86,47 @@ class PackageInstaller(
         }
     }
 
+    /**
+     * Install a package from a local archive file (zip).
+     * Used by the E2E verifier after downloading and validating a package.
+     *
+     * @param archivePath Path to the zip archive
+     * @param slug Package slug identifier
+     * @param type Package type (e.g. "mcp-server", "skill")
+     * @return InstallResult indicating success or failure
+     */
+    fun installFromArchive(
+        archivePath: java.nio.file.Path,
+        slug: String,
+        type: String,
+    ): InstallResult {
+        return try {
+            val bytes = java.nio.file.Files.readAllBytes(archivePath)
+            val scope = LocalMarketplaceStore.Scope.PROJECT
+
+            // Determine install directory
+            val installDir = localStore.getInstallDir(slug, "local", scope)
+
+            // Extract archive
+            extractZip(bytes, installDir)
+
+            // Record installation
+            val manifest = mapOf<String, Any?>(
+                "slug" to slug,
+                "type" to type,
+                "version" to "local",
+                "source" to "archive",
+            )
+            localStore.recordInstall(slug, "local", scope, LocalMarketplaceStore.Source.LOCAL, manifest)
+            localStore.reloadIndex()
+
+            InstallResult(true, slug, "local", scope)
+        } catch (e: Exception) {
+            log.error("Archive install failed for $slug", e)
+            InstallResult(false, slug, "local", LocalMarketplaceStore.Scope.PROJECT, "Archive install failed: ${e.message}")
+        }
+    }
+
     private fun preflight(manifest: Map<String, Any?>): String? {
         @Suppress("UNCHECKED_CAST")
         val permissions = manifest["permissions"] as? Map<String, Any?>

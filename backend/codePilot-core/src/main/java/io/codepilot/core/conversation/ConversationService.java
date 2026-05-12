@@ -132,8 +132,11 @@ public class ConversationService {
                                     "tokens", a.tokens()))
                         .toList())));
 
-    // Resolve the ChatClient based on modelId (system model or user's custom model)
-    ChatClient resolvedClient = chatClientFactory.resolve(req.modelId());
+    // Resolve the ChatClient based on modelId (model group / system model / user's custom model)
+    ChatClientFactory.ResolvedClient resolved = chatClientFactory.resolve(req.modelId());
+    ChatClient resolvedClient = resolved.chatClient();
+    // Track request lifecycle for load balancing and circuit-breaker
+    resolved.startRequest();
 
     // ── Agent mode: always use Graph engine ──
     // Graph engine handles planning, generate→verify→repair loop, gather, etc.
@@ -195,6 +198,7 @@ public class ConversationService {
           .onErrorResume(
               ex -> {
                 log.warn("LLM stream error", ex);
+                resolved.endRequest(false, 0);
                 return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
               });
     } else {
@@ -211,12 +215,14 @@ public class ConversationService {
           .onErrorResume(
               ex -> {
                 log.warn("LLM stream error", ex);
+                resolved.endRequest(false, 0);
                 return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
               });
     }
 
 
     return head.concatWith(body)
+        .doOnComplete(() -> resolved.endRequest(true, 0))
         .concatWith(
             Flux.just(
                 sse.event(

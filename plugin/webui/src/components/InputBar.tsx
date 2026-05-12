@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 import { AtReferencePopup } from './AtReferencePopup';
 import { ContextChipData } from './ContextChip';
+import { ImageAttachment, ImageData } from './ImageAttachment';
 
 interface AtSuggestion {
     type: string;
@@ -11,7 +12,7 @@ interface AtSuggestion {
 }
 
 interface InputBarProps {
-    onSend: (text: string, chips: ContextChipData[]) => void;
+    onSend: (text: string, chips: ContextChipData[], images?: ImageData[]) => void;
     onStop: () => void;
     contextChips: ContextChipData[];
     onRemoveChip: (id: string) => void;
@@ -29,6 +30,8 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     const [running, setRunning] = useState(false);
     const editorRef = useRef<HTMLDivElement>(null);
     const chipsMapRef = useRef<Map<string, ContextChipData>>(new Map());
+    // ★ Image attachment state
+    const [attachedImages, setAttachedImages] = useState<ImageData[]>([]);
 
     // @-reference popup state
     const [atPopupVisible, setAtPopupVisible] = useState(false);
@@ -73,14 +76,15 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         if (!editor) return;
 
         const { text, chips } = extractContent(editor, chipsMapRef.current);
-        if (!text.trim() && chips.length === 0) return;
+        if (!text.trim() && chips.length === 0 && attachedImages.length === 0) return;
 
-        onSend(text, chips);
-        // Clear editor
+        onSend(text, chips, attachedImages);
+        // Clear editor and images
         editor.innerHTML = '';
+        setAttachedImages([]);
         setAtPopupVisible(false);
         setRunning(true);
-    }, [onSend]);
+    }, [onSend, attachedImages]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         // If @-popup is visible, let it handle navigation keys
@@ -98,7 +102,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         setRunning(false);
     };
 
-    const hasContent = (editorRef.current?.textContent?.trim()?.length ?? 0) > 0 || contextChips.length > 0;
+    const hasContent = (editorRef.current?.textContent?.trim()?.length ?? 0) > 0 || contextChips.length > 0 || attachedImages.length > 0;
 
     // Handle click on remove button inside chip
     const handleEditorClick = (e: React.MouseEvent) => {
@@ -220,7 +224,22 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                     anchorRect={atAnchorRect}
                 />
             )}
+            {/* ★ Attached image thumbnails preview */}
+            {attachedImages.length > 0 && (
+                <div className="attached-images-preview" style={{ display: 'flex', gap: '4px', padding: '4px 8px', flexWrap: 'wrap' }}>
+                    {attachedImages.map(img => (
+                        <div key={img.id} style={{ position: 'relative', width: '48px', height: '48px' }}>
+                            <img src={img.thumbnail} alt={img.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px' }} />
+                            <button
+                                onClick={() => setAttachedImages(prev => prev.filter(i => i.id !== img.id))}
+                                style={{ position: 'absolute', top: '-4px', right: '-4px', background: '#ef5350', border: 'none', borderRadius: '50%', width: '14px', height: '14px', color: '#fff', fontSize: '9px', cursor: 'pointer', lineHeight: '14px', padding: 0 }}
+                            >×</button>
+                        </div>
+                    ))}
+                </div>
+            )}
             <div className="input-send-area">
+                <ImageAttachment onAttach={(imgs) => setAttachedImages(prev => [...prev, ...imgs])} />
                 {running ? (
                     <button className="stop-btn" onClick={handleStop}>Stop</button>
                 ) : (

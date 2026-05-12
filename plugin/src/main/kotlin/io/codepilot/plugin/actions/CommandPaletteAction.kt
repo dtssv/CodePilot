@@ -39,6 +39,7 @@ class CommandPaletteAction : AnAction("Command Palette", "Open CodePilot command
         Command("Toggle Agent Mode", "CodePilot.ToggleAgent", "Ctrl+I"),
         Command("Inline Edit", "CodePilot.InlineEdit", "Ctrl+K"),
         Command("Inline Completion", "CodePilot.InlineCompletion", "Ctrl+Shift+J"),
+        Command("Voice Input", "CodePilot.VoiceInput", "Ctrl+Shift+V"),
         Command("Accept Completion", "CodePilot.AcceptCompletion", "Ctrl+Shift+K"),
         Command("Dismiss Completion", "CodePilot.DismissCompletion", "Esc"),
         Command("Send Message", "CodePilot.SendMessage", "Ctrl+Enter"),

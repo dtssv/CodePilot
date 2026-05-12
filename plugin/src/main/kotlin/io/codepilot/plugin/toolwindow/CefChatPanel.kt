@@ -187,6 +187,10 @@ class CefChatPanel(
                 "at_resolve" -> handleAtResolve(payload["id"]?.asText() ?: return)
                 "apply_patches" -> handleApplyPatches(payload)
                 "apply_selected_hunks" -> handleApplySelectedHunks(payload)
+                // ★ Integration: Apply single code block from Chat code-block Apply button
+                "apply_code_block" -> handleApplyCodeBlock(payload)
+                // ★ Integration: Bug scan triggered from chat or action
+                "bug_scan" -> handleBugScan(payload)
                 // ★ Plan edit handlers for Agent mode
                 "plan_edit" -> handlePlanEdit(payload)
                 "continue_run" -> handleContinueRun()
@@ -313,6 +317,14 @@ class CefChatPanel(
             if (digest != null) payload["sessionDigest"] = digest
             if (completedToolCalls.size > 0) payload["completedToolCallsTail"] = completedToolCalls
             if (lastAssistantSummary != null) payload["lastAssistantTurnSummary"] = lastAssistantSummary
+
+            // ★ Integration: Inject .codepilotrules into the request payload
+            // ProjectRulesLoader reads from .codepilotrules / .codepilotrules.local
+            // and is already cached with VFS file-watcher auto-reload
+            val projectRules = io.codepilot.plugin.context.ProjectRulesLoader.getRules(project)
+            if (projectRules != null) {
+                payload["projectRules"] = listOf(projectRules)
+            }
             payload["contexts"] =
                 mapOf(
                     "pinned" to emptyList<Any>(),
@@ -375,6 +387,31 @@ class CefChatPanel(
 
                     override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
                         dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+
+                    // ── Bidirectional Memory: summaryForNextTurn + hintsForContext ──
+                    override fun onSelfCheck(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("self_check", data)
+                        // Consume summaryForNextTurn: inject into next turn context
+                        val summary = payload.path("summaryForNextTurn").asText(null)
+                        if (summary != null && summary.isNotBlank()) {
+                            // Store as session digest for next turn consumption
+                            sessionStore.saveDigest(handle, mapOf("summaryForNextTurn" to summary))
+                            dispatchToWeb("memory_summary", mapOf("summaryForNextTurn" to summary))
+                        }
+                        // Consume hintsForContext: pin/unpin hints for context optimization
+                        val hints = payload.path("hintsForContext")
+                        if (hints != null && !hints.isNull && hints.isObject) {
+                            val pinList = hints.path("pin")
+                            val unpinList = hints.path("unpin")
+                            val hintData = mutableMapOf<String, Any>()
+                            if (pinList != null && pinList.isArray) hintData["pin"] = pinList
+                            if (unpinList != null && unpinList.isArray) hintData["unpin"] = unpinList
+                            if (hintData.isNotEmpty()) {
+                                dispatchToWeb("memory_hints", hintData)
+                            }
+                        }
+                    }
 
                     // ── Graph engine events (internal, not shown to user) ──
                     override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -985,6 +1022,45 @@ class CefChatPanel(
                 patchApplier.applyUnifiedPatch(patchText)
             }
         }
+    }
+
+    /**
+     * ★ Integration: apply_code_block — Single code block Apply button from Chat.
+     * Delegates to ApplyCodeAction.applyCodeBlock() for file write/create.
+     */
+    private fun handleApplyCodeBlock(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val code = payload.path("code").asText("")
+        val language = payload.path("language").asText("")
+        val filePath = payload.path("filePath").asText(null)
+        if (code.isNotBlank()) {
+            io.codepilot.plugin.actions.ApplyCodeAction.applyCodeBlock(project, code, language, filePath)
+        }
+    }
+
+    /**
+     * ★ Integration: Bug scan — Collect IDE diagnostics via BugScanService
+     * and send them back to the chat for the Agent to process.
+     */
+    private fun handleBugScan(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val filePath = payload.path("filePath").asText(null)
+        val bugScan = io.codepilot.plugin.tools.BugScanService(project)
+        val result = if (filePath != null) {
+            bugScan.scanFile(filePath)
+        } else {
+            bugScan.scanOpenFiles()
+        }
+        // Send scan results back to the chat as a context message
+        val diagnosticsText = result.diagnostics.joinToString("\n") { d ->
+            "[${d.severity}] ${d.filePath}:${d.line} — ${d.message} (source: ${d.source})"
+        }
+        dispatchToWeb("bug_scan_result", mapOf(
+            "diagnostics" to result.diagnostics.map { mapOf(
+                "file" to it.filePath, "line" to it.line,
+                "severity" to it.severity, "message" to it.message, "source" to it.source
+            )},
+            "fileCount" to result.fileCount,
+            "durationMs" to result.durationMs,
+        ))
     }
 
     /**

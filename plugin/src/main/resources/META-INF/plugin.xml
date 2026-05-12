@@ -38,6 +38,7 @@
                 factoryClass="io.codepilot.plugin.toolwindow.CodePilotToolWindowFactory"/>
 
     <postStartupActivity implementation="io.codepilot.plugin.startup.CodePilotStartupActivity"/>
+    <postStartupActivity implementation="io.codepilot.plugin.keymap.CodePilotKeymap"/>
     <notificationGroup id="CodePilot" displayType="BALLOON"/>
 
     <inlineCompletionProvider implementation="io.codepilot.plugin.completion.CodePilotInlineCompletionProvider"/>

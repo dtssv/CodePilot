@@ -25,6 +25,7 @@ class ToolDispatcher(
     private val project: Project,
     private val client: ConversationClient,
     private val sessionId: String,
+    private val graphStateStore: GraphStateStore? = null,
 ) {
     private val patchApplier = PatchApplier(project)
     private val fileReader = FileReader(project)
@@ -108,10 +109,14 @@ class ToolDispatcher(
                         name == "shell.exec" -> ShellExecutor(project).execute(args)
                         name == "shell.session" -> dispatchShellSession(args)
                         name == "plan.show" -> planShow(args)
+                        name == "plan.update" -> planUpdate(args)
                         name == "ide.openFile" -> ideOpenFile(args)
                         name == "ide.diagnostics" -> ideDiagnostics(args)
                         name == "ide.applyPatch" -> ideApplyPatch(args)
                         name == "ide.shadowValidate" -> ideShadowValidate(args)
+                        // ★ Integration: NotepadService for Agent working memory
+                        name == "notepad.write" -> notepadWrite(args)
+                        name == "notepad.read" -> notepadRead(args)
                         name.startsWith("mcp.") -> dispatchMcp(name, args)
                         else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
                     }
@@ -231,6 +236,26 @@ class ToolDispatcher(
 
     // ---------- MCP routing (original) ----------
 
+    // ★ Integration: NotepadService for Agent working memory
+    private val notepadService = NotepadService.getInstance(project)
+
+    private fun notepadWrite(args: JsonNode): Map<String, Any?> {
+        val name = args.path("name").asText("default")
+        val content = args.path("content").asText("")
+        val entry = notepadService.write(sessionId, name, content)
+        return mapOf("id" to entry.id, "name" to entry.name, "updatedAt" to entry.updatedAt)
+    }
+
+    private fun notepadRead(args: JsonNode): Map<String, Any?> {
+        val name = args.path("name").asText("default")
+        val entry = notepadService.read(sessionId, name)
+        return if (entry != null) {
+            mapOf("id" to entry.id, "name" to entry.name, "content" to entry.content, "updatedAt" to entry.updatedAt)
+        } else {
+            mapOf("error" to "Notepad '$name' not found")
+        }
+    }
+
     private fun dispatchMcp(
         fullName: String,
         args: JsonNode,
@@ -323,6 +348,17 @@ class ToolDispatcher(
         // Emit plan data to the UI via session event
         client.submitPlanData(sessionId, planJson, ledgerJson)
         return mapOf("ack" to true, "planDisplayed" to true)
+    }
+
+    /**
+     * plan.update: User edits from PlanPanel → stored in GraphStateStore for next Agent turn.
+     * Per 01-§6.1: "用户可在 Plan / Ledger 面板里勾选/编辑/暂停/追问"
+     */
+    private fun planUpdate(args: JsonNode): Map<String, Any?> {
+        val edits = args.path("edits")
+        val graphStateStore = graphStateStore ?: return mapOf("ok" to false, "error" to "no graphStateStore")
+        graphStateStore.applyUserPlanEdits(edits)
+        return mapOf("ok" to true, "editsStored" to true)
     }
 
     private fun ideApplyPatch(args: JsonNode): Map<String, Any?> {

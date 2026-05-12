@@ -16,6 +16,7 @@ import io.codepilot.plugin.actions.NewChatAction
 import io.codepilot.plugin.actions.OpenChatAction
 import io.codepilot.plugin.actions.SendMessageAction
 import io.codepilot.plugin.actions.ToggleAgentAction
+import io.codepilot.plugin.actions.VoiceInputAction
 import javax.swing.KeyStroke
 
 /**
@@ -42,6 +43,7 @@ class CodePilotKeymap : ProjectActivity {
         registerIfAbsent(am, "CodePilot.DismissCompletion", DismissCompletionAction())
         registerIfAbsent(am, "CodePilot.SendMessage", SendMessageAction())
         registerIfAbsent(am, "CodePilot.CommandPalette", CommandPaletteAction())
+        registerIfAbsent(am, "CodePilot.VoiceInput", VoiceInputAction())
     }
 
     private fun registerShortcuts() {
@@ -56,6 +58,7 @@ class CodePilotKeymap : ProjectActivity {
         addShortcut(keymap, "CodePilot.DismissCompletion", "ESCAPE")
         addShortcut(keymap, "CodePilot.SendMessage", "control ENTER", "meta ENTER")
         addShortcut(keymap, "CodePilot.CommandPalette", "control shift P", "meta shift P")
+        addShortcut(keymap, "CodePilot.VoiceInput", "control shift V", "meta shift V")
     }
 
     private fun registerIfAbsent(am: ActionManager, id: String, action: AnAction) {

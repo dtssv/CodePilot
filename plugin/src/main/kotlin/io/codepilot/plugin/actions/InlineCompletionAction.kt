@@ -1,6 +1,5 @@
 package io.codepilot.plugin.actions
 
-import com.intellij.codeInsight.inline.completion.InlineCompletionHandler
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -17,16 +16,12 @@ import io.codepilot.plugin.settings.CodePilotSettings
  * Unlike auto-completion (which fires on typing via CodePilotInlineCompletionProvider),
  * this action explicitly requests a completion at the current cursor position.
  *
- * Two execution paths:
- * 1. **Primary**: Uses IntelliJ's InlineCompletionHandler to invoke the platform's
- *    inline completion pipeline, which routes to CodePilotInlineCompletionProvider.
- *    This shows the standard gray ghost-text that Tab accepts.
- * 2. **Fallback**: If the platform handler is unavailable, directly calls
- *    InlineCompletionService.complete() and inserts the result.
+ * In IntelliJ 2024.2+, the InlineCompletionHandler API changed and no longer
+ * exposes getInstance()/DirectInvocation directly. This action uses the fallback
+ * path to directly call InlineCompletionService and insert the result.
  *
  * This mirrors Cursor's behavior where pressing the completion shortcut
- * forces a suggestion even when auto-trigger conditions aren't met
- * (e.g., after a pause, or at a position where auto-trigger was suppressed).
+ * forces a suggestion even when auto-trigger conditions aren't met.
  */
 class InlineCompletionAction : AnAction(
     "Inline Completion",
@@ -45,25 +40,8 @@ class InlineCompletionAction : AnAction(
             return
         }
 
-        // Primary path: invoke via platform InlineCompletionHandler
-        // This triggers CodePilotInlineCompletionProvider.getSuggestion()
-        // which shows gray ghost-text that Tab accepts.
-        try {
-            val handler = InlineCompletionHandler.getInstance(project)
-            // DirectInvocation triggers the provider regardless of auto-trigger conditions
-            handler.invokeCompletion(
-                com.intellij.codeInsight.inline.completion.InlineCompletionEvent.DirectInvocation(
-                    editor,
-                ),
-            )
-            return
-        } catch (ex: Exception) {
-            // Fallback: platform handler unavailable (older IDE version or API change)
-            log.warn("InlineCompletionHandler.DirectInvocation failed, using fallback", ex)
-        }
-
-        // Fallback path: directly call InlineCompletionService and insert
-        fallbackDirectCompletion(project, editor)
+        // Directly call InlineCompletionService and insert the result
+        directCompletion(project, editor)
     }
 
     override fun update(e: AnActionEvent) {
@@ -74,10 +52,9 @@ class InlineCompletionAction : AnAction(
     }
 
     /**
-     * Fallback: directly call InlineCompletionService.complete() and insert the result.
-     * Used when the platform InlineCompletionHandler is unavailable.
+     * Directly call InlineCompletionService.complete() and insert the result.
      */
-    private fun fallbackDirectCompletion(project: Project, editor: Editor) {
+    private fun directCompletion(project: Project, editor: Editor) {
         val document = editor.document
         val offset = editor.caretModel.offset
         val text = document.text

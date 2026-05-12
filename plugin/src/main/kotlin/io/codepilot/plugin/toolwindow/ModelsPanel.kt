@@ -141,6 +141,8 @@ class ModelsPanel(
                 val data = node.path("data")
                 val sysItems = mutableListOf<ModelItem>()
                 data.path("system").forEach { m ->
+                    val caps = m.path("capabilities")
+                    val capList = if (caps.isArray) caps.mapNotNull { it.asText()?.takeIf(String::isNotBlank) } else emptyList()
                     sysItems.add(
                         ModelItem(
                             id = m.path("id").asText(),
@@ -149,11 +151,16 @@ class ModelsPanel(
                             baseUrl = m.path("baseUrl").asText(""),
                             model = m.path("model").asText(""),
                             type = "system",
+                            capabilities = capList,
+                            contextWindow = if (m.has("contextWindow")) m.path("contextWindow").asInt() else null,
+                            maxOutputTokens = if (m.has("maxOutputTokens")) m.path("maxOutputTokens").asInt() else null,
                         ),
                     )
                 }
                 val custItems = mutableListOf<ModelItem>()
                 data.path("custom").forEach { m ->
+                    val caps = m.path("capabilities")
+                    val capList = if (caps.isArray) caps.mapNotNull { it.asText()?.takeIf(String::isNotBlank) } else emptyList()
                     custItems.add(
                         ModelItem(
                             id = m.path("id").asText(),
@@ -162,6 +169,9 @@ class ModelsPanel(
                             baseUrl = m.path("baseUrl").asText(""),
                             model = m.path("model").asText(""),
                             type = "custom",
+                            capabilities = capList,
+                            contextWindow = if (m.has("contextWindow")) m.path("contextWindow").asInt() else null,
+                            maxOutputTokens = if (m.has("maxOutputTokens")) m.path("maxOutputTokens").asInt() else null,
                         ),
                     )
                 }
@@ -373,6 +383,9 @@ class ModelsPanel(
         val baseUrl: String,
         val model: String,
         val type: String,
+        val capabilities: List<String> = emptyList(), // chat, agent, completion, vision, tools
+        val contextWindow: Int? = null,               // max context tokens
+        val maxOutputTokens: Int? = null,             // max output tokens
     )
 
     data class ModelFormData(
@@ -410,6 +423,17 @@ class ModelsPanel(
             detail.foreground = java.awt.Color.GRAY
             panel.add(title)
             panel.add(detail)
+            // Capabilities badges
+            if (value.capabilities.isNotEmpty()) {
+                val capColors = mapOf("chat" to "#4fc3f7", "agent" to "#81c784", "completion" to "#ffb74d", "vision" to "#e57373", "tools" to "#ba68c8")
+                val badges = value.capabilities.joinToString(" ") { cap ->
+                    val color = capColors[cap] ?: "#999"
+                    "<font color='$color'>●</font> $cap"
+                }
+                val capLabel = JLabel("<html>$badges${value.contextWindow?.let { " &nbsp; ctx:${it / 1000}k" } ?: ""}${value.maxOutputTokens?.let { " out:${it / 1000}k" } ?: ""}</html>")
+                capLabel.foreground = java.awt.Color(120, 120, 120)
+                panel.add(capLabel)
+            }
             return panel
         }
     }

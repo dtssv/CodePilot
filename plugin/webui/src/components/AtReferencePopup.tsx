@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 
 interface AtSuggestion {
-    type: string;
+    type: string; // "file" | "folder" | "symbol" | "git" | "codebase" | "docs" | "web" | "terminal" | "notepad"
     label: string;
     detail: string;
     path?: string;

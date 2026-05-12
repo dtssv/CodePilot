@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.project.Project
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -186,6 +187,42 @@ class SessionStore {
         writeJson(handle.dir.resolve("digest.json"), digest)
     }
 
+    /**
+     * ★ Integration: Compress session context using LlmContextCompressor
+     * when token count exceeds the budget threshold (80%).
+     * Called before sending requests to the backend.
+     */
+    fun compressIfNeeded(handle: SessionHandle, tokenBudget: Int = 24000): CompressionResult? {
+        val estimated = estimateTokenCount(handle)
+        if (estimated < tokenBudget * 0.8) return null // No compression needed
+
+        val messages = readMessages(handle)
+        val targetTokens = (tokenBudget * 0.5).toInt() // Compress to 50% of budget
+        val request = LlmContextCompressor.CompressionRequest(
+            messages = messages,
+            targetTokens = targetTokens,
+        )
+        val result = LlmContextCompressor.compress(request)
+        if (result.method != "none" && result.summary.isNotBlank()) {
+            saveDigest(handle, mapOf(
+                "summary" to result.summary,
+                "method" to result.method,
+                "compressionRatio" to result.compressionRatio,
+            ))
+        }
+        return CompressionResult(
+            summary = result.summary,
+            method = result.method,
+            compressionRatio = result.compressionRatio,
+        )
+    }
+
+    data class CompressionResult(
+        val summary: String,
+        val method: String,
+        val compressionRatio: Double,
+    )
+
     /** Load the last session digest. */
     fun loadDigest(handle: SessionHandle): Map<String, Any>? {
         val file = handle.dir.resolve("digest.json")
@@ -311,20 +348,14 @@ class SessionStore {
      */
     fun estimateTokenCount(handle: SessionHandle): Int {
         val messages = readMessages(handle)
-        // Rough estimate: 1 token ≈ 4 characters for English, ≈ 2 characters for CJK
-        var totalChars = 0
-        for (msg in messages) {
-            val content = msg["content"] as? String ?: continue
-            totalChars += content.length
-        }
+        // Use TokenEstimator for accurate BPE tokenization (jtokkit when available)
+        var total = TokenEstimator.countMessages(messages)
         // Add plan and digest overhead
         val plan = loadPlan(handle)
-        if (plan != null) totalChars += mapper.writeValueAsString(plan).length
+        if (plan != null) total += TokenEstimator.countTokens(mapper.writeValueAsString(plan))
         val digest = loadDigest(handle)
-        if (digest != null) totalChars += mapper.writeValueAsString(digest).length
-
-        // Conservative estimate: 1 token per 3 characters
-        return totalChars / 3
+        if (digest != null) total += TokenEstimator.countTokens(mapper.writeValueAsString(digest))
+        return total
     }
 
     fun list(workspaceHash: String): List<SessionMeta> {
@@ -357,6 +388,19 @@ class SessionStore {
         block(handle.meta)
         handle.meta.updatedAt = Instant.now().toString()
         writeJson(handle.dir.resolve("meta.json"), handle.meta)
+    }
+
+    /**
+     * ★ Integration: Push session changes to cloud via ConversationHistorySync.
+     * Called after significant session events (new message, save plan, etc.)
+     * to ensure cross-device sync. Non-blocking, best-effort.
+     */
+    fun triggerSync(project: Project) {
+        Thread({
+            try {
+                ConversationHistorySync.sync(project)
+            } catch (_: Exception) { /* Non-critical */ }
+        }, "codepilot-sync-push").apply { isDaemon = true; start() }
     }
 
     /** Touch the lastMessageAt timestamp. */

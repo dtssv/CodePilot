@@ -31,19 +31,69 @@ object InlineCompletionService {
 
     private val pendingCall = AtomicReference<Call?>(null)
 
-    // ─── Multi-model Fallback ──────────────────────────────────────────
-    private val modelFallbackChain = listOf("deepseek-coder", "qwen2.5-coder", "starcoder2")
+    // ─── Multi-model Fallback (dynamic from backend /v1/models) ────────
+    private var modelFallbackChain = listOf("deepseek-coder", "qwen2.5-coder", "starcoder2")
     private var currentModelIdx = 0
     private val modelFailCounts = mutableMapOf<String, Int>()
     private val MODEL_FAIL_THRESHOLD = 3 // Switch after 3 consecutive failures
+    private var lastModelRefreshMs = 0L
+    private const val MODEL_REFRESH_INTERVAL_MS = 5 * 60 * 1000L // Refresh every 5 min
 
-    // ─── Cache Preheat ─────────────────────────────────────────────────
+    /** Refresh model fallback chain from backend /v1/models endpoint. */
+    private fun refreshModelChain() {
+        val now = System.currentTimeMillis()
+        if (now - lastModelRefreshMs < MODEL_REFRESH_INTERVAL_MS) return
+        lastModelRefreshMs = now
+        try {
+            val http = HttpClientService.getInstance()
+            val req = http.get("/v1/models?capability=fim")
+            val call = http.client().newCall(req)
+            val response = call.execute()
+            response.use { resp ->
+                if (!resp.isSuccessful) return
+                val body = resp.body?.string() ?: return
+                val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+                val root = mapper.readTree(body)
+                val models = root.path("data").path("models")
+                if (models.isArray) {
+                    val fimModels = models.filter { node ->
+                        val caps = node.path("capabilities")
+                        caps.isArray && caps.any { it.asText() == "fim" || it.asText() == "completion" }
+                    }.map { it.path("id").asText() }
+                    if (fimModels.isNotEmpty()) {
+                        modelFallbackChain = fimModels
+                        currentModelIdx = 0
+                    }
+                }
+            }
+        } catch (_: Exception) { /* Keep existing chain on failure */ }
+    }
+
+    // ─── Cache Preheat with Exponential Backoff ────────────────────────
     private val preheatQueue = java.util.concurrent.LinkedBlockingQueue<CompletionRequest>()
+    private var preheatConsecutiveFailures = 0
+    private var preheatBackoffMs = 0L
+    private val PREHEAT_MAX_BACKOFF_MS = 30_000L // Max 30s backoff
     private val preheatThread = Thread({
         while (!Thread.currentThread().isInterrupted) {
             try {
+                // Apply backoff delay if recent failures
+                if (preheatBackoffMs > 0) {
+                    Thread.sleep(preheatBackoffMs)
+                }
                 val req = preheatQueue.take()
-                preheatCompletion(req)
+                val success = preheatCompletion(req)
+                if (success) {
+                    preheatConsecutiveFailures = 0
+                    preheatBackoffMs = 0L
+                } else {
+                    preheatConsecutiveFailures++
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped)
+                    preheatBackoffMs = minOf(
+                        PREHEAT_MAX_BACKOFF_MS,
+                        (1L shl minOf(preheatConsecutiveFailures, 5)) * 1000L
+                    )
+                }
             } catch (_: InterruptedException) {
                 break
             }
@@ -83,6 +133,7 @@ object InlineCompletionService {
      */
     fun complete(request: CompletionRequest): String? {
         cancelPending()
+        refreshModelChain() // Dynamic model refresh from backend
 
         val cacheKey = computeCacheKey(request)
         synchronized(cache) {
@@ -1012,7 +1063,7 @@ object InlineCompletionService {
      * Execute a preheat completion request in the background.
      * Results are stored in the cache for fast retrieval on the next actual request.
      */
-    private fun preheatCompletion(request: CompletionRequest) {
+    private fun preheatCompletion(request: CompletionRequest): Boolean {
         try {
             val http = HttpClientService.getInstance()
             val payload = buildPayload(request).toMutableMap()
@@ -1021,17 +1072,18 @@ object InlineCompletionService {
             val call = http.client().newCall(httpReq)
             val response = call.execute()
             response.use { resp ->
-                if (!resp.isSuccessful) return
-                val body = resp.body?.string() ?: return
+                if (!resp.isSuccessful) return false
+                val body = resp.body?.string() ?: return false
                 val candidates = parseCompletionResponse(body)
-                if (candidates.isEmpty()) return
+                if (candidates.isEmpty()) return false
                 val scored = candidates.map { ScoredCandidate(it, scoreCandidate(it, request)) }
                     .sortedByDescending { it.score }
                 val result = CompletionResult(candidates = candidates, scoredCandidates = scored)
                 val cacheKey = computeCacheKey(request)
                 synchronized(cache) { cache[cacheKey] = result }
+                return true
             }
-        } catch (_: Exception) { /* Best-effort preheat */ }
+        } catch (_: Exception) { return false /* Best-effort preheat */ }
     }
 
     // ─── Inline Hint ───────────────────────────────────────────────────

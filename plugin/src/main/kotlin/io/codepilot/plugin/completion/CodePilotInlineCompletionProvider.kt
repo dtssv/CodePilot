@@ -48,6 +48,22 @@ class CodePilotInlineCompletionProvider : InlineCompletionProvider {
             val result = InlineCompletionService.complete(completionRequest)
             if (result != null) {
                 send(InlineCompletionGrayTextElement(result))
+
+                // ★ Integration: After accepting completion, trigger CursorTabSuggester
+                // to predict additional edit positions and show ghost suggestions
+                try {
+                    val suggester = CursorTabSuggester.getInstance(project, editor)
+                    val suggestions = suggester.predictAdditionalEdits(
+                        editor.caretModel.offset,
+                        result,
+                    )
+                    if (suggestions.isNotEmpty()) {
+                        // Render the first ghost suggestion
+                        suggester.acceptCurrent() // Will be rendered via InlayModel
+                    }
+                } catch (_: Exception) {
+                    // CursorTab suggestions are best-effort, don't block main completion
+                }
             }
         }
 

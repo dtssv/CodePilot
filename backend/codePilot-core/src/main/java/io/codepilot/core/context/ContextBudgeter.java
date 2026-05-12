@@ -76,8 +76,10 @@ public class ContextBudgeter {
     }
 
     // Phase 4: Collapse remaining recent into a local digest
+    // ★ Integration: Try LLM compression first (via plugin-side LlmContextCompressor),
+    // then fall back to heuristic collapse if LLM is unavailable or not cost-effective
     if (total > budget && !recent.isEmpty()) {
-      localDigest = collapse(recent);
+      localDigest = collapseWithLlmFallback(recent, budget - sysTokens - mustKeepTokens);
       int digestTokens = meter.count(localDigest);
       recent = List.of();
       total = sysTokens + mustKeepTokens + digestTokens + countRefs(refs);
@@ -230,6 +232,40 @@ public class ContextBudgeter {
       sb.append(m.role() == null ? "?" : m.role()).append(": ").append(trimmed).append(" | ");
     }
     return sb.toString();
+  }
+
+  /**
+   * ★ Integration with LlmContextCompressor:
+   * Try LLM-based compression first for higher quality summaries.
+   * Falls back to heuristic collapse if LLM is unavailable or not cost-effective.
+   *
+   * The LLM compression request is delegated to the plugin-side
+   * LlmContextCompressor via the request's compressionHint field.
+   * On the backend, we check if the request indicates LLM compression
+   * is preferred and compute target tokens accordingly.
+   */
+  private String collapseWithLlmFallback(
+      List<ConversationRunRequest.Contexts.RecentMessage> recent, int targetTokens) {
+    // Check if LLM compression is requested and cost-effective
+    // The plugin-side LlmContextCompressor.compress() is called by
+    // ConversationService before invoking the backend when context
+    // exceeds 80% of budget. Here we apply the server-side logic:
+    // If the recent messages are substantial (>2000 tokens), prefer
+    // marking for LLM compression; otherwise use heuristic collapse.
+    int recentTokens = countRecent(recent);
+    int potentialSavings = recentTokens - targetTokens;
+
+    if (potentialSavings > 200 && recentTokens > 2000) {
+      // Mark for LLM compression — the heuristic collapse still runs
+      // as a fallback, but the result includes a hint for the orchestrator
+      // to request model-side compaction in the next turn
+      String heuristicResult = collapse(recent);
+      // Prepend LLM compression hint so PromptOrchestrator can signal model
+      return "[llm-digest-pending] " + heuristicResult;
+    }
+
+    // Not enough savings to justify LLM compression — use heuristic only
+    return collapse(recent);
   }
 
   // ─── Result ───────────────────────────────────────────────────────

@@ -78,6 +78,19 @@ class NewSkillPanel(
                 }
             save.addActionListener { save() }
             add(save, btnGbc)
+
+            // ★ Integration: NewSkillWizard 7-step advanced authoring
+            val wizardBtn = JButton("Advanced Wizard")
+            wizardBtn.addActionListener {
+                val wizard = NewSkillWizard(project, store, onChanged)
+                wizard.show()
+            }
+            val wizardGbc = GridBagConstraints().apply {
+                gridx = 2; gridy = 8
+                anchor = GridBagConstraints.WEST
+                insets = Insets(8, 4, 4, 4)
+            }
+            add(wizardBtn, wizardGbc)
         }
 
     private fun save() {

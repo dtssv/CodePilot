@@ -47,6 +47,52 @@ class GraphStateStore(
         } catch (e: Exception) {
             log.warn("Failed to load graph state from $latest", e)
         }
+
+        // ★ Integration: Merge custom user graph nodes into the pipeline
+        injectCustomGraphNodes()
+    }
+
+    /**
+     * ★ Integration with UserGraphNodeRegistry:
+     * Inject custom nodes from .codepilot/graph-nodes.json into the graph pipeline.
+     * Custom nodes are inserted after their specified afterNode in the builtin pipeline.
+     */
+    private fun injectCustomGraphNodes() {
+        try {
+            val customNodes = io.codepilot.plugin.graph.UserGraphNodeRegistry.loadCustomNodes(project)
+            if (customNodes.isEmpty()) return
+
+            // Store custom node definitions in state for the backend to consume
+            val customNodesArray = mapper.createArrayNode()
+            for (node in customNodes) {
+                val nodeJson = mapper.createObjectNode().apply {
+                    put("id", node.id)
+                    put("label", node.label)
+                    put("afterNode", node.afterNode)
+                    put("condition", node.condition)
+                    put("prompt", node.prompt)
+                    put("onFailure", node.onFailure)
+                    put("maxRetries", node.maxRetries)
+                    put("timeout", node.timeout)
+                }
+                val toolsArray = mapper.createArrayNode()
+                node.tools.forEach { toolsArray.add(it) }
+                nodeJson.set<com.fasterxml.jackson.databind.node.ArrayNode>("tools", toolsArray)
+                customNodesArray.add(nodeJson)
+            }
+            state.set<com.fasterxml.jackson.databind.node.ArrayNode>("customNodes", customNodesArray)
+
+            // Build the full pipeline (builtin + custom) and store it
+            val fullPipeline = io.codepilot.plugin.graph.UserGraphNodeRegistry.buildFullPipeline(project)
+            val pipelineArray = mapper.createArrayNode()
+            fullPipeline.forEach { pipelineArray.add(it) }
+            state.set<com.fasterxml.jackson.databind.node.ArrayNode>("pipeline", pipelineArray)
+
+            persist()
+            log.info("Injected ${customNodes.size} custom graph nodes into pipeline: $fullPipeline")
+        } catch (e: Exception) {
+            log.warn("Failed to inject custom graph nodes", e)
+        }
     }
 
     /** Apply a graph_plan event (full plan with phases). */
@@ -128,6 +174,37 @@ class GraphStateStore(
 
     /** Check if awaiting user input. */
     fun isAwaiting(): Boolean = !state.path("awaiting").isMissingNode
+
+    /**
+     * Apply user edits to the plan (from PlanPanel UI).
+     * Per 01-§6.1: "用户可在 Plan / Ledger 面板里勾选/编辑/暂停/追问"
+     * Stores user edits under "userEdits" and marks them for next Agent turn.
+     */
+    fun applyUserPlanEdits(edits: JsonNode) {
+        val userEdits = state.withArray("userEdits")
+        // Each edit: { phaseId, action (skip/modify/reprioritize), detail? }
+        if (edits.isArray) {
+            for (edit in edits) {
+                userEdits.add(edit.deepCopy())
+            }
+        } else if (edits.isObject) {
+            userEdits.add(edits.deepCopy())
+        }
+        persist()
+    }
+
+    /**
+     * Get accumulated user plan edits and clear them (consumed by next Agent turn).
+     */
+    fun consumeUserPlanEdits(): JsonNode {
+        val edits: JsonNode = state.path("userEdits").deepCopy<JsonNode>()
+        state.remove("userEdits")
+        persist()
+        return edits
+    }
+
+    /** Check if there are pending user plan edits. */
+    fun hasUserPlanEdits(): Boolean = state.has("userEdits") && state.path("userEdits").size() > 0
 
     private fun persist() {
         version++

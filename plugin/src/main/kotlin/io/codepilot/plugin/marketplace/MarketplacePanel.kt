@@ -173,6 +173,32 @@ class MarketplacePanel(
             Messages.showWarningDialog(project, "No published version available for ${selected.slug}.", "CodePilot")
             return
         }
+
+        // ★ Integration: Use RegistryE2EVerifier for third-party registry installs
+        val selectedRegistry = registrySelector.selectedItem as? String ?: "official"
+        if (selectedRegistry != "official") {
+            // Third-party registry: run full E2E verification flow
+            val registryUrl = settings.state.registries.find { it.name == selectedRegistry }?.url
+            if (registryUrl != null) {
+                status.text = "Verifying ${selected.slug}@$version from $selectedRegistry…"
+                RegistryE2EVerifier.installFromRegistry(project, registryUrl, selected.slug, version)
+                    .whenComplete { result, err ->
+                        ApplicationManager.getApplication().invokeLater {
+                            if (err != null || result == null || !result.success) {
+                                val msg = err?.message ?: result?.message ?: "Unknown error"
+                                status.text = "Install failed: $msg"
+                                Messages.showErrorDialog(project, msg, "CodePilot")
+                            } else {
+                                status.text = "Installed ${selected.slug}@$version via $selectedRegistry (verified)."
+                                refreshInstalled()
+                            }
+                        }
+                    }
+                return
+            }
+        }
+
+        // Official registry: existing install flow
         status.text = "Installing ${selected.slug}@$version…"
         client.manifest(selected.slug, version).whenComplete { manifest, err ->
             if (err != null) {

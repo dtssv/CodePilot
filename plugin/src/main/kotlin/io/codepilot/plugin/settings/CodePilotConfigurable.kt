@@ -14,6 +14,8 @@ class CodePilotConfigurable : Configurable {
     private val settings = CodePilotSettings.getInstance()
     private val state = settings.state.copy()
     private var panel: JComponent? = null
+    // ★ Registries panel for marketplace registry management
+    private val registriesPanel = RegistriesPanel()
 
     override fun getDisplayName(): String = "CodePilot"
 
@@ -60,6 +62,12 @@ class CodePilotConfigurable : Configurable {
                 group("Storage") {
                     row("Session root:") {
                         textField().bindText({ state.sessionRoot }, { state.sessionRoot = it }).columns(40)
+                    }
+                }
+                // ★ Marketplace Registries management
+                group("Marketplace Registries") {
+                    row {
+                        cell(registriesPanel.component)
                     }
                 }
             }

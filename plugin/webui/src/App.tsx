@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from './bridge';
 import { ChatView } from './components/ChatView';
-import { InputBar } from './components/InputBar';
-import { LoginPage } from './components/LoginPage';
-import { SessionSidebar, SessionInfo } from './components/SessionSidebar';
-import { ContextChipData } from './components/ContextChip';
-import { MarketplacePanel } from './components/MarketplacePanel';
-import { NotepadsPanel } from './components/NotepadsPanel';
 import { ComposerPanel } from './components/ComposerPanel';
 import ContextBudgetBar from './components/ContextBudgetBar';
+import { ContextChipData } from './components/ContextChip';
+import { InputBar } from './components/InputBar';
+import { LoginPage } from './components/LoginPage';
+import { MarketplacePanel } from './components/MarketplacePanel';
+import { NotepadsPanel } from './components/NotepadsPanel';
+import { SessionInfo, SessionSidebar } from './components/SessionSidebar';
+import { ImageData } from './components/ImageAttachment';
+import { SessionCostPanel, SessionCostInfo } from './components/SessionCostPanel';
+import { MultiFileDiffPanel } from './components/MultiFileDiffPanel';
+import { PlanPanel } from './components/PlanPanel';
 
 interface ModelOption {
     id: string;
@@ -24,6 +28,8 @@ interface ChatMessage {
     riskNotice?: { level: string; message: string; filesPaths: string[] };
     needsInput?: { question: string; options: string[] };
     diff?: { path: string; hunks: string };
+    // ★ Image attachments for multi-modal
+    images?: { url: string; mimeType?: string; description?: string }[];
     _streaming?: boolean;
 }
 
@@ -51,6 +57,10 @@ export function App() {
     const [theme, setTheme] = useState<'dark' | 'light' | 'high-contrast'>('dark');
     const [branches, setBranches] = useState<BranchInfo[]>([]);
     const [activeBranchId, setActiveBranchId] = useState<string>('main');
+    // ★ Session cost tracking
+    const [sessionCost, setSessionCost] = useState<SessionCostInfo>({
+        messageCount: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: 0,
+    });
     const historyBtnRef = useRef<HTMLButtonElement>(null);
 
     // Apply theme to document root
@@ -72,7 +82,7 @@ export function App() {
     // Check auth state on mount and listen for changes
     useEffect(() => {
         // Ask the plugin for current auth state
-        sendToPlugin('check_auth', {}).catch(() => {});
+        sendToPlugin('check_auth', {}).catch(() => { });
 
         const unsubs = [
             onPluginEvent('auth_state', (payload) => {
@@ -84,7 +94,7 @@ export function App() {
                 if (result.success) {
                     setAuthenticated(true);
                     // Fetch models after login
-                    sendToPlugin('fetch_models', {}).catch(() => {});
+                    sendToPlugin('fetch_models', {}).catch(() => { });
                 }
             }),
         ];
@@ -97,9 +107,9 @@ export function App() {
 
         const unsubs = [
             onPluginEvent('models_loaded', (payload) => {
-                const data = payload as { builtin?: ModelOption[]; custom?: ModelOption[] };
+                const data = payload as { system?: ModelOption[]; custom?: ModelOption[] };
                 const all: ModelOption[] = [
-                    ...(data.builtin || []).map((m) => ({ ...m, type: 'system' as const })),
+                    ...(data.system || []).map((m) => ({ ...m, type: 'system' as const })),
                     ...(data.custom || []).map((m) => ({ ...m, type: 'custom' as const })),
                 ];
                 setModels(all);
@@ -244,11 +254,16 @@ export function App() {
                     { role: 'system', content: 'Patch generated', diff: { path: '', hunks: JSON.stringify(patchData) } },
                 ]);
             }),
+            // ★ Session cost updates
+            onPluginEvent('session_cost', (p) => {
+                const data = p as SessionCostInfo;
+                setSessionCost(data);
+            }),
         ];
         return () => unsubs.forEach((u) => u());
     }, [authenticated]);
 
-    const handleSend = (text: string, chips: ContextChipData[]) => {
+    const handleSend = (text: string, chips: ContextChipData[], images?: ImageData[]) => {
         // Build contextRefs for the plugin (no fullCode — that's in Kotlin contextStore)
         const contextRefs = chips.map((chip) => ({
             id: chip.id,
@@ -257,7 +272,14 @@ export function App() {
             startLine: chip.startLine,
             endLine: chip.endLine,
         }));
-        sendToPlugin('user_message', { text, contextRefs, mode, modelId: selectedModelId || undefined });
+        sendToPlugin('user_message', {
+            text,
+            contextRefs,
+            mode,
+            modelId: selectedModelId || undefined,
+            // ★ Pass image attachments to plugin for multi-modal processing
+            images: images?.map(img => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
+        });
         // Clear chips after send
         setContextChips([]);
     };
@@ -348,16 +370,21 @@ export function App() {
                     {activeTab === 'composer' && <ComposerPanel />}
                     {activeTab === 'marketplace' && <MarketplacePanel />}
                     {activeTab === 'notepads' && <NotepadsPanel />}
+                    {/* ★ Agent plan & multi-file diff panels (auto-visible when data arrives) */}
+                    <PlanPanel />
+                    <MultiFileDiffPanel />
                 </div>
                 <div className="input-section">
                     {activeTab === 'chat' && (
                         <>
-                            <ContextBudgetBar 
+                            <ContextBudgetBar
                                 currentTokens={contextTokens}
                                 totalTokens={totalTokens}
                                 estimatedTokens={estimatedTokens}
                                 onCompress={() => sendToPlugin('compress_context', {})}
                             />
+                            {/* ★ Session cost panel */}
+                            <SessionCostPanel costInfo={sessionCost} />
                             <InputBar onSend={handleSend} onStop={handleStop} contextChips={contextChips} onRemoveChip={handleRemoveChip} />
                             <div className="input-bottom-row">
                                 <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>

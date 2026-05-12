@@ -38,6 +38,8 @@ class McpPanel(
 ) {
     private val store = LocalMarketplaceStore.getInstance()
     private val mcpManager = McpProcessManager.getInstance()
+    // ★ Integration: McpSubscriptionManager for resource subscriptions
+    private val subscriptionManager = McpSubscriptionManager.getInstance(project)
     private val mapper = jacksonObjectMapper()
 
     // ---- Install tab ----
@@ -306,6 +308,19 @@ class McpPanel(
             )
             status.text = "Started ${item.entry.id}."
             refreshInstalled()
+            // ★ Integration: Auto-subscribe to MCP resources when server starts
+            try {
+                val resourcesResponse = mcpManager.call(item.entry.id, "resources/list", null)
+                val resources = resourcesResponse.path("resources")
+                if (resources != null && resources.isArray) {
+                    for (resource in resources) {
+                        val uri = resource.path("uri").asText(null)
+                        if (uri != null) {
+                            subscriptionManager.subscribe(item.entry.id, uri)
+                        }
+                    }
+                }
+            } catch (_: Exception) { /* Non-critical: subscription is best-effort */ }
         } catch (e: Exception) {
             Messages.showErrorDialog(project, "Failed to start: ${e.message}", "CodePilot")
         }

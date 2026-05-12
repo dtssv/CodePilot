@@ -84,12 +84,17 @@ class IndexScheduler(
         executor.submit { fullScan() }
     }
 
-    /** Search the local index. Delegates to LocalSearchEngine. */
+    /** Search the local index. Uses AdaptiveDepthSearcher for optimal depth. */
     fun search(
         query: String,
         topK: Int = 20,
         language: String? = null,
-    ): List<LocalSearchEngine.SearchHit> = searchEngine.search(query, topK, language)
+    ): List<LocalSearchEngine.SearchHit> {
+        // ★ Integration: Use AdaptiveDepthSearcher to determine optimal search depth
+        val searcher = AdaptiveDepthSearcher(project)
+        val params = searcher.resolveParams(query, topK * 200) // Estimate ~200 tokens per result
+        return searchEngine.search(query, params.topK, language)
+    }
 
     // ─── Internal ───────────────────────────────────────────────────
 

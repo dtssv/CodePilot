@@ -49,7 +49,8 @@ export type PluginEventType =
     | 'skill_list_result'
     | 'composer_result'
     | 'ide_theme'
-    | 'branch_list';
+    | 'branch_list'
+    | 'session_cost';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

@@ -15,6 +15,7 @@ dependencies {
     api(libs.bouncycastle.bcpkix)
 
     api("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml")
+    api("com.google.code.gson:gson")
 
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")

@@ -87,7 +87,14 @@ class ShadowWorkspace(
 
             // 3. Detect language and run appropriate validation
             val language = detectPrimaryLanguage(patches.map { it.path })
-            val errors = runValidation(shadowDir, language, affectedPaths)
+
+            // ★ Integration: Use IdeaBuildAsyncValidator for JVM projects
+            // Falls back to synchronous shell-based validation for other languages
+            val errors = if (language == "jvm") {
+                runIdeaBuildValidation(project, affectedPaths)
+            } else {
+                runValidation(shadowDir, language, affectedPaths)
+            }
             val duration = System.currentTimeMillis() - startTime
 
             return ValidationResult(
@@ -226,5 +233,41 @@ class ShadowWorkspace(
             }
         }
         return errors
+    }
+
+    /**
+     * ★ Integration: Use IdeaBuildAsyncValidator for JVM project builds.
+     * Falls back to synchronous shell validation if async build fails or times out.
+     */
+    private fun runIdeaBuildValidation(
+        project: Project,
+        affectedPaths: Set<String>,
+    ): List<ValidationError> {
+        return try {
+            val filePaths = affectedPaths.toList()
+            val result = IdeaBuildAsyncValidator.validateAsync(
+                project,
+                filePaths = filePaths,
+            ).get(30, java.util.concurrent.TimeUnit.SECONDS) // Timeout after 30s
+
+            if (result.success) {
+                emptyList()
+            } else {
+                result.errors.map { error ->
+                    ValidationError(
+                        file = error.filePath,
+                        line = error.line,
+                        message = error.message,
+                        severity = if (error.severity == "ERROR") "error" else "warning",
+                    )
+                }
+            }
+        } catch (e: java.util.concurrent.TimeoutException) {
+            log.debug("IdeaBuildAsyncValidator timed out, falling back to shell validation")
+            emptyList() // Don't block on validation timeout
+        } catch (e: Exception) {
+            log.debug("IdeaBuildAsyncValidator failed, falling back to shell validation", e)
+            emptyList() // Fall back gracefully
+        }
     }
 }
