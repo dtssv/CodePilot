@@ -13,6 +13,10 @@ import org.springframework.stereotype.Component;
  *
  * <p>This is NOT an AOP aspect to keep things explicit and debuggable; callers invoke
  * methods directly.
+ *
+ * <p><strong>Privacy Mode:</strong> When the request carries {@code X-CodePilot-Privacy: strict},
+ * audit events are completely skipped (not written to DB or Redis). This ensures zero data
+ * retention for privacy-conscious users.
  */
 @Component
 public class AuditInterceptor {
@@ -21,8 +25,26 @@ public class AuditInterceptor {
 
   private final AuditRepository auditRepo;
 
+  /** Thread-local to propagate privacy mode from the request context. */
+  private static final ThreadLocal<Boolean> PRIVACY_MODE = ThreadLocal.withInitial(() -> false);
+
   public AuditInterceptor(AuditRepository auditRepo) {
     this.auditRepo = auditRepo;
+  }
+
+  /** Set privacy mode for the current thread (called from gateway filter or controller). */
+  public static void setPrivacyMode(boolean strict) {
+    PRIVACY_MODE.set(strict);
+  }
+
+  /** Get current privacy mode. */
+  public static boolean isPrivacyStrict() {
+    return PRIVACY_MODE.get();
+  }
+
+  /** Clear privacy mode (call in finally block). */
+  public static void clearPrivacyMode() {
+    PRIVACY_MODE.remove();
   }
 
   /** Audit: conversation started. */
@@ -75,6 +97,11 @@ public class AuditInterceptor {
   // ---- Private ---- //
 
   private void insert(String kind, String userId, String deviceId, Map<String, Object> extra) {
+    // ★ Privacy Mode: strict = skip all audit writes
+    if (isPrivacyStrict()) {
+      log.debug("Privacy strict mode: skipping audit event kind={} for session", kind);
+      return;
+    }
     try {
       auditRepo.insert(
           TraceIdHolder.current(),

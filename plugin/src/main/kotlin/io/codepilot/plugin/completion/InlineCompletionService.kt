@@ -1015,7 +1015,7 @@ object InlineCompletionService {
     private fun preheatCompletion(request: CompletionRequest) {
         try {
             val http = HttpClientService.getInstance()
-            val payload = buildPayload(request)
+            val payload = buildPayload(request).toMutableMap()
             payload["temperature"] = 0.1f // Lower temperature for preheat (more deterministic)
             val httpReq = http.postJson("/v1/actions/inline-completion", payload)
             val call = http.client().newCall(httpReq)

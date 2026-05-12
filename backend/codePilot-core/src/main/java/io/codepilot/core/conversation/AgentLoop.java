@@ -67,7 +67,7 @@ public final class AgentLoop {
   public Flux<ServerSentEvent<String>> run(
       ConversationRunRequest req, String systemText, String userText) {
     int maxSteps =
-        req.policy() != null && req.policy().maxSteps() != null ? req.policy().maxSteps() : 8;
+        req.policy() != null && req.policy().maxSteps() != null ? req.policy().maxSteps() : 25;
 
     State state = new State(systemText, userText, maxSteps, req.sessionId());
 
@@ -120,11 +120,23 @@ public final class AgentLoop {
             buffered -> {
               ModelEnvelope env = parser.parseFinal(buffered);
               if (env == null) {
-                // Treat as plain text reply: emit a single delta + final.
+                // ★ EnvelopeValidator: JSON解析失败时尝试一次自动修正
+                if (state.parseRetries < 1) {
+                  state.parseRetries++;
+                  log.warn("Model output was not valid JSON, requesting self-correction for session {}",
+                      state.sessionId);
+                  state.history.append(
+                      "[SYSTEM: Your previous reply was not valid JSON. Please output ONLY the strict JSON envelope as specified.]");
+                  return nextTurn(state); // 重试一次
+                }
+                // 两次解析都失败，降级为纯文本
+                log.warn("Model output still not valid JSON after retry, falling back to plain text for session {}",
+                    state.sessionId);
                 return Flux.just(
                     sse.event(SseEvents.DELTA, Map.of("text", buffered)),
                     sse.event(SseEvents.DONE, Map.of("reason", "final")));
               }
+              state.parseRetries = 0; // 解析成功则重置
               return dispatchEnvelope(state, env);
             });
   }
@@ -139,8 +151,28 @@ public final class AgentLoop {
     if (env.plan() != null) emitted = emitted.concatWith(Flux.just(sse.event(SseEvents.PLAN, env.plan())));
     if (env.planDelta() != null)
       emitted = emitted.concatWith(Flux.just(sse.event(SseEvents.PLAN_DELTA, env.planDelta())));
-    if (env.selfCheck() != null)
+    if (env.selfCheck() != null) {
       emitted = emitted.concatWith(Flux.just(sse.event(SseEvents.SELF_CHECK, env.selfCheck())));
+      // ★ SelfCheck 强制校验逻辑
+      SelfCheck sc = env.selfCheck();
+      if (Boolean.TRUE.equals(sc.ok()) && Boolean.TRUE.equals(sc.matchedExpectation())) {
+        // 成功: 重置连续失败计数器
+        state.recordSuccess();
+      } else {
+        // 失败: 记录并检查是否需要强制replan
+        boolean shouldReplan = state.recordFailure();
+        log.warn("SelfCheck failed (consecutiveFailures={}, forceReplan={}) for session {}",
+            state.consecutiveFailures, state.forceReplan, state.sessionId);
+        // 如果nextAction=retry但已连续失败3次，强制改为replan
+        if (sc.nextAction() == SelfCheck.Action.RETRY && shouldReplan) {
+          log.warn("Overriding selfCheck nextAction from retry to replan due to {} consecutive failures",
+              state.consecutiveFailures);
+          // 注入replan提示到history，下一轮模型必须输出全量plan
+          state.history.append("[SYSTEM: 3 consecutive failures detected. You MUST output a full `plan` (replan) in this reply. Do NOT retry the same step.]");
+          state.forceReplan = true;
+        }
+      }
+    }
     if (env.riskNotice() != null)
       emitted = emitted.concatWith(Flux.just(sse.event(SseEvents.RISK_NOTICE, env.riskNotice())));
 
@@ -211,9 +243,18 @@ public final class AgentLoop {
           .concatWith(
               waitResult
                   .doOnNext(
-                      r ->
-                          state.history.append(
-                              "[tool:" + tc.name() + "] " + (r.ok() ? "OK" : "ERR")))
+                      r -> {
+                        state.history.append(
+                            "[tool:" + tc.name() + "] " + (r.ok() ? "OK" : "ERR"));
+                        // ★ 记录工具执行失败
+                        if (!r.ok()) {
+                          state.recordFailure();
+                          log.warn("Client tool {} failed (consecutiveFailures={}) for session {}",
+                              tc.name(), state.consecutiveFailures, state.sessionId);
+                        } else {
+                          state.recordSuccess();
+                        }
+                      })
                   .flatMapMany(
                       r ->
                           Flux.<ServerSentEvent<String>>just(
@@ -229,10 +270,21 @@ public final class AgentLoop {
 
   /** Calls the model and returns the buffered text. */
   private Mono<String> invokeModel(State state) {
+    // ★ 如果forceReplan=true，在system尾部追加replan段
+    String systemText = state.systemText;
+    if (state.forceReplan) {
+      systemText = systemText + "\n\n[REPLAN REQUIRED]\nThe previous attempts failed or drifted. In this reply you MUST:\n"
+          + "- Output a FULL `plan` (not planDelta).\n"
+          + "- Keep `goal` unchanged; reset all pending steps; try a different decomposition or tool choice.\n"
+          + "- Add a verification step early if the failure looks environmental.\n"
+          + "Then continue with one `toolCall` for the first new step.\n";
+      state.forceReplan = false; // 重置标志
+    }
+
     return chatClient
         .prompt()
         .messages(
-            new SystemMessage(state.systemText),
+            new SystemMessage(systemText),
             new UserMessage(state.userText + state.history.tail()))
         .stream()
         .chatResponse()
@@ -256,11 +308,1187 @@ public final class AgentLoop {
     final History history = new History();
     final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
 
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
     State(String systemText, String userText, int maxSteps, String sessionId) {
       this.systemText = systemText;
       this.userText = userText;
       this.maxSteps = maxSteps;
       this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+} /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}       .chatResponse()
+        .map(ChatResponse::getResult)
+        .filter(r -> r != null && r.getOutput() != null)
+        .map(r -> {
+          var msg = r.getOutput();
+          return msg.getText() == null ? "" : msg.getText();
+        })
+        .reduce(new StringBuilder(), StringBuilder::append)
+        .map(StringBuilder::toString);
+  }
+
+  /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+} /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}         + "- Keep `goal` unchanged; reset all pending steps; try a different decomposition or tool choice.\n"
+          + "- Add a verification step early if the failure looks environmental.\n"
+          + "Then continue with one `toolCall` for the first new step.\n";
+      state.forceReplan = false; // 重置标志
+    }
+
+    return chatClient
+        .prompt()
+        .messages(
+            new SystemMessage(systemText),
+            new UserMessage(state.userText + state.history.tail()))
+        .stream()
+        .chatResponse()
+        .map(ChatResponse::getResult)
+        .filter(r -> r != null && r.getOutput() != null)
+        .map(r -> {
+          var msg = r.getOutput();
+          return msg.getText() == null ? "" : msg.getText();
+        })
+        .reduce(new StringBuilder(), StringBuilder::append)
+        .map(StringBuilder::toString);
+  }
+
+  /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+} /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}       .chatResponse()
+        .map(ChatResponse::getResult)
+        .filter(r -> r != null && r.getOutput() != null)
+        .map(r -> {
+          var msg = r.getOutput();
+          return msg.getText() == null ? "" : msg.getText();
+        })
+        .reduce(new StringBuilder(), StringBuilder::append)
+        .map(StringBuilder::toString);
+  }
+
+  /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+} /** In-memory loop state (per /run call). */
+  private static final class State {
+    final String systemText;
+    final String userText;
+    final int maxSteps;
+    final String sessionId;
+    int steps;
+    final History history = new History();
+    final java.util.Set<String> completedToolCallIds = new java.util.HashSet<>();
+
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}
+    // ── SelfCheck failure tracking ──────────────────────────────
+    /** Number of consecutive selfCheck.ok=false or tool execution failures. */
+    int consecutiveFailures = 0;
+    /** Max consecutive failures before forcing replan. */
+    static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Whether replan should be forced on the next turn. */
+    boolean forceReplan = false;
+    /** Number of times we've retried JSON parse (EnvelopeValidator). */
+    int parseRetries = 0;
+
+    State(String systemText, String userText, int maxSteps, String sessionId) {
+      this.systemText = systemText;
+      this.userText = userText;
+      this.maxSteps = maxSteps;
+      this.sessionId = sessionId;
+    }
+
+    /** Record a successful selfCheck/tool execution, resetting failure counter. */
+    void recordSuccess() {
+      consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
+    }
+  }
+
+  private static final class History {
+    private final StringBuilder buf = new StringBuilder();
+
+    void append(String line) {
+      buf.append("\n").append(line);
+    }
+
+    String tail() {
+      return buf.length() == 0 ? "" : "\n[observations]" + buf;
+    }
+  }
+}     consecutiveFailures = 0;
+    }
+
+    /** Record a failure. Returns true if we've hit the replan threshold. */
+    boolean recordFailure() {
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        forceReplan = true;
+      }
+      return forceReplan;
     }
   }
 

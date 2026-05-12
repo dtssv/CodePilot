@@ -44,6 +44,8 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var localEncryption: Boolean = false,
         /** ★ Anonymous telemetry mode: sends usage stats without PII. */
         var anonymousMode: Boolean = false,
+        /** Conversation mode: "chat" or "agent" */
+        var conversationMode: String = "chat",
         var registries: List<RegistryEntry> =
             listOf(
                 RegistryEntry("Official", "https://marketplace.codepilot.io", ""),

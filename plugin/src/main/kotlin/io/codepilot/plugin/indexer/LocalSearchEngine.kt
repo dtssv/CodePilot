@@ -414,18 +414,7 @@ class LocalSearchEngine(
     }
 
     /** Get stats for display. */
-    fun stats(): IndexStats =
-        IndexStats(
-            totalFiles = forwardIndex.size,
-            totalChunks = forwardIndex.values.sumOf { it.size },
-            totalTerms = invertedIndex.size,
-        )
-
-    data class IndexStats(
-        val totalFiles: Int,
-        val totalChunks: Int,
-        val totalTerms: Int,
-    )
+    fun stats(): IndexStats = indexStats()
 
     // ─── Adaptive Context Depth ─────────────────────────────────────
 

@@ -3,11 +3,13 @@ package io.codepilot.api.action;
 import io.codepilot.core.conversation.ConversationService;
 import io.codepilot.core.dto.ConversationMode;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.prompt.ActionPromptLoader;
 import io.codepilot.core.safety.SystemPromptLeakOutputFilter;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.MediaType;
@@ -19,66 +21,75 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
 /**
- * One-click action endpoints (refactor, review, comment, gentest, gendoc, inline-completion,
- * commit-message). These are shortcuts that wrap /conversation/run with a fixed mode and
- * action-specific prompt assembly.
+ * One-click action endpoints. All actions use the shared {@link #runAction} method which loads
+ * prompt templates from {@code classpath:/prompts/action.<name>.txt} via
+ * {@link ActionPromptLoader}.
+ *
+ * <p>Actions that need custom Request records (e.g., commit-message, inline-completion,
+ * inline-edit, bug-scan) still converge on runAction for the final ConversationRunRequest
+ * assembly, ensuring consistent policy, leak-filtering, and error handling.
  */
-@Tag(name = "action", description = "One-click actions (refactor, review, comment, gentest, gendoc, inline-completion, commit-message)")
+@Tag(name = "action", description = "One-click actions (refactor, review, comment, gentest, gendoc, inline-completion, commit-message, bug-scan, inline-edit)")
 @RestController
 @RequestMapping(value = "/v1/actions", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
 public class ActionController {
 
   private final ConversationService service;
   private final SystemPromptLeakOutputFilter leakFilter;
+  private final ActionPromptLoader promptLoader;
 
-  public ActionController(ConversationService service, SystemPromptLeakOutputFilter leakFilter) {
+  public ActionController(
+      ConversationService service,
+      SystemPromptLeakOutputFilter leakFilter,
+      ActionPromptLoader promptLoader) {
     this.service = service;
     this.leakFilter = leakFilter;
+    this.promptLoader = promptLoader;
   }
+
+  // ─── Standard actions (use ActionRequest) ─────────────────────────────
 
   @Operation(summary = "Refactor selection")
   @PostMapping(value = "/refactor", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> refactor(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "refactor");
+    return runAction(req, "refactor", true);
   }
 
   @Operation(summary = "Review code")
   @PostMapping(value = "/review", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> review(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "review");
+    return runAction(req, "review", false);
   }
 
   @Operation(summary = "Generate comments")
   @PostMapping(value = "/comment", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> comment(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "comment");
+    return runAction(req, "comment", false);
   }
 
   @Operation(summary = "Generate tests")
   @PostMapping(value = "/gentest", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> gentest(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gentest");
+    return runAction(req, "gentest", true);
   }
 
   @Operation(summary = "Generate documentation")
   @PostMapping(value = "/gendoc", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> gendoc(@RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gendoc");
+    return runAction(req, "gendoc", false);
   }
+
+  // ─── Custom-request actions ───────────────────────────────────────────
 
   @Operation(summary = "Generate git commit message from diff")
   @PostMapping(value = "/commit-message", consumes = MediaType.APPLICATION_JSON_VALUE)
   public Flux<ServerSentEvent<String>> commitMessage(@RequestBody @Valid CommitMessageRequest req) {
-    String input = "[action:commit-message]\n"
-        + "Branch: " + (req.branchName() != null ? req.branchName() : "unknown") + "\n"
-        + (req.recentCommits() != null ? "Recent commits:\n" + req.recentCommits() + "\n" : "")
-        + "\n```diff\n" + req.diff() + "\n```";
-    ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
-        null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null,
-        null, null);
-    return leakFilter.guard(service.run(runReq));
+    Map<String, String> vars = new LinkedHashMap<>();
+    vars.put("diff", req.diff());
+    vars.put("branchName", req.branchName() != null ? req.branchName() : "unknown");
+    vars.put("recentCommits", req.recentCommits() != null ? req.recentCommits() : "");
+    String input = loadPrompt("commit-message", vars);
+    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
   }
 
   @Operation(summary = "Inline code completion (supports FIM mode)")
@@ -86,19 +97,22 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> inlineCompletion(
       @RequestBody @Valid InlineCompletionRequest req) {
 
-    // ★ FIM (Fill-In-the-Middle) mode: use native FIM format for models that support it
-    // When mode=fim, the prompt uses <PRE>prefix<SUF>suffix<MID> format
-    // which is more efficient than chat-based completion for code infilling
+    Map<String, String> vars = new LinkedHashMap<>();
+    vars.put("language", req.language());
+    vars.put("filePath", req.filePath());
+    vars.put("prefix", req.prefix());
+    vars.put("suffix", req.suffix());
+    vars.put("fileOutline", req.fileOutline() != null ? req.fileOutline() : "");
+    vars.put("maxCandidates", "3");
+
+    String action = "fim".equalsIgnoreCase(req.mode()) ? "inline-completion-fim" : "inline-completion";
     String input;
-    if ("fim".equalsIgnoreCase(req.mode())) {
-      // FIM format: the model natively supports infilling
-      // The prefix/suffix are passed directly; PromptOrchestrator will format as <PRE>/<SUF>/<MID>
-      input = "[action:inline-completion-fim]\n"
-          + "Language: " + req.language() + '\n'
-          + "File: " + req.filePath() + '\n'
-          + "\n<PRE>\n" + req.prefix() + "\n<SUF>\n" + req.suffix() + "\n<MID>";
+    if ("fim".equalsIgnoreCase(req.mode()) && promptLoader.exists(action)) {
+      input = loadPrompt(action, vars);
+    } else if (promptLoader.exists("inline-completion")) {
+      input = loadPrompt("inline-completion", vars);
     } else {
-      // Standard chat-based completion (default)
+      // Fallback inline prompt when template not found
       var sb = new StringBuilder();
       sb.append("[action:inline-completion]\n");
       sb.append("Language: ").append(req.language()).append('\n');
@@ -111,27 +125,61 @@ public class ActionController {
       sb.append("\nComplete the code at the cursor (between PREFIX and SUFFIX):");
       input = sb.toString();
     }
-
-    ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
-        null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null,
-        null, null);
-    return leakFilter.guard(service.run(runReq));
+    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
   }
 
-  private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action) {
-    // Build a ConversationRunRequest with mode=chat (actions are single-turn, no tools)
-    // The action type is passed via the input prefix for PromptOrchestrator to pick the right Skill
-    String input = "[action:" + action + "] " + (req.instruction() != null ? req.instruction() : "") + "\n\n" + req.context();
+  @Operation(summary = "Bug scan — find potential bugs, vulnerabilities, and code smells")
+  @PostMapping(value = "/bug-scan", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> bugScan(@RequestBody @Valid BugScanRequest req) {
+    Map<String, String> vars = new LinkedHashMap<>();
+    vars.put("language", req.language());
+    vars.put("filePath", req.filePath());
+    vars.put("code", req.code());
+    vars.put("diagnostics", req.diagnostics() != null && !req.diagnostics().isEmpty()
+        ? String.join("\n", req.diagnostics()) : "");
+    vars.put("userLocale", "zh-CN");
+    String input = loadPrompt("bug-scan", vars);
+    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+  }
 
-    // Determine engine: refactor and gentest benefit from graph (generate→verify→repair loop)
-    var useGraph = "refactor".equals(action) || "gentest".equals(action);
+  @Operation(summary = "Inline edit (Ctrl+K) — edit selected code with natural language instruction")
+  @PostMapping(value = "/inline-edit", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public Flux<ServerSentEvent<String>> inlineEdit(@RequestBody @Valid InlineEditRequest req) {
+    Map<String, String> vars = new LinkedHashMap<>();
+    vars.put("language", req.language());
+    vars.put("filePath", req.filePath());
+    vars.put("selection", req.selection());
+    vars.put("instruction", req.instruction());
+    String input = loadPrompt("inline-edit", vars);
+    return runActionWithInput(req.sessionId(), req.modelId(), input, false);
+  }
+
+  // ─── Core runAction method ────────────────────────────────────────────
+
+  /**
+   * Shared action execution path for standard ActionRequest-based endpoints.
+   * Loads the prompt template from resources, applies template variables,
+   * determines engine mode (graph for refactor/gentest), and dispatches
+   * to ConversationService.
+   */
+  private Flux<ServerSentEvent<String>> runAction(ActionRequest req, String action, boolean useGraph) {
+    Map<String, String> vars = new LinkedHashMap<>();
+    vars.put("language", req.language() != null ? req.language() : "text");
+    vars.put("filePath", req.filePath() != null ? req.filePath() : "<buffer>");
+    vars.put("selection", req.context());
+    vars.put("userInstruction", req.instruction() != null ? req.instruction() : "");
+    vars.put("testFramework", req.testFramework() != null ? req.testFramework() : "");
+    vars.put("docTarget", req.docTarget() != null ? req.docTarget() : "");
+    vars.put("audience", req.audience() != null ? req.audience() : "");
+    vars.put("userLocale", "zh-CN");
+
+    String input = loadPrompt(action, vars);
+
     var mode = useGraph ? ConversationMode.AGENT : ConversationMode.CHAT;
     var policy = useGraph
         ? new ConversationRunRequest.Policy(
             8, null, null, null, null, true, null, null, null, null,
-            "graph", action, // engine=graph, graphTemplate=action
+            "graph", action,
             new ConversationRunRequest.GraphVerifyPolicy(true, true, true, null),
             new ConversationRunRequest.GraphRepairPolicy(2, List.of("compile-error", "test-fail")),
             null, true, true)
@@ -144,6 +192,43 @@ public class ActionController {
         null, null);
     return leakFilter.guard(service.run(runReq));
   }
+
+  /**
+   * Shared action execution path for custom-request endpoints.
+   * Uses the already-assembled input string (from prompt template + custom vars).
+   */
+  private Flux<ServerSentEvent<String>> runActionWithInput(
+      String sessionId, String modelId, String input, boolean useGraph) {
+    var mode = useGraph ? ConversationMode.AGENT : ConversationMode.CHAT;
+    ConversationRunRequest runReq = new ConversationRunRequest(
+        sessionId, mode, modelId, input,
+        null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, null,
+        null, null);
+    return leakFilter.guard(service.run(runReq));
+  }
+
+  /**
+   * Load a prompt template from resources/prompts/action.<name>.txt,
+   * substitute variables, and return the resolved prompt.
+   * Falls back to a simple [action:<name>] prefix if the template is missing.
+   */
+  private String loadPrompt(String action, Map<String, String> vars) {
+    if (promptLoader.exists(action)) {
+      return promptLoader.load(action, vars);
+    }
+    // Fallback: use a simple prefix format
+    var sb = new StringBuilder();
+    sb.append("[action:").append(action).append("]\n");
+    for (var entry : vars.entrySet()) {
+      if (entry.getValue() != null && !entry.getValue().isEmpty()) {
+        sb.append(entry.getKey()).append(": ").append(entry.getValue()).append('\n');
+      }
+    }
+    return sb.toString();
+  }
+
+  // ─── Request records ──────────────────────────────────────────────────
 
   public record ActionRequest(
       @NotBlank String sessionId,
@@ -174,29 +259,6 @@ public class ActionController {
       Integer maxTokens,
       String mode) {}
 
-  /** ★ Bug Scan: scan code for potential bugs, vulnerabilities, and code smells. */
-  @Operation(summary = "Bug scan — find potential bugs, vulnerabilities, and code smells")
-  @PostMapping(value = "/bug-scan", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public Flux<ServerSentEvent<String>> bugScan(@RequestBody @Valid BugScanRequest req) {
-    String input = "[action:bug-scan]\n"
-        + "Language: " + req.language() + "\n"
-        + "File: " + req.filePath() + "\n"
-        + (req.diagnostics() != null && !req.diagnostics().isEmpty()
-            ? "IDE Diagnostics:\n" + req.diagnostics().stream()
-                .map(d -> "  - " + d)
-                .reduce((a, b) -> a + "\n" + b).orElse("") + "\n"
-            : "")
-        + "\n```" + req.language() + "\n" + req.code() + "\n```"
-        + "\n\nAnalyze the above code for bugs, vulnerabilities, and code smells. "
-        + "For each finding, provide: severity (critical/high/medium/low), line range, description, and suggested fix.";
-    ConversationRunRequest runReq = new ConversationRunRequest(
-        req.sessionId(), ConversationMode.CHAT, req.modelId(), input,
-        null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null,
-        null, null);
-    return leakFilter.guard(service.run(runReq));
-  }
-
   public record BugScanRequest(
       @NotBlank String sessionId,
       String modelId,
@@ -204,4 +266,12 @@ public class ActionController {
       @NotBlank String language,
       @NotBlank String filePath,
       List<String> diagnostics) {}
+
+  public record InlineEditRequest(
+      @NotBlank String sessionId,
+      String modelId,
+      @NotBlank String selection,
+      @NotBlank String instruction,
+      @NotBlank String language,
+      @NotBlank String filePath) {}
 }

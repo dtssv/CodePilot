@@ -7,6 +7,15 @@ import com.intellij.openapi.keymap.KeymapManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import com.intellij.openapi.util.SystemInfoRt
+import io.codepilot.plugin.actions.AcceptCompletionAction
+import io.codepilot.plugin.actions.CommandPaletteAction
+import io.codepilot.plugin.actions.DismissCompletionAction
+import io.codepilot.plugin.actions.InlineCompletionAction
+import io.codepilot.plugin.actions.InlineEditAction
+import io.codepilot.plugin.actions.NewChatAction
+import io.codepilot.plugin.actions.OpenChatAction
+import io.codepilot.plugin.actions.SendMessageAction
+import io.codepilot.plugin.actions.ToggleAgentAction
 import javax.swing.KeyStroke
 
 /**
@@ -25,6 +34,7 @@ class CodePilotKeymap : ProjectActivity {
     private fun registerActions() {
         val am = ActionManager.getInstance()
         registerIfAbsent(am, "CodePilot.InlineCompletion", InlineCompletionAction())
+        registerIfAbsent(am, "CodePilot.InlineEdit", InlineEditAction())
         registerIfAbsent(am, "CodePilot.OpenChat", OpenChatAction())
         registerIfAbsent(am, "CodePilot.ToggleAgent", ToggleAgentAction())
         registerIfAbsent(am, "CodePilot.NewChat", NewChatAction())
@@ -36,7 +46,9 @@ class CodePilotKeymap : ProjectActivity {
 
     private fun registerShortcuts() {
         val keymap = KeymapManager.getInstance().activeKeymap
-        addShortcut(keymap, "CodePilot.InlineCompletion", "control K", "meta K")
+        // Ctrl+K = Inline Edit (Cursor-style), InlineCompletion moved to Ctrl+Shift+J
+        addShortcut(keymap, "CodePilot.InlineEdit", "control K", "meta K")
+        addShortcut(keymap, "CodePilot.InlineCompletion", "control shift J", "meta shift J")
         addShortcut(keymap, "CodePilot.OpenChat", "control L", "meta L")
         addShortcut(keymap, "CodePilot.ToggleAgent", "control I", "meta I")
         addShortcut(keymap, "CodePilot.NewChat", "control shift L", "meta shift L")

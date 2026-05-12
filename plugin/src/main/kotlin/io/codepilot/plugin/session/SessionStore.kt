@@ -583,7 +583,7 @@ class SessionStore {
         val queryLower = query.lowercase()
         val results = mutableListOf<MessageSearchResult>()
 
-        val workspaceDir = sessionRoot().resolve(workspaceHash)
+        val workspaceDir = settingsRoot().resolve(workspaceHash)
         if (!Files.exists(workspaceDir)) return emptyList()
 
         Files.list(workspaceDir).use { dirs ->
