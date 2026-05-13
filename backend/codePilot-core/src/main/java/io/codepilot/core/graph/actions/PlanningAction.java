@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.model.ChatClientFactory;
@@ -100,7 +101,7 @@ public class PlanningAction implements NodeAction {
         JsonNode infoRequests = root.get("infoRequests");
         if (infoRequests != null && !infoRequests.isNull() && infoRequests.isArray() && !infoRequests.isEmpty()) {
             updates.put("planningResult", "infoRequests");
-            updates.put("infoRequests", mapper.convertValue(infoRequests, List.class));
+            updates.put("infoRequests", mapper.convertValue(infoRequests, new TypeReference<List<Map<String, Object>>>() {}));
             return updates;
         }
 
@@ -152,6 +153,14 @@ public class PlanningAction implements NodeAction {
         updates.put("phases", phases);
         updates.put("phaseCursor", phases.get(0).get("id"));
 
+        // C1 fast-path: for simple single-phase tasks, skip preCheck/verify to reduce latency
+        boolean isSimpleTask = phases.size() == 1
+                && "code-change".equals(String.valueOf(phases.get(0).getOrDefault("intent", "code-change")));
+        updates.put("fastPathEnabled", isSimpleTask);
+        if (isSimpleTask) {
+            log.info("Planning: fast-path enabled for single-phase code-change task");
+        }
+
         updates.put("planningResult", "phases");
         return updates;
     }
@@ -173,7 +182,7 @@ public class PlanningAction implements NodeAction {
             Map.of("phases", phases, "graphId", "gph-" + UUID.randomUUID().toString().substring(0, 8)));
         updates.put("phases", phases);
         updates.put("phaseCursor", "p1");
-
+        updates.put("fastPathEnabled", true); // fallback plan is always single-phase → fast-path
         updates.put("planningResult", "phases");
         return updates;
     }

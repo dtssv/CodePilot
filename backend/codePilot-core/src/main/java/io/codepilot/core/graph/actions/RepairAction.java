@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.codepilot.core.dto.Patch;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.actions.VerifyAction.VerifyReport;
 import io.codepilot.core.model.ChatClientFactory;
@@ -25,16 +26,8 @@ import java.util.*;
  *   <li>Track attempt count per phase — if exhausted, escalate to AskUser</li>
  *   <li>Construct a repair prompt with the failure context (errors, diffs, diagnostics)</li>
  *   <li>Call the LLM to produce a minimal repair patch</li>
- *   <li>Emit the repair result as toolCalls for the client to apply</li>
+ *   <li>Convert repair patches to pendingPatches for ApplyPatch to execute</li>
  * </ol>
- *
- * <p>The repair prompt explicitly instructs the model to:
- * <ul>
- *   <li>Produce the MINIMAL change to fix the issue</li>
- *   <li>Not refactor unrelated code</li>
- *   <li>Preserve existing public APIs</li>
- *   <li>Add only necessary imports</li>
- * </ul>
  */
 @Component
 public class RepairAction implements NodeAction {
@@ -77,21 +70,43 @@ public class RepairAction implements NodeAction {
             GraphSseHelper.emitEvent(state, SseEvents.GRAPH_BUDGET_ALERT,
                     Map.of("phaseId", phaseId, "kind", "attempts", "value", count, "limit", maxAttempts));
 
-            // Build an AskUser request with the failure context
+            // M3: Degradation strategy — check if any patches were partially applied
+            var patchResults = (List<Map<String, Object>>) state.value("patchResults").orElse(List.of());
+            long appliedCount = patchResults.stream()
+                    .filter(r -> Boolean.TRUE.equals(r.get("success")))
+                    .count();
+
             var verifyReport = state.value("verifyReport").orElse(null);
             String failureSummary = summarizeFailures(verifyReport);
-            updates.put("repairResult", "askUser");
-            updates.put("askUserQuestion", Map.of(
-                "title", "Auto-repair failed after " + count + " attempts",
-                "reason", "The agent could not fix the following issues automatically",
-                "blocking", true,
-                "failureSummary", failureSummary,
-                "suggestedActions", List.of(
-                    "Manually fix the errors and continue",
-                    "Revert the changes and replan",
-                    "Adjust the repair strategy"
-                )
-            ));
+
+            if (appliedCount > 0) {
+                // Partial success: commit what succeeded, mark phase as partial
+                log.info("Repair budget exhausted but {} patches were applied — committing partial results", appliedCount);
+                updates.put("repairResult", "partialCommit");
+                updates.put("askUserQuestion", Map.of(
+                    "title", "Auto-repair partially succeeded (" + appliedCount + " patches applied)",
+                    "reason", failureSummary,
+                    "blocking", false,
+                    "appliedCount", appliedCount,
+                    "suggestedActions", List.of(
+                        "Continue with partial changes",
+                        "Revert all changes and replan"
+                    )
+                ));
+            } else {
+                updates.put("repairResult", "askUser");
+                updates.put("askUserQuestion", Map.of(
+                    "title", "Auto-repair failed after " + count + " attempts",
+                    "reason", "The agent could not fix the following issues automatically",
+                    "blocking", true,
+                    "failureSummary", failureSummary,
+                    "suggestedActions", List.of(
+                        "Manually fix the errors and continue",
+                        "Revert the changes and replan",
+                        "Adjust the repair strategy"
+                    )
+                ));
+            }
             return updates;
         }
 
@@ -128,16 +143,37 @@ public class RepairAction implements NodeAction {
         }
 
         // ── Parse repair response ──
-        // The LLM should output toolCalls (fs.replace patches) for the client to apply
-        updates.put("repairResult", "toolCalls");
-        updates.put("repairToolCalls", parseRepairResponse(repairResponse));
+        List<Map<String, Object>> repairToolCalls = parseRepairResponse(repairResponse);
+        updates.put("repairToolCalls", repairToolCalls);
+
+        // ── B1 fix: Convert repair toolCalls to pendingPatches ──
+        // Without this, the repair→applyPatch loop re-sends the SAME original patches,
+        // causing infinite retry until budget exhaustion.
+        List<Patch> repairPatches = convertRepairToolCallsToPatches(repairToolCalls, repairResponse);
+        if (!repairPatches.isEmpty()) {
+            updates.put("pendingPatches", repairPatches);
+            updates.put("repairResult", "toolCalls");
+        } else {
+            // Repair couldn't produce valid patches — escalate to askUser instead of
+            // looping back to applyPatch with stale pendingPatches
+            log.warn("Repair phase={}: could not parse patches from LLM response, escalating to askUser", phaseId);
+            updates.put("repairResult", "askUser");
+            updates.put("askUserQuestion", Map.of(
+                "title", "Auto-repair could not produce a valid fix",
+                "reason", "The repair LLM response could not be parsed into executable patches",
+                "blocking", false,
+                "attempt", count,
+                "repairPreview", repairResponse != null ? repairResponse.substring(0, Math.min(repairResponse.length(), 500)) : ""
+            ));
+        }
 
         // Emit repair progress
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_REPAIR_PLAN,
                 Map.of("phaseId", phaseId, "attempt", count, "strategy", "minimal-patch"));
 
-        log.info("Repair phase={}: attempt={}/{}, responseLen={}",
-                phaseId, count, maxAttempts, repairResponse != null ? repairResponse.length() : 0);
+        log.info("Repair phase={}: attempt={}/{}, responseLen={}, patchesProduced={}",
+                phaseId, count, maxAttempts, repairResponse != null ? repairResponse.length() : 0,
+                repairPatches.size());
 
         return updates;
     }
@@ -147,6 +183,7 @@ public class RepairAction implements NodeAction {
         return switch (result) {
             case "infoRequests" -> "gather";
             case "askUser" -> "askUser";
+            case "partialCommit" -> "commit";
             default -> "applyPatch";
         };
     }
@@ -189,6 +226,10 @@ public class RepairAction implements NodeAction {
                             .append(" [").append(warn.rule).append("] ").append(warn.message).append("\n");
                 }
             }
+        } else if (verifyReportObj instanceof Map<?, ?> reportMap) {
+            appendMapFindings(sb, "Compile Errors", reportMap.get("compileErrors"));
+            appendMapFindings(sb, "Test Failures", reportMap.get("testFailures"));
+            appendMapFindings(sb, "Lint Warnings", reportMap.get("lintWarnings"));
         } else if (verifyReportObj != null) {
             sb.append(verifyReportObj.toString()).append("\n");
         }
@@ -219,8 +260,6 @@ public class RepairAction implements NodeAction {
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> parseRepairResponse(String response) {
-        // Attempt to extract toolCalls from the LLM response
-        // The response may be in envelope format (JSON) or plain text with patches
         try {
             var node = mapper.readTree(response);
             if (node.has("toolCall")) {
@@ -232,11 +271,82 @@ public class RepairAction implements NodeAction {
         } catch (Exception ignored) {
             // Not JSON — treat as plain text repair suggestion
         }
-        // Fallback: wrap the entire response as a single repair note
         return List.of(Map.of(
             "type", "repair_note",
             "content", response != null ? response.substring(0, Math.min(response.length(), 500)) : ""
         ));
+    }
+
+    // ─── Convert Repair ToolCalls to Patches (B1 fix) ────────────────
+
+    @SuppressWarnings("unchecked")
+    private List<Patch> convertRepairToolCallsToPatches(List<Map<String, Object>> toolCalls, String rawResponse) {
+        List<Patch> patches = new ArrayList<>();
+        for (Map<String, Object> tc : toolCalls) {
+            if ("repair_note".equals(tc.get("type"))) {
+                continue;
+            }
+            var args = (Map<String, Object>) tc.getOrDefault("args", tc);
+            String path = (String) args.getOrDefault("path", "");
+            String op = (String) args.getOrDefault("op", "replace");
+            String newContent = (String) args.getOrDefault("newContent", "");
+            String search = (String) args.getOrDefault("search", "");
+            String replace = (String) args.getOrDefault("replace", "");
+
+            if (path.isEmpty() && newContent.isEmpty()) {
+                continue;
+            }
+
+            Patch.Edit.Op editOp = switch (op.toLowerCase()) {
+                case "create" -> Patch.Edit.Op.CREATE;
+                case "replace" -> Patch.Edit.Op.REPLACE;
+                case "delete" -> Patch.Edit.Op.DELETE;
+                default -> Patch.Edit.Op.WRITE;
+            };
+
+            patches.add(new Patch(
+                "Repair patch",
+                List.of("repair"),
+                List.of(new Patch.Edit(path, editOp, null, null, search, replace, newContent, null, null, null, null, null, null)),
+                null, null, null
+            ));
+        }
+
+        // Fallback: try JSON envelope format (patches[])
+        if (patches.isEmpty() && rawResponse != null) {
+            try {
+                var node = mapper.readTree(extractJson(rawResponse));
+                if (node.has("patches")) {
+                    var patchesNode = node.get("patches");
+                    if (patchesNode.isArray()) {
+                        for (var patchNode : patchesNode) {
+                            Patch patch = mapper.treeToValue(patchNode, Patch.class);
+                            if (patch != null && patch.patches() != null && !patch.patches().isEmpty()) {
+                                patches.add(patch);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("Could not extract patches from repair response JSON", e);
+            }
+        }
+
+        return patches;
+    }
+
+    private String extractJson(String response) {
+        if (response == null) return "{}";
+        String trimmed = response.trim();
+        if (trimmed.startsWith("```")) {
+            int start = trimmed.indexOf('\n') + 1;
+            int end = trimmed.lastIndexOf("```");
+            if (end > start) return trimmed.substring(start, end).trim();
+        }
+        int braceStart = trimmed.indexOf('{');
+        int braceEnd = trimmed.lastIndexOf('}');
+        if (braceStart >= 0 && braceEnd > braceStart) return trimmed.substring(braceStart, braceEnd + 1);
+        return trimmed;
     }
 
     // ─── Utilities ────────────────────────────────────────────────────
@@ -258,5 +368,19 @@ public class RepairAction implements NodeAction {
             return sb.toString();
         }
         return "Unknown verification failure";
+    }
+
+    private void appendMapFindings(StringBuilder sb, String label, Object findingsObj) {
+        if (findingsObj instanceof List<?> list && !list.isEmpty()) {
+            sb.append(label).append(":\n");
+            for (var item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    sb.append("  - ").append(Objects.toString(m.get("file"), "?")).append(":")
+                            .append(Objects.toString(m.get("line"), "0"))
+                            .append(" [").append(Objects.toString(m.get("rule"), "")).append("] ")
+                            .append(Objects.toString(m.get("message"), "")).append("\n");
+                }
+            }
+        }
     }
 }

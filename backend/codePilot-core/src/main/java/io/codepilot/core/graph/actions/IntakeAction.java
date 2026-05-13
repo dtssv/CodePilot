@@ -60,6 +60,8 @@ public class IntakeAction implements NodeAction {
             "gatheredInfo", "infoRequests",
             // commit outputs
             "commitResult", "hasNextPhase",
+            // fast-path
+            "fastPathEnabled",
             // finalize outputs
             "donePayload", "sessionDigest", "summaryForNextTurn",
             "completedToolCalls", "taskLedger",

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import io.codepilot.plugin.marketplace.LocalMarketplaceStore
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
@@ -18,16 +19,22 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Minimal JSON-RPC 2.0 manager for MCP servers launched as stdio children.
+ * Minimal JSON-RPC 2.0 manager for MCP servers.
  *
- * <p>Lifetime is tied to the application; processes are lazily launched on first request and
- * reused for subsequent calls. Callers pass a `spec` that describes how to spawn the child.
+ * Supports three transport modes:
+ * - **stdio**: Local process communicating via stdin/stdout
+ * - **SSE**: Remote server via Server-Sent Events
+ * - **Streamable HTTP**: Remote server via HTTP POST
+ *
+ * Lifetime is tied to the application; stdio processes are lazily launched on first request and
+ * reused for subsequent calls. SSE/HTTP clients are managed separately.
  */
 @Service(Service.Level.APP)
 class McpProcessManager : Disposable {
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val procs = ConcurrentHashMap<String, Handle>()
     private val specs = ConcurrentHashMap<String, McpLaunchSpec>()
+    private val sseClients = ConcurrentHashMap<String, McpSseClient>()
     private val healthScheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val maxRestartAttempts = 3
     private val restartAttempts = ConcurrentHashMap<String, AtomicInteger>()
@@ -37,12 +44,18 @@ class McpProcessManager : Disposable {
         healthScheduler.scheduleAtFixedRate({ runHealthChecks() }, 30, 30, TimeUnit.SECONDS)
     }
 
-    /** Call {@code method} with {@code params} on the named MCP child and return the parsed result. */
+    /** Call {@code method} with {@code params} on the named MCP server and return the parsed result. */
     fun call(
         serverId: String,
         method: String,
         params: Any?,
     ): JsonNode {
+        // Try SSE/HTTP client first
+        val sseClient = sseClients[serverId]
+        if (sseClient != null) {
+            return sseClient.call(method, params)
+        }
+        // Fall back to stdio
         val h = procs[serverId] ?: throw IllegalStateException("mcp not started: $serverId")
         val id = h.nextId()
         val request: ObjectNode =
@@ -66,34 +79,69 @@ class McpProcessManager : Disposable {
         return response.get("result") ?: mapper.nullNode()
     }
 
+    /** Start a stdio-based MCP server. */
     fun start(
         serverId: String,
         spec: McpLaunchSpec,
     ) {
         specs[serverId] = spec
         restartAttempts.remove(serverId)
-        procs.computeIfAbsent(serverId) { launch(spec) }
+        // If there is a dead process from a previous run, clean it up first
+        val existing = procs[serverId]
+        if (existing != null && !existing.process.isAlive) {
+            procs.remove(serverId)
+            existing.close()
+        }
+        // Only launch if not already running
+        if (!procs.containsKey(serverId)) {
+            procs[serverId] = launch(spec)
+        }
+    }
+
+    /** Start a remote MCP server (SSE or Streamable HTTP). */
+    fun startRemote(
+        serverId: String,
+        url: String,
+        transport: LocalMarketplaceStore.McpTransport,
+        headers: Map<String, String> = emptyMap(),
+    ) {
+        // Disconnect existing client if any
+        sseClients.remove(serverId)?.disconnect()
+        val client = McpSseClient(serverId, url, transport, headers)
+        client.connect()
+        sseClients[serverId] = client
     }
 
     fun stop(serverId: String) {
         specs.remove(serverId)
         restartAttempts.remove(serverId)
         procs.remove(serverId)?.close()
+        sseClients.remove(serverId)?.disconnect()
     }
 
-    fun isRunning(serverId: String): Boolean = procs[serverId]?.process?.isAlive == true
+    fun isRunning(serverId: String): Boolean {
+        return procs[serverId]?.process?.isAlive == true || sseClients[serverId]?.isConnected == true
+    }
 
     /** Get health status for all running MCP servers. */
-    fun healthStatus(): Map<String, HealthStatus> =
-        procs.mapValues { (id, handle) ->
-            val alive = handle.process.isAlive
-            val attempts = restartAttempts[id]?.get() ?: 0
-            HealthStatus(
-                alive = alive,
-                restartAttempts = attempts,
+    fun healthStatus(): Map<String, HealthStatus> {
+        val result = mutableMapOf<String, HealthStatus>()
+        for ((id, handle) in procs) {
+            result[id] = HealthStatus(
+                alive = handle.process.isAlive,
+                restartAttempts = restartAttempts[id]?.get() ?: 0,
                 serverId = id,
             )
         }
+        for ((id, client) in sseClients) {
+            result[id] = HealthStatus(
+                alive = client.isConnected,
+                restartAttempts = 0,
+                serverId = id,
+            )
+        }
+        return result
+    }
 
     data class HealthStatus(
         val alive: Boolean,
@@ -226,6 +274,8 @@ class McpProcessManager : Disposable {
         }
         procs.values.forEach { it.close() }
         procs.clear()
+        sseClients.values.forEach { it.disconnect() }
+        sseClients.clear()
         specs.clear()
         restartAttempts.clear()
     }
@@ -274,13 +324,21 @@ class McpProcessManager : Disposable {
         fun close() {
             runCatching { writer.close() }
             runCatching { process.destroy() }
-            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                process.destroyForcibly()
-            }
+            // Non-blocking close: don't waitFor on caller thread (could be EDT).
+            // Schedule forced destroy as a safety net on a daemon thread.
+            val p = process
+            val killer = Thread({
+                if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    p.destroyForcibly()
+                }
+            }, "mcp-kill-${process.pid()}")
+            killer.isDaemon = true
+            killer.start()
         }
     }
 
     companion object {
-        @JvmStatic fun getInstance(): McpProcessManager = service()
+        @JvmStatic
+        fun getInstance(): McpProcessManager = service()
     }
 }

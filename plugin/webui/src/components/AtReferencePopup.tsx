@@ -45,8 +45,14 @@ export function AtReferencePopup({ inputValue, cursorPosition, visible, onSelect
         sendToPlugin('at_suggest', { query }).catch(() => { });
 
         const unsub = onPluginEvent('at_suggestions', (payload) => {
-            const data = payload as { suggestions: AtSuggestion[] };
-            setSuggestions(data.suggestions || []);
+            const data = payload as { suggestions: Array<Record<string, string>> };
+            const mapped: AtSuggestion[] = (data.suggestions || []).map(s => ({
+                type: s.type || 'file',
+                label: s.label || s.display || '',
+                detail: s.detail || '',
+                path: s.path || s.id?.split(':').slice(1).join(':') || '',
+            }));
+            setSuggestions(mapped);
             setSelectedIndex(0);
             setLoading(false);
         });

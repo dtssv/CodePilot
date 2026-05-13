@@ -5,7 +5,7 @@
 
 export interface ContextChipData {
     id: string;             // context ID (maps to fullCode in Kotlin contextStore)
-    type: 'code' | 'file' | 'package';
+    type: 'code' | 'file' | 'package' | 'folder' | 'symbol' | 'git' | 'codebase' | 'docs' | 'web' | 'terminal';
     display: string;        // compact label shown in the chip
     filePath: string;
     language: string;

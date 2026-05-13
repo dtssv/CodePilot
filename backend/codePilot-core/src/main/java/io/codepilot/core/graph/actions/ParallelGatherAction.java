@@ -54,7 +54,7 @@ public class ParallelGatherAction implements NodeAction {
         updates.put("currentNode", "parallel_gather");
 
         String phaseId = (String) state.value("phaseCursor").orElse("");
-        var rawRequests = (List<Map<String, Object>>) state.value("infoRequests").orElse(List.of());
+        var rawRequests = normalizeInfoRequests(state.value("infoRequests").orElse(List.of()));
 
         if (rawRequests.isEmpty()) {
             log.debug("ParallelGather: no info requests, skipping");
@@ -176,5 +176,29 @@ public class ParallelGatherAction implements NodeAction {
         }
 
         return batches;
+    }
+
+    /**
+     * Normalizes raw infoRequests from graph state into a type-safe List of Maps.
+     * Handles cases where LLM or Jackson deserialization produces String elements
+     * instead of Map elements (e.g., ["fs.read", "code.outline"]).
+     */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> normalizeInfoRequests(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> list)) return List.of();
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                result.add((Map<String, Object>) map);
+            } else if (item instanceof String kind) {
+                log.warn("ParallelGather: normalizing string infoRequest '{}' to Map form", kind);
+                result.add(Map.of("kind", (Object) kind, "id", UUID.randomUUID().toString()));
+            } else {
+                log.warn("ParallelGather: skipping unexpected infoRequest type: {}", item != null ? item.getClass() : "null");
+            }
+        }
+        return result;
     }
 }

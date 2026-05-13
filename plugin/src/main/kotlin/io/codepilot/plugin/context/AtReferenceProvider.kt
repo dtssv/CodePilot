@@ -83,16 +83,18 @@ class AtReferenceProvider(
             prefix == "file" || (!prefix.startsWith("f") && query.length > 0 && "file".startsWith(prefix)) -> {
                 searchFiles(subQuery, limit)
             }
-            prefix == "folder" -> searchFolders(subQuery, limit)
-            prefix == "symbol" -> searchSymbols(subQuery, limit)
-            prefix == "git" ->
+            prefix == "folder" || ("folder".startsWith(prefix) && prefix.isNotEmpty()) -> searchFolders(subQuery, limit)
+            prefix == "symbol" || ("symbol".startsWith(prefix) && prefix.isNotEmpty()) -> searchSymbols(subQuery, limit)
+            prefix == "git" || ("git".startsWith(prefix) && prefix.isNotEmpty()) ->
                 listOf(
                     Suggestion("git", "@git diff", "Unstaged changes"),
                     Suggestion("git", "@git diff --staged", "Staged changes"),
                     Suggestion("git", "@git log --oneline -10", "Recent commits"),
                 )
-            prefix == "codebase" -> listOf(Suggestion("codebase", "@codebase $subQuery", "Semantic search"))
-            prefix == "docs" -> searchDocs(subQuery, limit)
+            prefix == "codebase" || ("codebase".startsWith(prefix) && prefix.isNotEmpty()) -> listOf(Suggestion("codebase", "@codebase $subQuery", "Semantic search"))
+            prefix == "docs" || ("docs".startsWith(prefix) && prefix.isNotEmpty()) -> searchDocs(subQuery, limit)
+            prefix == "web" || ("web".startsWith(prefix) && prefix.isNotEmpty()) -> listOf(Suggestion("web", "@web $subQuery", "Fetch URL content"))
+            prefix == "terminal" || ("terminal".startsWith(prefix) && prefix.isNotEmpty()) -> listOf(Suggestion("terminal", "@terminal", "Recent terminal output"))
             else -> searchFiles(query, limit) + searchSymbols(query, limit / 2)
         }
     }
@@ -124,14 +126,36 @@ class AtReferenceProvider(
         query: String,
         limit: Int,
     ): List<Suggestion> {
-        if (query.isBlank()) return emptyList()
+        // If query is blank, show recently used / project root files as hints
+        if (query.isBlank()) {
+            val projectBase = project.basePath ?: return emptyList()
+            val root = VirtualFileManager.getInstance().findFileByUrl("file://$projectBase") ?: return emptyList()
+            return root.children
+                .filter { !it.isDirectory && it.length < 100_000 && !it.name.startsWith(".") }
+                .take(limit)
+                .map { vf ->
+                    val rel = vf.path.removePrefix(projectBase).trimStart('/')
+                    Suggestion("file", "@file $rel", "${vf.length / 1024}KB", rel)
+                }
+        }
         return ReadAction.compute<List<Suggestion>, Throwable> {
             val scope = GlobalSearchScope.projectScope(project)
-            val files =
+            // Try exact name match first, then fuzzy
+            val ext = query.substringAfterLast('.', "")
+            val namePart = query.substringBeforeLast('.')
+            val files = if (ext.isNotBlank()) {
                 FilenameIndex
-                    .getAllFilesByExt(project, query.substringAfterLast('.', ""), scope)
+                    .getAllFilesByExt(project, ext, scope)
                     .filter { it.name.lowercase().contains(query.lowercase()) }
                     .take(limit)
+            } else {
+                // No extension — search by name across common extensions
+                val commonExts = listOf("kt", "java", "ts", "tsx", "js", "jsx", "py", "go", "rs", "css", "html", "json", "yaml", "yml", "md", "xml", "gradle", "properties")
+                commonExts.flatMap { e ->
+                    FilenameIndex.getAllFilesByExt(project, e, scope)
+                        .filter { it.name.lowercase().contains(query.lowercase()) }
+                }.take(limit)
+            }
             files.map { vf ->
                 val rel = vf.path.removePrefix(project.basePath ?: "").trimStart('/')
                 Suggestion("file", "@file $rel", "${vf.length / 1024}KB", rel)
@@ -172,10 +196,19 @@ class AtReferenceProvider(
         query: String,
         limit: Int,
     ): List<Suggestion> {
-        if (query.isBlank()) return emptyList()
         val projectRoot =
             project.basePath?.let { VirtualFileManager.getInstance().findFileByUrl("file://$it") }
                 ?: return emptyList()
+        if (query.isBlank()) {
+            // Show top-level directories as hints
+            return projectRoot.children
+                .filter { it.isDirectory && !it.name.startsWith(".") && it.name != "node_modules" && it.name != "build" }
+                .take(limit)
+                .map { dir ->
+                    val rel = dir.path.removePrefix(project.basePath ?: "").trimStart('/')
+                    Suggestion("folder", "@folder $rel", "directory", rel)
+                }
+        }
         val results = mutableListOf<Suggestion>()
         VfsUtilCore.iterateChildrenRecursively(projectRoot, { it.isDirectory && it.name != ".git" && it.name != "node_modules" }) { dir ->
             if (dir.isDirectory && dir.name.lowercase().contains(query.lowercase())) {

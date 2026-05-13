@@ -223,15 +223,28 @@ open class LocalMarketplaceStore {
         val path: Path,
     )
 
+    /** Transport mode for an MCP server. */
+    enum class McpTransport(val value: String) {
+        STDIO("stdio"),
+        SSE("sse"),
+        STREAMABLE_HTTP("streamable-http"),
+    }
+
     /** Represents an installed MCP server. */
     data class McpEntry(
         val id: String,
         val version: String = "1.0.0",
-        val argv: List<String>,
+        val argv: List<String> = emptyList(),
         val cwd: String? = null,
         val env: Map<String, String> = emptyMap(),
         val installedAt: String = "",
         val disabled: Boolean = false,
+        /** Transport mode: stdio (local process), sse (remote SSE), or streamable-http. */
+        val transport: McpTransport = McpTransport.STDIO,
+        /** Remote URL for SSE / Streamable HTTP transport modes. */
+        val url: String? = null,
+        /** Custom HTTP headers for SSE / Streamable HTTP (e.g. Authorization). */
+        val headers: Map<String, String> = emptyMap(),
     )
 
     /** Returns all installed and enabled MCP servers (from global scope). */

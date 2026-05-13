@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
 import io.codepilot.core.graph.GraphSseHelper;
@@ -53,7 +54,7 @@ public class GenerateAction implements NodeAction {
         String phaseId = (String) state.value("phaseCursor").orElse("");
         var userPlan = (Map<String, Object>) state.value("userPlan").orElse(Map.of());
         var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
-        var gatheredInfo = (List<Map<String, Object>>) state.value("gatheredInfo").orElse(List.of());
+        var gatheredInfo = (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
 
         // Find current phase details
         Map<String, Object> currentPhase = phases.stream()
@@ -105,10 +106,10 @@ public class GenerateAction implements NodeAction {
     private String buildGeneratePrompt(String input, String phaseId,
                                         Map<String, Object> currentPhase,
                                         Map<String, Object> userPlan,
-                                        List<Map<String, Object>> gatheredInfo) {
+                                        Map<String, Object> gatheredInfo) {
         String template = promptRegistry.get("graph.generate");
         String gatheredContext = gatheredInfo.isEmpty() ? ""
-                : "[GATHERED CONTEXT]\n" + gatheredInfo.stream()
+                : "[GATHERED CONTEXT]\n" + gatheredInfo.values().stream()
                         .map(info -> "- " + info.toString())
                         .reduce((a, b) -> a + "\n" + b).orElse("");
         return template
@@ -125,19 +126,24 @@ public class GenerateAction implements NodeAction {
         String json = extractJson(llmResponse);
         JsonNode root = mapper.readTree(json);
 
-        // Check for infoRequests
+        // Check for infoRequests — LLM may return string elements instead of objects
         JsonNode infoRequests = root.get("infoRequests");
         if (infoRequests != null && !infoRequests.isNull() && infoRequests.isArray() && !infoRequests.isEmpty()) {
             updates.put("generateResult", "infoRequests");
-            updates.put("infoRequests", mapper.convertValue(infoRequests, List.class));
+            updates.put("infoRequests", normalizeInfoRequests(infoRequests));
             return updates;
         }
 
-        // Check for askUser
+        // Check for askUser — LLM may return a plain string instead of an object
         JsonNode askUser = root.get("askUser");
         if (askUser != null && !askUser.isNull()) {
             updates.put("generateResult", "askUser");
-            updates.put("askUserQuestion", mapper.convertValue(askUser, Map.class));
+            if (askUser.isObject()) {
+                updates.put("askUserQuestion", mapper.convertValue(askUser, Map.class));
+            } else {
+                // Wrap plain string into a structured askUser map
+                updates.put("askUserQuestion", Map.of("question", askUser.asText()));
+            }
             return updates;
         }
 
@@ -199,7 +205,10 @@ public class GenerateAction implements NodeAction {
             GraphSseHelper.emitEvent(state, SseEvents.DELTA,
                     Map.of("text", llmResponse));
         }
-        updates.put("generateResult", "toolCalls");
+        // B3 fix: use "textOutput" instead of "toolCalls" so the router skips
+        // applyPatch/verify and goes directly to commit, avoiding wasted time
+        // on empty patches flowing through the full pipeline
+        updates.put("generateResult", "textOutput");
         updates.put("pendingPatches", List.of());
         updates.put("modifiedFiles", List.of());
         return updates;
@@ -234,6 +243,28 @@ public class GenerateAction implements NodeAction {
         }
     }
 
+    /**
+     * Normalize infoRequests array: LLM may return string elements instead of
+     * structured objects. Wrap each string element into a standard map.
+     */
+    private List<Map<String, Object>> normalizeInfoRequests(JsonNode infoRequestsNode) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (JsonNode element : infoRequestsNode) {
+            if (element.isObject()) {
+                try {
+                    result.add(mapper.convertValue(element, new TypeReference<Map<String, Object>>() {}));
+                } catch (Exception e) {
+                    log.warn("Failed to parse infoRequest element, wrapping as string: {}", e.getMessage());
+                    result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "askUser", "question", element.toString()));
+                }
+            } else {
+                // Plain string — wrap into a structured request
+                result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "askUser", "question", element.asText()));
+            }
+        }
+        return result;
+    }
+
     private String extractJson(String response) {
         if (response == null) return "{}";
         String trimmed = response.trim();
@@ -257,6 +288,7 @@ public class GenerateAction implements NodeAction {
         return switch (result) {
             case "infoRequests" -> "gather";
             case "askUser" -> "askUser";
+            case "textOutput" -> "commit";  // B3 fix: skip applyPatch/verify for unstructured text
             default -> "applyPatch";
         };
     }

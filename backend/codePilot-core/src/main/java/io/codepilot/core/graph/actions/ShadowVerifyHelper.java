@@ -44,8 +44,8 @@ public class ShadowVerifyHelper {
         long startTime = System.currentTimeMillis();
 
         GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
-            "toolCallId", validateId,
-            "tool", "ide.shadowValidate",
+            "id", validateId,
+            "name", "ide.shadowValidate",
             "args", Map.of("patches", patches, "validateType", "compile")
         ));
 

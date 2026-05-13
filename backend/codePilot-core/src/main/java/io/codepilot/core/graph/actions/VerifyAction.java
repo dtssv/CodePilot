@@ -2,12 +2,15 @@ package io.codepilot.core.graph.actions;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
+import io.codepilot.core.conversation.ToolResultBus;
+import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.*;
 
 /**
@@ -15,21 +18,24 @@ import java.util.*;
  *
  * <p>Verification strategy (deterministic, no LLM call):
  * <ol>
- *   <li>Request IDE diagnostics from the client via {@code ide.diagnostics} tool</li>
- *   <li>Check if any compile errors exist in the modified files</li>
- *   <li>If {@code policy.graphVerify.runTests=true}, request test execution via {@code shell.exec}</li>
- *   <li>If {@code policy.graphVerify.runLint=true}, request lint check via {@code shell.exec}</li>
- *   <li>Aggregate results into a {@link VerifyReport}</li>
+ *   <li>Emit a {@code tool_call} SSE for {@code ide.diagnostics} to request IDE diagnostics</li>
+ *   <li>Await the client's result via {@link ToolResultBus} (Redis Pub/Sub)</li>
+ *   <li>Parse diagnostics and aggregate into a {@link VerifyReport}</li>
+ *   <li>If {@code policy.graphVerify.runTests=true}, also request test execution</li>
  * </ol>
- *
- * <p>The verify node does NOT execute tools itself — it emits a {@code graph_verify_request} SSE event
- * that instructs the client to run diagnostics/tests and report back. The client result is stored
- * in the graph state by the next turn of the AgentLoop.
  */
 @Component
 public class VerifyAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(VerifyAction.class);
+
+    private static final Duration DIAGNOSTICS_TIMEOUT = Duration.ofSeconds(30);
+
+    private final ToolResultBus toolResultBus;
+
+    public VerifyAction(ToolResultBus toolResultBus) {
+        this.toolResultBus = toolResultBus;
+    }
 
     @Override
     @SuppressWarnings("unchecked")
@@ -37,11 +43,20 @@ public class VerifyAction implements NodeAction {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "verify");
 
+        String sessionId = (String) state.value("sessionId").orElse("");
         String phaseId = (String) state.value("phaseCursor").orElse("");
         var modifiedFiles = (List<String>) state.value("modifiedFiles").orElse(List.of());
 
         // ── Step 1: Request IDE diagnostics from the client ──
-        // The client runs ide.diagnostics and reports back via tool-result
+        // Emit a tool_call SSE so the client runs ide.diagnostics and reports back
+        String diagToolCallId = UUID.randomUUID().toString();
+        GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
+            "id", diagToolCallId,
+            "name", "ide.diagnostics",
+            "args", Map.of("files", modifiedFiles)
+        ));
+
+        // Also emit the legacy event for backward compatibility
         GraphSseHelper.emitEvent(state, "graph_verify_request",
                 Map.of(
                     "phaseId", phaseId,
@@ -50,7 +65,27 @@ public class VerifyAction implements NodeAction {
                     "message", "Requesting IDE diagnostics for modified files"
                 ));
 
-        // ── Step 2: Check verification policy ──
+        // ── Step 2: Await client diagnostics via ToolResultBus ──
+        List<Map<String, Object>> clientDiagnostics = new ArrayList<>();
+        try {
+            ToolResultEvent result = toolResultBus.subscribe(sessionId)
+                .filter(e -> e.toolCallId().equals(diagToolCallId))
+                .timeout(DIAGNOSTICS_TIMEOUT)
+                .blockFirst();
+
+            if (result != null && result.ok() && result.result() != null) {
+                // Parse diagnostics from client result
+                clientDiagnostics = parseDiagnosticsResult(result.result());
+                log.info("Verify phase={}: received {} diagnostics from client", phaseId, clientDiagnostics.size());
+            } else {
+                String error = result != null ? result.errorMessage() : "Timeout waiting for diagnostics";
+                log.warn("Verify phase={}: diagnostics request failed: {}", phaseId, error);
+            }
+        } catch (Exception e) {
+            log.warn("Verify phase={}: diagnostics request timed out or failed: {}", phaseId, e.getMessage());
+        }
+
+        // ── Step 3: Check verification policy for additional checks ──
         var verifyPolicy = state.value("graphVerifyPolicy").orElse(null);
         boolean runTests = false;
         boolean runLint = false;
@@ -59,16 +94,56 @@ public class VerifyAction implements NodeAction {
             runLint = Boolean.TRUE.equals(policyMap.get("runLint"));
         }
 
-        // ── Step 3: Build the verify report from available data ──
-        // In a real implementation, the client would have returned diagnostics results
-        // which are stored in state. For now we check the state for client-reported results.
-        var clientDiagnostics = (List<Map<String, Object>>) state.value("clientDiagnostics").orElse(List.of());
-        var testResults = (Map<String, Object>) state.value("testResults").orElse(null);
-        var lintResults = (Map<String, Object>) state.value("lintResults").orElse(null);
+        Map<String, Object> testResults = null;
+        Map<String, Object> lintResults = null;
 
+        // ── Step 3a: Run tests if policy requires ──
+        if (runTests) {
+            String testToolCallId = UUID.randomUUID().toString();
+            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
+                "id", testToolCallId,
+                "name", "shell.exec",
+                "args", Map.of("command", "test", "files", modifiedFiles)
+            ));
+            try {
+                ToolResultEvent testResult = toolResultBus.subscribe(sessionId)
+                    .filter(e -> e.toolCallId().equals(testToolCallId))
+                    .timeout(Duration.ofSeconds(60))
+                    .blockFirst();
+                if (testResult != null && testResult.ok() && testResult.result() instanceof Map) {
+                    testResults = (Map<String, Object>) testResult.result();
+                }
+            } catch (Exception e) {
+                log.warn("Verify phase={}: test execution failed: {}", phaseId, e.getMessage());
+            }
+        }
+
+        // ── Step 3b: Run lint if policy requires ──
+        if (runLint) {
+            String lintToolCallId = UUID.randomUUID().toString();
+            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
+                "id", lintToolCallId,
+                "name", "shell.exec",
+                "args", Map.of("command", "lint", "files", modifiedFiles)
+            ));
+            try {
+                ToolResultEvent lintResult = toolResultBus.subscribe(sessionId)
+                    .filter(e -> e.toolCallId().equals(lintToolCallId))
+                    .timeout(Duration.ofSeconds(30))
+                    .blockFirst();
+                if (lintResult != null && lintResult.ok() && lintResult.result() instanceof Map) {
+                    lintResults = (Map<String, Object>) lintResult.result();
+                }
+            } catch (Exception e) {
+                log.warn("Verify phase={}: lint check failed: {}", phaseId, e.getMessage());
+            }
+        }
+
+        // ── Step 4: Build verify report from collected results ──
         VerifyReport report = buildVerifyReport(clientDiagnostics, testResults, lintResults, modifiedFiles);
 
-        updates.put("verifyReport", report);
+        updates.put("clientDiagnostics", clientDiagnostics);
+        updates.put("verifyReport", report.toMap());
         updates.put("verifyResult", report.overallResult);
 
         // Emit the verify report as SSE event
@@ -86,6 +161,38 @@ public class VerifyAction implements NodeAction {
                 report.compileErrors.size(), report.testFailures.size(), report.lintWarnings.size());
 
         return updates;
+    }
+
+    /**
+     * Parses the client diagnostics result into a list of diagnostic maps.
+     * Handles both list and map result formats.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> parseDiagnosticsResult(Object result) {
+        if (result instanceof List<?> list) {
+            List<Map<String, Object>> diagnostics = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    diagnostics.add((Map<String, Object>) map);
+                }
+            }
+            return diagnostics;
+        }
+        if (result instanceof Map<?, ?> map) {
+            // Single diagnostic or wrapped result
+            var diagnostics = (List<?>) map.get("diagnostics");
+            if (diagnostics != null) {
+                List<Map<String, Object>> result2 = new ArrayList<>();
+                for (Object item : diagnostics) {
+                    if (item instanceof Map<?, ?> m) {
+                        result2.add((Map<String, Object>) m);
+                    }
+                }
+                return result2;
+            }
+            return List.of((Map<String, Object>) map);
+        }
+        return List.of();
     }
 
     /**
@@ -131,6 +238,16 @@ public class VerifyAction implements NodeAction {
             return String.format("VerifyReport{result=%s, compileErrors=%d, testFailures=%d, lintWarnings=%d, duration=%dms}",
                     overallResult, compileErrors.size(), testFailures.size(), lintWarnings.size(), durationMs);
         }
+
+        public Map<String, Object> toMap() {
+            return Map.of(
+                "overallResult", overallResult,
+                "compileErrors", compileErrors.stream().map(VerifyFinding::toMap).toList(),
+                "testFailures", testFailures.stream().map(VerifyFinding::toMap).toList(),
+                "lintWarnings", lintWarnings.stream().map(VerifyFinding::toMap).toList(),
+                "durationMs", durationMs
+            );
+        }
     }
 
     public static class VerifyFinding {
@@ -146,6 +263,10 @@ public class VerifyAction implements NodeAction {
             this.severity = severity;
             this.message = message;
             this.rule = rule;
+        }
+
+        public Map<String, Object> toMap() {
+            return Map.of("file", file, "line", line, "severity", severity, "message", message, "rule", rule);
         }
     }
 

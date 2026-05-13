@@ -26,6 +26,8 @@ class ToolDispatcher(
     private val client: ConversationClient,
     private val sessionId: String,
     private val graphStateStore: GraphStateStore? = null,
+    /** Optional callback invoked after each tool execution completes, for UI feedback. */
+    private val onToolResult: ((toolCallId: String, ok: Boolean, result: Any?) -> Unit)? = null,
 ) {
     private val patchApplier = PatchApplier(project)
     private val fileReader = FileReader(project)
@@ -106,6 +108,7 @@ class ToolDispatcher(
                         name == "fs.replace" -> dispatchViaPatchApplier(name, args)
                         name == "fs.delete" -> dispatchViaPatchApplier(name, args)
                         name == "fs.move" -> dispatchViaPatchApplier(name, args)
+                        name == "fs.applyPatch" -> dispatchApplyPatch(args)
                         name == "shell.exec" -> ShellExecutor(project).execute(args)
                         name == "shell.session" -> dispatchShellSession(args)
                         name == "plan.show" -> planShow(args)
@@ -165,15 +168,26 @@ class ToolDispatcher(
         for (server in installed) {
             try {
                 if (!mcpManager.isRunning(server.id)) {
-                    mcpManager.start(
-                        server.id,
-                        McpProcessManager.McpLaunchSpec(
-                            id = server.id,
-                            argv = server.argv,
-                            cwd = server.cwd,
-                            env = server.env,
-                        ),
-                    )
+                    when (server.transport) {
+                        LocalMarketplaceStore.McpTransport.STDIO -> {
+                            mcpManager.start(
+                                server.id,
+                                McpProcessManager.McpLaunchSpec(
+                                    id = server.id,
+                                    argv = server.argv,
+                                    cwd = server.cwd,
+                                    env = server.env,
+                                ),
+                            )
+                        }
+                        LocalMarketplaceStore.McpTransport.SSE,
+                        LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP,
+                        -> {
+                            val url = server.url
+                                ?: throw IllegalStateException("Missing URL for remote MCP server '${server.id}'")
+                            mcpManager.startRemote(server.id, url, server.transport, server.headers)
+                        }
+                    }
                 }
                 // Fetch tools/list from the running server
                 val toolsResult = mcpManager.call(server.id, "tools/list", null)
@@ -283,6 +297,60 @@ class ToolDispatcher(
     ): Map<String, Any?> {
         patchApplier.apply(name, args)
         return mapOf("ack" to true, "appliedVia" to "DiffManager")
+    }
+
+    /**
+     * Dispatch fs.applyPatch tool calls.
+     * The backend sends fs.applyPatch with args in two formats:
+     * - Single edit: {path, op, search, replace, newContent}
+     * - Multi-edit batch: {patches: [{path, op, search, replace, newContent}, ...]}
+     * Routes each patch to PatchApplier with the appropriate tool name based on the op field.
+     */
+    private fun dispatchApplyPatch(args: JsonNode): Map<String, Any?> {
+        // Check if this is a batch (patches array) or single-edit format
+        val patchesNode = args.path("patches")
+        if (!patchesNode.isMissingNode && patchesNode.isArray && patchesNode.size() > 0) {
+            // Batch format: iterate over each patch in the array
+            val results = mutableListOf<Map<String, Any?>>()
+            for (patch in patchesNode) {
+                val result = applySinglePatch(patch)
+                results.add(result)
+            }
+            val appliedCount = results.count { it["ok"] == true }
+            return mapOf(
+                "ack" to true,
+                "appliedVia" to "DiffManager",
+                "batchSize" to patchesNode.size(),
+                "appliedCount" to appliedCount,
+                "results" to results,
+            )
+        }
+
+        // Single-edit format: use args directly
+        return applySinglePatch(args)
+    }
+
+    /**
+     * Apply a single patch edit. Determines the effective tool name based on op
+     * and routes to PatchApplier.
+     */
+    private fun applySinglePatch(patch: JsonNode): Map<String, Any?> {
+        val op = patch.path("op").asText("replace")
+        val hasSearchReplace = patch.has("search") && !patch.path("search").asText().isBlank()
+        val hasNewContent = patch.has("newContent") && !patch.path("newContent").asText().isBlank()
+        val path = patch.path("path").asText()
+
+        // Determine the effective tool name based on op and available args
+        val effectiveToolName = when {
+            op == "create" -> "fs.create"
+            op == "delete" -> "fs.delete"
+            op == "replace" && hasSearchReplace -> "fs.replace"
+            op == "replace" && hasNewContent && !hasSearchReplace -> "fs.write"
+            hasNewContent -> "fs.write"
+            else -> "fs.replace"
+        }
+        patchApplier.apply(effectiveToolName, patch)
+        return mapOf("ok" to true, "path" to path, "appliedVia" to "DiffManager", "originalOp" to op, "routedAs" to effectiveToolName)
     }
 
     // ---------- IDE tools ----------
@@ -422,6 +490,8 @@ class ToolDispatcher(
         startedNs: Long,
     ) {
         val durationMs = (System.nanoTime() - startedNs) / 1_000_000
+        // Notify UI callback about tool result for real-time status update
+        onToolResult?.invoke(toolCallId, ok, result)
         client.submitToolResult(
             mutableMapOf<String, Any?>(
                 "sessionId" to sessionId,

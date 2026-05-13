@@ -19,7 +19,11 @@ public class ReenterAction implements NodeAction {
     }
 
     public String routeAfterReenter(OverAllState state) {
-        String resumeTo = (String) state.value("gatherResumeTo").orElse("generate");
-        return resumeTo;
+        String resumeTo = (String) state.value("gatherResumeTo").orElse("");
+        // Only return valid targets that exist in the graph's conditional edge mapping
+        return switch (resumeTo) {
+            case "planning", "preCheck", "generate", "repair" -> resumeTo;
+            default -> "generate"; // safe default
+        };
     }
 }

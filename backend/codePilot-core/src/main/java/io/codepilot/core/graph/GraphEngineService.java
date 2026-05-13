@@ -1,21 +1,21 @@
 package io.codepilot.core.graph;
 
-import com.alibaba.cloud.ai.graph.StateGraph;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
-import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
+import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.action.AsyncEdgeAction;
-import com.alibaba.cloud.ai.graph.action.NodeAction;
-import com.alibaba.cloud.ai.graph.action.EdgeAction;
+import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
+import io.codepilot.core.conversation.SseFactory;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.graph.actions.*;
 import io.codepilot.core.sse.SseEvents;
-import io.codepilot.core.conversation.SseFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.Map;
 
@@ -36,6 +36,13 @@ import java.util.Map;
 public class GraphEngineService {
 
     private static final Logger log = LoggerFactory.getLogger(GraphEngineService.class);
+
+    /** Dedicated scheduler for graph engine execution — avoids blocking the ForkJoinPool.commonPool()
+     *  and provides bounded elasticity for concurrent agent requests. */
+    private final Scheduler graphScheduler = Schedulers.newBoundedElastic(
+            Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE,
+            Schedulers.DEFAULT_BOUNDED_ELASTIC_QUEUESIZE,
+            "graph-engine", 60, true);
 
     private final IntakeAction intakeAction;
     private final PlanningAction planningAction;
@@ -89,6 +96,14 @@ public class GraphEngineService {
     /**
      * Builds and executes the Graph for a conversation run request.
      * Returns SSE events as a reactive stream.
+     *
+     * <p>Uses {@code Sinks.Many} to stream SSE events in real-time as each graph node
+     * executes, rather than waiting for the entire graph to complete.
+     *
+     * <p>The graph executes on a dedicated scheduler (C3 fix) instead of
+     * ForkJoinPool.commonPool(). Each node's {@code GraphSseHelper.emitEvent()} pushes
+     * events directly to the reactive sink, so the client receives tool_call events
+     * immediately and can return tool results back to the backend (ToolResultBus).
      */
     public Flux<ServerSentEvent<String>> run(ConversationRunRequest req, String userId) {
         try {
@@ -102,11 +117,31 @@ public class GraphEngineService {
                 initialState.value("userId").orElse(null),
                 initialState.keyStrategies().keySet());
 
-            var resultState = graph.invoke(initialState.data());
-            log.info("GraphEngine result state keys={}, modelId={}", 
-                resultState.map(s -> s.data().keySet()).orElse(null),
-                resultState.flatMap(s -> s.value("modelId")).orElse(null));
-            return buildSseFromResult(resultState.orElse(null));
+            Sinks.Many<ServerSentEvent<String>> liveSink = Sinks.many().unicast().onBackpressureBuffer();
+
+            Runnable graphTask = () -> {
+                // Set the ThreadLocal live sink so GraphSseHelper.emitEvent() can push events
+                GraphSseHelper.setLiveSink(liveSink, sse);
+                // Also register in session-based map so async nodes on different threads can access it (M1 fix)
+                String sid = req.sessionId();
+                GraphSseHelper.registerSessionSink(sid, liveSink, sse);
+                try {
+                    var resultState = graph.invoke(initialState.data());
+                    log.info("GraphEngine completed: state keys={}",
+                        resultState.map(s -> s.data().keySet()).orElse(null));
+                    liveSink.tryEmitComplete();
+                } catch (Exception e) {
+                    log.error("Graph engine execution failed", e);
+                    liveSink.tryEmitNext(sse.error(50001, "Graph engine error: " + e.getMessage()));
+                    liveSink.tryEmitComplete();
+                } finally {
+                    GraphSseHelper.clearLiveSink();
+                    GraphSseHelper.unregisterSessionSink(sid);
+                }
+            };
+            graphScheduler.schedule(graphTask);
+
+            return liveSink.asFlux();
         } catch (Exception e) {
             log.error("Graph engine execution failed", e);
             return Flux.just(
@@ -143,25 +178,27 @@ public class GraphEngineService {
 
         graph.addEdge("preCheck", "generate");
 
-        // Generate → may need info, or produce toolCalls
+        // Generate → may need info, produce toolCalls, or textOutput (B3: skip applyPatch)
         graph.addConditionalEdges("generate",
                 AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
-                Map.of("applyPatch", "applyPatch", "gather", "gather", "askUser", "askUser"));
+                Map.of("applyPatch", "applyPatch", "gather", "gather",
+                        "askUser", "askUser", "commit", "commit"));
 
-        // ApplyPatch → may succeed or fail
+        // ApplyPatch → may succeed or fail; fast-path can skip verify (C1)
         graph.addConditionalEdges("applyPatch",
                 AsyncEdgeAction.edge_async(applyPatchAction::routeAfterApplyPatch),
-                Map.of("verify", "verify", "repair", "repair"));
+                Map.of("verify", "verify", "repair", "repair", "commit", "commit"));
 
         // Verify → success/fail/uncertain
         graph.addConditionalEdges("verify",
                 AsyncEdgeAction.edge_async(verifyAction::routeAfterVerify),
                 Map.of("commit", "commit", "repair", "repair", "askUser", "askUser"));
 
-        // Repair → may need info, or retry verify
+        // Repair → may need info, retry verify, or partial commit (M3)
         graph.addConditionalEdges("repair",
                 AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
-                Map.of("applyPatch", "applyPatch", "gather", "gather", "askUser", "askUser"));
+                Map.of("applyPatch", "applyPatch", "gather", "gather",
+                        "askUser", "askUser", "commit", "commit"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
@@ -245,24 +282,5 @@ public class GraphEngineService {
         graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();
-    }
-
-    private Flux<ServerSentEvent<String>> buildSseFromResult(OverAllState state) {
-        if (state == null) {
-            return Flux.just(sse.event(SseEvents.DONE, Map.of("reason", "error")));
-        }
-        // Extract SSE events accumulated during graph execution
-        @SuppressWarnings("unchecked")
-        var events = (java.util.List<Map<String, Object>>) state.value("sseEvents").orElse(java.util.List.of());
-        var sseList = events.stream()
-                .map(evt -> sse.event(
-                        (String) evt.get("event"),
-                        evt.get("data")))
-                .collect(java.util.stream.Collectors.toList());
-
-        String doneReason = (String) state.value("doneReason").orElse("final");
-        sseList.add(sse.event(SseEvents.DONE, Map.of("reason", doneReason)));
-
-        return Flux.fromIterable(sseList);
     }
 }

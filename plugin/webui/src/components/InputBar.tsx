@@ -178,11 +178,11 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                     if (/\s/.test(text[i])) break;
                 }
                 if (atIndex >= 0) {
-                    // Replace @query with empty text (chip will be added separately)
+                    // Replace @query with empty text
                     const before = text.substring(0, atIndex);
                     const after = text.substring(cursorOffset);
                     node.textContent = before + after;
-                    // Position cursor
+                    // Position cursor at the @ position
                     const newRange = document.createRange();
                     newRange.setStart(node, atIndex);
                     newRange.collapse(true);
@@ -192,8 +192,42 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
             }
         }
 
-        // Send at_resolve to plugin to get the full reference data
-        sendToPlugin('at_resolve', { type: suggestion.type, value: suggestion.path || suggestion.label }).catch(() => { });
+        // Create an inline chip immediately in the editor
+        // For types that need additional input (web, codebase), show inline input prompt
+        const needsInput = ['web', 'codebase'].includes(suggestion.type) && !suggestion.path && !suggestion.label.replace(/^@\w+\s*/, '');
+        const resolveValue = suggestion.path || suggestion.label.replace(/^@\w+\s*/, '');
+        const display = suggestion.label.replace(/^@\w+\s*/, '') || resolveValue;
+
+        if (needsInput) {
+            // Insert @type text for the user to complete (e.g., @web https://...)
+            // But keep the popup open for further typing
+            setAtPopupVisible(false);
+            return;
+        }
+
+        // For @web and @codebase with a value, create the chip directly
+        const chipId = `at-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const chipData: ContextChipData = {
+            id: chipId,
+            type: suggestion.type as ContextChipData['type'],
+            display: display,
+            filePath: resolveValue,
+            language: '',
+            startLine: null,
+            endLine: null,
+        };
+        chipsMapRef.current.set(chipId, chipData);
+
+        // Insert chip element at cursor
+        const chipEl = createChipElement(chipData);
+        insertNodeAtCursor(editor, chipEl);
+
+        // Send at_resolve to plugin to get the full reference content
+        // The plugin will store content in contextStore and return at_resolved
+        sendToPlugin('at_resolve', {
+            id: `${suggestion.type}:${resolveValue}`,
+            chipId: chipId,
+        }).catch(() => { });
 
         setAtPopupVisible(false);
     }, []);
@@ -299,6 +333,13 @@ const typeIcons: Record<string, string> = {
     code: '{ }',
     file: '📄',
     package: '📦',
+    folder: '📁',
+    symbol: '🔤',
+    git: '🔀',
+    codebase: '🔍',
+    docs: '📚',
+    web: '🌐',
+    terminal: '💻',
 };
 
 /** Insert a node at the current cursor/selection position */

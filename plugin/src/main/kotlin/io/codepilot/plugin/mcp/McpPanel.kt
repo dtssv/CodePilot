@@ -98,8 +98,9 @@ class McpPanel(
                 add(
                     JLabel(
                         "<html><b>Paste MCP Server JSON config</b><br>" +
-                            "Copy the JSON from the MCP Server's docs page. Supports npx, uvx, node, python commands.<br>" +
-                            "Format: <code>{\"mcpServers\":{\"name\":{\"command\":\"npx\",\"args\":[...],\"env\":{...}}}}</code></html>",
+                            "Copy the JSON from the MCP Server's docs page. Supports stdio (npx, uvx, node, python), SSE, and Streamable HTTP.<br>" +
+                            "Stdio: <code>{\"mcpServers\":{\"name\":{\"command\":\"npx\",\"args\":[...]}}}</code><br>" +
+                            "SSE/HTTP: <code>{\"mcpServers\":{\"name\":{\"url\":\"https://...\"}}}</code></html>",
                     ),
                     hintGbc,
                 )
@@ -213,9 +214,17 @@ class McpPanel(
     }
 
     /**
-     * Parses MCP JSON config. Supports two formats:
-     * 1. Standard: {"mcpServers":{"name":{"command":"npx","args":[...],"env":{...}}}}
-     * 2. Single:   {"command":"npx","args":[...],"env":{...}}
+     * Parses MCP JSON config. Supports three transport modes and multiple formats:
+     *
+     * Transport modes:
+     * - stdio: {"command":"npx","args":[...],"env":{...}}
+     * - SSE:   {"url":"https://..."}
+     * - Streamable HTTP: {"url":"https://..."}
+     *
+     * Formats:
+     * 1. Standard: {"mcpServers":{"name":{...}}}
+     * 2. Single server: {"command":"..."} or {"url":"..."}
+     * 3. Direct map: {"name":{...}}
      */
     private fun parseJsonConfig(raw: String): List<LocalMarketplaceStore.McpEntry> {
         val node = mapper.readTree(raw)
@@ -227,15 +236,15 @@ class McpPanel(
                 val server = servers[name]
                 results.add(parseSingleServer(name, server))
             }
-        } else if (node.has("command")) {
-            // Single server format
+        } else if (node.has("command") || node.has("url")) {
+            // Single server format (stdio or SSE/HTTP)
             val name = nameField.text.trim().ifEmpty { "mcp-server" }
             results.add(parseSingleServer(name, node))
         } else {
-            // Try as a map of servers directly: {"name": {"command":"...", ...}}
+            // Try as a map of servers directly: {"name": {"command":"..."|"url":"..."}}
             node.fieldNames().forEach { name ->
                 val server = node[name]
-                if (server.isObject && server.has("command")) {
+                if (server.isObject && (server.has("command") || server.has("url"))) {
                     results.add(parseSingleServer(name, server))
                 }
             }
@@ -247,22 +256,67 @@ class McpPanel(
         name: String,
         node: com.fasterxml.jackson.databind.JsonNode,
     ): LocalMarketplaceStore.McpEntry {
-        val command = node["command"]?.asText() ?: error("Missing 'command' field for server '$name'")
-        val args = mutableListOf(command)
-        node["args"]?.forEach { args.add(it.asText()) }
+        val url = node["url"]?.asText()
+        val command = node["command"]?.asText()
+
+        // Determine transport mode
+        val transport = when {
+            url != null && command == null -> detectTransportFromUrl(url)
+            else -> LocalMarketplaceStore.McpTransport.STDIO
+        }
+
+        // Parse common fields
         val env = mutableMapOf<String, String>()
         node["env"]?.fields()?.forEach { (k, v) -> env[k] = v.asText("") }
-        val cwd = node["cwd"]?.asText()
-        return LocalMarketplaceStore.McpEntry(
-            id = name,
-            argv = args,
-            cwd = cwd,
-            env = env,
-            installedAt =
-                java.time.Instant
+        val headers = mutableMapOf<String, String>()
+        node["headers"]?.fields()?.forEach { (k, v) -> headers[k] = v.asText("") }
+
+        if (transport == LocalMarketplaceStore.McpTransport.STDIO) {
+            // stdio mode: command is required
+            val cmd = command ?: error("Missing 'command' field for stdio server '$name'")
+            val args = mutableListOf<String>()
+            node["args"]?.forEach { args.add(it.asText()) }
+            val cwd = node["cwd"]?.asText()
+            return LocalMarketplaceStore.McpEntry(
+                id = name,
+                argv = buildList {
+                    add(cmd)
+                    addAll(args)
+                },
+                cwd = cwd,
+                env = env,
+                transport = transport,
+                url = url,
+                headers = headers,
+                installedAt = java.time.Instant
                     .now()
                     .toString(),
-        )
+            )
+        } else {
+            // SSE / Streamable HTTP mode: url is required
+            val serverUrl = url ?: error("Missing 'url' field for remote server '$name'")
+            return LocalMarketplaceStore.McpEntry(
+                id = name,
+                argv = emptyList(),
+                env = env,
+                transport = transport,
+                url = serverUrl,
+                headers = headers,
+                installedAt = java.time.Instant
+                    .now()
+                    .toString(),
+            )
+        }
+    }
+
+    /** Detect transport mode from URL pattern. SSE typically uses /sse endpoint. */
+    private fun detectTransportFromUrl(url: String): LocalMarketplaceStore.McpTransport {
+        val lower = url.lowercase()
+        return if (lower.contains("/sse") || lower.contains("eventsource")) {
+            LocalMarketplaceStore.McpTransport.SSE
+        } else {
+            LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP
+        }
     }
 
     private fun refreshInstalled() {
@@ -296,33 +350,72 @@ class McpPanel(
             Messages.showWarningDialog(project, "Select a server to start.", "CodePilot")
             return
         }
-        try {
-            mcpManager.start(
-                item.entry.id,
-                McpProcessManager.McpLaunchSpec(
-                    id = item.entry.id,
-                    argv = item.entry.argv,
-                    cwd = item.entry.cwd,
-                    env = item.entry.env,
-                ),
-            )
-            status.text = "Started ${item.entry.id}."
-            refreshInstalled()
-            // ★ Integration: Auto-subscribe to MCP resources when server starts
+        status.text = "Starting ${item.entry.id}..."
+        val serverId = item.entry.id
+        Thread({
             try {
-                val resourcesResponse = mcpManager.call(item.entry.id, "resources/list", null)
-                val resources = resourcesResponse.path("resources")
-                if (resources != null && resources.isArray) {
-                    for (resource in resources) {
-                        val uri = resource.path("uri").asText(null)
-                        if (uri != null) {
-                            subscriptionManager.subscribe(item.entry.id, uri)
-                        }
+                when (item.entry.transport) {
+                    LocalMarketplaceStore.McpTransport.STDIO -> {
+                        mcpManager.start(
+                            item.entry.id,
+                            McpProcessManager.McpLaunchSpec(
+                                id = item.entry.id,
+                                argv = item.entry.argv,
+                                cwd = item.entry.cwd,
+                                env = item.entry.env,
+                            ),
+                        )
+                    }
+                    LocalMarketplaceStore.McpTransport.SSE,
+                    LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP,
+                    -> {
+                        val url = item.entry.url
+                            ?: error("Missing URL for remote MCP server '${item.entry.id}'")
+                        mcpManager.startRemote(
+                            item.entry.id,
+                            url,
+                            item.entry.transport,
+                            item.entry.headers,
+                        )
                     }
                 }
-            } catch (_: Exception) { /* Non-critical: subscription is best-effort */ }
-        } catch (e: Exception) {
-            Messages.showErrorDialog(project, "Failed to start: ${e.message}", "CodePilot")
+                // Delay to allow process startup to complete
+                Thread.sleep(1500)
+                refreshInstalled()
+                // Verify the server is actually running after refresh
+                val actuallyRunning = mcpManager.isRunning(serverId)
+                if (!actuallyRunning) {
+                    SwingUtilities.invokeLater {
+                        status.text = "Failed to start $serverId — process exited immediately."
+                    }
+                } else {
+                    SwingUtilities.invokeLater {
+                        status.text = "Started $serverId."
+                    }
+                    // ★ Integration: Auto-subscribe to MCP resources when server starts
+                    try {
+                        val resourcesResponse = mcpManager.call(serverId, "resources/list", null)
+                        val resources = resourcesResponse.path("resources")
+                        if (resources != null && resources.isArray) {
+                            for (resource in resources) {
+                                val uri = resource.path("uri").asText(null)
+                                if (uri != null) {
+                                    subscriptionManager.subscribe(serverId, uri)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                        /* Non-critical: subscription is best-effort */
+                    }
+                }
+            } catch (e: Exception) {
+                SwingUtilities.invokeLater {
+                    Messages.showErrorDialog(project, "Failed to start: ${e.message}", "CodePilot")
+                }
+            }
+        }, "mcp-start-$serverId").apply {
+            isDaemon = true
+            start()
         }
     }
 
@@ -332,9 +425,18 @@ class McpPanel(
             Messages.showWarningDialog(project, "Select a server to stop.", "CodePilot")
             return
         }
-        mcpManager.stop(item.entry.id)
-        status.text = "Stopped ${item.entry.id}."
-        refreshInstalled()
+        val serverId = item.entry.id
+        status.text = "Stopping $serverId..."
+        Thread({
+            mcpManager.stop(serverId)
+            refreshInstalled()
+            SwingUtilities.invokeLater {
+                status.text = "Stopped $serverId."
+            }
+        }, "mcp-stop-$serverId").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun uninstallSelected() {
@@ -354,10 +456,19 @@ class McpPanel(
         ) {
             return
         }
-        mcpManager.stop(item.entry.id)
-        store.uninstallMcp(item.entry.id)
-        status.text = "Uninstalled ${item.entry.id}."
-        refreshInstalled()
+        val serverId = item.entry.id
+        status.text = "Uninstalling $serverId..."
+        Thread({
+            mcpManager.stop(serverId)
+            store.uninstallMcp(serverId)
+            refreshInstalled()
+            SwingUtilities.invokeLater {
+                status.text = "Uninstalled $serverId."
+            }
+        }, "mcp-uninstall-$serverId").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     data class McpServerItem(
@@ -382,21 +493,38 @@ class McpPanel(
                     JBUI.Borders.empty(6, 8),
                 )
             val statusIcon = if (value.running) "\u25CF Running" else "\u25CB Stopped"
+            val transportLabel = when (value.entry.transport) {
+                LocalMarketplaceStore.McpTransport.STDIO -> "stdio"
+                LocalMarketplaceStore.McpTransport.SSE -> "SSE"
+                LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP -> "Streamable HTTP"
+            }
             val title =
                 JLabel(
-                    "<html><b>${value.entry.id}</b> &nbsp; <font color='${if (value.running) "green" else "gray"}'>$statusIcon</font></html>",
+                    "<html><b>${value.entry.id}</b> &nbsp; <font color='blue'>[$transportLabel]</font> &nbsp; <font color='${if (value.running) "green" else "gray"}'>$statusIcon</font></html>",
                 )
-            val cmd = value.entry.argv.joinToString(" ")
-            val detail =
-                JLabel(
+            val detailText = when (value.entry.transport) {
+                LocalMarketplaceStore.McpTransport.STDIO -> {
+                    val cmd = value.entry.argv.joinToString(" ")
                     "<html><code>$cmd</code>" +
                         if (value.entry.env.isNotEmpty()) {
                             "<br>env: ${value.entry.env.keys.joinToString()}"
                         } else {
-                            "" +
-                                "</html>"
-                        },
-                )
+                            ""
+                        } + "</html>"
+                }
+                LocalMarketplaceStore.McpTransport.SSE,
+                LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP,
+                -> {
+                    val url = value.entry.url ?: ""
+                    "<html><code>$url</code>" +
+                        if (value.entry.headers.isNotEmpty()) {
+                            "<br>headers: ${value.entry.headers.keys.joinToString()}"
+                        } else {
+                            ""
+                        } + "</html>"
+                }
+            }
+            val detail = JLabel(detailText)
             detail.foreground = java.awt.Color.GRAY
             panel.add(title, BorderLayout.NORTH)
             panel.add(detail, BorderLayout.CENTER)
@@ -415,6 +543,12 @@ class McpPanel(
       "env": {
         "API_KEY": "your-api-key-here"
       }
+    },
+    "remote-sse": {
+      "url": "https://mcp.example.com/sse"
+    },
+    "remote-http": {
+      "url": "https://mcp.example.com/mcp"
     }
   }
 }

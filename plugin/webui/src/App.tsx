@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from './bridge';
 import { ChatView } from './components/ChatView';
 import { ComposerPanel } from './components/ComposerPanel';
+import { ConsoleEntry, ConsolePanel } from './components/ConsolePanel';
 import ContextBudgetBar from './components/ContextBudgetBar';
 import { ContextChipData } from './components/ContextChip';
 import { ImageData } from './components/ImageAttachment';
@@ -21,17 +22,28 @@ interface ModelOption {
     type: 'system' | 'custom';
 }
 
+export interface ToolCallInfo {
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    status?: 'running' | 'success' | 'error';
+}
+
 interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
     contextRefs?: { display: string; type?: string }[];
     toolCall?: { id: string; name: string; args: unknown };
+    /** Tool calls attached to an assistant message (rendered as inline cards) */
+    toolCalls?: ToolCallInfo[];
     riskNotice?: { level: string; message: string; filesPaths: string[] };
     needsInput?: { question: string; options: string[] };
     diff?: { path: string; hunks: string };
     // ★ Image attachments for multi-modal
     images?: { url: string; mimeType?: string; description?: string }[];
     _streaming?: boolean;
+    /** Timestamp for the message */
+    ts?: string;
 }
 
 interface BranchInfo {
@@ -44,7 +56,7 @@ interface BranchInfo {
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
-    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads'>('chat');
+    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'console'>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
     const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -62,7 +74,30 @@ export function App() {
     const [sessionCost, setSessionCost] = useState<SessionCostInfo>({
         messageCount: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: 0,
     });
+    // ★ Session recovery state
+    const [abnormalTermination, setAbnormalTermination] = useState(false);
+    const [hasCheckpoint, setHasCheckpoint] = useState(false);
+    const [isResuming, setIsResuming] = useState(false);
+    // ★ Auto-apply patches setting
+    const [autoApply, setAutoApply] = useState(false);
+    // ★ Pending file changes (for change list panel)
+    const [pendingChanges, setPendingChanges] = useState<{ path: string; op: string; toolCallId: string }[]>([]);
+    // ★ Console log entries
+    const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
+    const consoleIdRef = useRef(0);
     const historyBtnRef = useRef<HTMLButtonElement>(null);
+
+    // Console logging helper
+    const logConsole = (type: ConsoleEntry['type'], source: string, data: unknown) => {
+        const entry: ConsoleEntry = {
+            id: `console-${++consoleIdRef.current}`,
+            timestamp: new Date(),
+            type,
+            source,
+            data,
+        };
+        setConsoleEntries(prev => [...prev.slice(-500), entry]); // Keep last 500 entries
+    };
 
     // Apply theme to document root
     useEffect(() => {
@@ -132,6 +167,8 @@ export function App() {
                 setActiveSessionId(data.id);
                 setMessages([]);
                 setContextChips([]);
+                setAbnormalTermination(false);
+                setHasCheckpoint(false);
             }),
             // Branch list update
             onPluginEvent('branch_list', (payload) => {
@@ -141,8 +178,22 @@ export function App() {
             }),
             // Restore messages from local store
             onPluginEvent('session_messages', (payload) => {
-                const data = payload as { messages: ChatMessage[] };
-                setMessages(data.messages);
+                const data = payload as { messages: ChatMessage[]; abnormalTermination?: boolean; hasCheckpoint?: boolean };
+                // Restore messages with toolCalls data preserved
+                const restoredMessages = data.messages.map((msg: ChatMessage) => ({
+                    ...msg,
+                    // Ensure toolCalls from persisted data are properly typed
+                    toolCalls: msg.toolCalls?.map((tc: any) => ({
+                        id: tc.id || '',
+                        name: tc.name || 'unknown',
+                        args: tc.args || {},
+                        status: tc.status || 'success',
+                    })),
+                }));
+                setMessages(restoredMessages);
+                // Restore session recovery state
+                setAbnormalTermination(data.abnormalTermination ?? false);
+                setHasCheckpoint(data.hasCheckpoint ?? false);
             }),
             // User message saved from plugin (after persistence)
             onPluginEvent('user_message_saved', (payload) => {
@@ -156,16 +207,24 @@ export function App() {
             // Streaming delta
             onPluginEvent('delta', (p) => {
                 const { text } = p as { text: string };
+                logConsole('sse', 'delta', { text: text.substring(0, 100) + (text.length > 100 ? '...' : '') });
                 setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last && last.role === 'assistant' && last._streaming) {
                         return [...prev.slice(0, -1), { ...last, content: last.content + text }];
                     }
+                    // If last message is an assistant with toolCalls but not streaming,
+                    // append content to it (tool call + text in same turn)
+                    if (last && last.role === 'assistant' && last.toolCalls && last.toolCalls.length > 0 && !last._streaming) {
+                        return [...prev.slice(0, -1), { ...last, content: last.content + text, _streaming: true }];
+                    }
                     return [...prev, { role: 'assistant' as const, content: text, _streaming: true }];
                 });
             }),
             // Done — finalize streaming message and refresh session list
-            onPluginEvent('done', () => {
+            onPluginEvent('done', (p) => {
+                const data = p as { reason?: string };
+                logConsole('sse', 'done', data);
                 setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last && last._streaming) {
@@ -173,15 +232,112 @@ export function App() {
                     }
                     return prev;
                 });
+                // Clear abnormal termination state on successful completion
+                setAbnormalTermination(false);
+                setHasCheckpoint(false);
+                setIsResuming(false);
                 // Refresh session list to update lastMessageAt timestamp
                 sendToPlugin('list_sessions', {}).catch(() => { });
             }),
             onPluginEvent('tool_call', (p) => {
-                const tc = p as { id: string; name: string; args: unknown };
-                setMessages((msgs) => [
-                    ...msgs,
-                    { role: 'system', content: `Tool: ${tc.name}`, toolCall: tc },
-                ]);
+                const tc = p as { id?: string; toolCallId?: string; name?: string; tool?: string; args: unknown };
+                logConsole('tool', 'tool_call', tc);
+                const toolName = tc.name || tc.tool || 'unknown';
+                const toolCallId = tc.id || tc.toolCallId || '';
+                const toolCallInfo: ToolCallInfo = {
+                    id: toolCallId,
+                    name: toolName,
+                    args: (tc.args || {}) as Record<string, unknown>,
+                    status: 'running',
+                };
+                // ★ Extract pending changes from write-category tool calls
+                if (toolName.startsWith('fs.write') || toolName.startsWith('fs.create') || toolName.startsWith('fs.replace') || toolName.startsWith('fs.applyPatch') || toolName.startsWith('fs.delete')) {
+                    const rawArgs = (tc.args || {}) as Record<string, unknown>;
+                    // Handle patches array format
+                    const patches = rawArgs.patches as { path?: string; op?: string }[] | undefined;
+                    if (patches && Array.isArray(patches)) {
+                        const newChanges = patches.map(p => ({ path: p.path || '', op: p.op || 'replace', toolCallId }));
+                        setPendingChanges(prev => [...prev, ...newChanges]);
+                    } else {
+                        const path = (rawArgs.path as string) || '';
+                        const op = (rawArgs.op as string) || toolName.replace('fs.', '') || 'write';
+                        if (path) {
+                            setPendingChanges(prev => [...prev, { path, op, toolCallId }]);
+                        }
+                    }
+                }
+                setMessages((msgs) => {
+                    // If the last message is a streaming assistant message, finalize it first
+                    // and add the tool call to a new assistant message
+                    const last = msgs[msgs.length - 1];
+                    if (last && last.role === 'assistant' && last._streaming) {
+                        // Finalize the streaming message and create a new one with the tool call
+                        return [
+                            ...msgs.slice(0, -1),
+                            { ...last, _streaming: false },
+                            { role: 'assistant' as const, content: '', toolCalls: [toolCallInfo] },
+                        ];
+                    }
+                    // If the last message is an assistant message with existing toolCalls, append to it
+                    if (last && last.role === 'assistant' && last.toolCalls && last.toolCalls.length > 0) {
+                        const updated = [...msgs];
+                        const existing = updated[updated.length - 1];
+                        updated[updated.length - 1] = {
+                            ...existing,
+                            toolCalls: [...(existing.toolCalls || []), toolCallInfo],
+                        };
+                        return updated;
+                    }
+                    // Find the last assistant message to attach the tool call card
+                    let lastAssistantIdx = -1;
+                    for (let i = msgs.length - 1; i >= 0; i--) {
+                        if (msgs[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                    }
+                    if (lastAssistantIdx >= 0) {
+                        const updated = [...msgs];
+                        const existing = updated[lastAssistantIdx];
+                        updated[lastAssistantIdx] = {
+                            ...existing,
+                            toolCalls: [...(existing.toolCalls || []), toolCallInfo],
+                        };
+                        return updated;
+                    }
+                    // No assistant message yet — create a placeholder one with the tool call
+                    return [
+                        ...msgs,
+                        {
+                            role: 'assistant' as const,
+                            content: '',
+                            toolCalls: [toolCallInfo],
+                        },
+                    ];
+                });
+            }),
+            onPluginEvent('tool_result_ack', (p) => {
+                const ack = p as { toolCallId?: string; ok?: boolean };
+                logConsole('tool', 'tool_result_ack', ack);
+                const ackId = ack.toolCallId || '';
+                if (!ackId) return;
+                // ★ Remove completed changes from pending list
+                setPendingChanges(prev => prev.filter(c => c.toolCallId !== ackId));
+                setMessages((msgs) => {
+                    // Find the assistant message that contains this toolCall and update its status
+                    let assistantIdx = -1;
+                    for (let i = msgs.length - 1; i >= 0; i--) {
+                        if (msgs[i].role === 'assistant' && msgs[i].toolCalls?.some((tc) => tc.id === ackId)) {
+                            assistantIdx = i; break;
+                        }
+                    }
+                    if (assistantIdx < 0) return msgs;
+                    const updated = [...msgs];
+                    const existing = updated[assistantIdx];
+                    updated[assistantIdx] = {
+                        ...existing,
+                        toolCalls: existing.toolCalls?.map((tc) =>
+                            tc.id === ackId ? { ...tc, status: ack.ok ? 'success' : 'error' } : tc),
+                    };
+                    return updated;
+                });
             }),
             onPluginEvent('risk_notice', (p) => {
                 const rn = p as { level: string; message: string; filesPaths: string[] };
@@ -199,6 +355,7 @@ export function App() {
             }),
             onPluginEvent('error', (p) => {
                 const err = p as { code: number; message: string };
+                logConsole('error', 'error', err);
                 setMessages((msgs) => [
                     ...msgs,
                     { role: 'system', content: `Error: ${err.message}` },
@@ -264,6 +421,35 @@ export function App() {
                 const data = p as SessionCostInfo;
                 setSessionCost(data);
             }),
+            // ★ Session interrupted (abnormal termination)
+            onPluginEvent('session_interrupted', (p) => {
+                const data = p as { sessionId: string; hasCheckpoint: boolean };
+                setAbnormalTermination(true);
+                setHasCheckpoint(data.hasCheckpoint);
+                setIsResuming(false);
+                // Finalize any streaming message
+                setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last && last._streaming) {
+                        return [...prev.slice(0, -1), { ...last, _streaming: false }];
+                    }
+                    return prev;
+                });
+            }),
+            // ★ Session resuming
+            onPluginEvent('session_resuming', () => {
+                setIsResuming(true);
+            }),
+            // ★ Auto-apply state sync from plugin
+            onPluginEvent('auto_apply_state', (payload) => {
+                const data = payload as { enabled: boolean };
+                setAutoApply(data.enabled);
+            }),
+            // ★ Pending changes sync from plugin
+            onPluginEvent('pending_changes', (payload) => {
+                const data = payload as { changes: { path: string; op: string; toolCallId: string }[] };
+                setPendingChanges(data.changes);
+            }),
         ];
         return () => unsubs.forEach((u) => u());
     }, [authenticated]);
@@ -273,19 +459,22 @@ export function App() {
         const contextRefs = chips.map((chip) => ({
             id: chip.id,
             display: chip.display,
+            type: chip.type,
+            filePath: chip.filePath,
             language: chip.language,
             startLine: chip.startLine,
             endLine: chip.endLine,
         }));
-        sendToPlugin('user_message', {
+        const msgPayload = {
             text,
             contextRefs,
             mode,
             modelId: selectedModelId || undefined,
             modelSource: selectedModelId ? (models.find(m => m.id === selectedModelId)?.type === 'custom' ? 'custom' : 'group') : undefined,
-            // ★ Pass image attachments to plugin for multi-modal processing
             images: images?.map(img => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
-        });
+        };
+        logConsole('bridge', 'sendToPlugin:user_message', { text: text.substring(0, 100), mode, contextRefsCount: contextRefs.length });
+        sendToPlugin('user_message', msgPayload);
         // Clear chips after send
         setContextChips([]);
     };
@@ -300,6 +489,9 @@ export function App() {
         // Immediately clear local state
         setMessages([]);
         setContextChips([]);
+        setAbnormalTermination(false);
+        setHasCheckpoint(false);
+        setIsResuming(false);
     };
 
     const handleSelectSession = (id: string) => {
@@ -372,10 +564,70 @@ export function App() {
                 )}
 
                 <div className="chat-area">
+                    {/* ★ Abnormal termination recovery banner */}
+                    {activeTab === 'chat' && abnormalTermination && !isResuming && (
+                        <div className="session-recovery-banner">
+                            <div className="recovery-banner-content">
+                                <span className="recovery-icon">⚠️</span>
+                                <span className="recovery-text">上次任务异常中断</span>
+                                {hasCheckpoint && (
+                                    <button
+                                        className="recovery-btn"
+                                        onClick={() => {
+                                            setIsResuming(true);
+                                            sendToPlugin('resume_session', {});
+                                        }}
+                                    >
+                                        恢复任务
+                                    </button>
+                                )}
+                                <button
+                                    className="recovery-dismiss-btn"
+                                    onClick={() => {
+                                        setAbnormalTermination(false);
+                                    }}
+                                >
+                                    忽略
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    {activeTab === 'chat' && isResuming && (
+                        <div className="session-resuming-banner">
+                            <span className="resuming-spinner" />
+                            <span className="resuming-text">正在恢复任务...</span>
+                        </div>
+                    )}
+                    {/* ★ Pending changes panel */}
+                    {activeTab === 'chat' && pendingChanges.length > 0 && (
+                        <div className="pending-changes-panel">
+                            <div className="pending-changes-header">
+                                <span className="pending-changes-title">待变更文件 ({pendingChanges.length})</span>
+                                <div className="pending-changes-actions">
+                                    <button className="pending-changes-apply-btn" onClick={() => sendToPlugin('apply_patches', {})}>
+                                        全部应用
+                                    </button>
+                                    <button className="pending-changes-dismiss-btn" onClick={() => setPendingChanges([])}>
+                                        清除列表
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="pending-changes-list">
+                                {pendingChanges.map((c, idx) => (
+                                    <div key={`${c.toolCallId}-${idx}`} className="pending-change-item">
+                                        <span className="pending-change-icon">{c.op === 'create' ? '✨' : c.op === 'delete' ? '🗑️' : '📝'}</span>
+                                        <span className="pending-change-op">{c.op === 'create' ? '创建' : c.op === 'delete' ? '删除' : c.op === 'replace' ? '替换' : '修改'}</span>
+                                        <span className="pending-change-path">{c.path.split('/').pop() || c.path}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                     {activeTab === 'chat' && <ChatView messages={messages} onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })} />}
                     {activeTab === 'composer' && <ComposerPanel />}
                     {activeTab === 'marketplace' && <MarketplacePanel />}
                     {activeTab === 'notepads' && <NotepadsPanel />}
+                    {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={() => setConsoleEntries([])} />}
                     {/* ★ Agent plan & multi-file diff panels (auto-visible when data arrives) */}
                     <PlanPanel />
                     <MultiFileDiffPanel />
@@ -402,6 +654,20 @@ export function App() {
                                     selectedModelId={selectedModelId}
                                     onSelect={setSelectedModelId}
                                 />
+                                {mode === 'agent' && (
+                                    <label className="auto-apply-toggle" title="自动应用低风险文件变更">
+                                        <input
+                                            type="checkbox"
+                                            checked={autoApply}
+                                            onChange={(e) => {
+                                                const enabled = e.target.checked;
+                                                setAutoApply(enabled);
+                                                sendToPlugin('update_auto_apply', { enabled });
+                                            }}
+                                        />
+                                        <span className="auto-apply-label">自动写入</span>
+                                    </label>
+                                )}
                             </div>
                             {branches.length > 1 && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -427,6 +693,7 @@ export function App() {
                         <button className={activeTab === 'composer' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('composer')}>Composer</button>
                         <button className={activeTab === 'marketplace' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('marketplace')}>Marketplace</button>
                         <button className={activeTab === 'notepads' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('notepads')}>Notepads</button>
+                        <button className={activeTab === 'console' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('console')}>Console</button>
                         <button className="tab-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark')} title="切换主题">
                             {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '◐'}
                         </button>

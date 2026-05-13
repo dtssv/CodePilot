@@ -25,6 +25,7 @@ public class InfoRequestValidator {
      * Validates a batch of info requests.
      * @throws IllegalArgumentException if any request is invalid
      */
+    @SuppressWarnings("unchecked")
     public void validate(List<Map<String, Object>> requests) {
         if (requests == null || requests.isEmpty()) {
             throw new IllegalArgumentException("infoRequests is empty");
@@ -32,7 +33,16 @@ public class InfoRequestValidator {
         if (requests.size() > MAX_BATCH_SIZE) {
             throw new IllegalArgumentException("infoRequests exceeds max batch size: " + requests.size() + " > " + MAX_BATCH_SIZE);
         }
-        for (Map<String, Object> req : requests) {
+        for (int i = 0; i < requests.size(); i++) {
+            Object reqObj = requests.get(i);
+            Map<String, Object> req;
+            if (reqObj instanceof Map<?, ?>) {
+                req = (Map<String, Object>) reqObj;
+            } else {
+                throw new IllegalArgumentException(
+                    "infoRequests[" + i + "] is not a Map but " + (reqObj != null ? reqObj.getClass().getName() : "null")
+                    + ". Each infoRequest must be a JSON object with at least a 'kind' field.");
+            }
             String kind = (String) req.get("kind");
             if (kind == null || !ALLOWED_KINDS.contains(kind)) {
                 throw new IllegalArgumentException("unsupported or missing kind: " + kind);

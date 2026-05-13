@@ -1,5 +1,6 @@
 package io.codepilot.plugin.toolwindow
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -197,7 +198,7 @@ class CefChatPanel(
                 "auth_login_oidc" -> handleAuthLoginOidc()
                 // ★ @-reference resolution and patch events
                 "at_suggest" -> handleAtSuggest(payload["query"]?.asText() ?: "")
-                "at_resolve" -> handleAtResolve(payload["id"]?.asText() ?: return)
+                "at_resolve" -> handleAtResolve(payload["id"]?.asText() ?: return, payload["chipId"]?.asText())
                 "apply_patches" -> handleApplyPatches(payload)
                 "apply_selected_hunks" -> handleApplySelectedHunks(payload)
                 // ★ Integration: Apply single code block from Chat code-block Apply button
@@ -208,6 +209,8 @@ class CefChatPanel(
                 "plan_edit" -> handlePlanEdit(payload)
                 "continue_run" -> handleContinueRun()
                 "replan" -> handleReplan()
+                "resume_session" -> handleResumeSession()
+                "update_auto_apply" -> handleUpdateAutoApply(payload)
                 else -> log.warn("Unknown message type from web: $type")
             }
         } catch (e: Exception) {
@@ -273,18 +276,60 @@ class CefChatPanel(
                     val fullCode = contextStore[ctxId]
                     if (fullCode != null) {
                         val ref = contextRefs.find { it["id"] == ctxId }
+                        val refType = ref?.get("type") as? String ?: "file"
                         val lang = ref?.get("language") as? String ?: "text"
                         val display = ref?.get("display") as? String ?: "context"
                         val loc = if (ref?.get("startLine") != null) " :${ref["startLine"]}-${ref["endLine"]}" else ""
-                        appendLine("Context: $display$loc")
-                        appendLine("```$lang")
-                        appendLine(fullCode)
-                        appendLine("```")
+                        // Format context differently based on type
+                        when (refType) {
+                            "web" -> {
+                                appendLine("Web Content: $display")
+                                appendLine(fullCode)
+                            }
+                            "git" -> {
+                                appendLine("Git Context: $display")
+                                appendLine("```")
+                                appendLine(fullCode)
+                                appendLine("```")
+                            }
+                            "terminal" -> {
+                                appendLine("Terminal Output: $display")
+                                appendLine("```")
+                                appendLine(fullCode)
+                                appendLine("```")
+                            }
+                            "codebase" -> {
+                                appendLine("Codebase Search: $display")
+                                appendLine(fullCode)
+                            }
+                            "symbol" -> {
+                                appendLine("Symbol: $display$loc")
+                                appendLine("```$lang")
+                                appendLine(fullCode)
+                                appendLine("```")
+                            }
+                            else -> {
+                                // file, folder, docs, code, package
+                                appendLine("Context: $display$loc")
+                                appendLine("```$lang")
+                                appendLine(fullCode)
+                                appendLine("```")
+                            }
+                        }
                     }
                     remaining = remaining.substring(end + 1)
                 }
             }
-        val dispatcher = ToolDispatcher(project, client, handle.meta.id)
+        val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
+            // Dispatch tool_result_ack to WebUI immediately when tool execution completes
+            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+            // Record the tool result step
+            sessionStore.appendStep(handle, mapOf(
+                "toolCallId" to toolCallId,
+                "ok" to ok,
+                "ts" to java.time.Instant.now().toString(),
+            ))
+        })
         val gatherDispatcher =
             io.codepilot.plugin.tools
                 .GatherDispatcher(project, client, handle.meta.id)
@@ -390,7 +435,36 @@ class CefChatPanel(
                         val toolName = payload.path("name").asText(null)
                         val toolCallId = payload.path("id").asText(null)
                         if (toolName != null && toolCallId != null) {
+                            // Persist tool call step for session recovery (started, no result yet)
+                            sessionStore.appendStep(handle, mapOf(
+                                "toolCallId" to toolCallId,
+                                "toolName" to toolName,
+                                "stepId" to "",
+                                "started" to true,
+                                "ts" to java.time.Instant.now().toString(),
+                            ))
+                            // Update checkpoint for resume capability
+                            sessionStore.saveCheckpoint(handle, mapOf(
+                                "lastToolCallId" to toolCallId,
+                                "lastToolName" to toolName,
+                                "ts" to java.time.Instant.now().toString(),
+                            ))
+                            // Mark session as running (for abnormal termination detection)
+                            sessionStore.updateMeta(handle) { meta ->
+                                meta.running = true
+                            }
                             dispatcher.dispatch(payload)
+                        }
+                    }
+
+                    override fun onToolResultAck(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        // This SSE event from backend is a secondary confirmation.
+                        // The primary tool_result_ack is already dispatched by ToolDispatcher.onToolResult callback.
+                        // Just forward to UI as a backup in case the backend sends this event.
+                        val toolCallId = payload.path("toolCallId").asText(null) ?: payload.path("id").asText(null)
+                        val ok = payload.path("ok").asBoolean(true)
+                        if (toolCallId != null) {
+                            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
                         }
                     }
 
@@ -497,14 +571,67 @@ class CefChatPanel(
                         }
                         // Persist the full assistant response and update session metadata
                         val fullResponse = assistantBuilder.toString()
-                        if (fullResponse.isNotEmpty()) {
-                            sessionStore.appendMessage(handle, "assistant", fullResponse)
+                        // Rebuild tool calls from steps: merge "started" and "ok" records by toolCallId
+                        val steps = sessionStore.readSteps(handle)
+                        val toolCallMap = linkedMapOf<String, Map<String, Any>>()
+                        for (step in steps) {
+                            val tcId = step["toolCallId"] as? String ?: continue
+                            val existing = toolCallMap[tcId]
+                            if (step["started"] == true) {
+                                // Tool call started — record name
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to (step["toolName"] ?: "unknown"),
+                                    "status" to "running",
+                                )
+                            } else if (step["ok"] != null) {
+                                // Tool result ack — update status
+                                val name = existing?.get("name") ?: "unknown"
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to name,
+                                    "status" to if (step["ok"] == true) "success" else "error",
+                                )
+                            }
+                        }
+                        val turnToolCalls = toolCallMap.values.toList()
+                        if (fullResponse.isNotEmpty() || turnToolCalls.isNotEmpty()) {
+                            val extra = mutableMapOf<String, Any?>()
+                            if (turnToolCalls.isNotEmpty()) extra["toolCalls"] = turnToolCalls
+                            sessionStore.appendMessage(handle, "assistant", fullResponse, extra.toMap())
+                        }
+                        // Mark session as not running (clean completion)
+                        sessionStore.updateMeta(handle) { meta ->
+                            meta.running = false
+                            meta.abnormalTermination = false
                         }
                         sessionStore.touchLastMessage(handle)
                         dispatchSessionList() // refresh sidebar timestamps
                     }
 
-                    override fun onClosed() {}
+                    override fun onClosed() {
+                        // If the stream closed without a proper "done" event, the session
+                        // was abnormally terminated. Mark it for recovery UI.
+                        val isRunning = sessionHandle?.meta?.running == true
+                        if (isRunning) {
+                            sessionHandle?.let { handle ->
+                                sessionStore.updateMeta(handle) { meta ->
+                                    meta.running = false
+                                    meta.abnormalTermination = true
+                                }
+                                // Persist whatever assistant text was collected so far
+                                val partialResponse = assistantBuilder.toString()
+                                if (partialResponse.isNotEmpty()) {
+                                    sessionStore.appendMessage(handle, "assistant", partialResponse)
+                                }
+                                // Notify UI about the abnormal termination
+                                dispatchToWeb("session_interrupted", mapOf(
+                                    "sessionId" to handle.meta.id,
+                                    "hasCheckpoint" to sessionStore.hasCheckpoint(handle),
+                                ))
+                            }
+                        }
+                    }
                 },
             )
         }
@@ -575,6 +702,200 @@ class CefChatPanel(
     private fun handleStop() {
         val sid = sessionHandle?.meta?.id ?: return
         client.stop(sid)
+    }
+
+    /**
+     * Resume a session that was abnormally terminated.
+     * Uses the SessionStore.buildResumePayload to reconstruct the context
+     * and calls /v1/conversation/resume to continue the task.
+     */
+    private fun handleResumeSession() {
+        val handle = sessionHandle ?: return
+        val meta = handle.meta
+
+        // Only resume if there's a checkpoint and session was abnormally terminated
+        if (!sessionStore.hasCheckpoint(handle)) {
+            log.warn("[Resume] No checkpoint found for session ${meta.id}")
+            dispatchToWeb("error", mapOf("code" to 40401, "message" to "No checkpoint found for this session"))
+            return
+        }
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val modelId = meta.modelId ?: "default"
+            val resumePayload = sessionStore.buildResumePayload(
+                handle,
+                "继续之前中断的任务",
+                modelId,
+            )
+
+            // Mark session as running again
+            sessionStore.updateMeta(handle) { meta ->
+                meta.running = true
+                meta.abnormalTermination = false
+            }
+
+            // Notify UI that resume has started
+            dispatchToWeb("session_resuming", mapOf("sessionId" to handle.meta.id))
+
+            val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
+            // Dispatch tool_result_ack to WebUI immediately when tool execution completes
+            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+            // Record the tool result step
+            sessionStore.appendStep(handle, mapOf(
+                "toolCallId" to toolCallId,
+                "ok" to ok,
+                "ts" to java.time.Instant.now().toString(),
+            ))
+        })
+            val gatherDispatcher = io.codepilot.plugin.tools.GatherDispatcher(project, client, handle.meta.id)
+            val graphStateStore = io.codepilot.plugin.tools.GraphStateStore(project, handle.dir)
+            val assistantBuilder = StringBuilder()
+
+            client.resume(
+                resumePayload,
+                object : ConversationClient.Listener {
+                    override fun onDelta(text: String) {
+                        assistantBuilder.append(text)
+                        dispatchToWeb("delta", mapOf("text" to text))
+                    }
+
+                    override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("tool_call", data)
+                        val toolName = payload.path("name").asText(null)
+                        val toolCallId = payload.path("id").asText(null)
+                        if (toolName != null && toolCallId != null) {
+                            sessionStore.appendStep(handle, mapOf(
+                                "toolCallId" to toolCallId,
+                                "toolName" to toolName,
+                                "stepId" to "",
+                                "started" to true,
+                                "ts" to java.time.Instant.now().toString(),
+                            ))
+                            sessionStore.saveCheckpoint(handle, mapOf(
+                                "lastToolCallId" to toolCallId,
+                                "lastToolName" to toolName,
+                                "ts" to java.time.Instant.now().toString(),
+                            ))
+                            dispatcher.dispatch(payload)
+                        }
+                    }
+
+                    override fun onToolResultAck(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val toolCallId = payload.path("toolCallId").asText(null) ?: payload.path("id").asText(null)
+                        val ok = payload.path("ok").asBoolean(true)
+                        dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+                        if (toolCallId != null) {
+                            sessionStore.appendStep(handle, mapOf(
+                                "toolCallId" to toolCallId, "ok" to ok,
+                                "ts" to java.time.Instant.now().toString(),
+                            ))
+                        }
+                    }
+
+                    override fun onPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("plan", data)
+                        sessionStore.savePlan(handle, data)
+                    }
+
+                    override fun onPlanDelta(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("plan_delta", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onTaskLedger(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("task_ledger", data)
+                        sessionStore.saveLedger(handle, data)
+                    }
+
+                    override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onSelfCheck(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("self_check", data)
+                    }
+
+                    override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyGraphPlan(payload)
+                    override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyTransition(payload)
+                    override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) = gatherDispatcher.dispatchBatch(payload.path("requests"))
+                    override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyInfoResult(payload)
+                    override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyVerify(payload)
+                    override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) {}
+                    override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyPhaseDone(payload)
+                    override fun onGraphBudgetAlert(payload: com.fasterxml.jackson.databind.JsonNode) {}
+                    override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
+                    override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) = dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
+
+                    override fun onError(code: Int, message: String) =
+                        dispatchToWeb("error", mapOf("code" to code, "message" to message))
+
+                    override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
+                        dispatchToWeb("done", mapOf("reason" to reason))
+                        if (reason == "awaiting_user_input" || reason == "phase_done") {
+                            graphStateStore.applyAwaiting(payload)
+                        }
+                        val fullResponse = assistantBuilder.toString()
+                        // Rebuild tool calls from steps: merge "started" and "ok" records by toolCallId
+                        val steps = sessionStore.readSteps(handle)
+                        val toolCallMap = linkedMapOf<String, Map<String, Any>>()
+                        for (step in steps) {
+                            val tcId = step["toolCallId"] as? String ?: continue
+                            val existing = toolCallMap[tcId]
+                            if (step["started"] == true) {
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to (step["toolName"] ?: "unknown"),
+                                    "status" to "running",
+                                )
+                            } else if (step["ok"] != null) {
+                                val name = existing?.get("name") ?: "unknown"
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to name,
+                                    "status" to if (step["ok"] == true) "success" else "error",
+                                )
+                            }
+                        }
+                        val turnToolCalls = toolCallMap.values.toList()
+                        if (fullResponse.isNotEmpty() || turnToolCalls.isNotEmpty()) {
+                            val extra = mutableMapOf<String, Any?>()
+                            if (turnToolCalls.isNotEmpty()) extra["toolCalls"] = turnToolCalls
+                            sessionStore.appendMessage(handle, "assistant", fullResponse, extra.toMap())
+                        }
+                        sessionStore.updateMeta(handle) { meta ->
+                            meta.running = false
+                            meta.abnormalTermination = false
+                        }
+                        sessionStore.touchLastMessage(handle)
+                        dispatchSessionList()
+                    }
+
+                    override fun onClosed() {
+                        val isRunning = sessionHandle?.meta?.running == true
+                        if (isRunning) {
+                            sessionHandle?.let { h ->
+                                sessionStore.updateMeta(h) { meta ->
+                                    meta.running = false
+                                    meta.abnormalTermination = true
+                                }
+                                val partialResponse = assistantBuilder.toString()
+                                if (partialResponse.isNotEmpty()) {
+                                    sessionStore.appendMessage(h, "assistant", partialResponse)
+                                }
+                                dispatchToWeb("session_interrupted", mapOf(
+                                    "sessionId" to h.meta.id,
+                                    "hasCheckpoint" to sessionStore.hasCheckpoint(h),
+                                ))
+                            }
+                        }
+                    }
+                },
+            )
+        }
     }
 
     private fun handleRiskApproval(approved: Boolean) {
@@ -685,6 +1006,8 @@ class CefChatPanel(
     private fun dispatchCurrentSessionMessages() {
         val handle = sessionHandle
         if (handle != null) {
+            // Load completed steps to rebuild toolCalls for each assistant message
+            val steps = sessionStore.readSteps(handle)
             val messages =
                 sessionStore.readMessages(handle).map { msg ->
                     val m = mutableMapOf<String, Any?>(
@@ -697,11 +1020,46 @@ class CefChatPanel(
                     if (msg["toolCall"] != null) m["toolCall"] = msg["toolCall"]
                     // Preserve ts (timestamp) for display
                     if (msg["ts"] != null) m["ts"] = msg["ts"]
+                    // Restore toolCalls from persisted data or rebuild from steps
+                    if (msg["toolCalls"] != null) {
+                        m["toolCalls"] = msg["toolCalls"]
+                    } else if (msg["role"] == "assistant" && steps.isNotEmpty()) {
+                        // Rebuild toolCalls from step records: merge "started" and "ok" records
+                        val toolCallMap = linkedMapOf<String, Map<String, Any>>()
+                        for (step in steps) {
+                            val tcId = step["toolCallId"] as? String ?: continue
+                            if (step["started"] == true) {
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to (step["toolName"] ?: "unknown"),
+                                    "args" to emptyMap<String, Any>(),
+                                    "status" to "success",
+                                )
+                            } else if (step["ok"] != null) {
+                                val existing = toolCallMap[tcId]
+                                val name = existing?.get("name") ?: "unknown"
+                                val args = existing?.get("args") ?: emptyMap<String, Any>()
+                                toolCallMap[tcId] = mapOf(
+                                    "id" to tcId,
+                                    "name" to name,
+                                    "args" to args,
+                                    "status" to if (step["ok"] == true) "success" else "error",
+                                )
+                            }
+                        }
+                        val toolCalls = toolCallMap.values.toList()
+                        if (toolCalls.isNotEmpty()) m["toolCalls"] = toolCalls
+                    }
                     m.toMap()
                 }
-            dispatchToWeb("session_messages", mapOf("sessionId" to handle.meta.id, "messages" to messages))
+            dispatchToWeb("session_messages", mapOf(
+                "sessionId" to handle.meta.id,
+                "messages" to messages,
+                "abnormalTermination" to (handle.meta.abnormalTermination ?: false),
+                "hasCheckpoint" to sessionStore.hasCheckpoint(handle),
+            ))
         } else {
-            dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, Any?>>()))
+            dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, Any?>>(), "abnormalTermination" to false, "hasCheckpoint" to false))
         }
     }
 
@@ -798,9 +1156,8 @@ class CefChatPanel(
         val hasToken = settings.accessToken() != null
         val hasRefreshToken = settings.refreshToken() != null
         val hasDevToken = settings.state.devToken.isNotBlank()
-        val authenticated = hasToken || hasRefreshToken || hasDevToken
         log.info(
-            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, authenticated=$authenticated, devToken=${if (hasDevToken) {
+            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, devToken=${if (hasDevToken) {
                 settings.state.devToken.take(
                     8,
                 ) + "..."
@@ -808,11 +1165,48 @@ class CefChatPanel(
                 "null"
             }}, baseUrl=${settings.state.backendBaseUrl}",
         )
-        dispatchToWeb("auth_state", mapOf("authenticated" to authenticated))
-        // If authenticated, also trigger model fetch — RefreshOn401Interceptor
-        // will silently refresh the access token if it has expired.
-        if (authenticated) {
+
+        // Dev token: no expiry, trust immediately
+        if (hasDevToken) {
+            dispatchToWeb("auth_state", mapOf("authenticated" to true))
             handleFetchModels()
+            return
+        }
+
+        // No tokens at all → not authenticated
+        if (!hasToken && !hasRefreshToken) {
+            dispatchToWeb("auth_state", mapOf("authenticated" to false))
+            return
+        }
+
+        // We have an access token and/or refresh token.
+        // Validate by trying to fetch models — if the access token is expired,
+        // RefreshOn401Interceptor will attempt a silent refresh first.
+        // Report authenticated=true optimistically; if refresh fails later,
+        // the interceptor will dispatch auth_state=false.
+        dispatchToWeb("auth_state", mapOf("authenticated" to true))
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val refreshNeeded = hasRefreshToken && !hasToken
+                if (refreshNeeded) {
+                    // Access token is gone but refresh token exists — proactively refresh
+                    log.info("[Auth] checkAuth: access token missing, attempting refresh...")
+                    val refreshed = runCatching {
+                        io.codepilot.plugin.auth.AuthService.getInstance().refresh().get()
+                    }.getOrNull() == true
+                    if (!refreshed) {
+                        log.warn("[Auth] checkAuth: refresh failed, showing login page")
+                        settings.setAccessToken(null)
+                        settings.setRefreshToken(null)
+                        settings.setDeviceSecret(null)
+                        dispatchToWeb("auth_state", mapOf("authenticated" to false))
+                        return@executeOnPooledThread
+                    }
+                }
+                handleFetchModels()
+            } catch (e: Exception) {
+                log.error("[Auth] checkAuth: error during validation", e)
+            }
         }
     }
 
@@ -951,96 +1345,65 @@ class CefChatPanel(
 
     /**
      * ★ at_suggest: Returns a list of @-reference candidates for the given query.
-     * Supports @file, @symbol, @terminal, @git, @web patterns.
+     * Supports @file, @folder, @symbol, @terminal, @git, @codebase, @docs, @web patterns.
+     * Delegates to AtReferenceProvider for comprehensive results.
      */
     private fun handleAtSuggest(query: String) {
         ApplicationManager.getApplication().executeOnPooledThread {
-            val suggestions = mutableListOf<Map<String, String>>()
-            val lower = query.lowercase()
-            // @file — list files matching the query
-            if (lower.isEmpty() || lower.startsWith("file") || lower.startsWith("f")) {
-                val root = project.basePath ?: return@executeOnPooledThread
-                java.nio.file.Files
-                    .walk(
-                        java.nio.file.Path
-                            .of(root),
-                    ).limit(50)
-                    .filter {
-                        java.nio.file.Files
-                            .isRegularFile(it) &&
-                            !it.toString().contains("/.git/")
-                    }.forEach { path ->
-                        val rel = path.toString().removePrefix(root).trimStart('/')
-                        if (lower.isEmpty() || rel.lowercase().contains(lower.removePrefix("file").removePrefix("f"))) {
-                            suggestions.add(mapOf("id" to "file:$rel", "display" to rel, "type" to "file"))
-                        }
-                    }
+            val refProvider = io.codepilot.plugin.context.AtReferenceProvider.getInstance(project)
+            val rawSuggestions = refProvider.suggest(query, limit = 20)
+
+            // Map AtReferenceProvider.Suggestion to the webui format: {id, type, label, detail, path}
+            val suggestions = rawSuggestions.map { s ->
+                // Extract the value part from label: "@file path" -> "path", "@git diff" -> "diff"
+                val valueFromLabel = s.label.removePrefix("@").removePrefix(s.type).trim()
+                val effectivePath = s.path ?: valueFromLabel
+                mapOf(
+                    "id" to "${s.type}:${effectivePath}",
+                    "type" to s.type,
+                    "label" to s.label,
+                    "detail" to s.detail,
+                    "path" to effectivePath,
+                )
             }
-            // @terminal — suggest active terminal sessions
-            if (lower.isEmpty() || lower.startsWith("terminal") || lower.startsWith("t")) {
-                val sessionManager =
-                    io.codepilot.plugin.tools.TerminalSessionManager
-                        .getInstance(project)
-                suggestions.add(mapOf("id" to "terminal:default", "display" to "Terminal output", "type" to "terminal"))
-            }
-            // @git — suggest git context
-            if (lower.isEmpty() || lower.startsWith("git") || lower.startsWith("g")) {
-                suggestions.add(mapOf("id" to "git:diff", "display" to "Git diff (staged)", "type" to "git"))
-                suggestions.add(mapOf("id" to "git:log", "display" to "Git recent log", "type" to "git"))
-            }
-            dispatchToWeb("at_suggestions", mapOf("query" to query, "suggestions" to suggestions.take(20)))
+            dispatchToWeb("at_suggestions", mapOf("query" to query, "suggestions" to suggestions))
         }
     }
 
     /**
      * ★ at_resolve: Resolves an @-reference ID to its full content.
+     * Delegates to AtReferenceProvider for comprehensive resolution.
+     * Stores resolved content in contextStore for later inclusion in messages.
+     * Returns: {id, type, display, path, content, chipId} to the webui.
      */
-    private fun handleAtResolve(id: String) {
+    private fun handleAtResolve(id: String, chipId: String?) {
         ApplicationManager.getApplication().executeOnPooledThread {
             val parts = id.split(":", limit = 2)
             if (parts.size < 2) {
-                dispatchToWeb("at_resolved", mapOf("id" to id, "content" to "", "error" to "invalid reference"))
+                dispatchToWeb("at_resolved", mapOf("id" to id, "content" to "", "error" to "invalid reference format, expected type:value"))
                 return@executeOnPooledThread
             }
-            val (type, ref) = parts[0] to parts[1]
-            val content =
-                when (type) {
-                    "file" -> {
-                        try {
-                            val vf =
-                                io.codepilot.plugin.tools.PathGuard
-                                    .resolve(project, ref)
-                            String(vf.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8)
-                        } catch (e: Exception) {
-                            "Error reading file: ${e.message}"
-                        }
-                    }
-                    "terminal" -> {
-                        val sessionManager =
-                            io.codepilot.plugin.tools.TerminalSessionManager
-                                .getInstance(project)
-                        sessionManager.getRecentOutput(ref, 5000) ?: "(no terminal output)"
-                    }
-                    "git" -> {
-                        try {
-                            val cmd =
-                                when (ref) {
-                                    "diff" -> listOf("git", "diff", "--cached")
-                                    "log" -> listOf("git", "log", "--oneline", "-20")
-                                    else -> listOf("git", "status", "--short")
-                                }
-                            val proc = ProcessBuilder(cmd).directory(java.io.File(project.basePath)).start()
-                            proc.inputStream
-                                .bufferedReader()
-                                .readText()
-                                .take(8000)
-                        } catch (e: Exception) {
-                            "Error running git: ${e.message}"
-                        }
-                    }
-                    else -> "Unknown reference type: $type"
-                }
-            dispatchToWeb("at_resolved", mapOf("id" to id, "content" to content))
+            val (type, value) = parts[0] to parts[1]
+
+            val refProvider = io.codepilot.plugin.context.AtReferenceProvider.getInstance(project)
+            val result = refProvider.resolve(type, value)
+
+            if (result == null) {
+                dispatchToWeb("at_resolved", mapOf("id" to id, "type" to type, "content" to "", "error" to "Could not resolve @$type $value"))
+            } else {
+                // Store the resolved content in contextStore so it's available for the next message
+                val storeId = chipId ?: id
+                contextStore[storeId] = result.content
+
+                dispatchToWeb("at_resolved", mapOf(
+                    "id" to id,
+                    "type" to result.type,
+                    "display" to result.display,
+                    "path" to (result.path ?: ""),
+                    "content" to result.content,
+                    "chipId" to (chipId ?: ""),
+                ))
+            }
         }
     }
 
@@ -1354,5 +1717,14 @@ class CefChatPanel(
                 },
             )
         }
+    }
+
+    private fun handleUpdateAutoApply(payload: JsonNode) {
+        val enabled = payload["enabled"]?.asBoolean() ?: return
+        val settings = CodePilotSettings.getInstance()
+        settings.state.autoApplyLowRiskPatches = enabled
+        log.info("[Settings] Updated autoApplyLowRiskPatches to $enabled")
+        // Sync back to web UI
+        dispatchToWeb("auto_apply_state", mapOf("enabled" to enabled))
     }
 }

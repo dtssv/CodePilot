@@ -611,6 +611,10 @@ class SessionStore {
         val branchId: String = "main",
         val parentBranchId: String? = null,
         val parentMsgIndex: Int? = null,
+        /** Whether the session is currently running (SSE stream active). */
+        var running: Boolean = false,
+        /** Whether the session was abnormally terminated (stream closed without done event). */
+        var abnormalTermination: Boolean? = null,
     )
 
     companion object {
