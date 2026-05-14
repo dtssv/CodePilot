@@ -1,34 +1,34 @@
-# Action: gendoc
-# Purpose: Generate comprehensive documentation for code elements
-# Input: code element (class, function, interface) with usage context
-# Output: detailed documentation with examples
+[ROLE] You generate comprehensive documentation for {{language}} code.
 
-You are an expert technical writer specializing in API documentation. Create comprehensive documentation for the provided code element.
-
-## Documentation Structure:
-1. **Overview**: High-level description of purpose and use cases
-2. **Parameters**: Detailed parameter descriptions with types and constraints
-3. **Return Value**: Description of return types and possible values
-4. **Exceptions**: List of possible exceptions and conditions
-5. **Usage Examples**: Practical code examples showing common use cases
-6. **Best Practices**: Guidelines for optimal usage
-7. **Related Elements**: Links to related classes/functions
-
-## Input Code Element:
+[CONTEXT]
+- Code element to document:
+```{{language}}
+{{selection}}
 ```
-{{code_element}}
-```
+- File path: {{filePath}}
+- User instruction: {{userInstruction}}
 
-## Context Information:
-- Language: {{language}}
-- Framework: {{framework}}
-- Usage Context: {{usage_context}}
+[REQUIREMENTS]
+1. Generate documentation covering: Overview, Parameters, Return Value, Exceptions, Usage Examples, Best Practices.
+2. Use clear, concise language suitable for developers.
+3. Use consistent formatting and terminology matching the language conventions (Javadoc for Java, KDoc for Kotlin, docstrings for Python/Go, TSDoc for TypeScript).
+4. Include practical code examples showing common use cases.
+5. Add performance considerations where relevant.
+6. Place the documented code at the same file path (replace the entire file content with the documented version).
 
-## Format Requirements:
-- Use clear, concise language suitable for developers
-- Include code examples in ``` blocks
-- Use consistent formatting and terminology
-- Provide both simple and advanced usage examples
-- Add performance considerations where relevant
-
-Generate the complete documentation in a structured format.
+[OUTPUT FORMAT — Patch JSON]
+Return a JSON envelope with the documented code as a patch:
+{
+  "summary": "Generated documentation for ...",
+  "patches": [{"path":"{{filePath}}","op":"replace","newContent":"<fully documented code with inline docs>"}],
+  "selfCheck": {
+    "matchedExpectation": true,
+    "checks": [
+      {"name":"overview_provided","passed":true},
+      {"name":"parameters_documented","passed":true},
+      {"name":"examples_included","passed":true},
+      {"name":"consistent_style","passed":true}
+    ],
+    "risk":"low"
+  }
+}

@@ -63,7 +63,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> review(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "review", false, userId);
+    return runAction(req, "review", true, userId);
   }
 
   @Operation(summary = "Generate comments")
@@ -71,7 +71,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> comment(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "comment", false, userId);
+    return runAction(req, "comment", true, userId);
   }
 
   @Operation(summary = "Generate tests")
@@ -87,7 +87,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> gendoc(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gendoc", false, userId);
+    return runAction(req, "gendoc", true, userId);
   }
 
   // ─── Custom-request actions ───────────────────────────────────────────
@@ -207,7 +207,7 @@ public class ActionController {
         req.sessionId(), mode, req.modelId(), req.modelSource() != null ? io.codepilot.core.model.ModelSource.valueOf(req.modelSource().toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
         List.of(), null, null, null, null, null, null, null, policy, null,
-        null, null);
+        null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
 
@@ -222,7 +222,7 @@ public class ActionController {
         sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
         List.of(), null, null, null, null, null, null, null, null, null,
-        null, null);
+        null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
 

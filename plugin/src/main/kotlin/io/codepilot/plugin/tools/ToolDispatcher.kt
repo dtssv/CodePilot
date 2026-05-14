@@ -29,6 +29,7 @@ class ToolDispatcher(
     /** Optional callback invoked after each tool execution completes, for UI feedback. */
     private val onToolResult: ((toolCallId: String, ok: Boolean, result: Any?) -> Unit)? = null,
 ) {
+    private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ToolDispatcher::class.java)
     private val patchApplier = PatchApplier(project)
     private val fileReader = FileReader(project)
     private val codeInspector = CodeInspector(project)
@@ -79,6 +80,16 @@ class ToolDispatcher(
         val name = toolCall.path("name").asText()
         val id = toolCall.path("id").asText()
         val args = toolCall.path("args")
+
+        // Skip gather.execute tool calls — they are handled by GatherDispatcher
+        // via the graph_info_request SSE event, not by ToolDispatcher.
+        // Without this, ToolDispatcher would refuse the tool and send a failure
+        // result back to the backend's ToolResultBus, competing with the
+        // GatherDispatcher's correct result.
+        if (name == "gather.execute") {
+            log.info("ToolDispatcher: skipping gather.execute tool_call (handled by GatherDispatcher)")
+            return
+        }
 
         // Check cache for read-only tools
         if (isReadOnlyTool(name)) {

@@ -81,12 +81,17 @@ public class GenerateAction implements NodeAction {
                     .content();
         } catch (Exception e) {
             log.error("LLM generate call failed for phase={}", phaseId, e);
-            updates.put("generateResult", "infoRequests");
-            updates.put("infoRequests", List.of(Map.of(
-                    "id", "gen-fallback-" + phaseId,
-                    "kind", "askUser",
-                    "question", "LLM call failed: " + e.getMessage()
-            )));
+            // LLM call failed — route to askUser so the user can decide how to proceed
+            updates.put("generateResult", "askUser");
+            updates.put("askUserQuestion", Map.of(
+                    "id", "gen-llm-failed-" + phaseId,
+                    "text", "Code generation failed: " + e.getMessage(),
+                    "kind", "single-choice",
+                    "options", List.of(
+                            Map.of("id", "retry", "label", "Retry generation"),
+                            Map.of("id", "skip", "label", "Skip this phase")
+                    )
+            ));
             return updates;
         }
 
@@ -141,8 +146,13 @@ public class GenerateAction implements NodeAction {
             if (askUser.isObject()) {
                 updates.put("askUserQuestion", mapper.convertValue(askUser, Map.class));
             } else {
-                // Wrap plain string into a structured askUser map
-                updates.put("askUserQuestion", Map.of("question", askUser.asText()));
+                // Wrap plain string into a structured askUser map matching AskUserAction.buildQuestion() format
+                // Use "text" key (not "question") because buildQuestion reads raw.getOrDefault("text", "")
+                updates.put("askUserQuestion", Map.of("text", askUser.asText(),
+                        "kind", "single-choice",
+                        "options", List.of(
+                                Map.of("id", "yes", "label", "Yes, proceed"),
+                                Map.of("id", "no", "label", "No, reconsider"))));
             }
             return updates;
         }
@@ -246,6 +256,8 @@ public class GenerateAction implements NodeAction {
     /**
      * Normalize infoRequests array: LLM may return string elements instead of
      * structured objects. Wrap each string element into a standard map.
+     * Non-parseable elements are wrapped as kind="freeform-info" (a pseudo-gather kind)
+     * rather than "askUser" to keep them in the gather flow.
      */
     private List<Map<String, Object>> normalizeInfoRequests(JsonNode infoRequestsNode) {
         List<Map<String, Object>> result = new ArrayList<>();
@@ -254,12 +266,14 @@ public class GenerateAction implements NodeAction {
                 try {
                     result.add(mapper.convertValue(element, new TypeReference<Map<String, Object>>() {}));
                 } catch (Exception e) {
-                    log.warn("Failed to parse infoRequest element, wrapping as string: {}", e.getMessage());
-                    result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "askUser", "question", element.toString()));
+                    log.warn("Failed to parse infoRequest element, wrapping as freeform-info: {}", e.getMessage());
+                    result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "freeform-info",
+                            "question", element.toString()));
                 }
             } else {
-                // Plain string — wrap into a structured request
-                result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "askUser", "question", element.asText()));
+                // Plain string — wrap into a freeform-info request (gather will handle as best-effort)
+                result.add(Map.of("id", UUID.randomUUID().toString(), "kind", "freeform-info",
+                        "question", element.asText()));
             }
         }
         return result;

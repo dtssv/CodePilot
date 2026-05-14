@@ -38,7 +38,9 @@ public record ConversationRunRequest(
     // ★ 新增：来自 .codepilot/rules/ 的项目规则文本列表
     List<String> projectRules,
     // ★ 新增：多模态图片输入
-    List<Image> images) {
+    List<Image> images,
+    // ★ 新增：Graph状态快照（插件端上传，用于断点恢复）
+    Map<String, Object> graphState) {
 
   public enum Intent {
     @JsonProperty("new") NEW,
@@ -122,12 +124,6 @@ public record ConversationRunRequest(
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record GraphGatherPolicy(Integer gatherLoopMax, Integer gatherBudgetTokens) {}
-
-  /** Graph state uploaded from plugin for resume. */
-  public Map<String, Object> graphState() {
-    // Accessed via reflection by ObjectMapper; field stored in the JSON body
-    return null;
-  }
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record Skills(List<String> requested, List<String> disabled) {}

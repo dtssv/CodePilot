@@ -47,6 +47,11 @@ class CefChatPanel(
     /** Current active session; nullable — only created on first message. */
     private var sessionHandle: SessionStore.SessionHandle? = null
 
+    /** Tool dispatchers for handling tool_call SSE events during both run and resume. */
+    private var dispatcher: ToolDispatcher? = null
+    private var gatherDispatcher: io.codepilot.plugin.tools.GatherDispatcher? = null
+    private var graphStateStore: io.codepilot.plugin.tools.GraphStateStore? = null
+
     /**
      * Stores full code for context references. Key = contextId, Value = full code text.
      * This avoids embedding full code in messages, keeping messages compact and
@@ -119,6 +124,28 @@ class CefChatPanel(
         }
     }
 
+    /**
+     * Dispatch a tool_call from external sources (e.g., ActionBase SSE).
+     * Routes the tool call to ToolDispatcher for execution and notifies WebUI.
+     */
+    fun dispatchToolCall(toolCallId: String, toolName: String, args: com.fasterxml.jackson.databind.JsonNode) {
+        val handle = sessionHandle ?: return
+        // Create a payload node that matches the expected format
+        val payload = mapper.createObjectNode()
+        payload.put("id", toolCallId)
+        payload.put("name", toolName)
+        payload.set<com.fasterxml.jackson.databind.JsonNode>("args", args)
+
+        // Notify WebUI for card rendering
+        dispatchToWeb("tool_call", mapper.treeToValue(payload, Map::class.java))
+
+        // Dispatch to ToolDispatcher for execution
+        val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { tcId, ok, _ ->
+            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to tcId, "ok" to ok))
+        })
+        dispatcher.dispatch(payload)
+    }
+
     /** Store context fullCode by ID — avoids embedding code in messages. */
     fun storeContext(
         id: String,
@@ -180,7 +207,7 @@ class CefChatPanel(
                 "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
                 "risk_approved" -> handleRiskApproval(payload["approved"]?.asBoolean() ?: false)
-                "needs_input_response" -> handleNeedsInputResponse(payload["answer"]?.asText() ?: "")
+                "needs_input_response" -> handleNeedsInputResponse(payload)
                 "new_session" -> handleNewSession()
                 "list_sessions" -> handleListSessions()
                 "switch_session" -> handleSwitchSession(payload["sessionId"]?.asText() ?: return)
@@ -320,7 +347,7 @@ class CefChatPanel(
                     remaining = remaining.substring(end + 1)
                 }
             }
-        val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
+        dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
             // Dispatch tool_result_ack to WebUI immediately when tool execution completes
             dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
             // Record the tool result step
@@ -330,10 +357,10 @@ class CefChatPanel(
                 "ts" to java.time.Instant.now().toString(),
             ))
         })
-        val gatherDispatcher =
+        gatherDispatcher =
             io.codepilot.plugin.tools
                 .GatherDispatcher(project, client, handle.meta.id)
-        val graphStateStore =
+        graphStateStore =
             io.codepilot.plugin.tools
                 .GraphStateStore(project, handle.dir)
 
@@ -525,7 +552,9 @@ class CefChatPanel(
 
                     override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
                         // Execute client-side gather requests silently
-                        gatherDispatcher.dispatchBatch(payload.path("requests"))
+                        // Pass the toolCallId so the backend's ToolResultBus can match results
+                        val toolCallId = payload.path("toolCallId").asText("gather-batch")
+                        gatherDispatcher.dispatchBatch(payload.path("requests"), toolCallId)
                     }
 
                     override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -821,7 +850,10 @@ class CefChatPanel(
 
                     override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyGraphPlan(payload)
                     override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyTransition(payload)
-                    override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) = gatherDispatcher.dispatchBatch(payload.path("requests"))
+                    override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val toolCallId = payload.path("toolCallId").asText("gather-batch")
+                        gatherDispatcher.dispatchBatch(payload.path("requests"), toolCallId)
+                    }
                     override fun onGraphInfoResult(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyInfoResult(payload)
                     override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) = graphStateStore.applyVerify(payload)
                     override fun onGraphRepairPlan(payload: com.fasterxml.jackson.databind.JsonNode) {}
@@ -902,9 +934,87 @@ class CefChatPanel(
         log.info("Risk approval: $approved")
     }
 
-    private fun handleNeedsInputResponse(answer: String) {
-        val sid = sessionHandle?.meta?.id ?: return
-        client.submitToolResult(sid, "needs_input", answer, true)
+    private fun handleNeedsInputResponse(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val handle = sessionHandle ?: run {
+            log.warn("NeedsInputResponse: no active session handle")
+            return
+        }
+        val sid = handle.meta.id
+        val currentDispatcher = dispatcher ?: run {
+            log.warn("NeedsInputResponse: no active ToolDispatcher")
+            return
+        }
+        val currentGatherDispatcher = gatherDispatcher
+        val currentGraphStateStore = graphStateStore ?: GraphStateStore(project, handle.dir)
+
+        // Extract answers from WebUI payload
+        // WebUI sends: {answers: [{questionId, optionId, freeform}], continuationToken: null}
+        val answersNode = payload.path("answers")
+        val answers: List<Map<String, Any?>> = if (answersNode.isArray && answersNode.size() > 0) {
+            mapper.treeToValue(answersNode, List::class.java) as List<Map<String, Any?>>
+        } else {
+            // Fallback: single answer string
+            val answerText = payload.path("answer").asText(null)
+            if (answerText != null) listOf(mapOf("freeform" to answerText)) else emptyList()
+        }
+
+        // Get continuationToken from GraphStateStore (persisted by applyAwaiting from DONE event)
+        val continuationToken = currentGraphStateStore.snapshot().path("continuationToken").asText(null)
+
+        log.info("NeedsInputResponse: sessionId={}, continuationToken={}, answersCount={}", sid, continuationToken, answers.size)
+
+        // Build resume payload using SessionStore (includes graphState, completedToolCalls, etc.)
+        val userInput = answers.joinToString("; ") { a -> a["freeform"]?.toString() ?: a["optionId"]?.toString() ?: "" }
+        val resumePayload = sessionStore.buildResumePayload(handle, userInput, handle.meta.modelId ?: "default")
+        // Override with the actual answers and continuationToken from this response
+        val fullPayload = resumePayload.toMutableMap()
+        fullPayload["answers"] = answers
+        fullPayload["intent"] = "answer"
+        if (continuationToken != null) {
+            fullPayload["continuationToken"] = continuationToken
+        }
+
+        // Call /v1/conversation/resume which triggers GraphEngine.resume()
+        // Use the same listener pattern as the initial run to handle SSE events
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val assistantBuilder = StringBuilder()
+            client.resume(
+                fullPayload.toMap(),
+                object : ConversationClient.Listener {
+                    override fun onDelta(text: String) {
+                        assistantBuilder.append(text)
+                        dispatchToWeb("delta", mapOf("text" to text))
+                    }
+                    override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("tool_call", data)
+                        val toolName = payload.path("name").asText(null)
+                        val toolCallId = payload.path("id").asText(null)
+                        if (toolName != null && toolCallId != null) {
+                            currentDispatcher.dispatch(payload)
+                        }
+                    }
+                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+                    override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        currentGraphStateStore.applyGraphPlan(payload)
+                    override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        currentGraphStateStore.applyTransition(payload)
+                    override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val toolCallId = payload.path("toolCallId").asText("gather-batch")
+                        currentGatherDispatcher?.dispatchBatch(payload.path("requests"), toolCallId)
+                    }
+                    override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
+                        dispatchToWeb("done", mapOf("reason" to reason))
+                        if (reason == "awaiting_user_input" || reason == "phase_done") {
+                            currentGraphStateStore.applyAwaiting(payload)
+                        }
+                    }
+                    override fun onError(code: Int, message: String) =
+                        dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                },
+            )
+        }
     }
 
     // ---- Session management ---- //

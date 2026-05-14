@@ -37,8 +37,11 @@ class GatherDispatcher(
     /**
      * Dispatches a batch of info requests from a graph_info_request event.
      * Each request is executed individually; failures do not block other requests.
+     *
+     * @param toolCallId the tool call ID from the SSE event, used to correlate
+     *                   the result back to the backend's ToolResultBus subscription
      */
-    fun dispatchBatch(requests: JsonNode) {
+    fun dispatchBatch(requests: JsonNode, toolCallId: String = "gather-batch") {
         if (!requests.isArray) return
         ApplicationManager.getApplication().executeOnPooledThread {
             val results = mutableListOf<Map<String, Any?>>()
@@ -85,10 +88,12 @@ class GatherDispatcher(
                 }
             }
             // Submit all results back as a single batch tool-result
+            // Use the toolCallId from the SSE event so the backend's
+            // ToolResultBus subscription can match it
             client.submitToolResult(
                 mapOf(
                     "sessionId" to sessionId,
-                    "toolCallId" to "gather-batch",
+                    "toolCallId" to toolCallId,
                     "ok" to results.all { it["ok"] == true },
                     "result" to mapOf("gathered" to results),
                 ),

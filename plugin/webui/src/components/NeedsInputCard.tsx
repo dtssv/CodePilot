@@ -39,6 +39,7 @@ interface NeedsInputPayload {
     freeformAllowed: boolean;
     questions: Question[];
     notesForUser?: string[];
+    continuationToken?: string;
 }
 
 interface NeedsInputCardProps {
@@ -111,10 +112,10 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
         const answers = buildAnswers();
         setSubmitted(true);
 
-        // Send to plugin which will call /v1/conversation/run with intent=answer
+        // Send to plugin which will call /v1/conversation/resume with intent=answer
         sendToPlugin('needs_input_response', {
             answers,
-            continuationToken: null, // Will be filled by the plugin
+            continuationToken: payload.continuationToken || null,
         });
 
         onAnswered?.(answers);

@@ -1,0 +1,16 @@
+id: skill.action.comment
+version: 1.0.0
+title: Add documentation comments action
+source: system
+scope: system
+priority: 80
+merge: append
+category: ACTION
+triggers:
+  any:
+    - action: [comment]
+audit:
+  tokensEstimate: 130
+systemPrompt: |
+  [ACTION:comment]
+  Add comprehensive documentation comments to code. Explain the "why" not just the "what". Use language-conventional doc style (Javadoc/KDoc/docstrings/TSDoc). Output a Patch JSON that `replace`s the file with the documented version.

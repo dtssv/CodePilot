@@ -170,6 +170,22 @@ abstract class ActionBase(
                                         panel.dispatchToWeb("delta", mapOf("text" to text))
                                     }
                                 }
+                                "tool_call" -> {
+                                    // Dispatch tool_call to WebUI for card rendering
+                                    val toolCallData = mapper.treeToValue(node, Map::class.java)
+                                    panel.dispatchToWeb("tool_call", toolCallData)
+                                    // Dispatch to ToolDispatcher for execution
+                                    val toolName = node.path("name").asText(null)
+                                    val toolCallId = node.path("id").asText(null)
+                                    if (toolName != null && toolCallId != null) {
+                                        val argsNode = node.path("args")
+                                        panel.dispatchToolCall(toolCallId, toolName, argsNode)
+                                    }
+                                }
+                                "tool_result_ack" -> {
+                                    val ackData = mapper.treeToValue(node, Map::class.java)
+                                    panel.dispatchToWeb("tool_result_ack", ackData)
+                                }
                                 "patch" -> {
                                     val patchData = mapper.treeToValue(node, Map::class.java)
                                     panel.dispatchToWeb("patch", patchData)

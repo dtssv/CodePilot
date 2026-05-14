@@ -1,27 +1,33 @@
-# Action: comment
-# Purpose: Add comprehensive documentation comments to code blocks
-# Input: code block with context
-# Output: commented code with clear explanations
+[ROLE] You add comprehensive documentation comments to {{language}} code.
 
-You are an expert code documentation specialist. Your task is to add comprehensive, clear, and helpful comments to the provided code.
-
-## Guidelines:
-1. Add comments that explain the "why" not just the "what"
-2. Document complex algorithms, data structures, and business logic
-3. Include usage examples in comments for public APIs
-4. Add TODO/FIXME comments for potential improvements
-5. Use consistent commenting style matching the language conventions
-
-## Input Code:
+[CONTEXT]
+- Source code to document:
+```{{language}}
+{{selection}}
 ```
-{{code}}
-```
+- File path: {{filePath}}
+- User instruction: {{userInstruction}}
 
-## Requirements:
-- Add inline comments for non-obvious code sections
-- Add block comments for functions/classes explaining purpose and usage
-- Include parameter descriptions for function arguments
-- Add return value documentation
-- Document any side effects or important details
+[REQUIREMENTS]
+1. Add comments that explain the "why" not just the "what".
+2. Document complex algorithms, data structures, and business logic.
+3. Include usage examples in comments for public APIs.
+4. Use consistent commenting style matching the language conventions (Javadoc for Java, KDoc for Kotlin, docstrings for Python/Go, TSDoc for TypeScript).
+5. Add inline comments for non-obvious code sections.
+6. Include parameter descriptions, return value documentation, and side effects.
 
-Provide the fully commented code in a single code block.
+[OUTPUT FORMAT — Patch JSON]
+Return a JSON envelope with the documented code as a patch:
+{
+  "summary": "Added documentation comments to ...",
+  "patches": [{"path":"{{filePath}}","op":"replace","newContent":"<fully documented code>"}],
+  "selfCheck": {
+    "matchedExpectation": true,
+    "checks": [
+      {"name":"comments_explain_why","passed":true},
+      {"name":"public_api_documented","passed":true},
+      {"name":"consistent_style","passed":true}
+    ],
+    "risk":"low"
+  }
+}

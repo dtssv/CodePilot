@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import io.codepilot.plugin.settings.CodePilotSettings
 import java.nio.charset.StandardCharsets
@@ -29,6 +30,7 @@ import java.util.UUID
 class SessionStore {
     private val mapper: ObjectMapper = jacksonObjectMapper()
     private val crypto: SessionCryptoService = SessionCryptoService.getInstance()
+    private val log = logger<SessionStore>()
 
     fun newSession(
         workspaceHash: String,
@@ -244,6 +246,10 @@ class SessionStore {
      * Build a complete resume payload for /v1/conversation/resume.
      * Includes: lastPlan, completedToolCalls, sessionDigest, taskLedger, lastAssistantTurnSummary.
      * This is the core of the checkpoint recovery mechanism.
+     *
+     * If the session has a graph awaiting state (awaiting_user_input), includes
+     * the continuationToken and graphState so the backend can resume from the
+     * exact interrupt point.
      */
     fun buildResumePayload(
         handle: SessionHandle,
@@ -277,20 +283,53 @@ class SessionStore {
                 if (content.length > 1600) content.takeLast(1600) else content
             }
 
+        // ── Load graph state for interrupt-resume ──
+        // Read graph state directly from disk (SessionStore is APP-level, no project reference)
+        val plansDir = handle.dir.resolve("plans")
+        var continuationToken: String? = null
+        var isAwaiting = false
+        var graphStateMap: Map<String, Any?> = emptyMap()
+
+        try {
+            if (Files.isDirectory(plansDir)) {
+                val latestGraph = Files.list(plansDir)
+                    .filter { it.fileName.toString().startsWith("graph-") && it.fileName.toString().endsWith(".json") }
+                    .sorted(Comparator.reverseOrder())
+                    .findFirst()
+                    .orElse(null)
+
+                if (latestGraph != null) {
+                    val graphJson = mapper.readTree(Files.readString(latestGraph))
+                    // Check if the graph is in awaiting state
+                    val awaitingNode = graphJson.path("awaiting")
+                    isAwaiting = !awaitingNode.isMissingNode && !awaitingNode.isNull
+                    // Extract continuationToken from top level or from awaiting
+                    continuationToken = graphJson.path("continuationToken").asText(null)
+                        ?: awaitingNode.path("continuationToken").asText(null)
+                    // Convert graph state to map
+                    graphStateMap = mapper.convertValue(graphJson, Map::class.java) as Map<String, Any?>
+                }
+            }
+        } catch (e: Exception) {
+            log.warn("Failed to load graph state for resume: ${e.message}")
+        }
+
+        // Determine intent based on whether we're resuming from an interrupt point
+        val intent = if (isAwaiting && continuationToken != null) "answer" else "continue"
+
         // Build the resume payload matching /v1/conversation/resume schema
-        return mapOf(
+        val payload = mutableMapOf<String, Any?>(
             "sessionId" to handle.meta.id,
             "mode" to handle.meta.mode,
             "modelId" to modelId,
             "modelSource" to handle.meta.modelSource,
             "input" to userInput,
-            "intent" to "continue",
-            "lastPlan" to plan,
-            "completedToolCalls" to completedToolCalls,
+            "intent" to intent,
+            "lastPlanDigest" to plan,
+            "completedToolCallsTail" to completedToolCalls,
             "sessionDigest" to digest,
             "taskLedger" to ledger,
             "lastAssistantTurnSummary" to lastAssistantTurnSummary,
-            "checkpoint" to checkpoint,
             "policy" to
                 mapOf(
                     "requestCompact" to "auto",
@@ -298,8 +337,21 @@ class SessionStore {
                     "selfCheck" to true,
                     "askPolicy" to "prefer-ask",
                     "maxSteps" to 25,
+                    "engine" to "graph",
                 ),
         )
+
+        // Include continuationToken if resuming from an interrupt point
+        if (continuationToken != null) {
+            payload["continuationToken"] = continuationToken
+        }
+
+        // Include graphState for the backend to restore graph execution
+        if (graphStateMap.isNotEmpty()) {
+            payload["graphState"] = graphStateMap
+        }
+
+        return payload.toMap()
     }
 
     /**

@@ -240,6 +240,27 @@ public class ConversationService {
                     SseEvents.DONE, Map.of("reason", "final", "continuationToken", continuation))));
   }
 
+  /**
+   * Resumes a previously interrupted graph execution from a checkpoint.
+   *
+   * <p>If the request has a {@code continuationToken}, delegates to
+   * {@link GraphEngineService#resume} which loads the checkpoint from Redis
+   * and continues execution from the interrupt point.
+   *
+   * <p>If no continuationToken, falls back to a standard {@link #run} (backward compat).
+   */
+  public Flux<ServerSentEvent<String>> resume(ConversationRunRequest req, String userId) {
+    // If this is a graph resume request with continuationToken, use the checkpoint-based resume
+    if (req.mode() == ConversationMode.AGENT
+        && req.continuationToken() != null && !req.continuationToken().isBlank()) {
+      log.info("ConversationService.resume: resuming from checkpoint, token={}, sessionId={}",
+          req.continuationToken(), req.sessionId());
+      return graphEngine.resume(req, userId);
+    }
+    // Fallback: no checkpoint, just do a normal run
+    return run(req, userId);
+  }
+
   private static String deltaFromChatResponse(ChatResponse r) {
     if (r == null || r.getResult() == null || r.getResult().getOutput() == null) return "";
     String text = r.getResult().getOutput().getText();

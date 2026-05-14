@@ -134,6 +134,7 @@ public class WorkspaceProbe {
     if (s.contains("review")) keywords.add("review");
     if (s.contains("test") || s.contains("unittest")) keywords.add("gentest");
     if (s.contains("doc") || s.contains("documentation")) keywords.add("gendoc");
+    if (s.contains("comment") || s.contains("注释")) keywords.add("comment");
   }
 
   private String detectAction(ConversationRunRequest req) {

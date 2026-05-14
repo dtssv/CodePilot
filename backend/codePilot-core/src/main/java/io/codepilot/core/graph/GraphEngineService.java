@@ -6,6 +6,7 @@ import com.alibaba.cloud.ai.graph.action.AsyncEdgeAction;
 import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
 import io.codepilot.core.conversation.SseFactory;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.actions.*;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -59,6 +60,7 @@ public class GraphEngineService {
     private final SearchEvaluateAction searchEvaluateAction;
     private final SynthesizeAction synthesizeAction;
     private final SseFactory sse;
+    private final GraphCheckpointStore checkpointStore;
 
     public GraphEngineService(
             IntakeAction intakeAction,
@@ -75,7 +77,8 @@ public class GraphEngineService {
             FinalizeAction finalizeAction,
             SearchEvaluateAction searchEvaluateAction,
             SynthesizeAction synthesizeAction,
-            SseFactory sse) {
+            SseFactory sse,
+            GraphCheckpointStore checkpointStore) {
         this.intakeAction = intakeAction;
         this.planningAction = planningAction;
         this.preCheckAction = preCheckAction;
@@ -91,6 +94,7 @@ public class GraphEngineService {
         this.searchEvaluateAction = searchEvaluateAction;
         this.synthesizeAction = synthesizeAction;
         this.sse = sse;
+        this.checkpointStore = checkpointStore;
     }
 
     /**
@@ -130,6 +134,11 @@ public class GraphEngineService {
                     log.info("GraphEngine completed: state keys={}",
                         resultState.map(s -> s.data().keySet()).orElse(null));
                     liveSink.tryEmitComplete();
+                } catch (GraphInterruptException e) {
+                    // Controlled interrupt (e.g., AskUser): the DONE event has already been
+                    // emitted by the node. Just close the SSE stream gracefully.
+                    log.info("GraphEngine interrupted: reason={}, token={}", e.getReason(), e.getContinuationToken());
+                    liveSink.tryEmitComplete();
                 } catch (Exception e) {
                     log.error("Graph engine execution failed", e);
                     liveSink.tryEmitNext(sse.error(50001, "Graph engine error: " + e.getMessage()));
@@ -148,6 +157,91 @@ public class GraphEngineService {
                     sse.error(50001, "Graph engine error: " + e.getMessage()),
                     sse.event(SseEvents.DONE, Map.of("reason", "failed")));
         }
+    }
+
+    /**
+     * Resumes a previously interrupted graph execution from a checkpoint.
+     *
+     * <p>Loads the saved state snapshot from Redis using the continuationToken,
+     * merges any user answers, then re-invokes the graph starting from the
+     * interrupt point's next node.
+     *
+     * @param req              the resume request with continuationToken and answers
+     * @param userId           the user ID
+     * @return SSE event stream continuing from the interrupt point
+     */
+    public Flux<ServerSentEvent<String>> resume(ConversationRunRequest req, String userId) {
+        String continuationToken = req.continuationToken();
+        if (continuationToken == null || continuationToken.isBlank()) {
+            return Flux.just(
+                    sse.error(50002, "Missing continuationToken for resume"),
+                    sse.event(SseEvents.DONE, Map.of("reason", "failed")));
+        }
+
+        Sinks.Many<ServerSentEvent<String>> liveSink = Sinks.many().unicast().onBackpressureBuffer();
+
+        // Load checkpoint asynchronously, then resume graph execution
+        checkpointStore.load(continuationToken)
+                .subscribe(snapshot -> {
+                    if (snapshot == null) {
+                        liveSink.tryEmitNext(sse.error(50002,
+                                "Checkpoint not found or expired for token: " + continuationToken));
+                        liveSink.tryEmitComplete();
+                        return;
+                    }
+
+                    try {
+                        String template = req.policy() != null && req.policy().graphTemplate() != null
+                                ? req.policy().graphTemplate() : "default";
+                        var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
+
+                        // Restore state from checkpoint and merge answers
+                        var restoredState = IntakeAction.restoreFromCheckpoint(snapshot, req, userId);
+
+                        log.info("GraphEngine resume: token={}, nextNode={}, restoredStateKeys={}",
+                                continuationToken, snapshot.nextNode(), restoredState.data().keySet());
+
+                        // Register session sink for SSE
+                        String sid = req.sessionId();
+                        GraphSseHelper.registerSessionSink(sid, liveSink, sse);
+
+                        // Schedule graph execution on dedicated scheduler
+                        graphScheduler.schedule(() -> {
+                            GraphSseHelper.setLiveSink(liveSink, sse);
+                            try {
+                                var resultState = graph.invoke(restoredState.data());
+                                log.info("GraphEngine resume completed: state keys={}",
+                                        resultState.map(s -> s.data().keySet()).orElse(null));
+                                liveSink.tryEmitComplete();
+                            } catch (GraphInterruptException e) {
+                                // Controlled interrupt during resumed execution (e.g., another askUser)
+                                log.info("GraphEngine resume interrupted: reason={}, token={}", e.getReason(), e.getContinuationToken());
+                                liveSink.tryEmitComplete();
+                            } catch (Exception e) {
+                                log.error("Graph engine resume execution failed", e);
+                                liveSink.tryEmitNext(sse.error(50001, "Graph engine resume error: " + e.getMessage()));
+                                liveSink.tryEmitComplete();
+                            } finally {
+                                GraphSseHelper.clearLiveSink();
+                                GraphSseHelper.unregisterSessionSink(sid);
+                            }
+                        });
+
+                        // Clean up checkpoint after successful resume initiation
+                        checkpointStore.remove(continuationToken).subscribe();
+
+                    } catch (Exception e) {
+                        log.error("Graph engine resume setup failed", e);
+                        liveSink.tryEmitNext(sse.error(50001, "Graph engine resume error: " + e.getMessage()));
+                        liveSink.tryEmitComplete();
+                    }
+                }, error -> {
+                    log.error("Failed to load checkpoint for token={}", continuationToken, error);
+                    liveSink.tryEmitNext(sse.error(50002, "Failed to load checkpoint: " + error.getMessage()));
+                    liveSink.tryEmitComplete();
+                });
+
+        return liveSink.asFlux();
     }
 
     private CompiledGraph buildGraph() throws Exception {
@@ -169,14 +263,25 @@ public class GraphEngineService {
 
         // ── Define Edges ──
         graph.addEdge(StateGraph.START, "intake");
-        graph.addEdge("intake", "planning");
+
+        // Intake: on fresh run goes to planning; on resume (has resumeNextNode) jumps to the target node
+        graph.addConditionalEdges("intake",
+                AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
+                Map.of("planning", "planning", "preCheck", "preCheck",
+                        "generate", "generate", "applyPatch", "applyPatch",
+                        "repair", "repair", "gather", "gather",
+                        "askUser", "askUser", "verify", "verify",
+                        "commit", "commit"));
 
         // Planning → may need info or proceed to phase loop
         graph.addConditionalEdges("planning",
                 AsyncEdgeAction.edge_async(planningAction::routeAfterPlanning),
                 Map.of("preCheck", "preCheck", "gather", "gather", "finalize", "finalize"));
 
-        graph.addEdge("preCheck", "generate");
+        // PreCheck → may need info (gather), be blocked (askUser), or proceed (generate)
+        graph.addConditionalEdges("preCheck",
+                AsyncEdgeAction.edge_async(preCheckAction::routeAfterPreCheck),
+                Map.of("generate", "generate", "gather", "gather", "askUser", "askUser"));
 
         // Generate → may need info, produce toolCalls, or textOutput (B3: skip applyPatch)
         graph.addConditionalEdges("generate",
@@ -197,8 +302,8 @@ public class GraphEngineService {
         // Repair → may need info, retry verify, or partial commit (M3)
         graph.addConditionalEdges("repair",
                 AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
-                Map.of("applyPatch", "applyPatch", "gather", "gather",
-                        "askUser", "askUser", "commit", "commit"));
+                Map.of("applyPatch", "applyPatch", "askUser", "askUser",
+                        "commit", "commit"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
@@ -214,8 +319,14 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
                 Map.of("preCheck", "preCheck", "finalize", "finalize"));
 
-        // AskUser and Finalize are terminal
-        graph.addEdge("askUser", StateGraph.END);
+        // AskUser: can route to a target node (resume after user answers) or END (terminal)
+        graph.addConditionalEdges("askUser",
+                AsyncEdgeAction.edge_async(askUserAction::routeAfterAskUser),
+                Map.of("repair", "repair", "generate", "generate",
+                        "planning", "planning", "preCheck", "preCheck",
+                        "verify", "verify", "gather", "gather",
+                        "commit", "commit", "finalize", "finalize"));
+
         graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();
@@ -235,6 +346,7 @@ public class GraphEngineService {
         // Nodes
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
         graph.addNode("planning", AsyncNodeAction.node_async(planningAction));
+        graph.addNode("preCheck", AsyncNodeAction.node_async(preCheckAction));
         graph.addNode("generate", AsyncNodeAction.node_async(generateAction));
         graph.addNode("gather", AsyncNodeAction.node_async(gatherAction));
         graph.addNode("reenter", AsyncNodeAction.node_async(reenterAction));
@@ -246,7 +358,13 @@ public class GraphEngineService {
 
         // Edges
         graph.addEdge(StateGraph.START, "intake");
-        graph.addEdge("intake", "planning");
+
+        // Intake: on fresh run goes to planning; on resume jumps to target node
+        graph.addConditionalEdges("intake",
+                AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
+                Map.of("planning", "planning", "generate", "generate",
+                        "gather", "gather", "askUser", "askUser",
+                        "repair", "repair", "verify", "verify"));
 
         // Planning → generate first sub-question's search queries, or gather if need info first
         graph.addConditionalEdges("planning",
@@ -277,8 +395,15 @@ public class GraphEngineService {
         // Synthesize → finalize
         graph.addEdge("synthesize", "finalize");
 
+        // AskUser: can route to a target node (resume after user answers) or END
+        graph.addConditionalEdges("askUser",
+                AsyncEdgeAction.edge_async(askUserAction::routeAfterAskUser),
+                Map.of("repair", "repair", "generate", "generate",
+                        "planning", "planning", "preCheck", "preCheck",
+                        "verify", "verify", "gather", "gather",
+                        "commit", "commit", "finalize", "finalize"));
+
         // Terminals
-        graph.addEdge("askUser", StateGraph.END);
         graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();

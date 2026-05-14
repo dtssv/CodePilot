@@ -4,6 +4,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.graph.GraphCheckpointStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -53,7 +54,7 @@ public class IntakeAction implements NodeAction {
             "verifyReport", "verifyResult",
             "clientDiagnostics", "testResults", "lintResults",
             // repair outputs
-            "repairResult", "askUserQuestion",
+            "repairResult", "askUserQuestion", "repairToolCalls",
             "phaseOriginalCode", "appliedPatches",
             "graphVerifyPolicy", "graphRepairPolicy", "graphGatherPolicy",
             // gather outputs
@@ -66,7 +67,11 @@ public class IntakeAction implements NodeAction {
             "donePayload", "sessionDigest", "summaryForNextTurn",
             "completedToolCalls", "taskLedger",
             // search-evaluate / synthesize
-            "searchEvaluateResult", "synthesizeResult"
+            "searchEvaluateResult", "synthesizeResult",
+            // ── Interrupt-resume keys (previously missing) ──
+            "awaiting", "continuationToken", "askUserOrigin", "askUserTitle",
+            "pendingQuestions", "clientRequestsPending", "gatherCount",
+            "gatherExhausted", "verifyReportRaw", "resumeNextNode"
     );
 
     @Override
@@ -86,6 +91,33 @@ public class IntakeAction implements NodeAction {
             state.value("userId").orElse(null),
             state.keyStrategies().keySet());
         return updates;
+    }
+
+    /**
+     * Route after intake: determines the next node based on whether this is
+     * a fresh run or a resume from a checkpoint.
+     *
+     * <p>For fresh runs, routes to "planning" as usual.
+     * For resume runs (state has "resumeNextNode"), routes directly to the
+     * checkpoint's target node, skipping the intake→planning preamble.
+     */
+    public String routeAfterIntake(OverAllState state) {
+        String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
+        if (!resumeNextNode.isBlank()) {
+            // Resume mode: jump directly to the checkpoint's next node
+            log.info("IntakeAction route: resume mode, jumping to nextNode={}", resumeNextNode);
+            // Validate that the target node is a valid graph node
+            return switch (resumeNextNode) {
+                case "planning", "preCheck", "generate", "applyPatch", "repair",
+                     "gather", "askUser", "verify", "commit" -> resumeNextNode;
+                default -> {
+                    log.warn("IntakeAction route: invalid resumeNextNode={}, falling back to planning", resumeNextNode);
+                    yield "planning";
+                }
+            };
+        }
+        // Fresh run: proceed to planning
+        return "planning";
     }
 
     /**
@@ -138,6 +170,69 @@ public class IntakeAction implements NodeAction {
             state.value("userId").orElse("NULL"),
             state.data().keySet(),
             state.keyStrategies().keySet());
+        return state;
+    }
+
+    /**
+     * Restores OverAllState from a checkpoint snapshot for resume execution.
+     *
+     * <p>Merges the saved state data with any new data from the resume request
+     * (answers, graphState overrides). This is the core of the interrupt-resume
+     * mechanism: the graph continues from where it left off with the user's
+     * answers injected into state.
+     *
+     * @param snapshot the checkpoint loaded from Redis
+     * @param req      the resume request with answers and optional graphState
+     * @param userId   the user ID
+     * @return restored OverAllState ready for graph.invoke()
+     */
+    public static OverAllState restoreFromCheckpoint(
+            GraphCheckpointStore.CheckpointSnapshot snapshot,
+            ConversationRunRequest req,
+            String userId) {
+
+        // Start with the saved state data
+        var restored = new HashMap<>(snapshot.stateData());
+
+        // Override sessionId and userId from the resume request
+        restored.put("sessionId", req.sessionId());
+        restored.put("userId", userId);
+
+        // Inject user answers from the resume request
+        if (req.answers() != null && !req.answers().isEmpty()) {
+            restored.put("answers", req.answers());
+        }
+
+        // Carry over modelId/modelSource
+        if (req.modelId() != null) {
+            restored.put("modelId", req.modelId());
+        }
+        if (req.modelSource() != null) {
+            restored.put("modelSource", req.modelSource().name());
+        }
+
+        // Merge any additional graphState from the plugin
+        if (req.graphState() != null) {
+            restored.putAll(req.graphState());
+        }
+
+        // Set currentNode to the nextNode from the checkpoint (where to resume from)
+        restored.put("currentNode", snapshot.nextNode());
+
+        // Set resumeNextNode so IntakeAction's routeAfterIntake() can jump directly
+        // to the target node, bypassing the intake→planning preamble
+        restored.put("resumeNextNode", snapshot.nextNode());
+
+        // Clear doneReason so the graph doesn't immediately terminate
+        restored.remove("doneReason");
+
+        var state = new OverAllState(restored);
+        STATE_KEYS.forEach(key -> state.registerKeyAndStrategy(key, new ReplaceStrategy()));
+
+        log.info("restoreFromCheckpoint: nextNode={}, stateKeys={}, hasAnswers={}",
+                snapshot.nextNode(), state.data().keySet(),
+                req.answers() != null ? req.answers().size() : 0);
+
         return state;
     }
 }

@@ -16,6 +16,13 @@ import reactor.core.publisher.Flux;
 /**
  * Resumes an agent session with the plugin-side plan / completed tool calls / digest carried in
  * the request. Same stream shape as {@code /v1/conversation/run}.
+ *
+ * <p>If the request includes a {@code continuationToken}, the graph engine will load the
+ * saved checkpoint from Redis and resume execution from the interrupt point's next node,
+ * injecting the user's answers into the restored state.
+ *
+ * <p>Without a {@code continuationToken}, this falls back to starting a new graph run
+ * (legacy behavior for backward compatibility).
  */
 @RestController
 @RequestMapping(value = "/v1/conversation")
@@ -36,6 +43,8 @@ public class ResumeController {
   public Flux<ServerSentEvent<String>> resume(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ConversationRunRequest req) {
-    return leakFilter.guard(service.run(req, userId));
+    // Delegate to ConversationService.resume() which checks continuationToken
+    // and routes to graphEngine.resume() or graphEngine.run() accordingly
+    return leakFilter.guard(service.resume(req, userId));
   }
 }

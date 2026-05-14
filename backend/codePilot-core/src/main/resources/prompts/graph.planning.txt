@@ -22,7 +22,9 @@ User request: {{input}}
 - SIMPLE REQUESTS (single-file creation, bug fix, algorithm implementation, code refactoring) MUST use exactly 1 phase. Do NOT decompose into multiple phases.
 - Only decompose into 2-5 phases when the task genuinely requires modifying 3+ files or spans multiple independent modules.
 - Each phase should produce a concrete, verifiable code change.
-- If you need more information before planning, set infoRequests to an array of questions instead.
+- If you need more information before planning, set infoRequests to an array of structured requests instead:
+  [{"id": "unique-id", "kind": "fs.read|code.outline|code.symbol|code.usages|ide.diagnostics", "args": {"path": "..."}}]
+  - kind options: fs.read (read file content), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors/warnings)
 - ALL user-facing strings (goal, summary, step titles/descriptions) MUST be in the SAME language as the user's request.
 - If the user writes in Chinese, respond in Chinese. If in English, respond in English. Follow the user's language.
 - User-facing strings follow {{userLocale}} (default zh-CN).

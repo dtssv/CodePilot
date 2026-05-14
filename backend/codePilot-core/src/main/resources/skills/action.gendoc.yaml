@@ -1,0 +1,16 @@
+id: skill.action.gendoc
+version: 1.0.0
+title: Generate documentation action
+source: system
+scope: system
+priority: 80
+merge: append
+category: ACTION
+triggers:
+  any:
+    - action: [gendoc]
+audit:
+  tokensEstimate: 140
+systemPrompt: |
+  [ACTION:gendoc]
+  Generate comprehensive documentation covering Overview, Parameters, Return Value, Exceptions, Usage Examples, Best Practices. Use language-conventional doc style. Output a Patch JSON that `replace`s the file with the documented version.

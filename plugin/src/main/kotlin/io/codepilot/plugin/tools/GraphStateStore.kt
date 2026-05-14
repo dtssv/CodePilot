@@ -160,6 +160,19 @@ class GraphStateStore(
     fun applyAwaiting(donePayload: JsonNode) {
         state.set<JsonNode>("awaiting", donePayload)
         state.put("currentNode", "awaitUserInput")
+        // Extract and persist continuationToken at top level for easy access during resume
+        val token = donePayload.path("continuationToken").asText(null)
+        if (token != null) {
+            state.put("continuationToken", token)
+        }
+        // Also extract nextNode from awaiting if present
+        val awaitingNode = donePayload.path("awaiting")
+        if (awaitingNode.isObject) {
+            val nextNode = awaitingNode.path("nextNode").asText(null)
+            if (nextNode != null) {
+                state.put("resumeNextNode", nextNode)
+            }
+        }
         persist()
     }
 

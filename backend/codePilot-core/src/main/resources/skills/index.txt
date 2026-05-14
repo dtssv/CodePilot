@@ -11,3 +11,5 @@ lang.shell.yaml
 action.refactor.yaml
 action.review.yaml
 action.gentest.yaml
+action.comment.yaml
+action.gendoc.yaml

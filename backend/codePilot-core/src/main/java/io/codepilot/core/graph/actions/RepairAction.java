@@ -84,26 +84,24 @@ public class RepairAction implements NodeAction {
                 log.info("Repair budget exhausted but {} patches were applied — committing partial results", appliedCount);
                 updates.put("repairResult", "partialCommit");
                 updates.put("askUserQuestion", Map.of(
-                    "title", "Auto-repair partially succeeded (" + appliedCount + " patches applied)",
-                    "reason", failureSummary,
-                    "blocking", false,
-                    "appliedCount", appliedCount,
-                    "suggestedActions", List.of(
-                        "Continue with partial changes",
-                        "Revert all changes and replan"
+                    "id", "repair-partial-" + phaseId,
+                    "text", "Auto-repair partially succeeded (" + appliedCount + " patches applied). " + failureSummary,
+                    "kind", "single-choice",
+                    "options", List.of(
+                        Map.of("id", "continue", "label", "Continue with partial changes"),
+                        Map.of("id", "revert", "label", "Revert all changes and replan")
                     )
                 ));
             } else {
                 updates.put("repairResult", "askUser");
                 updates.put("askUserQuestion", Map.of(
-                    "title", "Auto-repair failed after " + count + " attempts",
-                    "reason", "The agent could not fix the following issues automatically",
-                    "blocking", true,
-                    "failureSummary", failureSummary,
-                    "suggestedActions", List.of(
-                        "Manually fix the errors and continue",
-                        "Revert the changes and replan",
-                        "Adjust the repair strategy"
+                    "id", "repair-failed-" + phaseId,
+                    "text", "Auto-repair failed after " + count + " attempts. " + failureSummary,
+                    "kind", "single-choice",
+                    "options", List.of(
+                        Map.of("id", "manual", "label", "Manually fix the errors and continue"),
+                        Map.of("id", "revert", "label", "Revert the changes and replan"),
+                        Map.of("id", "adjust", "label", "Adjust the repair strategy")
                     )
                 ));
             }
@@ -135,9 +133,13 @@ public class RepairAction implements NodeAction {
             log.error("LLM repair call failed for phase={}", phaseId, e);
             updates.put("repairResult", "askUser");
             updates.put("askUserQuestion", Map.of(
-                "title", "Repair LLM call failed",
-                "reason", "Exception: " + e.getMessage(),
-                "blocking", true
+                "id", "repair-llm-failed-" + phaseId,
+                "text", "Repair LLM call failed: " + e.getMessage(),
+                "kind", "single-choice",
+                "options", List.of(
+                    Map.of("id", "retry", "label", "Retry repair"),
+                    Map.of("id", "skip", "label", "Skip this phase")
+                )
             ));
             return updates;
         }
@@ -159,11 +161,14 @@ public class RepairAction implements NodeAction {
             log.warn("Repair phase={}: could not parse patches from LLM response, escalating to askUser", phaseId);
             updates.put("repairResult", "askUser");
             updates.put("askUserQuestion", Map.of(
-                "title", "Auto-repair could not produce a valid fix",
-                "reason", "The repair LLM response could not be parsed into executable patches",
-                "blocking", false,
-                "attempt", count,
-                "repairPreview", repairResponse != null ? repairResponse.substring(0, Math.min(repairResponse.length(), 500)) : ""
+                "id", "repair-parse-failed-" + phaseId,
+                "text", "Auto-repair could not produce a valid fix (attempt " + count + ")",
+                "kind", "single-choice",
+                "options", List.of(
+                    Map.of("id", "manual", "label", "I'll fix it manually"),
+                    Map.of("id", "revert", "label", "Revert changes and replan"),
+                    Map.of("id", "retry", "label", "Try repair again with more context")
+                )
             ));
         }
 
@@ -181,10 +186,9 @@ public class RepairAction implements NodeAction {
     public String routeAfterRepair(OverAllState state) {
         String result = (String) state.value("repairResult").orElse("toolCalls");
         return switch (result) {
-            case "infoRequests" -> "gather";
             case "askUser" -> "askUser";
             case "partialCommit" -> "commit";
-            default -> "applyPatch";
+            default -> "applyPatch";  // "toolCalls" or any unknown → applyPatch
         };
     }
 
@@ -251,7 +255,7 @@ public class RepairAction implements NodeAction {
         sb.append("2. Preserve existing public APIs and method signatures.\n");
         sb.append("3. Add only necessary imports.\n");
         sb.append("4. Output as fs.replace tool calls in the standard envelope format.\n");
-        sb.append("5. If the fix requires more than 3 separate edits, output infoRequests instead.\n");
+        sb.append("5. If you cannot produce a valid fix, the system will escalate to the user automatically.\n");
 
         return sb.toString();
     }

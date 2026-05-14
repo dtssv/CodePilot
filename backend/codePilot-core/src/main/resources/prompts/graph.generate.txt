@@ -30,7 +30,12 @@ Phase intent: {{phaseIntent}}
 - Produce actual, complete, working code. No placeholders, no TODOs, no "...".
 - For NEW files, use op="create" with full file content in newContent.
 - For modifying existing files, use op="replace" with search/replace pairs.
-- If you need more information to proceed, set infoRequests to an array of questions.
-- If you need user confirmation, set askUser to a question object.
+- If you need more information to proceed, set infoRequests to an array of structured requests:
+  [{"id": "unique-id", "kind": "fs.read|code.outline|code.symbol|code.usages|ide.diagnostics", "args": {"path": "..."}}]
+  - kind options: fs.read (read file), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors)
+- If you need user confirmation or decision, set askUser to a structured question:
+  {"text": "question text", "kind": "single-choice|yes-no|freeform", "options": [{"id": "opt1", "label": "Option 1"}]}
+  - kind options: single-choice (pick one), yes-no (boolean), freeform (open text)
+  - options: array of {id, label} objects (required for single-choice, optional for yes-no)
 - Output must be in the SAME language as the user's request for any user-facing text.
 - User-facing strings follow {{userLocale}} (default zh-CN).

@@ -190,6 +190,15 @@ public class ApplyPatchAction implements NodeAction {
             updates.put("patchResult", "failed");
         }
 
+        // Fast-path: request quick IDE diagnostics (best-effort, non-blocking)
+        // This is done in apply() rather than routeAfterApplyPatch() because
+        // route functions should be side-effect-free.
+        boolean fastPath = Boolean.TRUE.equals(state.value("fastPathEnabled").orElse(false));
+        String patchResult = (String) updates.getOrDefault("patchResult", "failed");
+        if (fastPath && ("success".equals(patchResult) || "partial".equals(patchResult))) {
+            requestQuickDiagnostics(state);
+        }
+
         // Emit progress event
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PHASE_DONE,
                 Map.of("phaseId", phaseId, "applied", appliedCount, "failed", failedCount));
@@ -202,6 +211,7 @@ public class ApplyPatchAction implements NodeAction {
         String result = (String) state.value("patchResult").orElse("failed");
 
         // C1 fast-path: if policy allows, skip verify for simple tasks
+        // (IDE diagnostics already requested in apply() via requestQuickDiagnostics)
         boolean fastPath = Boolean.TRUE.equals(state.value("fastPathEnabled").orElse(false));
         if (fastPath && ("success".equals(result) || "partial".equals(result))) {
             log.info("ApplyPatch fast-path: skipping verify, routing directly to commit");
@@ -214,6 +224,31 @@ public class ApplyPatchAction implements NodeAction {
             case "shadow_failed" -> "repair";
             default -> "repair";
         };
+    }
+
+    /**
+     * Best-effort request for IDE diagnostics in fast-path mode.
+     * Unlike VerifyAction which blocks for diagnostics, this is fire-and-forget:
+     * emits a tool_call and doesn't wait for the result. The diagnostics
+     * will be available in state for the next turn if needed.
+     */
+    private void requestQuickDiagnostics(OverAllState state) {
+        try {
+            String sessionId = (String) state.value("sessionId").orElse("");
+            @SuppressWarnings("unchecked")
+            var modifiedFiles = (List<String>) state.value("modifiedFiles").orElse(List.of());
+            if (modifiedFiles.isEmpty()) return;
+
+            String diagToolCallId = UUID.randomUUID().toString();
+            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
+                    "id", diagToolCallId,
+                    "name", "ide.diagnostics",
+                    "args", Map.of("files", modifiedFiles, "fastPath", true)
+            ));
+            log.info("ApplyPatch fast-path: emitted quick diagnostics request for {} files", modifiedFiles.size());
+        } catch (Exception e) {
+            log.warn("ApplyPatch fast-path: quick diagnostics request failed (non-blocking): {}", e.getMessage());
+        }
     }
 
     // ─── Individual Edit Fallback (for batch failure) ────────────────
