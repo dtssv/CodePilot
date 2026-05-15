@@ -1,4 +1,5 @@
 [GENERATE TASK]
+{{projectMeta}}
 User goal: {{input}}
 Current phase: {{phaseId}}
 Phase title: {{phaseTitle}}
@@ -8,34 +9,75 @@ Phase intent: {{phaseIntent}}
 [REQUIRED OUTPUT FORMAT — strict JSON, no other text]
 {
   "thought": "<brief internal reasoning>",
-  "patches": [
-    {
-      "summary": "<what this patch does>",
-      "patches": [
-        {
-          "path": "<file path>",
-          "op": "create|write|replace",
-          "newContent": "<full file content for create/write, or replacement content for replace>",
-          "search": "<text to find, only for replace>",
-          "replace": "<replacement text, only for replace>"
-        }
-      ]
-    }
-  ],
+  "patches": null,
   "infoRequests": null,
-  "askUser": null
+  "askUser": null,
+  "textOutput": null,
+  "agentThinking": null,
+  "agentWriting": null,
+  "agentContent": null
 }
 
 [RULES]
+- You MUST produce ONE of: patches, infoRequests, askUser, or textOutput. All others must be null.
+- To produce code changes, set "patches" to an array of patch objects:
+  {"patches": [{"summary": "<what this patch does>", "patches": [{"path": "<file path>", "op": "create|write|replace", "newContent": "<full file content for create/write>", "search": "<text to find, only for replace>", "replace": "<replacement text, only for replace>"}]}]}
 - Produce actual, complete, working code. No placeholders, no TODOs, no "...".
 - For NEW files, use op="create" with full file content in newContent.
 - For modifying existing files, use op="replace" with search/replace pairs.
-- If you need more information to proceed, set infoRequests to an array of structured requests:
-  [{"id": "unique-id", "kind": "fs.read|code.outline|code.symbol|code.usages|ide.diagnostics", "args": {"path": "..."}}]
-  - kind options: fs.read (read file), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors)
+- If the code already exists and no changes are needed, or you want to provide an explanation instead of code, set "textOutput" to your response text:
+  {"textOutput": "Your explanation or status here"}
 - If you need user confirmation or decision, set askUser to a structured question:
   {"text": "question text", "kind": "single-choice|yes-no|freeform", "options": [{"id": "opt1", "label": "Option 1"}]}
-  - kind options: single-choice (pick one), yes-no (boolean), freeform (open text)
-  - options: array of {id, label} objects (required for single-choice, optional for yes-no)
 - Output must be in the SAME language as the user's request for any user-facing text.
 - User-facing strings follow {{userLocale}} (default zh-CN).
+
+[ABOUT infoRequests]
+- Set infoRequests to null by default. Most code generation tasks do NOT need to read files first.
+- CRITICAL: If [GATHERED CONTEXT] is present above, you already have information. You MUST set infoRequests to null.
+- ONLY set infoRequests when you have a SPECIFIC, concrete reason, such as:
+  - You need to read a header file to know the exact API signature before calling it
+  - You need to read an import/included file to know its exported types or functions
+  - You need to read a config file (CMakeLists.txt, package.json, etc.) to match build settings
+  - You need to check another file that the current change depends on
+- Do NOT request infoRequests for:
+  - Reading files you are about to modify — just produce the patches directly based on what you know
+  - "Understanding the codebase" or "getting context" — use the project meta and gathered context above
+  - Reading the same file repeatedly — if it was already gathered, it's in [GATHERED CONTEXT]
+- If you do need infoRequests, use this format:
+  [{"id": "unique-id", "kind": "fs.read|fs.list|code.outline|code.symbol|code.usages|ide.diagnostics|mcp.call", "args": {"path": "..."}}]
+  - kind options: fs.read (read a single file), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors), mcp.call (call an MCP server tool)
+  - IMPORTANT: fs.read only works on individual files. To explore directory structure, use kind="fs.list". Do NOT use fs.read with a directory path.
+  - Only request files that actually exist per the project meta. Do NOT guess file names.
+- For mcp.call kind, args must include: {"fullName": "mcp.<serverId>.<toolName>", "arguments": {...}}
+{{mcpTools}}
+
+[ABOUT agentThinking]
+- agentThinking is a short, user-facing sentence explaining what you are about to do or why you need more information.
+- It is displayed to the user in real-time as a status indicator (e.g., "让我先查看XXX接口的定义", "我已了解项目结构，现在开始实现立方接雨水算法").
+- If you set infoRequests, agentThinking MUST explain WHY you need to read those files (e.g., "让我先查看项目结构，确认在哪里创建文件" or "需要读取Service接口的定义以正确调用").
+- If you set patches, agentThinking should describe your overall approach (e.g., "我将在根目录创建一个Java文件来实现算法").
+- If you set textOutput, agentThinking can be null (the textOutput itself is the user-facing message).
+- Keep it concise (1-2 sentences), in the SAME language as the user's request.
+- If you have nothing meaningful to say, set it to null.
+
+[ABOUT agentWriting]
+- agentWriting is a short, user-facing summary of the file changes you are producing.
+- Only set agentWriting when you set patches. For all other output types, set it to null.
+- Example: "想要创建新文件: TrapRainWater3D.java +101行" or "想要修改: Solver.java +15行, Main.java +3行"
+- Use the format: for each file, mention the file name (not full path, just the last segment), the operation (新建/修改/删除), and line count if known.
+- Keep it concise (1-2 sentences max), in the SAME language as the user's request.
+- If you have nothing meaningful to say or only trivial changes, set it to null.
+
+[ABOUT agentContent — structured output for user-facing display]
+- agentContent is a user-facing string that explains your reasoning, design decisions, and file changes.
+- It is rendered as real-time streaming text in the chat, so it must be readable and well-structured.
+- Use XML-like tags to mark different content types so the UI can render them appropriately:
+  - <plan>Your design reasoning and approach explanation</plan> — shows as a highlighted thinking block
+  - <file path="relative/path" op="create|write|replace" lines="+N">file content here</file> — shows as a collapsible code block
+  - <run cmd="command here">command output</run> — shows as a collapsible command block
+- Example agentContent:
+  "我将使用最小堆（优先队列）解法来实现立方接雨水算法。从边界向内收缩，每次处理最小高度的格子。\n\n<file path=\"TrapRainWater3D.java\" op=\"create\" lines=\"+101\">import java.util.*;\n\npublic class TrapRainWater3D {\n    // ... full implementation\n}</file>"
+- Set agentContent when you produce patches OR textOutput. It provides the user-facing explanation.
+- If agentContent is null, the UI will only show agentThinking (short one-liner) and the raw patches.
+- Text inside tags must be in the SAME language as the user's request. Code inside <file> is always in the target programming language.

@@ -2,6 +2,10 @@ plugins {
     `java-library`
 }
 
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("-Xlint:-processing")
+}
+
 dependencies {
     api(project(":codePilot-common"))
 

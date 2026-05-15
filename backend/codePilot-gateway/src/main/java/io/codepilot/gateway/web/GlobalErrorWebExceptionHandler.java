@@ -41,6 +41,7 @@ public class GlobalErrorWebExceptionHandler extends AbstractErrorWebExceptionHan
 
   private final ObjectMapper mapper;
 
+  @SuppressWarnings("this-escape")
   public GlobalErrorWebExceptionHandler(
       ErrorAttributes errorAttributes,
       ApplicationContext applicationContext,

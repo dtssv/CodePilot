@@ -152,13 +152,12 @@ public class ConversationService {
       } else {
         agentBody = graphEngine.run(req, userId);
       }
+      // ★ Agent engines (both Graph and Legacy) emit their own done(final) events.
+      // Do NOT append an extra done here — it causes duplicate done(final) events
+      // which lead to duplicate message persistence and split assistant replies in the UI.
       return head.concatWith(agentBody)
           .doOnComplete(() -> safeEndRequest(resolved, true, 0))
-          .doOnError(e -> safeEndRequest(resolved, false, 0))
-          .concatWith(
-              Flux.just(
-                  sse.event(
-                      SseEvents.DONE, Map.of("reason", "final", "continuationToken", continuation))));
+          .doOnError(e -> safeEndRequest(resolved, false, 0));
     }
 
     // chat mode: single streaming turn.
@@ -173,6 +172,23 @@ public class ConversationService {
     if (shape.needCompact() && assembled.systemText() != null) {
       // Compact instruction will be appended by PromptOrchestrator
       log.info("Auto-triggering digest compression (needCompact flag set)");
+    }
+
+    // ★ Build conversation history as multi-turn messages for LLM context
+    // This ensures the LLM has access to previous conversation turns
+    java.util.List<org.springframework.ai.chat.messages.Message> chatHistory =
+        new java.util.ArrayList<>();
+    if (req.contexts() != null && req.contexts().recent() != null) {
+      for (var recentMsg : req.contexts().recent()) {
+        String role = recentMsg.role();
+        String content = recentMsg.content() != null ? recentMsg.content() : "";
+        if (content.isBlank()) continue;
+        if ("user".equals(role)) {
+          chatHistory.add(new org.springframework.ai.chat.messages.UserMessage(content));
+        } else if ("assistant".equals(role)) {
+          chatHistory.add(new org.springframework.ai.chat.messages.AssistantMessage(content));
+        }
+      }
     }
 
     // Build user prompt with optional multi-modal content (01-§3.23)
@@ -194,8 +210,11 @@ public class ConversationService {
           .text(finalChatInput)
           .media(mediaList)
           .build();
+      // ★ Include history messages before the current user message
+      var allMessages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>(chatHistory);
+      allMessages.add(userMessage);
       var userPrompt = org.springframework.ai.chat.prompt.Prompt.builder()
-          .messages(userMessage)
+          .messages(allMessages)
           .build();
 
       body = resolvedClient
@@ -213,22 +232,45 @@ public class ConversationService {
                 return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
               });
     } else {
-      // Text-only mode (standard path)
-      body = resolvedClient
-          .prompt()
-          .system(assembled.systemText())
-          .user(finalChatInput)
-          .stream()
-          .chatResponse()
-          .map(ConversationService::deltaFromChatResponse)
-          .filter(s -> !s.isBlank())
-          .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
-          .onErrorResume(
-              ex -> {
-                log.warn("LLM stream error", ex);
-                safeEndRequest(resolved, false, 0);
-                return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
-              });
+      // Text-only mode — ★ include history messages as multi-turn context
+      if (!chatHistory.isEmpty()) {
+        var allMessages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>(chatHistory);
+        allMessages.add(new org.springframework.ai.chat.messages.UserMessage(finalChatInput));
+        var prompt = org.springframework.ai.chat.prompt.Prompt.builder()
+            .messages(allMessages)
+            .build();
+        body = resolvedClient
+            .prompt(prompt)
+            .system(assembled.systemText())
+            .stream()
+            .chatResponse()
+            .map(ConversationService::deltaFromChatResponse)
+            .filter(s -> !s.isBlank())
+            .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
+            .onErrorResume(
+                ex -> {
+                  log.warn("LLM stream error", ex);
+                  safeEndRequest(resolved, false, 0);
+                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+                });
+      } else {
+        // No history — standard single-turn path
+        body = resolvedClient
+            .prompt()
+            .system(assembled.systemText())
+            .user(finalChatInput)
+            .stream()
+            .chatResponse()
+            .map(ConversationService::deltaFromChatResponse)
+            .filter(s -> !s.isBlank())
+            .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
+            .onErrorResume(
+                ex -> {
+                  log.warn("LLM stream error", ex);
+                  safeEndRequest(resolved, false, 0);
+                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+                });
+      }
     }
 
 

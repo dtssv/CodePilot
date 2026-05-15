@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export interface ConsoleEntry {
     id: string;
     timestamp: Date;
-    type: 'sse' | 'tool' | 'error' | 'info' | 'bridge';
+    type: 'sse' | 'tool' | 'error' | 'info' | 'bridge' | 'agent';
     source: string; // e.g., 'delta', 'tool_call', 'done', 'sendToPlugin'
     data: unknown;
     collapsed?: boolean;
@@ -20,6 +20,7 @@ const TYPE_COLORS: Record<string, string> = {
     error: '#f14c4c',
     info: '#9d9d9d',
     bridge: '#569cd6',
+    agent: '#c586c0',
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -28,6 +29,7 @@ const TYPE_LABELS: Record<string, string> = {
     error: 'ERR',
     info: 'INFO',
     bridge: 'BRIDGE',
+    agent: 'AGENT',
 };
 
 function formatTimestamp(d: Date): string {

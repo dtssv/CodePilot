@@ -43,6 +43,8 @@ public class ShadowVerifyHelper {
         String validateId = UUID.randomUUID().toString();
         long startTime = System.currentTimeMillis();
 
+        // Register future BEFORE emitting SSE to avoid race condition
+        var validateFuture = ToolResultBus.registerFuture(sessionId, validateId);
         GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
             "id", validateId,
             "name", "ide.shadowValidate",
@@ -50,10 +52,7 @@ public class ShadowVerifyHelper {
         ));
 
         try {
-            ToolResultEvent result = toolResultBus.subscribe(sessionId)
-                .filter(e -> e.toolCallId().equals(validateId))
-                .timeout(Duration.ofSeconds(60))
-                .blockFirst();
+            ToolResultEvent result = validateFuture.get(60, java.util.concurrent.TimeUnit.SECONDS);
             long durationMs = System.currentTimeMillis() - startTime;
             if (result != null && result.ok()) {
                 String output = result.result() != null ? result.result().toString() : "";

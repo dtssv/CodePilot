@@ -26,6 +26,7 @@ class GatherDispatcher(
     private val project: Project,
     private val client: ConversationClient,
     private val sessionId: String,
+    private val onGatherResult: ((toolCallId: String, ok: Boolean, httpResponse: String?) -> Unit)? = null,
 ) {
     private val log = Logger.getInstance(GatherDispatcher::class.java)
     private val mapper = ObjectMapper()
@@ -51,7 +52,10 @@ class GatherDispatcher(
                 val args = req.path("args")
                 val startMs = System.currentTimeMillis()
                 try {
-                    val result = dispatchSingle(kind, args)
+                    // Run file operations in Read Action for IntelliJ VFS access
+                    val result = ApplicationManager.getApplication().runReadAction<Map<String, Any?>> {
+                        dispatchSingle(kind, args)
+                    }
                     results.add(
                         mapOf(
                             "id" to id,
@@ -90,14 +94,22 @@ class GatherDispatcher(
             // Submit all results back as a single batch tool-result
             // Use the toolCallId from the SSE event so the backend's
             // ToolResultBus subscription can match it
-            client.submitToolResult(
-                mapOf(
-                    "sessionId" to sessionId,
-                    "toolCallId" to toolCallId,
-                    "ok" to results.all { it["ok"] == true },
-                    "result" to mapOf("gathered" to results),
-                ),
-            )
+            val allOk = results.all { it["ok"] == true }
+            var httpResponse: String? = null
+            try {
+                httpResponse = client.submitToolResultSync(
+                    sessionId = sessionId,
+                    toolCallId = toolCallId,
+                    result = mapOf("gathered" to results),
+                    ok = allOk,
+                )
+                log.info("GatherDispatcher: submitted tool result for toolCallId=$toolCallId, ok=$allOk, response=$httpResponse")
+            } catch (e: Exception) {
+                log.error("GatherDispatcher: FAILED to submit tool result for toolCallId=$toolCallId", e)
+                httpResponse = "ERROR: ${e.message}"
+            }
+            // Notify UI that gather.execute completed
+            onGatherResult?.invoke(toolCallId, allOk, httpResponse)
         }
     }
 
@@ -106,7 +118,21 @@ class GatherDispatcher(
         args: JsonNode,
     ): Map<String, Any?> =
         when (kind) {
-            "fs.read" -> fileReader.read(args)
+            "fs.read" -> {
+                val path = args.path("path").asText("")
+                val vf = PathGuard.resolve(project, path)
+                if (vf.isDirectory) {
+                    // When reading a directory, read the first file in it instead
+                    val firstFile = vf.children.firstOrNull { !it.isDirectory }
+                    if (firstFile != null) {
+                        fileReader.read(mapper.readTree("{\"path\":\"${firstFile.path}\"}"))
+                    } else {
+                        throw ToolViolation("directory has no files: $path")
+                    }
+                } else {
+                    fileReader.read(args)
+                }
+            }
             "fs.list" -> {
                 val path = args.path("path").asText(".")
                 val vf = PathGuard.resolve(project, path)

@@ -16,8 +16,22 @@ class FileReader(
 ) {
     fun read(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
-        val maxBytes = args.path("maxBytes").asInt(262_144).coerceAtMost(1_048_576)
         val vf = PathGuard.resolve(project, path)
+
+        // If the resolved path is a directory, auto-degrade to listing entries
+        // (LLM sometimes uses fs.read with path="." to explore project structure)
+        if (vf.isDirectory) {
+            val entries = vf.children.take(500).map { f ->
+                mapOf(
+                    "name" to f.name,
+                    "type" to if (f.isDirectory) "dir" else "file",
+                    "size" to f.length,
+                )
+            }
+            return mapOf("path" to path, "isDirectory" to true, "entries" to entries)
+        }
+
+        val maxBytes = args.path("maxBytes").asInt(262_144).coerceAtMost(1_048_576)
         val raw = vf.contentsToByteArray()
         if (raw.size > maxBytes) {
             throw ToolViolation("file too large: ${raw.size} > $maxBytes")

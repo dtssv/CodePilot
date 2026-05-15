@@ -77,6 +77,11 @@ public class ParallelGatherAction implements NodeAction {
         var clientRequests = dispatchResult.clientSide();
 
         // 3. Build dependency-based execution batches
+        // ★ Inject sessionId into server-side requests (needed for mcp.call)
+        String currentSessionId = (String) state.value("sessionId").orElse("");
+        for (Map<String, Object> serverReq : serverRequests) {
+            serverReq.putIfAbsent("sessionId", currentSessionId);
+        }
         List<List<Map<String, Object>>> executionBatches = buildExecutionBatches(serverRequests);
 
         // 4. Execute batches: within batch = parallel, between batches = sequential

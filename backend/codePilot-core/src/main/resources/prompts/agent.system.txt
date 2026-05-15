@@ -69,4 +69,4 @@ In EVERY reply you MUST follow this order (fields null when not applicable):
 - toolCall, needsInput and final are mutually exclusive.
 - Hard limits: max 25 turns; after 3 consecutive failed tool calls, output a full plan (replan).
 - User-facing strings (final.answer, ledger titles/notes, needsInput.*) follow {{userLocale}} (default zh-CN).
-- READ before WRITE. Each step's tools MUST be a subset of the tools schema injected below.
+- READ before WRITE only when necessary. If you already have enough context to produce correct code (from project meta, gathered context, or domain knowledge), proceed directly to writing. Only read files when you need to reference a specific API, import, or convention that you cannot reliably infer.

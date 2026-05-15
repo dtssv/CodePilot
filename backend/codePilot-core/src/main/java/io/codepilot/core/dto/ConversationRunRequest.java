@@ -31,6 +31,7 @@ public record ConversationRunRequest(
     String projectRootHash,
     List<UserSkill> userSkills,
     List<UserMcp> userMcps,
+    List<Map<String, Object>> mcpTools,
     List<PlanEdit> userPlanEdits,
     Options options,
     Policy policy,
@@ -40,7 +41,9 @@ public record ConversationRunRequest(
     // ★ 新增：多模态图片输入
     List<Image> images,
     // ★ 新增：Graph状态快照（插件端上传，用于断点恢复）
-    Map<String, Object> graphState) {
+    Map<String, Object> graphState,
+    // ★ 新增：项目元信息（语言、根目录文件列表），由插件端注入，供 LLM 了解项目上下文
+    String projectMeta) {
 
   public enum Intent {
     @JsonProperty("new") NEW,

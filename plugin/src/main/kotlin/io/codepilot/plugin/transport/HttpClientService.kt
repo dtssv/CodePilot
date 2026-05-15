@@ -35,6 +35,10 @@ class HttpClientService {
         jacksonObjectMapper()
             .disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
 
+    /** Optional callback for logging HTTP requests/responses to UI console. */
+    @Volatile
+    var httpLogCallback: ((method: String, url: String, requestBody: String, statusCode: Int, durationMs: Long, responseBody: String) -> Unit)? = null
+
     private val baseClient: OkHttpClient =
         OkHttpClient
             .Builder()
@@ -47,6 +51,7 @@ class HttpClientService {
             .addInterceptor(::traceHeader)
             .addInterceptor(::authAndSignature)
             .addInterceptor(RefreshOn401Interceptor())
+            .addInterceptor(::loggingInterceptor)
             .build()
 
     fun client(): OkHttpClient = baseClient
@@ -215,6 +220,41 @@ class HttpClientService {
         val buffer = okio.Buffer()
         body.writeTo(buffer)
         return buffer.readUtf8()
+    }
+
+    /** OkHttp interceptor that logs HTTP request/response to UI console via callback. */
+    private fun loggingInterceptor(chain: Interceptor.Chain): Response {
+        val req = chain.request()
+        // Skip SSE streams from logging (they are long-lived and would spam the console)
+        val isSse = req.header("Accept")?.contains("text/event-stream") == true
+        // Capture request body (for POST/PUT)
+        val reqBody = if (!isSse && req.body != null) {
+            try {
+                val bodyStr = readBody(req)
+                if (bodyStr.length > 1000) bodyStr.substring(0, 1000) + "..." else bodyStr
+            } catch (_: Exception) { "" }
+        } else ""
+        val startMs = System.currentTimeMillis()
+        val response: Response
+        try {
+            response = chain.proceed(req)
+        } catch (e: Exception) {
+            val durationMs = System.currentTimeMillis() - startMs
+            if (!isSse) {
+                httpLogCallback?.invoke(req.method, req.url.toString(), reqBody, 0, durationMs, "ERROR: ${e.message}")
+            }
+            throw e
+        }
+        if (!isSse) {
+            val durationMs = System.currentTimeMillis() - startMs
+            val respBody = try {
+                val peeked = response.peekBody(2048L)
+                val text = peeked.string()
+                if (text.length > 500) text.substring(0, 500) + "..." else text
+            } catch (_: Exception) { "" }
+            httpLogCallback?.invoke(req.method, req.url.toString(), reqBody, response.code, durationMs, respBody)
+        }
+        return response
     }
 
     companion object {

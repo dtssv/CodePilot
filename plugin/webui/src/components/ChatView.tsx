@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
+import { AgentContentRenderer } from './AgentContentRenderer';
+import { AgentStep, AgentStepCard } from './AgentStepCard';
 import { BranchTimeline } from './BranchTimeline';
 import { DiffCard } from './DiffCard';
 import { IncrementalMarkdown } from './IncrementalMarkdown';
@@ -17,11 +19,15 @@ export interface ChatMessage {
     /** Tool calls attached to an assistant message (rendered as inline cards) */
     toolCalls?: ToolCallInfo[];
     riskNotice?: { level: string; message: string; filesPaths: string[] };
-    needsInput?: { question: string; options: string[] };
+    needsInput?: { title?: string; questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[]; continuationToken?: string };
     diff?: { path: string; hunks: string };
     // ★ Integration: Image attachments and branch info
     images?: { url: string; mimeType?: string; description?: string }[];
     branches?: { branchId: string; sessionId: string; forkMsgIndex: number }[];
+    /** Agent interactive steps (thinking/reading/writing/running) */
+    agentSteps?: AgentStep[];
+    /** Plan steps shown in the response (from user_plan event) */
+    planSteps?: { id: string; title: string; status: string }[];
     _streaming?: boolean;
     tokenMeta?: {
         inputTokens: number;
@@ -119,7 +125,7 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             {msg.role === 'user' ? 'U' : '✦'}
                         </div>
                     )}
-                    <div className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''} ${msg.role === 'assistant' && !msg.content && msg.toolCalls && msg.toolCalls.length > 0 ? 'msg-tool-calls-only' : ''}`}>
+                    <div className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}>
                         {msg.riskNotice ? (
                             <RiskNoticeCard {...msg.riskNotice} />
                         ) : msg.needsInput ? (
@@ -130,13 +136,46 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             <div className="msg-inline-refs">
                                 {parseInlineRefs(msg.content, msg.contextRefs).map((seg) => seg)}
                             </div>
-                        ) : msg.role === 'assistant' && !msg.content && msg.toolCalls && msg.toolCalls.length > 0 ? (
-                            // Assistant message with only tool calls, no text content — render tool calls inline
-                            <div className="msg-tool-calls">
-                                {msg.toolCalls.map((tc) => (
-                                    <ToolCallCard key={tc.id} toolCall={tc} />
-                                ))}
-                            </div>
+                        ) : msg.role === 'assistant' ? (
+                            // ★ Assistant message: unified rendering pipeline
+                            // Priority: content (AgentContentRenderer) > agentSteps (progress) > toolCalls (fallback)
+                            // When content exists, agentSteps are hidden to avoid duplicate display
+                            <>
+                                {/* Plan steps: always show when present (independent of content) */}
+                                {msg.planSteps && msg.planSteps.length > 0 && (
+                                    <div className="plan-steps-container">
+                                        <div className="plan-steps-header">📋 执行计划</div>
+                                        {msg.planSteps.map((step, idx) => (
+                                            <div key={step.id || idx} className="plan-step-item">
+                                                <span className={`plan-step-status plan-step-${step.status}`}>
+                                                    {step.status === 'success' || step.status === 'done' ? '✓' : step.status === 'running' || step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : '○'}
+                                                </span>
+                                                <span className="plan-step-title">{step.title}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Agent steps: only show as progress indicator when content hasn't arrived yet */}
+                                {msg.agentSteps && msg.agentSteps.length > 0 && !msg.content && (
+                                    <div className="agent-steps-container">
+                                        {msg.agentSteps.map((step, idx) => (
+                                            <AgentStepCard key={`step-${idx}`} step={step} />
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Content rendering — always takes priority when present */}
+                                {msg.content ? (
+                                    <AgentContentRenderer content={msg.content} isStreaming={msg._streaming} />
+                                ) : null}
+                                {/* Tool call cards — fallback when no content and no agentSteps */}
+                                {!msg.content && !(msg.agentSteps && msg.agentSteps.length > 0) && msg.toolCalls && msg.toolCalls.length > 0 && (
+                                    <div className="msg-tool-calls">
+                                        {msg.toolCalls.map((tc) => (
+                                            <ToolCallCard key={tc.id} toolCall={tc} />
+                                        ))}
+                                    </div>
+                                )}
+                            </>
                         ) : (
                             msg._streaming ? (
                                 <IncrementalMarkdown content={msg.content} isStreaming={true} />
@@ -147,14 +186,6 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                                     </ReactMarkdown>
                                 ) : null
                             )
-                        )}
-                        {/* Tool call cards for assistant messages (only when there's text content too) */}
-                        {msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0 && msg.content && (
-                            <div className="msg-tool-calls">
-                                {msg.toolCalls.map((tc) => (
-                                    <ToolCallCard key={tc.id} toolCall={tc} />
-                                ))}
-                            </div>
                         )}
                         {/* ★ Image attachments rendering */}
                         {msg.images && msg.images.length > 0 && (

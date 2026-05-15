@@ -48,6 +48,10 @@ public class PreCheckAction implements NodeAction {
         updates.put("preCheckPassed", result.passed);
         updates.put("preCheckResult", result.overallStatus);
         updates.put("preCheckInfoRequests", result.infoRequests);
+        // ★ Set infoRequests so GatherAction can read them when routing to gather
+        if (!result.infoRequests.isEmpty()) {
+            updates.put("infoRequests", result.infoRequests);
+        }
 
         GraphSseHelper.emitEvent(state, "graph_precheck",
                 Map.of(
@@ -64,6 +68,17 @@ public class PreCheckAction implements NodeAction {
 
     public String routeAfterPreCheck(OverAllState state) {
         String result = (String) state.value("preCheckResult").orElse("ok");
+        boolean gatherExhausted = Boolean.TRUE.equals(state.value("gatherExhausted").orElse(false));
+        int gatherCount = (int) state.value("gatherCount").orElse(0);
+
+        // ★ Anti-loop: when gather has already been executed multiple times,
+        // refuse to route back to gather from preCheck.
+        if ("missing_info".equals(result) && (gatherExhausted || gatherCount >= 3)) {
+            log.warn("PreCheckAction: missing_info but gather budget exceeded "
+                + "(gatherCount={}, gatherExhausted={}). Forcing to generate.", gatherCount, gatherExhausted);
+            return "generate";
+        }
+
         return switch (result) {
             case "missing_info" -> "gather";
             case "blocked" -> "askUser";

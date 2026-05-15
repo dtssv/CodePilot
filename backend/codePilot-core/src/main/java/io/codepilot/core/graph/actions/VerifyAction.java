@@ -50,6 +50,8 @@ public class VerifyAction implements NodeAction {
         // ── Step 1: Request IDE diagnostics from the client ──
         // Emit a tool_call SSE so the client runs ide.diagnostics and reports back
         String diagToolCallId = UUID.randomUUID().toString();
+        // Register future BEFORE emitting SSE to avoid race condition
+        var diagFuture = ToolResultBus.registerFuture(sessionId, diagToolCallId);
         GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
             "id", diagToolCallId,
             "name", "ide.diagnostics",
@@ -68,10 +70,7 @@ public class VerifyAction implements NodeAction {
         // ── Step 2: Await client diagnostics via ToolResultBus ──
         List<Map<String, Object>> clientDiagnostics = new ArrayList<>();
         try {
-            ToolResultEvent result = toolResultBus.subscribe(sessionId)
-                .filter(e -> e.toolCallId().equals(diagToolCallId))
-                .timeout(DIAGNOSTICS_TIMEOUT)
-                .blockFirst();
+            ToolResultEvent result = diagFuture.get(DIAGNOSTICS_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
             if (result != null && result.ok() && result.result() != null) {
                 // Parse diagnostics from client result
@@ -82,6 +81,7 @@ public class VerifyAction implements NodeAction {
                 log.warn("Verify phase={}: diagnostics request failed: {}", phaseId, error);
             }
         } catch (Exception e) {
+            ToolResultBus.unregisterFuture(sessionId, diagToolCallId);
             log.warn("Verify phase={}: diagnostics request timed out or failed: {}", phaseId, e.getMessage());
         }
 
@@ -100,16 +100,14 @@ public class VerifyAction implements NodeAction {
         // ── Step 3a: Run tests if policy requires ──
         if (runTests) {
             String testToolCallId = UUID.randomUUID().toString();
+            var testFuture = ToolResultBus.registerFuture(sessionId, testToolCallId);
             GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
                 "id", testToolCallId,
                 "name", "shell.exec",
                 "args", Map.of("command", "test", "files", modifiedFiles)
             ));
             try {
-                ToolResultEvent testResult = toolResultBus.subscribe(sessionId)
-                    .filter(e -> e.toolCallId().equals(testToolCallId))
-                    .timeout(Duration.ofSeconds(60))
-                    .blockFirst();
+                ToolResultEvent testResult = testFuture.get(60, java.util.concurrent.TimeUnit.SECONDS);
                 if (testResult != null && testResult.ok() && testResult.result() instanceof Map) {
                     testResults = (Map<String, Object>) testResult.result();
                 }
@@ -121,16 +119,14 @@ public class VerifyAction implements NodeAction {
         // ── Step 3b: Run lint if policy requires ──
         if (runLint) {
             String lintToolCallId = UUID.randomUUID().toString();
+            var lintFuture = ToolResultBus.registerFuture(sessionId, lintToolCallId);
             GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
                 "id", lintToolCallId,
                 "name", "shell.exec",
                 "args", Map.of("command", "lint", "files", modifiedFiles)
             ));
             try {
-                ToolResultEvent lintResult = toolResultBus.subscribe(sessionId)
-                    .filter(e -> e.toolCallId().equals(lintToolCallId))
-                    .timeout(Duration.ofSeconds(30))
-                    .blockFirst();
+                ToolResultEvent lintResult = lintFuture.get(30, java.util.concurrent.TimeUnit.SECONDS);
                 if (lintResult != null && lintResult.ok() && lintResult.result() instanceof Map) {
                     lintResults = (Map<String, Object>) lintResult.result();
                 }

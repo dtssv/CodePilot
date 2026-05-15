@@ -70,6 +70,12 @@ public class DeviceConcurrencyFilter implements WebFilter {
           // Proceed and decrement on completion
           return chain.filter(exchange)
               .doFinally(signal -> redis.opsForValue().decrement(key).subscribe());
-        });
+        })
+        .onErrorResume(
+            Exception.class,
+            ex -> {
+              log.warn("Redis unavailable, skipping device concurrency check for device={}: {}", deviceId, ex.getMessage());
+              return chain.filter(exchange);
+            });
   }
 }

@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.conversation.ToolResultBus;
+import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.dto.Patch;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.sse.SseEvents;
@@ -55,6 +56,40 @@ public class ApplyPatchAction implements NodeAction {
             updates.put("patchErrors", List.of());
             return updates;
         }
+
+        // ★ Filter out invalid patches: path must be a real file path (not "unknown"/blank),
+        // and at least one of newContent/search/replace must be non-empty.
+        List<Patch> validPatches = new ArrayList<>();
+        for (Patch p : patches) {
+            List<Patch.Edit> validEdits = new ArrayList<>();
+            for (Patch.Edit edit : p.patches()) {
+                String editPath = edit.path();
+                boolean hasValidPath = editPath != null && !editPath.isBlank()
+                        && !"unknown".equalsIgnoreCase(editPath);
+                boolean hasContent = (edit.newContent() != null && !edit.newContent().isBlank())
+                        || (edit.search() != null && !edit.search().isBlank())
+                        || (edit.replace() != null && !edit.replace().isBlank());
+                if (hasValidPath && hasContent) {
+                    validEdits.add(edit);
+                } else {
+                    log.warn("ApplyPatch: filtering out invalid edit: path={}, op={}, hasContent={}",
+                        editPath, edit.op(), hasContent);
+                }
+            }
+            if (!validEdits.isEmpty()) {
+                validPatches.add(new Patch(p.summary(), p.rationale(), validEdits,
+                        p.diffSummary(), p.rollback(), p.followUps()));
+            }
+        }
+
+        if (validPatches.isEmpty()) {
+            log.warn("ApplyPatch: all patches were invalid (path=unknown/blank or empty content), skipping");
+            updates.put("patchResult", "skipped");
+            updates.put("patchErrors", List.of());
+            return updates;
+        }
+        // Use validPatches instead of original patches from here on
+        patches = validPatches;
 
         // ── Shadow Workspace pre-apply validation (01-§3.22) ──
         long createCount = patches.stream()
@@ -139,15 +174,15 @@ public class ApplyPatchAction implements NodeAction {
                 );
             }
 
+            // Register future BEFORE emitting SSE to avoid race condition
+            var pendingFuture = ToolResultBus.registerFuture(sessionId, batchToolCallId);
+
             // Emit batch tool_call SSE event
             GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, batchArgs);
 
-            // Await result from client via ToolResultBus
+            // Await result from client via ToolResultBus (CompletableFuture — primary path)
             try {
-                var result = toolResultBus.subscribe(sessionId)
-                        .filter(e -> e.toolCallId().equals(batchToolCallId))
-                        .timeout(Duration.ofSeconds(120))
-                        .blockFirst();
+                ToolResultEvent result = pendingFuture.get(120, java.util.concurrent.TimeUnit.SECONDS);
 
                 if (result != null && result.ok()) {
                     appliedCount = allEdits.size();
@@ -165,6 +200,7 @@ public class ApplyPatchAction implements NodeAction {
                     failedCount = individualResult.failedCount();
                 }
             } catch (Exception e) {
+                ToolResultBus.unregisterFuture(sessionId, batchToolCallId);
                 String errMsg = "Batch tool result timeout: " + e.getMessage();
                 log.warn("{}. Falling back to individual edits.", errMsg);
                 var individualResult = applyIndividualEdits(state, sessionId, patches);
@@ -279,13 +315,12 @@ public class ApplyPatchAction implements NodeAction {
                         )
                 );
 
+                // Register future BEFORE emitting SSE to avoid race condition
+                var editFuture = ToolResultBus.registerFuture(sessionId, toolCallId);
                 GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, toolArgs);
 
                 try {
-                    var result = toolResultBus.subscribe(sessionId)
-                            .filter(e -> e.toolCallId().equals(toolCallId))
-                            .timeout(Duration.ofSeconds(60))
-                            .blockFirst();
+                    ToolResultEvent result = editFuture.get(60, java.util.concurrent.TimeUnit.SECONDS);
 
                     if (result != null && result.ok()) {
                         appliedCount++;
@@ -312,4 +347,5 @@ public class ApplyPatchAction implements NodeAction {
             List<String> errors,
             int appliedCount,
             int failedCount) {}
+
 }

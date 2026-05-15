@@ -176,6 +176,15 @@ class GraphStateStore(
         persist()
     }
 
+    /** Clear the awaiting state after user has responded. */
+    fun clearAwaiting() {
+        state.remove("awaiting")
+        state.remove("continuationToken")
+        state.remove("resumeNextNode")
+        state.put("currentNode", "")
+        persist()
+    }
+
     /** Get the current graphState for sending in request payloads. */
     fun snapshot(): JsonNode = state.deepCopy()
 

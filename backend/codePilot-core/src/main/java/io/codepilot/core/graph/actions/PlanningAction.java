@@ -54,7 +54,10 @@ public class PlanningAction implements NodeAction {
         String mode = (String) state.value("mode").orElse("AGENT");
 
         // ── Build planning prompt ──
-        String planningPrompt = buildPlanningPrompt(input, mode);
+        String projectMeta = (String) state.value("projectMeta").orElse("");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
+        String planningPrompt = buildPlanningPrompt(input, mode, projectMeta, mcpTools);
 
         // ── Call LLM ──
         String llmResponse;
@@ -65,11 +68,36 @@ public class PlanningAction implements NodeAction {
             ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
             log.info("PlanningAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
-            llmResponse = chatClient.prompt()
-                    .system(promptRegistry.get("agent.system"))
-                    .user(planningPrompt)
-                    .call()
-                    .content();
+
+            // ★ Build multi-turn context from conversation history
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> conversationHistory = (List<Map<String, String>>) state.value("conversationHistory").orElse(List.of());
+
+            if (!conversationHistory.isEmpty()) {
+                var messages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>();
+                for (var histMsg : conversationHistory) {
+                    String role = histMsg.getOrDefault("role", "");
+                    String content = histMsg.getOrDefault("content", "");
+                    if (content == null || content.isBlank()) continue;
+                    if ("user".equals(role)) {
+                        messages.add(new org.springframework.ai.chat.messages.UserMessage(content));
+                    } else if ("assistant".equals(role)) {
+                        messages.add(new org.springframework.ai.chat.messages.AssistantMessage(content));
+                    }
+                }
+                if (!messages.isEmpty()) {
+                    var allMessages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>(messages);
+                    allMessages.add(new org.springframework.ai.chat.messages.UserMessage(planningPrompt));
+                    var prompt = org.springframework.ai.chat.prompt.Prompt.builder()
+                            .messages(allMessages)
+                            .build();
+                    llmResponse = chatClient.prompt(prompt).call().content();
+                } else {
+                    llmResponse = chatClient.prompt().user(planningPrompt).call().content();
+                }
+            } else {
+                llmResponse = chatClient.prompt().user(planningPrompt).call().content();
+            }
         } catch (Exception e) {
             log.error("LLM planning call failed", e);
             // Fallback to default plan
@@ -80,16 +108,55 @@ public class PlanningAction implements NodeAction {
         try {
             return parseLlmPlan(llmResponse, state, input, updates);
         } catch (Exception e) {
-            log.warn("Failed to parse LLM planning response, using fallback", e);
+            log.warn("Failed to parse LLM planning response, using fallback. Response: {}",
+                llmResponse != null ? llmResponse.substring(0, Math.min(llmResponse.length(), 500)) : "null", e);
             return buildFallbackPlan(state, input, updates);
         }
     }
 
-    private String buildPlanningPrompt(String input, String mode) {
+    private String buildPlanningPrompt(String input, String mode, String projectMeta,
+                                        List<Map<String, Object>> mcpTools) {
         String template = promptRegistry.get("graph.planning");
+        String projectMetaSection = projectMeta.isBlank() ? ""
+                : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
+
+        // ★ Build MCP tools section for prompt injection
+        String mcpToolsSection = buildMcpToolsSection(mcpTools);
+
         return template
+                .replace("{{projectMeta}}", projectMetaSection)
                 .replace("{{input}}", input)
-                .replace("{{userLocale}}", "zh-CN");
+                .replace("{{userLocale}}", "zh-CN")
+                .replace("{{mcpTools}}", mcpToolsSection);
+    }
+
+    /**
+     * Builds a prompt section describing available MCP tools.
+     * Same format as GenerateAction's buildMcpToolsSection.
+     */
+    private String buildMcpToolsSection(List<Map<String, Object>> mcpTools) {
+        if (mcpTools == null || mcpTools.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("\n[MCP TOOLS — available for infoRequests with kind=\"mcp.call\"]\n");
+        sb.append("You can call MCP tools by setting infoRequests with kind=\"mcp.call\".\n");
+        sb.append("Each mcp.call request must have args with: {\"fullName\": \"mcp.<serverId>.<toolName>\", \"arguments\": {...}}\n");
+        sb.append("Available MCP tools:\n");
+        for (Map<String, Object> tool : mcpTools) {
+            String fullName = String.valueOf(tool.getOrDefault("name", "unknown"));
+            String desc = String.valueOf(tool.getOrDefault("description", ""));
+            sb.append("  - ").append(fullName);
+            if (!desc.isEmpty() && !"null".equals(desc)) {
+                sb.append(": ").append(desc);
+            }
+            Object params = tool.get("parameters");
+            if (params instanceof Map<?, ?> paramMap && !paramMap.isEmpty()) {
+                sb.append(" (params: ").append(paramMap.keySet()).append(")");
+            }
+            sb.append("\n");
+        }
+        sb.append("Example infoRequest for MCP: {\"id\": \"mcp-1\", \"kind\": \"mcp.call\", \"args\": {\"fullName\": \"mcp.<serverId>.<toolName>\", \"arguments\": {}}}\n");
+        return sb.toString();
     }
 
     private Map<String, Object> parseLlmPlan(String llmResponse, OverAllState state, String input, Map<String, Object> updates) throws Exception {
@@ -102,10 +169,53 @@ public class PlanningAction implements NodeAction {
         if (infoRequests != null && !infoRequests.isNull() && infoRequests.isArray() && !infoRequests.isEmpty()) {
             updates.put("planningResult", "infoRequests");
             updates.put("infoRequests", mapper.convertValue(infoRequests, new TypeReference<List<Map<String, Object>>>() {}));
+            // ★ Extract agentThinking from LLM output for interactive agent display
+            JsonNode agentThinkingNode = root.get("agentThinking");
+            if (agentThinkingNode != null && !agentThinkingNode.isNull() && !agentThinkingNode.asText("").isBlank()) {
+                String agentThinking = agentThinkingNode.asText();
+                updates.put("agentGatherIntent", agentThinking);
+                String phaseId = (String) state.value("phaseCursor").orElse("");
+                GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
+                    Map.of("text", agentThinking, "phaseId", phaseId));
+            }
+            // ★ Extract agentContent and emit as structured delta
+            JsonNode agentContentNode = root.get("agentContent");
+            if (agentContentNode != null && !agentContentNode.isNull() && !agentContentNode.asText("").isBlank()) {
+                GraphSseHelper.emitEvent(state, SseEvents.DELTA,
+                    Map.of("text", agentContentNode.asText() + "\n\n"));
+            }
             return updates;
         }
 
-        // Parse user plan
+        // ★ Check skipPlan flag — LLM decides if this task is simple enough to skip detailed planning
+        boolean skipPlan = false;
+        JsonNode skipPlanNode = root.get("skipPlan");
+        if (skipPlanNode != null && !skipPlanNode.isNull() && skipPlanNode.asBoolean(false)) {
+            skipPlan = true;
+            log.info("PlanningAction: LLM set skipPlan=true — simple task, skipping detailed plan display");
+        }
+
+        String phaseId = (String) state.value("phaseCursor").orElse("");
+
+        // ★ Emit agent events — avoid duplicate display
+        JsonNode agentContentNode = root.get("agentContent");
+        boolean hasAgentContent = agentContentNode != null && !agentContentNode.isNull()
+            && !agentContentNode.asText("").isBlank();
+
+        if (hasAgentContent && !skipPlan) {
+            // agentContent already includes thinking/reasoning — just emit it as delta
+            GraphSseHelper.emitEvent(state, SseEvents.DELTA,
+                Map.of("text", agentContentNode.asText() + "\n\n"));
+        } else {
+            // No agentContent — use agent_thinking for brief status
+            JsonNode agentThinkingNode = root.get("agentThinking");
+            String thinkingText = (agentThinkingNode != null && !agentThinkingNode.isNull() && !agentThinkingNode.asText("").isBlank())
+                ? agentThinkingNode.asText() : (skipPlan ? "我已分析你的需求，开始实现。" : "我已分析你的需求。");
+            GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
+                Map.of("text", thinkingText, "phaseId", phaseId));
+        }
+
+        // Parse user plan — only emit user_plan event when NOT skipping plan display
         JsonNode userPlanNode = root.get("userPlan");
         Map<String, Object> userPlan;
         List<Map<String, Object>> userSteps;
@@ -123,7 +233,11 @@ public class PlanningAction implements NodeAction {
             userPlan = Map.of("goal", input, "summary", input, "steps", userSteps, "status", "in_progress");
         }
 
-        GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN, userPlan);
+        // ★ Only emit user_plan SSE event when LLM didn't skip planning
+        // When skipPlan=true, we still store userPlan in state but don't show it in the UI
+        if (!skipPlan) {
+            GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN, userPlan);
+        }
         updates.put("userPlan", userPlan);
 
         // Parse execution phases
@@ -166,6 +280,13 @@ public class PlanningAction implements NodeAction {
     }
 
     private Map<String, Object> buildFallbackPlan(OverAllState state, String input, Map<String, Object> updates) {
+        // ★ Emit agent thinking and content so user sees progress even on fallback
+        String phaseId = (String) state.value("phaseCursor").orElse("");
+        GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
+            Map.of("text", "我正在制定执行计划...", "phaseId", phaseId));
+        GraphSseHelper.emitEvent(state, SseEvents.DELTA,
+            Map.of("text", "我正在分析你的需求并制定执行计划。\n\n"));
+
         // Single-phase fallback
         List<Map<String, Object>> userSteps = List.of(
             Map.of("id", "s1", "index", 1, "title", input, "description", input, "status", "in_progress")
@@ -212,6 +333,17 @@ public class PlanningAction implements NodeAction {
      */
     public String routeAfterPlanning(OverAllState state) {
         String result = (String) state.value("planningResult").orElse("phases");
+        boolean gatherExhausted = Boolean.TRUE.equals(state.value("gatherExhausted").orElse(false));
+        int gatherCount = (int) state.value("gatherCount").orElse(0);
+
+        // ★ Anti-loop: when gather has already been executed multiple times,
+        // refuse to route back to gather from planning.
+        if ("infoRequests".equals(result) && (gatherExhausted || gatherCount >= 3)) {
+            log.warn("PlanningAction: LLM output infoRequests but gather budget exceeded "
+                + "(gatherCount={}, gatherExhausted={}). Forcing to preCheck.", gatherCount, gatherExhausted);
+            return "preCheck";
+        }
+
         return switch (result) {
             case "infoRequests" -> "gather";
             case "error" -> "finalize";

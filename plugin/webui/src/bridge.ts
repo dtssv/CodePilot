@@ -54,7 +54,12 @@ export type PluginEventType =
     | 'session_interrupted'
     | 'session_resuming'
     | 'auto_apply_state'
-    | 'pending_changes';
+    | 'pending_changes'
+    | 'console_log'
+    | 'agent_thinking'
+    | 'agent_reading'
+    | 'agent_writing'
+    | 'agent_running';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

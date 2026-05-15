@@ -104,7 +104,7 @@
 
     <!-- PSI element (class/method) right-click -->
     <group id="CodePilot.PsiElementActions" text="CodePilot" popup="true">
-      <add-to-group group-id="PsiElementPopupMenu" anchor="last"/>
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
     </group>
 
     <action id="CodePilot.PsiGenTest"

@@ -166,15 +166,19 @@ class ToolDispatcher(
         dispatch(node)
     }
 
+    /** Cached MCP tool metadata, populated by background init. */
+    @Volatile
+    private var cachedMcpTools: List<Map<String, Any>> = emptyList()
+
     /**
-     * Initialize MCP servers from the installed list. Called once at session start.
-     * Returns the combined tools/list from all started servers.
+     * Initialize MCP servers from the installed list.
+     * Launches all servers and fetches tools/list in background to avoid blocking the caller.
+     * Returns currently cached tools (may be empty on first call).
      */
     fun initMcpServers(): List<Map<String, Any>> {
         val store = LocalMarketplaceStore.getInstance()
         val installed = store.installedMcpServers()
         val mcpManager = McpProcessManager.getInstance()
-        val allTools = mutableListOf<Map<String, Any>>()
 
         for (server in installed) {
             try {
@@ -200,26 +204,48 @@ class ToolDispatcher(
                         }
                     }
                 }
-                // Fetch tools/list from the running server
-                val toolsResult = mcpManager.call(server.id, "tools/list", null)
-                if (toolsResult.isArray) {
-                    toolsResult.forEach { tool ->
-                        allTools.add(
-                            mapOf(
-                                "name" to "mcp.${server.id}.${tool.path("name").asText()}",
-                                "description" to tool.path("description").asText(""),
-                                "parameters" to tool.path("inputSchema"),
-                            ),
-                        )
-                    }
-                }
             } catch (e: Exception) {
                 com.intellij.openapi.diagnostic.Logger
                     .getInstance("ToolDispatcher")
                     .warn("Failed to start MCP server ${server.id}", e)
             }
         }
-        return allTools
+
+        // Fetch tools/list asynchronously so we don't block the caller
+        Thread({
+            try {
+                val tools = mutableListOf<Map<String, Any>>()
+                for (server in installed) {
+                    try {
+                        val toolsResult = mcpManager.call(server.id, "tools/list", null, timeoutSeconds = 10)
+                        if (toolsResult.isArray) {
+                            toolsResult.forEach { tool ->
+                                tools.add(
+                                    mapOf(
+                                        "name" to "mcp.${server.id}.${tool.path("name").asText()}",
+                                        "description" to tool.path("description").asText(""),
+                                        "parameters" to tool.path("inputSchema"),
+                                    ),
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        com.intellij.openapi.diagnostic.Logger
+                            .getInstance("ToolDispatcher")
+                            .warn("Failed to fetch tools from MCP server ${server.id}: ${e.message}")
+                    }
+                }
+                if (tools.isNotEmpty()) {
+                    cachedMcpTools = tools
+                }
+            } catch (e: Exception) {
+                com.intellij.openapi.diagnostic.Logger
+                    .getInstance("ToolDispatcher")
+                    .warn("MCP background tools fetch failed: ${e.message}")
+            }
+        }, "mcp-tools-fetch").apply { isDaemon = true }.start()
+
+        return cachedMcpTools
     }
 
     // ---------- MCP routing ----------
@@ -389,20 +415,22 @@ class ToolDispatcher(
     private fun ideDiagnostics(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val vf = PathGuard.resolve(project, path)
-        val psiFile =
-            com.intellij.psi.PsiManager
-                .getInstance(project)
-                .findFile(vf)
-                ?: return mapOf("diagnostics" to emptyList<Any>())
-        val diagnostics =
-            com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx
-                .getInstanceEx(project)
-                .let { analyzer ->
-                    // Get highlights from the document
-                    val doc =
-                        com.intellij.openapi.fileEditor.FileDocumentManager
-                            .getInstance()
-                            .getDocument(vf) ?: return mapOf("diagnostics" to emptyList<Any>())
+            ?: return mapOf("diagnostics" to emptyList<Any>())
+
+        // ★ PsiManager.findFile() requires read access — wrap in ReadAction
+        return com.intellij.openapi.application.ApplicationManager
+            .getApplication()
+            .runReadAction<Map<String, Any?>> {
+                val psiFile =
+                    com.intellij.psi.PsiManager
+                        .getInstance(project)
+                        .findFile(vf)
+                        ?: return@runReadAction mapOf("diagnostics" to emptyList<Any>())
+                val doc =
+                    com.intellij.openapi.fileEditor.FileDocumentManager
+                        .getInstance()
+                        .getDocument(vf) ?: return@runReadAction mapOf("diagnostics" to emptyList<Any>())
+                val diagnostics =
                     com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
                         .getHighlights(doc, null, project)
                         .map { h ->
@@ -412,8 +440,8 @@ class ToolDispatcher(
                                 "message" to (h.description ?: ""),
                             )
                         }
-                }
-        return mapOf("path" to path, "diagnostics" to diagnostics)
+                mapOf("path" to path, "diagnostics" to diagnostics)
+            }
     }
 
     /**

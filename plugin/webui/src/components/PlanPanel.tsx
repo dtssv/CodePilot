@@ -52,6 +52,20 @@ export function PlanPanel() {
                 setPlan(prev => prev ? applyPlanDelta(prev, data) : prev);
             }),
             onPluginEvent('task_ledger', (data) => setLedger(data as TaskLedger)),
+            // ★ Graph engine plan events (PlanningAction emits these)
+            onPluginEvent('user_plan', (data) => {
+                const up = data as { goal?: string; steps?: { id: string; title: string; status?: string }[] };
+                if (up.steps && up.steps.length > 0) {
+                    setPlan({
+                        goal: up.goal || '',
+                        steps: up.steps.map(s => ({
+                            id: s.id,
+                            title: s.title,
+                            status: (s.status as PlanStep['status']) || 'pending',
+                        })),
+                    });
+                }
+            }),
         ];
         return () => unsubs.forEach(u => u());
     }, []);

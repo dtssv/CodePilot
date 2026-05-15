@@ -32,5 +32,15 @@ public final class SseEvents {
   public static final String USER_PLAN = "user_plan";
   public static final String USER_PLAN_PROGRESS = "user_plan_progress";
 
+  // ── Interactive Agent events (semantic layer over tool_call) ──
+  /** Agent declares its intent/thought before acting (e.g., "Let me check the project structure first"). */
+  public static final String AGENT_THINKING = "agent_thinking";
+  /** Agent declares a file-reading action with human-readable result (e.g., "This is a Java Maven project"). */
+  public static final String AGENT_READING = "agent_reading";
+  /** Agent declares a file-writing action with preview (e.g., "Creating TrapRainWater3D.java +101 lines"). */
+  public static final String AGENT_WRITING = "agent_writing";
+  /** Agent declares a command execution (e.g., "Verifying compilation and running tests"). */
+  public static final String AGENT_RUNNING = "agent_running";
+
   private SseEvents() {}
 }

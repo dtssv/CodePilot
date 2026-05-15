@@ -34,8 +34,8 @@ spring:
   data:
     redis:
       url: ${CODEPILOT_REDIS_URL:redis://localhost:6379}
-      timeout: 2s
-      connect-timeout: 2s
+      timeout: 5s
+      connect-timeout: 3s
       lettuce:
         pool:
           max-active: 64

@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.conversation.ToolResultBus;
+import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.gather.InfoRequestDispatcher;
 import io.codepilot.core.graph.gather.InfoRequestValidator;
@@ -76,15 +77,36 @@ public class GatherAction implements NodeAction {
 
         // 3. Execute server-side requests
         Map<String, Object> gatheredInfo = new HashMap<>();
+        // ★ Inject sessionId into server-side requests (needed for mcp.call to look up session-scoped MCP config)
+        String currentSessionId = (String) state.value("sessionId").orElse("");
+        for (Map<String, Object> serverReq : serverRequests) {
+            serverReq.putIfAbsent("sessionId", currentSessionId);
+        }
         var serverResults = dispatcher.executeServerSide(serverRequests);
         for (var result : serverResults) {
-            String key = (String) result.getOrDefault("id", UUID.randomUUID().toString());
+            String key = result.get("id") != null ? (String) result.get("id") : UUID.randomUUID().toString();
             gatheredInfo.put(key, result);
         }
 
         // 4. Emit client-side requests via SSE as a batch tool_call, then await results
         if (!clientRequests.isEmpty()) {
             String gatherToolCallId = UUID.randomUUID().toString();
+            String sessionId = (String) state.value("sessionId").orElse("");
+
+            // ★ Interactive Agent: emit agent_thinking before reading files
+            // Use the agentGatherIntent from the previous LLM output (Planning/Generate)
+            // which already explains WHY the files need to be read.
+            String thinkingText = (String) state.value("agentGatherIntent").orElse("");
+            if (thinkingText.isBlank()) {
+                thinkingText = "让我先收集所需信息。";
+            }
+            GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
+                Map.of("text", thinkingText, "phaseId", phaseId));
+
+            // IMPORTANT: Register the future BEFORE emitting the SSE event, otherwise a fast
+            // client response can arrive before the future is registered, causing publish() to
+            // find no pending future → result lost → timeout → re-gather loop.
+            var pendingFuture = ToolResultBus.registerFuture(sessionId, gatherToolCallId);
 
             // Emit a tool_call SSE so the client knows to execute and return results
             // via the ToolResultBus (same pattern as ApplyPatchAction/VerifyAction)
@@ -98,39 +120,58 @@ public class GatherAction implements NodeAction {
             GraphSseHelper.emitEvent(state, SseEvents.GRAPH_INFO_REQUEST,
                 Map.of("phaseId", phaseId, "requests", clientRequests, "toolCallId", gatherToolCallId));
 
-            // ── Block and wait for client results via ToolResultBus ──
+            // ── Block and wait for client results via ToolResultBus (CompletableFuture) ──
+            ToolResultEvent result;
             try {
-                String sessionId = (String) state.value("sessionId").orElse("");
-                var result = toolResultBus.subscribe(sessionId)
-                        .filter(e -> e.toolCallId().equals(gatherToolCallId))
-                        .timeout(CLIENT_RESULT_TIMEOUT)
-                        .blockFirst();
-
-                if (result != null && result.ok() && result.result() != null) {
-                    // Merge client results into gatheredInfo
-                    mergeClientResults(gatheredInfo, result.result());
-                    log.info("Gather: received client results for {} requests via toolCallId={}",
-                            clientRequests.size(), gatherToolCallId);
-                } else {
-                    String errMsg = result != null ? result.errorMessage() : "Timeout waiting for gather results";
-                    log.warn("Gather: client results failed or timed out: {}", errMsg);
-                    // Mark failed requests as errors in gatheredInfo
-                    for (var req : clientRequests) {
-                        String reqId = (String) req.getOrDefault("id", UUID.randomUUID().toString());
-                        gatheredInfo.put(reqId, Map.of(
-                                "id", reqId, "kind", req.get("kind"),
-                                "ok", false, "errorCode", "gather_timeout",
-                                "errorMessage", errMsg));
-                    }
-                }
+                log.info("Gather: waiting for client results, sessionId={}, toolCallId={}, timeout={}s",
+                        sessionId, gatherToolCallId, CLIENT_RESULT_TIMEOUT.toSeconds());
+                result = pendingFuture.get(CLIENT_RESULT_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                log.info("Gather: received client results for toolCallId={}, ok={}", gatherToolCallId,
+                        result != null && result.ok());
             } catch (Exception e) {
-                log.warn("Gather: client results wait exception: {}", e.getMessage());
+                ToolResultBus.unregisterFuture(sessionId, gatherToolCallId);
+                result = null;
+                if (e instanceof java.util.concurrent.TimeoutException) {
+                    log.warn("Gather: timeout waiting for client results toolCallId={}", gatherToolCallId);
+                } else {
+                    log.warn("Gather: error waiting for client results toolCallId={}", gatherToolCallId, e);
+                }
+            }
+
+            if (result != null && result.ok() && result.result() != null) {
+                // Merge client results into gatheredInfo
+                mergeClientResults(gatheredInfo, result.result());
+                log.info("Gather: received client results for {} requests via toolCallId={}",
+                        clientRequests.size(), gatherToolCallId);
+
+                // ★ Interactive Agent: emit agent_reading with human-readable summary
+                String readingSummary = buildGatherReadingSummary(clientRequests, result.result());
+                // Build file list for the frontend
+                List<Map<String, String>> readingFiles = clientRequests.stream()
+                    .filter(r -> "fs.read".equals(r.get("kind")) || "fs.list".equals(r.get("kind")))
+                    .map(r -> {
+                        var args = r.get("args");
+                        String path = "";
+                        if (args instanceof Map<?, ?> m) {
+                            Object p = m.get("path");
+                            if (p != null) path = p.toString();
+                        }
+                        return Map.of("path", path, "op", String.valueOf(r.getOrDefault("kind", "")));
+                    })
+                    .filter(f -> !f.get("path").isEmpty())
+                    .toList();
+                GraphSseHelper.emitEvent(state, SseEvents.AGENT_READING,
+                    Map.of("summary", readingSummary, "files", readingFiles, "fileCount", clientRequests.size(), "phaseId", phaseId));
+            } else {
+                String errMsg = result != null ? result.errorMessage() : "Timeout waiting for gather results";
+                log.warn("Gather: client results failed or timed out: {}", errMsg);
+                // Mark failed requests as errors in gatheredInfo
                 for (var req : clientRequests) {
                     String reqId = (String) req.getOrDefault("id", UUID.randomUUID().toString());
                     gatheredInfo.put(reqId, Map.of(
-                            "id", reqId, "kind", req.get("kind"),
-                            "ok", false, "errorCode", "gather_error",
-                            "errorMessage", e.getMessage()));
+                            "id", reqId, "kind", req.getOrDefault("kind", "unknown"),
+                            "ok", false, "errorCode", "gather_timeout",
+                            "errorMessage", errMsg != null ? errMsg : "gather_timeout"));
                 }
             }
         }
@@ -140,6 +181,8 @@ public class GatherAction implements NodeAction {
         updates.put("gatherCount", gatherCount);
         updates.put("gatheredInfo", gatheredInfo);
         updates.put("clientRequestsPending", !clientRequests.isEmpty());
+        // ★ Clear infoRequests so the next GenerateAction does not re-request the same files
+        updates.put("infoRequests", List.of());
 
         // ★ Set gatherResumeTo so ReenterAction knows which node to return to after gather.
         // The value is the node that was active BEFORE this gather (i.e., the source
@@ -155,9 +198,11 @@ public class GatherAction implements NodeAction {
                 };
         updates.put("gatherResumeTo", resumeTo);
 
-        // Enforce gather loop budget (max 3 per phase, max 10 total)
-        if (gatherCount > 10) {
-            log.warn("Gather: exceeded total gather budget (10), forcing continue");
+        // Enforce gather loop budget (max 3 per phase, max 5 total)
+        // ★ Lowered from 10 to 5 — the routeAfterGenerate/routeAfterPlanning/routeAfterPreCheck
+        // routers already block re-gather after 3 rounds; this is a secondary hard limit.
+        if (gatherCount > 5) {
+            log.warn("Gather: exceeded total gather budget (5), forcing continue");
             updates.put("gatherExhausted", true);
         }
 
@@ -225,5 +270,44 @@ public class GatherAction implements NodeAction {
             }
         }
         return result;
+    }
+
+    // ── Interactive Agent helper: build reading summary ──
+
+    /**
+     * Builds a simplified agent_reading summary after gather results are received.
+     * Lists the files that were read, without attempting project-type detection
+     * (which is better left to the LLM's semantic understanding).
+     */
+    @SuppressWarnings("unchecked")
+    private String buildGatherReadingSummary(List<Map<String, Object>> requests, Object rawResult) {
+        // Collect file paths from the requests
+        List<String> filePaths = requests.stream()
+            .filter(r -> "fs.read".equals(r.get("kind")))
+            .map(r -> {
+                var args = r.get("args");
+                if (args instanceof Map<?, ?> m) {
+                    Object p = m.get("path");
+                    return p != null ? p.toString() : "";
+                }
+                return "";
+            })
+            .filter(p -> !p.isEmpty())
+            .limit(5)
+            .toList();
+
+        long listCount = requests.stream().filter(r -> "fs.list".equals(r.get("kind"))).count();
+        long readCount = requests.stream().filter(r -> "fs.read".equals(r.get("kind"))).count();
+
+        StringBuilder sb = new StringBuilder("已获取所需信息");
+        if (listCount > 0 && readCount > 0) {
+            sb.append("，查看了目录结构并读取了 ").append(readCount).append(" 个文件");
+        } else if (listCount > 0) {
+            sb.append("，查看了目录结构");
+        } else if (!filePaths.isEmpty()) {
+            sb.append("，已读取 ").append(String.join("、", filePaths));
+            if (readCount > 5) sb.append(" 等 ").append(readCount).append(" 个文件");
+        }
+        return sb.toString();
     }
 }

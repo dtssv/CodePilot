@@ -5,6 +5,7 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.graph.GraphCheckpointStore;
+import io.codepilot.core.mcp.McpToolExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -19,6 +20,12 @@ import java.util.*;
 public class IntakeAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(IntakeAction.class);
+
+    private final McpToolExecutor mcpToolExecutor;
+
+    public IntakeAction(McpToolExecutor mcpToolExecutor) {
+        this.mcpToolExecutor = mcpToolExecutor;
+    }
 
     /**
      * Creates an empty OverAllState with ReplaceStrategy registered for all known keys.
@@ -35,7 +42,7 @@ public class IntakeAction implements NodeAction {
      *  the framework's input() and updateState() don't silently drop them. */
     private static final List<String> STATE_KEYS = List.of(
             "sessionId", "input", "mode", "intent",
-            "modelId", "modelSource", "userId",
+            "modelId", "modelSource", "userId", "projectMeta",
             "currentNode", "phaseCursor", "phases",
             "attempts", "gathered", "sseEvents",
             "gatherResumeTo", "gatherLoopCount", "doneReason",
@@ -71,7 +78,11 @@ public class IntakeAction implements NodeAction {
             // ── Interrupt-resume keys (previously missing) ──
             "awaiting", "continuationToken", "askUserOrigin", "askUserTitle",
             "pendingQuestions", "clientRequestsPending", "gatherCount",
-            "gatherExhausted", "verifyReportRaw", "resumeNextNode"
+            "gatherExhausted", "verifyReportRaw", "resumeNextNode",
+            // ── MCP integration keys ──
+            "mcpTools",
+            // ── Conversation history for multi-turn context ──
+            "conversationHistory"
     );
 
     @Override
@@ -83,6 +94,8 @@ public class IntakeAction implements NodeAction {
         state.<String>value("modelId").ifPresent(v -> updates.put("modelId", v));
         state.<String>value("modelSource").ifPresent(v -> updates.put("modelSource", v));
         state.<String>value("userId").ifPresent(v -> updates.put("userId", v));
+        // Carry over projectMeta so it survives across graph iterations.
+        state.<String>value("projectMeta").ifPresent(v -> updates.put("projectMeta", v));
 
         log.info("IntakeAction state keys={}, modelId={}, modelSource={}, userId={}, keyStrategies={}",
             state.data().keySet(),
@@ -116,7 +129,19 @@ public class IntakeAction implements NodeAction {
                 }
             };
         }
-        // Fresh run: proceed to planning
+
+        // ★ Determine if planning is needed based on mode
+        String mode = (String) state.value("mode").orElse("AGENT");
+
+        // CHAT mode: skip planning, go directly to generate
+        if ("CHAT".equalsIgnoreCase(mode)) {
+            log.info("IntakeAction route: CHAT mode, skipping planning → generate");
+            return "generate";
+        }
+
+        // AGENT mode: always go to planning — the LLM will decide whether
+        // to produce a multi-step plan or a simple single-phase plan.
+        // This avoids heuristic-based skipping that can misjudge complex short tasks.
         return "planning";
     }
 
@@ -138,6 +163,7 @@ public class IntakeAction implements NodeAction {
         initial.put("modelId", req.modelId());
         initial.put("modelSource", req.modelSource() != null ? req.modelSource().name() : null);
         initial.put("userId", userId);
+        initial.put("projectMeta", req.projectMeta() != null ? req.projectMeta() : "");
         initial.put("currentNode", "intake");
         initial.put("phaseCursor", "");
         initial.put("phases", new ArrayList<>());
@@ -148,6 +174,15 @@ public class IntakeAction implements NodeAction {
         initial.put("gatherLoopCount", 0);
         initial.put("doneReason", "final");
 
+        // ★ Store conversation history from contexts.recent for multi-turn context
+        // This allows GenerateAction and PlanningAction to include previous turns
+        // when building LLM prompts, enabling true multi-turn conversation.
+        if (req.contexts() != null && req.contexts().recent() != null && !req.contexts().recent().isEmpty()) {
+            initial.put("conversationHistory", req.contexts().recent());
+        } else {
+            initial.put("conversationHistory", List.of());
+        }
+
         // Carry over answers if intent=answer
         if (req.answers() != null) {
             initial.put("answers", req.answers());
@@ -156,6 +191,33 @@ public class IntakeAction implements NodeAction {
         // Carry over graphState from plugin for resume
         if (req.graphState() != null) {
             initial.putAll(req.graphState());
+        }
+
+        // ★ After merging graphState, re-apply request fields that must take precedence
+        // over any stale values in the saved graphState.
+        // The user's current input, intent, and answers should always override saved state.
+        initial.put("input", req.input());
+        initial.put("intent", req.intent() != null ? req.intent().name() : "NEW");
+        initial.put("sessionId", req.sessionId());
+        initial.put("mode", req.mode().name());
+        if (req.answers() != null) {
+            initial.put("answers", req.answers());
+        }
+
+        // ★ Register MCP configs and tool metadata for this session
+        if (req.userMcps() != null && !req.userMcps().isEmpty()) {
+            mcpToolExecutor.registerSession(req.sessionId(), req.userMcps());
+            // Register MCP tool metadata if provided by the plugin
+            if (req.mcpTools() != null && !req.mcpTools().isEmpty()) {
+                mcpToolExecutor.registerSessionTools(req.sessionId(), req.mcpTools());
+                initial.put("mcpTools", req.mcpTools());
+            } else {
+                // Fallback: build descriptors from registered session data
+                List<Map<String, Object>> mcpToolDescriptors = mcpToolExecutor.buildAvailableToolDescriptors(req.sessionId());
+                if (!mcpToolDescriptors.isEmpty()) {
+                    initial.put("mcpTools", mcpToolDescriptors);
+                }
+            }
         }
 
         var state = new OverAllState(initial);

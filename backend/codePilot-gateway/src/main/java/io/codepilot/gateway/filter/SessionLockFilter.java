@@ -58,6 +58,12 @@ public class SessionLockFilter implements WebFilter {
           // Proceed; release lock when the stream completes
           return chain.filter(exchange)
               .doFinally(signal -> redis.delete(lockKey).subscribe());
-        });
+        })
+        .onErrorResume(
+            Exception.class,
+            ex -> {
+              log.warn("Redis unavailable, skipping session lock for sessionId={}: {}", sessionId, ex.getMessage());
+              return chain.filter(exchange);
+            });
   }
 }

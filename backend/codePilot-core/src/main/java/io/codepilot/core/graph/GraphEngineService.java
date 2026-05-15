@@ -134,14 +134,16 @@ public class GraphEngineService {
                     log.info("GraphEngine completed: state keys={}",
                         resultState.map(s -> s.data().keySet()).orElse(null));
                     liveSink.tryEmitComplete();
-                } catch (GraphInterruptException e) {
-                    // Controlled interrupt (e.g., AskUser): the DONE event has already been
-                    // emitted by the node. Just close the SSE stream gracefully.
-                    log.info("GraphEngine interrupted: reason={}, token={}", e.getReason(), e.getContinuationToken());
-                    liveSink.tryEmitComplete();
                 } catch (Exception e) {
-                    log.error("Graph engine execution failed", e);
-                    liveSink.tryEmitNext(sse.error(50001, "Graph engine error: " + e.getMessage()));
+                    GraphInterruptException gie = unwrapGraphInterrupt(e);
+                    if (gie != null) {
+                        // Controlled interrupt (e.g., AskUser): the DONE event has already been
+                        // emitted by the node. Just close the SSE stream gracefully.
+                        log.info("GraphEngine interrupted: reason={}, token={}", gie.getReason(), gie.getContinuationToken());
+                    } else {
+                        log.error("Graph engine execution failed", e);
+                        liveSink.tryEmitNext(sse.error(50001, "Graph engine error: " + e.getMessage()));
+                    }
                     liveSink.tryEmitComplete();
                 } finally {
                     GraphSseHelper.clearLiveSink();
@@ -213,13 +215,15 @@ public class GraphEngineService {
                                 log.info("GraphEngine resume completed: state keys={}",
                                         resultState.map(s -> s.data().keySet()).orElse(null));
                                 liveSink.tryEmitComplete();
-                            } catch (GraphInterruptException e) {
-                                // Controlled interrupt during resumed execution (e.g., another askUser)
-                                log.info("GraphEngine resume interrupted: reason={}, token={}", e.getReason(), e.getContinuationToken());
-                                liveSink.tryEmitComplete();
                             } catch (Exception e) {
-                                log.error("Graph engine resume execution failed", e);
-                                liveSink.tryEmitNext(sse.error(50001, "Graph engine resume error: " + e.getMessage()));
+                                GraphInterruptException gie = unwrapGraphInterrupt(e);
+                                if (gie != null) {
+                                    // Controlled interrupt during resumed execution (e.g., another askUser)
+                                    log.info("GraphEngine resume interrupted: reason={}, token={}", gie.getReason(), gie.getContinuationToken());
+                                } else {
+                                    log.error("Graph engine resume execution failed", e);
+                                    liveSink.tryEmitNext(sse.error(50001, "Graph engine resume error: " + e.getMessage()));
+                                }
                                 liveSink.tryEmitComplete();
                             } finally {
                                 GraphSseHelper.clearLiveSink();
@@ -407,5 +411,26 @@ public class GraphEngineService {
         graph.addEdge("finalize", StateGraph.END);
 
         return graph.compile();
+    }
+
+    /**
+     * Unwraps a {@link GraphInterruptException} from the cause chain of an exception.
+     *
+     * <p>Spring AI Alibaba's {@code CompiledGraph.invoke()} wraps node exceptions in
+     * {@code ExecutionException} → {@code CompletionException}, so a direct
+     * {@code catch (GraphInterruptException)} never matches. This helper traverses
+     * the cause chain to find the controlled interrupt.
+     *
+     * @return the {@code GraphInterruptException} if found in the cause chain, otherwise null
+     */
+    private static GraphInterruptException unwrapGraphInterrupt(Throwable e) {
+        Throwable current = e;
+        while (current != null) {
+            if (current instanceof GraphInterruptException gie) {
+                return gie;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 }

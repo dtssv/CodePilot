@@ -22,6 +22,7 @@ package io.codepilot.core.graph;
  */
 public class GraphInterruptException extends RuntimeException {
 
+
     private final String continuationToken;
     private final String reason;
 

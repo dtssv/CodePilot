@@ -53,6 +53,24 @@ class ConversationClient(
         http.client().newCall(req).enqueue(noOpCallback)
     }
 
+    /** Synchronous tool result submission with error propagation. Returns response body. */
+    fun submitToolResultSync(sessionId: String, toolCallId: String, result: Any?, ok: Boolean): String {
+        val payload = mapOf(
+            "sessionId" to sessionId,
+            "toolCallId" to toolCallId,
+            "ok" to ok,
+            "result" to result,
+        )
+        val req = http.postJson("/v1/conversation/tool-result", payload)
+        val response = http.client().newCall(req).execute()
+        val body = response.body?.string() ?: ""
+        if (!response.isSuccessful) {
+            throw RuntimeException("submitToolResult failed: HTTP ${response.code} body=$body for toolCallId=$toolCallId")
+        }
+        response.close()
+        return body
+    }
+
     /** Convenience overload for submitting a tool result by individual fields. */
     fun submitToolResult(
         sessionId: String,
@@ -268,6 +286,15 @@ class ConversationClient(
         fun onUserPlan(payload: JsonNode) {}
 
         fun onUserPlanProgress(payload: JsonNode) {}
+
+        // ── Interactive Agent events (semantic layer) ──
+        fun onAgentThinking(payload: JsonNode) {}
+
+        fun onAgentReading(payload: JsonNode) {}
+
+        fun onAgentWriting(payload: JsonNode) {}
+
+        fun onAgentRunning(payload: JsonNode) {}
     }
 
     private class EventSourceAdapter(
@@ -318,6 +345,11 @@ class ConversationClient(
                 "graph_budget_alert" -> listener.onGraphBudgetAlert(node)
                 "user_plan" -> listener.onUserPlan(node)
                 "user_plan_progress" -> listener.onUserPlanProgress(node)
+                // ── Interactive Agent events ──
+                "agent_thinking" -> listener.onAgentThinking(node)
+                "agent_reading" -> listener.onAgentReading(node)
+                "agent_writing" -> listener.onAgentWriting(node)
+                "agent_running" -> listener.onAgentRunning(node)
                 else -> {} // ignore comments / unknown events
             }
         }

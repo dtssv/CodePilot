@@ -67,7 +67,13 @@ public class TokenQuotaFilter implements WebFilter {
             return exchange.getResponse().setComplete();
           }
           return chain.filter(exchange);
-        });
+        })
+        .onErrorResume(
+            Exception.class,
+            ex -> {
+              log.warn("Redis unavailable, skipping token quota check for user={}: {}", userId, ex.getMessage());
+              return chain.filter(exchange);
+            });
   }
 
   /**

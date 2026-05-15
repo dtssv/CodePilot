@@ -241,6 +241,530 @@
     border-left: 2px solid var(--accent);
 }
 
+/* ===== Agent Step Cards ===== */
+
+.agent-step {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin: 3px 0;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    max-width: 100%;
+}
+
+.agent-step-thinking {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    padding: 5px 10px;
+}
+
+.agent-step-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.agent-step-content {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-step-thinking .agent-step-content {
+    white-space: nowrap;
+}
+
+.agent-step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    min-height: 26px;
+}
+
+.agent-step-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.agent-step-expand-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+.agent-step-expand-btn:hover {
+    color: var(--text-primary);
+}
+
+.agent-step-status {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.agent-step-status-success {
+    color: var(--success);
+}
+
+.agent-step-status-error {
+    color: var(--error);
+}
+
+.agent-step-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Agent step states */
+.agent-step-running {
+    border-left: 2px solid var(--accent);
+    box-shadow: inset 1px 0 4px -2px var(--accent);
+}
+
+.agent-step-success {
+    border-left: 2px solid var(--success);
+    opacity: 0.9;
+}
+
+.agent-step-error {
+    border-left: 2px solid var(--error);
+    opacity: 0.9;
+}
+
+/* Agent step detail panel */
+.agent-step-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.agent-step-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-step-file {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.agent-step-file-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.agent-step-file-name {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.agent-step-file-op {
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.agent-step-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.agent-step-file-preview {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-command {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+}
+
+.agent-step-command code {
+    color: var(--accent);
+}
+
+.agent-step-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 4px 0;
+}
+
+/* Agent steps container */
+.agent-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+/* ===== Agent Content Renderer ===== */
+
+.agent-content {
+    max-width: 100%;
+}
+
+.agent-content-streaming {
+    max-width: 100%;
+}
+
+/* Plan block (💡 设计思路) */
+.agent-plan-block {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    overflow: hidden;
+}
+
+.agent-plan-header {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 8%);
+}
+
+.agent-plan-content {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.agent-plan-content p {
+    margin: 4px 0;
+}
+
+/* File block (📝 collapsible code) */
+.agent-file-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-file-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-file-op-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-file-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.agent-file-op-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.agent-file-path {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-file-expand-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.agent-file-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.agent-file-code {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Run block (⌨️ collapsible command) */
+.agent-run-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-run-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-run-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-run-cmd {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.agent-run-cmd code {
+    color: var(--accent);
+}
+
+.agent-run-output {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* JSON block (📋 collapsible raw JSON) */
+.agent-json-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-json-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-json-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-json-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-json-summary {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.agent-json-content {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== Plan Steps (inline in response) ===== */
+.plan-steps-container {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+}
+
+.plan-steps-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.plan-step-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.plan-step-status {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.plan-step-pending {
+    color: #888;
+}
+
+.plan-step-in_progress {
+    color: #58a6ff;
+}
+
+.plan-step-running {
+    color: #58a6ff;
+}
+
+.plan-step-success {
+    color: #3fb950;
+}
+
+.plan-step-done {
+    color: #3fb950;
+}
+
+.plan-step-failed {
+    color: #f85149;
+}
+
+.plan-step-skipped {
+    color: #8b949e;
+}
+
+.plan-step-title {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
 @keyframes fadeInDown {
     from {
         opacity: 0;
@@ -418,6 +942,530 @@
 
 .console-entry-bridge {
     border-left: 2px solid var(--accent);
+}
+
+/* ===== Agent Step Cards ===== */
+
+.agent-step {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin: 3px 0;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    max-width: 100%;
+}
+
+.agent-step-thinking {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    padding: 5px 10px;
+}
+
+.agent-step-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.agent-step-content {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-step-thinking .agent-step-content {
+    white-space: nowrap;
+}
+
+.agent-step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    min-height: 26px;
+}
+
+.agent-step-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.agent-step-expand-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+.agent-step-expand-btn:hover {
+    color: var(--text-primary);
+}
+
+.agent-step-status {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.agent-step-status-success {
+    color: var(--success);
+}
+
+.agent-step-status-error {
+    color: var(--error);
+}
+
+.agent-step-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Agent step states */
+.agent-step-running {
+    border-left: 2px solid var(--accent);
+    box-shadow: inset 1px 0 4px -2px var(--accent);
+}
+
+.agent-step-success {
+    border-left: 2px solid var(--success);
+    opacity: 0.9;
+}
+
+.agent-step-error {
+    border-left: 2px solid var(--error);
+    opacity: 0.9;
+}
+
+/* Agent step detail panel */
+.agent-step-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.agent-step-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-step-file {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.agent-step-file-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.agent-step-file-name {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.agent-step-file-op {
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.agent-step-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.agent-step-file-preview {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-command {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+}
+
+.agent-step-command code {
+    color: var(--accent);
+}
+
+.agent-step-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 4px 0;
+}
+
+/* Agent steps container */
+.agent-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+/* ===== Agent Content Renderer ===== */
+
+.agent-content {
+    max-width: 100%;
+}
+
+.agent-content-streaming {
+    max-width: 100%;
+}
+
+/* Plan block (💡 设计思路) */
+.agent-plan-block {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    overflow: hidden;
+}
+
+.agent-plan-header {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 8%);
+}
+
+.agent-plan-content {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.agent-plan-content p {
+    margin: 4px 0;
+}
+
+/* File block (📝 collapsible code) */
+.agent-file-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-file-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-file-op-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-file-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.agent-file-op-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.agent-file-path {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-file-expand-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.agent-file-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.agent-file-code {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Run block (⌨️ collapsible command) */
+.agent-run-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-run-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-run-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-run-cmd {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.agent-run-cmd code {
+    color: var(--accent);
+}
+
+.agent-run-output {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* JSON block (📋 collapsible raw JSON) */
+.agent-json-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-json-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-json-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-json-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-json-summary {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.agent-json-content {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== Plan Steps (inline in response) ===== */
+.plan-steps-container {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+}
+
+.plan-steps-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.plan-step-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.plan-step-status {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.plan-step-pending {
+    color: #888;
+}
+
+.plan-step-in_progress {
+    color: #58a6ff;
+}
+
+.plan-step-running {
+    color: #58a6ff;
+}
+
+.plan-step-success {
+    color: #3fb950;
+}
+
+.plan-step-done {
+    color: #3fb950;
+}
+
+.plan-step-failed {
+    color: #f85149;
+}
+
+.plan-step-skipped {
+    color: #8b949e;
+}
+
+.plan-step-title {
+    color: var(--text-primary);
+    font-size: 13px;
 }
 
 @keyframes slideInLeft {
@@ -2462,6 +3510,530 @@ button:disabled {
     border-left: 2px solid var(--accent);
 }
 
+/* ===== Agent Step Cards ===== */
+
+.agent-step {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin: 3px 0;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    max-width: 100%;
+}
+
+.agent-step-thinking {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    padding: 5px 10px;
+}
+
+.agent-step-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.agent-step-content {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-step-thinking .agent-step-content {
+    white-space: nowrap;
+}
+
+.agent-step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    min-height: 26px;
+}
+
+.agent-step-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.agent-step-expand-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+.agent-step-expand-btn:hover {
+    color: var(--text-primary);
+}
+
+.agent-step-status {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.agent-step-status-success {
+    color: var(--success);
+}
+
+.agent-step-status-error {
+    color: var(--error);
+}
+
+.agent-step-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Agent step states */
+.agent-step-running {
+    border-left: 2px solid var(--accent);
+    box-shadow: inset 1px 0 4px -2px var(--accent);
+}
+
+.agent-step-success {
+    border-left: 2px solid var(--success);
+    opacity: 0.9;
+}
+
+.agent-step-error {
+    border-left: 2px solid var(--error);
+    opacity: 0.9;
+}
+
+/* Agent step detail panel */
+.agent-step-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.agent-step-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-step-file {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.agent-step-file-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.agent-step-file-name {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.agent-step-file-op {
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.agent-step-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.agent-step-file-preview {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-command {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+}
+
+.agent-step-command code {
+    color: var(--accent);
+}
+
+.agent-step-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 4px 0;
+}
+
+/* Agent steps container */
+.agent-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+/* ===== Agent Content Renderer ===== */
+
+.agent-content {
+    max-width: 100%;
+}
+
+.agent-content-streaming {
+    max-width: 100%;
+}
+
+/* Plan block (💡 设计思路) */
+.agent-plan-block {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    overflow: hidden;
+}
+
+.agent-plan-header {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 8%);
+}
+
+.agent-plan-content {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.agent-plan-content p {
+    margin: 4px 0;
+}
+
+/* File block (📝 collapsible code) */
+.agent-file-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-file-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-file-op-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-file-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.agent-file-op-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.agent-file-path {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-file-expand-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.agent-file-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.agent-file-code {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Run block (⌨️ collapsible command) */
+.agent-run-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-run-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-run-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-run-cmd {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.agent-run-cmd code {
+    color: var(--accent);
+}
+
+.agent-run-output {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* JSON block (📋 collapsible raw JSON) */
+.agent-json-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-json-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-json-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-json-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-json-summary {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.agent-json-content {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== Plan Steps (inline in response) ===== */
+.plan-steps-container {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+}
+
+.plan-steps-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.plan-step-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.plan-step-status {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.plan-step-pending {
+    color: #888;
+}
+
+.plan-step-in_progress {
+    color: #58a6ff;
+}
+
+.plan-step-running {
+    color: #58a6ff;
+}
+
+.plan-step-success {
+    color: #3fb950;
+}
+
+.plan-step-done {
+    color: #3fb950;
+}
+
+.plan-step-failed {
+    color: #f85149;
+}
+
+.plan-step-skipped {
+    color: #8b949e;
+}
+
+.plan-step-title {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
 /* Streaming indicator pulse */
 .msg.streaming::after {
     content: '';
@@ -2725,6 +4297,530 @@ button:disabled {
 
 .console-entry-bridge {
     border-left: 2px solid var(--accent);
+}
+
+/* ===== Agent Step Cards ===== */
+
+.agent-step {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin: 3px 0;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    max-width: 100%;
+}
+
+.agent-step-thinking {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    padding: 5px 10px;
+}
+
+.agent-step-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.agent-step-content {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-step-thinking .agent-step-content {
+    white-space: nowrap;
+}
+
+.agent-step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    min-height: 26px;
+}
+
+.agent-step-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.agent-step-expand-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+.agent-step-expand-btn:hover {
+    color: var(--text-primary);
+}
+
+.agent-step-status {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.agent-step-status-success {
+    color: var(--success);
+}
+
+.agent-step-status-error {
+    color: var(--error);
+}
+
+.agent-step-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Agent step states */
+.agent-step-running {
+    border-left: 2px solid var(--accent);
+    box-shadow: inset 1px 0 4px -2px var(--accent);
+}
+
+.agent-step-success {
+    border-left: 2px solid var(--success);
+    opacity: 0.9;
+}
+
+.agent-step-error {
+    border-left: 2px solid var(--error);
+    opacity: 0.9;
+}
+
+/* Agent step detail panel */
+.agent-step-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.agent-step-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-step-file {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.agent-step-file-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.agent-step-file-name {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.agent-step-file-op {
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.agent-step-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.agent-step-file-preview {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-command {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+}
+
+.agent-step-command code {
+    color: var(--accent);
+}
+
+.agent-step-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 4px 0;
+}
+
+/* Agent steps container */
+.agent-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+/* ===== Agent Content Renderer ===== */
+
+.agent-content {
+    max-width: 100%;
+}
+
+.agent-content-streaming {
+    max-width: 100%;
+}
+
+/* Plan block (💡 设计思路) */
+.agent-plan-block {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    overflow: hidden;
+}
+
+.agent-plan-header {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 8%);
+}
+
+.agent-plan-content {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.agent-plan-content p {
+    margin: 4px 0;
+}
+
+/* File block (📝 collapsible code) */
+.agent-file-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-file-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-file-op-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-file-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.agent-file-op-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.agent-file-path {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-file-expand-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.agent-file-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.agent-file-code {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Run block (⌨️ collapsible command) */
+.agent-run-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-run-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-run-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-run-cmd {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.agent-run-cmd code {
+    color: var(--accent);
+}
+
+.agent-run-output {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* JSON block (📋 collapsible raw JSON) */
+.agent-json-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-json-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-json-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-json-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-json-summary {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.agent-json-content {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== Plan Steps (inline in response) ===== */
+.plan-steps-container {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+}
+
+.plan-steps-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.plan-step-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.plan-step-status {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.plan-step-pending {
+    color: #888;
+}
+
+.plan-step-in_progress {
+    color: #58a6ff;
+}
+
+.plan-step-running {
+    color: #58a6ff;
+}
+
+.plan-step-success {
+    color: #3fb950;
+}
+
+.plan-step-done {
+    color: #3fb950;
+}
+
+.plan-step-failed {
+    color: #f85149;
+}
+
+.plan-step-skipped {
+    color: #8b949e;
+}
+
+.plan-step-title {
+    color: var(--text-primary);
+    font-size: 13px;
 }
 
 /* Cost panel expand */
@@ -3205,6 +5301,7 @@ button:disabled {
         opacity: 0;
         transform: translateY(-8px);
     }
+
     to {
         opacity: 1;
         transform: translateY(0);
@@ -3376,4 +5473,528 @@ button:disabled {
 
 .console-entry-bridge {
     border-left: 2px solid var(--accent);
+}
+
+/* ===== Agent Step Cards ===== */
+
+.agent-step {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    margin: 3px 0;
+    font-size: 13px;
+    transition: all 0.2s ease;
+    max-width: 100%;
+}
+
+.agent-step-thinking {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    padding: 5px 10px;
+}
+
+.agent-step-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.agent-step-content {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agent-step-thinking .agent-step-content {
+    white-space: nowrap;
+}
+
+.agent-step-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    min-height: 26px;
+}
+
+.agent-step-label {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.agent-step-expand-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+.agent-step-expand-btn:hover {
+    color: var(--text-primary);
+}
+
+.agent-step-status {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+}
+
+.agent-step-status-success {
+    color: var(--success);
+}
+
+.agent-step-status-error {
+    color: var(--error);
+}
+
+.agent-step-spinner {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+}
+
+/* Agent step states */
+.agent-step-running {
+    border-left: 2px solid var(--accent);
+    box-shadow: inset 1px 0 4px -2px var(--accent);
+}
+
+.agent-step-success {
+    border-left: 2px solid var(--success);
+    opacity: 0.9;
+}
+
+.agent-step-error {
+    border-left: 2px solid var(--error);
+    opacity: 0.9;
+}
+
+/* Agent step detail panel */
+.agent-step-detail {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.agent-step-files {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-step-file {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    font-size: 12px;
+    flex-wrap: wrap;
+}
+
+.agent-step-file-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.agent-step-file-name {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.agent-step-file-op {
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.agent-step-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+}
+
+.agent-step-file-preview {
+    width: 100%;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-command {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-primary);
+}
+
+.agent-step-command code {
+    color: var(--accent);
+}
+
+.agent-step-output {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-step-summary {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 4px 0;
+}
+
+/* Agent steps container */
+.agent-steps-container {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+/* ===== Agent Content Renderer ===== */
+
+.agent-content {
+    max-width: 100%;
+}
+
+.agent-content-streaming {
+    max-width: 100%;
+}
+
+/* Plan block (💡 设计思路) */
+.agent-plan-block {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+    overflow: hidden;
+}
+
+.agent-plan-header {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 8%);
+}
+
+.agent-plan-content {
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.agent-plan-content p {
+    margin: 4px 0;
+}
+
+/* File block (📝 collapsible code) */
+.agent-file-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-file-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-file-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-file-op-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-file-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.agent-file-op-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-file-lines {
+    color: var(--success);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.agent-file-path {
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-file-expand-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.agent-file-expand-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.agent-file-code {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre;
+    tab-size: 4;
+}
+
+/* Run block (⌨️ collapsible command) */
+.agent-run-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-run-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-run-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-run-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-run-cmd {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+}
+
+.agent-run-cmd code {
+    color: var(--accent);
+}
+
+.agent-run-output {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* JSON block (📋 collapsible raw JSON) */
+.agent-json-block {
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.agent-json-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+    transition: background 0.15s;
+}
+
+.agent-json-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 80%, var(--accent) 5%);
+}
+
+.agent-json-icon {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.agent-json-summary {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.agent-json-content {
+    margin: 0;
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ===== Plan Steps (inline in response) ===== */
+.plan-steps-container {
+    margin: 8px 0;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+}
+
+.plan-steps-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.plan-step-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.plan-step-status {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.plan-step-pending {
+    color: #888;
+}
+
+.plan-step-in_progress {
+    color: #58a6ff;
+}
+
+.plan-step-running {
+    color: #58a6ff;
+}
+
+.plan-step-success {
+    color: #3fb950;
+}
+
+.plan-step-done {
+    color: #3fb950;
+}
+
+.plan-step-failed {
+    color: #f85149;
+}
+
+.plan-step-skipped {
+    color: #8b949e;
+}
+
+.plan-step-title {
+    color: var(--text-primary);
+    font-size: 13px;
 }

@@ -6,6 +6,8 @@ import io.codepilot.gateway.security.AuthPrincipal;
 import io.codepilot.gateway.web.WebErrors;
 import java.time.Duration;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -31,6 +33,8 @@ import reactor.core.publisher.Mono;
  */
 @Component
 public class RateLimitWebFilter implements WebFilter, Ordered {
+
+  private static final Logger log = LoggerFactory.getLogger(RateLimitWebFilter.class);
 
   public static final int ORDER = JwtAuthWebFilter.ORDER + 10;
 
@@ -119,6 +123,13 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
                     exchange.getResponse().getHeaders().add("X-RateLimit-Type", opType);
                     exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(limit));
                     exchange.getResponse().getHeaders().add("X-RateLimit-Remaining", String.valueOf(limit - count));
+                    return chain.filter(exchange);
+                  })
+              .onErrorResume(
+                  Exception.class,
+                  ex -> {
+                    log.warn("Redis unavailable, skipping rate limit for user={} opType={}: {}",
+                        principal.userId(), opType, ex.getMessage());
                     return chain.filter(exchange);
                   });
         });

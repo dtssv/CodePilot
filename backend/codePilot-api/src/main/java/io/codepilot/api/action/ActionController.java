@@ -206,8 +206,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), mode, req.modelId(), req.modelSource() != null ? io.codepilot.core.model.ModelSource.valueOf(req.modelSource().toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, policy, null,
-        null, null, null);
+        List.of(), null, null, null, null, null, null, null, null, policy, null,
+        null, null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
 
@@ -221,8 +221,8 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null,
-        null, null, null);
+        List.of(), null, null, null, null, null, null, null, null, null, null,
+        null, null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
 

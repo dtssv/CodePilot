@@ -32,6 +32,7 @@ function getToolCategory(name: string): string {
     if (name.startsWith('plan.')) return 'plan';
     if (name.startsWith('notepad.')) return 'notepad';
     if (name.startsWith('mcp.')) return 'mcp';
+    if (name.startsWith('gather.')) return 'read';
     return 'other';
 }
 
@@ -45,6 +46,7 @@ const toolIcons: Record<string, string> = {
     'plan.show': '📋', 'plan.update': '📋',
     'notepad.write': '📓', 'notepad.read': '📓',
     'rag.search': '🧠',
+    'gather.execute': '📥',
 };
 
 const TOOL_VERBS: Record<string, string> = {
@@ -57,6 +59,7 @@ const TOOL_VERBS: Record<string, string> = {
     'plan.show': '计划', 'plan.update': '计划',
     'notepad.write': '笔记', 'notepad.read': '笔记',
     'rag.search': '语义搜索',
+    'gather.execute': '收集',
 };
 
 function shortPath(p: string): string {
@@ -184,6 +187,19 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
             const topK = args.topK as number | undefined;
             return { description: q.length > 40 ? q.substring(0, 40) + '...' : q, detail: topK ? 'top-' + topK : '' };
         }
+        case 'gather.execute': {
+            const requests = args.requests as { id?: string; kind?: string; args?: Record<string, unknown> }[] | undefined;
+            if (!requests || requests.length === 0) {
+                return { description: '无请求', detail: '' };
+            }
+            // First file path as main description, file count as detail
+            const firstPath = shortPath(((requests[0]?.args as Record<string, unknown>)?.path as string) || '');
+            const fileCount = requests.length;
+            return {
+                description: firstPath + (fileCount > 1 ? ` +${fileCount - 1}` : ''),
+                detail: fileCount + ' 个文件',
+            };
+        }
         default: {
             if (name.startsWith('mcp.')) {
                 const parts = name.split('.');
@@ -211,6 +227,12 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
     const patches = toolCall.name === 'fs.applyPatch' ? extractPatches(rawArgs) : [];
     const hasMultiplePatches = patches.length > 1;
 
+    // ★ gather.execute: extract sub-requests for inline display
+    const isGatherExecute = toolCall.name === 'gather.execute';
+    const gatherRequests = isGatherExecute
+        ? (rawArgs.requests as { id?: string; kind?: string; args?: Record<string, unknown> }[] | undefined) || []
+        : [];
+
     // For single patch, resolve effective name based on op
     const effectiveName = toolCall.name === 'fs.applyPatch' && !hasMultiplePatches && op
         ? (op === 'create' ? 'fs.create' : op === 'delete' ? 'fs.delete' : op === 'replace' ? 'fs.replace' : toolCall.name)
@@ -235,10 +257,21 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
 
     return (
         <div className={'tool-call-card tool-call-' + status}>
-            <span className="tool-call-icon">{icon}</span>
-            <span className="tool-call-verb" style={{ color: categoryColor }}>{verb}</span>
-            <span className="tool-call-desc" title={description}>{description}</span>
-            {detail && <span className="tool-call-detail">{detail}</span>}
+            {!isGatherExecute && (
+                <>
+                    <span className="tool-call-icon">{icon}</span>
+                    <span className="tool-call-verb" style={{ color: categoryColor }}>{verb}</span>
+                    <span className="tool-call-desc" title={description}>{description}</span>
+                    {detail && <span className="tool-call-detail">{detail}</span>}
+                </>
+            )}
+            {isGatherExecute && (
+                <>
+                    <span className="tool-call-icon">📥</span>
+                    <span className="tool-call-verb" style={{ color: '#4ec9b0' }}>收集</span>
+                    <span className="tool-call-detail">{gatherRequests.length} 个文件</span>
+                </>
+            )}
             {hasMultiplePatches && (
                 <button className="tool-call-expand-btn" onClick={() => setExpanded(!expanded)} title={expanded ? '收起' : '展开'}>
                     {expanded ? '▾' : '▸'}
@@ -259,6 +292,27 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                             {p.lines > 0 && <span className="tool-call-patch-lines">{p.lines} 行</span>}
                         </div>
                     ))}
+                </div>
+            )}
+            {isGatherExecute && gatherRequests.length > 0 && (
+                <div className="tool-call-patches">
+                    {gatherRequests.map((req, reqIdx) => {
+                        const kind = req.kind || '';
+                        const reqArgs = req.args || {};
+                        const reqPath = shortPath((reqArgs.path as string) || '');
+                        const rIcon = toolIcons[kind] || '🔧';
+                        const rVerb = TOOL_VERBS[kind] || kind.split('.').pop() || kind;
+                        const reqStartLine = reqArgs.startLine as number | undefined;
+                        const reqEndLine = reqArgs.endLine as number | undefined;
+                        const range = reqStartLine && reqEndLine ? ':' + reqStartLine + '-' + reqEndLine : '';
+                        return (
+                            <div key={req.id || reqIdx} className="tool-call-patch-item">
+                                <span className="tool-call-patch-icon">{rIcon}</span>
+                                <span className="tool-call-patch-verb">{rVerb}</span>
+                                <span className="tool-call-patch-path">{reqPath}{range}</span>
+                            </div>
+                        );
+                    })}
                 </div>
             )}
         </div>
