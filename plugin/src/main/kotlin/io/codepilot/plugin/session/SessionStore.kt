@@ -667,6 +667,10 @@ class SessionStore {
         var running: Boolean = false,
         /** Whether the session was abnormally terminated (stream closed without done event). */
         var abnormalTermination: Boolean? = null,
+        /** P2-09: user can pin important sessions in SessionSidebarV2. */
+        var pinned: Boolean = false,
+        /** P2-09: archived sessions are hidden by default but kept on disk. */
+        var archived: Boolean = false,
     )
 
     companion object {

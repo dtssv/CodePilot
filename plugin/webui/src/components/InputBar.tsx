@@ -32,6 +32,8 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     const chipsMapRef = useRef<Map<string, ContextChipData>>(new Map());
     // ★ Image attachment state
     const [attachedImages, setAttachedImages] = useState<ImageData[]>([]);
+    const [dragOver, setDragOver] = useState(false);
+    const [recording, setRecording] = useState(false);
 
     // @-reference popup state
     const [atPopupVisible, setAtPopupVisible] = useState(false);
@@ -67,8 +69,14 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     }, [contextChips]);
 
     useEffect(() => {
-        const unsub = onPluginEvent('done', () => setRunning(false));
-        return unsub;
+        const offDone = onPluginEvent('done', () => setRunning(false));
+        const offVoice = onPluginEvent('voice_result', (payload) => appendTextToEditor((payload as { transcript?: string }).transcript ?? ''));
+        const offVoiceV2 = onPluginEvent('voice.result', (payload) => appendTextToEditor((payload as { text?: string }).text ?? ''));
+        return () => {
+            offDone();
+            offVoice();
+            offVoiceV2();
+        };
     }, []);
 
     const handleSubmit = useCallback(() => {
@@ -100,6 +108,78 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     const handleStop = () => {
         onStop();
         setRunning(false);
+    };
+
+    const addImagesFromFiles = useCallback(async (files: File[]) => {
+        const images: ImageData[] = [];
+        for (const file of files) {
+            if (!file.type.startsWith('image/') || file.size > 10 * 1024 * 1024) continue;
+            const dataUrl = await fileToDataUrl(file);
+            images.push({
+                id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                name: file.name || 'pasted.png',
+                mimeType: file.type,
+                base64: dataUrl.split(',')[1] ?? '',
+                thumbnail: dataUrl,
+            });
+        }
+        if (images.length > 0) setAttachedImages((prev) => [...prev, ...images]);
+    }, []);
+
+    const addChipToEditor = useCallback((chip: ContextChipData) => {
+        const editor = editorRef.current;
+        if (!editor) return;
+        chipsMapRef.current.set(chip.id, chip);
+        insertNodeAtCursor(editor, createChipElement(chip));
+        sendToPlugin('at_resolve', { id: `${chip.type}:${chip.filePath}`, chipId: chip.id }).catch(() => undefined);
+    }, []);
+
+    const handlePaste = useCallback((e: React.ClipboardEvent) => {
+        const images = Array.from(e.clipboardData.items)
+            .filter((item) => item.type.startsWith('image/'))
+            .map((item) => item.getAsFile())
+            .filter(Boolean) as File[];
+        if (images.length === 0) return;
+        e.preventDefault();
+        addImagesFromFiles(images);
+    }, [addImagesFromFiles]);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        setDragOver(false);
+        const images: File[] = [];
+        for (const item of Array.from(e.dataTransfer.items)) {
+            if (item.kind !== 'file') continue;
+            const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => { isDirectory?: boolean; fullPath?: string; name?: string } }).webkitGetAsEntry?.();
+            const file = item.getAsFile();
+            if (file?.type.startsWith('image/')) {
+                images.push(file);
+                continue;
+            }
+            const isFolder = Boolean(entry?.isDirectory);
+            const name = entry?.name || file?.name || 'dropped';
+            const filePath = entry?.fullPath || (file as File & { path?: string } | null)?.path || file?.webkitRelativePath || name;
+            addChipToEditor({
+                id: `drop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                type: isFolder ? 'folder' : 'file',
+                display: name,
+                filePath,
+                language: '',
+                startLine: null,
+                endLine: null,
+            });
+        }
+        if (images.length > 0) addImagesFromFiles(images);
+    }, [addChipToEditor, addImagesFromFiles]);
+
+    const startVoice = () => {
+        setRecording(true);
+        sendToPlugin('voice.start', {}).catch(() => undefined);
+    };
+
+    const stopVoice = () => {
+        setRecording(false);
+        sendToPlugin('voice.stop', {}).catch(() => undefined);
     };
 
     const hasContent = (editorRef.current?.textContent?.trim()?.length ?? 0) > 0 || contextChips.length > 0 || attachedImages.length > 0;
@@ -237,7 +317,8 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     }, []);
 
     return (
-        <div className="input-bar">
+        <div className={`input-bar ${dragOver ? 'drag-over' : ''}`}>
+            {dragOver && <div className="drag-overlay">松开以引用文件/文件夹或添加图片</div>}
             <div
                 ref={editorRef}
                 className="input-editor"
@@ -246,6 +327,10 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                 onKeyDown={handleKeyDown}
                 onClick={handleEditorClick}
                 onInput={handleEditorInput}
+                onPaste={handlePaste}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
                 data-placeholder={contextChips.length > 0 ? "Add a message about this context... (type @ to reference)" : "Ask CodePilot... (type @ for references, Enter to send)"}
             />
             {atPopupVisible && (
@@ -274,6 +359,16 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
             )}
             <div className="input-send-area">
                 <ImageAttachment onAttach={(imgs) => setAttachedImages(prev => [...prev, ...imgs])} />
+                <button
+                    type="button"
+                    className={`voice-btn ${recording ? 'recording' : ''}`}
+                    onMouseDown={startVoice}
+                    onMouseUp={stopVoice}
+                    onMouseLeave={() => recording && stopVoice()}
+                    title="按住说话"
+                >
+                    {recording ? 'Rec' : 'Voice'}
+                </button>
                 {running ? (
                     <button className="stop-btn" onClick={handleStop}>Stop</button>
                 ) : (
@@ -295,6 +390,22 @@ function getCursorTextOffset(editor: HTMLDivElement | null): number {
     preRange.setStart(editor, 0);
     preRange.setEnd(range.startContainer, range.startOffset);
     return preRange.toString().length;
+}
+
+function appendTextToEditor(text: string) {
+    if (!text.trim()) return;
+    const editor = document.querySelector('.input-editor') as HTMLDivElement | null;
+    if (!editor) return;
+    editor.focus();
+    insertNodeAtCursor(editor, document.createTextNode(text));
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(file);
+    });
 }
 
 /** Create a chip span element for insertion into contentEditable */
