@@ -224,7 +224,7 @@ public class ActionController {
             new ConversationRunRequest.GraphVerifyPolicy(true, true, true, null),
             new ConversationRunRequest.GraphRepairPolicy(2, List.of("compile-error", "test-fail")),
             null, true, true,
-            /*bareMode*/ null)
+            /*bareMode*/ null, null, null, null)
         : null;
 
     ConversationRunRequest runReq = new ConversationRunRequest(
@@ -250,7 +250,7 @@ public class ActionController {
     var policy = useGraph ? null : new ConversationRunRequest.Policy(
         null, null, null, null, null, null, null, null, null, null,
         null, null, null, null, null, null, null,
-        /*bareMode*/ Boolean.TRUE);
+        /*bareMode*/ Boolean.TRUE, null, null, null);
     ConversationRunRequest runReq = new ConversationRunRequest(
         sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,

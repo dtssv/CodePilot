@@ -26,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -112,10 +113,21 @@ public class ConversationService {
     String toolsSchemaJson = toolSchemas.renderSchema(req.tools());
     PromptOrchestrator.Assembled assembled =
         orchestrator.assembleForRequest(req, activated, toolsSchemaJson);
+    if (req.policy() != null && Boolean.TRUE.equals(req.policy().maxMode())) {
+      log.info("Max mode requested: thinkingMode={}, maxOutputTokens={}",
+          req.policy().thinkingMode(), req.policy().maxOutputTokens());
+    }
     ContextBudgeter.Result shape = budgeter.shape(req, assembled.systemText());
 
     Flux<ServerSentEvent<String>> head =
         Flux.just(
+            sse.event(
+                "model.requested",
+                Map.of(
+                    "modelId", req.modelId() != null ? req.modelId() : "default",
+                    "thinkingMode", req.policy() != null && req.policy().thinkingMode() != null ? req.policy().thinkingMode() : "",
+                    "maxOutputTokens", req.policy() != null && req.policy().maxOutputTokens() != null ? req.policy().maxOutputTokens() : 0,
+                    "maxMode", req.policy() != null && Boolean.TRUE.equals(req.policy().maxMode()))),
             sse.event(
                 SseEvents.SKILLS_ACTIVATED,
                 Map.of(
@@ -203,7 +215,7 @@ public class ConversationService {
           .filter(img -> img.mimeType() != null && img.mimeType().startsWith("image/"))
           .map(img -> new org.springframework.ai.content.Media(
               org.springframework.util.MimeTypeUtils.parseMimeType(img.mimeType()),
-              java.net.URI.create("data:" + img.mimeType() + ";base64," + img.data())))
+              java.net.URI.create(toDataUri(img))))
           .toList();
       
       var userMessage = org.springframework.ai.chat.messages.UserMessage.builder()
@@ -217,10 +229,10 @@ public class ConversationService {
           .messages(allMessages)
           .build();
 
-      body = resolvedClient
-          .prompt(userPrompt)
-          .system(assembled.systemText())
-          .stream()
+      var spec = resolvedClient.prompt(userPrompt).system(assembled.systemText());
+      OpenAiChatOptions opts = requestOptions(req);
+      if (opts != null) spec = spec.options(opts);
+      body = spec.stream()
           .chatResponse()
           .map(ConversationService::deltaFromChatResponse)
           .filter(s -> !s.isBlank())
@@ -239,10 +251,10 @@ public class ConversationService {
         var prompt = org.springframework.ai.chat.prompt.Prompt.builder()
             .messages(allMessages)
             .build();
-        body = resolvedClient
-            .prompt(prompt)
-            .system(assembled.systemText())
-            .stream()
+        var spec = resolvedClient.prompt(prompt).system(assembled.systemText());
+        OpenAiChatOptions opts = requestOptions(req);
+        if (opts != null) spec = spec.options(opts);
+        body = spec.stream()
             .chatResponse()
             .map(ConversationService::deltaFromChatResponse)
             .filter(s -> !s.isBlank())
@@ -255,11 +267,10 @@ public class ConversationService {
                 });
       } else {
         // No history — standard single-turn path
-        body = resolvedClient
-            .prompt()
-            .system(assembled.systemText())
-            .user(finalChatInput)
-            .stream()
+        var spec = resolvedClient.prompt().system(assembled.systemText()).user(finalChatInput);
+        OpenAiChatOptions opts = requestOptions(req);
+        if (opts != null) spec = spec.options(opts);
+        body = spec.stream()
             .chatResponse()
             .map(ConversationService::deltaFromChatResponse)
             .filter(s -> !s.isBlank())
@@ -307,6 +318,24 @@ public class ConversationService {
     if (r == null || r.getResult() == null || r.getResult().getOutput() == null) return "";
     String text = r.getResult().getOutput().getText();
     return text != null ? text : "";
+  }
+
+  private static String toDataUri(ConversationRunRequest.Image img) {
+    String data = img.data() != null ? img.data().trim() : "";
+    if (data.startsWith("data:")) return data;
+    return "data:" + img.mimeType() + ";base64," + data;
+  }
+
+  private static OpenAiChatOptions requestOptions(ConversationRunRequest req) {
+    if (req.policy() == null) return null;
+    Integer maxOutputTokens = req.policy().maxOutputTokens();
+    if (maxOutputTokens == null && !Boolean.TRUE.equals(req.policy().maxMode())) return null;
+    OpenAiChatOptions.Builder builder = OpenAiChatOptions.builder();
+    if (maxOutputTokens != null) builder.maxTokens(maxOutputTokens);
+    // Spring AI 1.0 does not expose a portable reasoning-effort option across
+    // providers. We still map the concrete output budget here; provider-specific
+    // reasoning fields can be added in ChatClientFactory when the SDK exposes them.
+    return builder.build();
   }
 
   /**

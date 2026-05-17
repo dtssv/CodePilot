@@ -65,8 +65,7 @@ class CodePilotInlineCompletionProvider : InlineCompletionProvider {
                         result,
                     )
                     if (suggestions.isNotEmpty()) {
-                        // Render the first ghost suggestion
-                        suggester.acceptCurrent() // Will be rendered via InlayModel
+                        suggester.renderPredictions(editor.caretModel.offset, result)
                     }
                 } catch (_: Exception) {
                     // CursorTab suggestions are best-effort, don't block main completion

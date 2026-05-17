@@ -1,5 +1,10 @@
 # 12 — Slash Commands、Prompt 模板、通知与 @ 兼容性修复(P2)
 
+> ✅ Completed(2026-05-17):已落地 `/clear /cost /model /compress /branch /run /help`
+> 及模板驱动自定义命令;新增 Templates 面板和 `.codepilot/templates.json`
+> 持久化;长任务完成/失败/needs_input 已接入 Web Notification + IDE fallback;
+> `@` 查询已修复中文标点边界。
+
 ## 1. 目标
 
 - 输入框支持 `/` 触发 **slash commands**(`/clear`, `/cost`, `/model`,

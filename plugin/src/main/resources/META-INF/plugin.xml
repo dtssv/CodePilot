@@ -149,6 +149,19 @@
       <keyboard-shortcut first-keystroke="alt R" keymap="$default"/>
     </action>
 
+    <action id="CodePilot.CursorTab.Accept"
+            class="io.codepilot.plugin.completion.AcceptCursorTabSuggestionAction"
+            text="CodePilot Cursor Tab: Accept Next Suggestion">
+      <keyboard-shortcut first-keystroke="alt ENTER" keymap="$default"/>
+      <keyboard-shortcut first-keystroke="alt ENTER" keymap="Mac OS X 10.5+"/>
+    </action>
+    <action id="CodePilot.CursorTab.Dismiss"
+            class="io.codepilot.plugin.completion.DismissCursorTabSuggestionAction"
+            text="CodePilot Cursor Tab: Dismiss Suggestion">
+      <keyboard-shortcut first-keystroke="ESCAPE" keymap="$default"/>
+      <keyboard-shortcut first-keystroke="ESCAPE" keymap="Mac OS X 10.5+"/>
+    </action>
+
     <action id="CodePilot.OpenChat"
             class="io.codepilot.plugin.actions.OpenChatAction"
             text="Open CodePilot chat">

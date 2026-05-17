@@ -1,6 +1,7 @@
 package io.codepilot.plugin.completion
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.Inlay
 import com.intellij.openapi.editor.InlayModel
@@ -30,10 +31,12 @@ import java.util.concurrent.atomic.AtomicReference
 class CursorTabSuggester(private val project: Project, private val editor: Editor) {
 
     data class GhostSuggestion(
+        val id: String = "tab-${System.nanoTime()}",
         val offset: Int,
         val text: String,
         val source: String, // "bracket", "import", "sibling", "parameter"
         val priority: Int,  // Lower = higher priority, Tab-through order
+        val cursorAfter: Int = offset + text.length,
     )
 
     private val ghostInlays = mutableListOf<Inlay<*>>()
@@ -184,6 +187,23 @@ class CursorTabSuggester(private val project: Project, private val editor: Edito
         return result
     }
 
+    fun renderPredictions(cursorOffset: Int, insertedText: String): Boolean {
+        val predicted = predictAdditionalEdits(cursorOffset, insertedText).sortedBy { it.priority }
+        if (predicted.isEmpty()) return false
+        suggestions.clear()
+        suggestions.addAll(predicted)
+        currentSuggestionIdx = 0
+        renderCurrentGhost()
+        val filePath = editor.virtualFile?.path ?: ""
+        TabFeedback.getInstance().recordSuggest(
+            project,
+            filePath,
+            0,
+            predicted.sumOf { it.text.length },
+        )
+        return true
+    }
+
     /**
      * Render the current ghost suggestion as a gray inline inlay.
      */
@@ -218,8 +238,11 @@ class CursorTabSuggester(private val project: Project, private val editor: Edito
         val suggestion = suggestions[currentSuggestionIdx]
         ApplicationManager.getApplication().invokeLater {
             if (editor.isDisposed) return@invokeLater
-            editor.document.insertString(suggestion.offset, suggestion.text)
-            editor.caretModel.moveToOffset(suggestion.offset + suggestion.text.length)
+            WriteCommandAction.runWriteCommandAction(project, "CodePilot Tab Prediction", null, {
+                editor.document.insertString(suggestion.offset, suggestion.text)
+                editor.caretModel.moveToOffset(suggestion.cursorAfter.coerceIn(0, editor.document.textLength))
+            })
+            TabFeedback.getInstance().recordAccept(project, editor.virtualFile?.path ?: "", suggestion.text.length)
             currentSuggestionIdx++
             if (currentSuggestionIdx < suggestions.size) {
                 renderCurrentGhost()
@@ -237,6 +260,7 @@ class CursorTabSuggester(private val project: Project, private val editor: Edito
         clearGhosts()
         suggestions.clear()
         currentSuggestionIdx = 0
+        TabFeedback.getInstance().recordDismiss(project, "cursor-tab-dismiss")
     }
 
     /**
@@ -272,19 +296,20 @@ class CursorTabSuggester(private val project: Project, private val editor: Edito
             g.color = color
             g.font = editor.contentComponent.font
             val fm = editor.contentComponent.getFontMetrics(g.font)
-            g.drawString(text.replace("\n", " "), targetRegion.x, targetRegion.y + fm.ascent)
+            text.lines().forEachIndexed { idx, line ->
+                g.drawString(line, targetRegion.x, targetRegion.y + fm.ascent + idx * editor.lineHeight)
+            }
         }
 
         override fun calcHeightInPixels(inlay: Inlay<*>): Int {
-            return editor.lineHeight
+            return editor.lineHeight * text.lines().size.coerceAtLeast(1)
         }
 
         override fun getContextMenuGroupId(inlay: Inlay<*>): String? = null
 
         override fun calcWidthInPixels(inlay: Inlay<*>): Int {
             val fm = editor.contentComponent.getFontMetrics(editor.contentComponent.font)
-            val displayText = text.replace("\n", " ")
-            return fm.stringWidth(displayText)
+            return text.lines().maxOfOrNull { fm.stringWidth(it) } ?: 0
         }
 
         override fun toString(): String = "GhostInlayRenderer($text)"

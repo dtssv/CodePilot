@@ -135,8 +135,93 @@ public class ModelService {
   public Map<String, Object> listModels(String userId) {
     List<ModelGroup> groups = listModelGroups();
     List<CustomModelProvider> custom = userId != null ? listCustomByUser(userId) : List.of();
-    // Return groups as "system" for backward compatibility with frontend
-    return Map.of("system", groups, "custom", custom);
+    // Return groups as "system" for backward compatibility, but enrich every
+    // row with Cursor-style routing metadata so clients do not need to guess.
+    return Map.of(
+        "system", groups.stream().map(this::modelGroupDto).toList(),
+        "custom", custom.stream().map(this::customModelDto).toList());
+  }
+
+  private Map<String, Object> modelGroupDto(ModelGroup g) {
+    String id = g.id().toString();
+    String model = g.model();
+    List<String> capabilities = normalizeCapabilities(model, g.capabilities());
+    return Map.ofEntries(
+        Map.entry("id", id),
+        Map.entry("name", g.name()),
+        Map.entry("model", model),
+        Map.entry("type", "system"),
+        Map.entry("source", "group"),
+        Map.entry("protocol", g.protocol()),
+        Map.entry("tier", inferTier(model, capabilities, g.maxTokens())),
+        Map.entry("capabilities", capabilities),
+        Map.entry("contextWindow", inferContextWindow(g.maxTokens(), capabilities)),
+        Map.entry("pricing", inferPricing(model)),
+        Map.entry("maxTokens", g.maxTokens()),
+        Map.entry("timeoutMs", g.timeoutMs()));
+  }
+
+  private Map<String, Object> customModelDto(CustomModelProvider p) {
+    String id = p.id().toString();
+    String model = p.model();
+    List<String> capabilities = normalizeCapabilities(model, List.of("TEXT", "TOOL_USE"));
+    return Map.ofEntries(
+        Map.entry("id", id),
+        Map.entry("name", p.name()),
+        Map.entry("model", model),
+        Map.entry("type", "custom"),
+        Map.entry("source", "custom"),
+        Map.entry("protocol", p.protocol()),
+        Map.entry("tier", inferTier(model, capabilities, 0)),
+        Map.entry("capabilities", capabilities),
+        Map.entry("contextWindow", inferContextWindow(0, capabilities)),
+        Map.entry("pricing", inferPricing(model)),
+        Map.entry("timeoutMs", p.timeoutMs()));
+  }
+
+  private List<String> normalizeCapabilities(String model, List<String> raw) {
+    java.util.LinkedHashSet<String> caps = new java.util.LinkedHashSet<>();
+    if (raw != null) {
+      raw.stream()
+          .filter(c -> c != null && !c.isBlank())
+          .map(c -> c.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_'))
+          .forEach(caps::add);
+    }
+    String id = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
+    caps.add("TEXT");
+    caps.add("TOOL_USE");
+    if (id.contains("vision") || id.contains("gpt-4") || id.contains("gpt-5")
+        || id.contains("claude") || id.contains("gemini")) caps.add("VISION");
+    if (id.contains("gpt") || id.contains("claude") || id.contains("gemini")) caps.add("JSON_MODE");
+    if (id.contains("200k") || id.contains("256k") || id.contains("claude")) caps.add("LONG_CTX_256K");
+    if (id.contains("1m") || id.contains("gemini")) caps.add("LONG_CTX_1M");
+    return List.copyOf(caps);
+  }
+
+  private String inferTier(String model, List<String> capabilities, int maxTokens) {
+    String id = model == null ? "" : model.toLowerCase(java.util.Locale.ROOT);
+    if (id.contains("haiku") || id.contains("flash") || id.contains("mini") || id.contains("fast")) return "FAST";
+    if (id.contains("opus") || id.contains("max") || id.contains("gpt-5")) return "PREMIUM";
+    if (id.contains("thinking") || id.contains("reason") || id.contains("sonnet")) return "THINKING";
+    if (capabilities.contains("LONG_CTX_1M") || maxTokens >= 256_000) return "PREMIUM";
+    return "DEFAULT";
+  }
+
+  private int inferContextWindow(int maxTokens, List<String> capabilities) {
+    if (maxTokens > 0) return maxTokens;
+    if (capabilities.contains("LONG_CTX_1M")) return 1_000_000;
+    if (capabilities.contains("LONG_CTX_256K")) return 256_000;
+    return 128_000;
+  }
+
+  private Map<String, Double> inferPricing(String model) {
+    String tier = inferTier(model, normalizeCapabilities(model, List.of()), 0);
+    return switch (tier) {
+      case "FAST" -> Map.of("inputPerM", 0.25, "outputPerM", 1.25);
+      case "THINKING" -> Map.of("inputPerM", 3.0, "outputPerM", 15.0);
+      case "PREMIUM" -> Map.of("inputPerM", 15.0, "outputPerM", 75.0);
+      default -> Map.of("inputPerM", 1.5, "outputPerM", 5.0);
+    };
   }
 
   // ---- Model Group CRUD ---- //

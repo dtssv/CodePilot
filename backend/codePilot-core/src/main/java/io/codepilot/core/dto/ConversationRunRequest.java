@@ -119,7 +119,12 @@ public record ConversationRunRequest(
       //    latency-sensitive endpoints like inline-edit / inline-completion
       //    where the action template already contains everything the model
       //    needs and the large base/chat preambles only add latency cost.
-      Boolean bareMode) {}
+      Boolean bareMode,
+      // ── P2-11 Model routing / Max mode hints. These are advisory and can be
+      // honored by providers that support explicit reasoning or output budgets.
+      String thinkingMode,          // "off" | "low" | "medium" | "high"
+      Integer maxOutputTokens,
+      Boolean maxMode) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record GraphVerifyPolicy(

@@ -1,5 +1,10 @@
 # 13 — Background Agents:并行任务、隔离 worktree(P3)
 
+> ✅ Completed(2026-05-17):已新增 `BackgroundTaskManager`、Background WebUI 面板
+> 和 `bg.submit/list/cancel/merge/discard/open_worktree` bridge。任务会创建独立
+> git worktree 与任务分支、后台运行独立会话、记录日志,并支持 squash merge /
+> discard / open worktree。当前版本为本地插件编排,不依赖 Java 服务端。
+
 ## 1. 目标
 
 对齐 Cursor 的 Background Agents:

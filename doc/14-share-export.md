@@ -1,5 +1,10 @@
 # 14 — 会话分享与导出(P3)
 
+> ✅ Completed(2026-05-17):已新增 `ExportService`、Export WebUI 面板和
+> `export.preview/export.save_file/share.create` bridge。支持 Markdown、PR
+> Description、JSON 预览/保存/复制;`share.create` 采用 offline-first 本地
+> `.codepilot/share/*.md` 文件 URL,可后续替换为云端 share-service。
+
 ## 1. 目标
 
 - **导出**:把当前会话(或选定的 turn 范围)导出为 Markdown / JSON / PR

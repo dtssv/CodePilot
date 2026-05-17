@@ -57,6 +57,8 @@ class CefChatPanel(
     private var dispatcher: ToolDispatcher? = null
     private var gatherDispatcher: io.codepilot.plugin.tools.GatherDispatcher? = null
     private var graphStateStore: io.codepilot.plugin.tools.GraphStateStore? = null
+    private var modelCatalog: List<Map<String, Any?>> = emptyList()
+    private val usageRecords = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
 
     /**
      * Stores full code for context references. Key = contextId, Value = full code text.
@@ -86,6 +88,9 @@ class CefChatPanel(
                     "payload" to env.payload,
                 ),
             )
+        }
+        io.codepilot.plugin.background.BackgroundTaskManager.getInstance(project).setDispatcher { type, payload ->
+            dispatchToWeb(type, payload)
         }
 
         // Register logout callback so RefreshOn401Interceptor can notify WebUI
@@ -197,6 +202,7 @@ class CefChatPanel(
     override fun dispose() {
         // Detach the EventBus dispatcher so a re-opened panel can re-attach cleanly.
         eventBus.setDispatcher(null)
+        io.codepilot.plugin.background.BackgroundTaskManager.getInstance(project).setDispatcher(null)
         // browser is disposed via Disposer.register
     }
 
@@ -566,6 +572,7 @@ class CefChatPanel(
                             mapOf(
                                 "id" to ref["id"].asText(),
                                 "display" to ref["display"].asText(),
+                                "type" to ref["type"].asText("file"),
                                 "language" to ref["language"].asText("text"),
                                 "startLine" to ref["startLine"].asInt(-1).let { if (it < 0) null else it },
                                 "endLine" to ref["endLine"].asInt(-1).let { if (it < 0) null else it },
@@ -585,6 +592,7 @@ class CefChatPanel(
                                 "content" to msg["content"].asText(""),
                             )
                         } ?: emptyList(),
+                        payload["maxMode"]?.asBoolean(false) ?: false,
                     )
                 "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
@@ -604,6 +612,21 @@ class CefChatPanel(
                 "switch_branch" -> handleSwitchSession(payload["sessionId"]?.asText() ?: return)
                 "voice.start" -> handleVoiceStart()
                 "voice.stop" -> handleVoiceStop()
+                "usage.get" -> dispatchUsage()
+                "ui.notify" -> handleUiNotify(payload)
+                "slash.commands.list" -> dispatchSlashCommands()
+                "templates.list" -> dispatchTemplates()
+                "templates.save" -> handleTemplateSave(payload)
+                "templates.delete" -> handleTemplateDelete(payload)
+                "bg.submit" -> handleBgSubmit(payload)
+                "bg.list" -> handleBgList()
+                "bg.cancel" -> handleBgCancel(payload)
+                "bg.merge" -> handleBgMerge(payload)
+                "bg.discard" -> handleBgDiscard(payload)
+                "bg.open_worktree" -> handleBgOpenWorktree(payload)
+                "export.preview" -> handleExportPreview(payload)
+                "export.save_file" -> handleExportSave(payload)
+                "share.create" -> handleShareCreate(payload)
                 // Auth messages from login page
                 "check_auth" -> handleCheckAuth()
                 "auth_discover" -> handleAuthDiscover()
@@ -688,10 +711,14 @@ class CefChatPanel(
         images: List<Map<String, String>> = emptyList(),
         // ★ Conversation history from WebUI for multi-turn context
         historyMessages: List<Map<String, String>> = emptyList(),
+        maxMode: Boolean = false,
     ) {
         // Ensure a session exists (lazy creation on first message)
+        val routedModel = routeModel(modelId, text, mode, images.isNotEmpty(), maxMode)
+        val effectiveModelId = routedModel["id"] as? String ?: modelId
+        val effectiveModelSource = routedModel["source"] as? String ?: modelSource
         if (sessionHandle == null) {
-            sessionHandle = sessionStore.newSession(workspaceHash, mode, modelId, modelSource)
+            sessionHandle = sessionStore.newSession(workspaceHash, mode, effectiveModelId, effectiveModelSource)
         }
         val handle = sessionHandle!!
 
@@ -827,8 +854,8 @@ class CefChatPanel(
                     "input" to fullText,
                     "intent" to "new",
                 )
-            if (modelId != null) payload["modelId"] = modelId
-            if (modelSource != null) payload["modelSource"] = modelSource
+            if (effectiveModelId != null && effectiveModelId != "auto") payload["modelId"] = effectiveModelId
+            if (effectiveModelSource != null) payload["modelSource"] = effectiveModelSource
 
             // ★ Inject project meta (language, root files) so LLM knows project context
             payload["projectMeta"] = buildProjectMeta()
@@ -955,6 +982,9 @@ class CefChatPanel(
                     "contextBudgetTokens" to 24000,
                     "keepRecentMessages" to 6,
                     "maxSteps" to 25,
+                    "thinkingMode" to if (maxMode) "high" else null,
+                    "maxOutputTokens" to if (maxMode) 8192 else null,
+                    "maxMode" to maxMode,
                 )
 
             val hookResult = io.codepilot.plugin.hooks.HookEngine.getInstance(project).run(
@@ -1203,6 +1233,7 @@ class CefChatPanel(
                                 meta.abnormalTermination = false
                             }
                             sessionStore.touchLastMessage(handle)
+                            recordUsage(handle.meta.id, turnId, effectiveModelId ?: "default", routedModel["tier"] as? String ?: "DEFAULT", fullText, fullResponse)
                             dispatchSessionList() // refresh sidebar timestamps
                         }
                     }
@@ -1274,7 +1305,11 @@ class CefChatPanel(
                 log.info("[Models] Body length: ${body.length}")
                 val node = mapper.readTree(body)
                 val data = node.path("data")
-                dispatchToWeb("models_loaded", mapper.treeToValue(data, Map::class.java))
+                val raw = mapper.treeToValue(data, Map::class.java) as Map<*, *>
+                val enriched = enrichModelCatalog(raw)
+                modelCatalog = ((enriched["system"] as? List<Map<String, Any?>>) ?: emptyList()) +
+                    ((enriched["custom"] as? List<Map<String, Any?>>) ?: emptyList())
+                dispatchToWeb("models_loaded", enriched)
             } else if (resp.code == 401 && retries > 0) {
                 log.warn("[Models] Got 401, prompting login (retries=$retries)")
                 SwingUtilities.invokeLater {
@@ -1297,6 +1332,27 @@ class CefChatPanel(
                 log.warn("[Models] Failed: code=${resp.code}, body=$errorBody")
             }
         }
+    }
+
+    private fun enrichModelCatalog(raw: Map<*, *>): Map<String, Any?> {
+        fun enrich(source: String, rows: Any?): List<Map<String, Any?>> =
+            (rows as? List<*>)?.mapNotNull { row ->
+                val m = row as? Map<*, *> ?: return@mapNotNull null
+                val id = m["id"]?.toString() ?: m["model"]?.toString() ?: return@mapNotNull null
+                val name = m["name"]?.toString() ?: id
+                val modelName = m["model"]?.toString() ?: id
+                val caps = (m["capabilities"] as? List<*>)?.mapNotNull { it?.toString() } ?: capabilitiesFor(modelName)
+                m.mapKeys { it.key.toString() } + mapOf(
+                    "id" to id,
+                    "name" to name,
+                    "type" to (m["type"]?.toString() ?: source),
+                    "source" to (m["source"]?.toString() ?: if (source == "custom") "custom" else "group"),
+                    "tier" to (m["tier"]?.toString() ?: tierFor(modelName)),
+                    "capabilities" to caps,
+                    "contextWindow" to (m["contextWindow"] ?: if ("LONG_CTX_1M" in caps) 1_000_000 else if ("LONG_CTX_256K" in caps) 256_000 else 128_000),
+                )
+            } ?: emptyList()
+        return mapOf("system" to enrich("system", raw["system"]), "custom" to enrich("custom", raw["custom"]))
     }
 
     private fun handleStop() {
@@ -1766,7 +1822,8 @@ class CefChatPanel(
 
     private fun handleForkFromMessage(messageIndex: Int) {
         val current = sessionHandle ?: return
-        val forked = runCatching { sessionStore.forkFromMessage(current, messageIndex) }.getOrNull() ?: return
+        val actualIndex = if (messageIndex < 0) sessionStore.readMessages(current).lastIndex else messageIndex
+        val forked = runCatching { sessionStore.forkFromMessage(current, actualIndex) }.getOrNull() ?: return
         sessionHandle = forked
         dispatchSessionList()
         dispatchBranchTree(current.meta.id)
@@ -1821,6 +1878,308 @@ class CefChatPanel(
             mapOf("kind" to "history", "tokens" to historyItems.sumOf { it["tokens"] as Int }, "items" to historyItems),
         )
         return mapOf("total" to 24000, "used" to totalUsed, "estimated" to 0, "buckets" to buckets)
+    }
+
+    private fun routeModel(
+        requestedModelId: String?,
+        text: String,
+        mode: String,
+        hasImages: Boolean,
+        maxMode: Boolean,
+    ): Map<String, Any?> {
+        if (requestedModelId != null && requestedModelId != "auto" && !maxMode) {
+            return mapOf("id" to requestedModelId, "source" to null, "tier" to tierFor(requestedModelId))
+        }
+        val desiredTier = when {
+            maxMode -> "PREMIUM"
+            mode == "inline-edit" -> "FAST"
+            hasImages -> "THINKING"
+            listOf("设计", "重构", "架构", "design", "refactor", "performance", "优化").any { text.contains(it, ignoreCase = true) } -> "THINKING"
+            text.length < 80 -> "FAST"
+            else -> "DEFAULT"
+        }
+        val candidates = modelCatalog.filter {
+            val caps = it["capabilities"] as? Collection<*> ?: emptyList<Any>()
+            (it["tier"] == desiredTier || (maxMode && it["tier"] == "PREMIUM")) &&
+                (!hasImages || caps.contains("VISION"))
+        }.ifEmpty {
+            modelCatalog.filter { it["tier"] == "DEFAULT" }
+        }.ifEmpty { modelCatalog }
+        val chosen = candidates.firstOrNull() ?: return mapOf("id" to requestedModelId, "tier" to desiredTier)
+        dispatchToWeb(
+            "model.routed",
+            mapOf("modelId" to chosen["id"], "name" to chosen["name"], "tier" to chosen["tier"], "reason" to if (maxMode) "Max mode" else "Auto: $desiredTier"),
+        )
+        eventBus.emit("system", "model-route-${System.nanoTime()}", io.codepilot.plugin.protocol.EventTypes.STEP_PROGRESS, mapOf("kind" to "model.routed", "model" to chosen))
+        return chosen
+    }
+
+    private fun tierFor(modelId: String): String {
+        val id = modelId.lowercase()
+        return when {
+            "haiku" in id || "flash" in id || "mini" in id || "fast" in id -> "FAST"
+            "opus" in id || "max" in id || "gpt-5" in id -> "PREMIUM"
+            "thinking" in id || "reason" in id || "sonnet" in id -> "THINKING"
+            else -> "DEFAULT"
+        }
+    }
+
+    private fun capabilitiesFor(modelId: String): List<String> {
+        val id = modelId.lowercase()
+        return buildList {
+            add("TEXT")
+            add("TOOL_USE")
+            if ("vision" in id || "gpt-4" in id || "gpt-5" in id || "claude" in id) add("VISION")
+            if ("json" in id || "gpt" in id || "claude" in id) add("JSON_MODE")
+            if ("200k" in id || "256k" in id || "claude" in id) add("LONG_CTX_256K")
+            if ("1m" in id || "gemini" in id) add("LONG_CTX_1M")
+        }
+    }
+
+    private fun recordUsage(
+        sessionId: String,
+        turnId: String,
+        modelId: String,
+        tier: String,
+        input: String,
+        output: String,
+    ) {
+        val inputTokens = io.codepilot.plugin.session.TokenEstimator.countTokens(input)
+        val outputTokens = io.codepilot.plugin.session.TokenEstimator.countTokens(output)
+        val cost = ((inputTokens * 1.5) + (outputTokens * 5.0)) / 1_000_000.0
+        usageRecords.add(
+            mapOf(
+                "ts" to System.currentTimeMillis(),
+                "sessionId" to sessionId,
+                "turnId" to turnId,
+                "modelId" to modelId,
+                "tier" to tier,
+                "inputTokens" to inputTokens,
+                "outputTokens" to outputTokens,
+                "costUsd" to cost,
+            ),
+        )
+        dispatchUsage()
+    }
+
+    private fun dispatchUsage() {
+        fun day(ts: Long) = java.time.Instant.ofEpochMilli(ts).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
+        fun aggregate(key: (Map<String, Any?>) -> String): Map<String, Map<String, Any>> =
+            usageRecords.groupBy(key).mapValues { (_, list) ->
+                mapOf(
+                    "count" to list.size,
+                    "inputTokens" to list.sumOf { it["inputTokens"] as? Int ?: 0 },
+                    "outputTokens" to list.sumOf { it["outputTokens"] as? Int ?: 0 },
+                    "costUsd" to list.sumOf { it["costUsd"] as? Double ?: 0.0 },
+                )
+            }
+        dispatchToWeb(
+            "usage.update",
+            mapOf(
+                "byDay" to aggregate { day(it["ts"] as? Long ?: 0L) },
+                "byModel" to aggregate { it["modelId"]?.toString() ?: "default" },
+                "records" to usageRecords.takeLast(100),
+            ),
+        )
+    }
+
+    private fun handleUiNotify(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val title = payload.path("title").asText("CodePilot")
+        val body = payload.path("body").asText("")
+        com.intellij.notification.Notifications.Bus.notify(
+            com.intellij.notification.Notification(
+                "CodePilot",
+                title,
+                body,
+                com.intellij.notification.NotificationType.INFORMATION,
+            ),
+            project,
+        )
+    }
+
+    private fun dispatchSlashCommands() {
+        val commands = loadTemplates().map {
+            mapOf(
+                "name" to (it["title"]?.toString()?.lowercase()?.replace(Regex("[^a-z0-9_-]+"), "-")?.trim('-') ?: "template"),
+                "description" to "Template: ${it["title"] ?: "Untitled"}",
+                "prompt" to (it["body"] ?: ""),
+            )
+        }
+        dispatchToWeb("slash.commands.loaded", mapOf("commands" to commands))
+    }
+
+    private fun dispatchTemplates() {
+        dispatchToWeb("templates.loaded", mapOf("templates" to loadTemplates()))
+    }
+
+    private fun handleTemplateSave(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { "tpl-${System.currentTimeMillis()}" }
+        val title = payload.path("title").asText("Untitled")
+        val body = payload.path("body").asText("")
+        val templates = loadTemplates().filterNot { it["id"] == id }.toMutableList()
+        templates.add(mapOf("id" to id, "title" to title, "body" to body))
+        saveTemplates(templates)
+        dispatchTemplates()
+        dispatchSlashCommands()
+    }
+
+    private fun handleTemplateDelete(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("")
+        saveTemplates(loadTemplates().filterNot { it["id"] == id })
+        dispatchTemplates()
+        dispatchSlashCommands()
+    }
+
+    private fun templatesPath(): java.nio.file.Path =
+        java.nio.file.Paths.get(project.basePath ?: ".").resolve(".codepilot").resolve("templates.json")
+
+    private fun loadTemplates(): List<Map<String, Any?>> {
+        val path = templatesPath()
+        if (!java.nio.file.Files.exists(path)) return emptyList()
+        return runCatching {
+            val root = mapper.readTree(java.nio.file.Files.readString(path))
+            val arr = if (root.isArray) root else root.path("templates")
+            arr.map { node ->
+                mapOf(
+                    "id" to node.path("id").asText("tpl-${System.nanoTime()}"),
+                    "title" to node.path("title").asText(node.path("name").asText("Untitled")),
+                    "body" to node.path("body").asText(node.path("prompt").asText("")),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveTemplates(templates: List<Map<String, Any?>>) {
+        val path = templatesPath()
+        java.nio.file.Files.createDirectories(path.parent)
+        java.nio.file.Files.writeString(path, mapper.writerWithDefaultPrettyPrinter().writeValueAsString(mapOf("templates" to templates)))
+    }
+
+    private fun bgManager() = io.codepilot.plugin.background.BackgroundTaskManager.getInstance(project)
+
+    private fun handleBgSubmit(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val title = payload.path("title").asText("")
+        val prompt = payload.path("prompt").asText("").ifBlank { return }
+        val result = runCatching { bgManager().submit(title, prompt) }
+        result.onFailure { dispatchToWeb("bg.error", mapOf("message" to (it.message ?: "failed to submit background task"))) }
+        handleBgList()
+    }
+
+    private fun handleBgList() {
+        dispatchToWeb("bg.tasks.update", mapOf("tasks" to bgManager().list().map { task ->
+            mapOf(
+                "id" to task.id,
+                "title" to task.title,
+                "prompt" to task.prompt,
+                "status" to task.status,
+                "worktreePath" to task.worktreePath,
+                "branchName" to task.branchName,
+                "baseRef" to task.baseRef,
+                "sessionId" to task.sessionId,
+                "createdAt" to task.createdAt,
+                "endedAt" to task.endedAt,
+                "outputs" to mapOf(
+                    "commits" to task.outputs.commits,
+                    "diffStat" to task.outputs.diffStat,
+                    "prUrl" to task.outputs.prUrl,
+                    "logPath" to task.outputs.logPath,
+                ),
+            )
+        }))
+    }
+
+    private fun handleBgCancel(payload: com.fasterxml.jackson.databind.JsonNode) {
+        bgManager().cancel(payload.path("id").asText(""))
+        handleBgList()
+    }
+
+    private fun handleBgMerge(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val result = bgManager().merge(payload.path("id").asText(""), payload.path("strategy").asText("squash"))
+        dispatchToWeb("bg.action.result", result)
+        handleBgList()
+    }
+
+    private fun handleBgDiscard(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val result = bgManager().discard(payload.path("id").asText(""))
+        dispatchToWeb("bg.action.result", result)
+        handleBgList()
+    }
+
+    private fun handleBgOpenWorktree(payload: com.fasterxml.jackson.databind.JsonNode) {
+        dispatchToWeb("bg.action.result", bgManager().openWorktree(payload.path("id").asText("")))
+    }
+
+    private fun exportFormat(raw: String): io.codepilot.plugin.export.ExportService.Format =
+        when (raw.lowercase()) {
+            "json" -> io.codepilot.plugin.export.ExportService.Format.JSON
+            "pr_description", "pr" -> io.codepilot.plugin.export.ExportService.Format.PR_DESCRIPTION
+            else -> io.codepilot.plugin.export.ExportService.Format.MARKDOWN
+        }
+
+    private fun handleExportPreview(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val sessionId = payload.path("sessionId").asText(sessionHandle?.meta?.id ?: "")
+        val format = exportFormat(payload.path("format").asText("markdown"))
+        val includeTools = payload.path("includeTools").asBoolean(true)
+        val result = runCatching {
+            io.codepilot.plugin.export.ExportService.getInstance(project).export(sessionId, format, includeTools)
+        }
+        dispatchToWeb(
+            "export.preview.result",
+            result.fold(
+                onSuccess = { mapOf("ok" to true, "content" to it, "format" to format.name.lowercase()) },
+                onFailure = { mapOf("ok" to false, "error" to (it.message ?: "export failed")) },
+            ),
+        )
+    }
+
+    private fun handleExportSave(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val sessionId = payload.path("sessionId").asText(sessionHandle?.meta?.id ?: "")
+        val format = exportFormat(payload.path("format").asText("markdown"))
+        val includeTools = payload.path("includeTools").asBoolean(true)
+        val path = payload.path("path").asText("")
+        val result = runCatching {
+            io.codepilot.plugin.export.ExportService.getInstance(project).save(sessionId, format, path, includeTools)
+        }
+        dispatchToWeb(
+            "export.save.result",
+            result.getOrElse { mapOf("ok" to false, "error" to (it.message ?: "save failed")) },
+        )
+    }
+
+    private fun handleShareCreate(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val sessionId = payload.path("sessionId").asText(sessionHandle?.meta?.id ?: "")
+        val title = sessionHandle?.meta?.title ?: "CodePilot Share"
+        val content = runCatching {
+            io.codepilot.plugin.export.ExportService.getInstance(project).export(
+                sessionId,
+                io.codepilot.plugin.export.ExportService.Format.MARKDOWN,
+                includeTools = false,
+            )
+        }.getOrElse {
+            dispatchToWeb("share.create.result", mapOf("ok" to false, "error" to (it.message ?: "export failed")))
+            return
+        }
+        val remote = runCatching {
+            val http = io.codepilot.plugin.transport.HttpClientService.getInstance()
+            val req = http.postJson(
+                "/v1/share/create",
+                mapOf("title" to title, "format" to "markdown", "content" to content, "expireDays" to payload.path("expireDays").asInt(7)),
+            )
+            http.client().newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) error("share service failed: HTTP ${resp.code}")
+                val body = resp.body?.string() ?: "{}"
+                val data = mapper.readTree(body).path("data")
+                mapOf("ok" to true, "url" to data.path("url").asText(""), "shareId" to data.path("shareId").asText(""))
+            }
+        }
+        val result = remote.getOrElse {
+            val dir = java.nio.file.Paths.get(project.basePath ?: ".").resolve(".codepilot").resolve("share")
+            java.nio.file.Files.createDirectories(dir)
+            val target = dir.resolve("${sessionId}-${System.currentTimeMillis()}.md")
+            java.nio.file.Files.writeString(target, content)
+            mapOf("ok" to true, "url" to target.toUri().toString(), "path" to target.toString(), "fallback" to "local-file")
+        }
+        dispatchToWeb("share.create.result", result)
     }
 
     /** Push the full session list (sorted by lastMessageAt desc) to the WebUI. */

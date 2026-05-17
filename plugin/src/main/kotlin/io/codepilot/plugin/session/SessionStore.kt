@@ -518,12 +518,14 @@ class SessionStore {
                 branchId = newBranchId,
                 parentBranchId = handle.meta.branchId,
                 parentMsgIndex = messageIndex,
+                rootSessionId = handle.meta.rootSessionId ?: handle.meta.id,
             )
         newHandle.meta = updatedMeta
         writeJson(newHandle.dir.resolve("meta.json"), updatedMeta)
 
-        // Save a branch map file for tracking all branches of the original session
-        val branchMapFile = handle.dir.resolve("branches.json")
+        // Save branch metadata on the root session so every fork can see siblings.
+        val rootHandle = resolve(workspaceHash, handle.meta.rootSessionId ?: handle.meta.id) ?: handle
+        val branchMapFile = rootHandle.dir.resolve("branches.json")
         val branches =
             if (Files.exists(branchMapFile)) {
                 @Suppress("UNCHECKED_CAST")
@@ -559,18 +561,19 @@ class SessionStore {
      * List all branches of a session (including the main branch).
      */
     fun listBranches(handle: SessionHandle): List<BranchInfo> {
-        val branchMapFile = handle.dir.resolve("branches.json")
+        val rootHandle = resolve(handle.meta.workspaceHash, handle.meta.rootSessionId ?: handle.meta.id) ?: handle
+        val branchMapFile = rootHandle.dir.resolve("branches.json")
         if (!Files.exists(branchMapFile)) {
-            return listOf(BranchInfo("main", handle.meta.id, null, null))
+            return listOf(BranchInfo("main", rootHandle.meta.id, null, null))
         }
 
         @Suppress("UNCHECKED_CAST")
         val branches =
             runCatching {
                 mapper.readValue(Files.readAllBytes(branchMapFile), Map::class.java) as Map<String, Any>
-            }.getOrNull() ?: return listOf(BranchInfo("main", handle.meta.id, null, null))
+            }.getOrNull() ?: return listOf(BranchInfo("main", rootHandle.meta.id, null, null))
 
-        val result = mutableListOf(BranchInfo("main", handle.meta.id, null, null))
+        val result = mutableListOf(BranchInfo("main", rootHandle.meta.id, null, null))
 
         @Suppress("UNCHECKED_CAST")
         val branchList = branches["branches"] as? List<Map<String, Any?>> ?: return result
@@ -663,6 +666,7 @@ class SessionStore {
         val branchId: String = "main",
         val parentBranchId: String? = null,
         val parentMsgIndex: Int? = null,
+        val rootSessionId: String? = null,
         /** Whether the session is currently running (SSE stream active). */
         var running: Boolean = false,
         /** Whether the session was abnormally terminated (stream closed without done event). */

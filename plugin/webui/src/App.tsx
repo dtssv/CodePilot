@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from './bridge';
 import { AgentStep } from './components/AgentStepCard';
 import { BranchTreeView } from './components/branches/BranchTreeView';
+import { BackgroundTasksPanel } from './components/background/BackgroundTasksPanel';
 import { ChangePanel } from './components/apply/ChangePanel';
 import { ChatView } from './components/ChatView';
 import { CodebasePanel } from './components/codebase/CodebasePanel';
@@ -9,6 +10,7 @@ import { ComposerPanel } from './components/ComposerPanel';
 import { ConsoleEntry, ConsolePanel } from './components/ConsolePanel';
 import ContextBudgetBar, { BudgetBreakdown } from './components/ContextBudgetBar';
 import { ContextChipData } from './components/ContextChip';
+import { ExportPanel } from './components/export/ExportPanel';
 import { ImageData } from './components/ImageAttachment';
 import { InlineEditTimeline } from './components/inline/InlineEditTimeline';
 import { TabSettingsPanel } from './components/inline/TabSettingsPanel';
@@ -23,13 +25,18 @@ import { RulesMemoryPanel } from './components/rules/RulesMemoryPanel';
 import { SessionCostInfo, SessionCostPanel } from './components/SessionCostPanel';
 import { SessionInfoV2, SessionSidebarV2 } from './components/sessions/SessionSidebarV2';
 import { ShellPolicyPanel } from './components/shell/ShellPolicyPanel';
+import { TemplatesPanel } from './components/templates/TemplatesPanel';
 import { ChatViewV2 } from './components/tools/v2/ChatViewV2';
+import { UsagePanel } from './components/usage/UsagePanel';
+import { notify } from './notifications/desktop';
 import { installChatV2Bridge, isV2Enabled } from './state/chatStore';
 
 interface ModelOption {
     id: string;
     name: string;
     type: 'system' | 'custom';
+    tier?: 'FAST' | 'DEFAULT' | 'THINKING' | 'PREMIUM';
+    capabilities?: string[];
 }
 
 export interface ToolCallInfo {
@@ -76,9 +83,11 @@ interface BranchInfo {
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
-    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'codebase' | 'rules' | 'mcp' | 'shell' | 'tab' | 'console'>('chat');
+    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'codebase' | 'rules' | 'mcp' | 'shell' | 'tab' | 'usage' | 'templates' | 'background' | 'export' | 'console'>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
+    const [lastRoute, setLastRoute] = useState<{ name?: string; tier?: string; reason?: string } | null>(null);
+    const [maxMode, setMaxMode] = useState(false);
     const [sessions, setSessions] = useState<SessionInfoV2[]>([]);
     const [activeSessionId, setActiveSessionId] = useState<string>('');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -220,8 +229,12 @@ export function App() {
                 ];
                 setModels(all);
                 if (!selectedModelId && all.length > 0) {
-                    setSelectedModelId(all[0].id);
+                    setSelectedModelId('auto');
                 }
+            }),
+            onPluginEvent('model.routed', (payload) => {
+                const data = payload as { name?: string; tier?: string; reason?: string };
+                setLastRoute(data);
             }),
             // Session list updates
             onPluginEvent('session_list', (payload) => {
@@ -298,6 +311,7 @@ export function App() {
                 logConsole('sse', 'done', data);
                 const reason = data.reason || 'final';
                 const isFinal = reason === 'final' || reason === 'failed' || reason === 'stopped' || reason === 'max_steps';
+                if (isFinal) notify(reason === 'final' ? 'CodePilot completed' : 'CodePilot stopped', `Reason: ${reason}`);
                 if (!isFinal) {
                     // Intermediate done (subtask_done, phase_done, awaiting_user_input...) —
                     // keep the assistant card streaming so subsequent rounds append into it.
@@ -388,6 +402,7 @@ export function App() {
                 setMessages((msgs) => [...msgs, { role: 'system', content: '', riskNotice: rn }]);
             }),
             onPluginEvent('needs_input', (p) => {
+                notify('CodePilot needs input', 'The agent is waiting for your response.');
                 const ni = p as {
                     title?: string;
                     questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[];
@@ -410,6 +425,7 @@ export function App() {
             onPluginEvent('error', (p) => {
                 const err = p as { code: number; message: string };
                 logConsole('error', 'error', err);
+                notify('CodePilot failed', err.message || 'The current task failed.');
                 if (activeReplyRef.current) {
                     setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
                         ...msg,
@@ -658,7 +674,8 @@ export function App() {
             contextRefs,
             mode,
             modelId: selectedModelId || undefined,
-            modelSource: selectedModelId ? (models.find(m => m.id === selectedModelId)?.type === 'custom' ? 'custom' : 'group') : undefined,
+            modelSource: selectedModelId && selectedModelId !== 'auto' ? (models.find(m => m.id === selectedModelId)?.type === 'custom' ? 'custom' : 'group') : undefined,
+            maxMode,
             images: images?.map(img => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
             // ★ Pass conversation history for multi-turn context
             historyMessages,
@@ -832,6 +849,10 @@ export function App() {
                     {activeTab === 'mcp' && <McpHooksPanel />}
                     {activeTab === 'shell' && <ShellPolicyPanel />}
                     {activeTab === 'tab' && <TabSettingsPanel />}
+                    {activeTab === 'usage' && <UsagePanel />}
+                    {activeTab === 'templates' && <TemplatesPanel />}
+                    {activeTab === 'background' && <BackgroundTasksPanel />}
+                    {activeTab === 'export' && <ExportPanel sessionId={activeSessionId} />}
                     {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={() => setConsoleEntries([])} />}
                     {/* ★ Agent plan & multi-file diff panels (auto-visible when data arrives) */}
 
@@ -854,7 +875,14 @@ export function App() {
                             />
                             {/* ★ Session cost panel */}
                             <SessionCostPanel costInfo={sessionCost} />
-                            <InputBar onSend={handleSend} onStop={handleStop} contextChips={contextChips} onRemoveChip={handleRemoveChip} />
+                            <InputBar
+                                onSend={handleSend}
+                                onStop={handleStop}
+                                contextChips={contextChips}
+                                onRemoveChip={handleRemoveChip}
+                                onModelSelect={setSelectedModelId}
+                                sessionCost={sessionCost}
+                            />
                             <div className="input-bottom-row">
                                 <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>
                                     <option value="agent">Agent</option>
@@ -864,7 +892,12 @@ export function App() {
                                     models={models}
                                     selectedModelId={selectedModelId}
                                     onSelect={setSelectedModelId}
+                                    lastRoute={lastRoute}
                                 />
+                                <label className="max-mode-toggle" title="Use the strongest model and larger response budget for this turn">
+                                    <input type="checkbox" checked={maxMode} onChange={(e) => setMaxMode(e.target.checked)} />
+                                    <span>Max</span>
+                                </label>
                                 {mode === 'agent' && (
                                     <label className="auto-apply-toggle" title="自动应用低风险文件变更">
                                         <input
@@ -900,6 +933,10 @@ export function App() {
                         <button className={activeTab === 'mcp' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('mcp')}>MCP</button>
                         <button className={activeTab === 'shell' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('shell')}>Shell</button>
                         <button className={activeTab === 'tab' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('tab')}>Tab</button>
+                        <button className={activeTab === 'usage' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('usage')}>Usage</button>
+                        <button className={activeTab === 'templates' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('templates')}>Templates</button>
+                        <button className={activeTab === 'background' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('background')}>Background</button>
+                        <button className={activeTab === 'export' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('export')}>Export</button>
                         <button className={activeTab === 'console' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('console')}>Console</button>
                         <button className="tab-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark')} title="切换主题">
                             {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '◐'}

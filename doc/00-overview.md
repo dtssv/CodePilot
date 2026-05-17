@@ -109,13 +109,15 @@ plugin/src/main/kotlin/io/codepilot/plugin/
 - [07 MCP / Hooks 管理](./07-mcp-hooks.md) ✅
 - [08 Shell Allowlist 与流式输出](./08-shell-allowlist.md) ✅
 - **[P1 阶段总结(含后端/prompt 核查)](./P1-summary.md)** ⭐
-- [09 会话分支树 UI 与历史增强](./09-branch-tree.md)
-- [10 Context Budget Breakdown 与多模态输入](./10-context-multimodal.md)
-- [11 模型 Auto 路由、Max 模式与 Usage 仪表盘](./11-model-router.md)
-- [12 Slash Commands、Prompt 模板、通知与 @ 修复](./12-slash-commands.md)
-- [13 Background Agents:并行任务、隔离 worktree](./13-background-agents.md)
-- [14 会话分享与导出](./14-share-export.md)
-- [15 Tab 多行预测与跨光标跳跃](./15-tab-multiline.md)
+- [09 会话分支树 UI 与历史增强](./09-branch-tree.md) ✅
+- [10 Context Budget Breakdown 与多模态输入](./10-context-multimodal.md) ✅
+- [11 模型 Auto 路由、Max 模式与 Usage 仪表盘](./11-model-router.md) ✅
+- [12 Slash Commands、Prompt 模板、通知与 @ 修复](./12-slash-commands.md) ✅
+- **[P2 阶段总结(含后端/prompt 核查)](./P2-summary.md)** ⭐
+- [13 Background Agents:并行任务、隔离 worktree](./13-background-agents.md) ✅
+- [14 会话分享与导出](./14-share-export.md) ✅
+- [15 Tab 多行预测与跨光标跳跃](./15-tab-multiline.md) ✅
+- **[P3 阶段总结(含限制与后续增强)](./P3-summary.md)** ⭐
 - [16 对标 Cursor 路线图](./16-对标Cursor路线图.md)
 
 ## 7. 验收基线

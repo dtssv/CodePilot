@@ -1,5 +1,11 @@
 # 11 — 模型 Auto 路由、Max 模式与 Usage 仪表盘(P2)
 
+> ✅ Completed(2026-05-17):WebUI 已支持 `Auto`、`Max` 和 Usage 面板;插件
+> `CefChatPanel` 已做 Auto 路由与 usage 聚合。后端 Java 已补齐
+> `/v1/models` 的 `tier/capabilities/contextWindow/pricing/source` 元数据,
+> 并在 `ConversationRunRequest.Policy` 增加 `thinkingMode/maxOutputTokens/maxMode`
+> 以承载 Max 请求提示。
+
 ## 1. 目标
 
 - 提供 **Auto 模式**:按任务类型自动选模型(fast / thinking / agent / inline)。

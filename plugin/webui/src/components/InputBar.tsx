@@ -3,6 +3,8 @@ import { onPluginEvent, sendToPlugin } from '../bridge';
 import { AtReferencePopup } from './AtReferencePopup';
 import { ContextChipData } from './ContextChip';
 import { ImageAttachment, ImageData } from './ImageAttachment';
+import { builtinCommands, customCommands, CustomSlashSpec, SlashCommand } from './slash/commands';
+import { SlashPopup } from './slash/SlashPopup';
 
 interface AtSuggestion {
     type: string;
@@ -16,6 +18,8 @@ interface InputBarProps {
     onStop: () => void;
     contextChips: ContextChipData[];
     onRemoveChip: (id: string) => void;
+    onModelSelect?: (id: string) => void;
+    sessionCost?: { estimatedCostUsd: number; messageCount: number };
 }
 
 const CHIP_DATA_ATTR = 'data-chip-id';
@@ -26,7 +30,7 @@ const CHIP_DATA_ATTR = 'data-chip-id';
  * so text and chips are naturally interleaved.
  * Typing '@' triggers the AtReferencePopup for file/symbol/codebase references.
  */
-export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBarProps) {
+export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onModelSelect, sessionCost }: InputBarProps) {
     const [running, setRunning] = useState(false);
     const editorRef = useRef<HTMLDivElement>(null);
     const chipsMapRef = useRef<Map<string, ContextChipData>>(new Map());
@@ -39,6 +43,10 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
     const [atPopupVisible, setAtPopupVisible] = useState(false);
     const [_atQuery, setAtQuery] = useState('');
     const [atAnchorRect, setAtAnchorRect] = useState<DOMRect | undefined>();
+    const [slashVisible, setSlashVisible] = useState(false);
+    const [slashQuery, setSlashQuery] = useState('');
+    const [slashAnchorRect, setSlashAnchorRect] = useState<DOMRect | undefined>();
+    const [customSlash, setCustomSlash] = useState<CustomSlashSpec[]>([]);
 
     // Keep chipsMapRef in sync
     useEffect(() => {
@@ -72,10 +80,16 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         const offDone = onPluginEvent('done', () => setRunning(false));
         const offVoice = onPluginEvent('voice_result', (payload) => appendTextToEditor((payload as { transcript?: string }).transcript ?? ''));
         const offVoiceV2 = onPluginEvent('voice.result', (payload) => appendTextToEditor((payload as { text?: string }).text ?? ''));
+        const offSlash = onPluginEvent('slash.commands.loaded', (payload) => setCustomSlash(((payload as { commands?: CustomSlashSpec[] }).commands ?? [])));
+        const setInput = (event: Event) => setEditorText((event as CustomEvent<string>).detail ?? '');
+        document.addEventListener('codepilot:input.set', setInput);
+        sendToPlugin('slash.commands.list', {}).catch(() => undefined);
         return () => {
             offDone();
             offVoice();
             offVoiceV2();
+            offSlash();
+            document.removeEventListener('codepilot:input.set', setInput);
         };
     }, []);
 
@@ -96,7 +110,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         // If @-popup is visible, let it handle navigation keys
-        if (atPopupVisible && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+        if ((atPopupVisible || slashVisible) && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
             return; // AtReferencePopup handles these via its own listener
         }
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -213,6 +227,18 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         const text = node.textContent || '';
         const cursorOffset = range.startOffset;
 
+        const lineStart = text.lastIndexOf('\n', cursorOffset - 1) + 1;
+        const lineFromStart = text.substring(lineStart, cursorOffset);
+        const slashMatch = /^\/([\w-]*)$/.exec(lineFromStart);
+        if (slashMatch) {
+            setSlashQuery(slashMatch[1]);
+            setSlashAnchorRect(range.getBoundingClientRect());
+            setSlashVisible(true);
+            setAtPopupVisible(false);
+            return;
+        }
+        setSlashVisible(false);
+
         // Look backwards from cursor for '@' that isn't part of a chip
         let atIndex = -1;
         for (let i = cursorOffset - 1; i >= 0; i--) {
@@ -221,8 +247,8 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                 atIndex = i;
                 break;
             }
-            // Stop if we hit whitespace — @ must be at start or after space
-            if (/\s/.test(ch)) break;
+            // Stop on whitespace or punctuation, including Chinese punctuation.
+            if (/[\s，。！？；：、（）【】《》“”‘’]/.test(ch)) break;
         }
 
         if (atIndex >= 0) {
@@ -316,6 +342,21 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
         setAtPopupVisible(false);
     }, []);
 
+    const allSlashCommands = [...builtinCommands(), ...customCommands(customSlash)];
+    const handleSlashSelect = useCallback((cmd: SlashCommand) => {
+        const editor = editorRef.current;
+        const raw = editor?.textContent ?? '';
+        const [head, ...rest] = raw.trim().split(/\s+/);
+        const args = head?.startsWith('/') ? rest : [];
+        cmd.run(args, {
+            setInput: setEditorText,
+            setModel: onModelSelect,
+            sessionCost,
+        });
+        setSlashVisible(false);
+        if (editor) editor.innerHTML = '';
+    }, [onModelSelect, sessionCost]);
+
     return (
         <div className={`input-bar ${dragOver ? 'drag-over' : ''}`}>
             {dragOver && <div className="drag-overlay">松开以引用文件/文件夹或添加图片</div>}
@@ -341,6 +382,15 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip }: InputBa
                     onSelect={handleAtSelect}
                     onClose={handleAtClose}
                     anchorRect={atAnchorRect}
+                />
+            )}
+            {slashVisible && (
+                <SlashPopup
+                    query={slashQuery}
+                    commands={allSlashCommands}
+                    anchorRect={slashAnchorRect}
+                    onSelect={handleSlashSelect}
+                    onClose={() => setSlashVisible(false)}
                 />
             )}
             {/* ★ Attached image thumbnails preview */}
@@ -398,6 +448,13 @@ function appendTextToEditor(text: string) {
     if (!editor) return;
     editor.focus();
     insertNodeAtCursor(editor, document.createTextNode(text));
+}
+
+function setEditorText(text: string) {
+    const editor = document.querySelector('.input-editor') as HTMLDivElement | null;
+    if (!editor) return;
+    editor.textContent = text;
+    editor.focus();
 }
 
 function fileToDataUrl(file: File): Promise<string> {

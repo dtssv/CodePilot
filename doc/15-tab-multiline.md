@@ -1,5 +1,9 @@
 # 15 — Tab 多行预测与跨光标跳跃(P3)
 
+> ✅ Completed(2026-05-17):基于已有 `CursorTabSuggester` 完成多行 ghost 渲染、
+> 后续位置预测、Tab accept 写命令包裹、accept/dismiss telemetry。修复了
+> inline completion 后续建议被立即 `acceptCurrent()` 的问题,现在只渲染预测。
+
 ## 1. 目标
 
 把现有 `CodePilotInlineCompletionProvider`(单行 ghost text)升级为对齐 Cursor

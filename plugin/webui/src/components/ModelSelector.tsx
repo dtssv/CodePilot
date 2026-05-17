@@ -4,22 +4,27 @@ interface ModelOption {
     id: string;
     name: string;
     type: 'system' | 'custom';
+    tier?: 'FAST' | 'DEFAULT' | 'THINKING' | 'PREMIUM';
+    capabilities?: string[];
 }
 
 interface ModelSelectorProps {
     models: ModelOption[];
     selectedModelId: string;
     onSelect: (id: string) => void;
+    lastRoute?: { name?: string; tier?: string; reason?: string } | null;
 }
 
-export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelectorProps) {
+export function ModelSelector({ models, selectedModelId, onSelect, lastRoute }: ModelSelectorProps) {
     const [open, setOpen] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
 
     const systemModels = models.filter(m => m.type === 'system');
     const customModels = models.filter(m => m.type === 'custom');
     const selected = models.find(m => m.id === selectedModelId);
-    const displayLabel = selected ? selected.name : 'Default';
+    const displayLabel = selectedModelId === 'auto'
+        ? `Auto${lastRoute?.name ? ` -> ${lastRoute.name}` : ''}`
+        : selected ? selected.name : 'Auto';
 
     // Close on outside click
     useEffect(() => {
@@ -47,6 +52,14 @@ export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelect
                 <div className="model-selector-dropdown">
                     {systemModels.length > 0 && (
                         <>
+                            <div
+                                className={`model-option ${selectedModelId === 'auto' ? 'selected' : ''}`}
+                                onClick={() => { onSelect('auto'); setOpen(false); }}
+                            >
+                                <span className="model-option-radio">{selectedModelId === 'auto' ? '●' : '○'}</span>
+                                <span className="model-option-name">Auto{lastRoute?.tier ? ` (${lastRoute.tier})` : ''}</span>
+                                {lastRoute?.reason && <span className="model-option-tier">{lastRoute.reason}</span>}
+                            </div>
                             <div className="model-group-label">System Models</div>
                             {systemModels.map(m => (
                                 <div
@@ -56,6 +69,7 @@ export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelect
                                 >
                                     <span className="model-option-radio">{m.id === selectedModelId ? '●' : '○'}</span>
                                     <span className="model-option-name">{m.name}</span>
+                                    {m.tier && <span className="model-option-tier">{m.tier}</span>}
                                 </div>
                             ))}
                         </>
@@ -74,6 +88,7 @@ export function ModelSelector({ models, selectedModelId, onSelect }: ModelSelect
                                 >
                                     <span className="model-option-radio">{m.id === selectedModelId ? '●' : '○'}</span>
                                     <span className="model-option-name">{m.name}</span>
+                                    {m.tier && <span className="model-option-tier">{m.tier}</span>}
                                 </div>
                             ))}
                         </>

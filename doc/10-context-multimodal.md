@@ -1,5 +1,10 @@
 # 10 — Context Budget Breakdown 与多模态输入(P2)
 
+> ✅ Completed(2026-05-17):`ContextBudgetBar` 已支持分桶 breakdown;`InputBar`
+> 支持粘贴图片、拖拽图片/文件/文件夹、语音输入;Kotlin 侧已接入
+> `VoiceInputService` 并通过 `context_budget` 下发 breakdown。Java 后端已补齐
+> 图片 `raw base64` / `data:` URI 兼容和 `/v1/speech/recognize` 语音识别接口。
+
 ## 1. 目标
 
 - **Budget Breakdown**:`ContextBudgetBar` 当前只显示总量,扩展为 stacked bar,

@@ -33,7 +33,7 @@ export function AtReferencePopup({ inputValue, cursorPosition, visible, onSelect
         const textBeforeCursor = inputValue.substring(0, cursorPosition);
         const atIndex = textBeforeCursor.lastIndexOf('@');
         if (atIndex === -1) return '';
-        return textBeforeCursor.substring(atIndex + 1);
+        return textBeforeCursor.substring(atIndex + 1).replace(/^[\s，。！？；：、（）【】《》“”‘’]+/, '');
     }, [inputValue, cursorPosition]);
 
     // Fetch suggestions from plugin
