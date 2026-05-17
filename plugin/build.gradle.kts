@@ -74,13 +74,15 @@ ktlint {
 val webUiDir = project.file("webui")
 val webUiDist = webUiDir.resolve("dist")
 val webUiResourceDir = project.file("src/main/resources/webui/dist")
+val npmExecutable = if (System.getProperty("os.name").lowercase().contains("windows")) "npm.cmd" else "npm"
 
 val webUiInstall by tasks.registering(Exec::class) {
     group = "webui"
     description = "Install WebUI npm dependencies"
     workingDir = webUiDir
-    commandLine("npm", "install")
+    commandLine(npmExecutable, "install")
     inputs.file(webUiDir.resolve("package.json"))
+    inputs.file(webUiDir.resolve("package-lock.json"))
     outputs.dir(webUiDir.resolve("node_modules"))
 }
 
@@ -89,7 +91,7 @@ val webUiBuild by tasks.registering(Exec::class) {
     description = "Build WebUI (vite)"
     dependsOn(webUiInstall)
     workingDir = webUiDir
-    commandLine("npm", "run", "build")
+    commandLine(npmExecutable, "run", "build")
     inputs.dir(webUiDir.resolve("src"))
     inputs.file(webUiDir.resolve("index.html"))
     inputs.file(webUiDir.resolve("vite.config.ts"))

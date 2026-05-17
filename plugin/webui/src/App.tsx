@@ -48,6 +48,8 @@ interface ChatMessage {
     _streaming?: boolean;
     /** Timestamp for the message */
     ts?: string;
+    /** ★ Turn id: groups one user send + its assistant reply (across multi-phase backend rounds) */
+    turnId?: string;
 }
 
 interface BranchInfo {
@@ -93,6 +95,45 @@ export function App() {
     // ★ Track whether we're in an active reply (from user send → done with reason=final)
     // This ensures all delta/tool_call/agent events within one request are merged into ONE assistant message
     const activeReplyRef = useRef(false);
+    // ★ Current turn id: every assistant event during this turn is merged into the assistant
+    //   message that carries the SAME turnId. Survives intermediate done/phase_done events,
+    //   tool calls, agent_* events, and any number of backend rounds within one user send.
+    const activeTurnIdRef = useRef<string>('');
+
+    /**
+     * ★ Locate (or create) the assistant message for the current turn.
+     * All event handlers funnel through this so EVERY backend event in a turn
+     * accumulates into ONE assistant card — never overwrites, never splits.
+     */
+    const upsertTurnAssistant = (
+        prev: ChatMessage[],
+        mutate: (msg: ChatMessage) => ChatMessage,
+    ): ChatMessage[] => {
+        const turnId = activeTurnIdRef.current;
+        if (turnId) {
+            // Find the assistant bound to this turn
+            for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].role === 'assistant' && prev[i].turnId === turnId) {
+                    const updated = [...prev];
+                    updated[i] = mutate(prev[i]);
+                    return updated;
+                }
+            }
+            // Not found — create a fresh placeholder bound to the turn
+            const fresh: ChatMessage = { role: 'assistant', content: '', _streaming: true, turnId };
+            return [...prev, mutate(fresh)];
+        }
+        // Fallback (no active turn — e.g. session restore events): append to last assistant
+        for (let i = prev.length - 1; i >= 0; i--) {
+            if (prev[i].role === 'assistant') {
+                const updated = [...prev];
+                updated[i] = mutate(prev[i]);
+                return updated;
+            }
+        }
+        const fresh: ChatMessage = { role: 'assistant', content: '', _streaming: true };
+        return [...prev, mutate(fresh)];
+    };
 
     // Console logging helper
     const logConsole = (type: ConsoleEntry['type'], source: string, data: unknown) => {
@@ -177,6 +218,7 @@ export function App() {
                 setAbnormalTermination(false);
                 setHasCheckpoint(false);
                 activeReplyRef.current = false;
+                activeTurnIdRef.current = '';
             }),
             // Branch list update
             onPluginEvent('branch_list', (payload) => {
@@ -204,7 +246,10 @@ export function App() {
                 setHasCheckpoint(data.hasCheckpoint ?? false);
             }),
             // User message saved from plugin (after persistence)
+            // ★ When an active turn is in flight, handleSend already inserted the user
+            //   message + assistant placeholder locally — skip to avoid duplicates.
             onPluginEvent('user_message_saved', (payload) => {
+                if (activeReplyRef.current) return;
                 const msg = payload as { role: string; content: string; contextRefs?: { display: string; type?: string }[] };
                 setMessages((prev) => [...prev, {
                     role: 'user' as const,
@@ -212,74 +257,39 @@ export function App() {
                     contextRefs: msg.contextRefs,
                 }]);
             }),
-            // Streaming delta
+            // Streaming delta — always append into the current turn's assistant card
             onPluginEvent('delta', (p) => {
                 const { text } = p as { text: string };
                 logConsole('sse', 'delta', { text: text.substring(0, 100) + (text.length > 100 ? '...' : '') });
-                setMessages((prev) => {
-                    // ★ During an active reply, ALWAYS append to the last assistant message
-                    // This handles multi-phase responses where intermediate "done" events
-                    // should NOT split the assistant reply into separate messages.
-                    const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant') {
-                        return [...prev.slice(0, -1), { ...last, content: last.content + text, _streaming: true }];
-                    }
-                    // No assistant message yet, or last message is not assistant (e.g. system event)
-                    // During active reply, find the last assistant message and append to it
-                    if (activeReplyRef.current) {
-                        for (let i = prev.length - 1; i >= 0; i--) {
-                            if (prev[i].role === 'assistant') {
-                                return [...prev.slice(0, i), { ...prev[i], content: prev[i].content + text, _streaming: true }, ...prev.slice(i + 1)];
-                            }
-                        }
-                    }
-                    return [...prev, { role: 'assistant' as const, content: text, _streaming: true }];
-                });
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
+                    ...msg,
+                    content: (msg.content || '') + text,
+                    _streaming: true,
+                })));
             }),
-            // Done — finalize streaming message and refresh session list
+            // Done — only FINAL reasons close the card; intermediate done keeps streaming
             onPluginEvent('done', (p) => {
                 const data = p as { reason?: string };
                 logConsole('sse', 'done', data);
                 const reason = data.reason || 'final';
-                // ★ Only end the active reply on "final" reason.
-                // Intermediate done events (subtask_done, phase_done, etc.) should NOT
-                // split the assistant reply — the graph execution is still in progress.
                 const isFinal = reason === 'final' || reason === 'failed' || reason === 'stopped' || reason === 'max_steps';
-                // ★ Defensive: if activeReplyRef is already false (duplicate done event),
-                // skip message state update to avoid re-finalizing an already finalized message
-                const isActive = activeReplyRef.current;
-                if (isActive || !isFinal) {
-                    setMessages((prev) => {
-                        // ★ Find the last assistant message (may not be the very last if system events were inserted)
-                        // and finalize its streaming state
-                        let lastAssistantIdx = -1;
-                        for (let i = prev.length - 1; i >= 0; i--) {
-                            if (prev[i].role === 'assistant') {
-                                lastAssistantIdx = i;
-                                break;
-                            }
-                        }
-                        if (lastAssistantIdx < 0) return prev;
-                        const last = prev[lastAssistantIdx];
-                        const finalizedSteps = last.agentSteps?.map(s => s.status === 'running' ? { ...s, status: 'success' as const } : s);
-                        const updated = [...prev];
-                        updated[lastAssistantIdx] = {
-                            ...last,
-                            _streaming: false,
-                            agentSteps: finalizedSteps || last.agentSteps,
-                        };
-                        return updated;
-                    });
+                if (!isFinal) {
+                    // Intermediate done (subtask_done, phase_done, awaiting_user_input...) —
+                    // keep the assistant card streaming so subsequent rounds append into it.
+                    return;
                 }
-                if (isFinal) {
-                    activeReplyRef.current = false;
-                    // Clear abnormal termination state on successful completion
-                    setAbnormalTermination(false);
-                    setHasCheckpoint(false);
-                    setIsResuming(false);
-                    // Refresh session list to update lastMessageAt timestamp
-                    sendToPlugin('list_sessions', {}).catch(() => { });
-                }
+                if (!activeReplyRef.current) return; // duplicate final done — ignore
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
+                    ...msg,
+                    _streaming: false,
+                    agentSteps: msg.agentSteps?.map(s => s.status === 'running' ? { ...s, status: 'success' as const } : s),
+                })));
+                activeReplyRef.current = false;
+                activeTurnIdRef.current = '';
+                setAbnormalTermination(false);
+                setHasCheckpoint(false);
+                setIsResuming(false);
+                sendToPlugin('list_sessions', {}).catch(() => { });
             }),
             onPluginEvent('tool_call', (p) => {
                 const tc = p as { id?: string; toolCallId?: string; name?: string; tool?: string; args: unknown };
@@ -308,31 +318,11 @@ export function App() {
                         }
                     }
                 }
-                setMessages((msgs) => {
-                    // ★ During active reply, always append tool call to the last assistant message
-                    // This ensures tool calls across graph phases are merged into ONE assistant message
-                    let lastAssistantIdx = -1;
-                    for (let i = msgs.length - 1; i >= 0; i--) {
-                        if (msgs[i].role === 'assistant') {
-                            lastAssistantIdx = i;
-                            break;
-                        }
-                    }
-                    if (lastAssistantIdx >= 0) {
-                        const last = msgs[lastAssistantIdx];
-                        const updated = [...msgs];
-                        updated[lastAssistantIdx] = {
-                            ...last,
-                            toolCalls: [...(last.toolCalls || []), toolCallInfo],
-                        };
-                        return updated;
-                    }
-                    // No assistant message yet — create one with the tool call
-                    return [
-                        ...msgs,
-                        { role: 'assistant' as const, content: '', toolCalls: [toolCallInfo] },
-                    ];
-                });
+                setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
+                    ...msg,
+                    toolCalls: [...(msg.toolCalls || []), toolCallInfo],
+                    _streaming: true,
+                })));
             }),
             onPluginEvent('tool_result_ack', (p) => {
                 const ack = p as { toolCallId?: string; ok?: boolean };
@@ -362,30 +352,17 @@ export function App() {
             }),
             onPluginEvent('risk_notice', (p) => {
                 const rn = p as { level: string; message: string; filesPaths: string[] };
-                setMessages((msgs) => {
-                    // ★ During active reply, attach risk notice to the last assistant message
-                    // instead of inserting a separate system message that would split the reply
-                    if (activeReplyRef.current) {
-                        let lastAssistantIdx = -1;
-                        for (let i = msgs.length - 1; i >= 0; i--) {
-                            if (msgs[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                        }
-                        if (lastAssistantIdx >= 0) {
-                            const last = msgs[lastAssistantIdx];
-                            // Merge risk notice into the assistant message's content
-                            const updated = [...msgs];
-                            updated[lastAssistantIdx] = {
-                                ...last,
-                                content: last.content + `\n\n⚠️ **Risk Notice (${rn.level})**: ${rn.message}${(rn.filesPaths && rn.filesPaths.length > 0) ? `\nFiles: ${rn.filesPaths.join(', ')}` : ''}`,
-                            };
-                            return updated;
-                        }
-                    }
-                    return [...msgs, { role: 'system', content: '', riskNotice: rn }];
-                });
+                if (activeReplyRef.current) {
+                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
+                        ...msg,
+                        content: (msg.content || '') + `\n\n⚠️ **Risk Notice (${rn.level})**: ${rn.message}${(rn.filesPaths && rn.filesPaths.length > 0) ? `\nFiles: ${rn.filesPaths.join(', ')}` : ''}`,
+                        _streaming: true,
+                    })));
+                    return;
+                }
+                setMessages((msgs) => [...msgs, { role: 'system', content: '', riskNotice: rn }]);
             }),
             onPluginEvent('needs_input', (p) => {
-                // Backend format: { title, questions: [{ id, prompt, kind, options: [{ id, label }] }], continuationToken }
                 const ni = p as {
                     title?: string;
                     questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[];
@@ -395,63 +372,41 @@ export function App() {
                 const optionsText = ni.questions && ni.questions.length > 0 && ni.questions[0].options
                     ? ni.questions[0].options.map(o => o.label || o.id).join(' / ')
                     : '';
-                setMessages((msgs) => {
-                    // ★ During active reply, attach needs_input to the last assistant message
-                    if (activeReplyRef.current) {
-                        let lastAssistantIdx = -1;
-                        for (let i = msgs.length - 1; i >= 0; i--) {
-                            if (msgs[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                        }
-                        if (lastAssistantIdx >= 0) {
-                            const last = msgs[lastAssistantIdx];
-                            const updated = [...msgs];
-                            updated[lastAssistantIdx] = {
-                                ...last,
-                                content: last.content + `\n\n❓ **${questionText}**${optionsText ? `\nOptions: ${optionsText}` : ''}`,
-                            };
-                            return updated;
-                        }
-                    }
-                    return [...msgs, { role: 'system', content: '', needsInput: ni }];
-                });
+                if (activeReplyRef.current) {
+                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
+                        ...msg,
+                        content: (msg.content || '') + `\n\n❓ **${questionText}**${optionsText ? `\nOptions: ${optionsText}` : ''}`,
+                        _streaming: true,
+                    })));
+                    return;
+                }
+                setMessages((msgs) => [...msgs, { role: 'system', content: '', needsInput: ni }]);
             }),
             onPluginEvent('error', (p) => {
                 const err = p as { code: number; message: string };
                 logConsole('error', 'error', err);
-                setMessages((msgs) => {
-                    // ★ During active reply, attach error to the last assistant message
-                    if (activeReplyRef.current) {
-                        let lastAssistantIdx = -1;
-                        for (let i = msgs.length - 1; i >= 0; i--) {
-                            if (msgs[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                        }
-                        if (lastAssistantIdx >= 0) {
-                            const last = msgs[lastAssistantIdx];
-                            const updated = [...msgs];
-                            updated[lastAssistantIdx] = {
-                                ...last,
-                                content: last.content + `\n\n❌ **Error**: ${err.message}`,
-                            };
-                            return updated;
-                        }
-                    }
-                    return [...msgs, { role: 'system', content: `Error: ${err.message}` }];
-                });
+                if (activeReplyRef.current) {
+                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
+                        ...msg,
+                        content: (msg.content || '') + `\n\n❌ **Error**: ${err.message}`,
+                        _streaming: true,
+                    })));
+                    return;
+                }
+                setMessages((msgs) => [...msgs, { role: 'system', content: `Error: ${err.message}` }]);
             }),
             // Action start — show compact action label in the chat
             onPluginEvent('action_start', (p) => {
                 const data = p as { action: string; display: string; instruction: string };
-                // ★ During an active reply (SSE stream), do NOT insert a new user message
-                // as it would split the assistant reply into separate messages.
-                // The action context is already visible via agent steps in the assistant message.
                 if (activeReplyRef.current) return;
                 setMessages((prev) => [
                     ...prev,
                     { role: 'user' as const, content: `**${data.display}**\n${data.instruction}` },
                 ]);
             }),
-            // Action done
+            // Action done — only finalize when not in an active turn reply
             onPluginEvent('action_done', () => {
+                if (activeReplyRef.current) return;
                 setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last && last._streaming) {
@@ -508,10 +463,10 @@ export function App() {
             onPluginEvent('session_interrupted', (p) => {
                 const data = p as { sessionId: string; hasCheckpoint: boolean };
                 activeReplyRef.current = false;
+                activeTurnIdRef.current = '';
                 setAbnormalTermination(true);
                 setHasCheckpoint(data.hasCheckpoint);
                 setIsResuming(false);
-                // Finalize any streaming message
                 setMessages((prev) => {
                     let lastAssistantIdx = -1;
                     for (let i = prev.length - 1; i >= 0; i--) {
@@ -545,161 +500,86 @@ export function App() {
                 const data = payload as { type?: string; source?: string; data?: unknown };
                 logConsole(data.type as ConsoleEntry['type'] || 'info', data.source || 'plugin', data.data);
             }),
-            // ★ Agent interactive steps — thinking/reading/writing/running
+            // ★ Agent interactive steps — all merged into the current turn's assistant card
             onPluginEvent('agent_thinking', (payload) => {
                 const data = payload as { text?: string; phaseId?: string };
                 logConsole('agent', 'agent_thinking', data);
                 const step: AgentStep = { type: 'thinking', content: data.text || '思考中...', status: 'running' };
-                setMessages((prev) => {
-                    // ★ Find the last assistant message (not necessarily the very last element)
-                    let lastAssistantIdx = -1;
-                    for (let i = prev.length - 1; i >= 0; i--) {
-                        if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                    }
-                    if (lastAssistantIdx >= 0) {
-                        const last = prev[lastAssistantIdx];
-                        const updated = [...prev];
-                        updated[lastAssistantIdx] = { ...last, agentSteps: [...(last.agentSteps || []), step] };
-                        return updated;
-                    }
-                    return [...prev, { role: 'assistant' as const, content: '', agentSteps: [step] }];
-                });
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
+                    ...msg,
+                    agentSteps: [...(msg.agentSteps || []), step],
+                    _streaming: true,
+                })));
             }),
             onPluginEvent('agent_reading', (payload) => {
                 const data = payload as { summary?: string; files?: { path: string; op?: string }[]; phaseId?: string };
                 logConsole('agent', 'agent_reading', data);
-                // Mark previous thinking step as success
-                setMessages((prev) => {
-                    let lastAssistantIdx = -1;
-                    for (let i = prev.length - 1; i >= 0; i--) {
-                        if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                const readingStep: AgentStep = {
+                    type: 'reading',
+                    content: data.summary || '读取文件',
+                    status: 'success',
+                    detail: { files: (data.files || []).map(f => ({ path: f.path, op: f.op })), summary: data.summary },
+                };
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
+                    const steps = [...(msg.agentSteps || [])];
+                    const last = steps[steps.length - 1];
+                    if (last && last.type === 'thinking' && last.status === 'running') {
+                        steps[steps.length - 1] = { ...last, status: 'success' };
                     }
-                    if (lastAssistantIdx >= 0) {
-                        const last = prev[lastAssistantIdx];
-                        if (last.agentSteps && last.agentSteps.length > 0) {
-                            const steps = [...last.agentSteps];
-                            const lastStep = steps[steps.length - 1];
-                            if (lastStep.type === 'thinking' && lastStep.status === 'running') {
-                                steps[steps.length - 1] = { ...lastStep, status: 'success' };
-                            }
-                            const readingStep: AgentStep = {
-                                type: 'reading',
-                                content: data.summary || '读取文件',
-                                status: 'success',
-                                detail: { files: (data.files || []).map(f => ({ path: f.path, op: f.op })), summary: data.summary },
-                            };
-                            const updated = [...prev];
-                            updated[lastAssistantIdx] = { ...last, agentSteps: [...steps, readingStep] };
-                            return updated;
-                        }
-                    }
-                    const readingStep: AgentStep = {
-                        type: 'reading',
-                        content: data.summary || '读取文件',
-                        status: 'success',
-                        detail: { files: (data.files || []).map(f => ({ path: f.path, op: f.op })), summary: data.summary },
-                    };
-                    return [...prev, { role: 'assistant' as const, content: '', agentSteps: [readingStep] }];
-                });
+                    return { ...msg, agentSteps: [...steps, readingStep], _streaming: true };
+                }));
             }),
             onPluginEvent('agent_writing', (payload) => {
                 const data = payload as { text?: string; files?: { path: string; op?: string; lineCount?: number; preview?: string }[]; phaseId?: string };
                 logConsole('agent', 'agent_writing', data);
-                // Mark previous thinking step as success
-                setMessages((prev) => {
-                    let lastAssistantIdx = -1;
-                    for (let i = prev.length - 1; i >= 0; i--) {
-                        if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                const writingStep: AgentStep = {
+                    type: 'writing',
+                    content: data.text || '修改文件',
+                    status: 'running',
+                    detail: { files: data.files || [] },
+                };
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
+                    const steps = [...(msg.agentSteps || [])];
+                    const last = steps[steps.length - 1];
+                    if (last && last.type === 'thinking' && last.status === 'running') {
+                        steps[steps.length - 1] = { ...last, status: 'success' };
                     }
-                    if (lastAssistantIdx >= 0) {
-                        const last = prev[lastAssistantIdx];
-                        if (last.agentSteps && last.agentSteps.length > 0) {
-                            const steps = [...last.agentSteps];
-                            const lastStep = steps[steps.length - 1];
-                            if (lastStep.type === 'thinking' && lastStep.status === 'running') {
-                                steps[steps.length - 1] = { ...lastStep, status: 'success' };
-                            }
-                            const writingStep: AgentStep = {
-                                type: 'writing',
-                                content: data.text || '修改文件',
-                                status: 'running',
-                                detail: { files: data.files || [] },
-                            };
-                            const updated = [...prev];
-                            updated[lastAssistantIdx] = { ...last, agentSteps: [...steps, writingStep] };
-                            return updated;
-                        }
-                    }
-                    const writingStep: AgentStep = {
-                        type: 'writing',
-                        content: data.text || '修改文件',
-                        status: 'running',
-                        detail: { files: data.files || [] },
-                    };
-                    return [...prev, { role: 'assistant' as const, content: '', agentSteps: [writingStep] }];
-                });
+                    return { ...msg, agentSteps: [...steps, writingStep], _streaming: true };
+                }));
             }),
             onPluginEvent('agent_running', (payload) => {
                 const data = payload as { text?: string; command?: string; output?: string; phaseId?: string };
                 logConsole('agent', 'agent_running', data);
-                // Mark previous writing step as success
-                setMessages((prev) => {
-                    let lastAssistantIdx = -1;
-                    for (let i = prev.length - 1; i >= 0; i--) {
-                        if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
+                const runningStep: AgentStep = {
+                    type: 'running',
+                    content: data.text || '运行命令',
+                    status: 'running',
+                    detail: { command: data.command, output: data.output },
+                };
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
+                    const steps = [...(msg.agentSteps || [])];
+                    const last = steps[steps.length - 1];
+                    if (last && last.type === 'writing' && last.status === 'running') {
+                        steps[steps.length - 1] = { ...last, status: 'success' };
                     }
-                    if (lastAssistantIdx >= 0) {
-                        const last = prev[lastAssistantIdx];
-                        if (last.agentSteps && last.agentSteps.length > 0) {
-                            const steps = [...last.agentSteps];
-                            const lastStep = steps[steps.length - 1];
-                            if (lastStep.type === 'writing' && lastStep.status === 'running') {
-                                steps[steps.length - 1] = { ...lastStep, status: 'success' };
-                            }
-                            const runningStep: AgentStep = {
-                                type: 'running',
-                                content: data.text || '运行命令',
-                                status: 'running',
-                                detail: { command: data.command, output: data.output },
-                            };
-                            const updated = [...prev];
-                            updated[lastAssistantIdx] = { ...last, agentSteps: [...steps, runningStep] };
-                            return updated;
-                        }
-                    }
-                    const runningStep: AgentStep = {
-                        type: 'running',
-                        content: data.text || '运行命令',
-                        status: 'running',
-                        detail: { command: data.command, output: data.output },
-                    };
-                    return [...prev, { role: 'assistant' as const, content: '', agentSteps: [runningStep] }];
-                });
+                    return { ...msg, agentSteps: [...steps, runningStep], _streaming: true };
+                }));
             }),
-            // ★ Plan steps from backend — store in current assistant message
+            // ★ Plan steps — merge/replace plan in the current turn's assistant card
             onPluginEvent('user_plan', (payload) => {
                 const data = payload as { goal?: string; steps?: { id: string; title: string; status?: string }[] };
                 logConsole('agent', 'user_plan', data);
-                if (data.steps && data.steps.length > 0) {
-                    const planSteps = data.steps.map(s => ({
-                        id: s.id,
-                        title: s.title,
-                        status: s.status || 'pending',
-                    }));
-                    setMessages((prev) => {
-                        let lastAssistantIdx = -1;
-                        for (let i = prev.length - 1; i >= 0; i--) {
-                            if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                        }
-                        if (lastAssistantIdx >= 0) {
-                            const last = prev[lastAssistantIdx];
-                            const updated = [...prev];
-                            updated[lastAssistantIdx] = { ...last, planSteps };
-                            return updated;
-                        }
-                        return [...prev, { role: 'assistant' as const, content: '', planSteps }];
-                    });
-                }
+                if (!data.steps || data.steps.length === 0) return;
+                const planSteps = data.steps.map(s => ({
+                    id: s.id,
+                    title: s.title,
+                    status: s.status || 'pending',
+                }));
+                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
+                    ...msg,
+                    planSteps,
+                    _streaming: true,
+                })));
             }),
         ];
         return () => unsubs.forEach((u) => u());
@@ -707,8 +587,23 @@ export function App() {
 
     const handleSend = (text: string, chips: ContextChipData[], images?: ImageData[]) => {
         // ★ Mark the start of an active reply — all subsequent delta/tool_call/agent events
-        // will be merged into ONE assistant message until done(reason=final)
+        // will be merged into ONE assistant card (bound by turnId) until done(reason=final)
         activeReplyRef.current = true;
+        const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        activeTurnIdRef.current = turnId;
+
+        // ★ Eagerly insert the user message + an empty assistant placeholder bound to this
+        //    turn, so every subsequent event in this turn appends into THIS one card,
+        //    no matter how many backend rounds (subtask_done, phase_done, tool_call…) occur.
+        const contextRefsForUi = chips.map((chip) => ({
+            display: chip.display,
+            type: chip.type,
+        }));
+        setMessages((prev) => [
+            ...prev,
+            { role: 'user' as const, content: text, contextRefs: contextRefsForUi, turnId },
+            { role: 'assistant' as const, content: '', _streaming: true, turnId },
+        ]);
 
         // Build contextRefs for the plugin (no fullCode — that's in Kotlin contextStore)
         const contextRefs = chips.map((chip) => ({
@@ -762,6 +657,7 @@ export function App() {
         setHasCheckpoint(false);
         setIsResuming(false);
         activeReplyRef.current = false;
+        activeTurnIdRef.current = '';
     };
 
     const handleSelectSession = (id: string) => {
