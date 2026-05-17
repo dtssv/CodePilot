@@ -123,6 +123,32 @@
       <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
     </action>
 
+    <!-- P0-04 Inline Edit (Cmd+K) and Accept/Reject/Rewrite shortcuts. The
+         Accept/Reject/Rewrite actions are only enabled while an InlineEditSession
+         exists for the active editor (see InlineEditController.sessionFor). -->
+    <action id="CodePilot.InlineEdit"
+            class="io.codepilot.plugin.inline.InlineEditAction"
+            text="CodePilot Inline Edit"
+            description="Describe an inline edit for the selected code">
+      <keyboard-shortcut first-keystroke="control K" keymap="$default"/>
+      <keyboard-shortcut first-keystroke="meta K" keymap="Mac OS X 10.5+"/>
+    </action>
+    <action id="CodePilot.InlineEdit.Accept"
+            class="io.codepilot.plugin.inline.AcceptInlineEditAction"
+            text="CodePilot Inline Edit: Accept">
+      <keyboard-shortcut first-keystroke="alt Y" keymap="$default"/>
+    </action>
+    <action id="CodePilot.InlineEdit.Reject"
+            class="io.codepilot.plugin.inline.RejectInlineEditAction"
+            text="CodePilot Inline Edit: Reject">
+      <keyboard-shortcut first-keystroke="alt N" keymap="$default"/>
+    </action>
+    <action id="CodePilot.InlineEdit.Rewrite"
+            class="io.codepilot.plugin.inline.RewriteInlineEditAction"
+            text="CodePilot Inline Edit: Rewrite">
+      <keyboard-shortcut first-keystroke="alt R" keymap="$default"/>
+    </action>
+
     <action id="CodePilot.OpenChat"
             class="io.codepilot.plugin.actions.OpenChatAction"
             text="Open CodePilot chat">

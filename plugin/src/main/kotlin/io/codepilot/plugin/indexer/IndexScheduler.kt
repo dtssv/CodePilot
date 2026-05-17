@@ -7,6 +7,8 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFileManager
+import io.codepilot.plugin.protocol.EventBus
+import io.codepilot.plugin.protocol.EventTypes
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,8 +48,21 @@ class IndexScheduler(
 
     private val running = AtomicBoolean(false)
     private val fullScanInProgress = AtomicBoolean(false)
+    private val paused = AtomicBoolean(false)
     private val indexedFileCount = AtomicInteger(0)
     private val totalFilesToIndex = AtomicInteger(0)
+    private val failedFileCount = AtomicInteger(0)
+
+    data class CodebaseStatus(
+        val state: String,
+        val totalFiles: Int,
+        val indexedFiles: Int,
+        val failedFiles: Int,
+        val lastIndexedAt: Long?,
+        val embeddingModel: String,
+        val ignored: List<String>,
+        val error: String? = null,
+    )
 
     /** Current indexing progress (0.0 to 1.0). Used by status bar widget. */
     val progress: Float
@@ -59,9 +74,40 @@ class IndexScheduler(
 
     val isIndexing: Boolean get() = fullScanInProgress.get()
 
+    fun statusSnapshot(error: String? = null): CodebaseStatus {
+        val stats = indexStore.stats()
+        val state =
+            when {
+                paused.get() -> "paused"
+                fullScanInProgress.get() -> "indexing"
+                running.get() -> "idle"
+                else -> "idle"
+            }
+        return CodebaseStatus(
+            state = state,
+            totalFiles = totalFilesToIndex.get().takeIf { it > 0 } ?: stats.totalFiles,
+            indexedFiles = indexedFileCount.get().takeIf { it > 0 } ?: stats.totalFiles,
+            failedFiles = failedFileCount.get(),
+            lastIndexedAt = stats.lastFullScanMs.takeIf { it > 0 },
+            embeddingModel = "local-tfidf",
+            ignored = loadIgnorePatterns(),
+            error = error,
+        )
+    }
+
+    fun emitStatus(error: String? = null) {
+        EventBus.getInstance(project).emit(
+            turnId = "system",
+            stepId = "codebase",
+            type = EventTypes.CODEBASE_STATUS,
+            payload = statusSnapshot(error),
+        )
+    }
+
     fun start() {
         if (!running.compareAndSet(false, true)) return
         watcher.initialize()
+        emitStatus()
 
         // Schedule incremental sync every 5 seconds
         executor.scheduleWithFixedDelay(::incrementalSync, 5, 5, TimeUnit.SECONDS)
@@ -81,7 +127,19 @@ class IndexScheduler(
     /** Trigger a full re-index of the entire project. */
     fun triggerFullScan() {
         if (!running.get()) return
+        paused.set(false)
         executor.submit { fullScan() }
+    }
+
+    fun pause() {
+        paused.set(true)
+        emitStatus()
+    }
+
+    fun resume() {
+        paused.set(false)
+        emitStatus()
+        if (!fullScanInProgress.get()) triggerFullScan()
     }
 
     /** Search the local index. Uses AdaptiveDepthSearcher for optimal depth. */
@@ -94,6 +152,14 @@ class IndexScheduler(
         val searcher = AdaptiveDepthSearcher(project)
         val params = searcher.resolveParams(query, topK * 200) // Estimate ~200 tokens per result
         return searchEngine.search(query, params.topK, language)
+    }
+
+    fun setIgnorePatterns(patterns: List<String>) {
+        val base = project.basePath ?: return
+        val target = java.nio.file.Path.of(base, ".codepilotindexignore")
+        java.nio.file.Files.writeString(target, patterns.joinToString("\n"))
+        emitStatus()
+        triggerFullScan()
     }
 
     // ─── Internal ───────────────────────────────────────────────────
@@ -109,12 +175,17 @@ class IndexScheduler(
                 }
             totalFilesToIndex.set(files.size)
             indexedFileCount.set(0)
+            failedFileCount.set(0)
+            emitStatus()
 
             val batchSize = 50
             var totalChunks = 0
 
             for (batch in files.chunked(batchSize)) {
                 if (!running.get()) break
+                while (paused.get() && running.get()) {
+                    Thread.sleep(250)
+                }
 
                 val allChunks = mutableListOf<ChunkBuilder.Chunk>()
 
@@ -150,6 +221,7 @@ class IndexScheduler(
                         indexedFileCount.incrementAndGet()
                     } catch (e: Exception) {
                         log.debug("Failed to index file: ${vf.path}", e)
+                        failedFileCount.incrementAndGet()
                         indexedFileCount.incrementAndGet()
                     }
                 }
@@ -161,6 +233,7 @@ class IndexScheduler(
                 }
 
                 // Yield to avoid blocking IDE
+                emitStatus()
                 Thread.sleep(50)
             }
 
@@ -168,10 +241,13 @@ class IndexScheduler(
             indexStore.save()
             val stats = searchEngine.stats()
             log.info("Full scan done: ${files.size} files, $totalChunks chunks, ${stats.totalTerms} terms indexed")
+            emitStatus()
         } catch (e: Exception) {
             log.warn("Full scan failed", e)
+            emitStatus(e.message)
         } finally {
             fullScanInProgress.set(false)
+            emitStatus()
         }
     }
 
@@ -232,6 +308,7 @@ class IndexScheduler(
             searchEngine.indexChunks(chunksToIndex)
         }
         indexStore.save()
+        emitStatus()
     }
 
     override fun dispose() {
@@ -244,5 +321,22 @@ class IndexScheduler(
     companion object {
         @JvmStatic
         fun getInstance(project: Project): IndexScheduler = project.service()
+    }
+
+    private fun loadIgnorePatterns(): List<String> {
+        val base = project.basePath ?: return emptyList()
+        val own = java.nio.file.Path.of(base, ".codepilotindexignore")
+        val cursor = java.nio.file.Path.of(base, ".cursorindexignore")
+        val patterns = mutableListOf<String>()
+        for (p in listOf(own, cursor)) {
+            if (java.nio.file.Files.exists(p)) {
+                patterns.addAll(
+                    java.nio.file.Files.readAllLines(p)
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() && !it.startsWith("#") },
+                )
+            }
+        }
+        return patterns.distinct()
     }
 }

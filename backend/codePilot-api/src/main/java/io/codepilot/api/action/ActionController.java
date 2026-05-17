@@ -55,7 +55,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> refactor(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "refactor", true, userId);
+    return runAction(req, "refactor", req.useGraph() == null || req.useGraph(), userId);
   }
 
   @Operation(summary = "Review code")
@@ -63,7 +63,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> review(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "review", true, userId);
+    return runAction(req, "review", req.useGraph() == null || req.useGraph(), userId);
   }
 
   @Operation(summary = "Generate comments")
@@ -71,7 +71,10 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> comment(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "comment", true, userId);
+    // P2 audit fix — let callers opt OUT of graph mode for one-shot CHAT
+    // comment generation (graph mode is overkill for a single file).
+    boolean useGraph = Boolean.TRUE.equals(req.useGraph());
+    return runAction(req, "comment", useGraph, userId);
   }
 
   @Operation(summary = "Generate tests")
@@ -79,7 +82,7 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> gentest(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gentest", true, userId);
+    return runAction(req, "gentest", req.useGraph() == null || req.useGraph(), userId);
   }
 
   @Operation(summary = "Generate documentation")
@@ -87,7 +90,8 @@ public class ActionController {
   public Flux<ServerSentEvent<String>> gendoc(
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestBody @Valid ActionRequest req) {
-    return runAction(req, "gendoc", true, userId);
+    boolean useGraph = Boolean.TRUE.equals(req.useGraph());
+    return runAction(req, "gendoc", useGraph, userId);
   }
 
   // ─── Custom-request actions ───────────────────────────────────────────
@@ -168,9 +172,28 @@ public class ActionController {
     vars.put("filePath", req.filePath());
     vars.put("selection", req.selection());
     vars.put("instruction", req.instruction());
-    String input = loadPrompt("inline-edit", vars);
+    // P0 audit fix — extended context fields. All optional; we pass empty
+    // string when the client did not supply them so prompt placeholders render
+    // cleanly without `null` leaking into the LLM input.
+    vars.put("fileOutline", emptyIfNull(req.fileOutline()));
+    vars.put("prefixContext", emptyIfNull(req.prefixContext()));
+    vars.put("suffixContext", emptyIfNull(req.suffixContext()));
+    vars.put("cursorOffset", req.cursorOffset() != null ? req.cursorOffset().toString() : "-1");
+    vars.put("diagnostics",
+        req.diagnostics() != null && !req.diagnostics().isEmpty()
+            ? String.join("\n", req.diagnostics()) : "");
+    vars.put("userLocale", "zh-CN");
+    // If the selection is empty (or only whitespace), fall back to the
+    // "generate" variant which produces fresh code from scratch instead of
+    // replacing existing code.
+    boolean empty = req.selection() == null || req.selection().trim().isEmpty();
+    String action = empty && promptLoader.exists("inline-edit-generate")
+        ? "inline-edit-generate" : "inline-edit";
+    String input = loadPrompt(action, vars);
     return runActionWithInput(req.sessionId(), req.modelId(), req.modelSource(), input, false, userId);
   }
+
+  private static String emptyIfNull(String s) { return s == null ? "" : s; }
 
   // ─── Core runAction method ────────────────────────────────────────────
 
@@ -200,7 +223,8 @@ public class ActionController {
             "graph", action,
             new ConversationRunRequest.GraphVerifyPolicy(true, true, true, null),
             new ConversationRunRequest.GraphRepairPolicy(2, List.of("compile-error", "test-fail")),
-            null, true, true)
+            null, true, true,
+            /*bareMode*/ null)
         : null;
 
     ConversationRunRequest runReq = new ConversationRunRequest(
@@ -212,16 +236,25 @@ public class ActionController {
   }
 
   /**
-   * Shared action execution path for custom-request endpoints.
-   * Uses the already-assembled input string (from prompt template + custom vars).
+   * Shared action execution path for custom-request endpoints. By default
+   * runs in bare mode so we don't ship the large base+chat system preamble
+   * on latency-sensitive endpoints (inline-edit, inline-completion,
+   * commit-message, bug-scan). Pass {@code useGraph=true} to opt into the
+   * full agent stack.
    */
   private Flux<ServerSentEvent<String>> runActionWithInput(
       String sessionId, String modelId, String modelSource, String input, boolean useGraph, String userId) {
     var mode = useGraph ? ConversationMode.AGENT : ConversationMode.CHAT;
+    // bareMode is only meaningful for CHAT runs — graph engine builds its
+    // own prompt stack and ignores the policy flag.
+    var policy = useGraph ? null : new ConversationRunRequest.Policy(
+        null, null, null, null, null, null, null, null, null, null,
+        null, null, null, null, null, null, null,
+        /*bareMode*/ Boolean.TRUE);
     ConversationRunRequest runReq = new ConversationRunRequest(
         sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, null, null,
+        List.of(), null, null, null, null, null, null, null, null, policy, null,
         null, null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
@@ -258,7 +291,14 @@ public class ActionController {
       String filePath,
       String testFramework,
       String docTarget,
-      String audience) {}
+      String audience,
+      /**
+       * Opt into graph engine mode (planning + verify + repair). Defaults to
+       * the action's historical setting: refactor/review/gentest default to
+       * graph=true, comment/gendoc default to graph=false unless the caller
+       * sets this flag.
+       */
+      Boolean useGraph) {}
 
   public record CommitMessageRequest(
       @NotBlank String sessionId,
@@ -289,6 +329,16 @@ public class ActionController {
       @NotBlank String filePath,
       List<String> diagnostics) {}
 
+  /**
+   * Inline-edit request. The first 7 fields are the original contract. The
+   * trailing 5 are P0-audit additions that let the model do Cursor-grade
+   * context-aware edits without breaking older clients (all optional).
+   *
+   * <p>Note: {@code selection} stays {@code @NotBlank} so the legacy "edit"
+   * mode keeps its invariant; the "generate" mode (empty selection) goes
+   * through the same record by passing a single space — the controller
+   * detects the whitespace-only case and routes to the generate prompt.
+   */
   public record InlineEditRequest(
       @NotBlank String sessionId,
       String modelId,
@@ -296,5 +346,15 @@ public class ActionController {
       @NotBlank String selection,
       @NotBlank String instruction,
       @NotBlank String language,
-      @NotBlank String filePath) {}
+      @NotBlank String filePath,
+      /** ~30 lines of code immediately before the selection (optional). */
+      String prefixContext,
+      /** ~30 lines of code immediately after the selection (optional). */
+      String suffixContext,
+      /** PSI top-level outline of the file (optional). */
+      String fileOutline,
+      /** Cursor offset inside the selection (0-based), or null if unknown. */
+      Integer cursorOffset,
+      /** Current IDE diagnostics on the file (one per line). */
+      java.util.List<String> diagnostics) {}
 }

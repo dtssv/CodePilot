@@ -45,8 +45,15 @@ class CodePilotInlineCompletionProvider : InlineCompletionProvider {
                     filePath = filePath,
                 )
 
+            val t0 = System.currentTimeMillis()
             val result = InlineCompletionService.complete(completionRequest)
             if (result != null) {
+                TabFeedback.getInstance().recordSuggest(
+                    project,
+                    filePath,
+                    System.currentTimeMillis() - t0,
+                    result.length,
+                )
                 send(InlineCompletionGrayTextElement(result))
 
                 // ★ Integration: After accepting completion, trigger CursorTabSuggester

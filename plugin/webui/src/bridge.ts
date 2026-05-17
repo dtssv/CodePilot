@@ -31,6 +31,10 @@ export type PluginEventType =
     | 'session_list'
     | 'session_switched'
     | 'session_messages'
+    | 'session.search.result'
+    | 'branch.tree.result'
+    | 'voice_result'
+    | 'voice.result'
     | 'action_start'
     | 'action_done'
     | 'context_added'
@@ -59,7 +63,25 @@ export type PluginEventType =
     | 'agent_thinking'
     | 'agent_reading'
     | 'agent_writing'
-    | 'agent_running';
+    | 'agent_running'
+    // v2 protocol — see doc/01-event-protocol.md and src/state/.
+    | 'envelope'
+    // P0-03 hunk apply
+    | 'apply.list_response'
+    | 'apply.result'
+    // P0-04 inline edit + tab stats
+    | 'tab.stats_response'
+    // P1-05 codebase index/search
+    | 'codebase.status_response'
+    | 'codebase.search_response'
+    // P1-06 rules/memories
+    | 'rules.response'
+    | 'memory.response'
+    // P1-07 MCP/hooks
+    | 'mcp.response'
+    | 'hooks.response'
+    // P1-08 shell policy
+    | 'shell.policy_response';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

@@ -30,6 +30,16 @@ public class PromptOrchestrator {
 
   public Assembled assemble(AssembleRequest req) {
     List<String> segments = new ArrayList<>();
+    // Bare mode: skip base/agent/chat preambles entirely. The action prompt
+    // (which is the user input) already contains role + context + rules, so
+    // we only prepend the non-negotiable security guard. This shaves ~5400
+    // chars (~1400 tokens) from latency-sensitive endpoints like inline-edit.
+    if (req.bareMode()) {
+      segments.add(registry.get("guard.system"));
+      String bareSystem = String.join("\n\n", segments)
+          .replace("{{userLocale}}", req.userLocale());
+      return new Assembled(bareSystem, List.copyOf(req.activatedSkills()));
+    }
     segments.add(registry.get("base.system"));
 
     if (req.mode() == ConversationMode.AGENT) {
@@ -132,6 +142,8 @@ public class PromptOrchestrator {
         req.options() != null && StringUtils.isNotBlank(req.options().locale())
             ? req.options().locale()
             : "zh-CN";
+    boolean bareMode =
+        req.policy() != null && Boolean.TRUE.equals(req.policy().bareMode());
     return assemble(
         new AssembleRequest(
             req.mode(),
@@ -149,7 +161,8 @@ public class PromptOrchestrator {
             activated,
             locale,
             req.projectRules(),
-            req.images()));
+            req.images(),
+            bareMode));
   }
 
   private String editsJson(ConversationRunRequest req) {
@@ -177,7 +190,33 @@ public class PromptOrchestrator {
       List<ActivatedSkill> activatedSkills,
       String userLocale,
       List<String> projectRules,
-      List<ConversationRunRequest.Image> images) {}
+      List<ConversationRunRequest.Image> images,
+      /** When true, only `guard.system` is emitted (no base/agent/chat). */
+      boolean bareMode) {
+    /** Backwards-compatible ctor: defaults bareMode=false. */
+    public AssembleRequest(
+        ConversationMode mode,
+        String toolsSchemaJson,
+        boolean requestCompact,
+        boolean replanHint,
+        boolean hasUserPlanEdits,
+        String userPlanEditsJson,
+        boolean hasLastToolResult,
+        int contextBudgetTokens,
+        boolean anyRiskyToolAvailable,
+        boolean priorTurnFailed,
+        boolean resuming,
+        boolean approachingDelivery,
+        List<ActivatedSkill> activatedSkills,
+        String userLocale,
+        List<String> projectRules,
+        List<ConversationRunRequest.Image> images) {
+      this(mode, toolsSchemaJson, requestCompact, replanHint, hasUserPlanEdits,
+          userPlanEditsJson, hasLastToolResult, contextBudgetTokens,
+          anyRiskyToolAvailable, priorTurnFailed, resuming, approachingDelivery,
+          activatedSkills, userLocale, projectRules, images, false);
+    }
+  }
 
   /** Assembled result; the body is internal and never written to logs verbatim. */
   public record Assembled(String systemText, List<ActivatedSkill> activatedSkills) {}

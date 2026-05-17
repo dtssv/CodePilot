@@ -44,6 +44,12 @@ class CefChatPanel(
     private val client = ConversationClient()
     private val workspaceHash = (project.basePath ?: project.name).hashCode().toString(16)
 
+    /** v2 protocol — see protocol/EventEnvelope.kt + protocol/LegacyEventAdapter.kt. */
+    private val eventBus = io.codepilot.plugin.protocol.EventBus.getInstance(project)
+
+    /** v2 adapter for the currently active turn (recreated per user_message). */
+    private var legacyAdapter: io.codepilot.plugin.protocol.LegacyEventAdapter? = null
+
     /** Current active session; nullable — only created on first message. */
     private var sessionHandle: SessionStore.SessionHandle? = null
 
@@ -64,6 +70,23 @@ class CefChatPanel(
     init {
         // Start with no session — will be created on first message
         sessionHandle = null
+
+        // Wire EventBus -> WebUI:every envelope is mirrored as a single `envelope` event.
+        // The new v2 UI listens to this; the legacy UI ignores it harmlessly.
+        eventBus.setDispatcher { env ->
+            dispatchToWeb(
+                "envelope",
+                mapOf(
+                    "seq" to env.seq,
+                    "turnId" to env.turnId,
+                    "stepId" to env.stepId,
+                    "parentStepId" to env.parentStepId,
+                    "ts" to env.ts,
+                    "type" to env.type,
+                    "payload" to env.payload,
+                ),
+            )
+        }
 
         // Register logout callback so RefreshOn401Interceptor can notify WebUI
         io.codepilot.plugin.transport.RefreshOn401Interceptor.onLogout = {
@@ -172,7 +195,342 @@ class CefChatPanel(
     }
 
     override fun dispose() {
+        // Detach the EventBus dispatcher so a re-opened panel can re-attach cleanly.
+        eventBus.setDispatcher(null)
         // browser is disposed via Disposer.register
+    }
+
+    /**
+     * v2 protocol: re-execute a tool locally and emit a fresh envelope sequence.
+     *
+     * This bypasses the LLM round-trip — the result is shown to the user but is
+     * NOT submitted back via [io.codepilot.plugin.conversation.ConversationClient.submitToolResult],
+     * so the model's state is unaffected.
+     *
+     * Payload: `{ stepId: string, tool: string, args: object }` (stepId only used
+     * for the synthetic step label; a fresh stepId is generated for the rerun.)
+     */
+    private fun handleToolRerun(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val tool = payload.path("tool").asText("").takeIf { it.isNotBlank() } ?: return
+        val args = payload.path("args")
+        val originStep = payload.path("stepId").asText("rerun")
+        val bus = eventBus
+        val turnId = legacyAdapter?.turnId ?: "rerun-${System.currentTimeMillis()}"
+        val rerunStepId = "$originStep-rerun-${System.nanoTime()}"
+
+        bus.startStep(turnId, rerunStepId, io.codepilot.plugin.protocol.StepKinds.TOOL, "$tool (rerun)")
+        bus.toolCall(turnId, rerunStepId, tool, args)
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                val handle = sessionHandle
+                // Build an ephemeral dispatcher that does not submit results upstream.
+                val dummyClient = client
+                val tempDispatcher = ToolDispatcher(
+                    project,
+                    dummyClient,
+                    handle?.meta?.id ?: "",
+                    onToolResult = { _, ok, result ->
+                        val classified = io.codepilot.plugin.protocol.ToolResultClassifier
+                            .classify(tool, args, ok, result)
+                        bus.toolResult(turnId, rerunStepId, ok, classified, null)
+                        bus.endStep(
+                            turnId, rerunStepId,
+                            if (ok) io.codepilot.plugin.protocol.StepStatuses.SUCCESS
+                            else io.codepilot.plugin.protocol.StepStatuses.ERROR,
+                        )
+                    },
+                )
+                // Synthesize a tool_call node compatible with ToolDispatcher.dispatch.
+                val syntheticId = "rerun-${System.nanoTime()}"
+                tempDispatcher.dispatch(tool, mapper.treeToValue(args, Map::class.java), syntheticId)
+            } catch (t: Throwable) {
+                bus.toolResult(turnId, rerunStepId, false, mapOf(
+                    "kind" to "error",
+                    "tool" to tool,
+                    "errorMessage" to (t.message ?: t.javaClass.simpleName),
+                ), t.message)
+                bus.endStep(turnId, rerunStepId, io.codepilot.plugin.protocol.StepStatuses.ERROR, t.message)
+            }
+        }
+    }
+
+    /**
+     * v2 protocol gap recovery. Called when the WebUI detects a missing seq number
+     * and asks the host to re-emit buffered envelopes.
+     */
+    private fun handleReplaySince(lastSeq: Long) {
+        val envelopes = eventBus.replaySince(lastSeq)
+        log.info("[Envelope] replay_since lastSeq=$lastSeq -> ${envelopes.size} envelopes")
+        envelopes.forEach { env ->
+            dispatchToWeb(
+                "envelope",
+                mapOf(
+                    "seq" to env.seq,
+                    "turnId" to env.turnId,
+                    "stepId" to env.stepId,
+                    "parentStepId" to env.parentStepId,
+                    "ts" to env.ts,
+                    "type" to env.type,
+                    "payload" to env.payload,
+                ),
+            )
+        }
+    }
+
+    // ---- P0-03 Hunk Apply endpoints ---- //
+
+    private val patchStaging by lazy { io.codepilot.plugin.apply.PatchStaging.getInstance(project) }
+
+    private fun handleApplyList() {
+        dispatchToWeb("apply.list_response", mapOf("pending" to patchStaging.snapshot()))
+    }
+
+    private fun handleApplyHunkStatus(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val pendingId = payload.path("pendingId").asText().ifBlank { return }
+        val hunkId = payload.path("hunkId").asText("")
+        val status = payload.path("status").asText("pending").uppercase()
+        val s = runCatching { io.codepilot.plugin.apply.PatchStaging.HunkStatus.valueOf(status) }
+            .getOrDefault(io.codepilot.plugin.apply.PatchStaging.HunkStatus.PENDING)
+        if (hunkId == "*") patchStaging.setAllHunks(pendingId, s)
+        else patchStaging.setHunkStatus(pendingId, hunkId, s)
+    }
+
+    private fun handleApplyApplyFile(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val pendingId = payload.path("pendingId").asText().ifBlank { return }
+        val result = patchStaging.applyFile(pendingId)
+        dispatchToWeb("apply.result", result + mapOf("op" to "apply_file"))
+    }
+
+    private fun handleApplyApplyAll(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val turnId = payload.path("turnId").asText().ifBlank { legacyAdapter?.turnId ?: return }
+        val result = patchStaging.applyAll(turnId)
+        dispatchToWeb("apply.result", result + mapOf("op" to "apply_all", "turnId" to turnId))
+    }
+
+    private fun handleApplyRejectFile(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val pendingId = payload.path("pendingId").asText().ifBlank { return }
+        val result = patchStaging.rejectFile(pendingId)
+        dispatchToWeb("apply.result", result + mapOf("op" to "reject_file"))
+    }
+
+    private fun handleApplyReapply(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val pendingId = payload.path("pendingId").asText().ifBlank { return }
+        val result = patchStaging.reapply(pendingId)
+        dispatchToWeb("apply.result", result + mapOf("op" to "reapply"))
+    }
+
+    private fun handleApplyUndoTurn(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val turnId = payload.path("turnId").asText().ifBlank { return }
+        val result = patchStaging.undoTurn(turnId)
+        dispatchToWeb("apply.result", result + mapOf("op" to "undo_turn", "turnId" to turnId))
+    }
+
+    // ---- P0-04 Tab completion telemetry ---- //
+    private fun handleTabGetStats() {
+        val stats = io.codepilot.plugin.completion.TabFeedback.getInstance().snapshot()
+        dispatchToWeb("tab.stats_response", stats)
+    }
+
+    private fun handleTabResetStats() {
+        io.codepilot.plugin.completion.TabFeedback.getInstance().reset()
+        dispatchToWeb("tab.stats_response", io.codepilot.plugin.completion.TabFeedback.getInstance().snapshot())
+    }
+
+    // ---- P1-05 Codebase index and search ---- //
+    private val indexScheduler by lazy { io.codepilot.plugin.indexer.IndexScheduler.getInstance(project) }
+
+    private fun handleCodebaseGetStatus() {
+        dispatchToWeb("codebase.status_response", indexScheduler.statusSnapshot())
+        indexScheduler.emitStatus()
+    }
+
+    private fun handleCodebaseRebuild() {
+        indexScheduler.start()
+        indexScheduler.triggerFullScan()
+        dispatchToWeb("codebase.status_response", indexScheduler.statusSnapshot())
+    }
+
+    private fun handleCodebasePause() {
+        indexScheduler.pause()
+        dispatchToWeb("codebase.status_response", indexScheduler.statusSnapshot())
+    }
+
+    private fun handleCodebaseResume() {
+        indexScheduler.resume()
+        dispatchToWeb("codebase.status_response", indexScheduler.statusSnapshot())
+    }
+
+    private fun handleCodebaseSearch(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val query = payload.path("query").asText("").trim()
+        if (query.isBlank()) return
+        val topK = payload.path("topK").asInt(12).coerceIn(1, 50)
+        val language = payload.path("language").asText("").takeIf { it.isNotBlank() }
+        val t0 = System.currentTimeMillis()
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            val hits = indexScheduler.search(query, topK, language).map {
+                mapOf(
+                    "path" to it.path,
+                    "startLine" to it.startLine,
+                    "endLine" to it.endLine,
+                    "score" to it.score,
+                    "snippet" to it.snippet,
+                    "symbols" to it.symbols,
+                    "matchType" to it.matchType,
+                )
+            }
+            val payloadMap = mapOf(
+                "query" to query,
+                "hits" to hits,
+                "durationMs" to (System.currentTimeMillis() - t0),
+            )
+            eventBus.emit(
+                turnId = "system",
+                stepId = "codebase-search-${System.nanoTime()}",
+                type = io.codepilot.plugin.protocol.EventTypes.CODEBASE_SEARCH_RESULT,
+                payload = payloadMap,
+            )
+            dispatchToWeb("codebase.search_response", payloadMap)
+        }
+    }
+
+    private fun handleCodebaseSetIgnore(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val patterns = payload.path("patterns")
+            .takeIf { it.isArray }
+            ?.map { it.asText() }
+            ?.filter { it.isNotBlank() }
+            ?: emptyList()
+        indexScheduler.setIgnorePatterns(patterns)
+        dispatchToWeb("codebase.status_response", indexScheduler.statusSnapshot())
+    }
+
+    // ---- P1-06 Rules and memories ---- //
+    private val rulesService by lazy { io.codepilot.plugin.rules.RulesService.getInstance(project) }
+    private val memoryService by lazy { io.codepilot.plugin.memory.MemoryService.getInstance(project) }
+
+    private fun handleRulesReload() {
+        val rules = rulesService.reload()
+        dispatchToWeb("rules.response", mapOf("rules" to rules.map { it.toDto() }))
+    }
+
+    private fun handleRulesList() {
+        val rules = rulesService.all()
+        dispatchToWeb("rules.response", mapOf("rules" to rules.map { it.toDto() }))
+    }
+
+    private fun handleRulesCreate(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("rule-${System.currentTimeMillis()}.mdc")
+        val description = payload.path("description").asText(id)
+        val globs = payload.path("globs").takeIf { it.isArray }?.map { it.asText() } ?: listOf("**/*")
+        val body = payload.path("body").asText("")
+        val rule = rulesService.createRule(id, description, globs, body)
+        dispatchToWeb("rules.response", mapOf("rules" to rulesService.all().map { it.toDto() }, "created" to rule.toDto()))
+    }
+
+    private fun handleMemoryList() {
+        dispatchToWeb("memory.response", mapOf("memories" to memoryService.list()))
+    }
+
+    private fun handleMemoryUpsert(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("memory-${System.currentTimeMillis()}")
+        val memory = io.codepilot.plugin.memory.MemoryService.Memory(
+            id = id,
+            scope = payload.path("scope").asText("project"),
+            kind = payload.path("kind").asText("fact"),
+            text = payload.path("text").asText(""),
+            confidence = payload.path("confidence").asDouble(0.8),
+            status = payload.path("status").asText("suggested"),
+        )
+        memoryService.upsert(memory)
+        dispatchToWeb("memory.response", mapOf("memories" to memoryService.list(), "updated" to memory))
+    }
+
+    private fun handleMemorySetStatus(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        val status = payload.path("status").asText("approved")
+        memoryService.setStatus(id, status)
+        dispatchToWeb("memory.response", mapOf("memories" to memoryService.list()))
+    }
+
+    private fun handleMemoryRemove(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        memoryService.remove(id)
+        dispatchToWeb("memory.response", mapOf("memories" to memoryService.list()))
+    }
+
+    // ---- P1-07 MCP and hooks ---- //
+    private val mcpService by lazy { io.codepilot.plugin.mcp.McpService.getInstance(project) }
+    private val hookEngine by lazy { io.codepilot.plugin.hooks.HookEngine.getInstance(project) }
+
+    private fun handleMcpList() {
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.list()))
+    }
+
+    private fun handleMcpReload() {
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.reloadConfig()))
+    }
+
+    private fun handleMcpStart(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val name = payload.path("name").asText("").ifBlank { return }
+        mcpService.start(name)
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.list()))
+    }
+
+    private fun handleMcpStop(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val name = payload.path("name").asText("").ifBlank { return }
+        mcpService.stop(name)
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.list()))
+    }
+
+    private fun handleMcpSetGranted(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val server = payload.path("server").asText("").ifBlank { return }
+        val tool = payload.path("tool").asText("").ifBlank { return }
+        val granted = payload.path("granted").asBoolean(false)
+        mcpService.setGranted(server, tool, granted)
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.list()))
+    }
+
+    private fun handleMcpEditConfig(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val content = payload.path("content").asText("{}")
+        mcpService.editConfig(content)
+        dispatchToWeb("mcp.response", mapOf("servers" to mcpService.list()))
+    }
+
+    private fun handleHooksList() {
+        dispatchToWeb("hooks.response", mapOf("hooks" to hookEngine.list()))
+    }
+
+    private fun handleHooksSave(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val hooks = payload.path("hooks").takeIf { it.isArray }?.map {
+            io.codepilot.plugin.hooks.HookEngine.Hook(
+                id = it.path("id").asText("hook-${System.nanoTime()}"),
+                event = it.path("event").asText("beforeSubmitPrompt"),
+                command = it.path("command").asText(""),
+                enabled = it.path("enabled").asBoolean(true),
+                timeoutMs = it.path("timeoutMs").asInt(30_000),
+            )
+        } ?: emptyList()
+        hookEngine.writeHooks(hooks)
+        dispatchToWeb("hooks.response", mapOf("hooks" to hookEngine.list()))
+    }
+
+    // ---- P1-08 Shell policy ---- //
+    private val shellPolicy by lazy { io.codepilot.plugin.shell.ShellPolicy.getInstance(project) }
+
+    private fun handleShellPolicyGet() {
+        dispatchToWeb("shell.policy_response", shellPolicy.reload())
+    }
+
+    private fun handleShellPolicySave(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val defaultAction = payload.path("defaultAction").asText("ask")
+        val rules = payload.path("rules").takeIf { it.isArray }?.map {
+            mapOf(
+                "pattern" to it.path("pattern").asText(""),
+                "action" to it.path("action").asText("ask"),
+            )
+        } ?: emptyList()
+        shellPolicy.writePolicy(defaultAction, rules)
+        dispatchToWeb("shell.policy_response", shellPolicy.snapshot())
     }
 
     // ---- Private ---- //
@@ -236,6 +594,16 @@ class CefChatPanel(
                 "list_sessions" -> handleListSessions()
                 "switch_session" -> handleSwitchSession(payload["sessionId"]?.asText() ?: return)
                 "delete_session" -> handleDeleteSession(payload["sessionId"]?.asText() ?: return)
+                "session.pin" -> handleSessionPin(payload)
+                "session.archive" -> handleSessionArchive(payload)
+                "session.rename" -> handleSessionRename(payload)
+                "session.search" -> handleSessionSearch(payload)
+                "session.duplicate" -> handleSessionDuplicate(payload)
+                "branch.tree" -> handleBranchTree(payload)
+                "fork_from_message" -> handleForkFromMessage(payload["messageIndex"]?.asInt() ?: return)
+                "switch_branch" -> handleSwitchSession(payload["sessionId"]?.asText() ?: return)
+                "voice.start" -> handleVoiceStart()
+                "voice.stop" -> handleVoiceStop()
                 // Auth messages from login page
                 "check_auth" -> handleCheckAuth()
                 "auth_discover" -> handleAuthDiscover()
@@ -262,6 +630,48 @@ class CefChatPanel(
                 "replan" -> handleReplan()
                 "resume_session" -> handleResumeSession()
                 "update_auto_apply" -> handleUpdateAutoApply(payload)
+                // v2 protocol: gap recovery — re-emit all envelopes with seq > lastSeq
+                "replay_since" -> handleReplaySince(payload["lastSeq"]?.asLong() ?: 0L)
+                // v2 protocol: re-execute a tool locally for user inspection (no LLM feedback).
+                "tool.rerun" -> handleToolRerun(payload)
+                // P0-03 hunk apply
+                "apply.list" -> handleApplyList()
+                "apply.hunk_status" -> handleApplyHunkStatus(payload)
+                "apply.apply_file" -> handleApplyApplyFile(payload)
+                "apply.apply_all" -> handleApplyApplyAll(payload)
+                "apply.reject_file" -> handleApplyRejectFile(payload)
+                "apply.reapply" -> handleApplyReapply(payload)
+                "apply.undo_turn" -> handleApplyUndoTurn(payload)
+                // P0-04 tab completion settings
+                "tab.get_stats" -> handleTabGetStats()
+                "tab.reset_stats" -> handleTabResetStats()
+                // P1-05 codebase index/search
+                "codebase.get_status" -> handleCodebaseGetStatus()
+                "codebase.rebuild" -> handleCodebaseRebuild()
+                "codebase.pause" -> handleCodebasePause()
+                "codebase.resume" -> handleCodebaseResume()
+                "codebase.search" -> handleCodebaseSearch(payload)
+                "codebase.set_ignore" -> handleCodebaseSetIgnore(payload)
+                // P1-06 rules and memories
+                "rules.reload" -> handleRulesReload()
+                "rules.list" -> handleRulesList()
+                "rules.create" -> handleRulesCreate(payload)
+                "memory.list" -> handleMemoryList()
+                "memory.upsert" -> handleMemoryUpsert(payload)
+                "memory.set_status" -> handleMemorySetStatus(payload)
+                "memory.remove" -> handleMemoryRemove(payload)
+                // P1-07 MCP + hooks
+                "mcp.list_servers" -> handleMcpList()
+                "mcp.reload" -> handleMcpReload()
+                "mcp.start" -> handleMcpStart(payload)
+                "mcp.stop" -> handleMcpStop(payload)
+                "mcp.set_granted" -> handleMcpSetGranted(payload)
+                "mcp.edit_config" -> handleMcpEditConfig(payload)
+                "hooks.list" -> handleHooksList()
+                "hooks.save" -> handleHooksSave(payload)
+                // P1-08 shell policy
+                "shell.policy_get" -> handleShellPolicyGet()
+                "shell.policy_save" -> handleShellPolicySave(payload)
                 else -> log.warn("Unknown message type from web: $type")
             }
         } catch (e: Exception) {
@@ -308,6 +718,12 @@ class CefChatPanel(
                 "contextRefs" to contextRefs,
             ),
         )
+
+        // v2 protocol: start a new turn envelope flow for this user message.
+        // The adapter is kept on the panel instance and consumed inside the SSE listener.
+        val turnId = "turn-${System.currentTimeMillis()}-${kotlin.math.abs(text.hashCode())}"
+        legacyAdapter = io.codepilot.plugin.protocol.LegacyEventAdapter(eventBus, turnId)
+        legacyAdapter!!.onTurnStart(displayText, contextRefs)
 
         // Build the full message for backend (replace inline placeholders with actual code)
         val fullText =
@@ -373,16 +789,15 @@ class CefChatPanel(
                     remaining = remaining.substring(end + 1)
                 }
             }
-        dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
-            // Dispatch tool_result_ack to WebUI immediately when tool execution completes
+        dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, result ->
             dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
-            // Record the tool result step
+            legacyAdapter?.onToolResultAck(toolCallId, ok, result)
             sessionStore.appendStep(handle, mapOf(
                 "toolCallId" to toolCallId,
                 "ok" to ok,
                 "ts" to java.time.Instant.now().toString(),
             ))
-        })
+        }).apply { currentTurnId = turnId }
         gatherDispatcher =
             io.codepilot.plugin.tools
                 .GatherDispatcher(project, client, handle.meta.id) { toolCallId, ok, httpResponse ->
@@ -492,13 +907,17 @@ class CefChatPanel(
             if (completedToolCalls.size > 0) payload["completedToolCallsTail"] = completedToolCalls
             if (lastAssistantSummary != null) payload["lastAssistantTurnSummary"] = lastAssistantSummary
 
-            // ★ Integration: Inject .codepilotrules into the request payload
-            // ProjectRulesLoader reads from .codepilotrules / .codepilotrules.local
-            // and is already cached with VFS file-watcher auto-reload
-            val projectRules = io.codepilot.plugin.context.ProjectRulesLoader.getRules(project)
-            if (projectRules != null) {
-                payload["projectRules"] = listOf(projectRules)
-            }
+            // P1-06: inject active .mdc / AGENTS.md / legacy project rules plus
+            // approved memories into backend PromptOrchestrator.projectRules.
+            val workingFiles = contextRefs.mapNotNull { it["display"] as? String }
+            val rulesText = io.codepilot.plugin.rules.RulesService
+                .getInstance(project)
+                .renderForSystemPrompt(
+                    io.codepilot.plugin.rules.RulesService.getInstance(project).activeFor(workingFiles),
+                )
+            val memoryText = io.codepilot.plugin.memory.MemoryService.getInstance(project).renderApproved()
+            val promptFragments = listOf(rulesText, memoryText).filter { it.isNotBlank() }
+            if (promptFragments.isNotEmpty()) payload["projectRules"] = promptFragments
             // ★ Build recent messages: merge WebUI-provided history with local session messages
             // WebUI history takes priority as it contains the full conversation context
             // Local session messages serve as fallback when WebUI history is empty
@@ -519,6 +938,15 @@ class CefChatPanel(
                 )
             // Estimate and report context usage
             val estimatedTokens = sessionStore.estimateTokenCount(handle)
+            dispatchToWeb(
+                "context_budget",
+                mapOf(
+                    "current" to estimatedTokens,
+                    "total" to 24000,
+                    "estimated" to 0,
+                    "breakdown" to budgetBreakdown(rulesText, memoryText, contextRefs, recentMessages, estimatedTokens),
+                ),
+            )
             payload["policy"] =
                 mapOf(
                     "requestCompact" to "auto",
@@ -529,17 +957,29 @@ class CefChatPanel(
                     "maxSteps" to 25,
                 )
 
+            val hookResult = io.codepilot.plugin.hooks.HookEngine.getInstance(project).run(
+                "beforeSubmitPrompt",
+                mapOf("sessionId" to handle.meta.id, "mode" to mode, "message" to text.take(500)),
+            )
+            if (!hookResult.pass) {
+                dispatchToWeb("error", mapOf("code" to 49901, "message" to "Blocked by hook: ${hookResult.reason}"))
+                return@executeOnPooledThread
+            }
+
             // Collect full assistant response for local persistence
             val assistantBuilder = StringBuilder()
             // ★ Guard to prevent duplicate assistant message persistence on double done events
             var assistantPersisted = false
 
+            // Capture adapter for use inside the anonymous listener
+            val adapter = legacyAdapter
             client.run(
                 payload.toMap(),
                 object : ConversationClient.Listener {
                     override fun onDelta(text: String) {
                         assistantBuilder.append(text)
                         dispatchToWeb("delta", mapOf("text" to text))
+                        adapter?.onTextDelta(text)
                     }
 
                     override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -548,6 +988,7 @@ class CefChatPanel(
                         val toolName = payload.path("name").asText(null)
                         val toolCallId = payload.path("id").asText(null)
                         if (toolName != null && toolCallId != null) {
+                            adapter?.onToolCall(toolCallId, toolName, payload.path("args"))
                             // Persist tool call step for session recovery (started, no result yet)
                             sessionStore.appendStep(handle, mapOf(
                                 "toolCallId" to toolCallId,
@@ -596,11 +1037,15 @@ class CefChatPanel(
                         sessionStore.saveLedger(handle, data)
                     }
 
-                    override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onRiskNotice(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("risk_notice", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onRiskNotice(mapper.treeToValue(payload, Map::class.java))
+                    }
 
-                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onNeedsInput(mapper.treeToValue(payload, Map::class.java))
+                    }
 
                     // ── Bidirectional Memory: summaryForNextTurn + hintsForContext ──
                     override fun onSelfCheck(payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -664,35 +1109,50 @@ class CefChatPanel(
                     }
 
                     // ── User-facing plan events (shown in Plan panel) ──
-                    override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
-                        dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
+                    override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("user_plan", data)
+                        adapter?.onPlanUpdate(data)
+                    }
 
                     override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) =
                         dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
 
                     // ── Interactive Agent events (semantic layer for user-facing steps) ──
-                    override fun onAgentThinking(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onAgentThinking(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_thinking", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentThinking(payload.path("text").asText(null))
+                    }
 
-                    override fun onAgentReading(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onAgentReading(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_reading", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentReading(payload.path("summary").asText(null))
+                    }
 
-                    override fun onAgentWriting(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onAgentWriting(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_writing", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentWriting(payload.path("text").asText(null))
+                    }
 
-                    override fun onAgentRunning(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    override fun onAgentRunning(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
 
                     override fun onError(
                         code: Int,
                         message: String,
-                    ) = dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                    ) {
+                        dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                        adapter?.onError(code, message)
+                    }
 
                     override fun onDone(
                         reason: String,
                         payload: com.fasterxml.jackson.databind.JsonNode,
                     ) {
                         dispatchToWeb("done", mapOf("reason" to reason))
+                        adapter?.onDone(reason)
                         // Persist graph awaiting state for resume
                         if (reason == "awaiting_user_input" || reason == "phase_done") {
                             gss.applyAwaiting(payload)
@@ -748,6 +1208,8 @@ class CefChatPanel(
                     }
 
                     override fun onClosed() {
+                        // v2 protocol: emit turn.end(interrupted) if no terminal done was seen.
+                        adapter?.onAbnormalClose()
                         // If the stream closed without a proper "done" event, the session
                         // was abnormally terminated. Mark it for recovery UI.
                         val isRunning = sessionHandle?.meta?.running == true
@@ -1243,22 +1705,180 @@ class CefChatPanel(
         dispatchCurrentSessionMessages()
     }
 
+    private fun handleSessionPin(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        val pinned = payload.path("pinned").asBoolean(true)
+        val handle = sessionStore.resolve(workspaceHash, id) ?: return
+        sessionStore.updateMeta(handle) { it.pinned = pinned }
+        if (sessionHandle?.meta?.id == id) sessionHandle = handle
+        dispatchSessionList()
+    }
+
+    private fun handleSessionArchive(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        val archived = payload.path("archived").asBoolean(true)
+        val handle = sessionStore.resolve(workspaceHash, id) ?: return
+        sessionStore.updateMeta(handle) { it.archived = archived }
+        if (sessionHandle?.meta?.id == id) sessionHandle = handle
+        dispatchSessionList()
+    }
+
+    private fun handleSessionRename(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        val title = payload.path("title").asText("").ifBlank { return }
+        val handle = sessionStore.resolve(workspaceHash, id) ?: return
+        sessionStore.updateMeta(handle) { it.title = title.take(120) }
+        if (sessionHandle?.meta?.id == id) sessionHandle = handle
+        dispatchSessionList()
+        dispatchCurrentSessionInfo()
+    }
+
+    private fun handleSessionSearch(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val query = payload.path("query").asText("")
+        val includeArchived = payload.path("includeArchived").asBoolean(false)
+        val results = sessionStore.list(workspaceHash)
+            .filter { includeArchived || !it.archived }
+            .mapNotNull { meta ->
+                val h = sessionStore.resolve(workspaceHash, meta.id) ?: return@mapNotNull null
+                val messages = sessionStore.readMessages(h)
+                val preview = previewOf(messages)
+                val haystack = listOf(meta.title ?: "", meta.mode, preview).joinToString("\n").lowercase()
+                if (query.isBlank() || haystack.contains(query.lowercase())) sessionDto(h, messages) else null
+            }
+        dispatchToWeb("session.search.result", mapOf("query" to query, "sessions" to results))
+    }
+
+    private fun handleSessionDuplicate(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("id").asText("").ifBlank { return }
+        val source = sessionStore.resolve(workspaceHash, id) ?: return
+        val copy = sessionStore.newSession(workspaceHash, source.meta.mode, source.meta.modelId, source.meta.modelSource)
+        sessionStore.readMessages(source).forEach {
+            sessionStore.appendMessage(copy, it["role"] as? String ?: "user", it["content"] as? String ?: "")
+        }
+        sessionStore.updateMeta(copy) {
+            it.title = "${source.meta.title ?: "Session"} (copy)"
+        }
+        sessionHandle = copy
+        dispatchSessionList()
+        dispatchCurrentSessionInfo()
+        dispatchCurrentSessionMessages()
+    }
+
+    private fun handleForkFromMessage(messageIndex: Int) {
+        val current = sessionHandle ?: return
+        val forked = runCatching { sessionStore.forkFromMessage(current, messageIndex) }.getOrNull() ?: return
+        sessionHandle = forked
+        dispatchSessionList()
+        dispatchBranchTree(current.meta.id)
+        dispatchCurrentSessionInfo()
+        dispatchCurrentSessionMessages()
+    }
+
+    private fun handleBranchTree(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val id = payload.path("sessionId").asText(sessionHandle?.meta?.id ?: "")
+        dispatchBranchTree(id)
+    }
+
+    private fun handleVoiceStart() {
+        io.codepilot.plugin.input.VoiceInputService.startRecording(project).thenAccept { transcript ->
+            if (transcript.isNotBlank()) {
+                dispatchToWeb("voice.result", mapOf("text" to transcript))
+                dispatchToWeb("voice_result", mapOf("transcript" to transcript))
+            }
+        }
+    }
+
+    private fun handleVoiceStop() {
+        io.codepilot.plugin.input.VoiceInputService.stopRecording(project)
+    }
+
+    private fun budgetBreakdown(
+        rulesText: String,
+        memoryText: String,
+        contextRefs: List<Map<String, Any?>>,
+        recentMessages: List<Map<String, Any?>>,
+        totalUsed: Int,
+    ): Map<String, Any?> {
+        fun tokens(text: String): Int = io.codepilot.plugin.session.TokenEstimator.countTokens(text)
+        fun item(id: String, label: String, count: Int, removable: Boolean) =
+            mapOf("id" to id, "label" to label, "tokens" to count, "removable" to removable)
+        val systemTokens = 1200
+        val ruleTokens = tokens(rulesText)
+        val memoryTokens = tokens(memoryText)
+        val chipItems = contextRefs.mapIndexed { idx, ref ->
+            val label = ref["display"]?.toString() ?: ref["filePath"]?.toString() ?: "context-${idx + 1}"
+            item(ref["id"]?.toString() ?: label, label.take(80), tokens(label), true)
+        }
+        val historyItems = recentMessages.mapIndexed { idx, msg ->
+            val content = msg["content"]?.toString() ?: ""
+            item("msg-$idx", "${msg["role"] ?: "message"}: ${content.take(48)}", tokens(content), true)
+        }
+        val buckets = listOf(
+            mapOf("kind" to "system", "tokens" to systemTokens, "items" to listOf(item("system", "System prompt", systemTokens, false))),
+            mapOf("kind" to "rules", "tokens" to ruleTokens, "items" to if (ruleTokens > 0) listOf(item("rules", "Project rules", ruleTokens, false)) else emptyList()),
+            mapOf("kind" to "memories", "tokens" to memoryTokens, "items" to if (memoryTokens > 0) listOf(item("memories", "Approved memories", memoryTokens, false)) else emptyList()),
+            mapOf("kind" to "chips", "tokens" to chipItems.sumOf { it["tokens"] as Int }, "items" to chipItems),
+            mapOf("kind" to "history", "tokens" to historyItems.sumOf { it["tokens"] as Int }, "items" to historyItems),
+        )
+        return mapOf("total" to 24000, "used" to totalUsed, "estimated" to 0, "buckets" to buckets)
+    }
+
     /** Push the full session list (sorted by lastMessageAt desc) to the WebUI. */
     private fun dispatchSessionList() {
         val sessions =
             sessionStore
                 .list(workspaceHash)
                 .sortedByDescending { it.lastMessageAt ?: it.createdAt }
-                .map { meta ->
-                    mapOf(
-                        "id" to meta.id,
-                        "title" to (meta.title ?: "New Chat"),
-                        "mode" to meta.mode,
-                        "createdAt" to meta.createdAt,
-                        "lastMessageAt" to meta.lastMessageAt,
-                    )
+                .mapNotNull { meta ->
+                    val handle = sessionStore.resolve(workspaceHash, meta.id) ?: return@mapNotNull null
+                    sessionDto(handle, sessionStore.readMessages(handle))
                 }
         dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to (sessionHandle?.meta?.id ?: "")))
+        sessionHandle?.meta?.id?.let { dispatchBranchTree(it) }
+    }
+
+    private fun sessionDto(
+        handle: io.codepilot.plugin.session.SessionStore.SessionHandle,
+        messages: List<Map<String, Any>>,
+    ): Map<String, Any?> {
+        val meta = handle.meta
+        return mapOf(
+            "id" to meta.id,
+            "title" to (meta.title ?: "New Chat"),
+            "mode" to meta.mode,
+            "createdAt" to meta.createdAt,
+            "updatedAt" to meta.updatedAt,
+            "lastMessageAt" to meta.lastMessageAt,
+            "messageCount" to messages.size,
+            "pinned" to meta.pinned,
+            "archived" to meta.archived,
+            "preview" to previewOf(messages),
+            "branches" to branchDtos(handle),
+        )
+    }
+
+    private fun previewOf(messages: List<Map<String, Any>>): String =
+        messages.firstOrNull { it["role"] == "user" }?.get("content")?.toString()?.take(120) ?: ""
+
+    private fun branchDtos(handle: io.codepilot.plugin.session.SessionStore.SessionHandle): List<Map<String, Any?>> =
+        sessionStore.listBranches(handle).map {
+            val branchHandle = sessionStore.resolve(workspaceHash, it.sessionId)
+            val messageCount = branchHandle?.let { h -> sessionStore.readMessages(h).size } ?: 0
+            mapOf(
+                "branchId" to it.branchId,
+                "sessionId" to it.sessionId,
+                "parentBranchId" to it.parentBranchId,
+                "forkMsgIndex" to it.forkMsgIndex,
+                "title" to (branchHandle?.meta?.title ?: it.branchId),
+                "createdAt" to (branchHandle?.meta?.createdAt ?: ""),
+                "messageCount" to messageCount,
+                "active" to (sessionHandle?.meta?.id == it.sessionId),
+            )
+        }
+
+    private fun dispatchBranchTree(sessionId: String) {
+        val handle = sessionStore.resolve(workspaceHash, sessionId) ?: sessionHandle ?: return
+        dispatchToWeb("branch.tree.result", mapOf("sessionId" to sessionId, "branches" to branchDtos(handle)))
     }
 
     /** Push current session metadata. */

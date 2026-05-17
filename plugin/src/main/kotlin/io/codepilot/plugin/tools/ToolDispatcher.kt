@@ -31,6 +31,16 @@ class ToolDispatcher(
 ) {
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ToolDispatcher::class.java)
     private val patchApplier = PatchApplier(project)
+    private val staging by lazy { io.codepilot.plugin.apply.PatchStaging.getInstance(project) }
+
+    /**
+     * P0-03: turnId is set by [io.codepilot.plugin.toolwindow.CefChatPanel] before each user turn
+     * begins. When [io.codepilot.plugin.settings.CodePilotSettings.State.stageBeforeApply] is on
+     * and this is non-null, mutating filesystem tool calls are diverted to [io.codepilot.plugin.apply.PatchStaging]
+     * instead of writing directly through [PatchApplier].
+     */
+    @Volatile
+    var currentTurnId: String? = null
     private val fileReader = FileReader(project)
     private val codeInspector = CodeInspector(project)
     private val grepTool = GrepSearchTool(project)
@@ -120,7 +130,12 @@ class ToolDispatcher(
                         name == "fs.delete" -> dispatchViaPatchApplier(name, args)
                         name == "fs.move" -> dispatchViaPatchApplier(name, args)
                         name == "fs.applyPatch" -> dispatchApplyPatch(args)
-                        name == "shell.exec" -> ShellExecutor(project).execute(args)
+                        name == "shell.exec" -> ShellExecutor(project).execute(
+                            args.deepCopy<com.fasterxml.jackson.databind.node.ObjectNode>().apply {
+                                put("stepId", id)
+                                currentTurnId?.let { put("turnId", it) }
+                            },
+                        )
                         name == "shell.session" -> dispatchShellSession(args)
                         name == "plan.show" -> planShow(args)
                         name == "plan.update" -> planUpdate(args)
@@ -332,8 +347,41 @@ class ToolDispatcher(
         name: String,
         args: JsonNode,
     ): Map<String, Any?> {
+        val staged = tryStage(name, args)
+        if (staged != null) return staged
         patchApplier.apply(name, args)
         return mapOf("ack" to true, "appliedVia" to "DiffManager")
+    }
+
+    /**
+     * P0-03: when staging is enabled and we know the turnId, divert mutating tools
+     * into [PatchStaging.stage]. Returns the staged ack, or null when the call
+     * should go through [PatchApplier] as before.
+     */
+    private fun tryStage(name: String, args: JsonNode): Map<String, Any?>? {
+        val settings = io.codepilot.plugin.settings.CodePilotSettings.getInstance().state
+        if (!settings.stageBeforeApply) return null
+        val turnId = currentTurnId ?: return null
+        val path = args.path("path").asText().takeIf { it.isNotBlank() } ?: return null
+        return try {
+            val pendingId = when (name) {
+                "fs.write", "fs.replace" -> {
+                    val content = args.path("content").asText(args.path("newContent").asText(""))
+                    staging.stage(turnId, path, content, io.codepilot.plugin.apply.PatchStaging.Op.WRITE)
+                }
+                "fs.create" -> {
+                    val content = args.path("content").asText(args.path("newContent").asText(""))
+                    staging.stage(turnId, path, content, io.codepilot.plugin.apply.PatchStaging.Op.CREATE)
+                }
+                "fs.delete" -> staging.stage(turnId, path, "", io.codepilot.plugin.apply.PatchStaging.Op.DELETE)
+                "fs.move" -> return null
+                else -> return null
+            }
+            mapOf("ack" to true, "appliedVia" to "PatchStaging", "staged" to true, "pendingId" to pendingId)
+        } catch (t: Throwable) {
+            log.warn("tryStage failed for $name $path: ${t.message}")
+            null
+        }
     }
 
     /**
@@ -385,6 +433,14 @@ class ToolDispatcher(
             op == "replace" && hasNewContent && !hasSearchReplace -> "fs.write"
             hasNewContent -> "fs.write"
             else -> "fs.replace"
+        }
+        val staged = tryStage(effectiveToolName, patch)
+        if (staged != null) {
+            return mapOf(
+                "ok" to true, "path" to path, "appliedVia" to "PatchStaging",
+                "originalOp" to op, "routedAs" to effectiveToolName,
+                "pendingId" to staged["pendingId"], "staged" to true,
+            )
         }
         patchApplier.apply(effectiveToolName, patch)
         return mapOf("ok" to true, "path" to path, "appliedVia" to "DiffManager", "originalOp" to op, "routedAs" to effectiveToolName)

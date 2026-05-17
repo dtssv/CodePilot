@@ -113,7 +113,13 @@ public record ConversationRunRequest(
       GraphRepairPolicy repair,
       GraphGatherPolicy gather,
       Boolean autoContinue,
-      Boolean askOnUncertain) {}
+      Boolean askOnUncertain,
+      // ── Bare mode: skip base.system + chat.system + agent.* segments and
+      //    emit ONLY guard.system + the action prompt itself. Used by short,
+      //    latency-sensitive endpoints like inline-edit / inline-completion
+      //    where the action template already contains everything the model
+      //    needs and the large base/chat preambles only add latency cost.
+      Boolean bareMode) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record GraphVerifyPolicy(

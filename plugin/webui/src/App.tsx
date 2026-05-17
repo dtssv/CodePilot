@@ -1,20 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from './bridge';
 import { AgentStep } from './components/AgentStepCard';
+import { BranchTreeView } from './components/branches/BranchTreeView';
+import { ChangePanel } from './components/apply/ChangePanel';
 import { ChatView } from './components/ChatView';
+import { CodebasePanel } from './components/codebase/CodebasePanel';
 import { ComposerPanel } from './components/ComposerPanel';
 import { ConsoleEntry, ConsolePanel } from './components/ConsolePanel';
-import ContextBudgetBar from './components/ContextBudgetBar';
+import ContextBudgetBar, { BudgetBreakdown } from './components/ContextBudgetBar';
 import { ContextChipData } from './components/ContextChip';
 import { ImageData } from './components/ImageAttachment';
+import { InlineEditTimeline } from './components/inline/InlineEditTimeline';
+import { TabSettingsPanel } from './components/inline/TabSettingsPanel';
 import { InputBar } from './components/InputBar';
 import { LoginPage } from './components/LoginPage';
 import { MarketplacePanel } from './components/MarketplacePanel';
+import { McpHooksPanel } from './components/mcp/McpHooksPanel';
 import { ModelSelector } from './components/ModelSelector';
 import { MultiFileDiffPanel } from './components/MultiFileDiffPanel';
 import { NotepadsPanel } from './components/NotepadsPanel';
+import { RulesMemoryPanel } from './components/rules/RulesMemoryPanel';
 import { SessionCostInfo, SessionCostPanel } from './components/SessionCostPanel';
-import { SessionInfo, SessionSidebar } from './components/SessionSidebar';
+import { SessionInfoV2, SessionSidebarV2 } from './components/sessions/SessionSidebarV2';
+import { ShellPolicyPanel } from './components/shell/ShellPolicyPanel';
+import { ChatViewV2 } from './components/tools/v2/ChatViewV2';
+import { installChatV2Bridge, isV2Enabled } from './state/chatStore';
 
 interface ModelOption {
     id: string;
@@ -57,15 +67,19 @@ interface BranchInfo {
     sessionId: string;
     parentBranchId: string | null;
     forkMsgIndex: number | null;
+    title?: string;
+    createdAt?: string | number;
+    messageCount?: number;
+    active?: boolean;
 }
 
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
-    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'console'>('chat');
+    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'codebase' | 'rules' | 'mcp' | 'shell' | 'tab' | 'console'>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
-    const [sessions, setSessions] = useState<SessionInfo[]>([]);
+    const [sessions, setSessions] = useState<SessionInfoV2[]>([]);
     const [activeSessionId, setActiveSessionId] = useState<string>('');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [historyOpen, setHistoryOpen] = useState(false);
@@ -73,6 +87,7 @@ export function App() {
     const [contextTokens, setContextTokens] = useState(0);
     const [totalTokens, setTotalTokens] = useState(128000); // Default to 128k
     const [estimatedTokens, setEstimatedTokens] = useState(0);
+    const [budgetBreakdown, setBudgetBreakdown] = useState<BudgetBreakdown | null>(null);
     const [theme, setTheme] = useState<'dark' | 'light' | 'high-contrast'>('dark');
     const [branches, setBranches] = useState<BranchInfo[]>([]);
     const [activeBranchId, setActiveBranchId] = useState<string>('main');
@@ -99,6 +114,11 @@ export function App() {
     //   message that carries the SAME turnId. Survives intermediate done/phase_done events,
     //   tool calls, agent_* events, and any number of backend rounds within one user send.
     const activeTurnIdRef = useRef<string>('');
+    const v2Enabled = isV2Enabled();
+
+    useEffect(() => {
+        if (v2Enabled) installChatV2Bridge();
+    }, [v2Enabled]);
 
     /**
      * ★ Locate (or create) the assistant message for the current turn.
@@ -205,7 +225,7 @@ export function App() {
             }),
             // Session list updates
             onPluginEvent('session_list', (payload) => {
-                const data = payload as { sessions: SessionInfo[]; activeSessionId: string };
+                const data = payload as { sessions: SessionInfoV2[]; activeSessionId: string };
                 setSessions(data.sessions);
                 setActiveSessionId(data.activeSessionId);
             }),
@@ -225,6 +245,11 @@ export function App() {
                 const data = payload as { branches: BranchInfo[]; activeBranchId: string };
                 setBranches(data.branches);
                 setActiveBranchId(data.activeBranchId);
+            }),
+            onPluginEvent('branch.tree.result', (payload) => {
+                const data = payload as { branches: BranchInfo[] };
+                setBranches(data.branches);
+                setActiveBranchId(data.branches.find((b) => b.active)?.branchId ?? 'main');
             }),
             // Restore messages from local store
             onPluginEvent('session_messages', (payload) => {
@@ -439,10 +464,11 @@ export function App() {
             }),
             // Context budget updates
             onPluginEvent('context_budget', (p) => {
-                const data = p as { current: number; total: number; estimated: number };
+                const data = p as { current: number; total: number; estimated: number; breakdown?: BudgetBreakdown };
                 setContextTokens(data.current);
                 setTotalTokens(data.total);
                 setEstimatedTokens(data.estimated);
+                setBudgetBreakdown(data.breakdown ?? null);
             }),
             // Patch from actions
             onPluginEvent('patch', (p) => {
@@ -719,7 +745,7 @@ export function App() {
                 {/* History popup */}
                 {historyOpen && (
                     <div className="history-popup">
-                        <SessionSidebar
+                        <SessionSidebarV2
                             sessions={sessions}
                             activeSessionId={activeSessionId}
                             onSelect={handleSelectSession}
@@ -789,10 +815,23 @@ export function App() {
                             </div>
                         </div>
                     )}
-                    {activeTab === 'chat' && <ChatView messages={messages} onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })} />}
+                    {activeTab === 'chat' && (
+                        <>
+                            <ChangePanel />
+                            <InlineEditTimeline />
+                            {v2Enabled
+                                ? <ChatViewV2 />
+                                : <ChatView messages={messages} onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })} />}
+                        </>
+                    )}
                     {activeTab === 'composer' && <ComposerPanel />}
                     {activeTab === 'marketplace' && <MarketplacePanel />}
                     {activeTab === 'notepads' && <NotepadsPanel />}
+                    {activeTab === 'codebase' && <CodebasePanel />}
+                    {activeTab === 'rules' && <RulesMemoryPanel />}
+                    {activeTab === 'mcp' && <McpHooksPanel />}
+                    {activeTab === 'shell' && <ShellPolicyPanel />}
+                    {activeTab === 'tab' && <TabSettingsPanel />}
                     {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={() => setConsoleEntries([])} />}
                     {/* ★ Agent plan & multi-file diff panels (auto-visible when data arrives) */}
 
@@ -805,7 +844,13 @@ export function App() {
                                 currentTokens={contextTokens}
                                 totalTokens={totalTokens}
                                 estimatedTokens={estimatedTokens}
+                                breakdown={budgetBreakdown}
                                 onCompress={() => sendToPlugin('compress_context', {})}
+                                onRemove={(kind, id) => {
+                                    if (kind === 'chips') handleRemoveChip(id);
+                                    if (kind === 'history') sendToPlugin('history.remove', { messageId: id });
+                                    if (kind === 'memories') sendToPlugin('memories.reject', { id });
+                                }}
                             />
                             {/* ★ Session cost panel */}
                             <SessionCostPanel costInfo={sessionCost} />
@@ -836,21 +881,12 @@ export function App() {
                                 )}
                             </div>
                             {branches.length > 1 && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>分支:</span>
-                                    <select className="opt-select" value={activeBranchId}
-                                        onChange={(e) => {
-                                            setActiveBranchId(e.target.value);
-                                            const branch = branches.find(b => b.branchId === e.target.value);
-                                            if (branch) sendToPlugin('switch_branch', { sessionId: branch.sessionId });
-                                        }}>
-                                        {branches.map(b => (
-                                            <option key={b.branchId} value={b.branchId}>
-                                                {b.branchId}{b.parentBranchId ? ` (fork from ${b.parentBranchId})` : ''}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </div>
+                                <BranchTreeView branches={branches.map((b) => ({
+                                    ...b,
+                                    title: b.title ?? b.branchId,
+                                    messageCount: b.messageCount ?? 0,
+                                    active: b.active ?? b.branchId === activeBranchId,
+                                }))} />
                             )}
                         </>
                     )}
@@ -859,6 +895,11 @@ export function App() {
                         <button className={activeTab === 'composer' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('composer')}>Composer</button>
                         <button className={activeTab === 'marketplace' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('marketplace')}>Marketplace</button>
                         <button className={activeTab === 'notepads' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('notepads')}>Notepads</button>
+                        <button className={activeTab === 'codebase' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('codebase')}>Codebase</button>
+                        <button className={activeTab === 'rules' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('rules')}>Rules</button>
+                        <button className={activeTab === 'mcp' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('mcp')}>MCP</button>
+                        <button className={activeTab === 'shell' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('shell')}>Shell</button>
+                        <button className={activeTab === 'tab' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('tab')}>Tab</button>
                         <button className={activeTab === 'console' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('console')}>Console</button>
                         <button className="tab-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark')} title="切换主题">
                             {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '◐'}
