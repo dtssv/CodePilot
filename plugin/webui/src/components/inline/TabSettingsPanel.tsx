@@ -16,6 +16,8 @@ export interface TabStats {
     dismissCount: number;
     avgLatencyMs: number;
     acceptRate: number;
+    lastPredictSource?: string;
+    byPredictSource?: Record<string, number>;
 }
 
 const ZERO: TabStats = {
@@ -39,6 +41,8 @@ export function TabSettingsPanel() {
                 dismissCount: s.dismissCount ?? 0,
                 avgLatencyMs: s.avgLatencyMs ?? 0,
                 acceptRate: s.acceptRate ?? 0,
+                lastPredictSource: s.lastPredictSource,
+                byPredictSource: s.byPredictSource,
             });
         });
         // Also accumulate from envelopes so the UI is responsive even between
@@ -72,40 +76,68 @@ export function TabSettingsPanel() {
     const pct = (stats.acceptRate * 100).toFixed(1);
 
     return (
-        <div className="tab-settings">
-            <header className="tab-settings-header">
-                <h3>Tab Completion</h3>
-                <div className="tab-settings-actions">
-                    <button type="button" onClick={() => sendToPlugin('tab.get_stats', {})}>
+        <div className="panel-base tab-settings">
+            <header className="panel-header">
+                <div className="panel-title-group">
+                    <h3 className="panel-title">↹ Tab Completion</h3>
+                    <span className="panel-subtitle">Inline suggestion metrics</span>
+                </div>
+                <div className="panel-actions">
+                    <button type="button" className="panel-btn" onClick={() => sendToPlugin('tab.get_stats', {})}>
                         Refresh
                     </button>
-                    <button type="button" onClick={() => sendToPlugin('tab.reset_stats', {})}>
-                        Reset stats
+                    <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('tab.reset_stats', {})}>
+                        Reset
                     </button>
                 </div>
             </header>
-            <dl className="tab-stats">
-                <div className="tab-stat">
-                    <dt>Suggestions</dt><dd>{stats.suggestCount}</dd>
+            <div className="panel-stats-grid">
+                <div className="panel-stat-card">
+                    <div className="panel-stat-label">Suggestions</div>
+                    <div className="panel-stat-value">{stats.suggestCount}</div>
                 </div>
-                <div className="tab-stat">
-                    <dt>Accepted</dt><dd>{stats.acceptCount}</dd>
+                <div className="panel-stat-card">
+                    <div className="panel-stat-label">Accepted</div>
+                    <div className="panel-stat-value">{stats.acceptCount}</div>
                 </div>
-                <div className="tab-stat">
-                    <dt>Dismissed</dt><dd>{stats.dismissCount}</dd>
+                <div className="panel-stat-card">
+                    <div className="panel-stat-label">Dismissed</div>
+                    <div className="panel-stat-value">{stats.dismissCount}</div>
                 </div>
-                <div className="tab-stat">
-                    <dt>Accept rate</dt><dd>{stats.suggestCount === 0 ? '—' : `${pct}%`}</dd>
+                <div className="panel-stat-card">
+                    <div className="panel-stat-label">Accept rate</div>
+                    <div className="panel-stat-value">{stats.suggestCount === 0 ? '—' : `${pct}%`}</div>
                 </div>
-                <div className="tab-stat">
-                    <dt>Avg latency</dt><dd>{stats.avgLatencyMs}ms</dd>
+                <div className="panel-stat-card">
+                    <div className="panel-stat-label">Avg latency</div>
+                    <div className="panel-stat-value">{stats.avgLatencyMs}ms</div>
                 </div>
                 {lastLatencyMs !== null && (
-                    <div className="tab-stat">
-                        <dt>Last latency</dt><dd>{lastLatencyMs}ms</dd>
+                    <div className="panel-stat-card">
+                        <div className="panel-stat-label">Last latency</div>
+                        <div className="panel-stat-value">{lastLatencyMs}ms</div>
                     </div>
                 )}
-            </dl>
+            </div>
+            {(stats.lastPredictSource || stats.byPredictSource) && (
+                <div className="panel-section">
+                    <h4 className="panel-section-title">Prediction source</h4>
+                    <p className="panel-hint muted">
+                        Last backend route: <strong>{stats.lastPredictSource ?? '—'}</strong>
+                        {' '}(heuristics → fim → model)
+                    </p>
+                    {stats.byPredictSource && Object.keys(stats.byPredictSource).length > 0 && (
+                        <div className="panel-table">
+                            {Object.entries(stats.byPredictSource).map(([src, n]) => (
+                                <div key={src} className="panel-table-row">
+                                    <span className="panel-table-cell-name">{src}</span>
+                                    <span>{n} hits</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 }

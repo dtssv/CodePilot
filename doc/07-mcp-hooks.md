@@ -1,5 +1,8 @@
 # 07 — MCP 管理 + Hooks(P1) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现: `mcp/McpService.kt` 读取 `.codepilot/mcp.json`,封装
 > `McpProcessManager` 的 list/start/stop/grant/editConfig;`hooks/HookEngine.kt`
 > 读取 `.codepilot/hooks.json`,支持 `beforeSubmitPrompt` 与 `beforeShellExecution`;

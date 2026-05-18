@@ -1,5 +1,8 @@
 # 14 — 会话分享与导出(P3)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > ✅ Completed(2026-05-17):已新增 `ExportService`、Export WebUI 面板和
 > `export.preview/export.save_file/share.create` bridge。支持 Markdown、PR
 > Description、JSON 预览/保存/复制;`share.create` 采用 offline-first 本地

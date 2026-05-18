@@ -46,6 +46,8 @@ export type PluginEventType =
     | 'export.preview.result'
     | 'export.save.result'
     | 'share.create.result'
+    | 'share.get.result'
+    | 'share.status.result'
     | 'action_start'
     | 'action_done'
     | 'context_added'
@@ -62,6 +64,7 @@ export type PluginEventType =
     | 'notepad_list_result'
     | 'context_budget'
     | 'skill_list_result'
+    | 'marketplace.error'
     | 'composer_result'
     | 'ide_theme'
     | 'branch_list'
@@ -75,6 +78,11 @@ export type PluginEventType =
     | 'agent_reading'
     | 'agent_writing'
     | 'agent_running'
+    | 'graph_verify'
+    | 'graph_phase_done'
+    | 'graph_repair_plan'
+    | 'graph_budget_alert'
+    | 'shell.progress'
     // v2 protocol — see doc/01-event-protocol.md and src/state/.
     | 'envelope'
     // P0-03 hunk apply
@@ -90,6 +98,7 @@ export type PluginEventType =
     | 'memory.response'
     // P1-07 MCP/hooks
     | 'mcp.response'
+    | 'mcp.confirm.request'
     | 'hooks.response'
     // P1-08 shell policy
     | 'shell.policy_response';

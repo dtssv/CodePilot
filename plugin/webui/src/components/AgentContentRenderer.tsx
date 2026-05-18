@@ -154,9 +154,30 @@ function RunBlock({ content, attrs }: { content: string; attrs?: Record<string, 
 /**
  * JsonBlock renders a raw JSON object as a collapsible block.
  * Extracts key fields for a summary line, with full JSON expandable.
+ * Skips overly large or tool-result JSON to avoid drowning the chat.
  */
 function JsonBlock({ content }: { content: string }) {
     const [expanded, setExpanded] = useState(false);
+
+    // Skip overly large JSON blobs — they belong in tool call cards, not inline
+    if (content.length > 2000) {
+        try {
+            const parsed = JSON.parse(content);
+            // Extract just a human-readable summary for these big blobs
+            if (parsed.agentWriting) {
+                return <div className="agent-json-block agent-json-skipped">📝 {String(parsed.agentWriting).substring(0, 200)}</div>;
+            }
+            if (parsed.agentContent) {
+                return <div className="agent-json-block agent-json-skipped">📝 {String(parsed.agentContent).substring(0, 200)}</div>;
+            }
+            if (parsed.patches) {
+                const fileNames = (parsed.patches as { path?: string }[]).map((p: { path?: string }) => p.path || '').filter(Boolean).join(', ');
+                return <div className="agent-json-block agent-json-skipped">📝 写入文件: {fileNames}</div>;
+            }
+        } catch {
+            // fall through to display
+        }
+    }
 
     // Try to extract a summary from common LLM output fields
     let summary = '';

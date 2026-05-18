@@ -13,10 +13,11 @@ import java.security.MessageDigest
  */
 class FileReader(
     private val project: Project,
+    private val workspaceRoot: java.nio.file.Path? = null,
 ) {
     fun read(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
-        val vf = PathGuard.resolve(project, path)
+        val vf = PathGuard.resolve(project, path, workspaceRoot)
 
         // If the resolved path is a directory, auto-degrade to listing entries
         // (LLM sometimes uses fs.read with path="." to explore project structure)
@@ -56,7 +57,7 @@ class FileReader(
         }
 
         return mapOf(
-            "path" to vf.path.removePrefix(PathGuard.projectRoot(project).path).trimStart('/'),
+            "path" to vf.path.removePrefix(effectiveRoot(project).path).trimStart('/'),
             "sha1" to sha1,
             "totalLines" to totalLines,
             "bytes" to raw.size,
@@ -65,6 +66,9 @@ class FileReader(
             "content" to content,
         )
     }
+
+    private fun effectiveRoot(project: Project) =
+        workspaceRoot?.let { PathGuard.workspaceRoot(it) } ?: PathGuard.projectRoot(project)
 
     private fun sliceLines(
         lines: List<String>,

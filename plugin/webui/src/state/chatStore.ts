@@ -5,12 +5,12 @@
  * components can subscribe with a selector without pulling in a new dependency
  * (no zustand / redux). The legacy App.tsx state remains untouched.
  *
- * Enable via:  localStorage.setItem('codepilot.protocol.v2', '1')
- * (Reads the flag at module load. To toggle at runtime, reload the page.)
+ * Enabled by default. Opt out: localStorage.setItem('codepilot.protocol.v2', '0')
  */
 
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
+import { buildV2StateFromLegacyMessages, type LegacyHydrateMessage } from './chatHydrate';
 import { applyEnvelope } from './turnReducer';
 import { INITIAL_V2_STATE, type ChatV2State, type EventEnvelope } from './events';
 
@@ -45,6 +45,11 @@ export function resetChatV2() {
     setState(INITIAL_V2_STATE);
 }
 
+/** Restore v2 turn tree from legacy session_messages (Integrated → Productized). */
+export function hydrateChatV2FromLegacyMessages(messages: LegacyHydrateMessage[]) {
+    setState(buildV2StateFromLegacyMessages(messages));
+}
+
 /**
  * Hook with selector + shallow equality (default: reference equality).
  *
@@ -71,12 +76,15 @@ export function useChatV2<T>(selector: (s: ChatV2State) => T, isEqual: (a: T, b:
     return slice;
 }
 
-/** Whether the v2 protocol is enabled for this session. */
+/** Whether the v2 protocol is enabled for this session (default: on). */
 export function isV2Enabled(): boolean {
     try {
-        return typeof localStorage !== 'undefined' && localStorage.getItem('codepilot.protocol.v2') === '1';
+        if (typeof localStorage === 'undefined') return true;
+        const flag = localStorage.getItem('codepilot.protocol.v2');
+        if (flag === '0') return false;
+        return true;
     } catch {
-        return false;
+        return true;
     }
 }
 

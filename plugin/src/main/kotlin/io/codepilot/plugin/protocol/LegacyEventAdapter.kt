@@ -41,6 +41,9 @@ class LegacyEventAdapter(
     /** Last agent_* step id, for "previous-step-success" cascading. */
     private var lastAgentStepId: String? = null
 
+    /** Stable plan step for the turn (user_plan + progress). */
+    private var planStepId: String? = null
+
     /** Monotonic counter for step IDs within this turn. */
     private var stepCounter = 0
 
@@ -52,8 +55,13 @@ class LegacyEventAdapter(
         return "$turnId-$prefix-$stepCounter"
     }
 
-    fun onTurnStart(userMessage: String, contextRefs: List<Map<String, Any?>>) {
-        bus.startTurn(turnId, userMessage, contextRefs)
+    fun onTurnStart(
+        userMessage: String,
+        contextRefs: List<Map<String, Any?>>,
+        images: List<Map<String, Any?>> = emptyList(),
+        forkMessageIndex: Int? = null,
+    ) {
+        bus.startTurn(turnId, userMessage, contextRefs, images, forkMessageIndex)
     }
 
     fun onTextDelta(text: String) {
@@ -135,10 +143,47 @@ class LegacyEventAdapter(
     }
 
     fun onPlanUpdate(payload: Any?) {
-        val sid = nextStepId("plan")
-        bus.startStep(turnId, sid, StepKinds.PLAN, "Plan")
+        val sid =
+            planStepId ?: run {
+                val s = nextStepId("plan")
+                bus.startStep(turnId, s, StepKinds.PLAN, "执行计划")
+                planStepId = s
+                s
+            }
         bus.emit(turnId, sid, EventTypes.PLAN_UPDATE, payload)
-        bus.endStep(turnId, sid, StepStatuses.SUCCESS)
+    }
+
+    fun onPlanProgress(payload: Any?) {
+        val sid = planStepId ?: return
+        bus.emit(turnId, sid, EventTypes.PLAN_PROGRESS, payload)
+    }
+
+    fun onGraphVerify(payload: Any?) {
+        val title = (payload as? Map<*, *>)?.get("summary")?.toString()
+            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("summary")?.asText("验证结果")
+            ?: "验证结果"
+        emitAgentStep(StepKinds.VERIFY, title, finalize = true)
+    }
+
+    fun onGraphPhaseDone(payload: Any?) {
+        val phase = (payload as? Map<*, *>)?.get("phase")?.toString()
+            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("phase")?.asText("phase")
+            ?: "phase"
+        emitAgentStep(StepKinds.SUBTASK, "阶段完成: $phase", finalize = true)
+    }
+
+    fun onGraphRepairPlan(payload: Any?) {
+        val title = (payload as? Map<*, *>)?.get("summary")?.toString()
+            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("summary")?.asText("修复计划")
+            ?: "修复计划"
+        emitAgentStep(StepKinds.REPAIR, title, finalize = true)
+    }
+
+    fun onGraphBudgetAlert(payload: Any?) {
+        val msg = (payload as? Map<*, *>)?.get("message")?.toString()
+            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("message")?.asText("预算警告")
+            ?: "预算警告"
+        bus.emit(turnId, llmStepId ?: turnId, EventTypes.RISK_NOTICE, mapOf("level" to "warn", "message" to msg))
     }
 
     fun onRiskNotice(payload: Any?) =
@@ -169,6 +214,8 @@ class LegacyEventAdapter(
         toolSteps.clear()
         lastAgentStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
         lastAgentStepId = null
+        planStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
+        planStepId = null
         llmStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
         llmStepId = null
 
@@ -190,6 +237,8 @@ class LegacyEventAdapter(
         toolSteps.clear()
         lastAgentStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
         lastAgentStepId = null
+        planStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
+        planStepId = null
         llmStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
         llmStepId = null
         bus.endTurn(turnId, TurnStatuses.INTERRUPTED, "stream_closed")

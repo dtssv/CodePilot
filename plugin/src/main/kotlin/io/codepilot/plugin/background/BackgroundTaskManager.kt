@@ -83,6 +83,63 @@ class BackgroundTaskManager(private val project: Project) {
         }
     }
 
+    /** Resume a background agent after needs_input. */
+    fun respond(id: String, answer: String) {
+        val task = tasks[id] ?: return
+        if (task.status != "needs_input") return
+        task.status = "running"
+        appendLog(task, "user response: $answer")
+        emit()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            client.resume(
+                mapOf(
+                    "sessionId" to task.sessionId,
+                    "mode" to "agent",
+                    "intent" to "answer",
+                    "input" to answer,
+                ),
+                bgResumeListener(task),
+            )
+        }
+    }
+
+    private fun bgResumeListener(task: Task): ConversationClient.Listener =
+        object : ConversationClient.Listener {
+            override fun onDelta(text: String) = onEvent(task, "delta", mapOf("text" to text))
+
+            override fun onToolCall(payload: JsonNode) = onEvent(task, "tool_call", payload.toString())
+
+            override fun onToolResultAck(payload: JsonNode) = onEvent(task, "tool_result_ack", payload.toString())
+
+            override fun onNeedsInput(payload: JsonNode) {
+                task.status = "needs_input"
+                onEvent(task, "needs_input", payload.toString())
+                emit()
+            }
+
+            override fun onError(code: Int, message: String) {
+                task.status = "failed"
+                task.endedAt = System.currentTimeMillis()
+                onEvent(task, "error", mapOf("code" to code, "message" to message))
+                emit()
+            }
+
+            override fun onDone(reason: String, payload: JsonNode) {
+                onEvent(task, "done", mapOf("reason" to reason))
+                if (reason == "final" || reason == "completed") {
+                    finishTask(task)
+                }
+            }
+
+            override fun onClosed() {
+                if (task.status == "running") {
+                    task.status = "failed"
+                    task.endedAt = System.currentTimeMillis()
+                    emit()
+                }
+            }
+        }
+
     fun merge(id: String, strategy: String = "squash"): Map<String, Any?> {
         val task = tasks[id] ?: return mapOf("ok" to false, "error" to "task not found")
         if (task.status != "completed") return mapOf("ok" to false, "error" to "task is not completed")
@@ -135,7 +192,7 @@ class BackgroundTaskManager(private val project: Project) {
             the user's main IDE session. If code changes are required, describe the exact files and
             edits in a final summary so they can be applied or reviewed from this worktree.
         """.trimIndent()
-        val toolDispatcher = WorktreeToolDispatcher(Path.of(task.worktreePath), client, task.sessionId) { appendLog(task, it) }
+        val toolDispatcher = WorktreeToolDispatcher(project, Path.of(task.worktreePath), client, task.sessionId) { appendLog(task, it) }
         client.run(
             mapOf("sessionId" to task.sessionId, "mode" to "agent", "input" to wrappedPrompt, "intent" to "new"),
             object : ConversationClient.Listener {
@@ -217,10 +274,10 @@ class BackgroundTaskManager(private val project: Project) {
         "title" to title,
         "prompt" to prompt,
         "status" to status,
+        "sessionId" to sessionId,
         "worktreePath" to worktreePath,
         "branchName" to branchName,
         "baseRef" to baseRef,
-        "sessionId" to sessionId,
         "createdAt" to createdAt,
         "endedAt" to endedAt,
         "outputs" to mapOf(

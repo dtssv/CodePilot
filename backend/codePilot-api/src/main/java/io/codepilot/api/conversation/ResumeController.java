@@ -29,10 +29,18 @@ import reactor.core.publisher.Flux;
 public class ResumeController {
 
   private final ConversationService service;
+  private final ConversationRunGate runGate;
+  private final ConversationQueuedOrchestrator queuedOrchestrator;
   private final SystemPromptLeakOutputFilter leakFilter;
 
-  public ResumeController(ConversationService service, SystemPromptLeakOutputFilter leakFilter) {
+  public ResumeController(
+      ConversationService service,
+      ConversationRunGate runGate,
+      ConversationQueuedOrchestrator queuedOrchestrator,
+      SystemPromptLeakOutputFilter leakFilter) {
     this.service = service;
+    this.runGate = runGate;
+    this.queuedOrchestrator = queuedOrchestrator;
     this.leakFilter = leakFilter;
   }
 
@@ -45,6 +53,8 @@ public class ResumeController {
       @RequestBody @Valid ConversationRunRequest req) {
     // Delegate to ConversationService.resume() which checks continuationToken
     // and routes to graphEngine.resume() or graphEngine.run() accordingly
-    return leakFilter.guard(service.resume(req, userId));
+    Flux<ServerSentEvent<String>> raw =
+        runGate.useQueue(req) ? queuedOrchestrator.run(req, userId) : service.resume(req, userId);
+    return leakFilter.guard(raw);
   }
 }

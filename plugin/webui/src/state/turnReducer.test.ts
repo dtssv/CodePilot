@@ -39,6 +39,7 @@ const env = (type: string, turnId: string, stepId: string, payload: unknown, par
         env('step.end', 't1', 't1-tool-2', { stepId: 't1-tool-2', status: 'success' }),
         env('step.end', 't1', 't1-llm-1', { stepId: 't1-llm-1', status: 'success' }),
         env('turn.end', 't1', 't1', { turnId: 't1', status: 'final', reason: 'final' }),
+        env('turn.metrics', 't1', 't1', { inputTokens: 100, outputTokens: 50, costUsd: 0.01, modelId: 'gpt-4o' }),
     ];
     let state = INITIAL_V2_STATE;
     for (const ev of events) state = reduceEnvelope(state, ev);
@@ -54,6 +55,8 @@ const env = (type: string, turnId: string, stepId: string, payload: unknown, par
     assert.equal(state.steps['t1-tool-2'].toolCall?.tool, 'fs.read');
     assert.equal(state.steps['t1-tool-2'].toolResult?.ok, true);
     assert.equal(state.steps['t1-tool-2'].status, 'success');
+    assert.equal(state.turns[0].tokenMeta?.inputTokens, 100);
+    assert.equal(state.turns[0].tokenMeta?.outputTokens, 50);
     console.log('✓ happy path');
 }
 

@@ -485,6 +485,7 @@ export CODEPILOT_PLUGIN_CERT_PASSWORD=your-cert-password
 | [`scripts/deploy/build-plugin.sh`](scripts/deploy/build-plugin.sh) | 插件构建 (签名/发布) | 插件分发 |
 | [`scripts/deploy/install-bare.sh`](scripts/deploy/install-bare.sh) | 裸机部署 (systemd 服务) | 非 Docker 部署 |
 | [`scripts/deploy/deploy-k8s.sh`](scripts/deploy/deploy-k8s.sh) | K8s Helm 部署 | Kubernetes 部署 |
+| [`scripts/deploy/drain-pod.sh`](scripts/deploy/drain-pod.sh) | 发版前排空本机 SSE/Graph run | 滚动发版 / 裸机维护 |
 | [`scripts/deploy/prod.env.template`](scripts/deploy/prod.env.template) | 生产环境变量模板 | 所有部署方式 |
 | [`scripts/deploy/docker-compose.dev.yml`](scripts/deploy/docker-compose.dev.yml) | 本地开发依赖 | 本地调试 |
 | [`scripts/deploy/docker-compose.prod.yml`](scripts/deploy/docker-compose.prod.yml) | 生产 Docker Compose | Docker 部署 |
@@ -497,12 +498,46 @@ export CODEPILOT_PLUGIN_CERT_PASSWORD=your-cert-password
 | 信号 | 端点/来源 | 备注 |
 |---|---|---|
 | 存活探针 | `/actuator/health/liveness` | 5xx 后由编排重启 |
-| 就绪探针 | `/actuator/health/readiness` | 启动后才接收流量 |
+| 就绪探针 | `/actuator/health/readiness` | 含 `deployDrain`；drain 期间为 OUT_OF_SERVICE |
 | 综合健康 | `/actuator/health` | 包含所有组件状态 |
+| 发版 drain | `POST /actuator/drain` | 滚动前排空本 Pod 上的 SSE/Graph run |
 | Prometheus 指标 | `/actuator/prometheus` | `codepilot_*` 自定义指标 |
 | 分布式追踪 | OTLP → `OTEL_EXPORTER_OTLP_ENDPOINT` | 按 traceId 透传 |
 | 日志 | stdout JSON | 收集到 Loki / ELK |
 | 版本信息 | `/v1/version` | 快速确认部署版本 |
+
+### 9.1 滚动发版与会话 drain（与恢复设计联动）
+
+发版时进行中对话默认**不会**被硬杀：每个 Pod 在摘除流量前排空本机 run，插件收到 `done(deploy_draining)` 后展示恢复条（`exact` / `soft`），用户可在新 Pod 上点「恢复」。
+
+**Kubernetes（推荐）**
+
+1. `helm upgrade` 使用 chart 默认 `maxUnavailable: 0`（逐 Pod 替换）。
+2. 每个 Pod **preStop** 自动 `POST /actuator/drain`（见 `helm/templates/deployment.yaml`）。
+3. `terminationGracePeriodSeconds: 60` 与 `spring.lifecycle.timeout-per-shutdown-phase: 55s` 对齐。
+4. drain 期间就绪探针失败 → Service Endpoints 移除该 Pod；新 `/conversation/run` 返回 **503**（`Retry-After: 60`），由其他副本承接。
+
+**裸机 systemd**
+
+- `systemctl stop codepilot` 发送 SIGTERM → `DeployDrainShutdownHook` 自动 drain（`TimeoutStopSec=60`）。
+- 手动排空：`./scripts/deploy/drain-pod.sh http://127.0.0.1:8080`，再停止服务。
+
+**环境变量**
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CODEPILOT_DEPLOY_DRAIN_ENABLED` | `true` | 关闭后不 drain、不拒绝新 run |
+| `CODEPILOT_DEPLOY_DRAIN_ON_SHUTDOWN` | `true` | SIGTERM 时自动 drain |
+
+**验收**
+
+1. 对话进行中执行 `helm upgrade` → 插件出现恢复横幅，非空白断连。
+2. `kubectl exec` 内 `wget -qO- --post-data='' http://127.0.0.1:8080/actuator/drain` → `remaining` 趋近 0。
+3. drain 期间对新 Pod 发 run 成功；对 draining Pod 发 run 得 503。
+
+设计细节见 [`doc/conversation-recovery-design.md`](doc/conversation-recovery-design.md) P2a。
+
+**P2b 任务队列**：Flyway `V10__conversation_runs.sql` 迁移后，Agent 对话自动写入 `conversation_runs`；发版时插件在 `deploy_draining` 后自动 `GET /v1/conversation/runs/{runId}/stream` 续接。关闭队列：`CODEPILOT_CONVERSATION_QUEUE=false`。
 
 ---
 

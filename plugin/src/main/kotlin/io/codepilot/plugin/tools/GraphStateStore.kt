@@ -156,6 +156,18 @@ class GraphStateStore(
         persist()
     }
 
+    /** Apply graph_checkpoint SSE (phase-boundary soft checkpoint). */
+    fun applyCheckpoint(data: JsonNode) {
+        data.path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }?.let {
+            state.put("continuationToken", it)
+        }
+        data.path("nextNode").asText(null)?.trim()?.takeIf { it.isNotBlank() }?.let {
+            state.put("resumeNextNode", it)
+        }
+        data.path("kind").asText(null)?.let { state.put("lastCheckpointKind", it) }
+        persist()
+    }
+
     /** Apply awaiting state (from done.reason=awaiting_user_input). */
     fun applyAwaiting(donePayload: JsonNode) {
         state.set<JsonNode>("awaiting", donePayload)

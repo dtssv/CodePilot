@@ -1,5 +1,8 @@
 # 16 — 对标 Cursor 的能力收敛路线图
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 目标：把 `CodePilot` 从“能力很多、主链略分散的工程型产品”收敛成“主路径稳定、过程可见、变更可审阅、上下文可信、默认行为正确”的 Cursor 级 JetBrains AI 编程体验。
 >
 > 本文不是能力清单，而是 **优先级路线图**。核心原则是：

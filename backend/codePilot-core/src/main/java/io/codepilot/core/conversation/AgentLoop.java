@@ -120,12 +120,22 @@ public final class AgentLoop {
                 // ★ EnvelopeValidator: JSON解析失败时尝试一次自动修正
                 if (state.parseRetries < 1) {
                   state.parseRetries++;
+                  // ★ Before retrying, check if this is a Graph-format JSON (patches/thought/agentThinking)
+                  // that doesn't match ModelEnvelope but is still valid JSON.
+                  // If so, extract user-facing fields instead of dumping raw text.
+                  Flux<ServerSentEvent<String>> graphFallback = tryGraphFormatFallback(buffered, state);
+                  if (graphFallback != null) return graphFallback;
+
                   log.warn("Model output was not valid JSON, requesting self-correction for session {}",
                       state.sessionId);
                   state.history.append(
                       "[SYSTEM: Your previous reply was not valid JSON. Please output ONLY the strict JSON envelope as specified.]");
                   return nextTurn(state); // 重试一次
                 }
+                // ★ Before falling back to raw text, check for Graph-format JSON
+                Flux<ServerSentEvent<String>> graphFallback = tryGraphFormatFallback(buffered, state);
+                if (graphFallback != null) return graphFallback;
+
                 // 两次解析都失败，降级为纯文本
                 log.warn("Model output still not valid JSON after retry, falling back to plain text for session {}",
                     state.sessionId);
@@ -293,6 +303,59 @@ public final class AgentLoop {
         })
         .reduce(new StringBuilder(), StringBuilder::append)
         .map(StringBuilder::toString);
+  }
+
+  /**
+   * Attempts to extract user-facing content from a Graph-format JSON response
+   * (contains patches/thought/agentThinking/agentContent but NOT toolCall/finalAnswer/needsInput).
+   * Returns structured SSE events or null if the buffered text is not valid Graph-format JSON.
+   */
+  private Flux<ServerSentEvent<String>> tryGraphFormatFallback(String buffered, State state) {
+    JsonNode tree = parser.parseTree(buffered);
+    if (tree == null) return null;
+
+    // Detect Graph-format: has patches/thought/agentThinking but NOT toolCall/finalAnswer
+    boolean hasGraphFields = tree.has("patches") || tree.has("thought")
+        || tree.has("agentThinking") || tree.has("agentContent") || tree.has("textOutput");
+    boolean hasEnvelopeFields = tree.has("toolCall") || tree.has("finalAnswer") || tree.has("needsInput");
+    if (!hasGraphFields || hasEnvelopeFields) return null;
+
+    log.info("AgentLoop: detected Graph-format JSON output, extracting structured fields for session {}",
+        state.sessionId);
+
+    java.util.List<ServerSentEvent<String>> events = new java.util.ArrayList<>();
+
+    // Emit agent_thinking if present
+    String agentThinking = tree.path("agentThinking").asText(null);
+    if (agentThinking != null && !agentThinking.isBlank()) {
+      events.add(sse.event(SseEvents.AGENT_THINKING,
+          Map.of("text", agentThinking)));
+    }
+
+    // Emit agentContent as delta if present
+    String agentContent = tree.path("agentContent").asText(null);
+    if (agentContent != null && !agentContent.isBlank()) {
+      events.add(sse.event(SseEvents.DELTA, Map.of("text", agentContent + "\n\n")));
+    }
+
+    // Emit textOutput as delta if present
+    String textOutput = tree.path("textOutput").asText(null);
+    if (textOutput != null && !textOutput.isBlank()) {
+      events.add(sse.event(SseEvents.DELTA, Map.of("text", textOutput)));
+    }
+
+    // If no content was extracted, emit thought as delta
+    if (events.isEmpty()) {
+      String thought = tree.path("thought").asText(null);
+      if (thought != null && !thought.isBlank()) {
+        events.add(sse.event(SseEvents.DELTA, Map.of("text", thought)));
+      }
+    }
+
+    // Always end with done(final)
+    events.add(sse.event(SseEvents.DONE, Map.of("reason", "final")));
+
+    return Flux.fromIterable(events);
   }
 
   /** In-memory loop state (per /run call). */

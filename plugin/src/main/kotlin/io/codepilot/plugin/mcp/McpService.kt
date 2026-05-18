@@ -83,6 +83,8 @@ class McpService(private val project: Project) {
         emit()
     }
 
+    fun isGranted(server: String, tool: String): Boolean = grants.contains("$server.$tool")
+
     fun setGranted(server: String, tool: String, granted: Boolean) {
         val key = "$server.$tool"
         if (granted) grants.add(key) else grants.remove(key)
@@ -90,6 +92,11 @@ class McpService(private val project: Project) {
             s.copy(tools = s.tools.map { if (it.name == tool) it.copy(granted = granted) else it })
         }
         emit()
+    }
+
+    /** Trust all tools currently advertised by a server (session-persistent in memory). */
+    fun grantServer(server: String) {
+        discoverTools(server).forEach { setGranted(server, it.name, true) }
     }
 
     fun editConfig(content: String) {

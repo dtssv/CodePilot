@@ -7,7 +7,7 @@ dependencies {
 
     api(libs.spring.ai.openai)
     api(libs.spring.ai.alibaba.graph)
-    // api(libs.spring.ai.mcp)  // TODO: MCP client starter not yet available at spring-ai 1.0.0
+    // api(libs.spring.ai.mcp)  // TODO: MCP client starter optional
 
     api(libs.caffeine)
     api(libs.json.schema.validator)
@@ -27,4 +27,5 @@ dependencies {
     implementation("io.opentelemetry:opentelemetry-sdk")
     implementation("io.opentelemetry:opentelemetry-exporter-otlp")
     implementation(libs.otel.semconv.incubating)
+    implementation(libs.okhttp)
 }

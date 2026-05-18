@@ -7,6 +7,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtil
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.marketplace.LocalMarketplaceStore
+import io.codepilot.plugin.mcp.McpConfirmGate
 import io.codepilot.plugin.mcp.McpProcessManager
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -28,6 +29,8 @@ class ToolDispatcher(
     private val graphStateStore: GraphStateStore? = null,
     /** Optional callback invoked after each tool execution completes, for UI feedback. */
     private val onToolResult: ((toolCallId: String, ok: Boolean, result: Any?) -> Unit)? = null,
+    /** When set (e.g. background worktree), all fs/shell paths resolve under this root. */
+    private val workspaceRoot: java.nio.file.Path? = null,
 ) {
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ToolDispatcher::class.java)
     private val patchApplier = PatchApplier(project)
@@ -41,8 +44,15 @@ class ToolDispatcher(
      */
     @Volatile
     var currentTurnId: String? = null
-    private val fileReader = FileReader(project)
+    private val fileReader = FileReader(project, workspaceRoot)
     private val codeInspector = CodeInspector(project)
+
+    private fun pgResolve(rawPath: String) = PathGuard.resolve(project, rawPath, workspaceRoot)
+
+    private fun pgResolveOrCreate(rawPath: String) = PathGuard.resolveOrCreate(project, rawPath, workspaceRoot)
+
+    private fun pgRoot(): String =
+        workspaceRoot?.let { PathGuard.workspaceRoot(it).path } ?: project.basePath ?: ""
     private val grepTool = GrepSearchTool(project)
 
     // ─── Tool Result Cache ─────────────────────────────────────────────
@@ -130,12 +140,14 @@ class ToolDispatcher(
                         name == "fs.delete" -> dispatchViaPatchApplier(name, args)
                         name == "fs.move" -> dispatchViaPatchApplier(name, args)
                         name == "fs.applyPatch" -> dispatchApplyPatch(args)
-                        name == "shell.exec" -> ShellExecutor(project).execute(
-                            args.deepCopy<com.fasterxml.jackson.databind.node.ObjectNode>().apply {
+                        name == "shell.exec" -> {
+                            val shellArgs = args.deepCopy<com.fasterxml.jackson.databind.node.ObjectNode>().apply {
                                 put("stepId", id)
                                 currentTurnId?.let { put("turnId", it) }
-                            },
-                        )
+                                workspaceRoot?.let { put("cwd", it.toString()) }
+                            }
+                            ShellExecutor(project).execute(shellArgs)
+                        }
                         name == "shell.session" -> dispatchShellSession(args)
                         name == "plan.show" -> planShow(args)
                         name == "plan.update" -> planUpdate(args)
@@ -332,6 +344,10 @@ class ToolDispatcher(
         val serverId = parts[0]
         val toolName = parts[1]
 
+        if (!McpConfirmGate.getInstance(project).ensureGranted(serverId, toolName, fullName, args)) {
+            throw ToolViolation("MCP tool call denied: $fullName")
+        }
+
         val mcpManager = McpProcessManager.getInstance()
         if (!mcpManager.isRunning(serverId)) {
             throw ToolViolation("MCP server not running: $serverId")
@@ -451,7 +467,7 @@ class ToolDispatcher(
     private fun ideOpenFile(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val line = args.path("line").asInt(1)
-        val vf = PathGuard.resolve(project, path)
+        val vf = pgResolve( path)
         ApplicationManager.getApplication().invokeLater {
             com.intellij.openapi.fileEditor.FileEditorManager
                 .getInstance(project)
@@ -470,7 +486,7 @@ class ToolDispatcher(
 
     private fun ideDiagnostics(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
-        val vf = PathGuard.resolve(project, path)
+        val vf = pgResolve( path)
             ?: return mapOf("diagnostics" to emptyList<Any>())
 
         // ★ PsiManager.findFile() requires read access — wrap in ReadAction
@@ -605,7 +621,7 @@ class ToolDispatcher(
     private fun readFile(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val maxBytes = args.path("maxBytes").asInt(262_144).coerceAtMost(1_048_576)
-        val vf = PathGuard.resolve(project, path)
+        val vf = pgResolve( path)
         if (vf.length > maxBytes) {
             throw ToolViolation("file too large: ${vf.length} > $maxBytes")
         }
@@ -650,14 +666,14 @@ class ToolDispatcher(
     private fun listDir(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText()
         val recursive = args.path("recursive").asBoolean(false)
-        val vf = PathGuard.resolve(project, path)
+        val vf = pgResolve( path)
         if (!vf.isDirectory) throw ToolViolation("not a directory: $path")
         val entries = mutableListOf<Map<String, Any?>>()
         VfsUtil.processFilesRecursively(vf) { f ->
             if (f != vf) {
                 entries.add(
                     mapOf(
-                        "path" to f.path.removePrefix(PathGuard.projectRoot(project).path).trimStart('/'),
+                        "path" to f.path.removePrefix(pgRoot()).trimStart('/'),
                         "type" to if (f.isDirectory) "dir" else "file",
                         "size" to f.length,
                     ),
@@ -674,9 +690,10 @@ class ToolDispatcher(
         val regex = args.path("regex").asBoolean(false)
         val pattern = if (regex) Regex(query) else Regex(Regex.escape(query))
         val hits = mutableListOf<Map<String, Any?>>()
-        val root = PathGuard.projectRoot(project)
+        val root = pgRoot()
         val limit = AtomicLong(50)
-        VfsUtil.processFilesRecursively(root) { f ->
+        val rootVf = PathGuard.projectRoot(project)
+        VfsUtil.processFilesRecursively(rootVf) { f ->
             if (limit.get() <= 0) return@processFilesRecursively false
             if (!f.isDirectory && f.length < 1_048_576) {
                 val text =
@@ -687,7 +704,7 @@ class ToolDispatcher(
                     val before = text.substring(0, m.range.first).count { it == '\n' } + 1
                     hits.add(
                         mapOf(
-                            "path" to f.path.removePrefix(root.path).trimStart('/'),
+                            "path" to f.path.removePrefix(root).trimStart('/'),
                             "line" to before,
                             "snippet" to m.value.take(120),
                         ),
@@ -700,7 +717,7 @@ class ToolDispatcher(
     }
 
     private fun fileOutline(args: JsonNode): Map<String, Any?> {
-        val vf = PathGuard.resolve(project, args.path("path").asText())
+        val vf = pgResolve( args.path("path").asText())
         val text = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         val firstLine = text.lineSequence().firstOrNull { it.isNotBlank() }
         return mapOf(
@@ -716,7 +733,7 @@ class ToolDispatcher(
         val rel = args.path("path").asText()
         val content = args.path("content").asText("")
         val overwrite = args.path("overwrite").asBoolean(false)
-        val target = PathGuard.resolveOrCreate(project, rel)
+        val target = pgResolveOrCreate(rel)
         if (Files.exists(target) && !overwrite) {
             throw ToolViolation("already exists: $rel (set overwrite=true to replace)")
         }

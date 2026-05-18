@@ -1,6 +1,9 @@
 # 01 — 事件协议与状态机重构(P0)
 
-> **实现状态:✅ 已完成(灰度上线)**
+> **成熟度**: Designed ✅ | Implemented ✅ | Integrated ⚠️ | Productized ⚠️  
+> 详见 [STATUS.md](./STATUS.md)
+
+> **实现状态:✅ 已完成(默认主链)**
 >
 > 落地文件:
 > - `plugin/src/main/kotlin/io/codepilot/plugin/protocol/EventEnvelope.kt`

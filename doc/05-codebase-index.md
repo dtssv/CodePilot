@@ -1,5 +1,8 @@
 # 05 — Codebase 索引与语义检索(P1) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现: `IndexScheduler.CodebaseStatus` + `emitStatus/statusSnapshot/pause/resume/setIgnorePatterns`;
 > `CefChatPanel` 暴露 `codebase.get_status/rebuild/pause/resume/search/set_ignore`;
 > WebUI `state/codebase.ts` + `components/codebase/CodebasePanel.tsx`。后端核查:

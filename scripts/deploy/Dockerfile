@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/root/.gradle \
 # --- Runtime stage ---------------------------------------------------------
 FROM eclipse-temurin:21-jre-alpine
 LABEL org.opencontainers.image.source="https://github.com/codePilot/CodePilot" \
-      org.opencontainers.image.description="CodePilot backend (Spring Boot 3.3 + Spring AI 1.0)" \
+      org.opencontainers.image.description="CodePilot backend (Spring Boot 3.3 + Spring AI 1.1.0)" \
       org.opencontainers.image.licenses="MIT"
 
 ENV JAVA_TOOL_OPTIONS="-XX:+UseG1GC -XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8 -Djava.security.egd=file:/dev/./urandom"

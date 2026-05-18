@@ -48,7 +48,7 @@ function fileName(path: string): string {
     return parts[parts.length - 1] || path;
 }
 
-export function AgentStepCard({ step }: { step: AgentStep }) {
+export function AgentStepCard({ step, compact = false }: { step: AgentStep; compact?: boolean }) {
     const [expanded, setExpanded] = useState(false);
     const icon = STEP_ICONS[step.type] || '🔧';
     const status = step.status || 'running';
@@ -56,10 +56,25 @@ export function AgentStepCard({ step }: { step: AgentStep }) {
     // For thinking steps: just show the content, no expand
     if (step.type === 'thinking') {
         return (
-            <div className="agent-step agent-step-thinking">
+            <div className={`agent-step agent-step-thinking ${compact ? 'agent-step-compact' : ''}`}>
                 <span className="agent-step-icon">{icon}</span>
                 <span className="agent-step-content">{step.content}</span>
                 {status === 'running' && <span className="agent-step-spinner" />}
+            </div>
+        );
+    }
+
+    // Compact mode: single line
+    if (compact) {
+        return (
+            <div className={`agent-step agent-step-compact agent-step-${step.type} agent-step-${status}`}>
+                <span className="agent-step-icon">{icon}</span>
+                <span className="agent-step-content">{step.content}</span>
+                <span className={`agent-step-status agent-step-status-${status}`}>
+                    {status === 'running' && <span className="agent-step-spinner" />}
+                    {status === 'success' && '✓'}
+                    {status === 'error' && '✗'}
+                </span>
             </div>
         );
     }

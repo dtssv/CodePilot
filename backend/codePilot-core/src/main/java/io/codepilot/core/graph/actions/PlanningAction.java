@@ -5,7 +5,9 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
@@ -69,35 +71,7 @@ public class PlanningAction implements NodeAction {
             log.info("PlanningAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
 
-            // ★ Build multi-turn context from conversation history
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> conversationHistory = (List<Map<String, String>>) state.value("conversationHistory").orElse(List.of());
-
-            if (!conversationHistory.isEmpty()) {
-                var messages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>();
-                for (var histMsg : conversationHistory) {
-                    String role = histMsg.getOrDefault("role", "");
-                    String content = histMsg.getOrDefault("content", "");
-                    if (content == null || content.isBlank()) continue;
-                    if ("user".equals(role)) {
-                        messages.add(new org.springframework.ai.chat.messages.UserMessage(content));
-                    } else if ("assistant".equals(role)) {
-                        messages.add(new org.springframework.ai.chat.messages.AssistantMessage(content));
-                    }
-                }
-                if (!messages.isEmpty()) {
-                    var allMessages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>(messages);
-                    allMessages.add(new org.springframework.ai.chat.messages.UserMessage(planningPrompt));
-                    var prompt = org.springframework.ai.chat.prompt.Prompt.builder()
-                            .messages(allMessages)
-                            .build();
-                    llmResponse = chatClient.prompt(prompt).call().content();
-                } else {
-                    llmResponse = chatClient.prompt().user(planningPrompt).call().content();
-                }
-            } else {
-                llmResponse = chatClient.prompt().user(planningPrompt).call().content();
-            }
+            llmResponse = GraphLlmHelper.completeUserPrompt(chatClient, state, planningPrompt);
         } catch (Exception e) {
             log.error("LLM planning call failed", e);
             // Fallback to default plan
@@ -161,7 +135,7 @@ public class PlanningAction implements NodeAction {
 
     private Map<String, Object> parseLlmPlan(String llmResponse, OverAllState state, String input, Map<String, Object> updates) throws Exception {
         // Extract JSON from response (may be wrapped in markdown code block)
-        String json = extractJson(llmResponse);
+        String json = LlmJsonExtract.parseableJson(llmResponse);
         JsonNode root = mapper.readTree(json);
 
         // Check if LLM requests more info

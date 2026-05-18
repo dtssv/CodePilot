@@ -42,10 +42,42 @@ class ConversationClient(
         return open(request, listener)
     }
 
+    /**
+     * Attach to a durable run (P2b): replay persisted events then live Redis fan-out.
+     */
+    fun attachRunStream(
+        runId: String,
+        afterSeq: Int,
+        listener: Listener,
+    ): EventSource {
+        val settings = CodePilotSettings.getInstance()
+        val url =
+            (settings.state.backendBaseUrl.trimEnd('/') +
+                "/v1/conversation/runs/$runId/stream?afterSeq=$afterSeq")
+                .toHttpUrl()
+        val builder =
+            Request
+                .Builder()
+                .url(url)
+                .get()
+                .header("Accept", "text/event-stream")
+        if (settings.state.privacyMode) {
+            builder.header("X-Privacy-Mode", "true")
+        }
+        return open(builder.build(), listener)
+    }
+
     fun stop(sessionId: String) {
+        cancelActiveStream()
+        if (sessionId.isNotBlank()) {
+            val req = http.postJson("/v1/conversation/stop", mapOf("sessionId" to sessionId))
+            http.client().newCall(req).enqueue(noOpCallback)
+        }
+    }
+
+    /** Cancel the in-flight SSE without notifying the backend (e.g. new chat while disconnected). */
+    fun cancelActiveStream() {
         source.getAndSet(null)?.cancel()
-        val req = http.postJson("/v1/conversation/stop", mapOf("sessionId" to sessionId))
-        http.client().newCall(req).enqueue(noOpCallback)
     }
 
     fun submitToolResult(payload: Map<String, Any?>) {
@@ -280,6 +312,8 @@ class ConversationClient(
 
         fun onGraphPhaseDone(payload: JsonNode) {}
 
+        fun onGraphCheckpoint(payload: JsonNode) {}
+
         fun onGraphBudgetAlert(payload: JsonNode) {}
 
         // ── Dual-layer plan events ──
@@ -295,6 +329,10 @@ class ConversationClient(
         fun onAgentWriting(payload: JsonNode) {}
 
         fun onAgentRunning(payload: JsonNode) {}
+
+        fun onRunStarted(payload: JsonNode) {}
+
+        fun onRunReclaimed(payload: JsonNode) {}
     }
 
     private class EventSourceAdapter(
@@ -342,6 +380,7 @@ class ConversationClient(
                 "graph_verify" -> listener.onGraphVerify(node)
                 "graph_repair_plan" -> listener.onGraphRepairPlan(node)
                 "graph_phase_done" -> listener.onGraphPhaseDone(node)
+                "graph_checkpoint" -> listener.onGraphCheckpoint(node)
                 "graph_budget_alert" -> listener.onGraphBudgetAlert(node)
                 "user_plan" -> listener.onUserPlan(node)
                 "user_plan_progress" -> listener.onUserPlanProgress(node)
@@ -350,6 +389,8 @@ class ConversationClient(
                 "agent_reading" -> listener.onAgentReading(node)
                 "agent_writing" -> listener.onAgentWriting(node)
                 "agent_running" -> listener.onAgentRunning(node)
+                "run_started" -> listener.onRunStarted(node)
+                "run_reclaimed" -> listener.onRunReclaimed(node)
                 else -> {} // ignore comments / unknown events
             }
         }

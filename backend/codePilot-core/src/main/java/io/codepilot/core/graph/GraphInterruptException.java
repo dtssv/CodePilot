@@ -22,6 +22,7 @@ package io.codepilot.core.graph;
  */
 public class GraphInterruptException extends RuntimeException {
 
+    private static final long serialVersionUID = 4563710685123875911L;
 
     private final String continuationToken;
     private final String reason;

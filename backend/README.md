@@ -1,6 +1,6 @@
 # CodePilot Backend
 
-Spring Boot 3.3 + Spring AI 1.0 + Java 21 + Gradle Kotlin DSL.
+Spring Boot 3.3 + Spring AI 1.1.0 + Spring AI Alibaba Graph 1.1.0.0 + Java 21 + Gradle Kotlin DSL.
 
 ## Prerequisites
 

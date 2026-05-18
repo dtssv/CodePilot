@@ -2,6 +2,7 @@ package io.codepilot.core.graph.actions;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
+import io.codepilot.core.graph.GraphPhaseCheckpointSaver;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.sse.SseEvents;
 import org.springframework.stereotype.Component;
@@ -13,6 +14,13 @@ import java.util.*;
  */
 @Component
 public class CommitAction implements NodeAction {
+
+    private final GraphPhaseCheckpointSaver phaseCheckpointSaver;
+
+    public CommitAction(GraphPhaseCheckpointSaver phaseCheckpointSaver) {
+        this.phaseCheckpointSaver = phaseCheckpointSaver;
+    }
+
     @Override
     @SuppressWarnings("unchecked")
     public Map<String, Object> apply(OverAllState state) {
@@ -50,6 +58,9 @@ public class CommitAction implements NodeAction {
             // Mark next user step as in_progress
             GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN_PROGRESS,
                 Map.of("stepId", nextPhaseId, "status", "in_progress", "message", "Starting phase"));
+            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "preCheck");
+        } else {
+            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "finalize");
         }
         return updates;
     }

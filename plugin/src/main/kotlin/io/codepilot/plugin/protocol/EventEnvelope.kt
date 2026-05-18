@@ -30,6 +30,8 @@ object StepKinds {
     const val TOOL = "tool"
     const val PLAN = "plan"
     const val SUBTASK = "subtask"
+    const val VERIFY = "verify"
+    const val REPAIR = "repair"
 }
 
 /** Turn statuses used in turn.end events. */
@@ -70,6 +72,7 @@ object EventTypes {
 
     // plan
     const val PLAN_UPDATE = "plan.update"
+    const val PLAN_PROGRESS = "plan.progress"
 
     // user interaction
     const val NEEDS_INPUT = "needs_input"

@@ -1,5 +1,8 @@
 # 02 — 工具调用结构化卡片(P0)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > **实现状态:✅ 已完成(灰度上线)**
 >
 > 落地文件:

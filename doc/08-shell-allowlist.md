@@ -1,5 +1,8 @@
 # 08 — Shell 命令权限与流式输出(P1) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现: `shell/ShellPolicy.kt` 读取/写入 `.codepilot/shell-policy.json`,
 > allow/deny/ask 三态与 workspace cwd 限制;`ShellExecutor` 集成 policy、确认弹窗、
 > `beforeShellExecution` hook 和 stdout/stderr `shell.progress`/`tool.progress` 流式事件;

@@ -10,9 +10,10 @@ import io.codepilot.core.rag.dto.RagSearchResponse;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.embedding.EmbeddingResponse;
 import org.springframework.ai.embedding.Embedding;
+import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.embedding.EmbeddingRequest;
+import org.springframework.ai.embedding.EmbeddingResponse;
 
 /**
  * Unit tests for {@link RagService}. Uses an in-memory mock of EmbeddingModel
@@ -80,6 +81,16 @@ class RagServiceTest {
   }
 
   private static class FakeEmbeddingModel implements EmbeddingModel {
+    @Override
+    public float[] embed(org.springframework.ai.document.Document document) {
+      return new float[1536];
+    }
+
+    @Override
+    public EmbeddingResponse call(EmbeddingRequest request) {
+      return embedForResponse(request.getInstructions());
+    }
+
     @Override
     public EmbeddingResponse embedForResponse(List<String> texts) {
       List<Embedding> embeddings = texts.stream()

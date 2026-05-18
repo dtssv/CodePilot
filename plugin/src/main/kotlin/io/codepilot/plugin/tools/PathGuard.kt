@@ -15,8 +15,9 @@ object PathGuard {
     fun resolve(
         project: Project,
         rawPath: String,
+        rootOverride: Path? = null,
     ): VirtualFile {
-        val root = projectRoot(project)
+        val root = rootOverride?.let { workspaceRoot(it) } ?: projectRoot(project)
         val normalized = Path.of(rawPath).normalize()
         val candidate =
             if (normalized.isAbsolute) {
@@ -40,8 +41,9 @@ object PathGuard {
     fun resolveOrCreate(
         project: Project,
         rawPath: String,
+        rootOverride: Path? = null,
     ): Path {
-        val root = projectRoot(project)
+        val root = rootOverride?.let { workspaceRoot(it) } ?: projectRoot(project)
         val normalized = Path.of(rawPath).normalize()
         val target =
             if (normalized.isAbsolute) {
@@ -60,6 +62,10 @@ object PathGuard {
         return LocalFileSystem.getInstance().refreshAndFindFileByPath(base)
             ?: throw ToolViolation("project root unavailable")
     }
+
+    fun workspaceRoot(rootPath: Path): VirtualFile =
+        LocalFileSystem.getInstance().refreshAndFindFileByPath(rootPath.toString())
+            ?: throw ToolViolation("workspace root unavailable: $rootPath")
 }
 
 class ToolViolation(

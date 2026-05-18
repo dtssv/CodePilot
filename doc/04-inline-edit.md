@@ -1,5 +1,8 @@
 # 04 — 内联编辑 (Cmd+K) 与 Tab 补全反馈(P0) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现:
 > - `inline/InlineEditAction` + `Accept/Reject/Rewrite` 三个绑定到
 >   `Cmd/Ctrl+K`、`Alt+Y/N/R` 的 IDE Action(`plugin.xml` 注册)。

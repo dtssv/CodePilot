@@ -5,12 +5,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.Map;
-import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -26,58 +22,70 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping(value = "/v1/share", produces = MediaType.APPLICATION_JSON_VALUE)
 public class ShareController {
 
-  private final Path storageDir;
+  private final SharePersistenceStore store;
+  private final String publicBaseUrl;
 
-  public ShareController(@Value("${codepilot.share.storage-dir:${java.io.tmpdir}/codepilot-share}") String storageDir) {
-    this.storageDir = Path.of(storageDir);
+  public ShareController(
+      SharePersistenceStore store,
+      @Value("${codepilot.share.public-base-url:http://localhost:8080}") String publicBaseUrl) {
+    this.store = store;
+    this.publicBaseUrl = publicBaseUrl.endsWith("/") ? publicBaseUrl.substring(0, publicBaseUrl.length() - 1) : publicBaseUrl;
+  }
+
+  @Operation(summary = "Share persistence backend (db or file)")
+  @GetMapping("/status")
+  public ApiResponse<Map<String, Object>> status() {
+    return ApiResponse.ok(Map.of("backend", store.isDbBacked() ? "db" : "file"));
   }
 
   @Operation(summary = "Create a shareable conversation snapshot")
   @PostMapping(value = "/create", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<Map<String, Object>> create(@RequestBody @Valid CreateShareRequest req) throws Exception {
-    Files.createDirectories(storageDir);
-    String id = UUID.randomUUID().toString();
-    Instant expiresAt = Instant.now().plus(req.expireDays() != null ? req.expireDays() : 7, ChronoUnit.DAYS);
     String redacted = redact(req.content());
-    String body = """
-        {
-          "id": "%s",
-          "title": %s,
-          "format": "%s",
-          "createdAt": "%s",
-          "expiresAt": "%s",
-          "content": %s
-        }
-        """.formatted(
-        id,
-        json(req.title() != null ? req.title() : "CodePilot Share"),
-        req.format() != null ? req.format() : "markdown",
-        Instant.now(),
-        expiresAt,
-        json(redacted));
-    Files.writeString(storageDir.resolve(id + ".json"), body);
-    return ApiResponse.ok(Map.of(
-        "shareId", id,
-        "url", "/v1/share/" + id,
-        "expiresAt", expiresAt.toString()));
+    SharePersistenceStore.ShareSnapshot snap =
+        store.create(req.title(), req.format(), redacted, req.expireDays() != null ? req.expireDays() : 7);
+    String path = "/v1/share/" + snap.id();
+    return ApiResponse.ok(
+        Map.of(
+            "shareId", snap.id(),
+            "url", publicBaseUrl + path,
+            "viewPath", path,
+            "expiresAt", snap.expiresAt().toString(),
+            "backend", store.isDbBacked() ? "db" : "file"));
   }
 
   @Operation(summary = "Get a shared conversation snapshot")
   @GetMapping("/{id}")
   public ApiResponse<Map<String, Object>> get(@PathVariable String id) throws Exception {
-    Path path = storageDir.resolve(id + ".json").normalize();
-    if (!path.startsWith(storageDir) || !Files.exists(path)) {
+    var opt = store.get(id);
+    if (opt.isEmpty()) {
       return ApiResponse.ok(Map.of("found", false));
     }
-    return ApiResponse.ok(Map.of("found", true, "raw", Files.readString(path)));
+    SharePersistenceStore.ShareSnapshot snap = opt.get();
+    if (snap.revoked()) {
+      return ApiResponse.ok(Map.of("found", false, "revoked", true));
+    }
+    if (snap.expiresAt().isBefore(Instant.now())) {
+      return ApiResponse.ok(Map.of("found", false, "expired", true));
+    }
+    return ApiResponse.ok(
+        Map.of(
+            "found", true,
+            "shareId", snap.id(),
+            "title", snap.title(),
+            "format", snap.format(),
+            "content", snap.content(),
+            "createdAt", snap.createdAt().toString(),
+            "expiresAt", snap.expiresAt().toString(),
+            "url", publicBaseUrl + "/v1/share/" + snap.id(),
+            "backend", store.isDbBacked() ? "db" : "file"));
   }
 
   @Operation(summary = "Revoke a share")
   @DeleteMapping("/{id}")
   public ApiResponse<Map<String, Object>> revoke(@PathVariable String id) throws Exception {
-    Path path = storageDir.resolve(id + ".json").normalize();
-    boolean deleted = path.startsWith(storageDir) && Files.deleteIfExists(path);
-    return ApiResponse.ok(Map.of("deleted", deleted));
+    boolean deleted = store.revoke(id);
+    return ApiResponse.ok(Map.of("deleted", deleted, "backend", store.isDbBacked() ? "db" : "file"));
   }
 
   private static String redact(String content) {
@@ -87,13 +95,6 @@ public class ShareController {
         .replaceAll("(?i)bearer\\s+[A-Za-z0-9._\\-]{20,}", "Bearer [REDACTED]");
   }
 
-  private static String json(String s) {
-    return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\"";
-  }
-
   public record CreateShareRequest(
-      String title,
-      String format,
-      @NotBlank String content,
-      Integer expireDays) {}
+      String title, String format, @NotBlank String content, Integer expireDays) {}
 }

@@ -1,15 +1,52 @@
 import type {
     ChatV2State,
     EventEnvelope,
-    PlanStep,
     StepNode,
     StepStatus,
     TurnNode,
     TurnStatus,
 } from './events';
+import {
+    applyPlanProgress,
+    parsePlanStepsFromPayload,
+    type PlanProgressPayload,
+} from './planNormalize';
 
 /** Cast helper that keeps the call sites readable. */
 const P = <T>(payload: unknown): T => payload as T;
+
+type ShellPartial = {
+    stream?: string;
+    line?: string;
+    stdout?: string;
+    stderr?: string;
+    command?: string;
+    exitCode?: number;
+    durationMs?: number;
+    kind?: string;
+};
+
+function mergeProgressDetail(cur: StepNode, partial: unknown): StepNode {
+    const p = (partial ?? {}) as ShellPartial;
+    const prev = (cur.progressDetail ?? {}) as ShellPartial;
+    let stdout = String(prev.stdout ?? '');
+    let stderr = String(prev.stderr ?? '');
+    if (p.line != null && p.line !== '') {
+        if (p.stream === 'stderr') stderr += `${p.line}\n`;
+        else stdout += `${p.line}\n`;
+    }
+    if (p.stdout != null) stdout = String(p.stdout);
+    if (p.stderr != null) stderr = String(p.stderr);
+    const merged: ShellPartial = {
+        ...prev,
+        ...p,
+        stdout,
+        stderr,
+        kind: p.kind ?? prev.kind ?? (cur.toolCall?.tool?.startsWith('shell.') ? 'shell' : undefined),
+        command: p.command ?? prev.command ?? (cur.toolCall?.args as { command?: string })?.command,
+    };
+    return { ...cur, progressDetail: merged };
+}
 
 /**
  * Pure reducer for the v2 event protocol. Never mutates input state.
@@ -24,11 +61,18 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
 
     switch (ev.type) {
         case 'turn.start': {
-            const p = P<{ userMessage?: string; contextRefs?: TurnNode['contextRefs'] }>(ev.payload);
+            const p = P<{
+                userMessage?: string;
+                contextRefs?: TurnNode['contextRefs'];
+                images?: TurnNode['images'];
+                forkMessageIndex?: number;
+            }>(ev.payload);
             const turn: TurnNode = {
                 turnId: ev.turnId,
                 userMessage: p?.userMessage ?? '',
                 contextRefs: p?.contextRefs ?? [],
+                images: p?.images ?? [],
+                forkMessageIndex: p?.forkMessageIndex,
                 status: 'running',
                 rootStepIds: [],
                 stepIds: [],
@@ -45,6 +89,22 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
                     t.turnId === ev.turnId
                         ? { ...t, status: p?.status ?? 'final', endedAt: ev.ts, reason: p?.reason ?? null }
                         : t,
+                ),
+            };
+        }
+
+        case 'turn.metrics': {
+            const p = P<{
+                inputTokens?: number;
+                outputTokens?: number;
+                costUsd?: number;
+                modelId?: string;
+                tier?: string;
+            }>(ev.payload);
+            return {
+                ...base,
+                turns: state.turns.map((t) =>
+                    t.turnId === ev.turnId ? { ...t, tokenMeta: { ...t.tokenMeta, ...p } } : t,
                 ),
             };
         }
@@ -141,14 +201,17 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             };
         }
 
-        case 'tool.progress': {
-            const p = P<{ stepId: string; partial: unknown }>(ev.payload);
-            if (!p?.stepId) return base;
-            const cur = state.steps[p.stepId];
+        case 'tool.progress':
+        case 'shell.progress': {
+            const p = P<{ stepId: string; partial?: unknown }>(ev.payload);
+            const stepId = p?.stepId ?? ev.stepId;
+            if (!stepId) return base;
+            const cur = state.steps[stepId];
             if (!cur) return base;
+            const merged = mergeProgressDetail(cur, p?.partial ?? ev.payload);
             return {
                 ...base,
-                steps: { ...state.steps, [p.stepId]: { ...cur, progressDetail: p.partial } },
+                steps: { ...state.steps, [stepId]: merged },
             };
         }
 
@@ -171,16 +234,26 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
         }
 
         case 'plan.update': {
-            const p = P<{ steps?: PlanStep[] } | PlanStep[]>(ev.payload);
-            const steps: PlanStep[] | undefined = Array.isArray(p)
-                ? (p as PlanStep[])
-                : (p as { steps?: PlanStep[] })?.steps;
+            const steps = parsePlanStepsFromPayload(ev.payload);
             if (!steps || steps.length === 0) return base;
             const cur = state.steps[ev.stepId];
             if (!cur) return base;
             return {
                 ...base,
                 steps: { ...state.steps, [ev.stepId]: { ...cur, plan: steps } },
+            };
+        }
+
+        case 'plan.progress': {
+            const data = P<PlanProgressPayload>(ev.payload);
+            const cur = state.steps[ev.stepId];
+            if (!cur?.plan?.length) return base;
+            return {
+                ...base,
+                steps: {
+                    ...state.steps,
+                    [ev.stepId]: { ...cur, plan: applyPlanProgress(cur.plan, data) },
+                },
             };
         }
 
@@ -196,8 +269,33 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             return base;
         }
 
-        // needs_input / risk_notice / tool.progress fallthroughs handled by callers
-        // that wish to surface UI overlays; reducer keeps them only via step state.
+        case 'risk_notice': {
+            const p = P<{ level?: string; message?: string; filesPaths?: string[] }>(ev.payload);
+            const notice = {
+                level: p?.level ?? 'warn',
+                message: p?.message ?? '',
+                filesPaths: p?.filesPaths,
+            };
+            return {
+                ...base,
+                turns: state.turns.map((t) =>
+                    t.turnId === ev.turnId
+                        ? { ...t, riskNotices: [...(t.riskNotices ?? []), notice] }
+                        : t,
+                ),
+            };
+        }
+
+        case 'needs_input': {
+            const p = P<TurnNode['needsInput']>(ev.payload);
+            return {
+                ...base,
+                turns: state.turns.map((t) =>
+                    t.turnId === ev.turnId ? { ...t, needsInput: p ?? t.needsInput } : t,
+                ),
+            };
+        }
+
         default:
             return base;
     }

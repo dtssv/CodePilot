@@ -25,38 +25,41 @@ export function McpHooksPanel() {
     }, []);
 
     return (
-        <section className="mcp-hooks-panel">
-            <header>
-                <h3>MCP Servers & Hooks</h3>
-                <button type="button" onClick={() => mcpApi.reload()}>Reload MCP config</button>
+        <section className="panel-base mcp-hooks-panel">
+            <header className="panel-header">
+                <div className="panel-title-group">
+                    <h3 className="panel-title">🔌 MCP Servers & Hooks</h3>
+                    <span className="panel-subtitle">Model Context Protocol integration</span>
+                </div>
+                <button type="button" className="panel-btn" onClick={() => mcpApi.reload()}>Reload</button>
             </header>
 
-            <div className="mcp-server-list">
-                {servers.length === 0 ? <p className="muted">No `.codepilot/mcp.json` servers configured.</p> : servers.map((server) => (
-                    <article key={server.name} className={`mcp-server state-${server.state}`}>
-                        <div className="mcp-server-head">
+            <div className="panel-section">
+                {servers.length === 0 ? <p className="panel-empty">No `.codepilot/mcp.json` servers configured.</p> : servers.map((server) => (
+                    <article key={server.name} className={`panel-card state-${server.state}`}>
+                        <div className="panel-card-header">
                             <div>
                                 <strong>{server.name}</strong>
-                                <span>{server.transport} · {server.state}</span>
+                                <span className="panel-card-meta">{server.transport} · {server.state}</span>
                             </div>
                             {server.state === 'running' ? (
-                                <button type="button" onClick={() => mcpApi.stop(server.name)}>Stop</button>
+                                <button type="button" className="panel-btn panel-btn-danger" onClick={() => mcpApi.stop(server.name)}>Stop</button>
                             ) : (
-                                <button type="button" onClick={() => mcpApi.start(server.name)}>Start</button>
+                                <button type="button" className="panel-btn panel-btn-primary" onClick={() => mcpApi.start(server.name)}>Start</button>
                             )}
                         </div>
-                        {server.error && <div className="mcp-error">{server.error}</div>}
-                        <ul className="mcp-tool-list">
+                        {server.error && <div className="panel-error">{server.error}</div>}
+                        <ul className="panel-list panel-list-compact">
                             {(server.tools ?? []).map((tool) => (
                                 <li key={tool.name}>
-                                    <label>
+                                    <label className="panel-check-row">
                                         <input
                                             type="checkbox"
                                             checked={tool.granted}
                                             onChange={(e) => mcpApi.setGranted(server.name, tool.name, e.target.checked)}
                                         />
                                         <code>{tool.name}</code>
-                                        <span>{tool.description}</span>
+                                        <span className="panel-card-meta">{tool.description}</span>
                                     </label>
                                 </li>
                             ))}
@@ -65,19 +68,21 @@ export function McpHooksPanel() {
                 ))}
             </div>
 
-            <details className="hooks-editor">
+            <details className="panel-details">
                 <summary>Hooks</summary>
                 {hooks.map((hook, idx) => (
-                    <div key={hook.id} className="hook-row">
+                    <div key={hook.id} className="panel-row">
                         <input
+                            className="panel-input"
                             value={hook.event}
                             onChange={(e) => updateHook(idx, { event: e.target.value }, hooks, setHooks)}
                         />
                         <input
+                            className="panel-input"
                             value={hook.command}
                             onChange={(e) => updateHook(idx, { command: e.target.value }, hooks, setHooks)}
                         />
-                        <label>
+                        <label className="panel-check-row">
                             <input
                                 type="checkbox"
                                 checked={hook.enabled}
@@ -87,19 +92,22 @@ export function McpHooksPanel() {
                         </label>
                     </div>
                 ))}
-                <button
-                    type="button"
-                    onClick={() => setHooks([...hooks, {
-                        id: `hook-${Date.now()}`,
-                        event: 'beforeSubmitPrompt',
-                        command: 'echo "{{message}}"',
-                        enabled: true,
-                        timeoutMs: 30000,
-                    }])}
-                >
-                    Add hook
-                </button>
-                <button type="button" onClick={() => hooksApi.save(hooks)}>Save hooks</button>
+                <div className="panel-actions">
+                    <button
+                        type="button"
+                        className="panel-btn"
+                        onClick={() => setHooks([...hooks, {
+                            id: `hook-${Date.now()}`,
+                            event: 'beforeSubmitPrompt',
+                            command: 'echo "{{message}}"',
+                            enabled: true,
+                            timeoutMs: 30000,
+                        }])}
+                    >
+                        Add hook
+                    </button>
+                    <button type="button" className="panel-btn panel-btn-primary" onClick={() => hooksApi.save(hooks)}>Save hooks</button>
+                </div>
             </details>
         </section>
     );

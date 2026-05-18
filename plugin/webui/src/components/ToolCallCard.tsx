@@ -83,9 +83,27 @@ interface PatchItem {
 
 function extractPatches(args: Record<string, unknown>): PatchItem[] {
     // If patches array exists (fs.applyPatch multi-patch format)
-    const patches = args.patches as PatchItem[] | undefined;
+    const patches = args.patches as unknown[];
     if (patches && Array.isArray(patches) && patches.length > 0) {
-        return patches;
+        // Flatten double-nested structure: each element may itself contain a "patches" sub-array
+        // (backend ToolCall.args.patches[].patches[] vs frontend expected patches[])
+        const result: PatchItem[] = [];
+        for (const p of patches) {
+            if (!p || typeof p !== 'object') continue;
+            const po = p as Record<string, unknown>;
+            // Check for double-nested: element has its own "patches" array
+            const innerPatches = po.patches as unknown[] | undefined;
+            if (innerPatches && Array.isArray(innerPatches) && innerPatches.length > 0) {
+                for (const ip of innerPatches) {
+                    if (!ip || typeof ip !== 'object') continue;
+                    result.push(ip as PatchItem);
+                }
+            } else {
+                // Single-level patch element
+                result.push(po as PatchItem);
+            }
+        }
+        return result;
     }
     // Single patch format (top-level op/path/newContent)
     const op = (args.op as string) || '';

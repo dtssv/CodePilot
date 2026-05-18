@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
@@ -82,39 +84,7 @@ public class GenerateAction implements NodeAction {
             log.info("GenerateAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
 
-            // ★ Build multi-turn context from conversation history
-            // Inject previous turns as Spring AI messages so the LLM has
-            // conversation continuity across user requests.
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> conversationHistory = (List<Map<String, String>>) state.value("conversationHistory").orElse(List.of());
-
-            var promptBuilder = chatClient.prompt().user(generatePrompt);
-            if (!conversationHistory.isEmpty()) {
-                var messages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>();
-                for (var histMsg : conversationHistory) {
-                    String role = histMsg.getOrDefault("role", "");
-                    String content = histMsg.getOrDefault("content", "");
-                    if (content == null || content.isBlank()) continue;
-                    if ("user".equals(role)) {
-                        messages.add(new org.springframework.ai.chat.messages.UserMessage(content));
-                    } else if ("assistant".equals(role)) {
-                        messages.add(new org.springframework.ai.chat.messages.AssistantMessage(content));
-                    }
-                }
-                if (!messages.isEmpty()) {
-                    // Include history before the current user prompt
-                    var allMessages = new java.util.ArrayList<org.springframework.ai.chat.messages.Message>(messages);
-                    allMessages.add(new org.springframework.ai.chat.messages.UserMessage(generatePrompt));
-                    var prompt = org.springframework.ai.chat.prompt.Prompt.builder()
-                            .messages(allMessages)
-                            .build();
-                    llmResponse = chatClient.prompt(prompt).call().content();
-                } else {
-                    llmResponse = chatClient.prompt().user(generatePrompt).call().content();
-                }
-            } else {
-                llmResponse = chatClient.prompt().user(generatePrompt).call().content();
-            }
+            llmResponse = GraphLlmHelper.completeUserPrompt(chatClient, state, generatePrompt);
         } catch (Exception e) {
             log.error("LLM generate call failed for phase={}", phaseId, e);
             // LLM call failed — route to askUser so the user can decide how to proceed
@@ -250,7 +220,7 @@ public class GenerateAction implements NodeAction {
 
     private Map<String, Object> parseGenerateResponse(String llmResponse, OverAllState state,
                                                        String phaseId, Map<String, Object> updates) throws Exception {
-        String json = extractJson(llmResponse);
+        String json = LlmJsonExtract.parseableJson(llmResponse);
         JsonNode root = mapper.readTree(json);
 
         // ★ Extract agentThinking from LLM output (overrides the preliminary "正在思考...")
@@ -513,24 +483,6 @@ public class GenerateAction implements NodeAction {
             }
         }
         return result;
-    }
-
-    private String extractJson(String response) {
-        if (response == null) return "{}";
-        String trimmed = response.trim();
-        if (trimmed.startsWith("```")) {
-            int start = trimmed.indexOf('\n') + 1;
-            int end = trimmed.lastIndexOf("```");
-            if (end > start) {
-                return trimmed.substring(start, end).trim();
-            }
-        }
-        int braceStart = trimmed.indexOf('{');
-        int braceEnd = trimmed.lastIndexOf('}');
-        if (braceStart >= 0 && braceEnd > braceStart) {
-            return trimmed.substring(braceStart, braceEnd + 1);
-        }
-        return trimmed;
     }
 
     public String routeAfterGenerate(OverAllState state) {

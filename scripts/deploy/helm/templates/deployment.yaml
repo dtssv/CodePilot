@@ -44,6 +44,15 @@ spec:
               port: 8080
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          {{- if .Values.deploy.drain.preStop.enabled }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - wget -qO- --post-data='' http://127.0.0.1:{{ .Values.deploy.drain.preStop.port }}/actuator/drain || true
+          {{- end }}
           resources: {{ toYaml .Values.resources | nindent 12 }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{ toYaml . | nindent 8 }}

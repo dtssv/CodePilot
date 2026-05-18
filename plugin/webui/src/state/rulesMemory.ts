@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 
 export interface RuleItem {
@@ -56,7 +57,24 @@ export function installRulesMemoryBridge() {
 export function getRulesMemoryState(): State { return state; }
 export function subscribeRulesMemory(listener: (state: State) => void) {
     listeners.add(listener);
+    listener(state);
     return () => { listeners.delete(listener); };
+}
+
+export function getPendingMemoryCount(): number {
+    return state.memories.filter((m) => m.status === 'suggested').length;
+}
+
+export function usePendingMemoryCount(): number {
+    const [count, setCount] = useState(getPendingMemoryCount);
+    useEffect(() => {
+        installRulesMemoryBridge();
+        memoryApi.list().catch(() => undefined);
+        return subscribeRulesMemory((s) => {
+            setCount(s.memories.filter((m) => m.status === 'suggested').length);
+        });
+    }, []);
+    return count;
 }
 
 export const rulesApi = {

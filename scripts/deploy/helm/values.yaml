@@ -39,6 +39,13 @@ podDisruptionBudget:
 
 terminationGracePeriodSeconds: 60
 
+# Rolling deploy: preStop drains in-flight SSE/graph runs before SIGTERM.
+deploy:
+  drain:
+    preStop:
+      enabled: true
+      port: 8080
+
 env:
   CODEPILOT_DB_URL: ""
   CODEPILOT_DB_USER: ""

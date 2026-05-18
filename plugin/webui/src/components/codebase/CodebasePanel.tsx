@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { sendToPlugin } from '../../bridge';
 import {
     getCodebaseState,
     installCodebaseBridge,
@@ -37,13 +38,13 @@ export function CodebasePanel() {
     }, [status.indexedFiles, status.totalFiles]);
 
     return (
-        <section className="codebase-panel">
-            <header className="codebase-header">
-                <div>
-                    <h3>Codebase Index</h3>
-                    <p className="muted">Local TF-IDF index · {status.embeddingModel}</p>
+        <section className="panel-base codebase-panel">
+            <header className="panel-header">
+                <div className="panel-title-group">
+                    <h3 className="panel-title">📦 Codebase Index</h3>
+                    <span className="panel-subtitle">Local TF-IDF index · {status.embeddingModel}</span>
                 </div>
-                <span className={`codebase-badge state-${status.state}`}>{status.state}</span>
+                <span className={`panel-badge state-${status.state}`}>{status.state}</span>
             </header>
 
             <div className="codebase-progress" aria-label={`Index progress ${pct}%`}>
@@ -56,25 +57,26 @@ export function CodebasePanel() {
             </div>
             {status.error && <div className="codebase-error">{status.error}</div>}
 
-            <div className="codebase-actions">
-                <button type="button" onClick={() => rebuildCodebase()}>Rebuild</button>
-                <button type="button" onClick={() => pauseCodebase()} disabled={status.state === 'paused'}>Pause</button>
-                <button type="button" onClick={() => resumeCodebase()} disabled={status.state !== 'paused'}>Resume</button>
+            <div className="panel-actions">
+                <button type="button" className="panel-btn" onClick={() => rebuildCodebase()}>Rebuild</button>
+                <button type="button" className="panel-btn" onClick={() => pauseCodebase()} disabled={status.state === 'paused'}>Pause</button>
+                <button type="button" className="panel-btn" onClick={() => resumeCodebase()} disabled={status.state !== 'paused'}>Resume</button>
             </div>
 
             <form
-                className="codebase-search"
+                className="panel-search"
                 onSubmit={(e) => {
                     e.preventDefault();
                     if (query.trim()) searchCodebase(query.trim(), 12).catch(() => undefined);
                 }}
             >
                 <input
+                    className="panel-input"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     placeholder="@Codebase search query"
                 />
-                <button type="submit">Search</button>
+                <button type="submit" className="panel-btn panel-btn-primary">Search</button>
             </form>
 
             {lastSearch && (
@@ -86,31 +88,48 @@ export function CodebasePanel() {
                 </div>
             )}
 
-            <details className="codebase-ignore">
-                <summary>Ignore patterns</summary>
-                <textarea
-                    rows={5}
-                    value={ignoreText}
-                    onChange={(e) => setIgnoreText(e.target.value)}
-                    placeholder="node_modules/**&#10;dist/**"
-                />
-                <button
-                    type="button"
-                    onClick={() => setCodebaseIgnore(ignoreText.split('\n').map((s) => s.trim()).filter(Boolean))}
-                >
-                    Save ignore and rebuild
-                </button>
+            <details className="codebase-ignore panel-card">
+                <summary className="panel-card-header">Ignore patterns</summary>
+                <div className="panel-form-group">
+                    <textarea
+                        className="panel-textarea"
+                        rows={5}
+                        value={ignoreText}
+                        onChange={(e) => setIgnoreText(e.target.value)}
+                        placeholder="node_modules/**&#10;dist/**"
+                    />
+                </div>
+                <div className="panel-actions">
+                    <button
+                        type="button"
+                        className="panel-btn panel-btn-primary"
+                        onClick={() => setCodebaseIgnore(ignoreText.split('\n').map((s) => s.trim()).filter(Boolean))}
+                    >
+                        Save ignore and rebuild
+                    </button>
+                </div>
             </details>
         </section>
     );
 }
 
 function HitView({ hit }: { hit: CodebaseHit }) {
+    const addToChat = () => {
+        sendToPlugin('context.add_ref', {
+            filePath: hit.path,
+            startLine: hit.startLine,
+            endLine: hit.endLine,
+        }).catch(() => undefined);
+    };
+
     return (
         <article className="codebase-hit">
             <div className="codebase-hit-meta">
                 <code>{hit.path}:{hit.startLine}-{hit.endLine}</code>
                 <span>{hit.matchType ?? 'match'} · {hit.score.toFixed(2)}</span>
+                <button type="button" className="panel-btn panel-btn-sm" onClick={addToChat}>
+                    Add to chat
+                </button>
             </div>
             {hit.symbols && hit.symbols.length > 0 && (
                 <div className="codebase-symbols">{hit.symbols.slice(0, 5).join(', ')}</div>

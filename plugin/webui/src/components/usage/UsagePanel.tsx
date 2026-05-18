@@ -11,12 +11,19 @@ interface AggBucket {
 interface UsageState {
     byDay: Record<string, AggBucket>;
     byModel: Record<string, AggBucket>;
+    quotaWarnings?: { userId?: string; warning?: string; dailyLimitUsd?: number }[];
+    recordCount?: number;
+    persisted?: boolean;
+    backend?: 'db' | 'file';
+    dailyQuotaUsd?: number;
 }
 
 const EMPTY: UsageState = { byDay: {}, byModel: {} };
 
 export function UsagePanel() {
     const [usage, setUsage] = useState<UsageState>(EMPTY);
+    const [quotaInput, setQuotaInput] = useState('');
+    const [quotaSaved, setQuotaSaved] = useState(false);
     useEffect(() => {
         const off = onPluginEvent('usage.update', (payload) => setUsage(payload as UsageState));
         sendToPlugin('usage.get', {}).catch(() => undefined);
@@ -27,35 +34,82 @@ export function UsagePanel() {
     const modelRows = Object.entries(usage.byModel);
     const dayRows = Object.entries(usage.byDay).sort(([a], [b]) => a.localeCompare(b)).slice(-30);
     return (
-        <div className="usage-panel">
-            <h3>Usage</h3>
-            <div className="usage-grid">
-                <UsageCard title="Today cost" value={`$${(todayBucket?.costUsd ?? 0).toFixed(4)}`} />
+        <div className="panel-base usage-panel">
+            <header className="panel-header">
+                <div className="panel-title-group">
+                    <h3 className="panel-title">📊 Usage</h3>
+                    <span className="panel-subtitle">
+                        Token & cost tracking
+                        {usage.persisted ? (usage.backend === 'db' ? ' · DB' : ' · synced') : ''}
+                    </span>
+                </div>
+                <button type="button" className="panel-btn" onClick={() => sendToPlugin('usage.get', {}).catch(() => undefined)}>
+                    Refresh
+                </button>
+            </header>
+            {usage.quotaWarnings && usage.quotaWarnings.length > 0 && (
+                <div className="panel-banner panel-banner-warn">
+                    Approaching daily quota (${usage.quotaWarnings[0].dailyLimitUsd?.toFixed(2) ?? '—'} limit)
+                </div>
+            )}
+            <div className="panel-section panel-quota-form">
+                <h4 className="panel-section-title">Daily quota (USD)</h4>
+                <div className="panel-row">
+                    <input
+                        className="panel-input"
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        placeholder={usage.quotaWarnings?.[0]?.dailyLimitUsd != null ? String(usage.quotaWarnings[0].dailyLimitUsd) : 'e.g. 10'}
+                        value={quotaInput}
+                        onChange={(e) => { setQuotaInput(e.target.value); setQuotaSaved(false); }}
+                    />
+                    <button
+                        type="button"
+                        className="panel-btn panel-btn-primary"
+                        onClick={() => {
+                            const limit = parseFloat(quotaInput);
+                            if (Number.isNaN(limit) || limit < 0) return;
+                            sendToPlugin('usage.set_quota', { userId: 'default', dailyLimitUsd: limit }).catch(() => undefined);
+                            setQuotaSaved(true);
+                        }}
+                    >
+                        {quotaSaved ? 'Saved' : 'Set quota'}
+                    </button>
+                </div>
+                <p className="panel-hint muted">Warns when today&apos;s spend reaches 90% of this limit (requires backend).</p>
+            </div>
+            <div className="panel-stats-grid">
+                <UsageCard title="Today cost" value={`${(todayBucket?.costUsd ?? 0).toFixed(4)}`} />
                 <UsageCard title="Today tokens" value={formatTokens((todayBucket?.inputTokens ?? 0) + (todayBucket?.outputTokens ?? 0))} />
                 <UsageCard title="Requests" value={String(todayBucket?.count ?? 0)} />
             </div>
-            <h4>By Model</h4>
-            {modelRows.length === 0 ? <div className="muted">No usage yet.</div> : (
-                <div className="usage-table">
-                    {modelRows.map(([model, bucket]) => (
-                        <div key={model} className="usage-row">
-                            <span>{model}</span>
-                            <span>{bucket.count} req</span>
-                            <span>{formatTokens(bucket.inputTokens)} in</span>
-                            <span>{formatTokens(bucket.outputTokens)} out</span>
-                            <span>${bucket.costUsd.toFixed(4)}</span>
-                        </div>
-                    ))}
-                </div>
-            )}
-            <h4>Last 30 Days</h4>
-            <Sparkline data={dayRows.map(([day, bucket]) => ({ day, cost: bucket.costUsd }))} />
+            <div className="panel-section">
+                <h4 className="panel-section-title">By Model</h4>
+                {modelRows.length === 0 ? <div className="panel-empty">No usage yet.</div> : (
+                    <div className="panel-table">
+                        {modelRows.map(([model, bucket]) => (
+                            <div key={model} className="panel-table-row">
+                                <span className="panel-table-cell-name">{model}</span>
+                                <span>{bucket.count} req</span>
+                                <span>{formatTokens(bucket.inputTokens)} in</span>
+                                <span>{formatTokens(bucket.outputTokens)} out</span>
+                                <span className="panel-table-cell-cost">${bucket.costUsd.toFixed(4)}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+            <div className="panel-section">
+                <h4 className="panel-section-title">Last 30 Days</h4>
+                <Sparkline data={dayRows.map(([day, bucket]) => ({ day, cost: bucket.costUsd }))} />
+            </div>
         </div>
     );
 }
 
 function UsageCard({ title, value }: { title: string; value: string }) {
-    return <div className="usage-card"><div className="usage-card-title">{title}</div><div className="usage-card-value">{value}</div></div>;
+    return <div className="panel-stat-card"><div className="panel-stat-label">{title}</div><div className="panel-stat-value">{value}</div></div>;
 }
 
 function Sparkline({ data }: { data: { day: string; cost: number }[] }) {

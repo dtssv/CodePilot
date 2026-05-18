@@ -1,5 +1,8 @@
 # 12 — Slash Commands、Prompt 模板、通知与 @ 兼容性修复(P2)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > ✅ Completed(2026-05-17):已落地 `/clear /cost /model /compress /branch /run /help`
 > 及模板驱动自定义命令;新增 Templates 面板和 `.codepilot/templates.json`
 > 持久化;长任务完成/失败/needs_input 已接入 Web Notification + IDE fallback;

@@ -1,5 +1,6 @@
 package io.codepilot.core.graph.actions;
 
+import com.alibaba.cloud.ai.graph.KeyStrategy;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
@@ -28,14 +29,12 @@ public class IntakeAction implements NodeAction {
     }
 
     /**
-     * Creates an empty OverAllState with ReplaceStrategy registered for all known keys.
-     * Used as the StateGraph factory so that the framework's internal overAllState
-     * has the correct keyStrategies from the start.
+     * Key strategies for all graph state fields (Spring AI Alibaba Graph 1.1+ {@code StateGraph} factory).
      */
-    public static OverAllState createStateWithStrategies() {
-        var state = new OverAllState();
-        STATE_KEYS.forEach(key -> state.registerKeyAndStrategy(key, new ReplaceStrategy()));
-        return state;
+    public static Map<String, KeyStrategy> keyStrategies() {
+        Map<String, KeyStrategy> strategies = new LinkedHashMap<>();
+        STATE_KEYS.forEach(key -> strategies.put(key, new ReplaceStrategy()));
+        return strategies;
     }
 
     /** All keys used in graph state — must be registered as keyStrategies so that
@@ -82,7 +81,9 @@ public class IntakeAction implements NodeAction {
             // ── MCP integration keys ──
             "mcpTools",
             // ── Conversation history for multi-turn context ──
-            "conversationHistory"
+            "conversationHistory",
+            // ── Max / thinking policy (propagated to graph LLM calls) ──
+            "maxMode", "thinkingMode", "maxOutputTokens"
     );
 
     @Override
@@ -173,12 +174,33 @@ public class IntakeAction implements NodeAction {
         initial.put("gatherResumeTo", "");
         initial.put("gatherLoopCount", 0);
         initial.put("doneReason", "final");
+        if (req.policy() != null) {
+            initial.put("maxMode", Boolean.TRUE.equals(req.policy().maxMode()));
+            if (req.policy().thinkingMode() != null) {
+                initial.put("thinkingMode", req.policy().thinkingMode());
+            }
+            if (req.policy().maxOutputTokens() != null) {
+                initial.put("maxOutputTokens", req.policy().maxOutputTokens());
+            }
+        }
 
         // ★ Store conversation history from contexts.recent for multi-turn context
         // This allows GenerateAction and PlanningAction to include previous turns
         // when building LLM prompts, enabling true multi-turn conversation.
+        // Convert RecentMessage records to Map<String, String> so downstream consumers
+        // can safely cast to List<Map<String, String>> without ClassCastException.
         if (req.contexts() != null && req.contexts().recent() != null && !req.contexts().recent().isEmpty()) {
-            initial.put("conversationHistory", req.contexts().recent());
+            var historyMaps = req.contexts().recent().stream()
+                .map(m -> {
+                    var map = new java.util.LinkedHashMap<String, String>();
+                    map.put("role", m.role());
+                    map.put("content", m.content());
+                    if (m.summary() != null) map.put("summary", m.summary());
+                    if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
+                    return map;
+                })
+                .toList();
+            initial.put("conversationHistory", historyMaps);
         } else {
             initial.put("conversationHistory", List.of());
         }

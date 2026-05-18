@@ -327,14 +327,15 @@ public class ApplyPatchAction implements NodeAction {
                         toolResults.add(Map.of("toolCallId", toolCallId, "success", true, "path", edit.path() != null ? edit.path() : ""));
                     } else {
                         failedCount++;
-                        String errMsg = result != null ? result.errorMessage() : "Timeout";
+                        String errMsg = result != null && result.errorMessage() != null ? result.errorMessage() : "Timeout";
                         errors.add("Patch failed for " + (edit.path() != null ? edit.path() : "unknown") + ": " + errMsg);
                         toolResults.add(Map.of("toolCallId", toolCallId, "success", false, "path", edit.path() != null ? edit.path() : "", "error", errMsg));
                     }
                 } catch (Exception e) {
                     failedCount++;
-                    errors.add("Patch timeout for " + (edit.path() != null ? edit.path() : "unknown") + ": " + e.getMessage());
-                    toolResults.add(Map.of("toolCallId", toolCallId, "success", false, "path", edit.path() != null ? edit.path() : "", "error", e.getMessage()));
+                    String exMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    errors.add("Patch timeout for " + (edit.path() != null ? edit.path() : "unknown") + ": " + exMsg);
+                    toolResults.add(Map.of("toolCallId", toolCallId, "success", false, "path", edit.path() != null ? edit.path() : "", "error", exMsg));
                 }
             }
         }

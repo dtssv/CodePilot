@@ -1,5 +1,8 @@
 # 06 — Rules + Memories(P1) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现: `rules/RulesService.kt` 支持 `AGENTS.md`、`.codepilotrules`、
 > `.codepilot/rules/*.mdc` 与用户级 rules;`memory/MemoryService.kt` 持久化
 > `.codepilot/memories.json`;`CefChatPanel` 注入 active rules + approved memories 到

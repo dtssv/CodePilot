@@ -242,6 +242,81 @@ class SessionStore {
     /** Check if a session has a recoverable checkpoint. */
     fun hasCheckpoint(handle: SessionHandle): Boolean = Files.exists(handle.dir.resolve("checkpoint.json"))
 
+    data class RecoveryAssessment(
+        /** exact | soft | none */
+        val mode: String,
+        val hasLocalCheckpoint: Boolean,
+        val hasContinuationToken: Boolean,
+    )
+
+    /** Classify how well this session can be resumed after an interrupt. */
+    fun assessRecovery(handle: SessionHandle): RecoveryAssessment {
+        val token = findContinuationToken(handle)
+        if (!token.isNullOrBlank()) {
+            return RecoveryAssessment("exact", hasCheckpoint(handle), true)
+        }
+        val soft =
+            hasCheckpoint(handle) ||
+                loadPlan(handle) != null ||
+                readMessages(handle).isNotEmpty()
+        return if (soft) {
+            RecoveryAssessment("soft", hasCheckpoint(handle), false)
+        } else {
+            RecoveryAssessment("none", false, false)
+        }
+    }
+
+    /** Best-effort continuation token from local checkpoint or latest graph-*.json. */
+    fun findContinuationToken(handle: SessionHandle): String? {
+        loadCheckpoint(handle)?.get("continuationToken")?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
+            return it
+        }
+        val plansDir = handle.dir.resolve("plans")
+        if (!Files.isDirectory(plansDir)) return null
+        return try {
+            Files.list(plansDir)
+                .filter { it.fileName.toString().startsWith("graph-") && it.fileName.toString().endsWith(".json") }
+                .sorted(Comparator.reverseOrder())
+                .findFirst()
+                .map { path ->
+                    val node = mapper.readTree(Files.readString(path))
+                    node.path("continuationToken").asText(null)
+                        ?: node.path("awaiting").path("continuationToken").asText(null)
+                }
+                .orElse(null)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            log.warn("findContinuationToken failed: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Persist recovery snapshot when SSE closes abnormally (deploy / network).
+     * Merges graph state and tool-step metadata into checkpoint.json.
+     */
+    fun persistAbnormalCloseSnapshot(
+        handle: SessionHandle,
+        graphSnapshot: com.fasterxml.jackson.databind.JsonNode?,
+    ) {
+        val existing = loadCheckpoint(handle)?.toMutableMap() as? MutableMap<String, Any?> ?: mutableMapOf<String, Any?>()
+        existing["reason"] = "abnormal_close"
+        existing["ts"] = Instant.now().toString()
+        existing["completedToolCallIds"] = completedToolCallIds(handle).toList()
+        graphSnapshot?.let { node ->
+            @Suppress("UNCHECKED_CAST")
+            existing["graphState"] = mapper.convertValue(node, Map::class.java) as Map<String, Any?>
+            node.path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }?.let {
+                existing["continuationToken"] = it
+            }
+            node.path("resumeNextNode").asText(null)?.trim()?.takeIf { it.isNotBlank() }?.let {
+                existing["resumeNextNode"] = it
+            }
+        }
+        saveCheckpoint(handle, existing)
+    }
+
     /**
      * Build a complete resume payload for /v1/conversation/resume.
      * Includes: lastPlan, completedToolCalls, sessionDigest, taskLedger, lastAssistantTurnSummary.

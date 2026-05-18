@@ -10,6 +10,7 @@ import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.prompt.PromptOrchestrator;
 import io.codepilot.core.rag.ServerToolExecutor;
+import io.codepilot.core.deploy.RunLifecycleRegistry;
 import io.codepilot.core.graph.GraphEngineService;
 import io.codepilot.core.safety.RedactionService;
 import io.codepilot.core.safety.SystemPromptLeakDetector;
@@ -53,6 +54,7 @@ public class ConversationService {
   private final ServerToolExecutor serverToolExecutor;
   private final AuditInterceptor audit;
   private final GraphEngineService graphEngine;
+  private final RunLifecycleRegistry runRegistry;
 
   public ConversationService(
       ChatClientFactory chatClientFactory,
@@ -70,7 +72,8 @@ public class ConversationService {
       SkillRouter skillRouter,
       ServerToolExecutor serverToolExecutor,
       AuditInterceptor audit,
-      GraphEngineService graphEngine) {
+      GraphEngineService graphEngine,
+      RunLifecycleRegistry runRegistry) {
     this.chatClientFactory = chatClientFactory;
     this.orchestrator = orchestrator;
     this.budgeter = budgeter;
@@ -87,6 +90,17 @@ public class ConversationService {
     this.serverToolExecutor = serverToolExecutor;
     this.audit = audit;
     this.graphEngine = graphEngine;
+    this.runRegistry = runRegistry;
+  }
+
+  private Flux<ServerSentEvent<String>> trackSession(
+      String sessionId, String runKind, Flux<ServerSentEvent<String>> flux) {
+    if (sessionId == null || sessionId.isBlank()) {
+      return flux;
+    }
+    return flux
+        .doOnSubscribe(s -> runRegistry.register(sessionId, runKind))
+        .doFinally(signal -> runRegistry.unregister(sessionId));
   }
 
   public Flux<ServerSentEvent<String>> run(ConversationRunRequest req, String userId) {
@@ -167,9 +181,12 @@ public class ConversationService {
       // ★ Agent engines (both Graph and Legacy) emit their own done(final) events.
       // Do NOT append an extra done here — it causes duplicate done(final) events
       // which lead to duplicate message persistence and split assistant replies in the UI.
-      return head.concatWith(agentBody)
-          .doOnComplete(() -> safeEndRequest(resolved, true, 0))
-          .doOnError(e -> safeEndRequest(resolved, false, 0));
+      return trackSession(
+          req.sessionId(),
+          useLegacy ? "legacy" : "graph",
+          head.concatWith(agentBody)
+              .doOnComplete(() -> safeEndRequest(resolved, true, 0))
+              .doOnError(e -> safeEndRequest(resolved, false, 0)));
     }
 
     // chat mode: single streaming turn.
@@ -285,12 +302,16 @@ public class ConversationService {
     }
 
 
-    return head.concatWith(body)
-        .doOnComplete(() -> safeEndRequest(resolved, true, 0))
-        .concatWith(
-            Flux.just(
-                sse.event(
-                    SseEvents.DONE, Map.of("reason", "final", "continuationToken", continuation))));
+    return trackSession(
+        req.sessionId(),
+        "chat",
+        head.concatWith(body)
+            .doOnComplete(() -> safeEndRequest(resolved, true, 0))
+            .concatWith(
+                Flux.just(
+                    sse.event(
+                        SseEvents.DONE,
+                        Map.of("reason", "final", "continuationToken", continuation)))));
   }
 
   /**
@@ -308,7 +329,7 @@ public class ConversationService {
         && req.continuationToken() != null && !req.continuationToken().isBlank()) {
       log.info("ConversationService.resume: resuming from checkpoint, token={}, sessionId={}",
           req.continuationToken(), req.sessionId());
-      return graphEngine.resume(req, userId);
+      return trackSession(req.sessionId(), "graph-resume", graphEngine.resume(req, userId));
     }
     // Fallback: no checkpoint, just do a normal run
     return run(req, userId);
@@ -327,15 +348,7 @@ public class ConversationService {
   }
 
   private static OpenAiChatOptions requestOptions(ConversationRunRequest req) {
-    if (req.policy() == null) return null;
-    Integer maxOutputTokens = req.policy().maxOutputTokens();
-    if (maxOutputTokens == null && !Boolean.TRUE.equals(req.policy().maxMode())) return null;
-    OpenAiChatOptions.Builder builder = OpenAiChatOptions.builder();
-    if (maxOutputTokens != null) builder.maxTokens(maxOutputTokens);
-    // Spring AI 1.0 does not expose a portable reasoning-effort option across
-    // providers. We still map the concrete output budget here; provider-specific
-    // reasoning fields can be added in ChatClientFactory when the SDK exposes them.
-    return builder.build();
+    return PolicyChatOptions.fromPolicy(req.policy(), req.modelId());
   }
 
   /**

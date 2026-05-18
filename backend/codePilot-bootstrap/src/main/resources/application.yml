@@ -14,7 +14,7 @@ spring:
     banner-mode: off
     web-application-type: reactive
   lifecycle:
-    timeout-per-shutdown-phase: 20s
+    timeout-per-shutdown-phase: 55s
   threads:
     virtual:
       enabled: true
@@ -54,15 +54,40 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: health,info,metrics,prometheus,drain
   endpoint:
     health:
       show-details: when_authorized
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,deployDrain
+        liveness:
+          include: livenessState
+    drain:
+      enabled: true
   tracing:
     sampling:
       probability: 1.0
 
 codepilot:
+  conversation:
+    queue:
+      enabled: ${CODEPILOT_CONVERSATION_QUEUE:auto}
+      agent-only: true
+      persistence: auto
+      lease-duration: 2m
+      reclaim-interval-ms: 30000
+      stale-lease-grace: 15s
+  deploy:
+    drain:
+      enabled: ${CODEPILOT_DEPLOY_DRAIN_ENABLED:true}
+      shutdown-auto-drain: ${CODEPILOT_DEPLOY_DRAIN_ON_SHUTDOWN:true}
+      reject-new-runs: true
+      readiness-when-draining: true
+      default-timeout: 55s
+      shutdown-timeout: 55s
   speech:
     # OpenAI-compatible speech-to-text endpoint. Defaults to the LLM provider.
     base-url: ${CODEPILOT_STT_BASE_URL:${CODEPILOT_LLM_BASE_URL:https://api.openai.com}}
@@ -70,6 +95,16 @@ codepilot:
     model: ${CODEPILOT_STT_MODEL:whisper-1}
   share:
     storage-dir: ${CODEPILOT_SHARE_STORAGE_DIR:${java.io.tmpdir}/codepilot-share}
+    persistence: ${CODEPILOT_SHARE_PERSISTENCE:auto}
+    public-base-url: ${CODEPILOT_SHARE_PUBLIC_BASE_URL:http://localhost:8080}
+  background:
+    persistence: ${CODEPILOT_BACKGROUND_PERSISTENCE:auto}
+    storage-file: ${CODEPILOT_BACKGROUND_STORAGE_FILE:${java.io.tmpdir}/codepilot-bg/tasks.json}
+  usage:
+    # auto: use DB when Flyway V8 tables exist; file fallback otherwise
+    persistence: ${CODEPILOT_USAGE_PERSISTENCE:auto}
+    storage-file: ${CODEPILOT_USAGE_STORAGE_FILE:${java.io.tmpdir}/codepilot-usage/records.json}
+    max-records: ${CODEPILOT_USAGE_MAX_RECORDS:10000}
   security:
     jwt-secret: ${CODEPILOT_JWT_SECRET:codepilot-dev-jwt-secret-at-least-32-chars!!}
     hmac-secret: ${CODEPILOT_HMAC_SECRET:codepilot-dev-hmac-secret-at-least-32-chars!!}

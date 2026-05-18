@@ -1,724 +1,141 @@
-import { useEffect, useRef, useState } from 'react';
-import { onPluginEvent, sendToPlugin } from './bridge';
-import { AgentStep } from './components/AgentStepCard';
-import { BranchTreeView } from './components/branches/BranchTreeView';
-import { BackgroundTasksPanel } from './components/background/BackgroundTasksPanel';
-import { ChangePanel } from './components/apply/ChangePanel';
-import { ChatView } from './components/ChatView';
-import { CodebasePanel } from './components/codebase/CodebasePanel';
-import { ComposerPanel } from './components/ComposerPanel';
-import { ConsoleEntry, ConsolePanel } from './components/ConsolePanel';
-import ContextBudgetBar, { BudgetBreakdown } from './components/ContextBudgetBar';
-import { ContextChipData } from './components/ContextChip';
-import { ExportPanel } from './components/export/ExportPanel';
-import { ImageData } from './components/ImageAttachment';
-import { InlineEditTimeline } from './components/inline/InlineEditTimeline';
-import { TabSettingsPanel } from './components/inline/TabSettingsPanel';
-import { InputBar } from './components/InputBar';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { sendToPlugin } from './bridge';
 import { LoginPage } from './components/LoginPage';
-import { MarketplacePanel } from './components/MarketplacePanel';
-import { McpHooksPanel } from './components/mcp/McpHooksPanel';
-import { ModelSelector } from './components/ModelSelector';
-import { MultiFileDiffPanel } from './components/MultiFileDiffPanel';
-import { NotepadsPanel } from './components/NotepadsPanel';
-import { RulesMemoryPanel } from './components/rules/RulesMemoryPanel';
-import { SessionCostInfo, SessionCostPanel } from './components/SessionCostPanel';
-import { SessionInfoV2, SessionSidebarV2 } from './components/sessions/SessionSidebarV2';
-import { ShellPolicyPanel } from './components/shell/ShellPolicyPanel';
-import { TemplatesPanel } from './components/templates/TemplatesPanel';
-import { ChatViewV2 } from './components/tools/v2/ChatViewV2';
-import { UsagePanel } from './components/usage/UsagePanel';
-import { notify } from './notifications/desktop';
-import { installChatV2Bridge, isV2Enabled } from './state/chatStore';
-
-interface ModelOption {
-    id: string;
-    name: string;
-    type: 'system' | 'custom';
-    tier?: 'FAST' | 'DEFAULT' | 'THINKING' | 'PREMIUM';
-    capabilities?: string[];
-}
-
-export interface ToolCallInfo {
-    id: string;
-    name: string;
-    args: Record<string, unknown>;
-    status?: 'running' | 'success' | 'error';
-}
-
-interface ChatMessage {
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-    contextRefs?: { display: string; type?: string }[];
-    toolCall?: { id: string; name: string; args: unknown };
-    /** Tool calls attached to an assistant message (rendered as inline cards) */
-    toolCalls?: ToolCallInfo[];
-    riskNotice?: { level: string; message: string; filesPaths: string[] };
-    needsInput?: { title?: string; questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[]; continuationToken?: string };
-    diff?: { path: string; hunks: string };
-    // ★ Image attachments for multi-modal
-    images?: { url: string; mimeType?: string; description?: string }[];
-    /** Agent interactive steps (thinking/reading/writing/running) */
-    agentSteps?: AgentStep[];
-    /** Plan steps shown in the response (from user_plan event) */
-    planSteps?: { id: string; title: string; status: string }[];
-    _streaming?: boolean;
-    /** Timestamp for the message */
-    ts?: string;
-    /** ★ Turn id: groups one user send + its assistant reply (across multi-phase backend rounds) */
-    turnId?: string;
-}
-
-interface BranchInfo {
-    branchId: string;
-    sessionId: string;
-    parentBranchId: string | null;
-    forkMsgIndex: number | null;
-    title?: string;
-    createdAt?: string | number;
-    messageCount?: number;
-    active?: boolean;
-}
+import { McpConfirmDialog } from './components/mcp/McpConfirmDialog';
+import { AppTabBar } from './components/layout/AppTabBar';
+import { AppTopBar } from './components/layout/AppTopBar';
+import { ChatInputSection } from './components/layout/ChatInputSection';
+import { ChatMainArea } from './components/layout/ChatMainArea';
+import type { BudgetBreakdown } from './components/ContextBudgetBar';
+import type { ContextChipData } from './components/ContextChip';
+import type { SessionCostInfo } from './components/SessionCostPanel';
+import {
+    installAuthenticatedSettings,
+    installContextEffects,
+    installContextEstimateDebounce,
+    installCoreBridges,
+    installLegacyChatEffect,
+    installSessionEffects,
+    installThemeBridge,
+    installVisionErrorBridge,
+} from './state/appBootstrap';
+import { useDocumentTheme } from './state/appShellBridge';
+import { isV2Enabled } from './state/chatStore';
+import type { ChatMessage } from './state/chatTypes';
+export type { ToolCallInfo } from './state/chatTypes';
+import { clearConsole, useConsoleEntries } from './state/consoleStore';
+import type { ModelOption } from './state/modelAuthBridge';
+import { useBackgroundActiveCount } from './state/bgTasksStore';
+import { usePendingMemoryCount } from './state/rulesMemory';
+import { useBranches, useSessions } from './state/sessionUiStore';
+import { createSendHandlers, createSessionActions, handleRemoveContextChip } from './state/sendBridge';
+import type { AppTab } from './types/appTabs';
 
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
-    const [activeTab, setActiveTab] = useState<'chat' | 'composer' | 'marketplace' | 'notepads' | 'codebase' | 'rules' | 'mcp' | 'shell' | 'tab' | 'usage' | 'templates' | 'background' | 'export' | 'console'>('chat');
+    const [activeTab, setActiveTab] = useState<AppTab>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
     const [lastRoute, setLastRoute] = useState<{ name?: string; tier?: string; reason?: string } | null>(null);
     const [maxMode, setMaxMode] = useState(false);
-    const [sessions, setSessions] = useState<SessionInfoV2[]>([]);
-    const [activeSessionId, setActiveSessionId] = useState<string>('');
+    const [sendError, setSendError] = useState<string | null>(null);
+    const { sessions, activeSessionId } = useSessions();
+    const { branches, activeBranchId } = useBranches();
+    const pendingMemoryCount = usePendingMemoryCount();
+    const bgActiveCount = useBackgroundActiveCount();
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [contextChips, setContextChips] = useState<ContextChipData[]>([]);
     const [contextTokens, setContextTokens] = useState(0);
-    const [totalTokens, setTotalTokens] = useState(128000); // Default to 128k
+    const [totalTokens, setTotalTokens] = useState(128000);
     const [estimatedTokens, setEstimatedTokens] = useState(0);
     const [budgetBreakdown, setBudgetBreakdown] = useState<BudgetBreakdown | null>(null);
     const [theme, setTheme] = useState<'dark' | 'light' | 'high-contrast'>('dark');
-    const [branches, setBranches] = useState<BranchInfo[]>([]);
-    const [activeBranchId, setActiveBranchId] = useState<string>('main');
-    // ★ Session cost tracking
     const [sessionCost, setSessionCost] = useState<SessionCostInfo>({
         messageCount: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCostUsd: 0,
     });
-    // ★ Session recovery state
     const [abnormalTermination, setAbnormalTermination] = useState(false);
-    const [hasCheckpoint, setHasCheckpoint] = useState(false);
+    const [, setHasCheckpoint] = useState(false);
+    const [recoveryMode, setRecoveryMode] = useState<'exact' | 'soft' | 'none'>('none');
     const [isResuming, setIsResuming] = useState(false);
-    // ★ Auto-apply patches setting
     const [autoApply, setAutoApply] = useState(false);
-    // ★ Pending file changes (for change list panel)
-    const [pendingChanges, setPendingChanges] = useState<{ path: string; op: string; toolCallId: string }[]>([]);
-    // ★ Console log entries
-    const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
-    const consoleIdRef = useRef(0);
     const historyBtnRef = useRef<HTMLButtonElement>(null);
-    // ★ Track whether we're in an active reply (from user send → done with reason=final)
-    // This ensures all delta/tool_call/agent events within one request are merged into ONE assistant message
     const activeReplyRef = useRef(false);
-    // ★ Current turn id: every assistant event during this turn is merged into the assistant
-    //   message that carries the SAME turnId. Survives intermediate done/phase_done events,
-    //   tool calls, agent_* events, and any number of backend rounds within one user send.
-    const activeTurnIdRef = useRef<string>('');
+    const activeTurnIdRef = useRef('');
+    const selectedModelIdRef = useRef(selectedModelId);
+    selectedModelIdRef.current = selectedModelId;
     const v2Enabled = isV2Enabled();
+    const consoleEntries = useConsoleEntries();
 
-    useEffect(() => {
-        if (v2Enabled) installChatV2Bridge();
-    }, [v2Enabled]);
+    const bootstrapSetters = useMemo(
+        () => ({
+            setAuthenticated,
+            setModels,
+            setSelectedModelId,
+            setLastRoute,
+            setMessages,
+            setContextChips,
+            setAbnormalTermination,
+            setHasCheckpoint,
+            setRecoveryMode,
+            setIsResuming,
+            setContextTokens,
+            setTotalTokens,
+            setEstimatedTokens,
+            setBudgetBreakdown,
+            setTheme,
+            setSessionCost,
+            setAutoApply,
+            setSendError,
+        }),
+        [],
+    );
 
-    /**
-     * ★ Locate (or create) the assistant message for the current turn.
-     * All event handlers funnel through this so EVERY backend event in a turn
-     * accumulates into ONE assistant card — never overwrites, never splits.
-     */
-    const upsertTurnAssistant = (
-        prev: ChatMessage[],
-        mutate: (msg: ChatMessage) => ChatMessage,
-    ): ChatMessage[] => {
-        const turnId = activeTurnIdRef.current;
-        if (turnId) {
-            // Find the assistant bound to this turn
-            for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].role === 'assistant' && prev[i].turnId === turnId) {
-                    const updated = [...prev];
-                    updated[i] = mutate(prev[i]);
-                    return updated;
-                }
-            }
-            // Not found — create a fresh placeholder bound to the turn
-            const fresh: ChatMessage = { role: 'assistant', content: '', _streaming: true, turnId };
-            return [...prev, mutate(fresh)];
-        }
-        // Fallback (no active turn — e.g. session restore events): append to last assistant
-        for (let i = prev.length - 1; i >= 0; i--) {
-            if (prev[i].role === 'assistant') {
-                const updated = [...prev];
-                updated[i] = mutate(prev[i]);
-                return updated;
-            }
-        }
-        const fresh: ChatMessage = { role: 'assistant', content: '', _streaming: true };
-        return [...prev, mutate(fresh)];
-    };
+    const bootstrapRefs = useMemo(
+        () => ({ activeReplyRef, activeTurnIdRef, selectedModelIdRef }),
+        [],
+    );
 
-    // Console logging helper
-    const logConsole = (type: ConsoleEntry['type'], source: string, data: unknown) => {
-        const entry: ConsoleEntry = {
-            id: `console-${++consoleIdRef.current}`,
-            timestamp: new Date(),
-            type,
-            source,
-            data,
-        };
-        setConsoleEntries(prev => [...prev.slice(-500), entry]); // Keep last 500 entries
-    };
+    useEffect(() => installCoreBridges(bootstrapRefs, bootstrapSetters), [bootstrapRefs, bootstrapSetters]);
+    useEffect(() => installSessionEffects(bootstrapSetters, bootstrapRefs), [bootstrapSetters, bootstrapRefs]);
+    useEffect(
+        () => installLegacyChatEffect(v2Enabled, bootstrapRefs, bootstrapSetters),
+        [v2Enabled, bootstrapRefs, bootstrapSetters],
+    );
+    useEffect(() => installContextEffects(bootstrapSetters), [bootstrapSetters]);
+    useEffect(() => installContextEstimateDebounce(contextChips, setEstimatedTokens), [contextChips]);
+    useDocumentTheme(theme);
+    useEffect(() => installThemeBridge(setTheme), []);
+    useEffect(() => installVisionErrorBridge(setSendError), []);
+    useEffect(
+        () => installAuthenticatedSettings(authenticated, bootstrapRefs, bootstrapSetters),
+        [authenticated, bootstrapRefs, bootstrapSetters],
+    );
 
-    // Apply theme to document root
-    useEffect(() => {
-        document.documentElement.setAttribute('data-theme', theme);
-    }, [theme]);
+    const { handleSend, handleStop, clearSessionLocalState } = useMemo(
+        () =>
+            createSendHandlers({
+                v2Enabled,
+                mode,
+                messages,
+                selectedModelId,
+                models,
+                maxMode,
+                activeReplyRef,
+                activeTurnIdRef,
+                setMessages,
+                setContextChips,
+                onSendBlocked: setSendError,
+            }),
+        [v2Enabled, mode, messages, selectedModelId, models, maxMode],
+    );
 
-    // Listen for IDE theme changes via plugin
-    useEffect(() => {
-        const unsub = onPluginEvent('ide_theme', (payload) => {
-            const ideTheme = (payload as { theme: string }).theme;
-            if (ideTheme === 'light') setTheme('light');
-            else if (ideTheme === 'high-contrast') setTheme('high-contrast');
-            else setTheme('dark');
-        });
-        return unsub;
-    }, []);
+    const sessionActions = useMemo(
+        () => createSessionActions(clearSessionLocalState),
+        [clearSessionLocalState],
+    );
 
-    // Check auth state on mount and listen for changes
-    useEffect(() => {
-        // Ask the plugin for current auth state
-        sendToPlugin('check_auth', {}).catch(() => { });
-
-        const unsubs = [
-            onPluginEvent('auth_state', (payload) => {
-                const state = payload as { authenticated: boolean };
-                setAuthenticated(state.authenticated);
-            }),
-            onPluginEvent('auth_login_result', (payload) => {
-                const result = payload as { success: boolean };
-                if (result.success) {
-                    setAuthenticated(true);
-                    // Fetch models and session list after login
-                    sendToPlugin('fetch_models', {}).catch(() => { });
-                    sendToPlugin('list_sessions', {}).catch(() => { });
-                }
-            }),
-        ];
-        return () => unsubs.forEach(u => u());
-    }, []);
-
-    useEffect(() => {
-        if (!authenticated) return;
-        sendToPlugin('fetch_models', {});
-        sendToPlugin('list_sessions', {});
-
-        const unsubs = [
-            onPluginEvent('models_loaded', (payload) => {
-                const data = payload as { system?: ModelOption[]; custom?: ModelOption[] };
-                const all: ModelOption[] = [
-                    ...(data.system || []).map((m) => ({ ...m, type: 'system' as const })),
-                    ...(data.custom || []).map((m) => ({ ...m, type: 'custom' as const })),
-                ];
-                setModels(all);
-                if (!selectedModelId && all.length > 0) {
-                    setSelectedModelId('auto');
-                }
-            }),
-            onPluginEvent('model.routed', (payload) => {
-                const data = payload as { name?: string; tier?: string; reason?: string };
-                setLastRoute(data);
-            }),
-            // Session list updates
-            onPluginEvent('session_list', (payload) => {
-                const data = payload as { sessions: SessionInfoV2[]; activeSessionId: string };
-                setSessions(data.sessions);
-                setActiveSessionId(data.activeSessionId);
-            }),
-            // Session switched — reset messages and chips
-            onPluginEvent('session_switched', (payload) => {
-                const data = payload as { id: string };
-                setActiveSessionId(data.id);
-                setMessages([]);
-                setContextChips([]);
-                setAbnormalTermination(false);
-                setHasCheckpoint(false);
-                activeReplyRef.current = false;
-                activeTurnIdRef.current = '';
-            }),
-            // Branch list update
-            onPluginEvent('branch_list', (payload) => {
-                const data = payload as { branches: BranchInfo[]; activeBranchId: string };
-                setBranches(data.branches);
-                setActiveBranchId(data.activeBranchId);
-            }),
-            onPluginEvent('branch.tree.result', (payload) => {
-                const data = payload as { branches: BranchInfo[] };
-                setBranches(data.branches);
-                setActiveBranchId(data.branches.find((b) => b.active)?.branchId ?? 'main');
-            }),
-            // Restore messages from local store
-            onPluginEvent('session_messages', (payload) => {
-                const data = payload as { messages: ChatMessage[]; abnormalTermination?: boolean; hasCheckpoint?: boolean };
-                // Restore messages with toolCalls data preserved
-                const restoredMessages = data.messages.map((msg: ChatMessage) => ({
-                    ...msg,
-                    // Ensure toolCalls from persisted data are properly typed
-                    toolCalls: msg.toolCalls?.map((tc: any) => ({
-                        id: tc.id || '',
-                        name: tc.name || 'unknown',
-                        args: tc.args || {},
-                        status: tc.status || 'success',
-                    })),
-                }));
-                setMessages(restoredMessages);
-                // Restore session recovery state
-                setAbnormalTermination(data.abnormalTermination ?? false);
-                setHasCheckpoint(data.hasCheckpoint ?? false);
-            }),
-            // User message saved from plugin (after persistence)
-            // ★ When an active turn is in flight, handleSend already inserted the user
-            //   message + assistant placeholder locally — skip to avoid duplicates.
-            onPluginEvent('user_message_saved', (payload) => {
-                if (activeReplyRef.current) return;
-                const msg = payload as { role: string; content: string; contextRefs?: { display: string; type?: string }[] };
-                setMessages((prev) => [...prev, {
-                    role: 'user' as const,
-                    content: msg.content,
-                    contextRefs: msg.contextRefs,
-                }]);
-            }),
-            // Streaming delta — always append into the current turn's assistant card
-            onPluginEvent('delta', (p) => {
-                const { text } = p as { text: string };
-                logConsole('sse', 'delta', { text: text.substring(0, 100) + (text.length > 100 ? '...' : '') });
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
-                    ...msg,
-                    content: (msg.content || '') + text,
-                    _streaming: true,
-                })));
-            }),
-            // Done — only FINAL reasons close the card; intermediate done keeps streaming
-            onPluginEvent('done', (p) => {
-                const data = p as { reason?: string };
-                logConsole('sse', 'done', data);
-                const reason = data.reason || 'final';
-                const isFinal = reason === 'final' || reason === 'failed' || reason === 'stopped' || reason === 'max_steps';
-                if (isFinal) notify(reason === 'final' ? 'CodePilot completed' : 'CodePilot stopped', `Reason: ${reason}`);
-                if (!isFinal) {
-                    // Intermediate done (subtask_done, phase_done, awaiting_user_input...) —
-                    // keep the assistant card streaming so subsequent rounds append into it.
-                    return;
-                }
-                if (!activeReplyRef.current) return; // duplicate final done — ignore
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
-                    ...msg,
-                    _streaming: false,
-                    agentSteps: msg.agentSteps?.map(s => s.status === 'running' ? { ...s, status: 'success' as const } : s),
-                })));
-                activeReplyRef.current = false;
-                activeTurnIdRef.current = '';
-                setAbnormalTermination(false);
-                setHasCheckpoint(false);
-                setIsResuming(false);
-                sendToPlugin('list_sessions', {}).catch(() => { });
-            }),
-            onPluginEvent('tool_call', (p) => {
-                const tc = p as { id?: string; toolCallId?: string; name?: string; tool?: string; args: unknown };
-                logConsole('tool', 'tool_call', tc);
-                const toolName = tc.name || tc.tool || 'unknown';
-                const toolCallId = tc.id || tc.toolCallId || '';
-                const toolCallInfo: ToolCallInfo = {
-                    id: toolCallId,
-                    name: toolName,
-                    args: (tc.args || {}) as Record<string, unknown>,
-                    status: 'running',
-                };
-                // ★ Extract pending changes from write-category tool calls
-                if (toolName.startsWith('fs.write') || toolName.startsWith('fs.create') || toolName.startsWith('fs.replace') || toolName.startsWith('fs.applyPatch') || toolName.startsWith('fs.delete')) {
-                    const rawArgs = (tc.args || {}) as Record<string, unknown>;
-                    // Handle patches array format
-                    const patches = rawArgs.patches as { path?: string; op?: string }[] | undefined;
-                    if (patches && Array.isArray(patches)) {
-                        const newChanges = patches.map(p => ({ path: p.path || '', op: p.op || 'replace', toolCallId }));
-                        setPendingChanges(prev => [...prev, ...newChanges]);
-                    } else {
-                        const path = (rawArgs.path as string) || '';
-                        const op = (rawArgs.op as string) || toolName.replace('fs.', '') || 'write';
-                        if (path) {
-                            setPendingChanges(prev => [...prev, { path, op, toolCallId }]);
-                        }
-                    }
-                }
-                setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
-                    ...msg,
-                    toolCalls: [...(msg.toolCalls || []), toolCallInfo],
-                    _streaming: true,
-                })));
-            }),
-            onPluginEvent('tool_result_ack', (p) => {
-                const ack = p as { toolCallId?: string; ok?: boolean };
-                logConsole('tool', 'tool_result_ack', ack);
-                const ackId = ack.toolCallId || '';
-                if (!ackId) return;
-                // ★ Remove completed changes from pending list
-                setPendingChanges(prev => prev.filter(c => c.toolCallId !== ackId));
-                setMessages((msgs) => {
-                    // Find the assistant message that contains this toolCall and update its status
-                    let assistantIdx = -1;
-                    for (let i = msgs.length - 1; i >= 0; i--) {
-                        if (msgs[i].role === 'assistant' && msgs[i].toolCalls?.some((tc) => tc.id === ackId)) {
-                            assistantIdx = i; break;
-                        }
-                    }
-                    if (assistantIdx < 0) return msgs;
-                    const updated = [...msgs];
-                    const existing = updated[assistantIdx];
-                    updated[assistantIdx] = {
-                        ...existing,
-                        toolCalls: existing.toolCalls?.map((tc) =>
-                            tc.id === ackId ? { ...tc, status: ack.ok ? 'success' : 'error' } : tc),
-                    };
-                    return updated;
-                });
-            }),
-            onPluginEvent('risk_notice', (p) => {
-                const rn = p as { level: string; message: string; filesPaths: string[] };
-                if (activeReplyRef.current) {
-                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
-                        ...msg,
-                        content: (msg.content || '') + `\n\n⚠️ **Risk Notice (${rn.level})**: ${rn.message}${(rn.filesPaths && rn.filesPaths.length > 0) ? `\nFiles: ${rn.filesPaths.join(', ')}` : ''}`,
-                        _streaming: true,
-                    })));
-                    return;
-                }
-                setMessages((msgs) => [...msgs, { role: 'system', content: '', riskNotice: rn }]);
-            }),
-            onPluginEvent('needs_input', (p) => {
-                notify('CodePilot needs input', 'The agent is waiting for your response.');
-                const ni = p as {
-                    title?: string;
-                    questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[];
-                    continuationToken?: string;
-                };
-                const questionText = ni.title || (ni.questions && ni.questions.length > 0 ? ni.questions[0].prompt : '');
-                const optionsText = ni.questions && ni.questions.length > 0 && ni.questions[0].options
-                    ? ni.questions[0].options.map(o => o.label || o.id).join(' / ')
-                    : '';
-                if (activeReplyRef.current) {
-                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
-                        ...msg,
-                        content: (msg.content || '') + `\n\n❓ **${questionText}**${optionsText ? `\nOptions: ${optionsText}` : ''}`,
-                        _streaming: true,
-                    })));
-                    return;
-                }
-                setMessages((msgs) => [...msgs, { role: 'system', content: '', needsInput: ni }]);
-            }),
-            onPluginEvent('error', (p) => {
-                const err = p as { code: number; message: string };
-                logConsole('error', 'error', err);
-                notify('CodePilot failed', err.message || 'The current task failed.');
-                if (activeReplyRef.current) {
-                    setMessages((msgs) => upsertTurnAssistant(msgs, (msg) => ({
-                        ...msg,
-                        content: (msg.content || '') + `\n\n❌ **Error**: ${err.message}`,
-                        _streaming: true,
-                    })));
-                    return;
-                }
-                setMessages((msgs) => [...msgs, { role: 'system', content: `Error: ${err.message}` }]);
-            }),
-            // Action start — show compact action label in the chat
-            onPluginEvent('action_start', (p) => {
-                const data = p as { action: string; display: string; instruction: string };
-                if (activeReplyRef.current) return;
-                setMessages((prev) => [
-                    ...prev,
-                    { role: 'user' as const, content: `**${data.display}**\n${data.instruction}` },
-                ]);
-            }),
-            // Action done — only finalize when not in an active turn reply
-            onPluginEvent('action_done', () => {
-                if (activeReplyRef.current) return;
-                setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last && last._streaming) {
-                        return [...prev.slice(0, -1), { ...last, _streaming: false }];
-                    }
-                    return prev;
-                });
-            }),
-            // Context added from right-click "Add to Chat" — creates a chip (NOT a message)
-            onPluginEvent('context_added', (p) => {
-                const data = p as {
-                    id: string;
-                    type: 'code' | 'file' | 'package';
-                    display: string;
-                    filePath: string;
-                    language: string;
-                    startLine: number | null;
-                    endLine: number | null;
-                };
-                const chip: ContextChipData = {
-                    id: data.id,
-                    type: data.type,
-                    display: data.display,
-                    filePath: data.filePath,
-                    language: data.language,
-                    startLine: data.startLine,
-                    endLine: data.endLine,
-                };
-                setContextChips((prev) => [...prev, chip]);
-            }),
-            // Context budget updates
-            onPluginEvent('context_budget', (p) => {
-                const data = p as { current: number; total: number; estimated: number; breakdown?: BudgetBreakdown };
-                setContextTokens(data.current);
-                setTotalTokens(data.total);
-                setEstimatedTokens(data.estimated);
-                setBudgetBreakdown(data.breakdown ?? null);
-            }),
-            // Patch from actions
-            onPluginEvent('patch', (p) => {
-                const patchData = p as { files: unknown; hunks: unknown };
-                // ★ During active reply, don't insert a separate system message
-                if (activeReplyRef.current) return;
-                setMessages((msgs) => [
-                    ...msgs,
-                    { role: 'system', content: 'Patch generated', diff: { path: '', hunks: JSON.stringify(patchData) } },
-                ]);
-            }),
-            // ★ Session cost updates
-            onPluginEvent('session_cost', (p) => {
-                const data = p as SessionCostInfo;
-                setSessionCost(data);
-            }),
-            // ★ Session interrupted (abnormal termination)
-            onPluginEvent('session_interrupted', (p) => {
-                const data = p as { sessionId: string; hasCheckpoint: boolean };
-                activeReplyRef.current = false;
-                activeTurnIdRef.current = '';
-                setAbnormalTermination(true);
-                setHasCheckpoint(data.hasCheckpoint);
-                setIsResuming(false);
-                setMessages((prev) => {
-                    let lastAssistantIdx = -1;
-                    for (let i = prev.length - 1; i >= 0; i--) {
-                        if (prev[i].role === 'assistant') { lastAssistantIdx = i; break; }
-                    }
-                    if (lastAssistantIdx >= 0 && prev[lastAssistantIdx]._streaming) {
-                        const updated = [...prev];
-                        updated[lastAssistantIdx] = { ...prev[lastAssistantIdx], _streaming: false };
-                        return updated;
-                    }
-                    return prev;
-                });
-            }),
-            // ★ Session resuming
-            onPluginEvent('session_resuming', () => {
-                activeReplyRef.current = true;
-                setIsResuming(true);
-            }),
-            // ★ Auto-apply state sync from plugin
-            onPluginEvent('auto_apply_state', (payload) => {
-                const data = payload as { enabled: boolean };
-                setAutoApply(data.enabled);
-            }),
-            // ★ Pending changes sync from plugin
-            onPluginEvent('pending_changes', (payload) => {
-                const data = payload as { changes: { path: string; op: string; toolCallId: string }[] };
-                setPendingChanges(data.changes);
-            }),
-            // ★ Console log from plugin (e.g., HTTP request/response)
-            onPluginEvent('console_log', (payload) => {
-                const data = payload as { type?: string; source?: string; data?: unknown };
-                logConsole(data.type as ConsoleEntry['type'] || 'info', data.source || 'plugin', data.data);
-            }),
-            // ★ Agent interactive steps — all merged into the current turn's assistant card
-            onPluginEvent('agent_thinking', (payload) => {
-                const data = payload as { text?: string; phaseId?: string };
-                logConsole('agent', 'agent_thinking', data);
-                const step: AgentStep = { type: 'thinking', content: data.text || '思考中...', status: 'running' };
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
-                    ...msg,
-                    agentSteps: [...(msg.agentSteps || []), step],
-                    _streaming: true,
-                })));
-            }),
-            onPluginEvent('agent_reading', (payload) => {
-                const data = payload as { summary?: string; files?: { path: string; op?: string }[]; phaseId?: string };
-                logConsole('agent', 'agent_reading', data);
-                const readingStep: AgentStep = {
-                    type: 'reading',
-                    content: data.summary || '读取文件',
-                    status: 'success',
-                    detail: { files: (data.files || []).map(f => ({ path: f.path, op: f.op })), summary: data.summary },
-                };
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
-                    const steps = [...(msg.agentSteps || [])];
-                    const last = steps[steps.length - 1];
-                    if (last && last.type === 'thinking' && last.status === 'running') {
-                        steps[steps.length - 1] = { ...last, status: 'success' };
-                    }
-                    return { ...msg, agentSteps: [...steps, readingStep], _streaming: true };
-                }));
-            }),
-            onPluginEvent('agent_writing', (payload) => {
-                const data = payload as { text?: string; files?: { path: string; op?: string; lineCount?: number; preview?: string }[]; phaseId?: string };
-                logConsole('agent', 'agent_writing', data);
-                const writingStep: AgentStep = {
-                    type: 'writing',
-                    content: data.text || '修改文件',
-                    status: 'running',
-                    detail: { files: data.files || [] },
-                };
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
-                    const steps = [...(msg.agentSteps || [])];
-                    const last = steps[steps.length - 1];
-                    if (last && last.type === 'thinking' && last.status === 'running') {
-                        steps[steps.length - 1] = { ...last, status: 'success' };
-                    }
-                    return { ...msg, agentSteps: [...steps, writingStep], _streaming: true };
-                }));
-            }),
-            onPluginEvent('agent_running', (payload) => {
-                const data = payload as { text?: string; command?: string; output?: string; phaseId?: string };
-                logConsole('agent', 'agent_running', data);
-                const runningStep: AgentStep = {
-                    type: 'running',
-                    content: data.text || '运行命令',
-                    status: 'running',
-                    detail: { command: data.command, output: data.output },
-                };
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => {
-                    const steps = [...(msg.agentSteps || [])];
-                    const last = steps[steps.length - 1];
-                    if (last && last.type === 'writing' && last.status === 'running') {
-                        steps[steps.length - 1] = { ...last, status: 'success' };
-                    }
-                    return { ...msg, agentSteps: [...steps, runningStep], _streaming: true };
-                }));
-            }),
-            // ★ Plan steps — merge/replace plan in the current turn's assistant card
-            onPluginEvent('user_plan', (payload) => {
-                const data = payload as { goal?: string; steps?: { id: string; title: string; status?: string }[] };
-                logConsole('agent', 'user_plan', data);
-                if (!data.steps || data.steps.length === 0) return;
-                const planSteps = data.steps.map(s => ({
-                    id: s.id,
-                    title: s.title,
-                    status: s.status || 'pending',
-                }));
-                setMessages((prev) => upsertTurnAssistant(prev, (msg) => ({
-                    ...msg,
-                    planSteps,
-                    _streaming: true,
-                })));
-            }),
-        ];
-        return () => unsubs.forEach((u) => u());
-    }, [authenticated]);
-
-    const handleSend = (text: string, chips: ContextChipData[], images?: ImageData[]) => {
-        // ★ Mark the start of an active reply — all subsequent delta/tool_call/agent events
-        // will be merged into ONE assistant card (bound by turnId) until done(reason=final)
-        activeReplyRef.current = true;
-        const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        activeTurnIdRef.current = turnId;
-
-        // ★ Eagerly insert the user message + an empty assistant placeholder bound to this
-        //    turn, so every subsequent event in this turn appends into THIS one card,
-        //    no matter how many backend rounds (subtask_done, phase_done, tool_call…) occur.
-        const contextRefsForUi = chips.map((chip) => ({
-            display: chip.display,
-            type: chip.type,
-        }));
-        setMessages((prev) => [
-            ...prev,
-            { role: 'user' as const, content: text, contextRefs: contextRefsForUi, turnId },
-            { role: 'assistant' as const, content: '', _streaming: true, turnId },
-        ]);
-
-        // Build contextRefs for the plugin (no fullCode — that's in Kotlin contextStore)
-        const contextRefs = chips.map((chip) => ({
-            id: chip.id,
-            display: chip.display,
-            type: chip.type,
-            filePath: chip.filePath,
-            language: chip.language,
-            startLine: chip.startLine,
-            endLine: chip.endLine,
-        }));
-
-        // ★ Build conversation history from current messages for context continuity
-        // Only include user and assistant messages (skip system messages)
-        // Trim content to reasonable length to avoid excessive token usage
-        const historyMessages = messages
-            .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
-            .map((msg) => ({
-                role: msg.role,
-                // Truncate long messages to keep context within budget
-                content: msg.content.length > 4000 ? msg.content.substring(0, 4000) + '...' : msg.content,
-            }));
-
-        const msgPayload = {
-            text,
-            contextRefs,
-            mode,
-            modelId: selectedModelId || undefined,
-            modelSource: selectedModelId && selectedModelId !== 'auto' ? (models.find(m => m.id === selectedModelId)?.type === 'custom' ? 'custom' : 'group') : undefined,
-            maxMode,
-            images: images?.map(img => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
-            // ★ Pass conversation history for multi-turn context
-            historyMessages,
-        };
-        logConsole('bridge', 'sendToPlugin:user_message', { text: text.substring(0, 100), mode, contextRefsCount: contextRefs.length, historyCount: historyMessages.length });
-        sendToPlugin('user_message', msgPayload);
-        // Clear chips after send
-        setContextChips([]);
-    };
-
-    const handleStop = () => {
-        sendToPlugin('stop', {});
-    };
-
-    const handleNewSession = () => {
-        sendToPlugin('new_session', {});
-        setHistoryOpen(false);
-        // Immediately clear local state
-        setMessages([]);
-        setContextChips([]);
-        setAbnormalTermination(false);
-        setHasCheckpoint(false);
-        setIsResuming(false);
-        activeReplyRef.current = false;
-        activeTurnIdRef.current = '';
-    };
-
-    const handleSelectSession = (id: string) => {
-        if (id !== activeSessionId) {
-            sendToPlugin('switch_session', { sessionId: id });
-        }
-        setHistoryOpen(false);
-    };
-
-    const handleDeleteSession = (id: string) => {
-        sendToPlugin('delete_session', { sessionId: id });
-    };
-
-    const handleRemoveChip = (id: string) => {
-        setContextChips((prev) => prev.filter((c) => c.id !== id));
-    };
-
-    // Close history popup when clicking outside
     useEffect(() => {
         if (!historyOpen) return;
         const handler = (e: MouseEvent) => {
@@ -732,218 +149,92 @@ export function App() {
         return () => document.removeEventListener('mousedown', handler);
     }, [historyOpen]);
 
-    // Show login page if not authenticated
     if (!authenticated) {
         return <LoginPage />;
     }
 
     return (
-        <div className="app-layout">
-            <div className="main-area">
-                {/* Top bar with history button */}
-                <div className="top-bar">
-                    <button
-                        ref={historyBtnRef}
-                        className="history-btn"
-                        onClick={() => setHistoryOpen(!historyOpen)}
-                        title="Chat history"
-                    >
-                        ☰ History
-                    </button>
-                    <button
-                        className="new-chat-btn-top"
-                        onClick={handleNewSession}
-                        title="New chat"
-                    >
-                        + New Chat
-                    </button>
-                </div>
-
-                {/* History popup */}
-                {historyOpen && (
-                    <div className="history-popup">
-                        <SessionSidebarV2
-                            sessions={sessions}
-                            activeSessionId={activeSessionId}
-                            onSelect={handleSelectSession}
-                            onNew={handleNewSession}
-                            onDelete={handleDeleteSession}
-                        />
-                    </div>
-                )}
-
-                <div className="chat-area">
-                    {/* ★ Abnormal termination recovery banner */}
-                    {activeTab === 'chat' && abnormalTermination && !isResuming && (
-                        <div className="session-recovery-banner">
-                            <div className="recovery-banner-content">
-                                <span className="recovery-icon">⚠️</span>
-                                <span className="recovery-text">上次任务异常中断</span>
-                                {hasCheckpoint && (
-                                    <button
-                                        className="recovery-btn"
-                                        onClick={() => {
-                                            setIsResuming(true);
-                                            sendToPlugin('resume_session', {});
-                                        }}
-                                    >
-                                        恢复任务
-                                    </button>
-                                )}
-                                <button
-                                    className="recovery-dismiss-btn"
-                                    onClick={() => {
-                                        setAbnormalTermination(false);
-                                    }}
-                                >
-                                    忽略
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                    {activeTab === 'chat' && isResuming && (
-                        <div className="session-resuming-banner">
-                            <span className="resuming-spinner" />
-                            <span className="resuming-text">正在恢复任务...</span>
-                        </div>
-                    )}
-                    {/* ★ Pending changes panel */}
-                    {activeTab === 'chat' && pendingChanges.length > 0 && (
-                        <div className="pending-changes-panel">
-                            <div className="pending-changes-header">
-                                <span className="pending-changes-title">待变更文件 ({pendingChanges.length})</span>
-                                <div className="pending-changes-actions">
-                                    <button className="pending-changes-apply-btn" onClick={() => sendToPlugin('apply_patches', {})}>
-                                        全部应用
-                                    </button>
-                                    <button className="pending-changes-dismiss-btn" onClick={() => setPendingChanges([])}>
-                                        清除列表
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="pending-changes-list">
-                                {pendingChanges.map((c, idx) => (
-                                    <div key={`${c.toolCallId}-${idx}`} className="pending-change-item">
-                                        <span className="pending-change-icon">{c.op === 'create' ? '✨' : c.op === 'delete' ? '🗑️' : '📝'}</span>
-                                        <span className="pending-change-op">{c.op === 'create' ? '创建' : c.op === 'delete' ? '删除' : c.op === 'replace' ? '替换' : '修改'}</span>
-                                        <span className="pending-change-path">{c.path.split('/').pop() || c.path}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {activeTab === 'chat' && (
-                        <>
-                            <ChangePanel />
-                            <InlineEditTimeline />
-                            {v2Enabled
-                                ? <ChatViewV2 />
-                                : <ChatView messages={messages} onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })} />}
-                        </>
-                    )}
-                    {activeTab === 'composer' && <ComposerPanel />}
-                    {activeTab === 'marketplace' && <MarketplacePanel />}
-                    {activeTab === 'notepads' && <NotepadsPanel />}
-                    {activeTab === 'codebase' && <CodebasePanel />}
-                    {activeTab === 'rules' && <RulesMemoryPanel />}
-                    {activeTab === 'mcp' && <McpHooksPanel />}
-                    {activeTab === 'shell' && <ShellPolicyPanel />}
-                    {activeTab === 'tab' && <TabSettingsPanel />}
-                    {activeTab === 'usage' && <UsagePanel />}
-                    {activeTab === 'templates' && <TemplatesPanel />}
-                    {activeTab === 'background' && <BackgroundTasksPanel />}
-                    {activeTab === 'export' && <ExportPanel sessionId={activeSessionId} />}
-                    {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={() => setConsoleEntries([])} />}
-                    {/* ★ Agent plan & multi-file diff panels (auto-visible when data arrives) */}
-
-                    <MultiFileDiffPanel />
-                </div>
-                <div className="input-section">
-                    {activeTab === 'chat' && (
-                        <>
-                            <ContextBudgetBar
-                                currentTokens={contextTokens}
+        <>
+            <McpConfirmDialog />
+            <div className="app-layout">
+                <div className="main-area">
+                    <AppTopBar
+                        historyOpen={historyOpen}
+                        historyBtnRef={historyBtnRef}
+                        sessions={sessions}
+                        activeSessionId={activeSessionId}
+                        onToggleHistory={() => setHistoryOpen((o) => !o)}
+                        onNewChat={() =>
+                            sessionActions.handleNewSession(
+                                setHistoryOpen,
+                                setAbnormalTermination,
+                                setHasCheckpoint,
+                                setRecoveryMode,
+                                setIsResuming,
+                            )
+                        }
+                        onSelectSession={(id) => sessionActions.handleSelectSession(id, activeSessionId, setHistoryOpen)}
+                        onDeleteSession={sessionActions.handleDeleteSession}
+                    />
+                    <ChatMainArea
+                        activeTab={activeTab}
+                        activeSessionId={activeSessionId}
+                        v2Enabled={v2Enabled}
+                        messages={messages}
+                        consoleEntries={consoleEntries}
+                        abnormalTermination={abnormalTermination}
+                        recoveryMode={recoveryMode}
+                        isResuming={isResuming}
+                        sendError={sendError}
+                        onDismissSendError={() => setSendError(null)}
+                        onResumeSession={() => {
+                            setIsResuming(true);
+                            sendToPlugin('resume_session', {});
+                        }}
+                        onDismissAbnormal={() => setAbnormalTermination(false)}
+                        onClearConsole={() => clearConsole()}
+                    />
+                    <div className="input-section">
+                        {activeTab === 'chat' && (
+                            <ChatInputSection
+                                contextTokens={contextTokens}
                                 totalTokens={totalTokens}
                                 estimatedTokens={estimatedTokens}
-                                breakdown={budgetBreakdown}
-                                onCompress={() => sendToPlugin('compress_context', {})}
-                                onRemove={(kind, id) => {
-                                    if (kind === 'chips') handleRemoveChip(id);
-                                    if (kind === 'history') sendToPlugin('history.remove', { messageId: id });
-                                    if (kind === 'memories') sendToPlugin('memories.reject', { id });
-                                }}
-                            />
-                            {/* ★ Session cost panel */}
-                            <SessionCostPanel costInfo={sessionCost} />
-                            <InputBar
+                                budgetBreakdown={budgetBreakdown}
+                                sessionCost={sessionCost}
+                                contextChips={contextChips}
+                                mode={mode}
+                                models={models}
+                                selectedModelId={selectedModelId}
+                                lastRoute={lastRoute}
+                                maxMode={maxMode}
+                                autoApply={autoApply}
+                                branches={branches}
+                                activeBranchId={activeBranchId}
                                 onSend={handleSend}
                                 onStop={handleStop}
-                                contextChips={contextChips}
-                                onRemoveChip={handleRemoveChip}
+                                onRemoveChip={(id) => handleRemoveContextChip(id, setContextChips)}
+                                onPinContext={(chip) => setContextChips((prev) => [...prev, chip])}
                                 onModelSelect={setSelectedModelId}
-                                sessionCost={sessionCost}
+                                onModeChange={setMode}
+                                onMaxModeChange={setMaxMode}
+                                onAutoApplyChange={(enabled) => {
+                                    setAutoApply(enabled);
+                                    sendToPlugin('update_auto_apply', { enabled });
+                                }}
                             />
-                            <div className="input-bottom-row">
-                                <select className="opt-select" value={mode} onChange={(e) => setMode(e.target.value as 'agent' | 'chat')}>
-                                    <option value="agent">Agent</option>
-                                    <option value="chat">Chat</option>
-                                </select>
-                                <ModelSelector
-                                    models={models}
-                                    selectedModelId={selectedModelId}
-                                    onSelect={setSelectedModelId}
-                                    lastRoute={lastRoute}
-                                />
-                                <label className="max-mode-toggle" title="Use the strongest model and larger response budget for this turn">
-                                    <input type="checkbox" checked={maxMode} onChange={(e) => setMaxMode(e.target.checked)} />
-                                    <span>Max</span>
-                                </label>
-                                {mode === 'agent' && (
-                                    <label className="auto-apply-toggle" title="自动应用低风险文件变更">
-                                        <input
-                                            type="checkbox"
-                                            checked={autoApply}
-                                            onChange={(e) => {
-                                                const enabled = e.target.checked;
-                                                setAutoApply(enabled);
-                                                sendToPlugin('update_auto_apply', { enabled });
-                                            }}
-                                        />
-                                        <span className="auto-apply-label">自动写入</span>
-                                    </label>
-                                )}
-                            </div>
-                            {branches.length > 1 && (
-                                <BranchTreeView branches={branches.map((b) => ({
-                                    ...b,
-                                    title: b.title ?? b.branchId,
-                                    messageCount: b.messageCount ?? 0,
-                                    active: b.active ?? b.branchId === activeBranchId,
-                                }))} />
-                            )}
-                        </>
-                    )}
-                    <div className="tab-bar">
-                        <button className={activeTab === 'chat' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('chat')}>Chat</button>
-                        <button className={activeTab === 'composer' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('composer')}>Composer</button>
-                        <button className={activeTab === 'marketplace' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('marketplace')}>Marketplace</button>
-                        <button className={activeTab === 'notepads' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('notepads')}>Notepads</button>
-                        <button className={activeTab === 'codebase' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('codebase')}>Codebase</button>
-                        <button className={activeTab === 'rules' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('rules')}>Rules</button>
-                        <button className={activeTab === 'mcp' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('mcp')}>MCP</button>
-                        <button className={activeTab === 'shell' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('shell')}>Shell</button>
-                        <button className={activeTab === 'tab' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('tab')}>Tab</button>
-                        <button className={activeTab === 'usage' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('usage')}>Usage</button>
-                        <button className={activeTab === 'templates' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('templates')}>Templates</button>
-                        <button className={activeTab === 'background' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('background')}>Background</button>
-                        <button className={activeTab === 'export' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('export')}>Export</button>
-                        <button className={activeTab === 'console' ? 'tab-active' : 'tab-btn'} onClick={() => setActiveTab('console')}>Console</button>
-                        <button className="tab-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark')} title="切换主题">
-                            {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '◐'}
-                        </button>
+                        )}
+                        <AppTabBar
+                            activeTab={activeTab}
+                            theme={theme}
+                            pendingMemoryCount={pendingMemoryCount}
+                            bgActiveCount={bgActiveCount}
+                            onTabChange={setActiveTab}
+                            onThemeCycle={() => setTheme((t) => (t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark'))}
+                        />
                     </div>
                 </div>
             </div>
-        </div>
+        </>
     );
 }

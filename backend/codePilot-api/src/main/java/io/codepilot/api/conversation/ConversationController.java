@@ -25,11 +25,18 @@ import reactor.core.publisher.Flux;
 public class ConversationController {
 
   private final ConversationService service;
+  private final ConversationRunGate runGate;
+  private final ConversationQueuedOrchestrator queuedOrchestrator;
   private final SystemPromptLeakOutputFilter leakOutputFilter;
 
   public ConversationController(
-      ConversationService service, SystemPromptLeakOutputFilter leakOutputFilter) {
+      ConversationService service,
+      ConversationRunGate runGate,
+      ConversationQueuedOrchestrator queuedOrchestrator,
+      SystemPromptLeakOutputFilter leakOutputFilter) {
     this.service = service;
+    this.runGate = runGate;
+    this.queuedOrchestrator = queuedOrchestrator;
     this.leakOutputFilter = leakOutputFilter;
   }
 
@@ -44,7 +51,9 @@ public class ConversationController {
     // This prevents double-execution of the LLM streaming pipeline caused by:
     //   1) leakOutputFilter.guard(raw)  — first subscriber
     //   2) raw.ignoreElements()         — second subscriber (heartbeat termination signal)
-    Flux<ServerSentEvent<String>> raw = service.run(req, userId).share();
+    Flux<ServerSentEvent<String>> raw =
+        (runGate.useQueue(req) ? queuedOrchestrator.run(req, userId) : service.run(req, userId))
+            .share();
     // Periodic heartbeats (SSE comment) keep long-lived proxies from idle-closing the stream.
     Flux<ServerSentEvent<String>> heartbeat =
         Flux.interval(Duration.ofSeconds(20))

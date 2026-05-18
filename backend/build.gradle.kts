@@ -39,9 +39,23 @@ subprojects {
     extensions.configure<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension> {
         imports {
             mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
+            mavenBom("org.springframework.ai:spring-ai-bom:${catalog.findVersion("spring-ai").get().requiredVersion}")
             mavenBom("com.fasterxml.jackson:jackson-bom:$jacksonVersion")
             mavenBom("io.opentelemetry:opentelemetry-bom:$otelVersion")
             mavenBom("org.springframework.cloud:spring-cloud-dependencies:${catalog.findVersion("spring-cloud").get().requiredVersion}")
+        }
+    }
+
+    configurations.configureEach {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "org.springframework.ai") {
+                useVersion(catalog.findVersion("spring-ai").get().requiredVersion)
+                because("Align Spring AI artifacts on BOM ${catalog.findVersion("spring-ai").get().requiredVersion}")
+            }
+            if (requested.group == "com.alibaba.cloud.ai") {
+                useVersion(catalog.findVersion("spring-ai-alibaba").get().requiredVersion)
+                because("Align Spring AI Alibaba artifacts on ${catalog.findVersion("spring-ai-alibaba").get().requiredVersion}")
+            }
         }
     }
 
@@ -58,6 +72,7 @@ subprojects {
 
         // Testing
         add("testImplementation", platform("org.junit:junit-bom:$junitVersion"))
+        add("testRuntimeOnly", "org.junit.platform:junit-platform-launcher")
         add("testImplementation", "org.springframework.boot:spring-boot-starter-test") {
             exclude(group = "org.mockito") // we don't allow mock libs in production code or tests
         }

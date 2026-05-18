@@ -1,5 +1,8 @@
 # 09 — 会话分支树 UI 与历史增强(P2)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > ✅ Completed(2026-05-17):已落地 `BranchTreeView`、`SessionSidebarV2`,并补齐
 > `session.pin/archive/rename/search/duplicate`、`branch.tree`、`fork_from_message`
 > / `switch_branch` 桥接。`session_list` 已返回 `pinned/archived/preview/messageCount/branches`。

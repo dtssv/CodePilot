@@ -16,7 +16,7 @@
 ```
 CodePilot/
 ├── docs/                                # 设计文档（架构 / 插件 / 后端 / Prompt / 接口）
-├── backend/                             # 后端（Spring Boot 3.3 + Spring AI 1.0）
+├── backend/                             # 后端（Spring Boot 3.3 + Spring AI 1.1）
 │   ├── codePilot-common/
 │   ├── codePilot-core/
 │   ├── codePilot-api/

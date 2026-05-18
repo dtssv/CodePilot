@@ -5,6 +5,8 @@ import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.action.AsyncEdgeAction;
 import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
 import io.codepilot.core.conversation.SseFactory;
+import io.codepilot.core.conversation.StopSignalBus;
+import io.codepilot.core.deploy.DeployDrainService;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.actions.*;
@@ -13,12 +15,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Graph-engine based conversation service using Spring AI Alibaba Graph (StateGraph).
@@ -61,6 +65,8 @@ public class GraphEngineService {
     private final SynthesizeAction synthesizeAction;
     private final SseFactory sse;
     private final GraphCheckpointStore checkpointStore;
+    private final StopSignalBus stopBus;
+    private final DeployDrainService deployDrainService;
 
     public GraphEngineService(
             IntakeAction intakeAction,
@@ -78,7 +84,9 @@ public class GraphEngineService {
             SearchEvaluateAction searchEvaluateAction,
             SynthesizeAction synthesizeAction,
             SseFactory sse,
-            GraphCheckpointStore checkpointStore) {
+            GraphCheckpointStore checkpointStore,
+            StopSignalBus stopBus,
+            DeployDrainService deployDrainService) {
         this.intakeAction = intakeAction;
         this.planningAction = planningAction;
         this.preCheckAction = preCheckAction;
@@ -95,6 +103,8 @@ public class GraphEngineService {
         this.synthesizeAction = synthesizeAction;
         this.sse = sse;
         this.checkpointStore = checkpointStore;
+        this.stopBus = stopBus;
+        this.deployDrainService = deployDrainService;
     }
 
     /**
@@ -123,12 +133,25 @@ public class GraphEngineService {
 
             Sinks.Many<ServerSentEvent<String>> liveSink = Sinks.many().unicast().onBackpressureBuffer();
 
+            String sid = req.sessionId();
             Runnable graphTask = () -> {
-                // Set the ThreadLocal live sink so GraphSseHelper.emitEvent() can push events
                 GraphSseHelper.setLiveSink(liveSink, sse);
-                // Also register in session-based map so async nodes on different threads can access it (M1 fix)
-                String sid = req.sessionId();
                 GraphSseHelper.registerSessionSink(sid, liveSink, sse);
+                AtomicBoolean stopHandled = new AtomicBoolean(false);
+                Disposable stopSub =
+                    stopBus
+                        .subscribe(sid)
+                        .take(1)
+                        .subscribe(
+                            msg -> {
+                              if (stopHandled.compareAndSet(false, true)) {
+                                if (!deployDrainService.isDraining()) {
+                                  liveSink.tryEmitNext(
+                                      sse.event(SseEvents.DONE, Map.of("reason", "stopped")));
+                                }
+                                liveSink.tryEmitComplete();
+                              }
+                            });
                 try {
                     var resultState = graph.invoke(initialState.data());
                     log.info("GraphEngine completed: state keys={}",
@@ -137,8 +160,6 @@ public class GraphEngineService {
                 } catch (Exception e) {
                     GraphInterruptException gie = unwrapGraphInterrupt(e);
                     if (gie != null) {
-                        // Controlled interrupt (e.g., AskUser): the DONE event has already been
-                        // emitted by the node. Just close the SSE stream gracefully.
                         log.info("GraphEngine interrupted: reason={}, token={}", gie.getReason(), gie.getContinuationToken());
                     } else {
                         log.error("Graph engine execution failed", e);
@@ -146,6 +167,7 @@ public class GraphEngineService {
                     }
                     liveSink.tryEmitComplete();
                 } finally {
+                    stopSub.dispose();
                     GraphSseHelper.clearLiveSink();
                     GraphSseHelper.unregisterSessionSink(sid);
                 }
@@ -210,6 +232,21 @@ public class GraphEngineService {
                         // Schedule graph execution on dedicated scheduler
                         graphScheduler.schedule(() -> {
                             GraphSseHelper.setLiveSink(liveSink, sse);
+                            AtomicBoolean stopHandled = new AtomicBoolean(false);
+                            Disposable stopSub =
+                                stopBus
+                                    .subscribe(sid)
+                                    .take(1)
+                                    .subscribe(
+                                        msg -> {
+                                          if (stopHandled.compareAndSet(false, true)) {
+                                            if (!deployDrainService.isDraining()) {
+                                              liveSink.tryEmitNext(
+                                                  sse.event(SseEvents.DONE, Map.of("reason", "stopped")));
+                                            }
+                                            liveSink.tryEmitComplete();
+                                          }
+                                        });
                             try {
                                 var resultState = graph.invoke(restoredState.data());
                                 log.info("GraphEngine resume completed: state keys={}",
@@ -218,7 +255,6 @@ public class GraphEngineService {
                             } catch (Exception e) {
                                 GraphInterruptException gie = unwrapGraphInterrupt(e);
                                 if (gie != null) {
-                                    // Controlled interrupt during resumed execution (e.g., another askUser)
                                     log.info("GraphEngine resume interrupted: reason={}, token={}", gie.getReason(), gie.getContinuationToken());
                                 } else {
                                     log.error("Graph engine resume execution failed", e);
@@ -226,6 +262,7 @@ public class GraphEngineService {
                                 }
                                 liveSink.tryEmitComplete();
                             } finally {
+                                stopSub.dispose();
                                 GraphSseHelper.clearLiveSink();
                                 GraphSseHelper.unregisterSessionSink(sid);
                             }
@@ -249,7 +286,7 @@ public class GraphEngineService {
     }
 
     private CompiledGraph buildGraph() throws Exception {
-        var graph = new StateGraph(IntakeAction::createStateWithStrategies);
+        var graph = new StateGraph(IntakeAction::keyStrategies);
 
         // ── Define Nodes ──
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
@@ -345,7 +382,7 @@ public class GraphEngineService {
      * → synthesize(汇总生成报告) → finalize
      */
     private CompiledGraph buildDeepResearchGraph() throws Exception {
-        var graph = new StateGraph(IntakeAction::createStateWithStrategies);
+        var graph = new StateGraph(IntakeAction::keyStrategies);
 
         // Nodes
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));

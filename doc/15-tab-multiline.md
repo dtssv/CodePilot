@@ -1,5 +1,8 @@
 # 15 — Tab 多行预测与跨光标跳跃(P3)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > ✅ Completed(2026-05-17):基于已有 `CursorTabSuggester` 完成多行 ghost 渲染、
 > 后续位置预测、Tab accept 写命令包裹、accept/dismiss telemetry。修复了
 > inline completion 后续建议被立即 `acceptCurrent()` 的问题,现在只渲染预测。

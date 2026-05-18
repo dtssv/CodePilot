@@ -179,11 +179,15 @@ class RulesService(private val project: Project) {
     }
 
     private fun emit() {
+        // Use current.get() directly instead of all() to avoid infinite recursion:
+        // reload() → emit() → all() → ifEmpty { reload() } → emit() → ...
+        // This can happen when sorted is empty (no rules files found).
+        val rules = current.get()
         EventBus.getInstance(project).emit(
             turnId = "system",
             stepId = "rules",
             type = EventTypes.RULES_LOADED,
-            payload = mapOf("rules" to all().map { it.toDto() }),
+            payload = mapOf("rules" to rules.map { it.toDto() }),
         )
     }
 

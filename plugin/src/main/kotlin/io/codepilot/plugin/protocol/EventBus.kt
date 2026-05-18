@@ -67,12 +67,24 @@ class EventBus(@Suppress("unused") private val project: Project) {
 
     // ---------- Convenience helpers (covers the common shapes) ---------- //
 
-    fun startTurn(turnId: String, userMessage: String, contextRefs: List<Map<String, Any?>> = emptyList()) =
+    fun startTurn(
+        turnId: String,
+        userMessage: String,
+        contextRefs: List<Map<String, Any?>> = emptyList(),
+        images: List<Map<String, Any?>> = emptyList(),
+        forkMessageIndex: Int? = null,
+    ) =
         emit(
             turnId = turnId,
             stepId = turnId,
             type = EventTypes.TURN_START,
-            payload = mapOf("userMessage" to userMessage, "contextRefs" to contextRefs),
+            payload =
+                buildMap {
+                    put("userMessage", userMessage)
+                    put("contextRefs", contextRefs)
+                    if (images.isNotEmpty()) put("images", images)
+                    if (forkMessageIndex != null) put("forkMessageIndex", forkMessageIndex)
+                },
         )
 
     fun endTurn(turnId: String, status: String, reason: String? = null) =

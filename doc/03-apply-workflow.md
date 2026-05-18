@@ -1,5 +1,8 @@
 # 03 — Hunk 级 Apply 工作流 + Undo all AI changes(P0) ✅ Completed
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > 已实现:`apply/DiffUtil.kt` 纯 Kotlin LCS 行级 diff;`apply/PatchStaging.kt` 项目级
 > 服务承载暂存/接受/驳回/提交/撤销;`ToolDispatcher.tryStage` 在
 > `stageBeforeApply` 开启时拦截 `fs.write/create/replace/delete`;`CefChatPanel`

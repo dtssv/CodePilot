@@ -1,5 +1,8 @@
 # 10 — Context Budget Breakdown 与多模态输入(P2)
 
+> **成熟度**: 见 [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
+
 > ✅ Completed(2026-05-17):`ContextBudgetBar` 已支持分桶 breakdown;`InputBar`
 > 支持粘贴图片、拖拽图片/文件/文件夹、语音输入;Kotlin 侧已接入
 > `VoiceInputService` 并通过 `context_budget` 下发 breakdown。Java 后端已补齐

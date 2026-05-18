@@ -126,6 +126,46 @@ class CursorTabSuggester(private val project: Project, private val editor: Edito
      */
     fun predictAdditionalEdits(cursorOffset: Int, insertedText: String): List<GhostSuggestion> {
         val result = mutableListOf<GhostSuggestion>()
+        val heuristic = predictHeuristicEdits(cursorOffset, insertedText)
+        result.addAll(heuristic)
+        result.addAll(predictModelEdits(cursorOffset, insertedText))
+        return result.distinctBy { "${it.offset}:${it.text}" }.sortedBy { it.priority }
+    }
+
+    private fun predictModelEdits(cursorOffset: Int, insertedText: String): List<GhostSuggestion> {
+        val file = editor.virtualFile ?: return emptyList()
+        val doc = editor.document
+        val line = doc.getLineNumber(cursorOffset)
+        val lineStart = doc.getLineStartOffset(line)
+        val column = cursorOffset - lineStart
+        val prefix = doc.text.substring(maxOf(0, cursorOffset - 1200), cursorOffset)
+        val suffix = doc.text.substring(cursorOffset, minOf(doc.textLength, cursorOffset + 400))
+        val language = file.extension ?: "text"
+        val result =
+            TabPredictionClient.getInstance(project).predict(
+                filePath = file.path,
+                language = language,
+                prefix = prefix,
+                suffix = suffix,
+                cursorLine = line,
+                cursorColumn = column,
+                cursorOffset = cursorOffset,
+            )
+        if (result.edits.isNotEmpty()) {
+            TabFeedback.getInstance().recordPredictionSource(result.source)
+        }
+        return result.edits.mapIndexed { idx, e ->
+            GhostSuggestion(
+                offset = e.offset,
+                text = e.newText,
+                source = e.source,
+                priority = 10 + idx,
+            )
+        }
+    }
+
+    private fun predictHeuristicEdits(cursorOffset: Int, insertedText: String): List<GhostSuggestion> {
+        val result = mutableListOf<GhostSuggestion>()
         val doc = editor.document.text
         val lineNumber = editor.document.getLineNumber(cursorOffset)
         val lineStart = editor.document.getLineStartOffset(lineNumber)

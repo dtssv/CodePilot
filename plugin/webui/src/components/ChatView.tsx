@@ -5,6 +5,8 @@ import remarkGfm from 'remark-gfm';
 import { AgentContentRenderer } from './AgentContentRenderer';
 import { AgentStep, AgentStepCard } from './AgentStepCard';
 import { BranchTimeline } from './BranchTimeline';
+import { MessageImages } from './MessageImages';
+import { sendToPlugin } from '../bridge';
 import { DiffCard } from './DiffCard';
 import { IncrementalMarkdown } from './IncrementalMarkdown';
 import { NeedsInputCard } from './NeedsInputCard';
@@ -138,43 +140,60 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             </div>
                         ) : msg.role === 'assistant' ? (
                             // ★ Assistant message: unified rendering pipeline
-                            // Priority: content (AgentContentRenderer) > agentSteps (progress) > toolCalls (fallback)
-                            // When content exists, agentSteps are hidden to avoid duplicate display
+                            // All sections coexist: planSteps + agentSteps + content + toolCalls
                             <>
-                                {/* Plan steps: always show when present (independent of content) */}
+                                {/* Plan steps: always show when present */}
                                 {msg.planSteps && msg.planSteps.length > 0 && (
                                     <div className="plan-steps-container">
                                         <div className="plan-steps-header">📋 执行计划</div>
                                         {msg.planSteps.map((step, idx) => (
                                             <div key={step.id || idx} className="plan-step-item">
                                                 <span className={`plan-step-status plan-step-${step.status}`}>
-                                                    {step.status === 'success' || step.status === 'done' ? '✓' : step.status === 'running' || step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : '○'}
+                                                    {step.status === 'success' || step.status === 'done' || step.status === 'completed' ? '✓' : step.status === 'running' || step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : '○'}
                                                 </span>
                                                 <span className="plan-step-title">{step.title}</span>
                                             </div>
                                         ))}
                                     </div>
                                 )}
-                                {/* Agent steps: only show as progress indicator when content hasn't arrived yet */}
-                                {msg.agentSteps && msg.agentSteps.length > 0 && !msg.content && (
-                                    <div className="agent-steps-container">
+                                {/* Agent steps: show as progress indicator (compact when content is also present) */}
+                                {msg.agentSteps && msg.agentSteps.length > 0 && (
+                                    <div className={`agent-steps-container ${msg.content ? 'agent-steps-compact' : ''}`}>
                                         {msg.agentSteps.map((step, idx) => (
-                                            <AgentStepCard key={`step-${idx}`} step={step} />
+                                            <AgentStepCard key={`step-${idx}`} step={step} compact={!!msg.content} />
                                         ))}
                                     </div>
                                 )}
-                                {/* Content rendering — always takes priority when present */}
+                                {/* Content rendering */}
                                 {msg.content ? (
                                     <AgentContentRenderer content={msg.content} isStreaming={msg._streaming} />
                                 ) : null}
-                                {/* Tool call cards — fallback when no content and no agentSteps */}
-                                {!msg.content && !(msg.agentSteps && msg.agentSteps.length > 0) && msg.toolCalls && msg.toolCalls.length > 0 && (
-                                    <div className="msg-tool-calls">
-                                        {msg.toolCalls.map((tc) => (
-                                            <ToolCallCard key={tc.id} toolCall={tc} />
-                                        ))}
-                                    </div>
-                                )}
+                                {/* Tool call cards — filter out duplicates with agent writing/running steps */}
+                                {(() => {
+                                    // When agentSteps contains writing/running types, the same operation
+                                    // is already shown as an agent step card — skip duplicate tool cards.
+                                    const hasWritingAgentSteps = msg.agentSteps?.some(
+                                        (s) => s.type === 'writing' || s.type === 'running'
+                                    );
+                                    const filteredToolCalls = hasWritingAgentSteps
+                                        ? msg.toolCalls?.filter((tc) =>
+                                            // Keep diagnostic/validation/shell tools; hide file-write tools
+                                            // that are already represented by agent writing/running steps.
+                                            !tc.name.startsWith('fs.write') &&
+                                            !tc.name.startsWith('fs.create') &&
+                                            !tc.name.startsWith('fs.replace') &&
+                                            !tc.name.startsWith('fs.applyPatch') &&
+                                            !tc.name.startsWith('fs.delete')
+                                        )
+                                        : msg.toolCalls;
+                                    return filteredToolCalls && filteredToolCalls.length > 0 ? (
+                                        <div className="msg-tool-calls">
+                                            {filteredToolCalls.map((tc) => (
+                                                <ToolCallCard key={tc.id} toolCall={tc} />
+                                            ))}
+                                        </div>
+                                    ) : null;
+                                })()}
                             </>
                         ) : (
                             msg._streaming ? (
@@ -188,25 +207,7 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             )
                         )}
                         {/* ★ Image attachments rendering */}
-                        {msg.images && msg.images.length > 0 && (
-                            <div className="msg-images">
-                                {msg.images.map((img, imgIdx) => (
-                                    <div key={`img-${i}-${imgIdx}`} className="msg-image-item">
-                                        <img
-                                            src={img.url}
-                                            alt={img.description || `Image ${imgIdx + 1}`}
-                                            className="msg-image-preview"
-                                            style={{ maxWidth: '100%', maxHeight: '200px', borderRadius: '4px', margin: '4px 0' }}
-                                        />
-                                        {img.description && (
-                                            <div className="msg-image-desc" style={{ fontSize: '11px', opacity: 0.6, marginTop: '2px' }}>
-                                                {img.description}
-                                            </div>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
+                        {msg.images && msg.images.length > 0 && <MessageImages images={msg.images} />}
                         {/* ★ Branch timeline rendering */}
                         {msg.branches && msg.branches.length > 0 && (
                             <BranchTimeline
@@ -218,13 +219,8 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                                 }))}
                                 activeBranchId={msg.branches[0]?.branchId || ''}
                                 onSwitchBranch={(branchId) => {
-                                    const branch = msg.branches?.find(b => b.branchId === branchId);
-                                    if (branch) {
-                                        // Dispatch branch switch via custom event
-                                        window.dispatchEvent(new CustomEvent('codepilot:switch_branch', {
-                                            detail: { sessionId: branch.sessionId, branchId }
-                                        }));
-                                    }
+                                    const branch = msg.branches?.find((b) => b.branchId === branchId);
+                                    if (branch) sendToPlugin('switch_branch', { sessionId: branch.sessionId }).catch(() => undefined);
                                 }}
                             />
                         )}

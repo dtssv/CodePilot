@@ -47,7 +47,8 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
           "/v1/auth/refresh",
           "/v1/auth/methods",
           "/v1/auth/device-code",
-          "/v1/auth/device-token");
+          "/v1/auth/device-token",
+          "/admin");
 
   private static final int MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
 
@@ -139,7 +140,7 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
 
   private boolean isPublic(String path) {
     for (String prefix : PUBLIC_PATH_PREFIXES) {
-      if (path.equals(prefix) || path.startsWith(prefix + "/") || path.startsWith(prefix)) {
+      if (path.startsWith(prefix + "/") || path.startsWith(prefix)) {
         return true;
       }
     }

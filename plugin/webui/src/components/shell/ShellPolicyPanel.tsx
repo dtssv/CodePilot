@@ -19,14 +19,18 @@ export function ShellPolicyPanel() {
     }, []);
 
     return (
-        <section className="shell-policy-panel">
-            <header>
-                <h3>Shell Policy</h3>
-                <button type="button" onClick={() => shellPolicyApi.save(policy)}>Save</button>
+        <section className="panel-base shell-policy-panel">
+            <header className="panel-header">
+                <div className="panel-title-group">
+                    <h3 className="panel-title">⌨️ Shell Policy</h3>
+                    <span className="panel-subtitle">Command allow/deny rules</span>
+                </div>
+                <button type="button" className="panel-btn panel-btn-primary" onClick={() => shellPolicyApi.save(policy)}>Save</button>
             </header>
-            <label>
-                Default action
+            <label className="panel-field">
+                <span className="panel-label">Default action</span>
                 <select
+                    className="panel-select"
                     value={policy.defaultAction}
                     onChange={(e) => setPolicy({ ...policy, defaultAction: e.target.value as ShellPolicyState['defaultAction'] })}
                 >
@@ -35,15 +39,17 @@ export function ShellPolicyPanel() {
                     <option value="deny">deny</option>
                 </select>
             </label>
-            <div className="shell-rule-list">
+            <div className="panel-section">
                 {policy.rules.map((rule, idx) => (
-                    <div key={`${rule.pattern}:${idx}`} className="shell-rule-row">
+                    <div key={`${rule.pattern}:${idx}`} className="panel-row">
                         <input
+                            className="panel-input"
                             value={rule.pattern}
                             onChange={(e) => updateRule(idx, { pattern: e.target.value }, policy, setPolicy)}
                             placeholder="^git status"
                         />
                         <select
+                            className="panel-select panel-select-sm"
                             value={rule.action}
                             onChange={(e) => updateRule(idx, { action: e.target.value as ShellRule['action'] }, policy, setPolicy)}
                         >
@@ -53,18 +59,20 @@ export function ShellPolicyPanel() {
                         </select>
                         <button
                             type="button"
+                            className="panel-btn panel-btn-danger"
                             onClick={() => setPolicy({ ...policy, rules: policy.rules.filter((_, i) => i !== idx) })}
                         >
-                            Remove
+                            ✕
                         </button>
                     </div>
                 ))}
             </div>
             <button
                 type="button"
+                className="panel-btn"
                 onClick={() => setPolicy({ ...policy, rules: [...policy.rules, { pattern: '^git status( |$)', action: 'allow' }] })}
             >
-                Add rule
+                + Add rule
             </button>
         </section>
     );

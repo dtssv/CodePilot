@@ -3,6 +3,8 @@ import { onPluginEvent, sendToPlugin } from '../bridge';
 import { AtReferencePopup } from './AtReferencePopup';
 import { ContextChipData } from './ContextChip';
 import { ImageAttachment, ImageData } from './ImageAttachment';
+import { chipFromResult, ContextRefResult, ContextRefResultCard } from './context/ContextRefResultCard';
+import { ActiveRulesPill } from './rules/ActiveRulesPill';
 import { builtinCommands, customCommands, CustomSlashSpec, SlashCommand } from './slash/commands';
 import { SlashPopup } from './slash/SlashPopup';
 
@@ -18,8 +20,13 @@ interface InputBarProps {
     onStop: () => void;
     contextChips: ContextChipData[];
     onRemoveChip: (id: string) => void;
+    onPinContext?: (chip: ContextChipData) => void;
     onModelSelect?: (id: string) => void;
     sessionCost?: { estimatedCostUsd: number; messageCount: number };
+    /** Pending @ refs token estimate (from context.estimate). */
+    pendingContextTokens?: number;
+    /** Model context window size for budget %. */
+    contextBudgetTotal?: number;
 }
 
 const CHIP_DATA_ATTR = 'data-chip-id';
@@ -30,7 +37,7 @@ const CHIP_DATA_ATTR = 'data-chip-id';
  * so text and chips are naturally interleaved.
  * Typing '@' triggers the AtReferencePopup for file/symbol/codebase references.
  */
-export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onModelSelect, sessionCost }: InputBarProps) {
+export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinContext, onModelSelect, sessionCost, pendingContextTokens = 0, contextBudgetTotal = 128000 }: InputBarProps) {
     const [running, setRunning] = useState(false);
     const editorRef = useRef<HTMLDivElement>(null);
     const chipsMapRef = useRef<Map<string, ContextChipData>>(new Map());
@@ -47,6 +54,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onModelSe
     const [slashQuery, setSlashQuery] = useState('');
     const [slashAnchorRect, setSlashAnchorRect] = useState<DOMRect | undefined>();
     const [customSlash, setCustomSlash] = useState<CustomSlashSpec[]>([]);
+    const [codebaseHits, setCodebaseHits] = useState<ContextRefResult[]>([]);
 
     // Keep chipsMapRef in sync
     useEffect(() => {
@@ -84,11 +92,23 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onModelSe
         const setInput = (event: Event) => setEditorText((event as CustomEvent<string>).detail ?? '');
         document.addEventListener('codepilot:input.set', setInput);
         sendToPlugin('slash.commands.list', {}).catch(() => undefined);
+        const offCodebase = onPluginEvent('codebase.search_response', (payload) => {
+            const data = payload as { hits?: { path: string; snippet?: string; score?: number }[] };
+            setCodebaseHits((data.hits ?? []).slice(0, 5).map((h, i) => ({
+                id: `codebase-${i}-${h.path}`,
+                type: 'codebase',
+                title: h.path.split('/').pop() || h.path,
+                path: h.path,
+                snippet: h.snippet,
+                tokenEstimate: Math.ceil((h.snippet?.length ?? 0) / 4),
+            })));
+        });
         return () => {
             offDone();
             offVoice();
             offVoiceV2();
             offSlash();
+            offCodebase();
             document.removeEventListener('codepilot:input.set', setInput);
         };
     }, []);
@@ -359,6 +379,34 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onModelSe
 
     return (
         <div className={`input-bar ${dragOver ? 'drag-over' : ''}`}>
+            <div className="input-bar-meta">
+                <ActiveRulesPill />
+                {contextChips.length > 0 && pendingContextTokens > 0 && (
+                    <span
+                        className="input-context-estimate"
+                        title="Estimated tokens from pending @ references (next send)"
+                    >
+                        +{pendingContextTokens.toLocaleString()} ctx
+                        {contextBudgetTotal > 0 && (
+                            <span className="input-context-pct">
+                                {' '}({Math.min(100, Math.round((pendingContextTokens / contextBudgetTotal) * 100))}% budget)
+                            </span>
+                        )}
+                    </span>
+                )}
+            </div>
+            {codebaseHits.length > 0 && (
+                <div className="codebase-hits-inline">
+                    {codebaseHits.map((h) => (
+                        <ContextRefResultCard
+                            key={h.id}
+                            result={h}
+                            onPin={(r) => onPinContext?.(chipFromResult(r))}
+                            onUnpin={() => setCodebaseHits((prev) => prev.filter((x) => x.id !== h.id))}
+                        />
+                    ))}
+                </div>
+            )}
             {dragOver && <div className="drag-overlay">松开以引用文件/文件夹或添加图片</div>}
             <div
                 ref={editorRef}

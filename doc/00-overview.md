@@ -1,5 +1,7 @@
 # CodePilot WebUI 与 Cursor 能力对齐 — 总设计
 
+> **成熟度矩阵**: [STATUS.md](./STATUS.md)（Designed / Implemented / Integrated / Productized）
+
 ## 0. 文档说明
 
 本套设计基于对 `plugin/webui/src/App.tsx` 及其事件流、Kotlin 侧

@@ -11,11 +11,11 @@ export type TurnStatus = 'running' | 'final' | 'failed' | 'stopped' | 'interrupt
 export type StepStatus = 'running' | 'success' | 'error' | 'cancelled';
 
 export type EventType =
-    | 'turn.start' | 'turn.end'
+    | 'turn.start' | 'turn.end' | 'turn.metrics'
     | 'step.start' | 'step.progress' | 'step.end'
     | 'text.delta' | 'text.thinking'
     | 'tool.call' | 'tool.progress' | 'tool.result'
-    | 'plan.update'
+    | 'plan.update' | 'plan.progress'
     | 'needs_input' | 'risk_notice'
     | 'error'
     | string; // forward-compatible
@@ -62,10 +62,34 @@ export interface StepNode {
     children: string[];
 }
 
+export interface RiskNotice {
+    level: string;
+    message: string;
+    filesPaths?: string[];
+}
+
+export interface NeedsInputPayload {
+    title?: string;
+    questions?: { id: string; prompt: string; kind?: string; options?: { id: string; label: string }[] }[];
+    continuationToken?: string;
+}
+
+export interface TurnImage {
+    url: string;
+    mimeType?: string;
+    name?: string;
+    description?: string;
+}
+
 export interface TurnNode {
     turnId: string;
     userMessage: string;
     contextRefs: { display?: string; type?: string }[];
+    images?: TurnImage[];
+    /** Index in session messages.ndjson for fork_from_message. */
+    forkMessageIndex?: number;
+    riskNotices?: RiskNotice[];
+    needsInput?: NeedsInputPayload;
     status: TurnStatus;
     /** Root-level steps (parentStepId == null). */
     rootStepIds: string[];
@@ -74,6 +98,13 @@ export interface TurnNode {
     startedAt: number;
     endedAt?: number;
     reason?: string | null;
+    tokenMeta?: {
+        inputTokens?: number;
+        outputTokens?: number;
+        costUsd?: number;
+        modelId?: string;
+        tier?: string;
+    };
 }
 
 export interface ChatV2State {

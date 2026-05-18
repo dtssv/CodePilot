@@ -3,6 +3,7 @@ import { sendToPlugin } from '../../../bridge';
 import type { StepNode } from '../../../state/events';
 import { ToolArgsView } from './ToolArgsView';
 import { ToolResultView } from './ToolResultView';
+import { isExternalMcpTool, parseMcpTool } from './mcpUtils';
 import type { ToolResultPayload } from './types';
 
 /**
@@ -22,16 +23,29 @@ export function ToolCallCard({ step }: { step: StepNode }) {
 
     if (!call) return null;
 
+    const mcp = parseMcpTool(call.tool);
     const duration = step.endedAt ? `${step.endedAt - step.startedAt}ms` : 'running…';
     const statusIcon = step.status === 'running' ? '⏳'
         : step.status === 'success' ? '✓'
         : step.status === 'error' ? '✗' : '·';
 
     return (
-        <div className={`tool-card tool-status-${step.status}`}>
+        <div className={`tool-card tool-status-${step.status}${mcp ? ' tool-card-mcp' : ''}`}>
+            {mcp && (
+                <div className="tool-mcp-banner" role="note">
+                    <span className="tool-mcp-badge">MCP</span>
+                    <span className="tool-mcp-server">{mcp.serverId}</span>
+                    <span className="tool-mcp-sep">·</span>
+                    <code className="tool-mcp-tool">{mcp.toolName}</code>
+                    <span className="tool-mcp-hint muted">External tool — review args</span>
+                </div>
+            )}
             <div className="tool-card-header">
                 <span className="tool-icon" aria-label={step.status}>{statusIcon}</span>
                 <code className="tool-name">{call.tool}</code>
+                {isExternalMcpTool(call.tool) && !mcp && (
+                    <span className="tool-mcp-source muted" title="MCP tool">MCP</span>
+                )}
                 <span className="tool-summary">{summarize(call.tool, call.args)}</span>
                 <span className="tool-duration">{duration}</span>
                 <button
@@ -121,8 +135,13 @@ function summarize(tool: string, rawArgs: unknown): string {
             return s(a.path);
         case tool === 'ide.diagnostics':
             return s(a.path) || 'workspace';
-        case tool.startsWith('mcp.'):
-            return Object.keys(a).slice(0, 3).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
+        case tool.startsWith('mcp.'): {
+            const parsed = parseMcpTool(tool);
+            const args = Object.keys(a).slice(0, 2).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
+            return parsed
+                ? `${parsed.serverId}/${parsed.toolName}${args ? ` · ${args}` : ''}`
+                : args || tool;
+        }
         default:
             return Object.keys(a).slice(0, 3).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
     }

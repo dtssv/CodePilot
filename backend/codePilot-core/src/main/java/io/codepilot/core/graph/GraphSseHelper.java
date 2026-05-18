@@ -58,6 +58,31 @@ public final class GraphSseHelper {
         SESSION_SSE_FACTORIES.remove(sessionId);
     }
 
+    /** Snapshot of sessions with an active graph SSE sink on this JVM. */
+    public static java.util.Set<String> activeSessionIds() {
+        return java.util.Set.copyOf(SESSION_SINKS.keySet());
+    }
+
+    /**
+     * Best-effort terminal event for deploy drain / stop (session may be on another thread).
+     */
+    public static void emitTerminalDone(String sessionId, String eventType, Object data) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        var sink = SESSION_SINKS.get(sessionId);
+        var sse = SESSION_SSE_FACTORIES.get(sessionId);
+        if (sink == null || sse == null) {
+            return;
+        }
+        try {
+            sink.tryEmitNext(sse.event(eventType, data));
+            sink.tryEmitComplete();
+        } catch (Exception ignored) {
+            // sink may already be terminated
+        }
+    }
+
     public static void setLiveSink(Sinks.Many<ServerSentEvent<String>> sink, SseFactory sse) {
         LIVE_SINK.set(sink);
         SSE_FACTORY.set(sse);

@@ -4,7 +4,9 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.graph.actions.VerifyAction.VerifyReport;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
@@ -124,11 +126,12 @@ public class RepairAction implements NodeAction {
             ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
             log.info("RepairAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
-            repairResponse = chatClient.prompt()
-                    .system(promptRegistry.get("agent.system"))
-                    .user(repairPrompt)
-                    .call()
-                    .content();
+            repairResponse =
+                GraphLlmHelper.completeSystemUser(
+                    chatClient,
+                    state,
+                    promptRegistry.get("agent.system"),
+                    repairPrompt);
         } catch (Exception e) {
             log.error("LLM repair call failed for phase={}", phaseId, e);
             updates.put("repairResult", "askUser");
@@ -319,7 +322,7 @@ public class RepairAction implements NodeAction {
         // Fallback: try JSON envelope format (patches[])
         if (patches.isEmpty() && rawResponse != null) {
             try {
-                var node = mapper.readTree(extractJson(rawResponse));
+                var node = mapper.readTree(LlmJsonExtract.parseableJson(rawResponse));
                 if (node.has("patches")) {
                     var patchesNode = node.get("patches");
                     if (patchesNode.isArray()) {

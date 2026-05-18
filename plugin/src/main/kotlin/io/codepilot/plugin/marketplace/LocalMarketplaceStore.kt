@@ -114,6 +114,16 @@ open class LocalMarketplaceStore {
         writeIndex(skillsIndex(scope, project), index.copy(skills = updated))
     }
 
+    /** All installed skill index entries (project + global). */
+    fun listInstalledSkills(project: Project?): List<Pair<Scope, Entry>> {
+        val out = mutableListOf<Pair<Scope, Entry>>()
+        readIndex(skillsIndex(Scope.GLOBAL, null)).skills.forEach { out.add(Scope.GLOBAL to it) }
+        if (project != null) {
+            readIndex(skillsIndex(Scope.PROJECT, project)).skills.forEach { out.add(Scope.PROJECT to it) }
+        }
+        return out
+    }
+
     /** Lists active (non-disabled) Skills across both scopes; project takes precedence. */
     fun activeSkills(project: Project?): List<ActiveSkill> {
         val merged = LinkedHashMap<String, ActiveSkill>()

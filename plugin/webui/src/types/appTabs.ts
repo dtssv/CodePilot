@@ -1,0 +1,15 @@
+export type AppTab =
+    | 'chat'
+    | 'composer'
+    | 'marketplace'
+    | 'notepads'
+    | 'codebase'
+    | 'rules'
+    | 'mcp'
+    | 'shell'
+    | 'tab'
+    | 'usage'
+    | 'templates'
+    | 'background'
+    | 'export'
+    | 'console';

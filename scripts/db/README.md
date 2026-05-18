@@ -17,6 +17,8 @@ scripts/db/
 ├── V2__pgvector.sql          # RAG chunks (pgvector, 24h TTL)
 ├── V3__marketplace.sql       # MCP / Skill packages + install records + plugin releases
 ├── V4__audit.sql             # audit_events + system_leak_events
+├── V8__usage.sql             # usage_records + usage_daily_quotas
+├── V9__share_and_background.sql  # conversation_shares + background_agent_tasks
 └── README.md                 # this file
 ```
 

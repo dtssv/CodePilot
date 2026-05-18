@@ -5,7 +5,9 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
 import io.codepilot.plugin.protocol.EventBus
 import io.codepilot.plugin.protocol.EventTypes
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * P0-04 — Application-scope counters and EventBus emitter for Tab inline-completion
@@ -24,6 +26,14 @@ class TabFeedback {
     private val dismissCount = AtomicLong(0)
     private val latencySum = AtomicLong(0)
     private val latencySamples = AtomicLong(0)
+    private val lastPredictSource = AtomicReference("—")
+    private val predictSourceCounts = ConcurrentHashMap<String, AtomicLong>()
+
+    fun recordPredictionSource(source: String) {
+        val key = source.ifBlank { "unknown" }
+        lastPredictSource.set(key)
+        predictSourceCounts.computeIfAbsent(key) { AtomicLong() }.incrementAndGet()
+    }
 
     /** Latency of the most recent suggestion (ms), tracked for the "average latency" stat. */
     fun recordSuggest(project: Project?, filePath: String, latencyMs: Long, length: Int) {
@@ -63,12 +73,16 @@ class TabFeedback {
             "dismissCount" to d,
             "avgLatencyMs" to avgLatency,
             "acceptRate" to acceptRate,
+            "lastPredictSource" to lastPredictSource.get(),
+            "byPredictSource" to predictSourceCounts.mapValues { it.value.get() },
         )
     }
 
     fun reset() {
         suggestCount.set(0); acceptCount.set(0); dismissCount.set(0)
         latencySum.set(0); latencySamples.set(0)
+        lastPredictSource.set("—")
+        predictSourceCounts.clear()
     }
 
     private fun emit(project: Project?, type: String, payload: Map<String, Any?>) {

@@ -18,6 +18,11 @@ public final class SseEvents {
   public static final String ERROR = "error";
   public static final String DONE = "done";
 
+  /** Durable run id (P2b queue); first event on queued agent runs. */
+  public static final String RUN_STARTED = "run_started";
+  /** Emitted when a run is reclaimed on another pod after deploy interrupt. */
+  public static final String RUN_RECLAIMED = "run_reclaimed";
+
   // ── Graph engine events ──
   public static final String GRAPH_PLAN = "graph_plan";
   public static final String GRAPH_TRANSITION = "graph_transition";
@@ -26,6 +31,8 @@ public final class SseEvents {
   public static final String GRAPH_VERIFY = "graph_verify";
   public static final String GRAPH_REPAIR_PLAN = "graph_repair_plan";
   public static final String GRAPH_PHASE_DONE = "graph_phase_done";
+  /** Phase-boundary soft checkpoint (Redis + plugin local token). */
+  public static final String GRAPH_CHECKPOINT = "graph_checkpoint";
   public static final String GRAPH_BUDGET_ALERT = "graph_budget_alert";
 
   // ── Dual-layer plan events ──
