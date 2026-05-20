@@ -27,6 +27,10 @@ public class InfoRequestValidator {
      */
     @SuppressWarnings("unchecked")
     public void validate(List<Map<String, Object>> requests) {
+        validate(requests, false);
+    }
+
+    public void validate(List<Map<String, Object>> requests, boolean allowMutatingShell) {
         if (requests == null || requests.isEmpty()) {
             throw new IllegalArgumentException("infoRequests is empty");
         }
@@ -37,7 +41,9 @@ public class InfoRequestValidator {
             Object reqObj = requests.get(i);
             Map<String, Object> req;
             if (reqObj instanceof Map<?, ?>) {
-                req = (Map<String, Object>) reqObj;
+                @SuppressWarnings("unchecked")
+                Map<String, Object> casted = (Map<String, Object>) reqObj;
+                req = casted;
             } else {
                 throw new IllegalArgumentException(
                     "infoRequests[" + i + "] is not a Map but " + (reqObj != null ? reqObj.getClass().getName() : "null")
@@ -47,8 +53,8 @@ public class InfoRequestValidator {
             if (kind == null || !ALLOWED_KINDS.contains(kind)) {
                 throw new IllegalArgumentException("unsupported or missing kind: " + kind);
             }
-            // shell.exec must have readOnly=true
-            if ("shell.exec".equals(kind)) {
+            // shell.exec in gather: read-only unless build/run was explicitly requested
+            if ("shell.exec".equals(kind) && !allowMutatingShell) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> args = (Map<String, Object>) req.getOrDefault("args", Map.of());
                 Boolean readOnly = (Boolean) args.getOrDefault("readOnly", false);

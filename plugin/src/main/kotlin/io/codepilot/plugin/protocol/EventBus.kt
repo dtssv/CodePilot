@@ -95,18 +95,27 @@ class EventBus(@Suppress("unused") private val project: Project) {
             payload = mapOf("turnId" to turnId, "status" to status, "reason" to reason),
         )
 
-    fun startStep(turnId: String, stepId: String, kind: String, title: String, parentStepId: String? = null) =
+    fun startStep(
+        turnId: String,
+        stepId: String,
+        kind: String,
+        title: String,
+        parentStepId: String? = null,
+        detail: Map<String, Any?>? = null,
+    ) =
         emit(
             turnId = turnId,
             stepId = stepId,
             type = EventTypes.STEP_START,
             parentStepId = parentStepId,
-            payload = mapOf(
-                "stepId" to stepId,
-                "kind" to kind,
-                "title" to title,
-                "parentStepId" to parentStepId,
-            ),
+            payload =
+                buildMap {
+                    put("stepId", stepId)
+                    put("kind", kind)
+                    put("title", title)
+                    put("parentStepId", parentStepId)
+                    if (detail != null) put("detail", detail)
+                },
         )
 
     fun endStep(turnId: String, stepId: String, status: String, error: String? = null) =
@@ -117,11 +126,27 @@ class EventBus(@Suppress("unused") private val project: Project) {
             payload = mapOf("stepId" to stepId, "status" to status, "error" to error),
         )
 
+    fun stepProgress(turnId: String, stepId: String, partial: Any?) =
+        emit(
+            turnId = turnId,
+            stepId = stepId,
+            type = EventTypes.STEP_PROGRESS,
+            payload = mapOf("stepId" to stepId, "partial" to partial),
+        )
+
     fun textDelta(turnId: String, stepId: String, text: String) =
         emit(
             turnId = turnId,
             stepId = stepId,
             type = EventTypes.TEXT_DELTA,
+            payload = mapOf("stepId" to stepId, "text" to text),
+        )
+
+    fun textThinking(turnId: String, stepId: String, text: String) =
+        emit(
+            turnId = turnId,
+            stepId = stepId,
+            type = EventTypes.TEXT_THINKING,
             payload = mapOf("stepId" to stepId, "text" to text),
         )
 
@@ -157,6 +182,11 @@ class EventBus(@Suppress("unused") private val project: Project) {
         buffer.asSequence().filter { it.seq > lastSeq }.sortedBy { it.seq }.toList()
 
     fun currentSeq(): Long = seq.get()
+
+    /** Drop replay buffer (e.g. on New Chat) so WebUI gap recovery does not restore old turns. */
+    fun clearBuffer() {
+        buffer.clear()
+    }
 
     private fun pushBuffer(env: EventEnvelope) {
         buffer.addLast(env)

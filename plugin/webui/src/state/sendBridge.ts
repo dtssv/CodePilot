@@ -10,6 +10,7 @@ import type { ModelOption } from './modelAuthBridge';
 import type { ChatMessage } from './chatTypes';
 import { logConsole } from './consoleStore';
 import { resetChatV2 } from './chatStore';
+import { getActiveSessionId, getChatClearEpoch, isPendingNewChat, markPendingNewChat } from './sessionUiStore';
 import { validateVisionSend } from './visionValidate';
 
 export interface SendBridgeDeps {
@@ -75,12 +76,16 @@ export function createSendHandlers(deps: SendBridgeDeps) {
             endLine: chip.endLine,
         }));
 
-        const historyMessages = messages
-            .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
-            .map((msg) => ({
-                role: msg.role,
-                content: msg.content.length > 4000 ? msg.content.substring(0, 4000) + '...' : msg.content,
-            }));
+        const freshChat = isPendingNewChat();
+        const includeHistory = !freshChat && getActiveSessionId() !== '';
+        const historyMessages = includeHistory
+            ? messages
+                  .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
+                  .map((msg) => ({
+                      role: msg.role,
+                      content: msg.content.length > 4000 ? msg.content.substring(0, 4000) + '...' : msg.content,
+                  }))
+            : [];
 
         const msgPayload = {
             text,
@@ -96,6 +101,8 @@ export function createSendHandlers(deps: SendBridgeDeps) {
             maxMode,
             images: images?.map((img) => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
             historyMessages,
+            freshChat,
+            ...(freshChat ? { chatClearEpoch: getChatClearEpoch() } : {}),
         };
         logConsole('bridge', 'sendToPlugin:user_message', {
             text: text.substring(0, 100),
@@ -117,7 +124,7 @@ export function createSendHandlers(deps: SendBridgeDeps) {
         setRecoveryMode: (v: 'exact' | 'soft' | 'none') => void,
         setIsResuming: (v: boolean) => void,
     ) => {
-        resetChatV2();
+        resetChatV2(undefined, { suppressEnvelopes: true });
         setMessages([]);
         setContextChips([]);
         setAbnormalTermination(false);
@@ -140,9 +147,10 @@ export function createSessionActions(clearSessionLocalState: ReturnType<typeof c
             setRecoveryMode: (v: 'exact' | 'soft' | 'none') => void,
             setIsResuming: (v: boolean) => void,
         ) => {
-            sendToPlugin('new_session', {});
-            setHistoryOpen(false);
+            markPendingNewChat();
             clearSessionLocalState(setAbnormalTermination, setHasCheckpoint, setRecoveryMode, setIsResuming);
+            setHistoryOpen(false);
+            sendToPlugin('new_session', {});
         },
         handleSelectSession: (id: string, activeSessionId: string | null, setHistoryOpen: (v: boolean) => void) => {
             if (id !== activeSessionId) {

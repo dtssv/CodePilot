@@ -8,26 +8,34 @@ public final class LlmJsonExtract {
   private LlmJsonExtract() {}
 
   public static String extractJson(String response) {
-    if (response == null) return "{}";
-    String trimmed = response.trim();
+    if (response == null) {
+      return "{}";
+    }
+    String trimmed = GraphMarkerSanitizer.stripForDisplay(response).trim();
+    if (trimmed.contains(GraphStreamProcessor.MARKER_GRAPH)) {
+      int start = trimmed.indexOf(GraphStreamProcessor.MARKER_GRAPH)
+          + GraphStreamProcessor.MARKER_GRAPH.length();
+      int end = trimmed.indexOf(GraphStreamProcessor.MARKER_END, start);
+      String body = end > start ? trimmed.substring(start, end).trim() : trimmed.substring(start).trim();
+      return extractJsonObject(body);
+    }
     if (trimmed.startsWith("```")) {
       int start = trimmed.indexOf('\n') + 1;
       int end = trimmed.lastIndexOf("```");
-      if (end > start) return trimmed.substring(start, end).trim();
+      if (end > start) {
+        return extractJsonObject(trimmed.substring(start, end).trim());
+      }
     }
-    int braceStart = trimmed.indexOf('{');
-    int braceEnd = trimmed.lastIndexOf('}');
-    if (braceStart >= 0 && braceEnd > braceStart) {
-      return trimmed.substring(braceStart, braceEnd + 1);
-    }
-    return trimmed;
+    return extractJsonObject(trimmed);
   }
 
   /**
    * Escape raw control chars (U+0000–U+001F except TAB) inside JSON string values so Jackson can parse.
    */
   public static String sanitizeControlChars(String json) {
-    if (json == null || json.isEmpty()) return json;
+    if (json == null || json.isEmpty()) {
+      return json;
+    }
     StringBuilder sb = new StringBuilder(json.length());
     boolean inString = false;
     for (int i = 0; i < json.length(); i++) {
@@ -40,7 +48,6 @@ public final class LlmJsonExtract {
               sb.append(c).append(next);
               i++;
             } else {
-              // LLM may emit invalid escapes like \` — drop the backslash, keep the raw char
               sb.append(next);
               i++;
             }
@@ -60,7 +67,9 @@ public final class LlmJsonExtract {
           sb.append(c);
         }
       } else {
-        if (c == '"') inString = true;
+        if (c == '"') {
+          inString = true;
+        }
         sb.append(c);
       }
     }
@@ -71,10 +80,49 @@ public final class LlmJsonExtract {
     return sanitizeControlChars(extractJson(response));
   }
 
-  /**
-   * Whether {@code ch} is a valid JSON escape character per RFC 8259 / Jackson.
-   * Valid escapes: " \ / b f n r t u
-   */
+  /** First balanced {@code {...}} object in text (skips prose before JSON). */
+  static String extractJsonObject(String text) {
+    if (text == null || text.isBlank()) {
+      return "{}";
+    }
+    int start = text.indexOf('{');
+    if (start < 0) {
+      return "{}";
+    }
+    int depth = 0;
+    boolean inString = false;
+    for (int i = start; i < text.length(); i++) {
+      char c = text.charAt(i);
+      if (inString) {
+        if (c == '\\' && i + 1 < text.length()) {
+          i++;
+          continue;
+        }
+        if (c == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        inString = true;
+        continue;
+      }
+      if (c == '{') {
+        depth++;
+      } else if (c == '}') {
+        depth--;
+        if (depth == 0) {
+          return text.substring(start, i + 1);
+        }
+      }
+    }
+    int braceEnd = text.lastIndexOf('}');
+    if (braceEnd > start) {
+      return text.substring(start, braceEnd + 1);
+    }
+    return text.substring(start).trim();
+  }
+
   private static boolean isJacksonValidEscape(char ch) {
     return switch (ch) {
       case '"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u' -> true;
@@ -93,4 +141,3 @@ public final class LlmJsonExtract {
     };
   }
 }
-

@@ -11,6 +11,7 @@ import {
     parsePlanStepsFromPayload,
     type PlanProgressPayload,
 } from './planNormalize';
+import { stripGraphMarkers } from '../utils/graphMarkers';
 
 /** Cast helper that keeps the call sites readable. */
 const P = <T>(payload: unknown): T => payload as T;
@@ -61,6 +62,9 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
 
     switch (ev.type) {
         case 'turn.start': {
+            if (state.turns.some((t) => t.turnId === ev.turnId)) {
+                return base;
+            }
             const p = P<{
                 userMessage?: string;
                 contextRefs?: TurnNode['contextRefs'];
@@ -83,8 +87,19 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
 
         case 'turn.end': {
             const p = P<{ status?: TurnStatus; reason?: string | null }>(ev.payload);
+            const turn = state.turns.find((t) => t.turnId === ev.turnId);
+            const steps = { ...state.steps };
+            if (turn) {
+                for (const stepId of turn.stepIds) {
+                    const step = steps[stepId];
+                    if (step?.status === 'running') {
+                        steps[stepId] = { ...step, status: 'success', endedAt: ev.ts };
+                    }
+                }
+            }
             return {
                 ...base,
+                steps,
                 turns: state.turns.map((t) =>
                     t.turnId === ev.turnId
                         ? { ...t, status: p?.status ?? 'final', endedAt: ev.ts, reason: p?.reason ?? null }
@@ -110,7 +125,13 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
         }
 
         case 'step.start': {
-            const p = P<{ stepId: string; kind: string; title?: string; parentStepId?: string | null }>(ev.payload);
+            const p = P<{
+                stepId: string;
+                kind: string;
+                title?: string;
+                parentStepId?: string | null;
+                detail?: { files?: { path: string; op?: string; lineCount?: number; preview?: string }[] };
+            }>(ev.payload);
             if (!p?.stepId) return base;
             const stepId = p.stepId;
             const step: StepNode = {
@@ -120,9 +141,11 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
                 title: p.title ?? '',
                 status: 'running',
                 startedAt: ev.ts,
+                orderSeq: ev.seq,
                 textBuf: '',
                 thinkingBuf: '',
                 children: [],
+                progressDetail: p.detail ?? undefined,
             };
             const steps: Record<string, StepNode> = { ...state.steps, [stepId]: step };
             if (step.parentStepId && steps[step.parentStepId]) {
@@ -142,6 +165,39 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
                 return { ...t, stepIds, rootStepIds };
             });
             return { ...base, steps, turns };
+        }
+
+        case 'step.progress': {
+            const p = P<{
+                stepId: string;
+                partial?: {
+                    files?: { path: string; op?: string; lineCount?: number; preview?: string }[];
+                    text?: string;
+                    kind?: string;
+                };
+            }>(ev.payload);
+            if (!p?.stepId) return base;
+            const cur = state.steps[p.stepId];
+            if (!cur) return base;
+            const partial = p.partial ?? {};
+            const prev = (cur.progressDetail ?? {}) as {
+                files?: { path: string; op?: string; lineCount?: number; preview?: string }[];
+            };
+            return {
+                ...base,
+                steps: {
+                    ...state.steps,
+                    [p.stepId]: {
+                        ...cur,
+                        title: partial.text?.trim() ? partial.text : cur.title,
+                        progressDetail: {
+                            ...prev,
+                            ...partial,
+                            files: partial.files ?? prev.files,
+                        },
+                    },
+                },
+            };
         }
 
         case 'step.end': {
@@ -167,23 +223,25 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
 
         case 'text.delta': {
             const p = P<{ stepId: string; text?: string }>(ev.payload);
-            if (!p?.stepId || !p.text) return base;
+            const text = p?.text ? stripGraphMarkers(p.text) : '';
+            if (!p?.stepId || !text) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
             return {
                 ...base,
-                steps: { ...state.steps, [p.stepId]: { ...cur, textBuf: cur.textBuf + p.text } },
+                steps: { ...state.steps, [p.stepId]: { ...cur, textBuf: cur.textBuf + text } },
             };
         }
 
         case 'text.thinking': {
             const p = P<{ stepId: string; text?: string }>(ev.payload);
-            if (!p?.stepId || !p.text) return base;
+            const text = p?.text ? stripGraphMarkers(p.text) : '';
+            if (!p?.stepId || !text) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
             return {
                 ...base,
-                steps: { ...state.steps, [p.stepId]: { ...cur, thinkingBuf: cur.thinkingBuf + p.text } },
+                steps: { ...state.steps, [p.stepId]: { ...cur, thinkingBuf: cur.thinkingBuf + text } },
             };
         }
 
@@ -192,11 +250,25 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             if (!p?.stepId) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
+            const args = p.args as { command?: string } | undefined;
+            const title =
+                (p.tool === 'shell.exec' || p.tool === 'shell.session') && args?.command
+                    ? args.command
+                    : cur.title;
             return {
                 ...base,
                 steps: {
                     ...state.steps,
-                    [p.stepId]: { ...cur, toolCall: { tool: p.tool, args: p.args } },
+                    [p.stepId]: {
+                        ...cur,
+                        title,
+                        toolCall: { tool: p.tool, args: p.args },
+                        progressDetail: {
+                            ...(cur.progressDetail as object),
+                            kind: p.tool.startsWith('shell.') ? 'shell' : (cur.progressDetail as { kind?: string })?.kind,
+                            command: args?.command ?? (cur.progressDetail as { command?: string })?.command,
+                        },
+                    },
                 },
             };
         }

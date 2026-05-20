@@ -8,6 +8,7 @@ import { ModelSelector } from '../ModelSelector';
 import { McpActivityBanner } from '../mcp/McpActivityBanner';
 import { MaxModeHint } from './MaxModeHint';
 import { NeedsInputDock } from '../NeedsInputDock';
+import { RateLimitBanner } from './RateLimitBanner';
 import type { ModelRouteInfo } from '../../state/modelAuthBridge';
 import type { SessionCostInfo } from '../SessionCostPanel';
 import { SessionCostPanel } from '../SessionCostPanel';
@@ -81,6 +82,7 @@ export function ChatInputSection({
             <SessionCostPanel costInfo={sessionCost} />
             <MaxModeHint maxMode={maxMode} lastRoute={lastRoute} />
             <McpActivityBanner />
+            <RateLimitBanner />
             <NeedsInputDock />
             <InputBar
                 onSend={onSend}
@@ -109,7 +111,7 @@ export function ChatInputSection({
                     <span>Max</span>
                 </label>
                 {mode === 'agent' && (
-                    <label className="auto-apply-toggle" title="自动应用低风险文件变更">
+                    <label className="auto-apply-toggle" title="勾选后直接写入磁盘；未勾选时在 IDE 中对比修改后再应用">
                         <input
                             type="checkbox"
                             checked={autoApply}

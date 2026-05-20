@@ -125,6 +125,11 @@ public class GraphEngineService {
                     ? req.policy().graphTemplate() : "default";
             var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
             var initialState = intakeAction.buildInitialState(req, userId);
+            String sid = req.sessionId();
+            GraphExecutionLog.runStart(
+                sid,
+                String.valueOf(initialState.value("mode").orElse("AGENT")),
+                req.input());
             log.info("GraphEngine initial state: modelId={}, modelSource={}, userId={}, keys={}",
                 initialState.value("modelId").orElse(null),
                 initialState.value("modelSource").orElse(null),
@@ -132,8 +137,6 @@ public class GraphEngineService {
                 initialState.keyStrategies().keySet());
 
             Sinks.Many<ServerSentEvent<String>> liveSink = Sinks.many().unicast().onBackpressureBuffer();
-
-            String sid = req.sessionId();
             Runnable graphTask = () -> {
                 GraphSseHelper.setLiveSink(liveSink, sse);
                 GraphSseHelper.registerSessionSink(sid, liveSink, sse);
@@ -156,6 +159,7 @@ public class GraphEngineService {
                     var resultState = graph.invoke(initialState.data());
                     log.info("GraphEngine completed: state keys={}",
                         resultState.map(s -> s.data().keySet()).orElse(null));
+                    GraphExecutionLog.runEnd(sid, "completed", resultState.map(s -> s.data().keySet()).orElse(null));
                     liveSink.tryEmitComplete();
                 } catch (Exception e) {
                     GraphInterruptException gie = unwrapGraphInterrupt(e);
@@ -163,7 +167,10 @@ public class GraphEngineService {
                         log.info("GraphEngine interrupted: reason={}, token={}", gie.getReason(), gie.getContinuationToken());
                     } else {
                         log.error("Graph engine execution failed", e);
-                        liveSink.tryEmitNext(sse.error(50001, "Graph engine error: " + e.getMessage()));
+                        liveSink.tryEmitNext(
+                                sse.error(
+                                        io.codepilot.common.api.ErrorCodes.UPSTREAM_MODEL,
+                                        "当前请求处理失败，请稍后重试。若问题持续出现，请联系运营人员排查。"));
                     }
                     liveSink.tryEmitComplete();
                 } finally {
@@ -178,7 +185,9 @@ public class GraphEngineService {
         } catch (Exception e) {
             log.error("Graph engine execution failed", e);
             return Flux.just(
-                    sse.error(50001, "Graph engine error: " + e.getMessage()),
+                    sse.error(
+                            io.codepilot.common.api.ErrorCodes.UPSTREAM_MODEL,
+                            "当前请求处理失败，请稍后重试。若问题持续出现，请联系运营人员排查。"),
                     sse.event(SseEvents.DONE, Map.of("reason", "failed")));
         }
     }
@@ -328,7 +337,8 @@ public class GraphEngineService {
         graph.addConditionalEdges("generate",
                 AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
                 Map.of("applyPatch", "applyPatch", "gather", "gather",
-                        "askUser", "askUser", "commit", "commit"));
+                        "askUser", "askUser", "commit", "commit",
+                        "reenter", "reenter"));
 
         // ApplyPatch → may succeed or fail; fast-path can skip verify (C1)
         graph.addConditionalEdges("applyPatch",
@@ -358,7 +368,13 @@ public class GraphEngineService {
         // Commit → next phase or finalize
         graph.addConditionalEdges("commit",
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
-                Map.of("preCheck", "preCheck", "finalize", "finalize"));
+                Map.of(
+                        "preCheck",
+                        "preCheck",
+                        "finalize",
+                        "finalize",
+                        "retryGenerate",
+                        "generate"));
 
         // AskUser: can route to a target node (resume after user answers) or END (terminal)
         graph.addConditionalEdges("askUser",
@@ -431,7 +447,7 @@ public class GraphEngineService {
         // Commit → next sub-question (generate) or all done (synthesize)
         graph.addConditionalEdges("commit",
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
-                Map.of("preCheck", "generate", "finalize", "synthesize"));
+                Map.of("preCheck", "generate", "finalize", "synthesize", "retryGenerate", "generate"));
 
         // Synthesize → finalize
         graph.addEdge("synthesize", "finalize");

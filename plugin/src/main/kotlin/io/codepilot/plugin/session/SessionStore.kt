@@ -185,6 +185,74 @@ class SessionStore {
             .mapNotNull { it["toolCallId"] as? String }
             .toSet()
 
+    /**
+     * Rebuild persisted tool cards for session replay: merges started + result steps so WebUI
+     * shows command, cwd, stdout/stderr, and deny/skip state after reload.
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun mergeToolCallsFromSteps(steps: List<Map<String, Any>>): List<Map<String, Any>> {
+        val merged = linkedMapOf<String, MutableMap<String, Any?>>()
+        for (step in steps) {
+            val id = step["toolCallId"] as? String ?: continue
+            val entry = merged.getOrPut(id) { mutableMapOf("id" to id) }
+            if (step["started"] == true) {
+                entry["name"] = step["toolName"] ?: "unknown"
+                step["args"]?.let { entry["args"] = it }
+            }
+            if (step.containsKey("ok")) {
+                val ok = step["ok"] == true
+                entry["status"] = if (ok) "success" else "error"
+                step["result"]?.let { entry["result"] = it }
+                entry["executionState"] = deriveExecutionState(ok, step["result"] as? Map<String, Any?>)
+            }
+        }
+        return merged.values.map { it.filterValues { it != null }.toMap() as Map<String, Any> }
+    }
+
+    /**
+     * Merge persisted message toolCalls with steps.ndjson (steps win for result/status/args).
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun mergeToolCallsPersisted(
+        msgToolCalls: List<Map<String, Any>>?,
+        steps: List<Map<String, Any>>,
+    ): List<Map<String, Any>> {
+        val fromSteps = mergeToolCallsFromSteps(steps)
+        if (msgToolCalls.isNullOrEmpty()) {
+            return fromSteps
+        }
+        if (fromSteps.isEmpty()) {
+            return msgToolCalls
+        }
+        val stepById = fromSteps.associateBy { it["id"]?.toString().orEmpty() }
+        return msgToolCalls.map { tc ->
+            val id = tc["id"]?.toString().orEmpty()
+            val merged = stepById[id] ?: return@map tc
+            val out = tc.toMutableMap()
+            merged["result"]?.let { out["result"] = it }
+            merged["status"]?.let { out["status"] = it }
+            merged["executionState"]?.let { out["executionState"] = it }
+            if (out["args"] == null) {
+                merged["args"]?.let { out["args"] = it }
+            }
+            val name = out["name"]?.toString()
+            if (name.isNullOrBlank() || name == "unknown") {
+                merged["name"]?.let { out["name"] = it }
+            }
+            out
+        }
+    }
+
+    private fun deriveExecutionState(ok: Boolean, result: Map<String, Any?>?): String {
+        if (ok) return "success"
+        val stderr = result?.get("stderr")?.toString() ?: ""
+        return when {
+            stderr.contains("用户已跳过") || stderr.contains("Skipped by user") -> "skipped"
+            stderr.contains("用户已拒绝") || stderr.contains("Denied:") -> "denied"
+            else -> "error"
+        }
+    }
+
     /** Save a session digest (context compression result). */
     fun saveDigest(
         handle: SessionHandle,

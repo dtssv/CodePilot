@@ -15,6 +15,8 @@ import { MessageImages } from '../../MessageImages';
 import { NeedsInputCard } from '../../NeedsInputCard';
 import { ShellStepCard, type ShellStepState } from '../../shell/ShellStepCard';
 import { ToolCallCard as LegacyToolCallCard } from '../../ToolCallCard';
+import { normalizeAgentContentText, stripGraphMarkers } from '../../../utils/graphMarkers';
+import { sortStepsChronologically } from '../../../utils/timelineSort';
 import { shouldHideToolStep, stepToToolCall } from './stepToToolCall';
 
 export function ChatViewV2() {
@@ -93,12 +95,11 @@ function RiskBanner({ notice }: { notice: RiskNotice }) {
 }
 
 function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepNode> }) {
-    const stepList = turn.stepIds
-        .map((id) => steps[id])
-        .filter((s): s is StepNode => Boolean(s));
+    const stepList = sortStepsChronologically(turn.stepIds, steps);
 
-    const planStepIds = stepList.filter((s) => s.kind === 'plan').map((s) => s.stepId);
-    const latestPlanId = planStepIds.length > 0 ? planStepIds[planStepIds.length - 1] : null;
+    // Merge all plan steps from all plan-type steps into a single unified plan view.
+    // Earlier plan steps provide base entries; later ones update status progressively.
+    const mergedPlanSteps = mergePlanSteps(stepList);
 
     return (
         <article className={`turn turn-${turn.status}`}>
@@ -132,11 +133,15 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
                 </div>
                 <div className="msg msg-assistant">
                     <TurnAlerts turn={turn} />
+                    {/* Unified plan progress — always at top when present */}
+                    {mergedPlanSteps && mergedPlanSteps.length > 0 && (
+                        <PlanStepsView steps={mergedPlanSteps} />
+                    )}
                     <div className="turn-steps">
                         {stepList.map((step) => {
-                            if (step.kind === 'plan' && step.stepId !== latestPlanId) return null;
-                            if (step.kind === 'tool' && shouldHideToolStep(step, stepList)) return null;
-                            return renderStep(step, stepList);
+                            // Plan steps are rendered above as a unified view; skip individual ones
+                            if (step.kind === 'plan') return null;
+                            return renderStep(step, stepList, true);
                         })}
                     </div>
                     <footer className="turn-footer">
@@ -167,12 +172,8 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
     );
 }
 
-/** Internal step kinds that should be hidden from the main chat flow.
- *  These are driver events (verify, repair, subtask phase markers) that
- *  pollute the conversation with low-level state information. */
-const HIDDEN_STEP_KINDS = new Set([
-    'verify', 'repair', 'subtask', 'phase', 'diagnose', 'validate',
-]);
+/** Internal step kinds hidden once completed (running steps stay visible). */
+const HIDDEN_WHEN_DONE_KINDS = new Set(['subtask', 'phase', 'diagnose', 'validate']);
 
 /** Tool names that are internal/diagnostic and should not appear as cards. */
 const HIDDEN_TOOL_PREFIXES = [
@@ -180,11 +181,14 @@ const HIDDEN_TOOL_PREFIXES = [
 ];
 
 function shouldHideStep(step: StepNode, allSteps: StepNode[]): boolean {
-    // Hide internal driver event kinds
-    if (HIDDEN_STEP_KINDS.has(step.kind)) return true;
+    if (HIDDEN_WHEN_DONE_KINDS.has(step.kind) && step.status !== 'running') return true;
 
     // Hide subtask completion markers (title like "阶段完成: phase" or "success")
-    if (step.kind === 'subtask' || step.title?.startsWith('阶段完成') || step.title === 'success') {
+    if (
+        (step.kind === 'subtask' || step.kind === 'verify' || step.kind === 'repair')
+        && step.status !== 'running'
+        && (step.title?.startsWith('阶段完成') || step.title === 'success')
+    ) {
         return true;
     }
 
@@ -198,7 +202,14 @@ function shouldHideStep(step: StepNode, allSteps: StepNode[]): boolean {
     return false;
 }
 
-function renderStep(step: StepNode, allSteps: StepNode[]) {
+/** Only the last writing step (merged file list) is shown per turn. */
+function isCanonicalWritingStep(step: StepNode, allSteps: StepNode[]): boolean {
+    const writingSteps = allSteps.filter((s) => s.kind === 'writing');
+    if (writingSteps.length === 0) return true;
+    return writingSteps[writingSteps.length - 1].stepId === step.stepId;
+}
+
+function renderStep(step: StepNode, allSteps: StepNode[], suppressFilePreviews: boolean) {
     // Filter out internal/driver steps that should not appear in the chat flow
     if (shouldHideStep(step, allSteps)) return null;
 
@@ -213,27 +224,23 @@ function renderStep(step: StepNode, allSteps: StepNode[]) {
             );
         }
         case 'llm':
-            return <LlmStep key={step.stepId} step={step} />;
+            return <LlmStep key={step.stepId} step={step} suppressFilePreviews={suppressFilePreviews} />;
         case 'thinking':
             return <ThinkingStep key={step.stepId} step={step} />;
-        case 'plan':
-            return <PlanStep key={step.stepId} step={step} />;
         case 'reading':
         case 'writing':
         case 'running':
+        case 'verify':
+        case 'repair': {
+            if (step.kind === 'writing' && !isCanonicalWritingStep(step, allSteps)) {
+                return null;
+            }
             return (
                 <div key={step.stepId} className="agent-steps-container">
                     <AgentStepCard step={agentStepFromNode(step)} />
                 </div>
             );
-        case 'verify':
-        case 'repair':
-            // Render as compact agent step (not hidden, but compact)
-            return (
-                <div key={step.stepId} className="agent-steps-container agent-steps-compact">
-                    <AgentStepCard step={agentStepFromNode(step)} compact />
-                </div>
-            );
+        }
         default:
             if (isShellStep(step)) {
                 return <ShellStepCard key={step.stepId} step={shellStepFromNode(step)} />;
@@ -244,11 +251,15 @@ function renderStep(step: StepNode, allSteps: StepNode[]) {
     }
 }
 
-function LlmStep({ step }: { step: StepNode }) {
+function LlmStep({ step, suppressFilePreviews }: { step: StepNode; suppressFilePreviews?: boolean }) {
     if (!step.textBuf) return null;
     return (
         <div className="step step-llm">
-            <AgentContentRenderer content={step.textBuf} isStreaming={step.status === 'running'} />
+            <AgentContentRenderer
+                content={normalizeAgentContentText(step.textBuf)}
+                isStreaming={step.status === 'running'}
+                suppressFileBlocks={suppressFilePreviews}
+            />
         </div>
     );
 }
@@ -265,12 +276,44 @@ function ThinkingStep({ step }: { step: StepNode }) {
     );
 }
 
-function PlanStep({ step }: { step: StepNode }) {
-    if (!step.plan?.length) return null;
+
+
+/** Merge plan steps from all plan-type steps into a single unified view.
+ *  Later plan updates override the status of earlier steps with the same id,
+ *  ensuring plan progress is tracked correctly across multiple plan events. */
+function mergePlanSteps(stepList: StepNode[]): import('../../../state/events').PlanStep[] | null {
+    const planSteps = stepList.filter((s) => s.kind === 'plan' && s.plan?.length);
+    if (planSteps.length === 0) return null;
+
+    // Start with the first plan's steps, then merge subsequent updates
+    const merged = new Map<string, import('../../../state/events').PlanStep>();
+    for (const ps of planSteps) {
+        for (const step of ps.plan ?? []) {
+            const existing = merged.get(step.id);
+            if (!existing) {
+                merged.set(step.id, { ...step });
+            } else {
+                // Later updates take precedence for status; keep the original title
+                // Only override status if the new status is more advanced
+                const statusOrder: Record<string, number> = { pending: 0, running: 1, success: 2, error: 2, skipped: 2 };
+                const curOrder = statusOrder[existing.status] ?? 0;
+                const newOrder = statusOrder[step.status] ?? 0;
+                if (newOrder >= curOrder) {
+                    merged.set(step.id, { ...existing, status: step.status });
+                }
+            }
+        }
+    }
+
+    return Array.from(merged.values());
+}
+
+/** Render a unified plan steps view with proper progress tracking. */
+function PlanStepsView({ steps }: { steps: import('../../../state/events').PlanStep[] }) {
     return (
         <div className="plan-steps-container">
             <div className="plan-steps-header">📋 执行计划</div>
-            {step.plan.map((s, idx) => (
+            {steps.map((s, idx) => (
                 <div key={s.id || idx} className="plan-step-item">
                     <span className={`plan-step-status plan-step-${planStatusCssClass(s.status)}`}>
                         {planStatusIcon(s.status)}
@@ -290,11 +333,13 @@ function agentStepFromNode(step: StepNode): AgentStep {
         verify: 'checking',
         repair: 'thinking',
     };
+    const rawDetail = step.progressDetail as AgentStep['detail'] | undefined;
+    const files = rawDetail?.files;
     return {
         type: typeMap[step.kind] ?? 'checking',
-        content: step.title,
+        content: stripGraphMarkers(step.title),
         status: step.status === 'running' ? 'running' : step.status === 'error' ? 'error' : 'success',
-        detail: step.progressDetail as AgentStep['detail'],
+        detail: files && files.length > 0 ? { files } : rawDetail,
     };
 }
 
@@ -305,9 +350,13 @@ function isShellStep(step: StepNode): boolean {
 
 function shellStepFromNode(step: StepNode): ShellStepState {
     const p = (step.progressDetail ?? step.toolResult?.result ?? {}) as Record<string, unknown>;
+    const args = step.toolCall?.args as { command?: string } | undefined;
     return {
         id: step.stepId,
-        command: String(p.command ?? step.title ?? 'shell'),
+        command: String(
+            p.command ?? args?.command ?? (step.title?.startsWith('shell.') ? '' : step.title) ?? 'shell',
+        ),
+        startedAt: typeof p.startedAt === 'number' ? p.startedAt : step.startedAt,
         stdout: String(p.stdout ?? p.partial ?? step.textBuf ?? ''),
         stderr: String(p.stderr ?? ''),
         exitCode: typeof p.exitCode === 'number' ? p.exitCode : undefined,

@@ -17,6 +17,9 @@ import { installMcpConfirmBridge } from './mcpConfirm';
 import { bootstrapAuthenticatedSession, installModelAuthBridge, type ModelOption } from './modelAuthBridge';
 import { clearMcpActivity, installMcpActivityBridge } from './mcpActivityStore';
 import { installNeedsInputBridge } from './needsInputStore';
+import { installRateLimitBridge } from './rateLimitStore';
+import { installMessageQueueBridge } from './messageQueueStore';
+import { installShellAskBridge } from './shellAskStore';
 import { installPendingBridge } from './pending';
 import { installSessionBridge } from './sessionBridge';
 
@@ -49,9 +52,12 @@ export interface AppBootstrapSetters {
 
 export function installCoreBridges(refs: AppBootstrapRefs, setters: AppBootstrapSetters): () => void {
     installChatV2Bridge();
+    const offMessageQueue = installMessageQueueBridge();
+    const offShellAsk = installShellAskBridge();
     installPendingBridge();
     installMcpConfirmBridge();
     const offNeedsInput = installNeedsInputBridge();
+    const offRateLimit = installRateLimitBridge();
     const offMcpActivity = installMcpActivityBridge();
     const offAuth = installModelAuthBridge({
         setAuthenticated: setters.setAuthenticated,
@@ -61,7 +67,10 @@ export function installCoreBridges(refs: AppBootstrapRefs, setters: AppBootstrap
         getSelectedModelId: () => refs.selectedModelIdRef.current,
     });
     return () => {
+        offMessageQueue();
+        offShellAsk();
         offNeedsInput();
+        offRateLimit();
         offMcpActivity();
         offAuth();
     };
@@ -140,6 +149,7 @@ export function installVisionErrorBridge(setSendError: AppBootstrapSetters['setS
     return onPluginEvent('error', (payload) => {
         const data = payload as { code?: number; message?: string };
         if (data.code === 40001 && data.message) setSendError(data.message);
+        if (data.code === 42901 && data.message) setSendError(data.message);
     });
 }
 

@@ -4,19 +4,39 @@ You are planning a task. Based on the user's request below, produce a JSON plan.
 
 User request: {{input}}
 
-[REQUIRED OUTPUT FORMAT — strict JSON, no other text]
+[OUTPUT MODE — pick exactly one]
+A) Simple chat / Q&A / explanation / scoring / review / comparison with NO code changes: reply in plain text only (no JSON, no markers).
+B) Code/agent task: wrap machine JSON in markers:
+<<<GRAPH_JSON>>>
+{ ...strict JSON as below... }
+<<<END>>>
+C) Stream your reasoning BEFORE the JSON (recommended for multi-step tasks):
+<<<AGENT_CONTENT>>>
+Explain your analysis, trade-offs, and approach in markdown. You may use <plan>bullets</plan> for the checklist preview.
+<<<END>>>
+<<<AGENT_THINKING>>>
+Optional one-line status (e.g. "开始制定分步计划")
+<<<END>>>
+
+[MARKER RULES — STRICT]
+- Use ONLY full markers: <<<AGENT_CONTENT>>> … <<<END>>> (three < and three > each). Never AGENT_CONTENT>, END>AGENT_THINKING, or GRAPH_JSONAGENT_CONTENT.
+- Markdown in AGENT_CONTENT (GFM only, no HTML): blank line before headings; "## Title" with space after ## (real titles only, not numbered steps); blank line before lists; plain "1./2./3." lines without leading # hashes; each "第N步：" on its own line; fenced code with newline after opening ```; no glued headings or broken ** emphasis.
+- Keep streamed reasoning concise (overview + approach). Put the detailed step list in JSON userPlan.steps, not as a long duplicated essay in AGENT_CONTENT.
+- NEVER use malformed tags like `<plan-第一步`, `</plan`, or inline `<plan-...>` — only valid `<plan>...</plan>` wrappers or JSON userPlan.steps.
+
+[REQUIRED JSON SHAPE when using mode B]
 {
   "skipPlan": false,
   "userPlan": {
     "goal": "<restate the user's goal in user's language>",
     "summary": "<one-line summary in user's language>",
     "steps": [
-      {"id": "s1", "index": 1, "title": "<verb-object title in user's language>", "description": "<brief description in user's language>", "status": "in_progress"}
+      {"id": "s1", "index": 1, "title": "<verb-object title>", "description": "<brief description>", "intent": "<see intents below>", "status": "pending"}
     ],
     "status": "in_progress"
   },
   "phases": [
-    {"id": "p1", "title": "<phase title>", "intent": "code-change", "entry": [], "exit": [], "budget": {"attempts": 3}}
+    {"id": "p1", "title": "<same as step 1 title>", "intent": "<same slug as step 1 intent>", "entry": [], "exit": [], "budget": {"attempts": 3}}
   ],
   "infoRequests": null,
   "agentThinking": null,
@@ -24,57 +44,37 @@ User request: {{input}}
 }
 
 [RULES]
-- ALL user-facing strings (goal, summary, step titles/descriptions) MUST be in the SAME language as the user's request.
-- User-facing strings follow {{userLocale}} (default zh-CN).
+- ALL user-facing strings MUST use {{userLocale}} — the same natural language as the user's request above.
+
+[NEVER SHOW — meta about the planner itself]
+- Do NOT discuss skipPlan, output mode, "whether to customize a plan", "pure Q&A task", or "no code changes needed".
+- Show real design reasoning instead (architecture, file layout, risks, approach).
 
 [ABOUT skipPlan]
-- Set skipPlan to true when the task is simple enough that NO multi-step plan is needed.
-- Simple tasks include: single file creation, algorithm implementation, quick bug fix, code explanation, simple refactoring.
-- When skipPlan is true, you MUST still provide a single phase in "phases" and set userPlan to a minimal single-step plan.
-- When skipPlan is true, set agentThinking to a concise one-liner (e.g., "我将直接实现这个功能"), and set agentContent to null.
-- Set skipPlan to false when the task genuinely requires multiple steps (modifying 3+ files, cross-module changes, multi-stage implementation).
+- skipPlan=true only for trivial single-shot tasks (one file, one-line fix, casual chat).
+- Multi-step doc/setup tasks: skipPlan=false with 2-8 userPlan.steps.
 
-[ABOUT plan complexity]
-- SIMPLE REQUESTS (single-file creation, bug fix, algorithm implementation, code refactoring) MUST use exactly 1 phase. Do NOT decompose into multiple phases.
-- Only decompose into 2-5 phases when the task genuinely requires modifying 3+ files or spans multiple independent modules.
-- Each phase should produce a concrete, verifiable code change.
-- NEVER create separate phases for "understanding", "testing", or "documentation" — these are part of the implementation phase.
-- Prefer fewer phases with more comprehensive patches over many phases with tiny changes.
+[PHASE INTENT — required machine slug, same on matching step and phase]
+Use exactly one of: discover | inspect | analyze | synthesize | prepare | compile | run | code-change
+- discover — locate files/dirs (fs.list); not enough for analysis deliverables
+- inspect — read configs / verify structure (fs.read); not bare listing for analysis steps
+- analyze — read source + explain complexity/logic (fs.read/grep + textOutput in same step)
+- synthesize — format prior reads into report/markdown (textOutput or patches); after analyze/discover steps that already read sources
+- prepare — cmake/configure or layout before build
+- compile — build (shell compile commands)
+- run — execute built binary / program
+- code-change — implement or edit files (default for patch-heavy work)
+Do NOT rely on title wording for the engine — set intent explicitly per step.
+
+[CRITICAL — userPlan.steps vs phases[]]
+- When userPlan has 2+ steps, phases[] MUST have the SAME number of entries as steps[] (p1..pN ↔ s1..sN).
+- Each phase title should match its step title. The engine runs ONE phase at a time (generate→apply→verify per step).
+- Do NOT collapse all steps into a single phase.
+
+[ABOUT agentContent / agentThinking]
+- Stream detailed reasoning in <<<AGENT_CONTENT>>> (mode C). JSON agentContent may be null if already streamed.
+- agentThinking: short status only, or null.
 
 [ABOUT infoRequests]
-- **IMPORTANT: Set infoRequests to null for the vast majority of tasks.** Most tasks can be planned without additional file reads.
-- ONLY set infoRequests when you have a CRITICAL, BLOCKING reason, such as:
-  - You MUST read an exact API interface to generate correct code that compiles against it
-  - You MUST check a config file to determine the correct framework version or pattern
-- Do NOT set infoRequests for:
-  - "Understanding the codebase" or "exploring the project" — plan based on the project meta above
-  - Reading files you will modify anyway — the generate phase handles this automatically
-  - Simple tasks like algorithm implementation, file creation, bug fixes, or code generation — just produce the plan directly
-  - When the user's request is clear and self-contained (e.g., "implement LeetCode problem X", "create a new file", "fix this bug")
-- **When in doubt, set infoRequests to null and proceed with planning.**
-- If you do need infoRequests, use this format:
-  [{"id": "unique-id", "kind": "fs.read|fs.list|code.outline|code.symbol|code.usages|ide.diagnostics|mcp.call", "args": {"path": "..."}}]
-  - kind options: fs.read (read a single file's content), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors/warnings), mcp.call (call an MCP server tool)
-  - IMPORTANT: fs.read only works on individual files. To explore directory structure, use kind="fs.list" with path="." or a subdirectory path. Do NOT use fs.read with a directory path.
-  - Only request files that actually exist per the project meta. Do NOT guess file names.
-- For mcp.call kind, args must include: {"fullName": "mcp.<serverId>.<toolName>", "arguments": {...}}
+- Set infoRequests to null unless critically blocking. See prior format rules.
 {{mcpTools}}
-
-[ABOUT agentThinking]
-- agentThinking is a short, user-facing sentence that explains what you are about to do or why you need information.
-- It is displayed to the user as a real-time status message (like "让我先查看项目结构，确认在哪里创建文件").
-- If you set infoRequests, agentThinking MUST explain WHY you need to read those files (e.g., "让我先查看项目结构，确认在哪里创建文件").
-- If you do NOT set infoRequests, agentThinking should describe your overall plan (e.g., "我将直接在根目录创建算法文件").
-- Keep it concise (1-2 sentences), in the SAME language as the user's request.
-- If you have nothing meaningful to say, set it to null.
-
-[ABOUT agentContent — structured output for user-facing display]
-- agentContent is a user-facing string that explains your planning reasoning and design decisions.
-- It is rendered as real-time streaming text in the chat before the plan is shown.
-- Use XML-like tags to mark different content types:
-  - <plan>Your design reasoning and approach explanation</plan> — shows as a highlighted thinking block
-- Example: "用户需要实现一个算法，这是一个独立任务，我将在单个阶段中完成。<plan>分析：立方接雨水问题可以使用最小堆解法。我需要在项目根目录创建一个Java文件，实现LeetCode 407的解法。</plan>"
-- Set agentContent when you have meaningful reasoning to share with the user.
-- If null, the UI will only show agentThinking (short one-liner).
-- Text must be in the SAME language as the user's request.
-- When skipPlan is true, set agentContent to null (no need for detailed reasoning on simple tasks).

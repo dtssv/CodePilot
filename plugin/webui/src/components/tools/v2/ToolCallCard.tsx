@@ -1,36 +1,60 @@
 import { useState } from 'react';
 import { sendToPlugin } from '../../../bridge';
 import type { StepNode } from '../../../state/events';
+import type { ToolExecutionState } from '../../../state/chatTypes';
 import { ToolArgsView } from './ToolArgsView';
 import { ToolResultView } from './ToolResultView';
 import { isExternalMcpTool, parseMcpTool } from './mcpUtils';
 import type { ToolResultPayload } from './types';
+import { summarizeApplyPatch } from '../../../utils/graphMarkers';
+import { ShellAskBar } from '../../shell/ShellAskBar';
+import { ShellCommandHeader, resolveShellCwd } from '../../shell/ShellCommandHeader';
+import { ShellOutputPreview } from '../../shell/ShellOutputPreview';
+import { useShellAskForStep } from '../../../state/shellAskStore';
+import { deriveShellExecutionState } from '../../../utils/shellOutput';
 
 /**
  * v2 tool call card. Renders a single tool step from the v2 envelope store.
- *
- * Layout:
- *   [ status • name • one-line summary • duration • copy/rerun ]
- *   [ ▶ Arguments (collapsed by default) ]
- *   [ ▼ Result (auto-expanded for short, collapsed for very long) ]
  */
 export function ToolCallCard({ step }: { step: StepNode }) {
+    const shellAsk = useShellAskForStep(step.stepId);
     const call = step.toolCall;
     const result = step.toolResult;
     const [argsOpen, setArgsOpen] = useState(false);
-    const initialResultOpen = shouldAutoOpenResult(result?.result as ToolResultPayload | undefined);
+    const shellPayload = result?.result as ToolResultPayload | undefined;
+    const initialResultOpen = shouldAutoOpenResult(shellPayload);
     const [resultOpen, setResultOpen] = useState(initialResultOpen);
 
     if (!call) return null;
 
+    const isShell = call.tool === 'shell.exec' || call.tool === 'shell.session';
+    const args = (call.args && typeof call.args === 'object')
+        ? (call.args as Record<string, unknown>)
+        : {};
+    const shellRecord = isShell ? shellResultAsRecord(shellPayload, args) : undefined;
+    const stepStatus = step.status === 'running' ? 'running' : step.status === 'error' ? 'error' : 'success';
+    const executionState: ToolExecutionState | undefined =
+        step.executionState
+        ?? (isShell ? deriveShellExecutionState(stepStatus, shellRecord) : stepStatus);
+    const terminal = executionState && executionState !== 'running';
+
     const mcp = parseMcpTool(call.tool);
     const duration = step.endedAt ? `${step.endedAt - step.startedAt}ms` : 'running…';
-    const statusIcon = step.status === 'running' ? '⏳'
+    const statusIcon = executionState === 'denied' ? '⊘'
+        : executionState === 'skipped' ? '⊘'
+        : step.status === 'running' ? '⏳'
         : step.status === 'success' ? '✓'
         : step.status === 'error' ? '✗' : '·';
+    const statusLabel =
+        executionState === 'denied' ? '已拒绝'
+        : executionState === 'skipped' ? '已跳过'
+        : null;
+
+    const shellCmd = isShell ? String(args.command ?? '') : '';
+    const shellCwd = isShell ? resolveShellCwd(args, shellRecord) : '';
 
     return (
-        <div className={`tool-card tool-status-${step.status}${mcp ? ' tool-card-mcp' : ''}`}>
+        <div className={`tool-card tool-status-${executionState ?? step.status}${mcp ? ' tool-card-mcp' : ''}`}>
             {mcp && (
                 <div className="tool-mcp-banner" role="note">
                     <span className="tool-mcp-badge">MCP</span>
@@ -42,11 +66,18 @@ export function ToolCallCard({ step }: { step: StepNode }) {
             )}
             <div className="tool-card-header">
                 <span className="tool-icon" aria-label={step.status}>{statusIcon}</span>
-                <code className="tool-name">{call.tool}</code>
-                {isExternalMcpTool(call.tool) && !mcp && (
-                    <span className="tool-mcp-source muted" title="MCP tool">MCP</span>
+                {isShell && shellCmd ? (
+                    <ShellCommandHeader command={shellCmd} cwd={shellCwd} />
+                ) : (
+                    <>
+                        <code className="tool-name">{call.tool}</code>
+                        {isExternalMcpTool(call.tool) && !mcp && (
+                            <span className="tool-mcp-source muted" title="MCP tool">MCP</span>
+                        )}
+                        <span className="tool-summary">{summarize(call.tool, call.args)}</span>
+                    </>
                 )}
-                <span className="tool-summary">{summarize(call.tool, call.args)}</span>
+                {statusLabel ? <span className="tool-exec-badge muted">{statusLabel}</span> : null}
                 <span className="tool-duration">{duration}</span>
                 <button
                     type="button"
@@ -56,7 +87,7 @@ export function ToolCallCard({ step }: { step: StepNode }) {
                 >
                     Copy args
                 </button>
-                {step.status !== 'running' && (
+                {step.status !== 'running' && !terminal && (
                     <button
                         type="button"
                         className="tool-action"
@@ -71,6 +102,18 @@ export function ToolCallCard({ step }: { step: StepNode }) {
                     </button>
                 )}
             </div>
+            {(call.tool === 'shell.exec' || call.tool === 'shell.session') && shellAsk && (
+                <ShellAskBar ask={shellAsk} />
+            )}
+            {isShell && shellRecord && formatHasOutput(shellRecord) && (
+                <ShellOutputPreview result={shellRecord} className="tool-shell-output-inline" />
+            )}
+            {isShell && terminal && executionState === 'denied' && !formatHasOutput(shellRecord) && (
+                <div className="tool-call-shell-state muted">命令未执行（用户拒绝）</div>
+            )}
+            {isShell && terminal && executionState === 'skipped' && !formatHasOutput(shellRecord) && (
+                <div className="tool-call-shell-state muted">命令未执行（用户跳过）</div>
+            )}
 
             <div className="tool-card-section">
                 <button
@@ -95,12 +138,44 @@ export function ToolCallCard({ step }: { step: StepNode }) {
                     {resultOpen && (
                         result
                             ? <ToolResultView payload={result.result as ToolResultPayload} ok={result.ok} />
-                            : <div className="tool-progress-placeholder">…executing</div>
+                            : (
+                                <div className="tool-progress-placeholder shell-running-hint" role="status">
+                                    <span className="tool-call-spinner" /> 正在执行命令…
+                                    {isShell && (
+                                        <pre className="shell-cmd-inline">$ {summarize(call.tool, call.args)}</pre>
+                                    )}
+                                </div>
+                            )
                     )}
                 </div>
             )}
         </div>
     );
+}
+
+function shellResultAsRecord(
+    payload: ToolResultPayload | undefined,
+    args: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+    if (!payload) return undefined;
+    if (payload.kind === 'shell') {
+        return {
+            command: payload.command,
+            cwd: payload.cwd,
+            stdout: payload.stdout,
+            stderr: payload.stderr,
+            exitCode: payload.exitCode,
+            durationMs: payload.durationMs,
+            timedOut: payload.timedOut,
+        };
+    }
+    if (typeof payload === 'object') return payload as Record<string, unknown>;
+    return args;
+}
+
+function formatHasOutput(r?: Record<string, unknown>): boolean {
+    if (!r) return false;
+    return Boolean(String(r.stdout ?? '').trim() || String(r.stderr ?? '').trim());
 }
 
 function copyToClipboard(text: string) {
@@ -111,10 +186,6 @@ function copyToClipboard(text: string) {
     }
 }
 
-/**
- * Produce a short one-line summary for the header so users don't need to expand
- * Arguments to understand what the tool is doing.
- */
 function summarize(tool: string, rawArgs: unknown): string {
     const a = (rawArgs && typeof rawArgs === 'object') ? (rawArgs as Record<string, unknown>) : {};
     const s = (v: unknown) => typeof v === 'string' ? v : '';
@@ -124,8 +195,12 @@ function summarize(tool: string, rawArgs: unknown): string {
             const r = a.range as { startLine?: number; endLine?: number } | undefined;
             return r?.startLine ? `${p}:${r.startLine}-${r.endLine ?? ''}` : p;
         }
+        case tool === 'fs.applyPatch': {
+            const d = summarizeApplyPatch(a);
+            return d.detail ? `${d.description} · ${d.detail}` : d.description;
+        }
         case tool.startsWith('fs.write') || tool === 'fs.create' || tool === 'fs.replace'
-            || tool === 'fs.delete' || tool === 'fs.move' || tool === 'fs.applyPatch':
+            || tool === 'fs.delete' || tool === 'fs.move':
             return s(a.path) || 'multiple files';
         case tool === 'fs.grep' || tool === 'fs.search':
             return `"${s(a.pattern)}"${a.path ? ` in ${s(a.path)}` : ''}`;
@@ -137,10 +212,10 @@ function summarize(tool: string, rawArgs: unknown): string {
             return s(a.path) || 'workspace';
         case tool.startsWith('mcp.'): {
             const parsed = parseMcpTool(tool);
-            const args = Object.keys(a).slice(0, 2).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
+            const argParts = Object.keys(a).slice(0, 2).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
             return parsed
-                ? `${parsed.serverId}/${parsed.toolName}${args ? ` · ${args}` : ''}`
-                : args || tool;
+                ? `${parsed.serverId}/${parsed.toolName}${argParts ? ` · ${argParts}` : ''}`
+                : argParts || tool;
         }
         default:
             return Object.keys(a).slice(0, 3).map((k) => `${k}=${shortenValue(a[k])}`).join(' ');
@@ -162,7 +237,6 @@ function shortenValue(v: unknown): string {
 function shouldAutoOpenResult(p: ToolResultPayload | undefined): boolean {
     if (!p) return true;
     switch (p.kind) {
-        // Don't auto-open very large or content-heavy renderers
         case 'fs.read':
             return (p.content?.length ?? 0) < 4000;
         case 'shell':

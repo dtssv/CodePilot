@@ -290,6 +290,16 @@ class ConversationClient(
             message: String,
         ) {}
 
+        /** HTTP 429 / API 42901 — stream never started; {@link #onClosed()} is not called afterward. */
+        fun onRateLimited(
+            code: Int,
+            message: String,
+            retryAfterSec: Int,
+            opType: String?,
+        ) {
+            onError(code, message)
+        }
+
         fun onDone(
             reason: String,
             payload: JsonNode,
@@ -404,8 +414,22 @@ class ConversationClient(
             t: Throwable?,
             response: Response?,
         ) {
+            val parsed = response?.let { SseHttpErrors.parse(it, http.mapper) }
             response?.close()
-            listener.onError(50002, t?.message ?: "stream failed")
+            if (parsed != null && parsed.isRateLimited) {
+                listener.onRateLimited(
+                    parsed.apiCode,
+                    SseHttpErrors.userMessage(parsed),
+                    parsed.retryAfterSec,
+                    parsed.opType,
+                )
+                return
+            }
+            if (parsed != null) {
+                listener.onError(parsed.apiCode, parsed.message)
+            } else {
+                listener.onError(50002, t?.message ?: "stream failed")
+            }
             listener.onClosed()
         }
     }

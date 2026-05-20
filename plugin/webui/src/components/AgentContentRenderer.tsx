@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
+import { MarkdownBody } from './MarkdownBody';
+import { normalizeAgentContentText, normalizeMarkdownForDisplay } from '../utils/graphMarkers';
 
 /**
  * AgentContentRenderer parses text containing XML-like structured tags
@@ -21,8 +22,8 @@ interface ParsedSegment {
 
 function parseAgentContent(text: string): ParsedSegment[] {
     const segments: ParsedSegment[] = [];
-    // Regex to match <plan>, <file>, <run> tags
-    const tagRegex = /<(plan|file|run)(\s[^>]*)?>([\s\S]*?)<\/\1>/g;
+    // <plan>, <file path="...">, <filepath="..."> (LLM typo), <run>
+    const tagRegex = /<(plan|file(?:path)?|run)(\s[^>]*)?>([\s\S]*?)<\/(?:plan|file(?:path)?|run)>/gi;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
@@ -36,7 +37,8 @@ function parseAgentContent(text: string): ParsedSegment[] {
             }
         }
 
-        const tagName = match[1];
+        const rawTag = match[1].toLowerCase();
+        const tagName = rawTag.startsWith('file') ? 'file' : rawTag;
         const attrStr = match[2] || '';
         const innerContent = match[3];
 
@@ -44,6 +46,10 @@ function parseAgentContent(text: string): ParsedSegment[] {
             segments.push({ type: 'plan', content: innerContent.trim() });
         } else if (tagName === 'file') {
             const attrs = parseAttrs(attrStr);
+            if (!attrs.path) {
+                const pathMatch = attrStr.match(/(?:path|filepath)\s*=\s*"([^"]*)"/i);
+                if (pathMatch) attrs.path = pathMatch[1];
+            }
             segments.push({ type: 'file', content: innerContent, attrs });
         } else if (tagName === 'run') {
             const attrs = parseAttrs(attrStr);
@@ -57,11 +63,49 @@ function parseAgentContent(text: string): ParsedSegment[] {
     if (lastIndex < text.length) {
         const remaining = text.slice(lastIndex);
         if (remaining.trim()) {
-            addMarkdownOrJson(segments, remaining);
+            parseLooseFileBlocks(segments, remaining);
         }
     }
 
+    if (segments.length === 0 && text.trim()) {
+        parseLooseFileBlocks(segments, text);
+    }
+
     return segments;
+}
+
+/** Parse <file path="..."> blocks without a closing tag (streaming / LLM typo). */
+function parseLooseFileBlocks(segments: ParsedSegment[], text: string) {
+    const headerRe = /<(file|filepath)(\s[^>]*)>/gi;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let found = false;
+    while ((match = headerRe.exec(text)) !== null) {
+        found = true;
+        if (match.index > lastIndex) {
+            addMarkdownOrJson(segments, text.slice(lastIndex, match.index));
+        }
+        const attrStr = match[2] || '';
+        const start = match.index + match[0].length;
+        const rest = text.slice(start);
+        const closeMatch = rest.match(/^([\s\S]*?)<\/(?:file|filepath)>/i);
+        const inner = closeMatch ? closeMatch[1] : rest;
+        const attrs = parseAttrs(attrStr);
+        if (!attrs.path) {
+            const pathMatch = attrStr.match(/(?:path|filepath)\s*=\s*"([^"]*)"/i);
+            if (pathMatch) attrs.path = pathMatch[1];
+        }
+        if (attrs.path) {
+            segments.push({ type: 'file', content: inner.trim(), attrs });
+        }
+        lastIndex = closeMatch ? start + closeMatch[0].length : text.length;
+    }
+    if (!found) {
+        addMarkdownOrJson(segments, text);
+    } else if (lastIndex < text.length) {
+        const tail = text.slice(lastIndex).trim();
+        if (tail) addMarkdownOrJson(segments, tail);
+    }
 }
 
 /**
@@ -213,47 +257,70 @@ function JsonBlock({ content }: { content: string }) {
 interface AgentContentRendererProps {
     content: string;
     isStreaming?: boolean;
+    /** Hide <file> preview blocks when canonical patch list is shown in writing step. */
+    suppressFileBlocks?: boolean;
 }
 
-export function AgentContentRenderer({ content, isStreaming }: AgentContentRendererProps) {
+/** If the buffer is a graph JSON envelope, extract user-facing agentContent/textOutput. */
+function normalizeGraphEnvelope(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('{')) return text;
+    try {
+        const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+        if (typeof parsed.agentContent === 'string' && parsed.agentContent.trim()) {
+            return parsed.agentContent;
+        }
+        if (typeof parsed.textOutput === 'string' && parsed.textOutput.trim()) {
+            return parsed.textOutput;
+        }
+    } catch {
+        // keep original
+    }
+    return text;
+}
+
+export function AgentContentRenderer({ content, isStreaming, suppressFileBlocks }: AgentContentRendererProps) {
     if (!content) return null;
 
-    const segments = parseAgentContent(content);
+    const stripped = normalizeAgentContentText(content);
+    if (!stripped) return null;
 
-    // If no structured tags found, render as regular Markdown
+    const normalized = normalizeMarkdownForDisplay(
+        isStreaming ? stripped : normalizeGraphEnvelope(stripped),
+    );
+    let segments = parseAgentContent(normalized);
+    if (suppressFileBlocks) {
+        segments = segments.filter((s) => s.type !== 'file');
+    }
+
+    // If no structured tags found, render as regular Markdown (hide raw JSON while streaming)
     if (segments.length === 1 && segments[0].type === 'markdown') {
+        const md = segments[0].content;
+        if (isStreaming && md.trim().startsWith('{')) {
+            return <div className="agent-content-streaming agent-content-pending">正在生成回复…</div>;
+        }
         return isStreaming ? (
             <div className="agent-content-streaming">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                    {segments[0].content}
-                </ReactMarkdown>
+                <MarkdownBody className="markdown-body agent-content-markdown">{md}</MarkdownBody>
             </div>
         ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                {segments[0].content}
-            </ReactMarkdown>
+            <MarkdownBody className="markdown-body agent-content-markdown">{md}</MarkdownBody>
         );
     }
 
+    // Deduplicate plan segments: if multiple <plan> tags exist, merge into one
+    // to avoid showing repeated "💡 设计思路" blocks in the chat.
+    const planSegments = segments.filter((s) => s.type === 'plan');
+    const nonPlanSegments = segments.filter((s) => s.type !== 'plan');
+    const mergedPlanContent = planSegments.map((s) => s.content).join('\n\n');
+    const hasMergedPlan = planSegments.length > 0;
+
     return (
         <div className="agent-content">
-            {segments.map((seg, idx) => {
+            {nonPlanSegments.map((seg, idx) => {
                 switch (seg.type) {
                     case 'markdown':
-                        return (
-                            <ReactMarkdown key={`md-${idx}`} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                                {seg.content}
-                            </ReactMarkdown>
-                        );
-                    case 'plan':
-                        return (
-                            <div key={`plan-${idx}`} className="agent-plan-block">
-                                <div className="agent-plan-header">💡 设计思路</div>
-                                <div className="agent-plan-content">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{seg.content}</ReactMarkdown>
-                                </div>
-                            </div>
-                        );
+                        return <MarkdownBody key={`md-${idx}`}>{seg.content}</MarkdownBody>;
                     case 'file':
                         return <FileBlock key={`file-${idx}`} content={seg.content} attrs={seg.attrs} />;
                     case 'run':
@@ -264,6 +331,14 @@ export function AgentContentRenderer({ content, isStreaming }: AgentContentRende
                         return null;
                 }
             })}
+            {hasMergedPlan && (
+                <details className="agent-plan-block" open>
+                    <summary className="agent-plan-header">💡 设计思路</summary>
+                    <div className="agent-plan-content">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{mergedPlanContent}</ReactMarkdown>
+                    </div>
+                </details>
+            )}
         </div>
     );
 }

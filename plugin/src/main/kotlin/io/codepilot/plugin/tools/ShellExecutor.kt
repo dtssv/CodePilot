@@ -3,13 +3,13 @@ package io.codepilot.plugin.tools
 import com.fasterxml.jackson.databind.JsonNode
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.process.CapturingProcessHandler
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.SystemInfo
 import io.codepilot.plugin.hooks.HookEngine
 import io.codepilot.plugin.protocol.EventBus
 import io.codepilot.plugin.protocol.EventTypes
+import io.codepilot.plugin.shell.ShellGrantDecision
+import io.codepilot.plugin.shell.ShellGrantWaiter
 import io.codepilot.plugin.shell.ShellPolicy
 import java.util.regex.Pattern
 
@@ -31,7 +31,7 @@ class ShellExecutor(
             throw ToolViolation("command blocked by denylist")
         }
         val timeoutMs = args.path("timeoutMs").asInt(60_000).coerceIn(1_000, 600_000)
-        val cwd = args.path("cwd").asText("").ifBlank { project.basePath ?: "." }
+        val cwd = ShellWorkingDirectory.resolve(project, args.path("cwd").asText(null))
         val osHint = args.path("osHint").asText(detectOs())
         val turnId = args.path("turnId").asText("system")
         val stepId = args.path("stepId").asText("shell-${System.nanoTime()}")
@@ -43,8 +43,14 @@ class ShellExecutor(
                     return denied(command, cwd, osHint, decision.reason)
                 }
                 ShellPolicy.Action.ASK -> {
-                    val allow = askUser(command, cwd, decision.reason)
-                    if (!allow) return denied(command, cwd, osHint, "user denied: ${decision.reason}")
+                    when (askUser(command, cwd, decision.reason, turnId, stepId)) {
+                        ShellGrantDecision.ALLOW -> Unit
+                        ShellGrantDecision.DENY ->
+                            return denied(command, cwd, osHint, "用户已拒绝执行此命令")
+                        ShellGrantDecision.SKIP ->
+                            return denied(command, cwd, osHint, "用户已跳过此命令")
+                        null -> return denied(command, cwd, osHint, "等待确认超时")
+                    }
                 }
                 ShellPolicy.Action.ALLOW -> Unit
             }
@@ -68,23 +74,27 @@ class ShellExecutor(
             "command" to command,
         )
 
-    private fun askUser(command: String, cwd: String, reason: String): Boolean {
-        val app = ApplicationManager.getApplication()
-        val result = java.util.concurrent.atomic.AtomicInteger(Messages.CANCEL)
-        val action = {
-            result.set(
-                Messages.showOkCancelDialog(
-                    project,
-                    "Allow CodePilot to run this shell command?\n\n$command\n\ncwd: $cwd\nreason: $reason",
-                    "CodePilot Shell Permission",
-                    "Allow",
-                    "Deny",
-                    Messages.getWarningIcon(),
-                ),
-            )
-        }
-        if (app.isDispatchThread) action() else app.invokeAndWait(action)
-        return result.get() == Messages.OK
+    private fun askUser(
+        command: String,
+        cwd: String,
+        reason: String,
+        turnId: String,
+        stepId: String,
+    ): ShellGrantDecision? {
+        val token = "shell-ask-${System.nanoTime()}"
+        EventBus.getInstance(project).emit(
+            turnId,
+            stepId,
+            EventTypes.SHELL_ASK,
+            mapOf(
+                "token" to token,
+                "stepId" to stepId,
+                "command" to command,
+                "cwd" to cwd,
+                "reason" to reason,
+            ),
+        )
+        return ShellGrantWaiter.awaitGrant(token, 5 * 60_000)
     }
 
     private fun executeStreaming(
@@ -103,6 +113,17 @@ class ShellExecutor(
         val stdout = StringBuilder()
         val stderr = StringBuilder()
         val bus = EventBus.getInstance(project)
+        bus.toolProgress(
+            turnId,
+            stepId,
+            mapOf(
+                "kind" to "shell",
+                "command" to command,
+                "cwd" to cwd,
+                "status" to "running",
+                "startedAt" to startMs,
+            ),
+        )
         val outThread = Thread({
             proc.inputStream.bufferedReader().forEachLine { line ->
                 stdout.append(line).append('\n')
@@ -125,14 +146,16 @@ class ShellExecutor(
         if (!completed) proc.destroy()
         outThread.join(1_000)
         errThread.join(1_000)
+        val exitCode = if (completed) proc.exitValue() else -1
         return mapOf(
-            "exitCode" to if (completed) proc.exitValue() else -1,
+            "exitCode" to exitCode,
             "timedOut" to !completed,
             "durationMs" to (System.currentTimeMillis() - startMs),
             "stdout" to truncate(stdout.toString(), 64 * 1024),
             "stderr" to truncate(stderr.toString(), 16 * 1024),
             "os" to osHint,
             "cwd" to cwd,
+            "command" to command,
         )
     }
 

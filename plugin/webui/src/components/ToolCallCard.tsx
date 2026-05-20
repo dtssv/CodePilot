@@ -1,10 +1,19 @@
 import { useEffect, useState } from 'react';
+import { ShellAskBar } from './shell/ShellAskBar';
+import { ShellCommandHeader, resolveShellCwd } from './shell/ShellCommandHeader';
+import { ShellOutputPreview } from './shell/ShellOutputPreview';
+import { useShellAskForStep } from '../state/shellAskStore';
+import type { ToolExecutionState } from '../state/chatTypes';
+import { deriveShellExecutionState } from '../utils/shellOutput';
+import { extractPatchItems, summarizeApplyPatch } from '../utils/graphMarkers';
 
 export interface ToolCallInfo {
     id: string;
     name: string;
     args: Record<string, unknown>;
     status?: 'running' | 'success' | 'error';
+    executionState?: ToolExecutionState;
+    result?: Record<string, unknown>;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -73,50 +82,8 @@ function lineCount(s: string | undefined): number {
     return s.split('\n').length;
 }
 
-interface PatchItem {
-    path?: string;
-    op?: string;
-    newContent?: string;
-    search?: string;
-    replace?: string;
-}
-
-function extractPatches(args: Record<string, unknown>): PatchItem[] {
-    // If patches array exists (fs.applyPatch multi-patch format)
-    const patches = args.patches as unknown[];
-    if (patches && Array.isArray(patches) && patches.length > 0) {
-        // Flatten double-nested structure: each element may itself contain a "patches" sub-array
-        // (backend ToolCall.args.patches[].patches[] vs frontend expected patches[])
-        const result: PatchItem[] = [];
-        for (const p of patches) {
-            if (!p || typeof p !== 'object') continue;
-            const po = p as Record<string, unknown>;
-            // Check for double-nested: element has its own "patches" array
-            const innerPatches = po.patches as unknown[] | undefined;
-            if (innerPatches && Array.isArray(innerPatches) && innerPatches.length > 0) {
-                for (const ip of innerPatches) {
-                    if (!ip || typeof ip !== 'object') continue;
-                    result.push(ip as PatchItem);
-                }
-            } else {
-                // Single-level patch element
-                result.push(po as PatchItem);
-            }
-        }
-        return result;
-    }
-    // Single patch format (top-level op/path/newContent)
-    const op = (args.op as string) || '';
-    const path = (args.path as string) || '';
-    if (op || path) {
-        return [{ path, op, newContent: args.newContent as string | undefined, search: args.search as string | undefined, replace: args.replace as string | undefined }];
-    }
-    return [];
-}
-
 function buildToolMeta(name: string, args: Record<string, unknown>): { description: string; detail: string } {
     const path = (args.path as string) || '';
-    const op = (args.op as string) || '';
     const content = (args.newContent as string) || (args.content as string) || (args.replace as string) || '';
     const search = (args.search as string) || '';
     const lines = lineCount(content);
@@ -148,28 +115,8 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
             return { description: sp, detail: '' };
         case 'fs.move':
             return { description: sp + ' → ' + shortPath((args.destination as string) || (args.to as string) || ''), detail: '' };
-        case 'fs.applyPatch': {
-            const patches = extractPatches(args);
-            if (patches.length > 0) {
-                // Multi-patch: summarize file count
-                const fileCount = patches.length;
-                const firstPath = shortPath(patches[0]?.path || '');
-                if (fileCount === 1) {
-                    const p = patches[0];
-                    const patchOp = p.op || '';
-                    const patchLines = lineCount(p.newContent);
-                    if (patchOp === 'create') return { description: firstPath, detail: patchLines > 0 ? patchLines + ' 行' : '' };
-                    if (patchOp === 'delete') return { description: firstPath, detail: '' };
-                    return { description: firstPath, detail: patchLines > 0 ? patchLines + ' 行' : '' };
-                }
-                return { description: firstPath + (fileCount > 1 ? ` +${fileCount - 1}` : ''), detail: fileCount + ' 个文件' };
-            }
-            // Fallback: single top-level op
-            const patchLines = lineCount(args.newContent as string | undefined);
-            if (op === 'create') return { description: sp, detail: patchLines > 0 ? patchLines + ' 行' : '' };
-            if (op === 'delete') return { description: sp, detail: '' };
-            return { description: sp, detail: patchLines > 0 ? patchLines + ' 行' : '' };
-        }
+        case 'fs.applyPatch':
+            return summarizeApplyPatch(args);
         case 'ide.openFile': {
             const line = args.line as number | undefined;
             return { description: sp, detail: line ? ':' + line : '' };
@@ -184,7 +131,7 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
         }
         case 'shell.exec': {
             const cmd = (args.command as string) || '';
-            return { description: cmd.length > 50 ? cmd.substring(0, 50) + '...' : cmd, detail: sp ? sp : '' };
+            return { description: cmd || 'shell', detail: '' };
         }
         case 'shell.session':
             return { description: (args.action as string) || 'exec', detail: '' };
@@ -229,8 +176,11 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
 }
 
 export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
-    const [status, setStatus] = useState<'running' | 'success' | 'error'>(toolCall.status || 'running');
+    const initialStatus = toolCall.status
+        ?? (toolCall.result || toolCall.executionState ? 'success' : 'running');
+    const [status, setStatus] = useState<'running' | 'success' | 'error'>(initialStatus);
     const [expanded, setExpanded] = useState(false);
+    const shellAsk = useShellAskForStep(toolCall.id);
 
     useEffect(() => {
         if (toolCall.status && toolCall.status !== status) {
@@ -242,7 +192,7 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
     // The args may come as a nested object from the backend SSE stream
     const rawArgs = toolCall.args || {};
     const op = (rawArgs.op as string) || '';
-    const patches = toolCall.name === 'fs.applyPatch' ? extractPatches(rawArgs) : [];
+    const patches = toolCall.name === 'fs.applyPatch' ? extractPatchItems(rawArgs) : [];
     const hasMultiplePatches = patches.length > 1;
 
     // ★ gather.execute: extract sub-requests for inline display
@@ -251,16 +201,33 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
         ? (rawArgs.requests as { id?: string; kind?: string; args?: Record<string, unknown> }[] | undefined) || []
         : [];
 
+    const applyPatchDisplay =
+        toolCall.name === 'fs.applyPatch' ? summarizeApplyPatch(rawArgs) : null;
+
     // For single patch, resolve effective name based on op
-    const effectiveName = toolCall.name === 'fs.applyPatch' && !hasMultiplePatches && op
-        ? (op === 'create' ? 'fs.create' : op === 'delete' ? 'fs.delete' : op === 'replace' ? 'fs.replace' : toolCall.name)
-        : toolCall.name;
+    const effectiveName =
+        toolCall.name === 'fs.applyPatch' && !hasMultiplePatches && op
+            ? op === 'create'
+                ? 'fs.create'
+                : op === 'delete'
+                  ? 'fs.delete'
+                  : op === 'replace'
+                    ? 'fs.replace'
+                    : toolCall.name
+            : toolCall.name;
 
     const icon = toolIcons[effectiveName] || toolIcons[toolCall.name] || '🔧';
-    const verb = TOOL_VERBS[effectiveName] || TOOL_VERBS[toolCall.name] || toolCall.name.split('.').pop() || '';
+    const verb =
+        applyPatchDisplay?.verb ||
+        TOOL_VERBS[effectiveName] ||
+        TOOL_VERBS[toolCall.name] ||
+        toolCall.name.split('.').pop() ||
+        '';
     const category = getToolCategory(effectiveName);
     const categoryColor = CATEGORY_COLORS[category];
-    const { description, detail } = buildToolMeta(effectiveName, rawArgs);
+    const built = buildToolMeta(effectiveName, rawArgs);
+    const description = applyPatchDisplay?.description || built.description;
+    const detail = applyPatchDisplay?.detail ?? built.detail;
 
     // Build per-patch info for expanded view
     const patchItems = patches.map((p, idx) => {
@@ -273,16 +240,42 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
         return { idx, path: shortPath(patchPath), verb: pVerb, icon: pIcon, lines: patchLines, op: patchOp };
     });
 
+    const isShell = toolCall.name === 'shell.exec' || toolCall.name === 'shell.session';
+    const shellCmd = isShell ? ((rawArgs.command as string) || description) : '';
+    const shellCwd = isShell ? resolveShellCwd(rawArgs, toolCall.result) : '';
+    const executionState: ToolExecutionState | undefined =
+        toolCall.executionState
+        ?? (isShell && toolCall.result
+            ? deriveShellExecutionState(status, toolCall.result)
+            : status);
+    const terminal = executionState && executionState !== 'running';
+
+    const statusLabel =
+        executionState === 'denied' ? '已拒绝'
+        : executionState === 'skipped' ? '已跳过'
+        : executionState === 'success' ? '✓'
+        : executionState === 'error' ? '✗'
+        : null;
+
     return (
-        <div className={'tool-call-card tool-call-' + status}>
-            {!isGatherExecute && (
+        <div className={'tool-call-card tool-call-' + (executionState ?? status)}>
+            {isShell && shellCmd ? (
+                <div className="tool-call-shell-primary">
+                    <span className="tool-call-icon">{icon}</span>
+                    <ShellCommandHeader command={shellCmd} cwd={shellCwd} />
+                    <span className={'tool-call-status tool-call-status-' + (executionState ?? status)}>
+                        {status === 'running' && !shellAsk && <span className="tool-call-spinner" />}
+                        {statusLabel}
+                    </span>
+                </div>
+            ) : !isGatherExecute ? (
                 <>
                     <span className="tool-call-icon">{icon}</span>
                     <span className="tool-call-verb" style={{ color: categoryColor }}>{verb}</span>
                     <span className="tool-call-desc" title={description}>{description}</span>
-                    {detail && <span className="tool-call-detail">{detail}</span>}
+                    {detail && <span className="tool-call-detail muted">{detail}</span>}
                 </>
-            )}
+            ) : null}
             {isGatherExecute && (
                 <>
                     <span className="tool-call-icon">📥</span>
@@ -291,15 +284,24 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                 </>
             )}
             {hasMultiplePatches && (
-                <button className="tool-call-expand-btn" onClick={() => setExpanded(!expanded)} title={expanded ? '收起' : '展开'}>
-                    {expanded ? '▾' : '▸'}
+                <button
+                    type="button"
+                    className="agent-file-expand-btn tool-call-expand-btn"
+                    onClick={() => setExpanded(!expanded)}
+                >
+                    {expanded ? '▾ 收起' : '▸ 展开详情'}
                 </button>
             )}
+            {!isShell && (
             <span className={'tool-call-status tool-call-status-' + status}>
-                {status === 'running' && <span className="tool-call-spinner" />}
+                {status === 'running' && !shellAsk && <span className="tool-call-spinner" />}
                 {status === 'success' && '✓'}
                 {status === 'error' && '✗'}
             </span>
+            )}
+            {toolCall.name === 'shell.exec' && shellAsk && (
+                <ShellAskBar ask={shellAsk} />
+            )}
             {expanded && hasMultiplePatches && (
                 <div className="tool-call-patches">
                     {patchItems.map((p) => (
@@ -311,6 +313,15 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                         </div>
                     ))}
                 </div>
+            )}
+            {toolCall.name === 'shell.exec' && toolCall.result && (
+                <ShellOutputPreview result={toolCall.result} />
+            )}
+            {toolCall.name === 'shell.exec' && terminal && executionState === 'denied' && (
+                <div className="tool-call-shell-state muted">命令未执行（用户拒绝）</div>
+            )}
+            {toolCall.name === 'shell.exec' && terminal && executionState === 'skipped' && (
+                <div className="tool-call-shell-state muted">命令未执行（用户跳过）</div>
             )}
             {isGatherExecute && gatherRequests.length > 0 && (
                 <div className="tool-call-patches">

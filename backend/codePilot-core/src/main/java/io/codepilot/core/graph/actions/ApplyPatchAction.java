@@ -5,7 +5,12 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.conversation.ToolResultBus;
 import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GraphPatchUiHelper;
+import io.codepilot.core.graph.GraphExecutionLog;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.GraphToolWaitHelper;
+import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +50,7 @@ public class ApplyPatchAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "applyPatch");
+        GraphExecutionLog.nodeEnter(state, "applyPatch");
 
         String sessionId = (String) state.value("sessionId").orElse("");
         String phaseId = (String) state.value("phaseCursor").orElse("");
@@ -90,6 +96,9 @@ public class ApplyPatchAction implements NodeAction {
         }
         // Use validPatches instead of original patches from here on
         patches = validPatches;
+
+        GraphUiEmitter.transition(state, "applyPatch");
+        UserPlanProgressHelper.emitForCurrentPhase(state, "in_progress");
 
         // ── Shadow Workspace pre-apply validation (01-§3.22) ──
         long createCount = patches.stream()
@@ -177,13 +186,24 @@ public class ApplyPatchAction implements NodeAction {
             // Register future BEFORE emitting SSE to avoid race condition
             var pendingFuture = ToolResultBus.registerFuture(sessionId, batchToolCallId);
 
-            // Emit batch tool_call SSE event
+            List<Map<String, Object>> writingFiles = GraphPatchUiHelper.buildWritingFiles(patches);
+            String writingText = GraphPatchUiHelper.buildWritingTextFromFiles(writingFiles);
+            GraphSseHelper.emitEvent(state, SseEvents.AGENT_WRITING,
+                Map.of("text", writingText, "files", writingFiles, "phaseId", phaseId));
+
+            GraphExecutionLog.toolCallEmit(state, batchToolCallId, "fs.applyPatch", batchArgs);
             GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, batchArgs);
 
             // Await result from client via ToolResultBus (CompletableFuture — primary path)
             try {
-                ToolResultEvent result = pendingFuture.get(120, java.util.concurrent.TimeUnit.SECONDS);
+                ToolResultEvent result =
+                        GraphToolWaitHelper.await(
+                                pendingFuture, state, "应用补丁中", Duration.ofSeconds(120));
 
+                if (result != null) {
+                    GraphExecutionLog.toolResultAwait(
+                            state, batchToolCallId, result.ok(), result.errorMessage());
+                }
                 if (result != null && result.ok()) {
                     appliedCount = allEdits.size();
                     for (var edit : allEdits) {
@@ -211,9 +231,10 @@ public class ApplyPatchAction implements NodeAction {
             }
         }
 
-        // Update state with results
-        updates.put("patchResults", toolResults);
-        updates.put("patchErrors", errors);
+        // Update state with results — use immutable copies to prevent ConcurrentModificationException
+        // during state serialization/cloning by the graph framework
+        updates.put("patchResults", List.copyOf(toolResults));
+        updates.put("patchErrors", List.copyOf(errors));
         updates.put("appliedCount", appliedCount);
         updates.put("failedCount", failedCount);
 
@@ -240,6 +261,7 @@ public class ApplyPatchAction implements NodeAction {
                 Map.of("phaseId", phaseId, "applied", appliedCount, "failed", failedCount));
 
         log.info("ApplyPatch: {} applied, {} failed out of {} patches", appliedCount, failedCount, patches.size());
+        GraphExecutionLog.nodeExit(state, "applyPatch", updates);
         return updates;
     }
 
@@ -320,7 +342,9 @@ public class ApplyPatchAction implements NodeAction {
                 GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, toolArgs);
 
                 try {
-                    ToolResultEvent result = editFuture.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                    ToolResultEvent result =
+                            GraphToolWaitHelper.await(
+                                    editFuture, state, "应用补丁中", Duration.ofSeconds(60));
 
                     if (result != null && result.ok()) {
                         appliedCount++;

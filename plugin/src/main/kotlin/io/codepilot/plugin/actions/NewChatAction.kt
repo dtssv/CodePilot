@@ -8,8 +8,7 @@ import com.intellij.openapi.wm.ToolWindowManager
 /**
  * Start a new chat session (Ctrl+Shift+L).
  *
- * Opens the CodePilot ToolWindow and sends a "new_session" event
- * to the WebUI so it clears the current conversation and starts fresh.
+ * Opens the CodePilot ToolWindow and starts a fresh session (abort SSE, clear handle).
  */
 class NewChatAction : AnAction("New Chat", "Start a new CodePilot chat session", null) {
 
@@ -18,7 +17,7 @@ class NewChatAction : AnAction("New Chat", "Start a new CodePilot chat session",
         val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
         tw.show {
             val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
-            panel?.dispatchToWeb("new_session", emptyMap<String, Any>())
+            panel?.handleNewSessionFromAction()
         }
     }
 

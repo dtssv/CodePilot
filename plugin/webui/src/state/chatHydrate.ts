@@ -3,6 +3,7 @@
  */
 
 import type { AgentStep } from '../components/AgentStepCard';
+import type { ToolExecutionState } from './chatTypes';
 import type { ChatV2State, StepNode, TurnNode } from './events';
 import { normalizePlanStatus } from './planNormalize';
 
@@ -14,7 +15,34 @@ export interface LegacyHydrateMessage {
     turnId?: string;
     planSteps?: { id: string; title: string; status: string }[];
     agentSteps?: AgentStep[];
-    toolCalls?: { id: string; name: string; args: Record<string, unknown>; status?: string }[];
+    toolCalls?: {
+        id: string;
+        name: string;
+        args: Record<string, unknown>;
+        status?: string;
+        result?: Record<string, unknown>;
+        executionState?: string;
+    }[];
+}
+
+function shellToolResultPayload(tc: {
+    name: string;
+    args: Record<string, unknown>;
+    result?: Record<string, unknown>;
+    status?: string;
+}): Record<string, unknown> {
+    const args = tc.args || {};
+    const r = tc.result || {};
+    return {
+        kind: 'shell',
+        command: String(r.command ?? args.command ?? ''),
+        cwd: String(r.cwd ?? args.cwd ?? ''),
+        exitCode: typeof r.exitCode === 'number' ? r.exitCode : (tc.status === 'error' ? 1 : 0),
+        stdout: String(r.stdout ?? ''),
+        stderr: String(r.stderr ?? ''),
+        durationMs: typeof r.durationMs === 'number' ? r.durationMs : 0,
+        timedOut: r.timedOut === true,
+    };
 }
 
 function mapAgentKind(type: AgentStep['type']): string {
@@ -71,9 +99,15 @@ export function buildV2StateFromLegacyMessages(messages: LegacyHydrateMessage[])
         const assistant = messages[i];
         i += 1;
         let stepCounter = 0;
+        let hydrateOrderSeq = 0;
 
         const addStep = (step: StepNode) => {
-            steps[step.stepId] = step;
+            const seq = hydrateOrderSeq++;
+            steps[step.stepId] = {
+                ...step,
+                orderSeq: step.orderSeq ?? seq,
+                startedAt: step.startedAt + seq,
+            };
             turn.stepIds.push(step.stepId);
             if (!step.parentStepId) turn.rootStepIds.push(step.stepId);
         };
@@ -115,19 +149,29 @@ export function buildV2StateFromLegacyMessages(messages: LegacyHydrateMessage[])
         }
 
         for (const tc of assistant.toolCalls || []) {
-            const sid = `${turnId}-tool-${stepCounter++}`;
+            const sid = tc.id || `${turnId}-tool-${stepCounter++}`;
+            stepCounter += 1;
             const isShell = tc.name.startsWith('shell.');
+            const hasResult = Boolean(tc.result && Object.keys(tc.result).length > 0);
+            const stepStatus =
+                tc.status === 'error' ? 'error'
+                : tc.status === 'running' && !hasResult ? 'running'
+                : 'success';
             addStep({
                 stepId: sid,
                 kind: 'tool',
                 title: tc.name,
-                status: tc.status === 'error' ? 'error' : 'success',
+                status: stepStatus,
                 startedAt,
                 endedAt: startedAt + 300,
                 textBuf: '',
                 thinkingBuf: '',
+                executionState: tc.executionState as ToolExecutionState | undefined,
                 toolCall: { tool: tc.name, args: tc.args || {} },
-                toolResult: { ok: tc.status !== 'error', result: isShell ? { kind: 'shell', command: (tc.args as { command?: string }).command } : tc.args },
+                toolResult: {
+                    ok: tc.status !== 'error' && tc.executionState !== 'denied' && tc.executionState !== 'skipped',
+                    result: isShell ? shellToolResultPayload(tc) : (hasResult ? tc.result : tc.args),
+                },
                 children: [],
             });
         }

@@ -10,6 +10,7 @@ import com.intellij.openapi.util.Disposer
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import io.codepilot.plugin.conversation.ConversationClient
+import io.codepilot.plugin.protocol.TerminalDoneReasons
 import io.codepilot.plugin.session.SessionStore
 import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.tools.ToolDispatcher
@@ -55,6 +56,9 @@ class CefChatPanel(
     /** Bumped when starting a new chat / switching session so stale SSE callbacks are ignored. */
     private var activeStreamGeneration = 0
 
+    /** When set, matching {@link #onClosed} must not mark session interrupted (rate limit). */
+    private var rateLimitedStreamGen = -1
+
     /** P2b durable run id from {@code run_started} (survives rolling deploy). */
     private var durableRunId: String? = null
     private var durableRunLastSeq: Int = 0
@@ -77,6 +81,33 @@ class CefChatPanel(
      * allowing the code to be re-read from disk if needed.
      */
     private val contextStore = mutableMapOf<String, String>()
+
+    /** Queued user messages for the active session (processed FIFO after the current turn ends). */
+    private val pendingUserMessages = ArrayDeque<PendingUserMessage>()
+    private val conversationLock = Any()
+
+    /** True while an SSE graph run is in flight for this chat panel. */
+    @Volatile
+    private var conversationInFlight = false
+
+    /** After New Chat until the first message creates a session — blocks stale message hydration on reload. */
+    @Volatile
+    private var pendingFreshChat = false
+
+    private data class PendingUserMessage(
+        val text: String,
+        val mode: String,
+        val modelId: String?,
+        val modelSource: String?,
+        val contextRefs: List<Map<String, Any?>>,
+        val images: List<Map<String, String>>,
+        val historyMessages: List<Map<String, String>>,
+        val freshChat: Boolean,
+        val maxMode: Boolean,
+        val effectiveModelId: String?,
+        val effectiveModelSource: String?,
+        val routedModel: Map<String, Any?>,
+    )
 
     private val panel = JPanel(BorderLayout())
 
@@ -164,7 +195,20 @@ class CefChatPanel(
                         // Push session list and current session messages to the WebUI
                         dispatchSessionList()
                         dispatchCurrentSessionInfo()
-                        dispatchCurrentSessionMessages()
+                        if (pendingFreshChat || sessionHandle == null) {
+                            dispatchToWeb(
+                                "session_messages",
+                                mapOf(
+                                    "sessionId" to "",
+                                    "messages" to emptyList<Map<String, Any?>>(),
+                                    "abnormalTermination" to false,
+                                    "hasCheckpoint" to false,
+                                    "freshChat" to true,
+                                ),
+                            )
+                        } else {
+                            dispatchCurrentSessionMessages()
+                        }
                     }
                 }
             },
@@ -334,6 +378,7 @@ class CefChatPanel(
 
     private fun handleApplyApplyAll(payload: com.fasterxml.jackson.databind.JsonNode) {
         val turnId = payload.path("turnId").asText().ifBlank { legacyAdapter?.turnId ?: return }
+        patchStaging.acceptAllForTurn(turnId)
         val result = patchStaging.applyAll(turnId)
         dispatchToWeb("apply.result", result + mapOf("op" to "apply_all", "turnId" to turnId))
     }
@@ -696,10 +741,12 @@ class CefChatPanel(
                                 "content" to msg["content"].asText(""),
                             )
                         } ?: emptyList(),
-                        payload["maxMode"]?.asBoolean(false) ?: false,
+                        freshChat = payload["freshChat"]?.asBoolean(false) ?: false,
+                        maxMode = payload["maxMode"]?.asBoolean(false) ?: false,
                     )
                 "fetch_models" -> handleFetchModels()
                 "stop" -> handleStop()
+                "shell.grant" -> handleShellGrant(payload)
                 "risk_approved" -> handleRiskApproval(payload["approved"]?.asBoolean() ?: false)
                 "needs_input_response" -> handleNeedsInputResponse(payload)
                 "new_session" -> handleNewSession()
@@ -827,7 +874,10 @@ class CefChatPanel(
         images: List<Map<String, String>> = emptyList(),
         // ★ Conversation history from WebUI for multi-turn context
         historyMessages: List<Map<String, String>> = emptyList(),
+        freshChat: Boolean = false,
         maxMode: Boolean = false,
+        /** When draining the queue, the user message was already persisted. */
+        skipUserPersist: Boolean = false,
     ) {
         if (images.isNotEmpty() && !maxMode && !modelId.isNullOrBlank() && modelId != "auto") {
             val caps =
@@ -848,8 +898,10 @@ class CefChatPanel(
         val routedModel = routeModel(modelId, text, mode, images.isNotEmpty(), maxMode)
         val effectiveModelId = routedModel["id"] as? String ?: modelId
         val effectiveModelSource = routedModel["source"] as? String ?: modelSource
-        if (sessionHandle == null) {
+        val createdNewSession = sessionHandle == null
+        if (createdNewSession) {
             sessionHandle = sessionStore.newSession(workspaceHash, mode, effectiveModelId, effectiveModelSource)
+            pendingFreshChat = false
         }
         val handle = sessionHandle!!
 
@@ -870,25 +922,68 @@ class CefChatPanel(
                 )
             }
         if (imageDtos.isNotEmpty()) userMsgExtra["images"] = imageDtos
-        sessionStore.appendMessage(handle, "user", displayText, userMsgExtra.toMap())
-        val forkMessageIndex = sessionStore.readMessages(handle).size - 1
-        // Auto-derive title from first user message
-        if (handle.meta.title.isNullOrBlank()) {
-            sessionStore.updateMeta(handle) { meta ->
-                meta.title = text.take(50)
+        if (!skipUserPersist) {
+            sessionStore.appendMessage(handle, "user", displayText, userMsgExtra.toMap())
+            // Auto-derive title from first user message
+            if (handle.meta.title.isNullOrBlank()) {
+                sessionStore.updateMeta(handle) { meta ->
+                    meta.title = text.take(50)
+                }
+            }
+            sessionStore.touchLastMessage(handle)
+            dispatchToWeb(
+                "user_message_saved",
+                mapOf(
+                    "role" to "user",
+                    "content" to displayText,
+                    "contextRefs" to contextRefs,
+                    "images" to imageDtos,
+                ),
+            )
+            if (createdNewSession) {
+                dispatchToWeb(
+                    "session_switched",
+                    mapOf("id" to handle.meta.id, "promote" to true),
+                )
+                dispatchSessionList()
             }
         }
-        sessionStore.touchLastMessage(handle)
-        // Notify WebUI with compact display message
-        dispatchToWeb(
-            "user_message_saved",
-            mapOf(
-                "role" to "user",
-                "content" to displayText,
-                "contextRefs" to contextRefs,
-                "images" to imageDtos,
-            ),
-        )
+        val forkMessageIndex = sessionStore.readMessages(handle).size - 1
+
+        val queued =
+            synchronized(conversationLock) {
+                if (conversationInFlight) {
+                    pendingUserMessages.add(
+                        PendingUserMessage(
+                            text,
+                            mode,
+                            modelId,
+                            modelSource,
+                            contextRefs,
+                            images,
+                            historyMessages,
+                            freshChat,
+                            maxMode,
+                            effectiveModelId,
+                            effectiveModelSource,
+                            routedModel,
+                        ),
+                    )
+                    true
+                } else {
+                    conversationInFlight = true
+                    false
+                }
+            }
+        if (queued) {
+            dispatchMessageQueueSnapshot()
+            dispatchToWeb(
+                "message_queued",
+                mapOf("queueSize" to pendingUserMessages.size),
+            )
+            return
+        }
+        dispatchToWeb("conversation_running", mapOf("running" to true))
 
         // v2 protocol: start a new turn envelope flow for this user message.
         // The adapter is kept on the panel instance and consumed inside the SSE listener.
@@ -961,11 +1056,15 @@ class CefChatPanel(
                 }
             }
         dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, result ->
-            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+            dispatchToWeb(
+                "tool_result_ack",
+                mapOf("toolCallId" to toolCallId, "ok" to ok, "result" to result),
+            )
             legacyAdapter?.onToolResultAck(toolCallId, ok, result)
             sessionStore.appendStep(handle, mapOf(
                 "toolCallId" to toolCallId,
                 "ok" to ok,
+                "result" to result,
                 "ts" to java.time.Instant.now().toString(),
             ))
         }).apply { currentTurnId = turnId }
@@ -973,11 +1072,16 @@ class CefChatPanel(
             io.codepilot.plugin.tools
                 .GatherDispatcher(project, client, handle.meta.id) { toolCallId, ok, httpResponse ->
                     // Dispatch tool_result_ack to WebUI when gather execution completes
-                    dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+                    dispatchToWeb(
+                        "tool_result_ack",
+                        mapOf("toolCallId" to toolCallId, "ok" to ok, "result" to httpResponse),
+                    )
+                    legacyAdapter?.onToolResultAck(toolCallId, ok, httpResponse)
                     // Record the tool result step
                     sessionStore.appendStep(handle, mapOf(
                         "toolCallId" to toolCallId,
                         "ok" to ok,
+                        "result" to httpResponse,
                         "ts" to java.time.Instant.now().toString(),
                     ))
                 }
@@ -1043,14 +1147,21 @@ class CefChatPanel(
                 }
             }
 
-            // Resume from graph awaiting state if applicable
+            // Resume from graph askUser interrupt: use /resume with checkpoint token
+            var useGraphResume = false
             if (mode == "agent") {
                 gss.loadLatest()
-                if (gss.isAwaiting()) {
-                    payload["intent"] = "continue"
+                val continuationToken =
+                    gss.snapshot().path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
+                if (gss.isAwaiting() && continuationToken != null) {
+                    useGraphResume = true
+                    payload["intent"] = "answer"
+                    payload["continuationToken"] = continuationToken
                     payload["graphState"] = gss.snapshot()
-                    // Clear awaiting after sending resume — next message should be a fresh turn
-                    gss.clearAwaiting()
+                    if (fullText.isNotBlank()) {
+                        payload["input"] = fullText
+                        payload["answers"] = listOf(mapOf("freeform" to fullText))
+                    }
                 }
             }
 
@@ -1099,7 +1210,14 @@ class CefChatPanel(
                 mapOf("role" to msg["role"], "content" to (msg["content"] as? String)?.take(2000))
             }
             // Use WebUI history if available, otherwise fall back to local session messages
-            val recentMessages = if (webUiHistory.isNotEmpty()) webUiHistory else localRecent
+            val messageCount = sessionStore.readMessages(handle).size
+            val recentMessages =
+                when {
+                    freshChat -> emptyList()
+                    webUiHistory.isNotEmpty() -> webUiHistory
+                    messageCount <= 1 -> emptyList()
+                    else -> localRecent
+                }
 
             payload["contexts"] =
                 mapOf(
@@ -1138,23 +1256,36 @@ class CefChatPanel(
             )
             if (!hookResult.pass) {
                 dispatchToWeb("error", mapOf("code" to 49901, "message" to "Blocked by hook: ${hookResult.reason}"))
+                finishConversationAndDrainQueue()
                 return@executeOnPooledThread
             }
 
             // Collect full assistant response for local persistence
             val assistantBuilder = StringBuilder()
+            val turnPlanSteps = mutableListOf<MutableMap<String, Any?>>()
             // ★ Guard to prevent duplicate assistant message persistence on double done events
             var assistantPersisted = false
+            var terminalDoneReceived = false
 
             // Capture adapter for use inside the anonymous listener
             val adapter = legacyAdapter
+            val capturedTurnId = legacyAdapter?.turnId
             val streamGen = activeStreamGeneration
             val streamSessionId = handle.meta.id
             fun isStaleStream(): Boolean =
                 streamGen != activeStreamGeneration || sessionHandle?.meta?.id != streamSessionId
 
-            client.run(
-                payload.toMap(),
+            val startStream =
+                if (useGraphResume) {
+                    { listener: ConversationClient.Listener ->
+                        client.resume(payload.toMap(), listener)
+                    }
+                } else {
+                    { listener: ConversationClient.Listener ->
+                        client.run(payload.toMap(), listener)
+                    }
+                }
+            startStream(
                 object : ConversationClient.Listener {
                     override fun onDelta(text: String) {
                         if (isStaleStream()) return
@@ -1261,6 +1392,8 @@ class CefChatPanel(
 
                     override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
                         gss.applyTransition(payload)
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        adapter?.onGraphTransition(data)
                     }
 
                     override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -1310,6 +1443,20 @@ class CefChatPanel(
                     override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
                         if (isStaleStream()) return
                         val data = mapper.treeToValue(payload, Map::class.java)
+                        @Suppress("UNCHECKED_CAST")
+                        val steps = data["steps"] as? List<Map<String, Any?>>
+                        if (!steps.isNullOrEmpty()) {
+                            turnPlanSteps.clear()
+                            for (s in steps) {
+                                turnPlanSteps.add(
+                                    mutableMapOf(
+                                        "id" to (s["id"]?.toString() ?: ""),
+                                        "title" to (s["title"]?.toString() ?: ""),
+                                        "status" to (s["status"]?.toString() ?: "pending"),
+                                    ),
+                                )
+                            }
+                        }
                         dispatchToWeb("user_plan", data)
                         adapter?.onPlanUpdate(data)
                     }
@@ -1317,6 +1464,27 @@ class CefChatPanel(
                     override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
                         if (isStaleStream()) return
                         val data = mapper.treeToValue(payload, Map::class.java)
+                        val stepId = data["stepId"]?.toString()
+                        val stepIndex = (data["stepIndex"] as? Number)?.toInt()
+                        val status = data["status"]?.toString()
+                        val completedSteps = (data["completedSteps"] as? Number)?.toInt()
+                        if (turnPlanSteps.isNotEmpty()) {
+                            if (!stepId.isNullOrBlank()) {
+                                turnPlanSteps
+                                    .filter { it["id"]?.toString() == stepId }
+                                    .forEach { if (status != null) it["status"] = status }
+                            } else if (stepIndex != null && stepIndex in turnPlanSteps.indices && status != null) {
+                                turnPlanSteps[stepIndex]["status"] = status
+                            }
+                            if (completedSteps != null && completedSteps > 0) {
+                                for (i in 0 until completedSteps.coerceAtMost(turnPlanSteps.size)) {
+                                    val cur = turnPlanSteps[i]["status"]?.toString() ?: "pending"
+                                    if (cur == "pending" || cur == "in_progress" || cur == "running") {
+                                        turnPlanSteps[i]["status"] = "success"
+                                    }
+                                }
+                            }
+                        }
                         dispatchToWeb("user_plan_progress", data)
                         adapter?.onPlanProgress(data)
                     }
@@ -1334,12 +1502,37 @@ class CefChatPanel(
 
                     override fun onAgentWriting(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_writing", mapper.treeToValue(payload, Map::class.java))
-                        adapter?.onAgentWriting(payload.path("text").asText(null))
+                        val filesNode = payload.path("files")
+                        val files =
+                            if (filesNode.isArray) {
+                                filesNode.mapNotNull { node ->
+                                    val path = node.path("path").asText(null) ?: return@mapNotNull null
+                                    buildMap<String, Any?> {
+                                        put("path", path)
+                                        node.path("op").asText(null)?.let { put("op", it) }
+                                        if (node.has("lineCount")) put("lineCount", node.path("lineCount").asInt())
+                                        node.path("preview").asText(null)?.let { put("preview", it) }
+                                    }
+                                }
+                            } else {
+                                emptyList()
+                            }
+                        adapter?.onAgentWriting(payload.path("text").asText(null), files)
                     }
 
                     override fun onAgentRunning(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
                         adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
+
+                    override fun onRateLimited(
+                        code: Int,
+                        message: String,
+                        retryAfterSec: Int,
+                        opType: String?,
+                    ) {
+                        if (isStaleStream()) return
+                        handleStreamRateLimited(streamGen, code, message, retryAfterSec, opType)
                     }
 
                     override fun onError(
@@ -1370,9 +1563,11 @@ class CefChatPanel(
                         if (isStaleStream()) return
                         dispatchToWeb("done", mapOf("reason" to reason))
                         adapter?.onDone(reason)
-                        // Persist graph awaiting state for resume
+                        // Persist graph awaiting state for resume, or clear after user answered
                         if (reason == "awaiting_user_input" || reason == "phase_done") {
                             gss.applyAwaiting(payload)
+                        } else if (reason != "deploy_draining") {
+                            gss.clearAwaiting()
                         }
                         // ★ Only persist the assistant message on the FIRST done event
                         // with a "final" reason. Subsequent done events (e.g., from a
@@ -1385,38 +1580,23 @@ class CefChatPanel(
                             handleAttachDurableRun(durableRunId!!)
                             return
                         }
-                        val isTerminalDone = reason == "final" || reason == "failed" || reason == "stopped" || reason == "max_steps" || isDeployDrain
+                        val isTerminalDone = TerminalDoneReasons.isTerminal(reason)
+                        if (isTerminalDone) {
+                            terminalDoneReceived = true
+                        }
                         if (isTerminalDone && !assistantPersisted) {
                             assistantPersisted = true
-                            // Persist the full assistant response and update session metadata
                             val fullResponse = assistantBuilder.toString()
                             // Rebuild tool calls from steps: merge "started" and "ok" records by toolCallId
                             val steps = sessionStore.readSteps(handle)
-                            val toolCallMap = linkedMapOf<String, Map<String, Any>>()
-                            for (step in steps) {
-                                val tcId = step["toolCallId"] as? String ?: continue
-                                val existing = toolCallMap[tcId]
-                                if (step["started"] == true) {
-                                    // Tool call started — record name
-                                    toolCallMap[tcId] = mapOf(
-                                        "id" to tcId,
-                                        "name" to (step["toolName"] ?: "unknown"),
-                                        "status" to "running",
-                                    )
-                                } else if (step["ok"] != null) {
-                                    // Tool result ack — update status
-                                    val name = existing?.get("name") ?: "unknown"
-                                    toolCallMap[tcId] = mapOf<String, Any>(
-                                        "id" to tcId,
-                                        "name" to name,
-                                        "status" to if (step["ok"] == true) "success" else "error",
-                                    )
-                                }
-                            }
-                            val turnToolCalls = toolCallMap.values.toList()
-                            if (fullResponse.isNotEmpty() || turnToolCalls.isNotEmpty()) {
+                            val turnToolCalls = sessionStore.mergeToolCallsFromSteps(steps)
+                            if (fullResponse.isNotEmpty() || turnToolCalls.isNotEmpty() || turnPlanSteps.isNotEmpty()) {
                                 val extra = mutableMapOf<String, Any?>()
                                 if (turnToolCalls.isNotEmpty()) extra["toolCalls"] = turnToolCalls
+                                if (turnPlanSteps.isNotEmpty()) {
+                                    extra["planSteps"] = turnPlanSteps.map { it.toMap() }
+                                }
+                                if (!capturedTurnId.isNullOrBlank()) extra["turnId"] = capturedTurnId
                                 sessionStore.appendMessage(handle, "assistant", fullResponse, extra.toMap())
                             }
                             sessionStore.updateMeta(handle) { meta ->
@@ -1431,10 +1611,17 @@ class CefChatPanel(
                             recordUsage(handle.meta.id, turnId, effectiveModelId ?: "default", routedModel["tier"] as? String ?: "DEFAULT", fullText, fullResponse)
                             dispatchSessionList() // refresh sidebar timestamps
                         }
+                        if (isTerminalDone) {
+                            finishConversationAndDrainQueue()
+                        }
                     }
 
                     override fun onClosed() {
                         if (isStaleStream()) return
+                        if (streamGen == rateLimitedStreamGen) {
+                            rateLimitedStreamGen = -1
+                            return
+                        }
                         // v2 protocol: emit turn.end(interrupted) if no terminal done was seen.
                         adapter?.onAbnormalClose()
                         // If the stream closed without a proper "done" event, the session
@@ -1453,6 +1640,9 @@ class CefChatPanel(
                                 }
                                 dispatchSessionInterrupted(handle, gss)
                             }
+                        }
+                        if (!terminalDoneReceived) {
+                            finishConversationAndDrainQueue()
                         }
                     }
                 },
@@ -1552,6 +1742,7 @@ class CefChatPanel(
         activeStreamGeneration++
         legacyAdapter = null
         client.stop(sid)
+        finishConversationAndDrainQueue()
     }
 
     /**
@@ -1606,11 +1797,40 @@ class CefChatPanel(
             }
         }
 
+        val names = rootEntries.map { it.trimEnd('/') }
+        val hasCMake = names.any { it.equals("CMakeLists.txt", ignoreCase = true) }
+        val hasMakefile = names.any { it.equals("Makefile", ignoreCase = true) }
+        val hasPom = names.any { it.equals("pom.xml", ignoreCase = true) }
+        val hasGradle = names.any { it.startsWith("build.gradle") }
+        val hasPackageJson = names.any { it.equals("package.json", ignoreCase = true) }
+        val cppSources = names.count { it.endsWith(".cpp") || it.endsWith(".cc") || it.endsWith(".cxx") }
+
         return buildString {
             if (languages.isNotEmpty()) {
                 appendLine(
                     "Project languages: ${languages.joinToString(", ")}",
                 )
+            }
+            appendLine("Build system hints (pick commands that match user compile/run intent):")
+            when {
+                hasCMake -> {
+                    appendLine("  - CMake detected (CMakeLists.txt).")
+                    appendLine(
+                        "    Typical path for compile+run: read CMakeLists.txt if needed → cmake --build build -j → run ./build/<target>",
+                    )
+                    appendLine(
+                        "    fs.list/fs.read on build/, target/, out/, dist/ etc. are allowed (build outputs)",
+                    )
+                }
+                hasMakefile -> appendLine("  - Makefile detected. Prefer: make -j (read Makefile targets first)")
+                hasPom -> appendLine("  - Maven detected (pom.xml). Prefer: mvn -q compile / mvn -q exec:java …")
+                hasGradle -> appendLine("  - Gradle detected. Prefer: ./gradlew build or tasks from build.gradle")
+                hasPackageJson -> appendLine("  - Node/npm detected. Prefer: npm run build / npm test per package.json scripts")
+                cppSources > 0 && !hasCMake && !hasMakefile ->
+                    appendLine(
+                        "  - Bare C++ sources ($cppSources .cpp at root). Prefer: g++ -std=c++17 -O0 -o app main.cpp [others…] then ./app",
+                    )
+                else -> appendLine("  - Unknown — run fs.list/fs.read before choosing compile commands")
             }
             appendLine("Root directory entries (${rootEntries.size}):")
             for (entry in rootEntries.take(50)) {
@@ -1652,13 +1872,12 @@ class CefChatPanel(
             // Notify UI that resume has started
             dispatchToWeb("session_resuming", mapOf("sessionId" to handle.meta.id))
 
-            val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, _ ->
-            // Dispatch tool_result_ack to WebUI immediately when tool execution completes
-            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
-            // Record the tool result step
+            val dispatcher = ToolDispatcher(project, client, handle.meta.id, onToolResult = { toolCallId, ok, result ->
+            dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok, "result" to result))
             sessionStore.appendStep(handle, mapOf(
                 "toolCallId" to toolCallId,
                 "ok" to ok,
+                "result" to result,
                 "ts" to java.time.Instant.now().toString(),
             ))
         })
@@ -1682,11 +1901,20 @@ class CefChatPanel(
                         val toolName = payload.path("name").asText(null)
                         val toolCallId = payload.path("id").asText(null)
                         if (toolName != null && toolCallId != null) {
+                            @Suppress("UNCHECKED_CAST")
+                            val argsMap =
+                                if (payload.path("args").isObject) {
+                                    mapper.convertValue(payload.path("args"), Map::class.java)
+                                        as Map<String, Any?>
+                                } else {
+                                    emptyMap()
+                                }
                             sessionStore.appendStep(handle, mapOf(
                                 "toolCallId" to toolCallId,
                                 "toolName" to toolName,
                                 "stepId" to "",
                                 "started" to true,
+                                "args" to argsMap,
                                 "ts" to java.time.Instant.now().toString(),
                             ))
                             sessionStore.saveCheckpoint(handle, mapOf(
@@ -1701,10 +1929,20 @@ class CefChatPanel(
                     override fun onToolResultAck(payload: com.fasterxml.jackson.databind.JsonNode) {
                         val toolCallId = payload.path("toolCallId").asText(null) ?: payload.path("id").asText(null)
                         val ok = payload.path("ok").asBoolean(true)
-                        dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok))
+                        val resultNode = payload.path("result")
+                        val resultMap =
+                            if (resultNode.isObject) {
+                                @Suppress("UNCHECKED_CAST")
+                                mapper.convertValue(resultNode, Map::class.java) as Map<String, Any?>
+                            } else {
+                                null
+                            }
+                        dispatchToWeb("tool_result_ack", mapOf("toolCallId" to toolCallId, "ok" to ok, "result" to resultMap))
                         if (toolCallId != null) {
                             sessionStore.appendStep(handle, mapOf(
-                                "toolCallId" to toolCallId, "ok" to ok,
+                                "toolCallId" to toolCallId,
+                                "ok" to ok,
+                                "result" to resultMap,
                                 "ts" to java.time.Instant.now().toString(),
                             ))
                         }
@@ -1757,30 +1995,12 @@ class CefChatPanel(
                         dispatchToWeb("done", mapOf("reason" to reason))
                         if (reason == "awaiting_user_input" || reason == "phase_done") {
                             graphStateStore.applyAwaiting(payload)
+                        } else if (reason != "deploy_draining") {
+                            graphStateStore.clearAwaiting()
                         }
                         val fullResponse = assistantBuilder.toString()
-                        // Rebuild tool calls from steps: merge "started" and "ok" records by toolCallId
                         val steps = sessionStore.readSteps(handle)
-                        val toolCallMap = linkedMapOf<String, Map<String, Any>>()
-                        for (step in steps) {
-                            val tcId = step["toolCallId"] as? String ?: continue
-                            val existing = toolCallMap[tcId]
-                            if (step["started"] == true) {
-                                toolCallMap[tcId] = mapOf(
-                                    "id" to tcId,
-                                    "name" to (step["toolName"] ?: "unknown"),
-                                    "status" to "running",
-                                )
-                            } else if (step["ok"] != null) {
-                                val name = existing?.get("name") ?: "unknown"
-                                toolCallMap[tcId] = mapOf(
-                                    "id" to tcId,
-                                    "name" to name,
-                                    "status" to if (step["ok"] == true) "success" else "error",
-                                )
-                            }
-                        }
-                        val turnToolCalls = toolCallMap.values.toList()
+                        val turnToolCalls = sessionStore.mergeToolCallsFromSteps(steps)
                         if (fullResponse.isNotEmpty() || turnToolCalls.isNotEmpty()) {
                             val extra = mutableMapOf<String, Any?>()
                             if (turnToolCalls.isNotEmpty()) extra["toolCalls"] = turnToolCalls
@@ -1819,6 +2039,17 @@ class CefChatPanel(
         log.info("Risk approval: $approved")
     }
 
+    private fun handleShellGrant(payload: com.fasterxml.jackson.databind.JsonNode) {
+        val token = payload.path("token").asText("").ifBlank { return }
+        val decision =
+            when (payload.path("decision").asText("deny")) {
+                "allow", "run" -> io.codepilot.plugin.shell.ShellGrantDecision.ALLOW
+                "skip" -> io.codepilot.plugin.shell.ShellGrantDecision.SKIP
+                else -> io.codepilot.plugin.shell.ShellGrantDecision.DENY
+            }
+        io.codepilot.plugin.shell.ShellGrantWaiter.complete(token, decision)
+    }
+
     private fun handleNeedsInputResponse(payload: com.fasterxml.jackson.databind.JsonNode) {
         val handle = sessionHandle ?: run {
             log.warn("NeedsInputResponse: no active session handle")
@@ -1843,10 +2074,21 @@ class CefChatPanel(
             if (answerText != null) listOf(mapOf("freeform" to answerText)) else emptyList()
         }
 
-        // Get continuationToken from GraphStateStore (persisted by applyAwaiting from DONE event)
-        val continuationToken = currentGraphStateStore.snapshot().path("continuationToken").asText(null)
+        // Prefer token from WebUI payload, then GraphStateStore (persisted by applyAwaiting)
+        val continuationToken =
+            payload.path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
+                ?: currentGraphStateStore.snapshot().path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
 
         log.info("NeedsInputResponse: sessionId=$sid, continuationToken=$continuationToken, answersCount=${answers.size}")
+
+        if (continuationToken == null) {
+            log.warn("NeedsInputResponse: missing continuationToken, cannot resume graph")
+            dispatchToWeb(
+                "error",
+                mapOf("code" to 50002, "message" to "Missing continuation token; cannot resume agent run"),
+            )
+            return
+        }
 
         // Build resume payload using SessionStore (includes graphState, completedToolCalls, etc.)
         val userInput = answers.joinToString("; ") { a -> a["freeform"]?.toString() ?: a["optionId"]?.toString() ?: "" }
@@ -1855,8 +2097,9 @@ class CefChatPanel(
         val fullPayload = resumePayload.toMutableMap()
         fullPayload["answers"] = answers
         fullPayload["intent"] = "answer"
-        if (continuationToken != null) {
-            fullPayload["continuationToken"] = continuationToken
+        fullPayload["continuationToken"] = continuationToken
+        if (answers.isEmpty() && userInput.isNotBlank()) {
+            fullPayload["answers"] = listOf(mapOf("freeform" to userInput))
         }
 
         // Call /v1/conversation/resume which triggers GraphEngine.resume()
@@ -1865,6 +2108,8 @@ class CefChatPanel(
             val assistantBuilder = StringBuilder()
             // ★ Guard to prevent duplicate assistant message persistence on double done events
             var assistantPersisted = false
+            val resumeStreamGen = activeStreamGeneration
+            var resumeRateLimited = false
             client.resume(
                 fullPayload.toMap(),
                 object : ConversationClient.Listener {
@@ -1895,10 +2140,32 @@ class CefChatPanel(
                         dispatchToWeb("done", mapOf("reason" to reason))
                         if (reason == "awaiting_user_input" || reason == "phase_done") {
                             currentGraphStateStore.applyAwaiting(payload)
+                        } else if (reason != "deploy_draining") {
+                            currentGraphStateStore.clearAwaiting()
                         }
                     }
-                    override fun onError(code: Int, message: String) =
+                    override fun onRateLimited(
+                        code: Int,
+                        message: String,
+                        retryAfterSec: Int,
+                        opType: String?,
+                    ) {
+                        resumeRateLimited = true
+                        handleStreamRateLimited(resumeStreamGen, code, message, retryAfterSec, opType)
+                    }
+
+                    override fun onError(code: Int, message: String) {
                         dispatchToWeb("error", mapOf("code" to code, "message" to message))
+                        if (!resumeRateLimited) {
+                            finishConversationAndDrainQueue()
+                        }
+                    }
+
+                    override fun onClosed() {
+                        if (!resumeRateLimited) {
+                            finishConversationAndDrainQueue()
+                        }
+                    }
                 },
             )
         }
@@ -1914,13 +2181,109 @@ class CefChatPanel(
         beginNewChatSession()
     }
 
+    private fun dispatchMessageQueueSnapshot() {
+        val pending =
+            synchronized(conversationLock) {
+                pendingUserMessages.map { msg ->
+                    mapOf(
+                        "text" to msg.text.take(500),
+                        "mode" to msg.mode,
+                    )
+                }
+            }
+        dispatchToWeb("message_queue_updated", mapOf("pending" to pending))
+    }
+
+    private fun handleStreamRateLimited(
+        streamGen: Int,
+        code: Int,
+        message: String,
+        retryAfterSec: Int,
+        opType: String?,
+    ) {
+        if (streamGen != activeStreamGeneration) return
+        rateLimitedStreamGen = streamGen
+        sessionHandle?.let { h ->
+            sessionStore.updateMeta(h) { meta ->
+                meta.running = false
+                meta.abnormalTermination = false
+            }
+        }
+        dispatchToWeb(
+            "rate_limited",
+            mapOf(
+                "code" to code,
+                "message" to message,
+                "retryAfterSec" to retryAfterSec,
+                "opType" to (opType ?: ""),
+            ),
+        )
+        dispatchToWeb("error", mapOf("code" to code, "message" to message))
+        legacyAdapter?.onDone("stopped")
+        finishConversationAndDrainQueue()
+    }
+
+    private fun finishConversationAndDrainQueue() {
+        val next: PendingUserMessage?
+        synchronized(conversationLock) {
+            conversationInFlight = false
+            next = pendingUserMessages.removeFirstOrNull()
+            if (next != null) {
+                conversationInFlight = true
+            }
+        }
+        if (next == null) {
+            dispatchToWeb("conversation_running", mapOf("running" to false))
+            dispatchMessageQueueSnapshot()
+            return
+        }
+        dispatchToWeb("conversation_running", mapOf("running" to true))
+        ApplicationManager.getApplication().executeOnPooledThread {
+            handleUserMessage(
+                next.text,
+                next.mode,
+                next.modelId,
+                next.modelSource,
+                next.contextRefs,
+                next.images,
+                next.historyMessages,
+                freshChat = next.freshChat,
+                maxMode = next.maxMode,
+                skipUserPersist = true,
+            )
+        }
+    }
+
     /** Stop in-flight SSE, drop adapter, and clear the active session pointer. */
     private fun beginNewChatSession() {
+        pendingFreshChat = true
+        synchronized(conversationLock) {
+            pendingUserMessages.clear()
+            conversationInFlight = false
+        }
+        dispatchMessageQueueSnapshot()
+        dispatchToWeb("conversation_running", mapOf("running" to false))
         abortActiveConversation()
+        eventBus.clearBuffer()
+        val replayBaseline = eventBus.currentSeq()
         sessionHandle = null
+        dispatchToWeb(
+            "chat_reset",
+            mapOf("replayBaseline" to replayBaseline),
+        )
+        dispatchToWeb("session_switched", mapOf("id" to ""))
         dispatchSessionList()
         dispatchCurrentSessionInfo()
-        dispatchCurrentSessionMessages()
+        dispatchToWeb(
+            "session_messages",
+            mapOf(
+                "sessionId" to "",
+                "messages" to emptyList<Map<String, Any?>>(),
+                "abnormalTermination" to false,
+                "hasCheckpoint" to false,
+                "freshChat" to true,
+            ),
+        )
     }
 
     /**
@@ -2030,11 +2393,18 @@ class CefChatPanel(
 
     private fun handleListSessions() {
         dispatchSessionList()
-        // Also restore current session messages if a session is active
-        dispatchCurrentSessionMessages()
+        // Do not reload session_messages here — that overwrites the live v2 chat tree
+        // mid-turn and causes duplicate / truncated history. Messages load on switch_session
+        // and initial page load only.
     }
 
     private fun handleSwitchSession(sessionId: String) {
+        pendingFreshChat = false
+        synchronized(conversationLock) {
+            pendingUserMessages.clear()
+            conversationInFlight = false
+        }
+        dispatchToWeb("conversation_running", mapOf("running" to false))
         abortActiveConversation()
         val handle =
             sessionStore.resolve(workspaceHash, sessionId) ?: run {
@@ -3048,7 +3418,9 @@ class CefChatPanel(
                     val handle = sessionStore.resolve(workspaceHash, meta.id) ?: return@mapNotNull null
                     sessionDto(handle, sessionStore.readMessages(handle))
                 }
-        dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to (sessionHandle?.meta?.id ?: "")))
+        val activeId =
+            if (pendingFreshChat) "" else (sessionHandle?.meta?.id ?: "")
+        dispatchToWeb("session_list", mapOf("sessions" to sessions, "activeSessionId" to activeId))
         sessionHandle?.meta?.id?.let { dispatchBranchTree(it) }
     }
 
@@ -3127,6 +3499,19 @@ class CefChatPanel(
 
     /** Push all messages of the current session so the WebUI can restore the chat view. */
     private fun dispatchCurrentSessionMessages() {
+        if (pendingFreshChat) {
+            dispatchToWeb(
+                "session_messages",
+                mapOf(
+                    "sessionId" to "",
+                    "messages" to emptyList<Map<String, Any?>>(),
+                    "abnormalTermination" to false,
+                    "hasCheckpoint" to false,
+                    "freshChat" to true,
+                ),
+            )
+            return
+        }
         val handle = sessionHandle
         if (handle != null) {
             // Load completed steps to rebuild toolCalls for each assistant message
@@ -3140,51 +3525,39 @@ class CefChatPanel(
                     // Preserve contextRefs if present
                     if (msg["contextRefs"] != null) m["contextRefs"] = msg["contextRefs"]
                     if (msg["images"] != null) m["images"] = msg["images"]
+                    if (msg["turnId"] != null) m["turnId"] = msg["turnId"]
+                    if (msg["planSteps"] != null) m["planSteps"] = msg["planSteps"]
+                    if (msg["agentSteps"] != null) m["agentSteps"] = msg["agentSteps"]
                     // Preserve toolCall info if present
                     if (msg["toolCall"] != null) m["toolCall"] = msg["toolCall"]
                     // Preserve ts (timestamp) for display
                     if (msg["ts"] != null) m["ts"] = msg["ts"]
-                    // Restore toolCalls from persisted data or rebuild from steps
-                    if (msg["toolCalls"] != null) {
-                        m["toolCalls"] = msg["toolCalls"]
-                    } else if (msg["role"] == "assistant" && steps.isNotEmpty()) {
-                        // Rebuild toolCalls from step records: merge "started" and "ok" records
-                        val toolCallMap = linkedMapOf<String, Map<String, Any>>()
-                        for (step in steps) {
-                            val tcId = step["toolCallId"] as? String ?: continue
-                            if (step["started"] == true) {
-                                toolCallMap[tcId] = mapOf(
-                                    "id" to tcId,
-                                    "name" to (step["toolName"] ?: "unknown"),
-                                    "args" to emptyMap<String, Any>(),
-                                    "status" to "success",
-                                )
-                            } else if (step["ok"] != null) {
-                                val existing = toolCallMap[tcId]
-                                val name = existing?.get("name") ?: "unknown"
-                                val args = existing?.get("args") ?: emptyMap<String, Any>()
-                                toolCallMap[tcId] = mapOf(
-                                    "id" to tcId,
-                                    "name" to name,
-                                    "args" to args,
-                                    "status" to if (step["ok"] == true) "success" else "error",
-                                )
-                            }
+                    // Restore toolCalls: always reconcile with steps.ndjson when present
+                    if (msg["role"] == "assistant" && steps.isNotEmpty()) {
+                        @Suppress("UNCHECKED_CAST")
+                        val persisted = msg["toolCalls"] as? List<Map<String, Any>>
+                        val toolCalls = sessionStore.mergeToolCallsPersisted(persisted, steps)
+                        if (toolCalls.isNotEmpty()) {
+                            m["toolCalls"] = toolCalls
                         }
-                        val toolCalls = toolCallMap.values.toList()
-                        if (toolCalls.isNotEmpty()) m["toolCalls"] = toolCalls
+                    } else if (msg["toolCalls"] != null) {
+                        m["toolCalls"] = msg["toolCalls"]
                     }
                     m.toMap()
                 }
             val assessment = sessionStore.assessRecovery(handle)
-            dispatchToWeb("session_messages", mapOf(
-                "sessionId" to handle.meta.id,
-                "messages" to messages,
-                "abnormalTermination" to (handle.meta.abnormalTermination ?: false),
-                "hasCheckpoint" to assessment.hasLocalCheckpoint,
-                "hasContinuationToken" to assessment.hasContinuationToken,
-                "recoveryMode" to assessment.mode,
-            ))
+            dispatchToWeb(
+                "session_messages",
+                mapOf(
+                    "sessionId" to handle.meta.id,
+                    "messages" to messages,
+                    "envelopeSeq" to eventBus.currentSeq(),
+                    "abnormalTermination" to (handle.meta.abnormalTermination ?: false),
+                    "hasCheckpoint" to assessment.hasLocalCheckpoint,
+                    "hasContinuationToken" to assessment.hasContinuationToken,
+                    "recoveryMode" to assessment.mode,
+                ),
+            )
             dispatchSessionCost(handle.meta.id)
         } else {
             dispatchToWeb("session_messages", mapOf("sessionId" to "", "messages" to emptyList<Map<String, Any?>>(), "abnormalTermination" to false, "hasCheckpoint" to false))
@@ -3675,16 +4048,23 @@ class CefChatPanel(
                 .GraphStateStore(project, handle.dir)
         graphStateStore.loadLatest()
         if (graphStateStore.isAwaiting()) {
+            val continuationToken =
+                graphStateStore.snapshot().path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
+            if (continuationToken == null) {
+                log.warn("[Plan] continue_run: awaiting but no continuationToken")
+                return
+            }
             val payload =
                 mapOf(
                     "sessionId" to sid,
                     "mode" to (handle.meta.mode ?: "agent"),
                     "input" to "",
-                    "intent" to "continue",
+                    "intent" to "answer",
+                    "continuationToken" to continuationToken,
                     "graphState" to graphStateStore.snapshot(),
                 )
             ApplicationManager.getApplication().executeOnPooledThread {
-                client.run(
+                client.resume(
                     payload,
                     object : ConversationClient.Listener {
                         override fun onDelta(text: String) = dispatchToWeb("delta", mapOf("text" to text))
@@ -3747,6 +4127,8 @@ class CefChatPanel(
                             dispatchToWeb("done", mapOf("reason" to reason))
                             if (reason == "awaiting_user_input" || reason == "phase_done") {
                                 graphStateStore.applyAwaiting(p)
+                            } else if (reason != "deploy_draining") {
+                                graphStateStore.clearAwaiting()
                             }
                             sessionStore.touchLastMessage(handle)
                             dispatchSessionList()

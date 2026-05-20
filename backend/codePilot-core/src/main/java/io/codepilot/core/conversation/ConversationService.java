@@ -176,7 +176,17 @@ public class ConversationService {
         AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
         agentBody = loop.run(req, assembled.systemText(), redactedInput);
       } else {
-        agentBody = graphEngine.run(req, userId);
+        String resumeToken = resolveContinuationToken(req);
+        if (shouldResumeFromCheckpoint(req, resumeToken)) {
+          log.info(
+              "ConversationService.run: redirecting to graph resume, token={}, sessionId={}, intent={}",
+              resumeToken,
+              req.sessionId(),
+              req.intent());
+          agentBody = graphEngine.resume(withContinuationToken(req, resumeToken), userId);
+        } else {
+          agentBody = graphEngine.run(req, userId);
+        }
       }
       // ★ Agent engines (both Graph and Legacy) emit their own done(final) events.
       // Do NOT append an extra done here — it causes duplicate done(final) events
@@ -324,15 +334,88 @@ public class ConversationService {
    * <p>If no continuationToken, falls back to a standard {@link #run} (backward compat).
    */
   public Flux<ServerSentEvent<String>> resume(ConversationRunRequest req, String userId) {
+    String resumeToken = resolveContinuationToken(req);
     // If this is a graph resume request with continuationToken, use the checkpoint-based resume
-    if (req.mode() == ConversationMode.AGENT
-        && req.continuationToken() != null && !req.continuationToken().isBlank()) {
+    if (req.mode() == ConversationMode.AGENT && resumeToken != null && !resumeToken.isBlank()) {
       log.info("ConversationService.resume: resuming from checkpoint, token={}, sessionId={}",
-          req.continuationToken(), req.sessionId());
-      return trackSession(req.sessionId(), "graph-resume", graphEngine.resume(req, userId));
+          resumeToken, req.sessionId());
+      return trackSession(
+          req.sessionId(),
+          "graph-resume",
+          graphEngine.resume(withContinuationToken(req, resumeToken), userId));
     }
     // Fallback: no checkpoint, just do a normal run
     return run(req, userId);
+  }
+
+  /**
+   * Resolves the checkpoint token from the request or embedded graphState snapshot.
+   * The plugin may send the token only inside {@code graphState} when the user replies
+   * in the main chat input instead of the structured needs_input card.
+   */
+  static String resolveContinuationToken(ConversationRunRequest req) {
+    if (req.continuationToken() != null && !req.continuationToken().isBlank()) {
+      return req.continuationToken();
+    }
+    if (req.graphState() == null) {
+      return null;
+    }
+    Object top = req.graphState().get("continuationToken");
+    if (top instanceof String s && !s.isBlank()) {
+      return s;
+    }
+    Object awaiting = req.graphState().get("awaiting");
+    if (awaiting instanceof Map<?, ?> awaitingMap) {
+      Object nested = awaitingMap.get("continuationToken");
+      if (nested instanceof String s && !s.isBlank()) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  /** True when the client is answering an askUser interrupt and should reload the checkpoint. */
+  static boolean shouldResumeFromCheckpoint(ConversationRunRequest req, String token) {
+    if (token == null || token.isBlank() || req.mode() != ConversationMode.AGENT) {
+      return false;
+    }
+    return req.intent() == ConversationRunRequest.Intent.ANSWER
+        || req.intent() == ConversationRunRequest.Intent.CONTINUE;
+  }
+
+  static ConversationRunRequest withContinuationToken(ConversationRunRequest req, String token) {
+    if (token.equals(req.continuationToken())) {
+      return req;
+    }
+    return new ConversationRunRequest(
+        req.sessionId(),
+        req.mode(),
+        req.modelId(),
+        req.modelSource(),
+        req.input(),
+        req.intent(),
+        token,
+        req.answers(),
+        req.taskLedger(),
+        req.lastPlanDigest(),
+        req.lastAssistantTurnSummary(),
+        req.sessionDigest(),
+        req.contexts(),
+        req.tools(),
+        req.completedToolCallsTail(),
+        req.earlierToolCallsCount(),
+        req.projectRootHash(),
+        req.userSkills(),
+        req.userMcps(),
+        req.mcpTools(),
+        req.userPlanEdits(),
+        req.options(),
+        req.policy(),
+        req.skills(),
+        req.projectRules(),
+        req.images(),
+        req.graphState(),
+        req.projectMeta());
   }
 
   private static String deltaFromChatResponse(ChatResponse r) {

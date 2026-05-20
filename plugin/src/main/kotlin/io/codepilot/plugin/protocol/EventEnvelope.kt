@@ -34,6 +34,17 @@ object StepKinds {
     const val REPAIR = "repair"
 }
 
+/**
+ * SSE {@code done.reason} values that end the conversation turn.
+ * {@code partial} is legacy (Finalize used it when goalUnmet); treat as terminal for v2 turn.end.
+ */
+object TerminalDoneReasons {
+    private val TERMINAL = setOf("final", "failed", "stopped", "max_steps", "partial")
+
+    fun isTerminal(reason: String): Boolean =
+        reason in TERMINAL || reason == "deploy_draining"
+}
+
 /** Turn statuses used in turn.end events. */
 object TurnStatuses {
     const val FINAL = "final"

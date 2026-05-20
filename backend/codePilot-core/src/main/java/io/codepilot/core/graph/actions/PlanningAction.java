@@ -5,8 +5,13 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.codepilot.core.graph.GraphExecutionLog;
 import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.GraphStreamProcessor;
+import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.PhasePlanNormalizer;
+import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
@@ -51,6 +56,7 @@ public class PlanningAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "planning");
+        GraphExecutionLog.nodeEnter(state, "planning");
 
         String input = (String) state.value("input").orElse("");
         String mode = (String) state.value("mode").orElse("AGENT");
@@ -61,7 +67,9 @@ public class PlanningAction implements NodeAction {
         List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
         String planningPrompt = buildPlanningPrompt(input, mode, projectMeta, mcpTools);
 
-        // ── Call LLM ──
+        GraphUiEmitter.transition(state, "planning");
+
+        // ── Call LLM (marker-aware streaming) ──
         String llmResponse;
         try {
             String modelId = (String) state.value("modelId").orElse(null);
@@ -71,20 +79,38 @@ public class PlanningAction implements NodeAction {
             log.info("PlanningAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
 
-            llmResponse = GraphLlmHelper.completeUserPrompt(chatClient, state, planningPrompt);
+            llmResponse = GraphLlmHelper.streamUserPromptToSse(chatClient, state, planningPrompt, updates);
         } catch (Exception e) {
             log.error("LLM planning call failed", e);
-            // Fallback to default plan
-            return buildFallbackPlan(state, input, updates);
+            var fallback = buildFallbackPlan(state, input, updates);
+            GraphExecutionLog.nodeExit(state, "planning", fallback);
+            return fallback;
         }
 
         // ── Parse LLM response ──
         try {
-            return parseLlmPlan(llmResponse, state, input, updates);
+            var result = parseLlmPlan(llmResponse, state, input, updates);
+            GraphExecutionLog.nodeExit(state, "planning", result);
+            return result;
         } catch (Exception e) {
+            String trimmed = llmResponse != null ? llmResponse.trim() : "";
+            if (!trimmed.isEmpty() && !trimmed.startsWith("{")
+                && !trimmed.contains(GraphStreamProcessor.MARKER_GRAPH)) {
+                log.info("PlanningAction: treating response as plain-text (skipPlan)");
+                if (!Boolean.TRUE.equals(updates.get("plainTextStreamed"))
+                    && !Boolean.TRUE.equals(updates.get("agentContentStreamed"))) {
+                    GraphSseHelper.emitStreamDelta(state, llmResponse);
+                }
+                updates.put("skipPlan", true);
+                var minimal = buildMinimalPhases(state, input, updates);
+                GraphExecutionLog.nodeExit(state, "planning", minimal);
+                return minimal;
+            }
             log.warn("Failed to parse LLM planning response, using fallback. Response: {}",
                 llmResponse != null ? llmResponse.substring(0, Math.min(llmResponse.length(), 500)) : "null", e);
-            return buildFallbackPlan(state, input, updates);
+            var fallback = buildFallbackPlan(state, input, updates);
+            GraphExecutionLog.nodeExit(state, "planning", fallback);
+            return fallback;
         }
     }
 
@@ -100,7 +126,7 @@ public class PlanningAction implements NodeAction {
         return template
                 .replace("{{projectMeta}}", projectMetaSection)
                 .replace("{{input}}", input)
-                .replace("{{userLocale}}", "zh-CN")
+                .replace("{{userLocale}}", "与用户输入语言一致")
                 .replace("{{mcpTools}}", mcpToolsSection);
     }
 
@@ -134,7 +160,10 @@ public class PlanningAction implements NodeAction {
     }
 
     private Map<String, Object> parseLlmPlan(String llmResponse, OverAllState state, String input, Map<String, Object> updates) throws Exception {
-        // Extract JSON from response (may be wrapped in markdown code block)
+        boolean contentStreamed = Boolean.TRUE.equals(updates.get("agentContentStreamed"));
+        boolean thinkingEmitted = Boolean.TRUE.equals(updates.get("agentThinkingEmitted"));
+
+        // Extract JSON from response (may be wrapped in markdown code block or markers)
         String json = LlmJsonExtract.parseableJson(llmResponse);
         JsonNode root = mapper.readTree(json);
 
@@ -143,21 +172,13 @@ public class PlanningAction implements NodeAction {
         if (infoRequests != null && !infoRequests.isNull() && infoRequests.isArray() && !infoRequests.isEmpty()) {
             updates.put("planningResult", "infoRequests");
             updates.put("infoRequests", mapper.convertValue(infoRequests, new TypeReference<List<Map<String, Object>>>() {}));
-            // ★ Extract agentThinking from LLM output for interactive agent display
+            String phaseId = (String) state.value("phaseCursor").orElse("");
             JsonNode agentThinkingNode = root.get("agentThinking");
             if (agentThinkingNode != null && !agentThinkingNode.isNull() && !agentThinkingNode.asText("").isBlank()) {
-                String agentThinking = agentThinkingNode.asText();
-                updates.put("agentGatherIntent", agentThinking);
-                String phaseId = (String) state.value("phaseCursor").orElse("");
-                GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-                    Map.of("text", agentThinking, "phaseId", phaseId));
+                updates.put("agentGatherIntent", agentThinkingNode.asText());
             }
-            // ★ Extract agentContent and emit as structured delta
-            JsonNode agentContentNode = root.get("agentContent");
-            if (agentContentNode != null && !agentContentNode.isNull() && !agentContentNode.asText("").isBlank()) {
-                GraphSseHelper.emitEvent(state, SseEvents.DELTA,
-                    Map.of("text", agentContentNode.asText() + "\n\n"));
-            }
+            GraphUiEmitter.thinkingIfPresent(state, root, phaseId, thinkingEmitted);
+            GraphUiEmitter.contentIfPresent(state, root, contentStreamed);
             return updates;
         }
 
@@ -168,26 +189,12 @@ public class PlanningAction implements NodeAction {
             skipPlan = true;
             log.info("PlanningAction: LLM set skipPlan=true — simple task, skipping detailed plan display");
         }
+        updates.put("skipPlan", skipPlan);
 
         String phaseId = (String) state.value("phaseCursor").orElse("");
 
-        // ★ Emit agent events — avoid duplicate display
-        JsonNode agentContentNode = root.get("agentContent");
-        boolean hasAgentContent = agentContentNode != null && !agentContentNode.isNull()
-            && !agentContentNode.asText("").isBlank();
-
-        if (hasAgentContent && !skipPlan) {
-            // agentContent already includes thinking/reasoning — just emit it as delta
-            GraphSseHelper.emitEvent(state, SseEvents.DELTA,
-                Map.of("text", agentContentNode.asText() + "\n\n"));
-        } else {
-            // No agentContent — use agent_thinking for brief status
-            JsonNode agentThinkingNode = root.get("agentThinking");
-            String thinkingText = (agentThinkingNode != null && !agentThinkingNode.isNull() && !agentThinkingNode.asText("").isBlank())
-                ? agentThinkingNode.asText() : (skipPlan ? "我已分析你的需求，开始实现。" : "我已分析你的需求。");
-            GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-                Map.of("text", thinkingText, "phaseId", phaseId));
-        }
+        GraphUiEmitter.contentIfPresent(state, root, contentStreamed);
+        GraphUiEmitter.thinkingIfPresent(state, root, phaseId, thinkingEmitted);
 
         // Parse user plan — only emit user_plan event when NOT skipping plan display
         JsonNode userPlanNode = root.get("userPlan");
@@ -211,6 +218,9 @@ public class PlanningAction implements NodeAction {
         // When skipPlan=true, we still store userPlan in state but don't show it in the UI
         if (!skipPlan) {
             GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN, userPlan);
+            if (!userSteps.isEmpty()) {
+                UserPlanProgressHelper.emitByIndex(state, 0, "in_progress", null);
+            }
         }
         updates.put("userPlan", userPlan);
 
@@ -236,6 +246,9 @@ public class PlanningAction implements NodeAction {
             );
         }
 
+        phases = PhasePlanNormalizer.normalize(userSteps, phases);
+        updates.put("userPlanStepCursor", 0);
+
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PLAN,
             Map.of("phases", phases, "graphId", "gph-" + UUID.randomUUID().toString().substring(0, 8)));
         updates.put("phases", phases);
@@ -254,20 +267,15 @@ public class PlanningAction implements NodeAction {
     }
 
     private Map<String, Object> buildFallbackPlan(OverAllState state, String input, Map<String, Object> updates) {
-        // ★ Emit agent thinking and content so user sees progress even on fallback
-        String phaseId = (String) state.value("phaseCursor").orElse("");
-        GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-            Map.of("text", "我正在制定执行计划...", "phaseId", phaseId));
-        GraphSseHelper.emitEvent(state, SseEvents.DELTA,
-            Map.of("text", "我正在分析你的需求并制定执行计划。\n\n"));
+        updates.put("skipPlan", true);
+        return buildMinimalPhases(state, input, updates);
+    }
 
-        // Single-phase fallback
+    private Map<String, Object> buildMinimalPhases(OverAllState state, String input, Map<String, Object> updates) {
         List<Map<String, Object>> userSteps = List.of(
             Map.of("id", "s1", "index", 1, "title", input, "description", input, "status", "in_progress")
         );
-        var userPlan = Map.of("goal", input, "summary", input, "steps", userSteps, "status", "in_progress");
-        GraphSseHelper.emitEvent(state, SseEvents.USER_PLAN, userPlan);
-        updates.put("userPlan", userPlan);
+        updates.put("userPlan", Map.of("goal", input, "summary", input, "steps", userSteps, "status", "in_progress"));
 
         List<Map<String, Object>> phases = List.of(
             Map.of("id", "p1", "title", "Implementation", "intent", "code-change",
@@ -277,7 +285,7 @@ public class PlanningAction implements NodeAction {
             Map.of("phases", phases, "graphId", "gph-" + UUID.randomUUID().toString().substring(0, 8)));
         updates.put("phases", phases);
         updates.put("phaseCursor", "p1");
-        updates.put("fastPathEnabled", true); // fallback plan is always single-phase → fast-path
+        updates.put("fastPathEnabled", true);
         updates.put("planningResult", "phases");
         return updates;
     }

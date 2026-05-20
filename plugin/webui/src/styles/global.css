@@ -474,6 +474,86 @@
     max-width: 100%;
 }
 
+.agent-content-markdown {
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+.agent-content-markdown h1,
+.agent-content-markdown h2,
+.agent-content-markdown h3,
+.agent-content-markdown h4 {
+    margin: 0.85em 0 0.4em;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.agent-content-markdown h1 { font-size: 1.35em; }
+.agent-content-markdown h2 { font-size: 1.2em; }
+.agent-content-markdown h3 { font-size: 1.08em; }
+
+.agent-content-markdown p {
+    margin: 0.45em 0;
+}
+
+.agent-content-markdown ul,
+.agent-content-markdown ol {
+    margin: 0.4em 0;
+    padding-left: 1.4em;
+}
+
+.agent-content-markdown li {
+    margin: 0.2em 0;
+}
+
+.agent-content-markdown pre {
+    margin: 0.6em 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    overflow-x: auto;
+    font-size: 12px;
+}
+
+.agent-content-markdown code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+}
+
+.agent-content-markdown :not(pre) > code {
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
+}
+
+.agent-content-markdown .md-table-wrap {
+    overflow-x: auto;
+    margin: 0.5em 0;
+}
+
+.agent-content-markdown table {
+    border-collapse: collapse;
+    margin: 0.6em 0;
+    width: 100%;
+    font-size: 12.5px;
+}
+
+.agent-content-markdown th,
+.agent-content-markdown td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+}
+
+.agent-content-markdown blockquote {
+    margin: 0.5em 0;
+    padding-left: 12px;
+    border-left: 3px solid var(--accent);
+    color: var(--text-secondary);
+}
+
 /* Plan block (💡 设计思路) */
 .agent-plan-block {
     margin: 8px 0;
@@ -3924,4 +4004,330 @@ button:disabled {
     font-size: 11px;
     max-height: 200px;
     overflow: auto;
+}
+
+.input-section .message-queue-banner {
+    margin: 0 12px 8px;
+    flex-shrink: 0;
+}
+
+.message-queue-banner {
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle, #333);
+    background: var(--bg-secondary, #1a1a1a);
+    font-size: 12px;
+}
+
+.input-section .rate-limit-banner {
+    margin: 0 12px 8px;
+    flex-shrink: 0;
+}
+
+.rate-limit-banner {
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--warn, #e6a700) 45%, var(--border-subtle, #333));
+    background: color-mix(in srgb, var(--warn, #e6a700) 8%, var(--bg-secondary, #1a1a1a));
+    font-size: 12px;
+}
+
+.rate-limit-title {
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--warn, #e6a700);
+}
+
+.rate-limit-message {
+    margin: 0 0 4px;
+    line-height: 1.45;
+}
+
+.rate-limit-countdown {
+    margin: 0;
+    font-size: 11px;
+}
+
+.message-queue-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 8px;
+}
+
+.message-queue-title {
+    font-weight: 600;
+    color: var(--text-primary, #e6e6e6);
+}
+
+.message-queue-hint {
+    color: var(--text-secondary, #888);
+}
+
+.message-queue-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.message-queue-item {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--bg-tertiary, #252525);
+}
+
+.message-queue-index {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 4px;
+    background: #58a6ff33;
+    color: #58a6ff;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.message-queue-text {
+    color: var(--text-secondary, #ccc);
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.tool-call-shell-primary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.tool-call-shell-cmd,
+.tool-shell-cmd-header,
+.agent-step-shell-cmd,
+.shell-cmd-primary {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 1.4;
+    word-break: break-all;
+    white-space: pre-wrap;
+    color: var(--text-primary, #e8e8e8);
+}
+
+.shell-step-command {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-all;
+    white-space: pre-wrap;
+}
+
+.shell-step-long-hint {
+    margin: 4px 0 0 28px;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-left: 3px solid var(--accent, #58a6ff);
+}
+
+.shell-step-elapsed {
+    font-size: 11px;
+    margin-left: 6px;
+    color: var(--text-secondary, #aaa);
+}
+
+.tool-progress-placeholder.shell-running-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px;
+}
+
+.shell-cmd-inline {
+    margin: 0;
+    font-size: 12px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    word-break: break-all;
+}
+
+.tool-call-shell-output {
+    margin: 4px 0 0 24px;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #1e1e1e);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    line-height: 1.45;
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.shell-command-header {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+}
+
+.shell-command-cwd {
+    font-size: 11px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.shell-command-line,
+.shell-ask-command {
+    font-size: 12px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    word-break: break-all;
+}
+
+.tool-call-shell-primary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.tool-call-shell-state {
+    margin: 4px 0 0 24px;
+    font-size: 12px;
+}
+
+.shell-output-preview {
+    margin: 6px 0 0 24px;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #1e1e1e);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+}
+
+.tool-shell-output-inline.shell-output-preview {
+    margin: 6px 0 4px 28px;
+}
+
+.shell-output-preview-text {
+    margin: 4px 0 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow: auto;
+}
+
+.shell-output-expand-btn {
+    margin-top: 4px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent, #58a6ff);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.shell-output-meta {
+    font-size: 11px;
+}
+
+.shell-exit.ok { color: var(--accent, #4ec9b0); }
+.shell-exit.err { color: #f48771; }
+
+.tool-exec-badge {
+    font-size: 11px;
+    margin-left: 4px;
+}
+
+.tool-card.tool-status-denied .tool-icon,
+.tool-card.tool-status-skipped .tool-icon {
+    opacity: 0.85;
+}
+
+/* Inline shell permission (replaces IDE modal) */
+.shell-ask-bar {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 4px 24px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle, rgba(255, 200, 80, 0.35));
+    background: var(--bg-secondary, rgba(255, 200, 80, 0.08));
+}
+
+.tool-card .shell-ask-bar,
+.shell-step-card .shell-ask-bar {
+    margin: 8px 0 0;
+    width: 100%;
+}
+
+.shell-ask-reason {
+    font-size: 12px;
+    flex: 1 1 100%;
+}
+
+.shell-ask-command {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.shell-ask-cwd {
+    font-size: 11px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.shell-ask-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.shell-ask-btn {
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle, #444);
+    background: var(--bg-tertiary, #2d2d2d);
+    color: var(--text-primary, #e0e0e0);
+    cursor: pointer;
+}
+
+.shell-ask-btn:hover {
+    filter: brightness(1.1);
+}
+
+.shell-ask-btn-run {
+    border-color: var(--accent, #4ec9b0);
+    color: var(--accent, #4ec9b0);
+}
+
+.shell-ask-btn-deny {
+    border-color: #f48771;
+    color: #f48771;
+}
+
+.shell-ask-btn-skip {
+    opacity: 0.9;
 }

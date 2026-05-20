@@ -13,6 +13,14 @@ public class ReenterAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "reenter");
+        if (io.codepilot.core.graph.PhaseOutcomeHelper.rawToolsHadFailure(state)) {
+            if (io.codepilot.core.graph.PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+                updates.put("phaseToolsHadFailure", false);
+            } else {
+                int retries = (int) state.value("phaseFailureRetries").orElse(0) + 1;
+                updates.put("phaseFailureRetries", retries);
+            }
+        }
         GraphSseHelper.emitEvent(state, "graph_info_result",
                 Map.of("phaseId", state.value("phaseCursor").orElse("")));
         return updates;

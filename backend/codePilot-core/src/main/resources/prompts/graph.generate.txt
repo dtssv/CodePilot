@@ -4,13 +4,53 @@ User goal: {{input}}
 Current phase: {{phaseId}}
 Phase title: {{phaseTitle}}
 Phase intent: {{phaseIntent}}
+
+[USER PLAN — full checklist]
+{{userPlanSteps}}
+
+[CURRENT STEP — implement ONLY this step in this phase]
+{{currentPlanStep}}
+
+If [GATHERED CONTEXT] contains [FAILED] for one command but a later [OK] entry already meets this step's goal (e.g. g++ compile succeeded after cmake failed), the step IS done — use textOutput and stop retrying the failed command.
+
+Plan steps are guidance for the user's goal, NOT a mandatory command script. Prefer the shortest working path (cmake, make, g++, mvn, …). Never retry the same failed command; switch approach.
+If [SESSION EXECUTION FACTS] is present, it overrides stale plan wording from before tools ran (failed attempts, successful outcomes, primary targets, plan pivots). Always prefer session facts over the original checklist for this step.
+
 {{gatheredContext}}
 
-[REQUIRED OUTPUT FORMAT — strict JSON, no other text]
+[OUTPUT MODE — pick exactly one]
+A) Conversational answer with NO file changes: plain text only (no JSON, no markers). Use textOutput inside JSON only when you must return structured envelope in mode B.
+B) Code changes: wrap JSON in (markers MUST be exact — three < and three >):
+<<<GRAPH_JSON>>>
+{ ...strict JSON as below... }
+<<<END>>>
+C) Stream user-facing explanation while generating (prose only — NO <file> tags):
+<<<AGENT_CONTENT>>>
+Brief explanation of what you will change (markdown prose only).
+<<<END>>>
+File paths and content belong ONLY in patches[] JSON, not in agentContent.
+Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
+
+[MARKER RULES — STRICT]
+- Valid open/close ONLY: <<<AGENT_CONTENT>>> … <<<END>>> (same for AGENT_THINKING, GRAPH_JSON). Three < and three > on EACH side.
+- NEVER emit bare tokens: AGENT_CONTENT>, GRAPH_JSON, END>, END>AGENT_THINKING, GRAPH_JSONAGENT_CONTENT.
+- Put each marker block on its own lines; never glue marker names to markdown or to each other.
+- Inside <<<AGENT_CONTENT>>>, use proper GitHub-flavored markdown only (no HTML, no raw <<< markers):
+  - Blank line before every heading; "## Title" (space after ##), e.g. "## 分析" not "##分析".
+  - Blank line before bullet/numbered lists; use "- item" or incrementing "1. item", "2. item", "3. item" (space after the dot). NEVER repeat "1." on every line.
+  - Do NOT prefix list lines with "#" or "##" (wrong: "# # 1. item" or "## 1. item"). Use plain "1. item" only.
+  - Chinese steps: put each "第一步：" / "第二步：" on its own line; do not glue "-第五步：" to the previous sentence on the same line.
+  - File paths like doc/design.md (no space before .md); use fenced ``` blocks for code with a newline after the opening fence.
+  - Do not glue headings to the previous sentence on the same line; do not use *** or broken ** at line ends.
+- Do NOT paste the full multi-step plan essay in AGENT_CONTENT — one short paragraph for THIS step only.
+- NEVER use malformed tags like `<plan-第一步` or bare `AGENT_CONTENT` without `<<<` / `>>>`.
+
+[REQUIRED JSON SHAPE when using mode B]
 {
   "thought": "<brief internal reasoning>",
   "patches": null,
   "infoRequests": null,
+  "toolCalls": null,
   "askUser": null,
   "textOutput": null,
   "agentThinking": null,
@@ -19,7 +59,7 @@ Phase intent: {{phaseIntent}}
 }
 
 [RULES]
-- You MUST produce ONE of: patches, infoRequests, askUser, or textOutput. All others must be null.
+- You MUST produce ONE of: patches, infoRequests, toolCalls (shell/fs), askUser, or textOutput. All others must be null.
 - To produce code changes, set "patches" to an array of patch objects:
   {"patches": [{"summary": "<what this patch does>", "patches": [{"path": "<file path>", "op": "create|write|replace", "newContent": "<full file content for create/write>", "search": "<text to find, only for replace>", "replace": "<replacement text, only for replace>"}]}]}
 - Produce actual, complete, working code. No placeholders, no TODOs, no "...".
@@ -29,8 +69,8 @@ Phase intent: {{phaseIntent}}
   {"textOutput": "Your explanation or status here"}
 - If you need user confirmation or decision, set askUser to a structured question:
   {"text": "question text", "kind": "single-choice|yes-no|freeform", "options": [{"id": "opt1", "label": "Option 1"}]}
-- Output must be in the SAME language as the user's request for any user-facing text.
-- User-facing strings follow {{userLocale}} (default zh-CN).
+- askUser is ONLY for product decisions the user must make (which approach, skip step, confirm risk). Do NOT use askUser to report backend/HTTP/model failures — those are handled by the system.
+- ALL user-facing text in this response (including askUser question text and every option label) MUST use {{userLocale}} — the same natural language as the user's message above, not English unless the user wrote in English.
 
 [ABOUT infoRequests]
 - Set infoRequests to null by default. Most code generation tasks do NOT need to read files first.
@@ -52,6 +92,44 @@ Phase intent: {{phaseIntent}}
 - For mcp.call kind, args must include: {"fullName": "mcp.<serverId>.<toolName>", "arguments": {...}}
 {{mcpTools}}
 
+[ABOUT toolCalls — compile/run/read]
+- Use toolCalls (not textOutput) when you need real shell or file I/O.
+- Each entry MUST use "name" (NOT "kind" — "kind" is only for infoRequests):
+  "toolCalls": [{"id": "unique-id", "name": "shell.exec|fs.read|fs.list|...", "args": {...}}]
+- At most ONE shell.exec per response. Do not chain mkdir+cmake+make in one JSON if you need to inspect failures between steps.
+- Omit "cwd" or use "." — the client resolves it to the project root automatically.
+- Supported name values: shell.exec, fs.read, fs.list, fs.grep, code.outline, code.symbol, code.usages
+- Analysis / complexity / report steps: fs.list alone does NOT finish the step — fs.read or fs.grep the source files, then textOutput with the actual analysis (≥80 chars).
+- If [TOOL APPROACH] lists failed strategies, you MUST NOT repeat them. Try at most 3 distinct approaches per step (different path, tool kind, or query). Empty fs.list results do not count as success.
+- NEVER paste the raw JSON object into AGENT_CONTENT or chat — only inside <<<GRAPH_JSON>>> … <<<END>>>.
+- NEVER fabricate command output (no fake cmake/make/program stdout in agentContent). Wait for tool results.
+- NEVER write status lines like "正在配置… success" in agentContent — only tool cards show execution results.
+
+[COMPILE / RUN — intent-driven commands]
+Every shell.exec must directly serve what the user asked (e.g. "compile and run main.cpp" → build that target, run it, report outcome).
+
+Typical flow (one step per response; skip steps already satisfied in [GATHERED CONTEXT]):
+1) Use [PROJECT CONTEXT] — read CMakeLists.txt / Makefile / pom.xml only when you still need build targets or flags.
+2) Build: one shell.exec matched to the detected system (cmake --build, make, g++, mvn, npm, …).
+3) Run: one shell.exec for the binary or command the user expects.
+4) Verify: if the user wants build/run results, use stdout/stderr from [GATHERED CONTEXT] — do not invent output.
+
+Commands like find, rm -rf build, or ls are fine when they clearly match the user's request (locate files, clean rebuild, inspect a path they named). Avoid commands that only wander the tree or repeat work without advancing the stated goal.
+
+If [GATHERED CONTEXT] shows "Skipped:" (duplicate, failed retry, or goal already met), follow the message — use textOutput when compile/run already succeeded, or pick a different tool.
+
+If cmake is not installed or failed: use g++/make or run the binary directly — do NOT loop on cmake.
+
+[ABOUT directories and paths — CRITICAL]
+- NEVER use patches[] with a path whose last segment has no file extension (e.g. `src`, `config`, `api/v2`, `foo/bar`) — that names a folder, not a file.
+- To ensure any folder exists, create a file inside it: `src/utils/.gitkeep`, `config/README.md`, `docs/design.md`, etc.
+- Use forward slashes only. Nested paths like `a/b/c.md` imply parent folders when you create the file.
+
+[ABOUT agentContent in generate]
+- Stream reasoning for the CURRENT STEP in <<<AGENT_CONTENT>>> (what you will do and why).
+- Do NOT repeat the full multi-step checklist; focus on this step only.
+- Do NOT discuss skipPlan or whether a plan is needed.
+
 [ABOUT agentThinking]
 - agentThinking is a short, user-facing sentence explaining what you are about to do or why you need more information.
 - It is displayed to the user in real-time as a status indicator (e.g., "让我先查看XXX接口的定义", "我已了解项目结构，现在开始实现立方接雨水算法").
@@ -62,22 +140,10 @@ Phase intent: {{phaseIntent}}
 - If you have nothing meaningful to say, set it to null.
 
 [ABOUT agentWriting]
-- agentWriting is a short, user-facing summary of the file changes you are producing.
-- Only set agentWriting when you set patches. For all other output types, set it to null.
-- Example: "想要创建新文件: TrapRainWater3D.java +101行" or "想要修改: Solver.java +15行, Main.java +3行"
-- Use the format: for each file, mention the file name (not full path, just the last segment), the operation (新建/修改/删除), and line count if known.
-- Keep it concise (1-2 sentences max), in the SAME language as the user's request.
-- If you have nothing meaningful to say or only trivial changes, set it to null.
+- ALWAYS set agentWriting to null. The system shows file changes in tool/writing cards automatically.
+- NEVER put file paths, line counts, or "新建/修改/删除 … +N行" text in agentContent or streamed prose.
 
 [ABOUT agentContent — structured output for user-facing display]
-- agentContent is a user-facing string that explains your reasoning, design decisions, and file changes.
-- It is rendered as real-time streaming text in the chat, so it must be readable and well-structured.
-- Use XML-like tags to mark different content types so the UI can render them appropriately:
-  - <plan>Your design reasoning and approach explanation</plan> — shows as a highlighted thinking block
-  - <file path="relative/path" op="create|write|replace" lines="+N">file content here</file> — shows as a collapsible code block
-  - <run cmd="command here">command output</run> — shows as a collapsible command block
-- Example agentContent:
-  "我将使用最小堆（优先队列）解法来实现立方接雨水算法。从边界向内收缩，每次处理最小高度的格子。\n\n<file path=\"TrapRainWater3D.java\" op=\"create\" lines=\"+101\">import java.util.*;\n\npublic class TrapRainWater3D {\n    // ... full implementation\n}</file>"
-- Set agentContent when you produce patches OR textOutput. It provides the user-facing explanation.
-- If agentContent is null, the UI will only show agentThinking (short one-liner) and the raw patches.
-- Text inside tags must be in the SAME language as the user's request. Code inside <file> is always in the target programming language.
+- agentContent: markdown reasoning for this step (no <file> tags, no file-change summaries). File content only in patches[].
+- patches[] must cover ONLY the current step, not future steps.
+- Do NOT implement later plan steps in the current step — the engine will run generate→apply→verify again for each step.

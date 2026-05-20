@@ -155,6 +155,16 @@ public class ToolSchemaRegistry {
     return List.copyOf(tools.keySet());
   }
 
+  /** One-line-per-tool catalog for intake intent classification prompts. */
+  public String renderCatalogBrief() {
+    StringBuilder sb = new StringBuilder("[TOOL CATALOG — use exact names in tools[]]\n");
+    for (ObjectNode node : tools.values()) {
+      sb.append("- ").append(node.path("name").asText());
+      sb.append(": ").append(node.path("description").asText()).append("\n");
+    }
+    return sb.toString();
+  }
+
   /**
    * Dynamically register MCP tools for a session. Called when the plugin sends {@code userMcps[]}
    * in the request. These tools are added to the session-level schema and evicted at session end.

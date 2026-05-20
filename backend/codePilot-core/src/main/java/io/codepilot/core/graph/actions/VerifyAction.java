@@ -5,6 +5,8 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.conversation.ToolResultBus;
 import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.GraphToolWaitHelper;
+import io.codepilot.core.graph.GraphUiEmitter;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +14,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Verify node: runs compile/test/lint assertions against the applied patches.
@@ -47,6 +50,8 @@ public class VerifyAction implements NodeAction {
         String phaseId = (String) state.value("phaseCursor").orElse("");
         var modifiedFiles = (List<String>) state.value("modifiedFiles").orElse(List.of());
 
+        GraphUiEmitter.transition(state, "verify");
+
         // ── Step 1: Request IDE diagnostics from the client ──
         // Emit a tool_call SSE so the client runs ide.diagnostics and reports back
         String diagToolCallId = UUID.randomUUID().toString();
@@ -67,25 +72,7 @@ public class VerifyAction implements NodeAction {
                     "message", "Requesting IDE diagnostics for modified files"
                 ));
 
-        // ── Step 2: Await client diagnostics via ToolResultBus ──
-        List<Map<String, Object>> clientDiagnostics = new ArrayList<>();
-        try {
-            ToolResultEvent result = diagFuture.get(DIAGNOSTICS_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
-
-            if (result != null && result.ok() && result.result() != null) {
-                // Parse diagnostics from client result
-                clientDiagnostics = parseDiagnosticsResult(result.result());
-                log.info("Verify phase={}: received {} diagnostics from client", phaseId, clientDiagnostics.size());
-            } else {
-                String error = result != null ? result.errorMessage() : "Timeout waiting for diagnostics";
-                log.warn("Verify phase={}: diagnostics request failed: {}", phaseId, error);
-            }
-        } catch (Exception e) {
-            ToolResultBus.unregisterFuture(sessionId, diagToolCallId);
-            log.warn("Verify phase={}: diagnostics request timed out or failed: {}", phaseId, e.getMessage());
-        }
-
-        // ── Step 3: Check verification policy for additional checks ──
+        // ── Step 2: Check verification policy and emit parallel client checks ──
         var verifyPolicy = state.value("graphVerifyPolicy").orElse(null);
         boolean runTests = false;
         boolean runLint = false;
@@ -94,43 +81,87 @@ public class VerifyAction implements NodeAction {
             runLint = Boolean.TRUE.equals(policyMap.get("runLint"));
         }
 
+        // Do not emit shell.exec with literal "test"/"lint" — they are not real binaries and
+        // cause repeated useless tool runs. IDE diagnostics cover compile issues after patch.
+        CompletableFuture<ToolResultEvent> testFuture = null;
+        String testToolCallId = null;
+        if (runTests) {
+            log.info("Verify phase={}: runTests requested — using ide.diagnostics only (no shell test stub)", phaseId);
+        }
+
+        CompletableFuture<ToolResultEvent> lintFuture = null;
+        String lintToolCallId = null;
+        if (runLint) {
+            log.info("Verify phase={}: runLint requested — using ide.diagnostics only (no shell lint stub)", phaseId);
+        }
+
+        List<CompletableFuture<ToolResultEvent>> parallelWaits = new ArrayList<>();
+        parallelWaits.add(diagFuture);
+        if (testFuture != null) parallelWaits.add(testFuture);
+        if (lintFuture != null) parallelWaits.add(lintFuture);
+
+        Duration verifyTimeout = Duration.ofSeconds(
+                Math.max(DIAGNOSTICS_TIMEOUT.toSeconds(), runTests ? 60 : 0));
+        if (runLint) {
+            verifyTimeout = verifyTimeout.plusSeconds(30);
+        }
+
+        List<Map<String, Object>> clientDiagnostics = new ArrayList<>();
         Map<String, Object> testResults = null;
         Map<String, Object> lintResults = null;
 
-        // ── Step 3a: Run tests if policy requires ──
-        if (runTests) {
-            String testToolCallId = UUID.randomUUID().toString();
-            var testFuture = ToolResultBus.registerFuture(sessionId, testToolCallId);
-            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
-                "id", testToolCallId,
-                "name", "shell.exec",
-                "args", Map.of("command", "test", "files", modifiedFiles)
-            ));
+        try {
+            GraphToolWaitHelper.awaitAll(parallelWaits, state, "验证中", verifyTimeout);
+        } catch (Exception e) {
+            log.warn("Verify phase={}: parallel verification timed out or failed: {}", phaseId, e.getMessage());
+        }
+
+        try {
+            ToolResultEvent result = diagFuture.getNow(null);
+            if (result == null && diagFuture.isDone()) {
+                result = diagFuture.get();
+            }
+            if (result != null && result.ok() && result.result() != null) {
+                clientDiagnostics = parseDiagnosticsResult(result.result());
+                log.info("Verify phase={}: received {} diagnostics from client", phaseId, clientDiagnostics.size());
+            } else if (result != null) {
+                log.warn("Verify phase={}: diagnostics request failed: {}", phaseId, result.errorMessage());
+            }
+        } catch (Exception e) {
+            ToolResultBus.unregisterFuture(sessionId, diagToolCallId);
+            log.warn("Verify phase={}: diagnostics failed: {}", phaseId, e.getMessage());
+        }
+
+        if (testFuture != null) {
             try {
-                ToolResultEvent testResult = testFuture.get(60, java.util.concurrent.TimeUnit.SECONDS);
+                ToolResultEvent testResult = testFuture.getNow(null);
+                if (testResult == null && testFuture.isDone()) {
+                    testResult = testFuture.get();
+                }
                 if (testResult != null && testResult.ok() && testResult.result() instanceof Map) {
                     testResults = (Map<String, Object>) testResult.result();
                 }
             } catch (Exception e) {
+                if (testToolCallId != null) {
+                    ToolResultBus.unregisterFuture(sessionId, testToolCallId);
+                }
                 log.warn("Verify phase={}: test execution failed: {}", phaseId, e.getMessage());
             }
         }
 
-        // ── Step 3b: Run lint if policy requires ──
-        if (runLint) {
-            String lintToolCallId = UUID.randomUUID().toString();
-            var lintFuture = ToolResultBus.registerFuture(sessionId, lintToolCallId);
-            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
-                "id", lintToolCallId,
-                "name", "shell.exec",
-                "args", Map.of("command", "lint", "files", modifiedFiles)
-            ));
+        if (lintFuture != null) {
             try {
-                ToolResultEvent lintResult = lintFuture.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                ToolResultEvent lintResult = lintFuture.getNow(null);
+                if (lintResult == null && lintFuture.isDone()) {
+                    lintResult = lintFuture.get();
+                }
                 if (lintResult != null && lintResult.ok() && lintResult.result() instanceof Map) {
                     lintResults = (Map<String, Object>) lintResult.result();
                 }
             } catch (Exception e) {
+                if (lintToolCallId != null) {
+                    ToolResultBus.unregisterFuture(sessionId, lintToolCallId);
+                }
                 log.warn("Verify phase={}: lint check failed: {}", phaseId, e.getMessage());
             }
         }
@@ -138,19 +169,20 @@ public class VerifyAction implements NodeAction {
         // ── Step 4: Build verify report from collected results ──
         VerifyReport report = buildVerifyReport(clientDiagnostics, testResults, lintResults, modifiedFiles);
 
-        updates.put("clientDiagnostics", clientDiagnostics);
+        updates.put("clientDiagnostics", List.copyOf(clientDiagnostics));
         updates.put("verifyReport", report.toMap());
         updates.put("verifyResult", report.overallResult);
 
         // Emit the verify report as SSE event
-        GraphSseHelper.emitEvent(state, SseEvents.GRAPH_VERIFY, Map.of(
-                "phaseId", phaseId,
-                "result", report.overallResult,
-                "compileErrors", report.compileErrors.size(),
-                "testFailures", report.testFailures.size(),
-                "lintWarnings", report.lintWarnings.size(),
-                "summary", report.summary()
-        ));
+        var verifyPayload = new LinkedHashMap<String, Object>();
+        verifyPayload.put("phaseId", phaseId);
+        verifyPayload.put("result", report.overallResult);
+        verifyPayload.put("compileErrors", report.compileErrors.size());
+        verifyPayload.put("testFailures", report.testFailures.size());
+        verifyPayload.put("lintWarnings", report.lintWarnings.size());
+        verifyPayload.put("summary", report.displaySummary());
+        verifyPayload.put("failures", report.failureLines());
+        GraphSseHelper.emitEvent(state, SseEvents.GRAPH_VERIFY, verifyPayload);
 
         log.info("Verify phase={}: result={}, compileErrors={}, testFailures={}, lintWarnings={}",
                 phaseId, report.overallResult,
@@ -230,9 +262,62 @@ public class VerifyAction implements NodeAction {
             this.durationMs = durationMs;
         }
 
+        /** Short user-facing summary (chat UI). */
+        public String displaySummary() {
+            return switch (overallResult) {
+                case "success" -> "验证通过：未发现编译错误、测试失败或严重告警。";
+                case "fail" -> buildFailureHeadline();
+                default -> "验证结果不确定，请查看详情或手动确认。";
+            };
+        }
+
+        /** Machine-readable summary for logs and debugging. */
         public String summary() {
-            return String.format("VerifyReport{result=%s, compileErrors=%d, testFailures=%d, lintWarnings=%d, duration=%dms}",
-                    overallResult, compileErrors.size(), testFailures.size(), lintWarnings.size(), durationMs);
+            return String.format(
+                    "VerifyReport{result=%s, compileErrors=%d, testFailures=%d, lintWarnings=%d, duration=%dms}",
+                    overallResult,
+                    compileErrors.size(),
+                    testFailures.size(),
+                    lintWarnings.size(),
+                    durationMs);
+        }
+
+        public List<String> failureLines() {
+            List<String> lines = new ArrayList<>();
+            for (VerifyFinding f : compileErrors) {
+                lines.add(formatFinding("编译错误", f));
+            }
+            for (VerifyFinding f : testFailures) {
+                lines.add(formatFinding("测试失败", f));
+            }
+            for (VerifyFinding f : lintWarnings) {
+                lines.add(formatFinding("告警", f));
+            }
+            return lines;
+        }
+
+        private String buildFailureHeadline() {
+            var parts = new ArrayList<String>();
+            if (!compileErrors.isEmpty()) {
+                parts.add(compileErrors.size() + " 个编译错误");
+            }
+            if (!testFailures.isEmpty()) {
+                parts.add(testFailures.size() + " 个测试失败");
+            }
+            if (!lintWarnings.isEmpty()) {
+                parts.add(lintWarnings.size() + " 条告警");
+            }
+            if (parts.isEmpty()) {
+                return "验证未通过，请查看详情。";
+            }
+            return "验证未通过：" + String.join("，", parts) + "。";
+        }
+
+        private static String formatFinding(String prefix, VerifyFinding f) {
+            if (f.line > 0) {
+                return String.format("%s · %s:%d — %s", prefix, f.file, f.line, f.message);
+            }
+            return String.format("%s · %s — %s", prefix, f.file, f.message);
         }
 
         public Map<String, Object> toMap() {

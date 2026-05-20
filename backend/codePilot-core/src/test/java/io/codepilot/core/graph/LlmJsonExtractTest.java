@@ -31,6 +31,19 @@ class LlmJsonExtractTest {
   }
 
   @Test
+  void extractsJsonAfterMarkerProse() throws Exception {
+    String raw =
+        "<<<GRAPH_JSON>>>\n"
+            + "Some preamble from the model.\n"
+            + "{\"patches\":[{\"path\":\"doc/a.md\",\"op\":\"create\",\"newContent\":\"# A\"}]}\n"
+            + "<<<END>>>";
+    String json = LlmJsonExtract.parseableJson(raw);
+    assertThat(mapper.readTree(json).get("patches").isArray()).isTrue();
+    assertThat(mapper.readTree(json).get("patches").get(0).get("path").asText())
+        .isEqualTo("doc/a.md");
+  }
+
+  @Test
   void removesInvalidBacktickEscape() throws Exception {
     // LLM may output \` inside JSON string values — Jackson rejects it
     String raw = "{\"text\":\"hello \\`world\\`\"}";

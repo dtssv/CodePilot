@@ -2,11 +2,16 @@
 
 import type { AgentStep } from '../components/AgentStepCard';
 
+export type ToolExecutionState = 'running' | 'success' | 'error' | 'denied' | 'skipped';
+
 export interface ToolCallInfo {
     id: string;
     name: string;
     args: Record<string, unknown>;
     status?: 'running' | 'success' | 'error';
+    /** Terminal UI state including user deny/skip on shell permission. */
+    executionState?: ToolExecutionState;
+    result?: Record<string, unknown>;
 }
 
 export interface ChatMessage {

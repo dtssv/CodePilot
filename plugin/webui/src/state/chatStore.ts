@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
+import { isTerminalDoneReason } from '../utils/terminalDone';
 import { buildV2StateFromLegacyMessages, type LegacyHydrateMessage } from './chatHydrate';
 import { applyEnvelope } from './turnReducer';
 import { INITIAL_V2_STATE, type ChatV2State, type EventEnvelope } from './events';
@@ -18,6 +19,9 @@ type Listener = (s: ChatV2State) => void;
 
 let state: ChatV2State = INITIAL_V2_STATE;
 const listeners = new Set<Listener>();
+
+/** After new chat, ignore stale envelopes until the user starts a new turn. */
+let suppressEnvelopesUntilTurnStart = false;
 
 /** Throttle for replay_since requests so we don't spam on a long gap burst. */
 let lastReplayRequestAt = 0;
@@ -33,6 +37,11 @@ export function getChatV2State(): ChatV2State {
     return state;
 }
 
+/** True while any turn is still running (blocks destructive session hydration). */
+export function hasRunningTurn(): boolean {
+    return state.turns.some((t) => t.status === 'running');
+}
+
 export function subscribeChatV2(l: Listener): () => void {
     listeners.add(l);
     return () => {
@@ -40,13 +49,52 @@ export function subscribeChatV2(l: Listener): () => void {
     };
 }
 
+export interface ResetChatV2Options {
+    /** When true, drop envelopes until the next turn.start (new chat only). */
+    suppressEnvelopes?: boolean;
+}
+
 /** Reset the store — used when switching sessions in v2 UI. */
-export function resetChatV2() {
-    setState(INITIAL_V2_STATE);
+export function resetChatV2(replayBaseline?: number, opts?: ResetChatV2Options) {
+    suppressEnvelopesUntilTurnStart = opts?.suppressEnvelopes === true;
+    setState({
+        ...INITIAL_V2_STATE,
+        lastSeq: typeof replayBaseline === 'number' ? replayBaseline : INITIAL_V2_STATE.lastSeq,
+    });
+}
+
+/** After hydrating history, align seq cursor so replay_since does not replay live buffer. */
+export function setChatV2LastSeq(seq: number) {
+    if (typeof seq !== 'number' || seq < 0) return;
+    setState({ ...state, lastSeq: seq });
+}
+
+/** Force-close stuck running turns/steps when the plugin reports idle (conversation ended). */
+export function finalizeRunningTurns() {
+    const hasRunningTurns = state.turns.some((t) => t.status === 'running');
+    const hasRunningSteps = Object.values(state.steps).some((s) => s.status === 'running');
+    if (!hasRunningTurns && !hasRunningSteps) return;
+    const now = Date.now();
+    const steps = { ...state.steps };
+    for (const [id, step] of Object.entries(steps)) {
+        if (step.status === 'running') {
+            steps[id] = { ...step, status: 'success', endedAt: now };
+        }
+    }
+    setState({
+        ...state,
+        steps,
+        turns: state.turns.map((t) =>
+            t.status === 'running'
+                ? { ...t, status: 'final' as const, endedAt: now, reason: 'final' }
+                : t,
+        ),
+    });
 }
 
 /** Restore v2 turn tree from legacy session_messages (Integrated → Productized). */
 export function hydrateChatV2FromLegacyMessages(messages: LegacyHydrateMessage[]) {
+    suppressEnvelopesUntilTurnStart = false;
     setState(buildV2StateFromLegacyMessages(messages));
 }
 
@@ -96,9 +144,22 @@ let installed = false;
 export function installChatV2Bridge(): () => void {
     if (installed) return () => undefined;
     installed = true;
+    const unsubDone = onPluginEvent('done', (payload) => {
+        const reason = (payload as { reason?: string }).reason;
+        if (isTerminalDoneReason(reason)) {
+            finalizeRunningTurns();
+        }
+    });
     const unsub = onPluginEvent('envelope', (payload) => {
         const ev = payload as EventEnvelope;
         if (!ev || typeof ev.seq !== 'number') return;
+        if (suppressEnvelopesUntilTurnStart) {
+            if (ev.type === 'turn.start') {
+                suppressEnvelopesUntilTurnStart = false;
+            } else {
+                return;
+            }
+        }
         const { next, requestReplayFrom } = applyEnvelope(state, ev);
         setState(next);
         if (requestReplayFrom !== undefined) {
@@ -112,6 +173,7 @@ export function installChatV2Bridge(): () => void {
     return () => {
         installed = false;
         unsub();
+        unsubDone();
     };
 }
 

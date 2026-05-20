@@ -36,14 +36,20 @@ export interface PlanStep {
     status: 'pending' | 'running' | 'success' | 'error' | string;
 }
 
+export type { ToolExecutionState } from './chatTypes';
+
 export interface StepNode {
     stepId: string;
+    /** Restored from persisted toolCalls (denied/skipped/success). */
+    executionState?: import('./chatTypes').ToolExecutionState;
     parentStepId?: string | null;
     kind: StepKind;
     title: string;
     status: StepStatus;
     startedAt: number;
     endedAt?: number;
+    /** Envelope seq at step.start — stable chronological order in the UI. */
+    orderSeq?: number;
 
     /** Streamed text for LLM steps. */
     textBuf: string;

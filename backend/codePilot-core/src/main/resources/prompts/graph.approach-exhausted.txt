@@ -1,0 +1,22 @@
+[APPROACH EXHAUSTED — USER MESSAGE]
+
+The automated agent could not complete the current step after trying several different tool strategies.
+
+User goal:
+{{input}}
+
+Current plan step:
+{{currentPlanStep}}
+
+Approaches already tried (for your reference — describe them in plain language, do not dump raw keys):
+{{triedApproaches}}
+
+{{gatheredContext}}
+
+Write a concise, friendly message TO THE USER in {{userLocale}}:
+- Explain what was attempted and why usable files/results could not be obtained
+- State that this automated flow cannot continue this step without help
+- Suggest practical alternatives (e.g. paste file or folder contents in chat, add missing files to the project, give the correct path, skip this step, or start a new task)
+- Invite the user to stop or adjust how they want to proceed
+
+Output plain markdown only. No JSON, no GRAPH_JSON markers, no toolCalls, no infoRequests, no askUser block.

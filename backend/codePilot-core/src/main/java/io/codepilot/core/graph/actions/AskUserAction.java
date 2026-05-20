@@ -3,6 +3,7 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.dto.NeedsInput;
+import io.codepilot.core.graph.AskUserPolicy;
 import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.GraphInterruptException;
 import io.codepilot.core.graph.GraphSseHelper;
@@ -45,11 +46,19 @@ public class AskUserAction implements NodeAction {
         var rawQuestions = new ArrayList<Map<String, Object>>();
         @SuppressWarnings("unchecked")
         var pendingList = (List<Map<String, Object>>) state.value("pendingQuestions").orElse(List.of());
-        rawQuestions.addAll(pendingList);
+        for (Map<String, Object> q : pendingList) {
+            Map<String, Object> normalized = AskUserPolicy.normalizeQuestionMap(q);
+            if (normalized != null) {
+                rawQuestions.add(normalized);
+            }
+        }
         @SuppressWarnings("unchecked")
         var singleQuestion = (Map<String, Object>) state.value("askUserQuestion").orElse(null);
         if (singleQuestion != null && !singleQuestion.isEmpty()) {
-            rawQuestions.add(singleQuestion);
+            Map<String, Object> normalized = AskUserPolicy.normalizeQuestionMap(singleQuestion);
+            if (normalized != null) {
+                rawQuestions.add(normalized);
+            }
         }
         var verifyReport = (Map<String, Object>) state.value("verifyReport").orElse(null);
         var repairAttempts = (int) state.value("repairAttempts").orElse(0);
@@ -95,7 +104,7 @@ public class AskUserAction implements NodeAction {
         }
 
         // 4. Build NeedsInput structure
-        String title = (String) state.value("askUserTitle").orElse("Need your input to continue");
+        String title = (String) state.value("askUserTitle").orElse(AskUserPolicy.defaultNeedsInputTitle());
         NeedsInput needsInput = new NeedsInput(title, null, true, 1, true, questions, null);
 
         // 5. Build continuation context for resume
@@ -205,26 +214,40 @@ public class AskUserAction implements NodeAction {
             Map<String, Object> verifyReport, int repairAttempts) {
         List<NeedsInput.Question> questions = new ArrayList<>();
 
-        // If repair has been attempted multiple times, ask user how to proceed
         if (repairAttempts >= 2) {
-            var options = List.of(
-                new NeedsInput.Option("retry", "Retry repair with more context", "May succeed with additional info", List.of("Fresh attempt"), List.of("Takes more time")),
-                new NeedsInput.Option("skip", "Skip this phase and continue", "Task proceeds but this phase may be incomplete", List.of("Avoids blocking"), List.of("Incomplete result")),
-                new NeedsInput.Option("abort", "Abort the task", "Stops execution entirely", List.of("Clean stop"), List.of("No partial results")),
-                new NeedsInput.Option("manual", "I'll fix it manually", "You take over and fix the issue", List.of("Human expertise"), List.of("Requires manual effort"))
-            );
-            questions.add(new NeedsInput.Question(
-                "repair-decision", null, "Repair has failed " + repairAttempts + " times. How would you like to proceed?",
-                null, NeedsInput.Question.Kind.SINGLE_CHOICE, true, "manual", options, null));
+            var options =
+                    List.of(
+                            new NeedsInput.Option("retry", "重试", "", List.of(), List.of()),
+                            new NeedsInput.Option("skip", "跳过此步骤", "", List.of(), List.of()),
+                            new NeedsInput.Option("abort", "停止任务", "", List.of(), List.of()),
+                            new NeedsInput.Option("manual", "我手动处理", "", List.of(), List.of()));
+            questions.add(
+                    new NeedsInput.Question(
+                            "repair-decision",
+                            null,
+                            "修复已失败 " + repairAttempts + " 次。请选择下一步：",
+                            null,
+                            NeedsInput.Question.Kind.SINGLE_CHOICE,
+                            true,
+                            "manual",
+                            options,
+                            null));
         }
 
-        // If verify report has errors, ask about them
         if (verifyReport != null && !verifyReport.isEmpty()) {
             var errors = (List<?>) verifyReport.getOrDefault("compileErrors", List.of());
             if (!errors.isEmpty()) {
-                questions.add(new NeedsInput.Question(
-                    "compile-errors", null, "Compilation errors detected. Should I attempt a different approach?",
-                    null, NeedsInput.Question.Kind.YES_NO, true, null, List.of(), null));
+                questions.add(
+                        new NeedsInput.Question(
+                                "compile-errors",
+                                null,
+                                "检测到编译错误，是否尝试换一种方式？",
+                                null,
+                                NeedsInput.Question.Kind.YES_NO,
+                                true,
+                                null,
+                                List.of(),
+                                null));
             }
         }
 

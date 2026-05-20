@@ -4,8 +4,11 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GraphFailurePolicy;
 import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.GraphUserMessages;
 import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.graph.actions.VerifyAction.VerifyReport;
 import io.codepilot.core.model.ChatClientFactory;
@@ -60,11 +63,13 @@ public class RepairAction implements NodeAction {
                 ? ((Number) repairPolicy.get("maxAttempts")).intValue()
                 : DEFAULT_MAX_ATTEMPTS;
 
-        // ── Track attempts ──
-        var attempts = (Map<String, Integer>) state.value("attempts").orElse(new HashMap<>());
+        // ── Track attempts — create a new copy to avoid ConcurrentModificationException
+        // during state serialization/cloning by the graph framework
+        var prevAttempts = (Map<String, Integer>) state.value("attempts").orElse(Map.of());
+        var attempts = new HashMap<>(prevAttempts);
         int count = attempts.getOrDefault(phaseId, 0) + 1;
         attempts.put(phaseId, count);
-        updates.put("attempts", attempts);
+        updates.put("attempts", Map.copyOf(attempts));
 
         // ── Check budget ──
         if (count >= maxAttempts) {
@@ -78,34 +83,18 @@ public class RepairAction implements NodeAction {
                     .filter(r -> Boolean.TRUE.equals(r.get("success")))
                     .count();
 
-            var verifyReport = state.value("verifyReport").orElse(null);
-            String failureSummary = summarizeFailures(verifyReport);
-
             if (appliedCount > 0) {
                 // Partial success: commit what succeeded, mark phase as partial
                 log.info("Repair budget exhausted but {} patches were applied — committing partial results", appliedCount);
                 updates.put("repairResult", "partialCommit");
-                updates.put("askUserQuestion", Map.of(
-                    "id", "repair-partial-" + phaseId,
-                    "text", "Auto-repair partially succeeded (" + appliedCount + " patches applied). " + failureSummary,
-                    "kind", "single-choice",
-                    "options", List.of(
-                        Map.of("id", "continue", "label", "Continue with partial changes"),
-                        Map.of("id", "revert", "label", "Revert all changes and replan")
-                    )
-                ));
+                updates.put(
+                        "askUserQuestion",
+                        GraphUserMessages.repairBudgetQuestion(phaseId, count, true, appliedCount));
             } else {
                 updates.put("repairResult", "askUser");
-                updates.put("askUserQuestion", Map.of(
-                    "id", "repair-failed-" + phaseId,
-                    "text", "Auto-repair failed after " + count + " attempts. " + failureSummary,
-                    "kind", "single-choice",
-                    "options", List.of(
-                        Map.of("id", "manual", "label", "Manually fix the errors and continue"),
-                        Map.of("id", "revert", "label", "Revert the changes and replan"),
-                        Map.of("id", "adjust", "label", "Adjust the repair strategy")
-                    )
-                ));
+                updates.put(
+                        "askUserQuestion",
+                        GraphUserMessages.repairBudgetQuestion(phaseId, count, false, 0));
             }
             return updates;
         }
@@ -117,8 +106,12 @@ public class RepairAction implements NodeAction {
 
         String repairPrompt = buildRepairPrompt(verifyReport, originalCode, appliedPatches, phaseId);
 
-        // ── Call LLM for repair ──
-        String repairResponse;
+        GraphUiEmitter.transition(state, "repair");
+        GraphSseHelper.emitEvent(state, SseEvents.GRAPH_REPAIR_PLAN,
+                Map.of("phaseId", phaseId, "attempt", count, "strategy", "minimal-patch"));
+
+        // ── Call LLM for repair (stream progress) ──
+        String repairResponse = "";
         try {
             String modelId = (String) state.value("modelId").orElse(null);
             String modelSourceName = (String) state.value("modelSource").orElse(null);
@@ -127,24 +120,17 @@ public class RepairAction implements NodeAction {
             log.info("RepairAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
             repairResponse =
-                GraphLlmHelper.completeSystemUser(
+                GraphLlmHelper.streamSystemUserToSse(
                     chatClient,
                     state,
                     promptRegistry.get("agent.system"),
-                    repairPrompt);
+                    repairPrompt,
+                    updates);
         } catch (Exception e) {
             log.error("LLM repair call failed for phase={}", phaseId, e);
-            updates.put("repairResult", "askUser");
-            updates.put("askUserQuestion", Map.of(
-                "id", "repair-llm-failed-" + phaseId,
-                "text", "Repair LLM call failed: " + e.getMessage(),
-                "kind", "single-choice",
-                "options", List.of(
-                    Map.of("id", "retry", "label", "Retry repair"),
-                    Map.of("id", "skip", "label", "Skip this phase")
-                )
-            ));
-            return updates;
+            if (GraphFailurePolicy.handleRepairLlmFailure(state, updates, phaseId, e)) {
+                return updates;
+            }
         }
 
         // ── Parse repair response ──
@@ -163,21 +149,10 @@ public class RepairAction implements NodeAction {
             // looping back to applyPatch with stale pendingPatches
             log.warn("Repair phase={}: could not parse patches from LLM response, escalating to askUser", phaseId);
             updates.put("repairResult", "askUser");
-            updates.put("askUserQuestion", Map.of(
-                "id", "repair-parse-failed-" + phaseId,
-                "text", "Auto-repair could not produce a valid fix (attempt " + count + ")",
-                "kind", "single-choice",
-                "options", List.of(
-                    Map.of("id", "manual", "label", "I'll fix it manually"),
-                    Map.of("id", "revert", "label", "Revert changes and replan"),
-                    Map.of("id", "retry", "label", "Try repair again with more context")
-                )
-            ));
+            updates.put(
+                    "askUserQuestion",
+                    GraphUserMessages.repairParseFailedQuestion(phaseId, count));
         }
-
-        // Emit repair progress
-        GraphSseHelper.emitEvent(state, SseEvents.GRAPH_REPAIR_PLAN,
-                Map.of("phaseId", phaseId, "attempt", count, "strategy", "minimal-patch"));
 
         log.info("Repair phase={}: attempt={}/{}, responseLen={}, patchesProduced={}",
                 phaseId, count, maxAttempts, repairResponse != null ? repairResponse.length() : 0,
@@ -191,6 +166,8 @@ public class RepairAction implements NodeAction {
         return switch (result) {
             case "askUser" -> "askUser";
             case "partialCommit" -> "commit";
+            case "retryRepair" -> "repair";
+            case "failed" -> "finalize";
             default -> "applyPatch";  // "toolCalls" or any unknown → applyPatch
         };
     }

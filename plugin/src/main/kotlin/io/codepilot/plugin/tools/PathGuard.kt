@@ -6,11 +6,19 @@ import com.intellij.openapi.vfs.VirtualFile
 import java.nio.file.Path
 
 /**
- * Ensures every path used by a tool is *inside the current workspace root* and does not escape
- * via `..`, absolute paths, or sensitive directories (e.g. `.git/objects`, `node_modules`).
+ * Ensures every path used by a tool is inside the workspace root and does not escape via `..` or
+ * absolute paths outside the project.
+ *
+ * Read tools (fs.read / fs.list) must be able to inspect build output trees (build/, target/,
+ * out/, dist/, cmake-build-*, etc.) — those are not blocked here.
  */
 object PathGuard {
-    private val DENY_DIRS = listOf(".git/objects", ".idea", "node_modules", "target", "build")
+
+    /**
+     * Only paths that are never needed for normal agent work and are unsafe or prohibitively large
+     * to traverse. Build artifact directories are intentionally allowed.
+     */
+    private val DENY_DIRS = listOf(".git/objects", "node_modules")
 
     fun resolve(
         project: Project,

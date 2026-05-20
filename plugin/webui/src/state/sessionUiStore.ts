@@ -21,6 +21,10 @@ type BranchesListener = (b: BranchInfo[], activeBranchId: string) => void;
 
 let sessions: SessionInfoV2[] = [];
 let activeSessionId = '';
+/** True after "New chat" until the first turn of the new session completes. */
+let pendingNewChat = false;
+/** Bumped on each new chat; used to block stale hydration and empty backend context. */
+let chatClearEpoch = 0;
 let branches: BranchInfo[] = [];
 let activeBranchId = 'main';
 
@@ -37,13 +41,41 @@ function notifyBranches() {
 
 export function setSessionList(list: SessionInfoV2[], activeId: string) {
     sessions = list;
+    if (pendingNewChat) {
+        // Do not adopt sidebar "active" session while user is in a fresh chat — that restores old history.
+        notifySessions();
+        return;
+    }
     activeSessionId = activeId;
     notifySessions();
 }
 
-export function setActiveSessionId(id: string) {
+export function setActiveSessionId(id: string, opts?: { promote?: boolean }) {
     activeSessionId = id;
+    if (id && !opts?.promote) {
+        pendingNewChat = false;
+    }
     notifySessions();
+}
+
+export function markPendingNewChat() {
+    pendingNewChat = true;
+    chatClearEpoch += 1;
+    activeSessionId = '';
+    notifySessions();
+}
+
+export function isPendingNewChat(): boolean {
+    return pendingNewChat;
+}
+
+export function getChatClearEpoch(): number {
+    return chatClearEpoch;
+}
+
+/** Called when plugin confirms the fresh session turn finished (or user switched away). */
+export function completeFreshChat() {
+    pendingNewChat = false;
 }
 
 export function setBranchList(list: BranchInfo[], activeId: string) {

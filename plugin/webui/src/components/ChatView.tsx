@@ -2,13 +2,13 @@ import { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
+import { sendToPlugin } from '../bridge';
 import { AgentContentRenderer } from './AgentContentRenderer';
 import { AgentStep, AgentStepCard } from './AgentStepCard';
 import { BranchTimeline } from './BranchTimeline';
-import { MessageImages } from './MessageImages';
-import { sendToPlugin } from '../bridge';
 import { DiffCard } from './DiffCard';
 import { IncrementalMarkdown } from './IncrementalMarkdown';
+import { MessageImages } from './MessageImages';
 import { NeedsInputCard } from './NeedsInputCard';
 import { RiskNoticeCard } from './RiskNoticeCard';
 import { ToolCallCard, ToolCallInfo } from './ToolCallCard';
@@ -142,50 +142,88 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             // ★ Assistant message: unified rendering pipeline
                             // All sections coexist: planSteps + agentSteps + content + toolCalls
                             <>
-                                {/* Plan steps: always show when present */}
-                                {msg.planSteps && msg.planSteps.length > 0 && (
-                                    <div className="plan-steps-container">
-                                        <div className="plan-steps-header">📋 执行计划</div>
-                                        {msg.planSteps.map((step, idx) => (
-                                            <div key={step.id || idx} className="plan-step-item">
-                                                <span className={`plan-step-status plan-step-${step.status}`}>
-                                                    {step.status === 'success' || step.status === 'done' || step.status === 'completed' ? '✓' : step.status === 'running' || step.status === 'in_progress' ? '◉' : step.status === 'failed' ? '✗' : '○'}
-                                                </span>
-                                                <span className="plan-step-title">{step.title}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
+                                {/* Plan steps: always show when present, auto-advance stalled steps */}
+                                {msg.planSteps && msg.planSteps.length > 0 && (() => {
+                                    // Auto-advance: if a step has been running but a later step
+                                    // has already started, mark the earlier one as success.
+                                    const steps = msg.planSteps;
+                                    let lastActiveIdx = -1;
+                                    for (let si = steps.length - 1; si >= 0; si--) {
+                                        const st = steps[si].status;
+                                        if (st === 'running' || st === 'in_progress' || st === 'success' || st === 'done' || st === 'completed' || st === 'failed') {
+                                            lastActiveIdx = si;
+                                            break;
+                                        }
+                                    }
+                                    const displaySteps = steps.map((step, idx) => {
+                                        // If a step is still "running" but a later step has progressed,
+                                        // treat the earlier one as success
+                                        if ((step.status === 'running' || step.status === 'in_progress') && idx < lastActiveIdx) {
+                                            return { ...step, status: 'success' };
+                                        }
+                                        return step;
+                                    });
+                                    return (
+                                        <div className="plan-steps-container">
+                                            <div className="plan-steps-header">📋 执行计划</div>
+                                            {displaySteps.map((step, idx) => (
+                                                <div key={step.id || idx} className="plan-step-item">
+                                                    <span className={`plan-step-status plan-step-${step.status}`}>
+                                                        {step.status === 'success' || step.status === 'done' || step.status === 'completed' ? '✓' : step.status === 'running' || step.status === 'in_progress' ? '◉' : step.status === 'failed' || step.status === 'error' ? '✗' : '○'}
+                                                    </span>
+                                                    <span className="plan-step-title">{step.title}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    );
+                                })()}
                                 {/* Agent steps: show as progress indicator (compact when content is also present) */}
-                                {msg.agentSteps && msg.agentSteps.length > 0 && (
-                                    <div className={`agent-steps-container ${msg.content ? 'agent-steps-compact' : ''}`}>
-                                        {msg.agentSteps.map((step, idx) => (
-                                            <AgentStepCard key={`step-${idx}`} step={step} compact={!!msg.content} />
-                                        ))}
-                                    </div>
-                                )}
+                                {msg.agentSteps && msg.agentSteps.length > 0 && (() => {
+                                    // Filter out internal/diagnostic agent steps that pollute the chat
+                                    const visibleSteps = msg.agentSteps.filter((s) => {
+                                        // Hide verify/checking steps (diagnostic results like VerifyReport)
+                                        if (s.type === 'checking') return false;
+                                        // Hide thinking steps with no useful content
+                                        if (s.type === 'thinking' && (!s.content || s.content === '思考中...')) return false;
+                                        return true;
+                                    });
+                                    if (visibleSteps.length === 0) return null;
+                                    return (
+                                        <div className={`agent-steps-container ${msg.content ? 'agent-steps-compact' : ''}`}>
+                                            {visibleSteps.map((step, idx) => (
+                                                <AgentStepCard key={`step-${idx}`} step={step} compact={!!msg.content} />
+                                            ))}
+                                        </div>
+                                    );
+                                })()}
                                 {/* Content rendering */}
                                 {msg.content ? (
                                     <AgentContentRenderer content={msg.content} isStreaming={msg._streaming} />
                                 ) : null}
-                                {/* Tool call cards — filter out duplicates with agent writing/running steps */}
+                                {/* Tool call cards — filter out internal tools & duplicates with agent steps */}
                                 {(() => {
+                                    const INTERNAL_TOOL_PREFIXES = [
+                                        'ide.shadowValidate', 'ide.diagnostics', 'plan.show', 'plan.update',
+                                    ];
                                     // When agentSteps contains writing/running types, the same operation
                                     // is already shown as an agent step card — skip duplicate tool cards.
                                     const hasWritingAgentSteps = msg.agentSteps?.some(
                                         (s) => s.type === 'writing' || s.type === 'running'
                                     );
-                                    const filteredToolCalls = hasWritingAgentSteps
-                                        ? msg.toolCalls?.filter((tc) =>
-                                            // Keep diagnostic/validation/shell tools; hide file-write tools
-                                            // that are already represented by agent writing/running steps.
+                                    let filteredToolCalls = msg.toolCalls?.filter((tc) =>
+                                        // Hide internal diagnostic/plan tools
+                                        !INTERNAL_TOOL_PREFIXES.some((p) => tc.name.startsWith(p))
+                                    );
+                                    if (hasWritingAgentSteps) {
+                                        filteredToolCalls = filteredToolCalls?.filter((tc) =>
+                                            // Hide file-write tools that are already represented by agent steps
                                             !tc.name.startsWith('fs.write') &&
                                             !tc.name.startsWith('fs.create') &&
                                             !tc.name.startsWith('fs.replace') &&
                                             !tc.name.startsWith('fs.applyPatch') &&
                                             !tc.name.startsWith('fs.delete')
-                                        )
-                                        : msg.toolCalls;
+                                        );
+                                    }
                                     return filteredToolCalls && filteredToolCalls.length > 0 ? (
                                         <div className="msg-tool-calls">
                                             {filteredToolCalls.map((tc) => (

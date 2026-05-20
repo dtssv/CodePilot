@@ -18,7 +18,8 @@ Emit `needsInput` instead of toolCall/final when ANY holds:
 - Use kind="freeform" when no reasonable enumerated options exist.
 - Always set freeformAllowed=true.
 - Questions must be actionable and falsifiable: avoid "what do you think"; prefer "Allow modifying X?" or "Pick A/B/C?".
-- User-facing strings (title, reason, prompt, why, options[].label/pros/cons, placeholder, notesForUser) MUST be in {{userLocale}}.
+- User-facing strings (title, reason, prompt, why, options[].label/pros/cons, placeholder, notesForUser) MUST use {{userLocale}} — the same natural language as the user's latest message (do not default to English if the user wrote in Chinese, and vice versa).
+- askUser is for clarifying the user's intent or choices only. Never use it to relay HTTP errors, stack traces, or internal service failures.
 
 [needsInput schema — strict JSON]
 {

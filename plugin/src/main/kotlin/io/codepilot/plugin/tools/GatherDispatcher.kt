@@ -56,11 +56,17 @@ class GatherDispatcher(
                     val result = ApplicationManager.getApplication().runReadAction<Map<String, Any?>> {
                         dispatchSingle(kind, args)
                     }
+                    val ok =
+                        if (kind == "shell.exec") {
+                            ShellWorkingDirectory.isSuccess(result)
+                        } else {
+                            true
+                        }
                     results.add(
                         mapOf(
                             "id" to id,
                             "kind" to kind,
-                            "ok" to true,
+                            "ok" to ok,
                             "result" to result,
                             "durationMs" to (System.currentTimeMillis() - startMs),
                         ),

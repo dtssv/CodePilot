@@ -145,13 +145,13 @@ function ShellResult({ p }: { p: Extract<ToolResultPayload, { kind: 'shell' }> }
     const exitClass = p.exitCode === 0 ? 'ok' : 'err';
     return (
         <div className="shell-result">
+            <pre className="shell-cmd shell-cmd-primary">$ {p.command}</pre>
             <div className="shell-header">
-                {p.cwd && <span className="shell-cwd" title={p.cwd}>{p.cwd}</span>}
+                {p.cwd && <span className="shell-cwd muted" title={p.cwd}>{p.cwd}</span>}
                 <span className={`shell-exit ${exitClass}`}>
                     exit {p.exitCode}{p.timedOut ? ' · timed out' : ''} · {p.durationMs}ms
                 </span>
             </div>
-            <pre className="shell-cmd">$ {p.command}</pre>
             {p.stdout && <pre className="shell-stdout">{p.stdout}</pre>}
             {p.stderr && <pre className="shell-stderr">{p.stderr}</pre>}
         </div>

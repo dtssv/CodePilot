@@ -144,7 +144,16 @@ class ToolDispatcher(
                             val shellArgs = args.deepCopy<com.fasterxml.jackson.databind.node.ObjectNode>().apply {
                                 put("stepId", id)
                                 currentTurnId?.let { put("turnId", it) }
-                                workspaceRoot?.let { put("cwd", it.toString()) }
+                                if (workspaceRoot != null) {
+                                    put("cwd", workspaceRoot.toString())
+                                } else {
+                                    val resolved =
+                                        ShellWorkingDirectory.resolve(
+                                            project,
+                                            path("cwd").asText(null),
+                                        )
+                                    put("cwd", resolved)
+                                }
                             }
                             ShellExecutor(project).execute(shellArgs)
                         }
@@ -168,7 +177,19 @@ class ToolDispatcher(
                     toolResultCache[cacheKey] = CachedToolResult(result)
                 }
 
-                respond(id, true, result, null, null, started)
+                val ok =
+                    when (name) {
+                        "shell.exec", "shell.session" -> ShellWorkingDirectory.isSuccess(result)
+                        else -> true
+                    }
+                if (name == "shell.exec") {
+                    val m = result as? Map<*, *>
+                    log.info(
+                        "shell.exec id=$id ok=$ok exitCode=${m?.get("exitCode")} cwd=${m?.get("cwd")} " +
+                            "cmd=${m?.get("command")}",
+                    )
+                }
+                respond(id, ok, result, if (ok) null else "shell_failed", shellErrorMessage(result), started)
             } catch (v: ToolViolation) {
                 respond(id, false, null, "path_violation", v.message, started)
             } catch (t: Throwable) {
@@ -376,6 +397,9 @@ class ToolDispatcher(
      */
     private fun tryStage(name: String, args: JsonNode): Map<String, Any?>? {
         val settings = io.codepilot.plugin.settings.CodePilotSettings.getInstance().state
+        // Agent chat: always apply via IDE (sync write / diff), not WebUI staging overlay
+        if (currentTurnId != null) return null
+        if (settings.autoApplyLowRiskPatches) return null
         if (!settings.stageBeforeApply) return null
         val turnId = currentTurnId ?: return null
         val path = args.path("path").asText().takeIf { it.isNotBlank() } ?: return null
@@ -417,12 +441,12 @@ class ToolDispatcher(
                 val result = applySinglePatch(patch)
                 results.add(result)
             }
-            val appliedCount = results.count { it["ok"] == true }
+            val writtenCount = results.count { it["written"] == true }
             return mapOf(
                 "ack" to true,
                 "appliedVia" to "DiffManager",
                 "batchSize" to patchesNode.size(),
-                "appliedCount" to appliedCount,
+                "appliedCount" to writtenCount,
                 "results" to results,
             )
         }
@@ -455,11 +479,20 @@ class ToolDispatcher(
             return mapOf(
                 "ok" to true, "path" to path, "appliedVia" to "PatchStaging",
                 "originalOp" to op, "routedAs" to effectiveToolName,
-                "pendingId" to staged["pendingId"], "staged" to true,
+                "pendingId" to staged["pendingId"], "staged" to true, "written" to false,
             )
         }
-        patchApplier.apply(effectiveToolName, patch)
-        return mapOf("ok" to true, "path" to path, "appliedVia" to "DiffManager", "originalOp" to op, "routedAs" to effectiveToolName)
+        val sync = patchApplier.applySync(effectiveToolName, patch)
+        return mapOf(
+            "ok" to sync.ok,
+            "written" to sync.written,
+            "path" to path,
+            "lineCount" to sync.lineCount,
+            "appliedVia" to "DiffManager",
+            "originalOp" to op,
+            "routedAs" to effectiveToolName,
+            "error" to sync.error,
+        )
     }
 
     // ---------- IDE tools ----------
@@ -592,6 +625,15 @@ class ToolDispatcher(
         return "$name:${args.hashCode().toString(16)}"
     }
 
+    private fun shellErrorMessage(result: Any?): String? {
+        val m = result as? Map<*, *> ?: return "shell command failed"
+        val stderr = m["stderr"]?.toString()?.trim().orEmpty()
+        if (stderr.isNotEmpty()) return stderr.lines().first()
+        val exitCode = (m["exitCode"] as? Number)?.toInt()
+        if (m["timedOut"] == true) return "command timed out"
+        return exitCode?.let { "exit code $it" } ?: "shell command failed"
+    }
+
     private fun respond(
         toolCallId: String,
         ok: Boolean,
@@ -664,24 +706,32 @@ class ToolDispatcher(
     }
 
     private fun listDir(args: JsonNode): Map<String, Any?> {
-        val path = args.path("path").asText()
+        val path = args.path("path").asText(".").ifBlank { "." }
         val recursive = args.path("recursive").asBoolean(false)
-        val vf = pgResolve( path)
+        val vf = pgResolve(path)
         if (!vf.isDirectory) throw ToolViolation("not a directory: $path")
+        val root = pgRoot()
+        fun entryFor(f: com.intellij.openapi.vfs.VirtualFile): Map<String, Any?> =
+            mapOf(
+                "name" to f.name,
+                "path" to f.path.removePrefix(root).trimStart('/', '\\'),
+                "type" to if (f.isDirectory) "dir" else "file",
+                "size" to f.length,
+            )
+        if (!recursive) {
+            // One level only — same as GatherDispatcher (VfsUtil callback must return true
+            // at the root to descend; the old `recursive || f.parent == vf` never did).
+            val entries = vf.children.take(2_000).map(::entryFor)
+            return mapOf("path" to path, "entries" to entries)
+        }
         val entries = mutableListOf<Map<String, Any?>>()
         VfsUtil.processFilesRecursively(vf) { f ->
             if (f != vf) {
-                entries.add(
-                    mapOf(
-                        "path" to f.path.removePrefix(pgRoot()).trimStart('/'),
-                        "type" to if (f.isDirectory) "dir" else "file",
-                        "size" to f.length,
-                    ),
-                )
+                entries.add(entryFor(f))
             }
-            recursive || f.parent == vf
+            true
         }
-        return mapOf("entries" to entries.take(2_000))
+        return mapOf("path" to path, "entries" to entries.take(2_000))
     }
 
     private fun searchProject(args: JsonNode): Map<String, Any?> {

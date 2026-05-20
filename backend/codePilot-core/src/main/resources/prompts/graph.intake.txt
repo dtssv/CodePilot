@@ -1,0 +1,46 @@
+You classify what a coding agent should do for the user's request. The user may write in ANY language.
+
+{{projectMeta}}
+
+User message:
+{{input}}
+
+Mode: {{mode}}
+
+{{toolCatalog}}
+{{mcpTools}}
+
+Return ONLY one JSON object (no markdown):
+{
+  "needsTools": false,
+  "needsPlanning": true,
+  "tools": [],
+  "reason": "<one short sentence in the user's language>"
+}
+
+Field meanings (infer from full context — NOT keyword matching):
+
+needsTools (boolean)
+  true if answering requires running one or more tools first (read repo, search, compile, diagnostics, MCP, etc.).
+  false if a direct textual answer is enough (conceptual Q&A, scoring pasted snippet, general advice with no repo/shell).
+
+needsPlanning (boolean)
+  true if the task needs multi-step agent work: code edits, multi-file changes, phased delivery, or combining tools + patches.
+  false for simple tool-then-answer OR pure chat with no tools and no code changes.
+
+tools (array)
+  When needsTools is true, list the specific tools to run FIRST, in sensible order.
+  Each item: {"name": "<exact tool name from catalog>", "why": "<brief purpose>"}
+  Only use names from the catalog above. Empty array when needsTools is false.
+  Examples:
+  - analyze sources: fs.list, fs.read, fs.grep, code.outline
+  - compile/run: ordered steps toward user goal (read build config if needed → build → run → check output); each command must justify itself against the user's request
+  - semantic search: rag.search
+  - code changes later: still list read/diagnostic tools first; needsPlanning handles patches
+
+Consistency rules:
+- needsTools false → tools must be []
+- needsTools true → tools must be non-empty unless truly impossible to name any tool
+- needsPlanning false AND needsTools false → pure direct answer (no tools, no plan)
+- If tools include shell.exec, needsTools must be true
+- When unsure about tools, set needsTools true with best-guess tools; needsPlanning true

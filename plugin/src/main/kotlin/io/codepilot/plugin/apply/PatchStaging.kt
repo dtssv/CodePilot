@@ -131,6 +131,33 @@ class PatchStaging(private val project: Project) {
         return true
     }
 
+    fun pendingForTurn(turnId: String): List<Pending> =
+        pending.values.filter { it.turnId == turnId }.toList()
+
+    /** Accept every hunk for all pending files in a turn (used before apply-all). */
+    fun acceptAllForTurn(turnId: String) {
+        pendingForTurn(turnId).forEach { setAllHunks(it.pendingId, HunkStatus.ACCEPTED) }
+    }
+
+    /**
+     * Agent doc-generation: auto-accept and commit CREATE files under `doc/`.
+     * Avoids requiring manual Accept + Apply for markdown design deliverables.
+     */
+    fun autoApplyDocCreates(turnId: String): Map<String, Any?> {
+        val entries = pendingForTurn(turnId)
+        var committed = 0
+        for (entry in entries) {
+            val norm = entry.path.replace('\\', '/')
+            val isDoc = norm.startsWith("doc/") || norm.contains("/doc/")
+            if (isDoc && entry.op == Op.CREATE) {
+                setAllHunks(entry.pendingId, HunkStatus.ACCEPTED)
+                val r = applyFile(entry.pendingId)
+                if (r["ok"] == true) committed++
+            }
+        }
+        return mapOf("ok" to true, "committed" to committed, "turnId" to turnId)
+    }
+
     // ---------------- apply ---------------- //
 
     /**

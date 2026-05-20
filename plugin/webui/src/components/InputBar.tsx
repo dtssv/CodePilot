@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 import { AtReferencePopup } from './AtReferencePopup';
+import { chipFromResult, ContextRefResult, ContextRefResultCard } from './context/ContextRefResultCard';
 import { ContextChipData } from './ContextChip';
 import { ImageAttachment, ImageData } from './ImageAttachment';
-import { chipFromResult, ContextRefResult, ContextRefResultCard } from './context/ContextRefResultCard';
 import { ActiveRulesPill } from './rules/ActiveRulesPill';
+import { isRateLimited, useRateLimitState } from '../state/rateLimitStore';
 import { builtinCommands, customCommands, CustomSlashSpec, SlashCommand } from './slash/commands';
 import { SlashPopup } from './slash/SlashPopup';
 
@@ -84,8 +85,21 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
         editor.focus();
     }, [contextChips]);
 
+    const terminalDoneReasons = new Set(['final', 'failed', 'stopped', 'max_steps', 'partial']);
+    const rateLimit = useRateLimitState();
+    const rateLimited = rateLimit != null;
+
     useEffect(() => {
-        const offDone = onPluginEvent('done', () => setRunning(false));
+        const offRateLimited = onPluginEvent('rate_limited', () => setRunning(false));
+        const offDone = onPluginEvent('done', (payload) => {
+            const reason = (payload as { reason?: string }).reason ?? 'final';
+            if (terminalDoneReasons.has(reason)) {
+                setRunning(false);
+            }
+        });
+        const offConversationRunning = onPluginEvent('conversation_running', (payload) => {
+            setRunning(Boolean((payload as { running?: boolean }).running));
+        });
         const offVoice = onPluginEvent('voice_result', (payload) => appendTextToEditor((payload as { transcript?: string }).transcript ?? ''));
         const offVoiceV2 = onPluginEvent('voice.result', (payload) => appendTextToEditor((payload as { text?: string }).text ?? ''));
         const offSlash = onPluginEvent('slash.commands.loaded', (payload) => setCustomSlash(((payload as { commands?: CustomSlashSpec[] }).commands ?? [])));
@@ -104,7 +118,9 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
             })));
         });
         return () => {
+            offRateLimited();
             offDone();
+            offConversationRunning();
             offVoice();
             offVoiceV2();
             offSlash();
@@ -114,6 +130,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
     }, []);
 
     const handleSubmit = useCallback(() => {
+        if (isRateLimited()) return;
         const editor = editorRef.current;
         if (!editor) return;
 
@@ -297,11 +314,13 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
             if (node.nodeType === Node.TEXT_NODE) {
                 const text = node.textContent || '';
                 const cursorOffset = range.startOffset;
-                // Find the @ position
+                // Find the @ position — search back past spaces so that
+                // "@file path/to/file" is fully removed when a file chip is created.
                 let atIndex = -1;
                 for (let i = cursorOffset - 1; i >= 0; i--) {
                     if (text[i] === '@') { atIndex = i; break; }
-                    if (/\s/.test(text[i])) break;
+                    // Only stop on newline (paragraph boundary), not on spaces
+                    if (text[i] === '\n') break;
                 }
                 if (atIndex >= 0) {
                     // Replace @query with empty text
@@ -319,14 +338,67 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
         }
 
         // Create an inline chip immediately in the editor
-        // For types that need additional input (web, codebase), show inline input prompt
-        const needsInput = ['web', 'codebase'].includes(suggestion.type) && !suggestion.path && !suggestion.label.replace(/^@\w+\s*/, '');
+        // For types that need additional input, we must not create an empty chip.
+        // Instead, insert the @type prefix so the user can continue typing to search.
+        const typeOnlySuggestions = ['file', 'folder'];
+        const freeInputTypes = ['web', 'codebase'];
+        const isTypeOnly = typeOnlySuggestions.includes(suggestion.type)
+            && !suggestion.path
+            && !suggestion.label.replace(/^@\w+\s*/, '');
+        const isFreeInput = freeInputTypes.includes(suggestion.type)
+            && !suggestion.path
+            && !suggestion.label.replace(/^@\w+\s*/, '');
+
         const resolveValue = suggestion.path || suggestion.label.replace(/^@\w+\s*/, '');
         const display = suggestion.label.replace(/^@\w+\s*/, '') || resolveValue;
 
-        if (needsInput) {
-            // Insert @type text for the user to complete (e.g., @web https://...)
-            // But keep the popup open for further typing
+        if (isTypeOnly) {
+            // @file / @folder without a specific path — insert @type prefix and
+            // keep popup open showing the file/folder list for the user to pick one.
+            const typePrefix = `@${suggestion.type} `;
+            const sel2 = window.getSelection();
+            if (sel2 && sel2.rangeCount > 0) {
+                const range2 = sel2.getRangeAt(0);
+                const node2 = range2.startContainer;
+                if (node2.nodeType === Node.TEXT_NODE) {
+                    const offset2 = range2.startOffset;
+                    const currentText = node2.textContent || '';
+                    node2.textContent = currentText.substring(0, offset2) + typePrefix + currentText.substring(offset2);
+                    // Move cursor after the inserted type prefix
+                    const newRange2 = document.createRange();
+                    newRange2.setStart(node2, offset2 + typePrefix.length);
+                    newRange2.collapse(true);
+                    sel2.removeAllRanges();
+                    sel2.addRange(newRange2);
+                }
+            }
+            // Update atQuery state and request suggestions for the type prefix
+            // so the popup immediately shows file/folder list
+            setAtQuery(suggestion.type);
+            sendToPlugin('at_suggest', { query: suggestion.type }).catch(() => { });
+            // Keep popup visible for further typing
+            return;
+        }
+
+        if (isFreeInput) {
+            // @web / @codebase without a value — insert @type prefix and close popup.
+            // The user types a URL or search query freely; popup reopens on further @ input.
+            const typePrefix = `@${suggestion.type} `;
+            const sel2 = window.getSelection();
+            if (sel2 && sel2.rangeCount > 0) {
+                const range2 = sel2.getRangeAt(0);
+                const node2 = range2.startContainer;
+                if (node2.nodeType === Node.TEXT_NODE) {
+                    const offset2 = range2.startOffset;
+                    const currentText = node2.textContent || '';
+                    node2.textContent = currentText.substring(0, offset2) + typePrefix + currentText.substring(offset2);
+                    const newRange2 = document.createRange();
+                    newRange2.setStart(node2, offset2 + typePrefix.length);
+                    newRange2.collapse(true);
+                    sel2.removeAllRanges();
+                    sel2.addRange(newRange2);
+                }
+            }
             setAtPopupVisible(false);
             return;
         }
@@ -470,7 +542,14 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
                 {running ? (
                     <button className="stop-btn" onClick={handleStop}>Stop</button>
                 ) : (
-                    <button className="send-btn" onClick={handleSubmit} disabled={!hasContent}>↑</button>
+                    <button
+                        className="send-btn"
+                        onClick={handleSubmit}
+                        disabled={!hasContent || rateLimited}
+                        title={rateLimited ? '限流冷却中，请稍后再发' : undefined}
+                    >
+                        ↑
+                    </button>
                 )}
             </div>
         </div>

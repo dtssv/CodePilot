@@ -6,6 +6,9 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.graph.GraphCheckpointStore;
+import io.codepilot.core.graph.GraphExecutionLog;
+import io.codepilot.core.graph.IntakeIntent;
+import io.codepilot.core.graph.IntakeIntentClassifier;
 import io.codepilot.core.mcp.McpToolExecutor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,9 +26,11 @@ public class IntakeAction implements NodeAction {
     private static final Logger log = LoggerFactory.getLogger(IntakeAction.class);
 
     private final McpToolExecutor mcpToolExecutor;
+    private final IntakeIntentClassifier intakeIntentClassifier;
 
-    public IntakeAction(McpToolExecutor mcpToolExecutor) {
+    public IntakeAction(McpToolExecutor mcpToolExecutor, IntakeIntentClassifier intakeIntentClassifier) {
         this.mcpToolExecutor = mcpToolExecutor;
+        this.intakeIntentClassifier = intakeIntentClassifier;
     }
 
     /**
@@ -83,13 +88,39 @@ public class IntakeAction implements NodeAction {
             // ── Conversation history for multi-turn context ──
             "conversationHistory",
             // ── Max / thinking policy (propagated to graph LLM calls) ──
-            "maxMode", "thinkingMode", "maxOutputTokens"
+            "maxMode", "thinkingMode", "maxOutputTokens",
+            // ── Conversational Q&A (skip planning) ──
+            "conversationalOnly",
+            "planningProseStreamed",
+            "requireFileGather",
+            "allowShellExec",
+            "directToolRound",
+            "phaseToolsHadFailure",
+            "phaseFailureRetries",
+            "phaseCommitBlocked",
+            "sessionHadSuccessfulCompile",
+            "sessionHadSuccessfulRun",
+            "sessionExecutionFacts",
+            "overallGoalUnmet",
+            "intakeIntent",
+            "needsTools",
+            "needsPlanning",
+            "intakeSuggestedTools",
+            "toolApproachHistory",
+            "toolApproachExhausted",
+            "approachEscalationDone",
+            "approachRepeatBlocked",
+            "sessionHasSourceReads",
+            "sessionHasAnalysisOutput",
+            "phaseHasAnalysisOutput",
+            "phaseGeneratePasses"
     );
 
     @Override
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "intake");
+        GraphExecutionLog.nodeEnter(state, "intake");
 
         // Carry over modelId, modelSource and userId so they survive across graph iterations.
         state.<String>value("modelId").ifPresent(v -> updates.put("modelId", v));
@@ -98,12 +129,58 @@ public class IntakeAction implements NodeAction {
         // Carry over projectMeta so it survives across graph iterations.
         state.<String>value("projectMeta").ifPresent(v -> updates.put("projectMeta", v));
 
+        String input = (String) state.value("input").orElse("");
+        String mode = (String) state.value("mode").orElse("AGENT");
+        String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
+
+        if (resumeNextNode.isBlank() && !input.isBlank()) {
+            IntakeIntent intent = intakeIntentClassifier.classify(state, input, mode);
+            updates.put("intakeIntent", intent.toMap());
+            updates.put("needsTools", intent.needsTools());
+            updates.put("needsPlanning", intent.needsPlanning());
+            updates.put("intakeSuggestedTools", intent.toolsAsMaps());
+
+            if (intent.requireFileGather()) {
+                updates.put("requireFileGather", true);
+            }
+            if (intent.allowShellExec()) {
+                updates.put("allowShellExec", true);
+            }
+            if (intent.allowShellExec() && intent.needsPlanning()) {
+                updates.put("workflowCompileRun", true);
+            }
+            if (intent.conversationalOnly()) {
+                updates.put("conversationalOnly", true);
+                updates.put("skipPlan", true);
+                List<Map<String, Object>> phases =
+                        List.of(
+                                Map.of(
+                                        "id",
+                                        "p1",
+                                        "title",
+                                        "Answer",
+                                        "intent",
+                                        "text",
+                                        "entry",
+                                        List.of(),
+                                        "exit",
+                                        List.of(),
+                                        "budget",
+                                        Map.of("attempts", 1)));
+                updates.put("phases", phases);
+                updates.put("phaseCursor", "p1");
+                updates.put("fastPathEnabled", true);
+                log.info("IntakeAction: LLM classified conversational-only → generate (no planning)");
+            }
+        }
+
         log.info("IntakeAction state keys={}, modelId={}, modelSource={}, userId={}, keyStrategies={}",
             state.data().keySet(),
             state.value("modelId").orElse(null),
             state.value("modelSource").orElse(null),
             state.value("userId").orElse(null),
             state.keyStrategies().keySet());
+        GraphExecutionLog.nodeExit(state, "intake", updates);
         return updates;
     }
 
@@ -140,9 +217,18 @@ public class IntakeAction implements NodeAction {
             return "generate";
         }
 
-        // AGENT mode: always go to planning — the LLM will decide whether
-        // to produce a multi-step plan or a simple single-phase plan.
-        // This avoids heuristic-based skipping that can misjudge complex short tasks.
+        if (Boolean.TRUE.equals(state.value("conversationalOnly").orElse(false))) {
+            log.info("IntakeAction route: direct answer → generate (no planning)");
+            return "generate";
+        }
+
+        boolean needsTools = Boolean.TRUE.equals(state.value("needsTools").orElse(false));
+        boolean needsPlanning = Boolean.TRUE.equals(state.value("needsPlanning").orElse(true));
+        if (needsTools && !needsPlanning) {
+            log.info("IntakeAction route: tool-first (no multi-step plan) → generate");
+            return "generate";
+        }
+
         return "planning";
     }
 
@@ -275,48 +361,110 @@ public class IntakeAction implements NodeAction {
             ConversationRunRequest req,
             String userId) {
 
-        // Start with the saved state data
+        // Start with the saved state data, then overlay plugin graphState
         var restored = new HashMap<>(snapshot.stateData());
-
-        // Override sessionId and userId from the resume request
-        restored.put("sessionId", req.sessionId());
-        restored.put("userId", userId);
-
-        // Inject user answers from the resume request
-        if (req.answers() != null && !req.answers().isEmpty()) {
-            restored.put("answers", req.answers());
+        if (req.graphState() != null) {
+            restored.putAll(req.graphState());
         }
 
-        // Carry over modelId/modelSource
+        restored.put("sessionId", req.sessionId());
+        restored.put("userId", userId);
         if (req.modelId() != null) {
             restored.put("modelId", req.modelId());
         }
         if (req.modelSource() != null) {
             restored.put("modelSource", req.modelSource().name());
         }
-
-        // Merge any additional graphState from the plugin
-        if (req.graphState() != null) {
-            restored.putAll(req.graphState());
+        if (req.input() != null && !req.input().isBlank()) {
+            restored.put("input", req.input());
+        }
+        if (req.intent() != null) {
+            restored.put("intent", req.intent().name());
         }
 
-        // Set currentNode to the nextNode from the checkpoint (where to resume from)
+        List<ConversationRunRequest.Answer> answers = resolveResumeAnswers(req);
+        if (!answers.isEmpty()) {
+            restored.put("answers", answers);
+            recordAnsweredNotes(restored, answers);
+        }
+
+        if (req.contexts() != null
+                && req.contexts().recent() != null
+                && !req.contexts().recent().isEmpty()) {
+            var historyMaps =
+                    req.contexts().recent().stream()
+                            .map(
+                                    m -> {
+                                        var map = new java.util.LinkedHashMap<String, String>();
+                                        map.put("role", m.role());
+                                        map.put("content", m.content());
+                                        if (m.summary() != null) map.put("summary", m.summary());
+                                        if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
+                                        return map;
+                                    })
+                            .toList();
+            restored.put("conversationHistory", historyMaps);
+        }
+
+        // Checkpoint nextNode wins over stale graphState fields
         restored.put("currentNode", snapshot.nextNode());
-
-        // Set resumeNextNode so IntakeAction's routeAfterIntake() can jump directly
-        // to the target node, bypassing the intake→planning preamble
         restored.put("resumeNextNode", snapshot.nextNode());
-
-        // Clear doneReason so the graph doesn't immediately terminate
         restored.remove("doneReason");
+        restored.remove("awaiting");
 
         var state = new OverAllState(restored);
         STATE_KEYS.forEach(key -> state.registerKeyAndStrategy(key, new ReplaceStrategy()));
 
-        log.info("restoreFromCheckpoint: nextNode={}, stateKeys={}, hasAnswers={}",
-                snapshot.nextNode(), state.data().keySet(),
-                req.answers() != null ? req.answers().size() : 0);
+        log.info(
+                "restoreFromCheckpoint: nextNode={}, stateKeys={}, answerCount={}, hasInput={}",
+                snapshot.nextNode(),
+                state.data().keySet(),
+                answers.size(),
+                req.input() != null && !req.input().isBlank());
 
         return state;
+    }
+
+    /**
+     * Builds answers for resume: structured {@code answers[]} from the client, or a single
+     * freeform answer synthesized from {@code input} when the user typed in the chat box.
+     */
+    static List<ConversationRunRequest.Answer> resolveResumeAnswers(ConversationRunRequest req) {
+        if (req.answers() != null && !req.answers().isEmpty()) {
+            return req.answers();
+        }
+        if (req.input() == null || req.input().isBlank()) {
+            return List.of();
+        }
+        if (req.intent() == ConversationRunRequest.Intent.ANSWER
+                || req.intent() == ConversationRunRequest.Intent.CONTINUE) {
+            return List.of(new ConversationRunRequest.Answer("", null, req.input(), null));
+        }
+        return List.of();
+    }
+
+    @SuppressWarnings("unchecked")
+    static void recordAnsweredNotes(
+            Map<String, Object> restored, List<ConversationRunRequest.Answer> answers) {
+        var ledger =
+                new HashMap<>(
+                        (Map<String, Object>)
+                                restored.getOrDefault("taskLedger", Map.of()));
+        var notes = new ArrayList<>((List<String>) ledger.getOrDefault("notes", List.of()));
+        for (var answer : answers) {
+            if (answer.questionId() != null && !answer.questionId().isBlank()) {
+                String value =
+                        answer.freeform() != null && !answer.freeform().isBlank()
+                                ? answer.freeform()
+                                : answer.optionId();
+                notes.add("answered:" + answer.questionId() + "=" + value);
+            } else if (answer.freeform() != null && !answer.freeform().isBlank()) {
+                notes.add("answered:freeform=" + answer.freeform());
+            } else if (answer.optionId() != null && !answer.optionId().isBlank()) {
+                notes.add("answered:option=" + answer.optionId());
+            }
+        }
+        ledger.put("notes", notes);
+        restored.put("taskLedger", ledger);
     }
 }

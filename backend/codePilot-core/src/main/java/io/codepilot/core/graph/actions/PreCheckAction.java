@@ -3,6 +3,8 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.UserPlanProgressHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -38,6 +40,8 @@ public class PreCheckAction implements NodeAction {
         updates.put("currentNode", "preCheck");
 
         String phaseId = (String) state.value("phaseCursor").orElse("");
+        GraphUiEmitter.transition(state, "preCheck");
+        UserPlanProgressHelper.emitForCurrentPhase(state, "in_progress");
         var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
         var completedPhases = (List<String>) state.value("completedPhases").orElse(List.of());
         var modifiedFiles = (List<String>) state.value("modifiedFiles").orElse(List.of());

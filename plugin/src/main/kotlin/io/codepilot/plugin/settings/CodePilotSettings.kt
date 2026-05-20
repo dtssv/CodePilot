@@ -37,7 +37,8 @@ class CodePilotSettings : PersistentStateComponent<CodePilotSettings.State> {
         var autoApplyLowRiskPatches: Boolean = false,
         /** ★ P0-03 Hunk Apply: when true, fs.write/create/replace go through PatchStaging
          *  so the WebUI can show per-hunk accept/reject before committing to disk. */
-        var stageBeforeApply: Boolean = true,
+        /** When false (default), patches go through IDE diff / direct write instead of WebUI staging. */
+        var stageBeforeApply: Boolean = false,
         var allowDevSso: Boolean = false,
         /** Dev token for bypassing JWT auth in development builds. Empty in production. */
         var devToken: String = "",

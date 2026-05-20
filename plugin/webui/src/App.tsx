@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { sendToPlugin } from './bridge';
-import { LoginPage } from './components/LoginPage';
-import { McpConfirmDialog } from './components/mcp/McpConfirmDialog';
+import { onPluginEvent, sendToPlugin } from './bridge';
+import type { BudgetBreakdown } from './components/ContextBudgetBar';
+import type { ContextChipData } from './components/ContextChip';
 import { AppTabBar } from './components/layout/AppTabBar';
 import { AppTopBar } from './components/layout/AppTopBar';
 import { ChatInputSection } from './components/layout/ChatInputSection';
 import { ChatMainArea } from './components/layout/ChatMainArea';
-import type { BudgetBreakdown } from './components/ContextBudgetBar';
-import type { ContextChipData } from './components/ContextChip';
+import { MessageQueueBanner } from './components/layout/MessageQueueBanner';
+import { LoginPage } from './components/LoginPage';
+import { McpConfirmDialog } from './components/mcp/McpConfirmDialog';
 import type { SessionCostInfo } from './components/SessionCostPanel';
 import {
     installAuthenticatedSettings,
@@ -20,16 +21,16 @@ import {
     installVisionErrorBridge,
 } from './state/appBootstrap';
 import { useDocumentTheme } from './state/appShellBridge';
-import { isV2Enabled } from './state/chatStore';
+import { useBackgroundActiveCount } from './state/bgTasksStore';
+import { finalizeRunningTurns, isV2Enabled } from './state/chatStore';
 import type { ChatMessage } from './state/chatTypes';
-export type { ToolCallInfo } from './state/chatTypes';
 import { clearConsole, useConsoleEntries } from './state/consoleStore';
 import type { ModelOption } from './state/modelAuthBridge';
-import { useBackgroundActiveCount } from './state/bgTasksStore';
 import { usePendingMemoryCount } from './state/rulesMemory';
-import { useBranches, useSessions } from './state/sessionUiStore';
 import { createSendHandlers, createSessionActions, handleRemoveContextChip } from './state/sendBridge';
+import { useBranches, useSessions } from './state/sessionUiStore';
 import type { AppTab } from './types/appTabs';
+export type { ToolCallInfo } from './state/chatTypes';
 
 export function App() {
     const [authenticated, setAuthenticated] = useState(false);
@@ -108,6 +109,23 @@ export function App() {
     useDocumentTheme(theme);
     useEffect(() => installThemeBridge(setTheme), []);
     useEffect(() => installVisionErrorBridge(setSendError), []);
+    useEffect(() => {
+        const offQueued = onPluginEvent('message_queued', (payload) => {
+            const size = (payload as { queueSize?: number }).queueSize ?? 1;
+            setSendError(`上一条任务仍在执行，消息已加入队列（${size}）`);
+        });
+        const offRunning = onPluginEvent('conversation_running', (payload) => {
+            const running = Boolean((payload as { running?: boolean }).running);
+            if (!running) {
+                setSendError(null);
+                finalizeRunningTurns();
+            }
+        });
+        return () => {
+            offQueued();
+            offRunning();
+        };
+    }, []);
     useEffect(
         () => installAuthenticatedSettings(authenticated, bootstrapRefs, bootstrapSetters),
         [authenticated, bootstrapRefs, bootstrapSetters],
@@ -195,6 +213,7 @@ export function App() {
                         onClearConsole={() => clearConsole()}
                     />
                     <div className="input-section">
+                        {activeTab === 'chat' && <MessageQueueBanner />}
                         {activeTab === 'chat' && (
                             <ChatInputSection
                                 contextTokens={contextTokens}

@@ -3,6 +3,8 @@ package io.codepilot.core.graph.actions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.PhaseGoalHelper;
+import io.codepilot.core.graph.ShellCommandGate;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,7 +30,11 @@ public class FinalizeAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "finalize");
+        boolean goalUnmet = Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))
+                || !PhaseGoalHelper.overallCompileRunGoalMet(state);
+        // Always mark the graph run as finished; goalUnmet is informational for the client UI.
         updates.put("doneReason", "final");
+        updates.put("goalUnmet", goalUnmet);
 
         String sessionId = (String) state.value("sessionId").orElse("");
         var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
@@ -77,6 +83,17 @@ public class FinalizeAction implements NodeAction {
 
         summary.append("Tool calls executed: ").append(completedToolCalls.size()).append("\n");
 
+        if (goalUnmet && ShellCommandGate.isCompileRunIntent((String) state.value("input").orElse(""))) {
+            summary.append("\n⚠ User goal (compile and run) was not fully verified.\n");
+            if (!Boolean.TRUE.equals(state.value("sessionHadSuccessfulCompile").orElse(false))) {
+                summary.append("- No successful compile command was recorded.\n");
+            }
+            if (!Boolean.TRUE.equals(state.value("sessionHadSuccessfulRun").orElse(false))) {
+                summary.append("- No successful run of the built executable was recorded.\n");
+            }
+            summary.append("Try running the binary directly (e.g. ./main_program or ./build/test).\n");
+        }
+
         // 2. Build session digest for persistence
         Map<String, Object> sessionDigest = new HashMap<>();
         sessionDigest.put("summary", summary.toString());
@@ -103,6 +120,7 @@ public class FinalizeAction implements NodeAction {
         GraphSseHelper.emitEvent(state, SseEvents.DONE,
             Map.of(
                 "reason", "final",
+                "goalUnmet", goalUnmet,
                 "summary", summary.toString(),
                 "changedFiles", changedFiles,
                 "completedPhases", completedPhases,

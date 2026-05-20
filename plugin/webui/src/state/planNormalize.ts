@@ -68,12 +68,22 @@ export type PlanProgressPayload = {
     completedSteps?: number;
 };
 
+function stepIndexFromPlanId(stepId: string | undefined): number | undefined {
+    if (!stepId) return undefined;
+    const m = /^(?:s|p)(\d+)$/i.exec(stepId.trim());
+    if (!m) return undefined;
+    const n = parseInt(m[1], 10);
+    return Number.isFinite(n) && n > 0 ? n - 1 : undefined;
+}
+
 export function applyPlanProgress(plan: PlanStep[], data: PlanProgressPayload): PlanStep[] {
     if (!plan.length) return plan;
+    const phaseIdx = stepIndexFromPlanId(data.stepId);
     let updated = plan.map((step, idx) => {
         const nextStatus = data.status ? normalizePlanStatus(data.status) : step.status;
         if (data.stepId && step.id === data.stepId) return { ...step, status: nextStatus };
         if (data.stepIndex !== undefined && idx === data.stepIndex) return { ...step, status: nextStatus };
+        if (phaseIdx !== undefined && idx === phaseIdx) return { ...step, status: nextStatus };
         return step;
     });
     if (data.completedSteps !== undefined && data.completedSteps > 0) {

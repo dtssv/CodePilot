@@ -2,6 +2,7 @@ package io.codepilot.core.graph;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import io.codepilot.core.conversation.SseFactory;
+import io.codepilot.core.sse.SseEvents;
 import org.springframework.http.codec.ServerSentEvent;
 import reactor.core.publisher.Sinks;
 
@@ -95,6 +96,7 @@ public final class GraphSseHelper {
 
     @SuppressWarnings("unchecked")
     public static void emitEvent(OverAllState state, String eventType, Object data) {
+        GraphExecutionLog.sseEmit(state, eventType, data);
         // 1. Accumulate in state for backward compatibility
         var events = (List<Map<String, Object>>) state.value("sseEvents")
                 .orElseGet(ArrayList::new);
@@ -126,5 +128,23 @@ public final class GraphSseHelper {
                 // Sink may be closed or terminated; ignore
             }
         }
+    }
+
+  /** User-visible token stream during LLM calls. */
+  public static void emitStreamDelta(OverAllState state, String text) {
+    if (text == null || text.isBlank()) {
+      return;
+    }
+    String cleaned = GraphContentSanitizer.stripForDisplay(text);
+    if (cleaned.isBlank()) {
+      return;
+    }
+    emitEvent(state, SseEvents.DELTA, Map.of("text", cleaned));
+  }
+
+    /** Announces graph node entry (transition only; user text comes from the model). */
+    public static void emitNodeStarted(OverAllState state, String node) {
+        String phaseId = (String) state.value("phaseCursor").orElse("");
+        emitEvent(state, SseEvents.GRAPH_TRANSITION, Map.of("to", node, "phaseId", phaseId));
     }
 }

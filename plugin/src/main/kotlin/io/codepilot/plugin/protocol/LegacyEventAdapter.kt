@@ -41,6 +41,9 @@ class LegacyEventAdapter(
     /** Last agent_* step id, for "previous-step-success" cascading. */
     private var lastAgentStepId: String? = null
 
+    /** Kind of the last open agent step (suppress duplicate running heartbeats). */
+    private var lastAgentKind: String? = null
+
     /** Stable plan step for the turn (user_plan + progress). */
     private var planStepId: String? = null
 
@@ -49,6 +52,11 @@ class LegacyEventAdapter(
 
     /** Whether endTurn() has already been emitted (idempotency). */
     private var ended = false
+
+    /** Single writing step per turn — merged file list from all apply phases. */
+    private var writingStepId: String? = null
+
+    private val writingFilesAcc = mutableListOf<Map<String, Any?>>()
 
     private fun nextStepId(prefix: String): String {
         stepCounter += 1
@@ -61,6 +69,8 @@ class LegacyEventAdapter(
         images: List<Map<String, Any?>> = emptyList(),
         forkMessageIndex: Int? = null,
     ) {
+        writingStepId = null
+        writingFilesAcc.clear()
         bus.startTurn(turnId, userMessage, contextRefs, images, forkMessageIndex)
     }
 
@@ -77,11 +87,25 @@ class LegacyEventAdapter(
     }
 
     fun onToolCall(toolCallId: String, toolName: String, args: com.fasterxml.jackson.databind.JsonNode?) {
-        // close any in-flight LLM step textually but keep it open until turn end
-        val sid = nextStepId("tool")
+        // Use backend toolCallId as envelope stepId so shell.ask aligns with the tool card.
+        val sid = toolCallId
         toolSteps[toolCallId] = sid
         toolCallInfos[toolCallId] = ToolCallInfo(toolName, args)
-        bus.startStep(turnId, sid, StepKinds.TOOL, toolName, parentStepId = llmStepId)
+        val title =
+            when (toolName) {
+                "shell.exec", "shell.session" ->
+                    args?.path("command")?.asText(null)?.trim()?.takeIf { it.isNotBlank() }
+                        ?: toolName
+                else -> toolName
+            }
+        val detail =
+            if (toolName == "shell.exec" || toolName == "shell.session") {
+                val cmd = args?.path("command")?.asText(null)?.trim().orEmpty()
+                mapOf("kind" to "shell", "command" to cmd, "status" to "running")
+            } else {
+                null
+            }
+        bus.startStep(turnId, sid, StepKinds.TOOL, title, parentStepId = llmStepId, detail = detail)
         bus.toolCall(turnId, sid, toolName, args, parentStepId = llmStepId)
     }
 
@@ -123,23 +147,84 @@ class LegacyEventAdapter(
     fun onAgentReading(summary: String?) =
         emitAgentStep("reading", summary ?: "Reading files", finalize = true)
 
-    fun onAgentWriting(text: String?) =
-        emitAgentStep("writing", text ?: "Writing files", finalize = false)
+    fun onAgentWriting(text: String?, files: List<Map<String, Any?>>? = null) {
+        if (!files.isNullOrEmpty()) {
+            for (f in files) {
+                val path = f["path"]?.toString()?.trim().orEmpty()
+                if (path.isEmpty()) continue
+                writingFilesAcc.removeAll { it["path"]?.toString() == path }
+                writingFilesAcc.add(f)
+            }
+        }
+        val summary = text?.takeIf { it.isNotBlank() }
+            ?: if (writingFilesAcc.isEmpty()) "Writing files"
+            else writingFilesAcc.joinToString(", ") { f ->
+                val path = f["path"]?.toString() ?: "?"
+                val op = f["op"]?.toString() ?: "write"
+                val lines = f["lineCount"]
+                val label = if (op == "create") "新建" else if (op == "delete") "删除" else "修改"
+                if (lines != null) "$label: $path +${lines}行" else "$label: $path"
+            }
+        val existing = writingStepId
+        if (existing != null) {
+            bus.stepProgress(
+                turnId,
+                existing,
+                mapOf(
+                    "files" to writingFilesAcc.toList(),
+                    "text" to summary,
+                    "kind" to "writing",
+                ),
+            )
+            return
+        }
+        lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
+        val sid = nextStepId("writing")
+        writingStepId = sid
+        lastAgentStepId = sid
+        lastAgentKind = "writing"
+        bus.startStep(
+            turnId,
+            sid,
+            "writing",
+            summary,
+            parentStepId = llmStepId,
+            detail = if (writingFilesAcc.isEmpty()) null else mapOf("files" to writingFilesAcc.toList()),
+        )
+    }
 
     fun onAgentRunning(text: String?) =
         emitAgentStep("running", text ?: "Running command", finalize = false)
 
-    private fun emitAgentStep(kind: String, title: String, finalize: Boolean) {
-        // Close previous still-running agent step (legacy events implied "previous done")
+    private fun emitAgentStep(
+        kind: String,
+        title: String,
+        finalize: Boolean,
+        detail: Map<String, Any?>? = null,
+    ) {
+        if (!finalize && lastAgentStepId != null && lastAgentKind == kind) {
+            return
+        }
         lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
         val sid = nextStepId(kind)
-        bus.startStep(turnId, sid, kind, title, parentStepId = llmStepId)
+        bus.startStep(turnId, sid, kind, title, parentStepId = llmStepId, detail = detail)
         if (finalize) {
             bus.endStep(turnId, sid, StepStatuses.SUCCESS)
             lastAgentStepId = null
+            lastAgentKind = null
         } else {
             lastAgentStepId = sid
+            lastAgentKind = kind
         }
+    }
+
+    /** Graph node transition — show as a running progress step in the chat timeline. */
+    fun onGraphTransition(payload: Any?) {
+        val message =
+            (payload as? Map<*, *>)?.get("message")?.toString()
+                ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("message")?.asText(null)
+        if (message.isNullOrBlank()) return
+        emitAgentStep("running", message, finalize = false)
     }
 
     fun onPlanUpdate(payload: Any?) {
@@ -159,10 +244,63 @@ class LegacyEventAdapter(
     }
 
     fun onGraphVerify(payload: Any?) {
-        val title = (payload as? Map<*, *>)?.get("summary")?.toString()
-            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("summary")?.asText("验证结果")
-            ?: "验证结果"
-        emitAgentStep(StepKinds.VERIFY, title, finalize = true)
+        val map =
+            when (payload) {
+                is Map<*, *> -> payload
+                is com.fasterxml.jackson.databind.JsonNode -> payload
+                else -> null
+            }
+        val result =
+            when (map) {
+                is Map<*, *> -> map["result"]?.toString()
+                is com.fasterxml.jackson.databind.JsonNode -> map.path("result").asText(null)
+                else -> null
+            } ?: "uncertain"
+        val summary =
+            when (map) {
+                is Map<*, *> -> map["summary"]?.toString()
+                is com.fasterxml.jackson.databind.JsonNode -> map.path("summary").asText(null)
+                else -> null
+            }
+        val title =
+            when (result) {
+                "success" -> "验证通过"
+                "fail" -> "验证未通过"
+                else -> "验证结果待确认"
+            }
+        val failures =
+            when (map) {
+                is Map<*, *> ->
+                    (map["failures"] as? List<*>)?.mapNotNull { it?.toString()?.takeIf { s -> s.isNotBlank() } }
+                        ?: emptyList()
+                is com.fasterxml.jackson.databind.JsonNode -> {
+                    val node = map.path("failures")
+                    if (!node.isArray) emptyList()
+                    else node.mapNotNull { it.asText(null)?.takeIf { s -> s.isNotBlank() } }
+                }
+                else -> emptyList()
+            }
+        val detail =
+            when {
+                failures.isNotEmpty() ->
+                    mapOf(
+                        "output" to failures.joinToString("\n"),
+                        "summary" to (summary ?: title),
+                    )
+                summary != null -> mapOf("summary" to summary)
+                else -> null
+            }
+        val endStatus =
+            when (result) {
+                "fail" -> StepStatuses.ERROR
+                else -> StepStatuses.SUCCESS
+            }
+        lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
+        val sid = nextStepId("verify")
+        bus.startStep(turnId, sid, StepKinds.VERIFY, title, parentStepId = llmStepId, detail = detail)
+        bus.endStep(turnId, sid, endStatus, if (result == "fail") summary else null)
+        lastAgentStepId = null
+        lastAgentKind = null
     }
 
     fun onGraphPhaseDone(payload: Any?) {
@@ -176,7 +314,7 @@ class LegacyEventAdapter(
         val title = (payload as? Map<*, *>)?.get("summary")?.toString()
             ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("summary")?.asText("修复计划")
             ?: "修复计划"
-        emitAgentStep(StepKinds.REPAIR, title, finalize = true)
+        emitAgentStep(StepKinds.REPAIR, title, finalize = false)
     }
 
     fun onGraphBudgetAlert(payload: Any?) {
@@ -204,7 +342,7 @@ class LegacyEventAdapter(
 
     /** Call on every legacy `done` event. Only terminal reasons close the turn. */
     fun onDone(reason: String) {
-        val terminal = reason in TERMINAL_REASONS
+        val terminal = TerminalDoneReasons.isTerminal(reason)
         if (!terminal) return
         if (ended) return
         ended = true
@@ -244,7 +382,4 @@ class LegacyEventAdapter(
         bus.endTurn(turnId, TurnStatuses.INTERRUPTED, "stream_closed")
     }
 
-    companion object {
-        private val TERMINAL_REASONS = setOf("final", "failed", "stopped", "max_steps")
-    }
 }

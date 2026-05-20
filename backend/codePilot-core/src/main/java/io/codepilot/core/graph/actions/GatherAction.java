@@ -4,7 +4,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.conversation.ToolResultBus;
 import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
-import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.*;
 import io.codepilot.core.graph.gather.InfoRequestDispatcher;
 import io.codepilot.core.graph.gather.InfoRequestValidator;
 import io.codepilot.core.sse.SseEvents;
@@ -45,6 +45,7 @@ public class GatherAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "gather");
+        GraphExecutionLog.nodeEnter(state, "gather");
 
         String phaseId = (String) state.value("phaseCursor").orElse("");
         var rawRequests = normalizeInfoRequests(state.value("infoRequests").orElse(List.of()));
@@ -55,11 +56,15 @@ public class GatherAction implements NodeAction {
             return updates;
         }
 
+        GraphUiEmitter.transition(state, "gather");
+
         // 1. Validate requests (validate throws on invalid batch)
         List<Map<String, Object>> validRequests = new ArrayList<>();
         List<String> validationErrors = new ArrayList<>();
+        boolean allowMutatingShell =
+                Boolean.TRUE.equals(state.value("allowShellExec").orElse(false));
         try {
-            validator.validate(rawRequests);
+            validator.validate(rawRequests, allowMutatingShell);
             validRequests.addAll(rawRequests);
         } catch (IllegalArgumentException e) {
             log.warn("Gather: validation failed: {}", e.getMessage());
@@ -110,10 +115,12 @@ public class GatherAction implements NodeAction {
 
             // Emit a tool_call SSE so the client knows to execute and return results
             // via the ToolResultBus (same pattern as ApplyPatchAction/VerifyAction)
+            var gatherArgs = Map.of("phaseId", phaseId, "requests", clientRequests);
+            GraphExecutionLog.toolCallEmit(state, gatherToolCallId, "gather.execute", gatherArgs);
             GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, Map.of(
                 "id", gatherToolCallId,
                 "name", "gather.execute",
-                "args", Map.of("phaseId", phaseId, "requests", clientRequests)
+                "args", gatherArgs
             ));
 
             // Also emit the legacy graph_info_request event for UI display
@@ -125,9 +132,14 @@ public class GatherAction implements NodeAction {
             try {
                 log.info("Gather: waiting for client results, sessionId={}, toolCallId={}, timeout={}s",
                         sessionId, gatherToolCallId, CLIENT_RESULT_TIMEOUT.toSeconds());
-                result = pendingFuture.get(CLIENT_RESULT_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                result = GraphToolWaitHelper.await(
+                        pendingFuture, state, "读取文件中", CLIENT_RESULT_TIMEOUT);
                 log.info("Gather: received client results for toolCallId={}, ok={}", gatherToolCallId,
                         result != null && result.ok());
+                if (result != null) {
+                    GraphExecutionLog.toolResultAwait(
+                            state, gatherToolCallId, result.ok(), result.errorMessage());
+                }
             } catch (Exception e) {
                 ToolResultBus.unregisterFuture(sessionId, gatherToolCallId);
                 result = null;
@@ -206,8 +218,12 @@ public class GatherAction implements NodeAction {
             updates.put("gatherExhausted", true);
         }
 
+        PhaseOutcomeHelper.recordGatheredOutcome(state, gatheredInfo, updates);
+        ToolApproachTracker.recordFromRequests(state, clientRequests, gatheredInfo, updates);
+
         log.info("Gather: {} server + {} client requests processed (total gathers: {})",
             serverRequests.size(), clientRequests.size(), gatherCount);
+        GraphExecutionLog.nodeExit(state, "gather", updates);
         return updates;
     }
 

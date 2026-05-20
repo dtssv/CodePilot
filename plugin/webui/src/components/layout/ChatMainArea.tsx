@@ -1,7 +1,6 @@
 import { sendToPlugin } from '../../bridge';
 import type { ChatMessage } from '../../state/chatTypes';
 import type { AppTab } from '../../types/appTabs';
-import { ChangePanel } from '../apply/ChangePanel';
 import { BackgroundTasksPanel } from '../background/BackgroundTasksPanel';
 import { ChatView } from '../ChatView';
 import { CodebasePanel } from '../codebase/CodebasePanel';
@@ -86,7 +85,6 @@ export function ChatMainArea({
             )}
             {activeTab === 'chat' && (
                 <>
-                    <ChangePanel />
                     <InlineEditTimeline />
                     {v2Enabled ? (
                         <ChatViewV2 />

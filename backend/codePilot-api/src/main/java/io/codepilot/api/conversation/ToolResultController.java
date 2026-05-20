@@ -3,6 +3,7 @@ package io.codepilot.api.conversation;
 import io.codepilot.common.api.ApiResponse;
 import io.codepilot.core.conversation.ToolResultBus;
 import io.codepilot.core.conversation.ToolResultBus.ToolResultEvent;
+import io.codepilot.core.graph.GraphExecutionLog;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.MediaType;
@@ -39,6 +40,8 @@ public class ToolResultController {
             req.errorCode(),
             req.errorMessage(),
             req.durationMs() == null ? 0 : req.durationMs());
+    GraphExecutionLog.toolResultIn(
+        req.sessionId(), req.toolCallId(), req.ok(), req.result(), req.errorMessage());
     return bus.publish(req.sessionId(), event)
         .map(received -> ApiResponse.ok(new Ack(req.toolCallId(), "received")));
   }

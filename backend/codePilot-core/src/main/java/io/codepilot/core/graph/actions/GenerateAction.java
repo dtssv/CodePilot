@@ -6,9 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
-import io.codepilot.core.graph.GraphLlmHelper;
-import io.codepilot.core.graph.GraphSseHelper;
-import io.codepilot.core.graph.LlmJsonExtract;
+import io.codepilot.core.graph.*;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
@@ -51,9 +49,37 @@ public class GenerateAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "generate");
+        if (Boolean.TRUE.equals(state.value("approachRepeatBlocked").orElse(false))) {
+            updates.put("approachRepeatBlocked", false);
+        }
+        GraphExecutionLog.nodeEnter(state, "generate");
 
         String input = (String) state.value("input").orElse("");
         String phaseId = (String) state.value("phaseCursor").orElse("");
+        int failureRetries = (int) state.value("phaseFailureRetries").orElse(0);
+        int generatePasses = (int) state.value("phaseGeneratePasses").orElse(0) + 1;
+        updates.put("phaseGeneratePasses", generatePasses);
+        if (ToolApproachTracker.isExhausted(state)
+                && !Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false))) {
+            log.warn("GenerateAction: tool approaches exhausted for phase {} — LLM user message", phaseId);
+            var escalated = deliverApproachEscalation(state, updates, phaseId, input);
+            GraphExecutionLog.nodeExit(state, "generate", escalated);
+            return escalated;
+        }
+        if (failureRetries >= 3
+                && PhaseOutcomeHelper.rawToolsHadFailure(state)
+                && !PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+            log.warn(
+                    "GenerateAction: phase {} stuck after {} failure retries — escalating to askUser",
+                    phaseId,
+                    failureRetries);
+            updates.put("generateResult", "askUser");
+            updates.put("askUserQuestion", GraphUserMessages.stepStuckQuestion(phaseId));
+            GraphExecutionLog.nodeExit(state, "generate", updates);
+            return updates;
+        }
+        boolean conversationalOnly =
+                Boolean.TRUE.equals(state.value("conversationalOnly").orElse(false));
         var userPlan = (Map<String, Object>) state.value("userPlan").orElse(Map.of());
         var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
         var gatheredInfo = (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
@@ -72,10 +98,28 @@ public class GenerateAction implements NodeAction {
         // requesting more information. This prevents infinite generate→gather→reenter→generate loops.
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
-        String generatePrompt = buildGeneratePrompt(input, phaseId, currentPhase, userPlan, gatheredInfo, projectMeta, gatherCount, gatherExhausted, mcpTools);
+        String generatePrompt =
+                conversationalOnly
+                        ? buildConversationalPrompt(input, projectMeta)
+                        : buildGeneratePrompt(
+                                state,
+                                input,
+                                phaseId,
+                                currentPhase,
+                                userPlan,
+                                gatheredInfo,
+                                projectMeta,
+                                gatherCount,
+                                gatherExhausted,
+                                mcpTools);
 
-        // ── Call LLM ──
-        String llmResponse;
+        GraphUiEmitter.transition(state, "generate");
+        if (!conversationalOnly) {
+            UserPlanProgressHelper.emitForCurrentPhase(state, "in_progress");
+        }
+
+        // ── Call LLM (marker-aware streaming) ──
+        String llmResponse = "";
         try {
             String modelId = (String) state.value("modelId").orElse(null);
             String modelSourceName = (String) state.value("modelSource").orElse(null);
@@ -84,47 +128,69 @@ public class GenerateAction implements NodeAction {
             log.info("GenerateAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
             ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
 
-            llmResponse = GraphLlmHelper.completeUserPrompt(chatClient, state, generatePrompt);
+            llmResponse =
+                    GraphLlmHelper.streamUserPromptToSse(
+                            chatClient, state, generatePrompt, updates, !conversationalOnly);
         } catch (Exception e) {
             log.error("LLM generate call failed for phase={}", phaseId, e);
-            // LLM call failed — route to askUser so the user can decide how to proceed
-            updates.put("generateResult", "askUser");
-            updates.put("askUserQuestion", Map.of(
-                    "id", "gen-llm-failed-" + phaseId,
-                    "text", "Code generation failed: " + e.getMessage(),
-                    "kind", "single-choice",
-                    "options", List.of(
-                            Map.of("id", "retry", "label", "Retry generation"),
-                            Map.of("id", "skip", "label", "Skip this phase")
-                    )
-            ));
-            return updates;
+            if (GraphFailurePolicy.handleGenerateLlmFailure(state, updates, phaseId, e)) {
+                GraphExecutionLog.nodeExit(state, "generate", updates);
+                return updates;
+            }
         }
 
         // ── Parse LLM response ──
-        GraphSseHelper.emitEvent(state, "graph_transition",
-                Map.of("from", "preCheck", "to", "generate", "phaseId", phaseId));
-
+        if (conversationalOnly) {
+            var conv = handleUnstructuredResponse(
+                    llmResponse,
+                    state,
+                    phaseId,
+                    updates,
+                    Boolean.TRUE.equals(updates.get("plainTextStreamed")));
+            GraphExecutionLog.nodeExit(state, "generate", conv);
+            return conv;
+        }
         try {
-            return parseGenerateResponse(llmResponse, state, phaseId, updates);
+            var parsed = parseGenerateResponse(llmResponse, state, phaseId, updates);
+            GraphExecutionLog.nodeExit(state, "generate", parsed);
+            return parsed;
         } catch (Exception e) {
             log.warn("Failed to parse LLM generate response for phase={}, treating as text output", phaseId, e);
-            // If we can't parse structured output, wrap the raw text as a delta event
-            return handleUnstructuredResponse(llmResponse, state, phaseId, updates);
+            var unstructured = handleUnstructuredResponse(
+                    llmResponse,
+                    state,
+                    phaseId,
+                    updates,
+                    Boolean.TRUE.equals(updates.get("plainTextStreamed")));
+            GraphExecutionLog.nodeExit(state, "generate", unstructured);
+            return unstructured;
         }
     }
 
-    private String buildGeneratePrompt(String input, String phaseId,
-                                        Map<String, Object> currentPhase,
-                                        Map<String, Object> userPlan,
-                                        Map<String, Object> gatheredInfo,
-                                        String projectMeta,
-                                        int gatherCount,
-                                        boolean gatherExhausted,
-                                        List<Map<String, Object>> mcpTools) {
+    private String buildConversationalPrompt(String input, String projectMeta) {
+        String template = promptRegistry.get("graph.conversational");
+        String projectMetaSection =
+                projectMeta.isBlank() ? "" : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
+        return template.replace("{{projectMeta}}", projectMetaSection).replace("{{input}}", input);
+    }
+
+    private String buildGeneratePrompt(
+            OverAllState state,
+            String input,
+            String phaseId,
+            Map<String, Object> currentPhase,
+            Map<String, Object> userPlan,
+            Map<String, Object> gatheredInfo,
+            String projectMeta,
+            int gatherCount,
+            boolean gatherExhausted,
+            List<Map<String, Object>> mcpTools) {
+        int stepIndex = UserPlanProgressHelper.currentStepIndex(state);
+        boolean planningProseStreamed =
+                Boolean.TRUE.equals(state.value("planningProseStreamed").orElse(false));
         String template = promptRegistry.get("graph.generate");
         String gatheredContext = gatheredInfo.isEmpty() ? ""
-                : "[GATHERED CONTEXT]\n" + formatGatheredInfo(gatheredInfo);
+                : "[GATHERED CONTEXT]\n" + GatheredInfoFormatter.format(gatheredInfo);
         String projectMetaSection = projectMeta.isBlank() ? ""
                 : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
 
@@ -149,92 +215,229 @@ public class GenerateAction implements NodeAction {
             antiLoopDirective += "\n[GATHER BUDGET EXHAUSTED] You have exceeded the maximum number of information-gathering rounds. "
                 + "You MUST produce patches or textOutput now. Setting infoRequests will be ignored.\n";
         }
-
+        String goalDirective = PhaseGoalHelper.stepAlreadySatisfiedDirective(state);
+        if (!goalDirective.isBlank()) {
+            antiLoopDirective += goalDirective;
+        } else if (PhaseOutcomeHelper.rawToolsHadFailure(state)) {
+            antiLoopDirective += PhaseOutcomeHelper.failureDirective();
+        }
+        String approachDirective = ToolApproachTracker.promptDirective(state);
+        if (!approachDirective.isBlank()) {
+            antiLoopDirective += approachDirective;
+        }
+        if (Boolean.TRUE.equals(state.value("approachRepeatBlocked").orElse(false))) {
+            antiLoopDirective +=
+                    "\n[MANDATORY] Your last toolCalls repeated an approach already listed above. "
+                            + "Use a DIFFERENT tool, path, or query — do not resend the same fs.list/fs.read.\n";
+        }
+        String taskDirective =
+                buildTaskDirective(state)
+                        + CompileHintHelper.directive(projectMeta, input)
+                        + SessionExecutionFacts.adaptationDirective(state);
+        String proseBudget = "";
+        if (planningProseStreamed || stepIndex > 0) {
+            proseBudget =
+                    "\n\n[PROSE BUDGET — STRICT]\n"
+                            + "Do NOT restate the user's full request or multi-step plan essay.\n"
+                            + "AGENT_CONTENT: at most 2 short sentences about what you will do in THIS step only.\n"
+                            + "Prefer toolCalls over long prose when compile/run is needed.\n";
+        }
         return template
                 .replace("{{projectMeta}}", projectMetaSection)
                 .replace("{{input}}", input)
                 .replace("{{phaseId}}", phaseId)
                 .replace("{{phaseTitle}}", String.valueOf(currentPhase.getOrDefault("title", "")))
                 .replace("{{phaseIntent}}", String.valueOf(currentPhase.getOrDefault("intent", "code-change")))
+                .replace("{{userPlanSteps}}", formatUserPlanOverview(userPlan))
+                .replace(
+                        "{{currentPlanStep}}",
+                        formatCurrentPlanStep(state, userPlan, currentPhase, stepIndex))
                 .replace("{{gatheredContext}}", gatheredContext)
-                .replace("{{userLocale}}", "zh-CN")
+                .replace("{{userLocale}}", "与用户输入语言一致")
                 .replace("{{mcpTools}}", mcpToolsSection)
+                + taskDirective
+                + proseBudget
                 + antiLoopDirective;
     }
 
-    /**
-     * Formats gathered info into a human-readable string that the LLM can understand.
-     * Each entry is formatted as: "kind: path\n<content snippet>"
-     */
     @SuppressWarnings("unchecked")
-    private String formatGatheredInfo(Map<String, Object> gatheredInfo) {
+    private String buildTaskDirective(OverAllState state) {
         StringBuilder sb = new StringBuilder();
-        for (var entry : gatheredInfo.entrySet()) {
-            Object value = entry.getValue();
-            if (value instanceof Map<?, ?> rawMap) {
-                Map<String, Object> map = (Map<String, Object>) rawMap;
-                String kind = String.valueOf(map.getOrDefault("kind", "unknown"));
-                String id = String.valueOf(map.getOrDefault("id", entry.getKey()));
-                boolean ok = Boolean.TRUE.equals(map.get("ok"));
-
-                if (!ok) {
-                    sb.append("- [FAILED] ").append(kind).append(" (").append(id).append("): ")
-                      .append(map.getOrDefault("errorMessage", "unknown error")).append("\n");
-                    continue;
-                }
-
-                Object result = map.get("result");
-                if (result instanceof Map<?, ?> rawResultMap) {
-                    Map<String, Object> resultMap = (Map<String, Object>) rawResultMap;
-                    // fs.read result: has "path" and "content"
-                    String path = String.valueOf(resultMap.getOrDefault("path", ""));
-                    Object content = resultMap.get("content");
-                    if (content != null && !content.toString().isBlank()) {
-                        String contentStr = content.toString();
-                        // Truncate very long file contents
-                        if (contentStr.length() > 4000) {
-                            contentStr = contentStr.substring(0, 4000) + "\n... (truncated)";
-                        }
-                        sb.append("- File: ").append(path).append("\n```\n")
-                          .append(contentStr).append("\n```\n");
-                    } else {
-                        // fs.list result: has "path" and "entries"
-                        Object entries = resultMap.get("entries");
-                        if (entries != null) {
-                            sb.append("- Directory listing: ").append(path).append("\n")
-                              .append(entries.toString()).append("\n");
-                        } else {
-                            sb.append("- ").append(kind).append(": ").append(resultMap).append("\n");
-                        }
+        List<Map<String, Object>> suggested =
+                (List<Map<String, Object>>) state.value("intakeSuggestedTools").orElse(List.of());
+        if (!suggested.isEmpty() && !Boolean.TRUE.equals(state.value("gatherExhausted").orElse(false))) {
+            sb.append("\n\n[INTAKE TOOL PLAN — execute before answering]\n");
+            sb.append(
+                    "Intent classification determined these tools are needed (use infoRequests or toolCalls; "
+                            + "exact names only):\n");
+            for (Map<String, Object> t : suggested) {
+                String name = String.valueOf(t.getOrDefault("name", ""));
+                String why = String.valueOf(t.getOrDefault("why", ""));
+                if (!name.isBlank()) {
+                    sb.append("- ").append(name);
+                    if (!why.isBlank() && !"null".equals(why)) {
+                        sb.append(": ").append(why);
                     }
-                } else {
-                    sb.append("- ").append(kind).append(" (").append(id).append("): ")
-                      .append(value).append("\n");
+                    sb.append("\n");
                 }
-            } else {
-                sb.append("- ").append(entry.getKey()).append(": ").append(value).append("\n");
             }
+            sb.append(
+                    "NEVER fabricate tool output in prose. Run the tools, then answer from [GATHERED CONTEXT] or "
+                            + "tool results.\n");
         }
         return sb.toString();
     }
 
-    private Map<String, Object> parseGenerateResponse(String llmResponse, OverAllState state,
-                                                       String phaseId, Map<String, Object> updates) throws Exception {
+    @SuppressWarnings("unchecked")
+    private String formatUserPlanOverview(Map<String, Object> userPlan) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> steps =
+                (List<Map<String, Object>>) userPlan.getOrDefault("steps", List.of());
+        if (steps.isEmpty()) {
+            return "(无分步计划)";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < steps.size(); i++) {
+            Map<String, Object> step = steps.get(i);
+            String title = String.valueOf(step.getOrDefault("title", "步骤 " + (i + 1)));
+            String status = String.valueOf(step.getOrDefault("status", "pending"));
+            sb.append(i + 1).append(". [").append(status).append("] ").append(title).append('\n');
+        }
+        return sb.toString().trim();
+    }
+
+    private String formatCurrentPlanStep(
+            OverAllState state,
+            Map<String, Object> userPlan,
+            Map<String, Object> currentPhase,
+            int stepIndex) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> steps =
+                (List<Map<String, Object>>) userPlan.getOrDefault("steps", List.of());
+        if (steps.isEmpty()) {
+            return "按用户目标完成本阶段工作。";
+        }
+        int idx = Math.max(0, Math.min(stepIndex, steps.size() - 1));
+        Map<String, Object> step = steps.get(idx);
+        String title = String.valueOf(step.getOrDefault("title", "步骤 " + (idx + 1)));
+        String desc = String.valueOf(step.getOrDefault("description", ""));
+        Object phaseDesc = currentPhase.get("stepDescription");
+        StringBuilder sb = new StringBuilder();
+        sb.append("Step ").append(idx + 1).append("/").append(steps.size()).append(": ").append(title);
+        if (!desc.isBlank() && !desc.equals(title)) {
+            sb.append("\nDescription: ").append(desc);
+        }
+        if (phaseDesc != null && !phaseDesc.toString().isBlank() && !phaseDesc.toString().equals(desc)) {
+            sb.append("\nPhase scope: ").append(phaseDesc);
+        }
+        String adapted = SessionExecutionFacts.resolvedStepAction(state);
+        if (!adapted.isBlank()) {
+            sb.append("\n\n[ADAPTED SCOPE — overrides stale plan wording]\n").append(adapted);
+        }
+        sb.append("\n\nImplement ONLY this step in patches[]. Do not implement later steps.");
+        sb.append(
+                "\nPlan wording (e.g. cmake) is a hint — satisfy the step goal with any working approach.");
+        if (steps.size() > 1) {
+            sb.append("\n\n[FORBIDDEN IN THIS PHASE — do NOT create or modify files for these steps yet]");
+            for (int i = 0; i < steps.size(); i++) {
+                if (i == idx) {
+                    continue;
+                }
+                String otherTitle = String.valueOf(steps.get(i).getOrDefault("title", "步骤 " + (i + 1)));
+                sb.append("\n- Step ").append(i + 1).append(": ").append(otherTitle);
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /** Reject mistaken directory-as-file patches (any folder-like path with no real file content). */
+    private boolean isValidPatchPath(String path, Patch.Edit edit) {
+        if (path == null || path.isBlank() || "unknown".equalsIgnoreCase(path)) {
+            return false;
+        }
+        String normalized = path.replace('\\', '/').trim();
+        if (normalized.endsWith("/")) {
+            return false;
+        }
+        boolean hasContent =
+                (edit.newContent() != null && !edit.newContent().isBlank())
+                        || (edit.search() != null && !edit.search().isBlank())
+                        || (edit.replace() != null && !edit.replace().isBlank());
+        if (!hasContent) {
+            return false;
+        }
+        if (looksLikeDirectoryPath(normalized) && edit.newContent() != null) {
+            String content = edit.newContent().trim();
+            if (content.isEmpty()) {
+                log.warn("GenerateAction: rejecting empty create for directory-like path: {}", path);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** True when the final path segment has no extension (typical folder name, not a file). */
+    private static boolean looksLikeDirectoryPath(String normalized) {
+        int slash = normalized.lastIndexOf('/');
+        String name = slash >= 0 ? normalized.substring(slash + 1) : normalized;
+        return !name.isEmpty() && !name.contains(".");
+    }
+
+    private Map<String, Object> parseGenerateResponse(
+            String llmResponse, OverAllState state, String phaseId, Map<String, Object> updates)
+            throws Exception {
+        boolean contentStreamed = Boolean.TRUE.equals(updates.get("agentContentStreamed"));
+        boolean thinkingEmitted = Boolean.TRUE.equals(updates.get("agentThinkingEmitted"));
+
         String json = LlmJsonExtract.parseableJson(llmResponse);
         JsonNode root = mapper.readTree(json);
 
-        // ★ Extract agentThinking from LLM output (overrides the preliminary "正在思考...")
+        JsonNode userPlanNode = root.get("userPlan");
+        if (userPlanNode != null && !userPlanNode.isNull() && userPlanNode.isObject()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> revised = mapper.convertValue(userPlanNode, Map.class);
+            updates.put("userPlan", revised);
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> revisedSteps =
+                    (List<Map<String, Object>>) revised.getOrDefault("steps", List.of());
+            if (revisedSteps.size() > 1) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> phases =
+                        (List<Map<String, Object>>) state.value("phases").orElse(List.of());
+                updates.put("phases", PhasePlanNormalizer.normalize(revisedSteps, phases));
+            }
+        }
+
         JsonNode agentThinkingNode = root.get("agentThinking");
         String agentThinking = null;
         if (agentThinkingNode != null && !agentThinkingNode.isNull() && !agentThinkingNode.asText("").isBlank()) {
             agentThinking = agentThinkingNode.asText();
         }
 
-        // ★ Extract agentContent from LLM output (structured user-facing content with XML tags)
         JsonNode agentContentNode = root.get("agentContent");
         String agentContent = null;
         if (agentContentNode != null && !agentContentNode.isNull() && !agentContentNode.asText("").isBlank()) {
-            agentContent = agentContentNode.asText();
+            agentContent = GraphContentSanitizer.stripFileToolPreviews(agentContentNode.asText());
+        }
+
+        if (GraphDirectToolExecutor.containsDirectToolCalls(root)) {
+            if (GraphDirectToolExecutor.executeFromJson(state, root, mapper, updates)) {
+                updates.put("generateResult", "directTools");
+                updates.put("pendingPatches", List.of());
+                GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                return updates;
+            }
+            if (Boolean.TRUE.equals(updates.get("approachRepeatBlocked"))) {
+                log.warn("GenerateAction: direct toolCalls blocked — duplicate approach");
+                updates.put("generateResult", "retryGenerate");
+                updates.put(
+                        "phaseFailureRetries",
+                        (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                return updates;
+            }
         }
 
         // Check for infoRequests — LLM may return string elements instead of objects
@@ -243,27 +446,28 @@ public class GenerateAction implements NodeAction {
             updates.put("generateResult", "infoRequests");
             updates.put("infoRequests", normalizeInfoRequests(infoRequests));
             // ★ Emit agent_thinking with LLM-provided text, and store intent for GatherAction
-            String thinkingText = agentThinking != null ? agentThinking : "需要更多信息";
-            GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-                Map.of("text", thinkingText, "phaseId", phaseId));
-            updates.put("agentGatherIntent", thinkingText);
+            if (agentThinking != null) {
+                updates.put("agentGatherIntent", agentThinking);
+            }
+            GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
             return updates;
         }
 
         // Check for askUser — LLM may return a plain string instead of an object
         JsonNode askUser = root.get("askUser");
         if (askUser != null && !askUser.isNull()) {
-            updates.put("generateResult", "askUser");
+            Map<String, Object> question;
             if (askUser.isObject()) {
-                updates.put("askUserQuestion", mapper.convertValue(askUser, Map.class));
+                @SuppressWarnings("unchecked")
+                Map<String, Object> raw = mapper.convertValue(askUser, Map.class);
+                question = AskUserPolicy.normalizeQuestionMap(raw);
             } else {
-                // Wrap plain string into a structured askUser map matching AskUserAction.buildQuestion() format
-                // Use "text" key (not "question") because buildQuestion reads raw.getOrDefault("text", "")
-                updates.put("askUserQuestion", Map.of("text", askUser.asText(),
-                        "kind", "single-choice",
-                        "options", List.of(
-                                Map.of("id", "yes", "label", "Yes, proceed"),
-                                Map.of("id", "no", "label", "No, reconsider"))));
+                question = AskUserPolicy.normalizeQuestionMap(
+                        GraphUserMessages.defaultYesNoProceed(askUser.asText()));
+            }
+            if (question != null) {
+                updates.put("generateResult", "askUser");
+                updates.put("askUserQuestion", question);
             }
             return updates;
         }
@@ -273,16 +477,73 @@ public class GenerateAction implements NodeAction {
         JsonNode textOutput = root.get("textOutput");
         if (textOutput != null && !textOutput.isNull() && !textOutput.asText("").isBlank()) {
             String textStr = textOutput.asText();
-            log.info("GenerateAction: LLM returned textOutput for phase={}: {} chars", phaseId, textStr.length());
-            // ★ Emit events based on whether agentContent is provided
-            if (agentContent != null) {
-                // agentContent already includes thinking — just emit it as delta
-                GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", agentContent + "\n\n"));
-            } else if (agentThinking != null) {
-                GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-                    Map.of("text", agentThinking, "phaseId", phaseId));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> gatheredNow =
+                    (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
+            PhaseGoalHelper.StepKind stepKind = PhaseGoalHelper.inferStepKind(state);
+            String userInput = (String) state.value("input").orElse("");
+            if (stepKind == PhaseGoalHelper.StepKind.RUN
+                    && !PhaseGoalHelper.hasSuccessfulRun(gatheredNow)) {
+                log.warn(
+                        "GenerateAction: rejecting textOutput on RUN step — need shell.exec to run the binary");
+                updates.put("generateResult", "directTools");
+                updates.put(
+                        "phaseFailureRetries", (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                return updates;
             }
-            GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", textStr));
+            if (PhaseGoalHelper.sessionExpectsCompileRunWorkflow(state)
+                    && stepKind == PhaseGoalHelper.StepKind.RUN
+                    && !PhaseGoalHelper.overallCompileRunGoalMet(state)) {
+                log.warn("GenerateAction: compile+run goal unmet — rejecting textOutput");
+                updates.put("generateResult", "directTools");
+                updates.put(
+                        "phaseFailureRetries", (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                return updates;
+            }
+            if (stepKind == PhaseGoalHelper.StepKind.ANALYZE
+                    || stepKind == PhaseGoalHelper.StepKind.SYNTHESIZE) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> gatheredForAnalyze =
+                        (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
+                boolean hasReads =
+                        PhaseGoalHelper.hasSuccessfulSourceRead(gatheredForAnalyze)
+                                || PhaseGoalHelper.sessionHasSourceReads(state);
+                int passes = (int) state.value("phaseGeneratePasses").orElse(0);
+                if ((!hasReads || textStr.trim().length() < 80)
+                        && passes < 10
+                        && stepKind != PhaseGoalHelper.StepKind.SYNTHESIZE) {
+                    log.warn(
+                            "GenerateAction: rejecting textOutput on {} step — need fs.read/grep of sources and substantive analysis",
+                            stepKind);
+                    updates.put("generateResult", "directTools");
+                    updates.put(
+                            "phaseFailureRetries",
+                            (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                    return updates;
+                }
+                if (stepKind == PhaseGoalHelper.StepKind.SYNTHESIZE
+                        && (!PhaseGoalHelper.sessionHasSourceReads(state)
+                                || textStr.trim().length() < 80)
+                        && passes < 10) {
+                    log.warn(
+                            "GenerateAction: rejecting textOutput on SYNTHESIZE — need prior source reads and substantive report");
+                    updates.put("generateResult", "directTools");
+                    updates.put(
+                            "phaseFailureRetries",
+                            (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                    return updates;
+                }
+                updates.put("phaseHasAnalysisOutput", true);
+            }
+            log.info("GenerateAction: LLM returned textOutput for phase={}: {} chars", phaseId, textStr.length());
+            GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+            GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+            if (!contentStreamed) {
+                GraphSseHelper.emitEvent(
+                        state,
+                        SseEvents.DELTA,
+                        Map.of("text", GraphContentSanitizer.stripForDisplay(textStr)));
+            }
             updates.put("generateResult", "textOutput");
             updates.put("pendingPatches", List.of());
             updates.put("modifiedFiles", List.of());
@@ -296,12 +557,26 @@ public class GenerateAction implements NodeAction {
         if (patchesNode != null && !patchesNode.isNull() && patchesNode.isArray()) {
             for (JsonNode patchNode : patchesNode) {
                 try {
-                    Patch patch = mapper.treeToValue(patchNode, Patch.class);
+                    Patch patch = parsePatchEntry(patchNode);
                     if (patch != null && patch.patches() != null && !patch.patches().isEmpty()) {
                         pendingPatches.add(patch);
                     }
                 } catch (Exception e) {
                     log.warn("Failed to parse patch entry, skipping: {}", e.getMessage());
+                }
+            }
+        }
+
+        JsonNode toolCallsNode = root.get("toolCalls");
+        if (pendingPatches.isEmpty() && toolCallsNode != null && toolCallsNode.isArray()) {
+            for (JsonNode tc : toolCallsNode) {
+                try {
+                    Patch patch = convertToolCallToPatch(tc);
+                    if (patch.patches() != null && !patch.patches().isEmpty()) {
+                        pendingPatches.add(patch);
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse toolCalls entry, skipping: {}", e.getMessage());
                 }
             }
         }
@@ -324,12 +599,7 @@ public class GenerateAction implements NodeAction {
                 List<Patch.Edit> validEdits = new ArrayList<>();
                 for (Patch.Edit edit : p.patches()) {
                     String path = edit.path();
-                    boolean hasValidPath = path != null && !path.isBlank()
-                            && !"unknown".equalsIgnoreCase(path);
-                    boolean hasContent = (edit.newContent() != null && !edit.newContent().isBlank())
-                            || (edit.search() != null && !edit.search().isBlank())
-                            || (edit.replace() != null && !edit.replace().isBlank());
-                    if (hasValidPath && hasContent) {
+                    if (isValidPatchPath(path, edit)) {
                         validEdits.add(edit);
                         modifiedFiles.add(path);
                     } else {
@@ -355,53 +625,14 @@ public class GenerateAction implements NodeAction {
             }
 
             updates.put("generateResult", "toolCalls");
-            updates.put("pendingPatches", validPatches);
-            updates.put("modifiedFiles", modifiedFiles);
+            updates.put("pendingPatches", List.copyOf(validPatches));
+            updates.put("modifiedFiles", List.copyOf(modifiedFiles));
 
-            // ★ Interactive Agent: emit events based on whether agentContent is provided
             if (agentContent != null) {
-                // When agentContent is provided (contains <plan>/<file> structured tags),
-                // it already includes thinking reasoning and file information.
-                // Only emit the structured content as delta — NO agent_thinking or agent_writing
-                // to avoid duplicate display of the same information.
-                GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", agentContent + "\n\n"));
-            } else {
-                // No agentContent — use agent_thinking + agent_writing for user-facing display
-                if (agentThinking != null) {
-                    GraphSseHelper.emitEvent(state, SseEvents.AGENT_THINKING,
-                        Map.of("text", agentThinking, "phaseId", phaseId));
-                }
-
-                // Extract agentWriting from LLM output, fallback to rule-based generation
-                JsonNode agentWritingNode = root.get("agentWriting");
-                String agentWritingText = null;
-                if (agentWritingNode != null && !agentWritingNode.isNull() && !agentWritingNode.asText("").isBlank()) {
-                    agentWritingText = agentWritingNode.asText();
-                }
-
-                List<Map<String, Object>> writingFiles = new ArrayList<>();
-                for (Patch p : validPatches) {
-                    for (Patch.Edit edit : p.patches()) {
-                        Map<String, Object> filePreview = new HashMap<>();
-                        filePreview.put("path", edit.path());
-                        filePreview.put("op", edit.op() != null ? edit.op().name().toLowerCase() : "write");
-                        if (edit.newContent() != null) {
-                            filePreview.put("lineCount", edit.newContent().split("\n").length);
-                            // Preview: first 5 lines of new content
-                            String[] lines = edit.newContent().split("\n");
-                            String preview = String.join("\n", java.util.Arrays.copyOf(lines, Math.min(lines.length, 5)));
-                            if (lines.length > 5) preview += "\n...";
-                            filePreview.put("preview", preview);
-                        }
-                        writingFiles.add(filePreview);
-                    }
-                }
-                if (!writingFiles.isEmpty()) {
-                    String writingText = agentWritingText != null ? agentWritingText : buildWritingTextFallback(writingFiles);
-                    GraphSseHelper.emitEvent(state, SseEvents.AGENT_WRITING,
-                        Map.of("text", writingText, "files", writingFiles, "phaseId", phaseId));
-                }
+                agentContent = GraphContentSanitizer.stripForDisplay(agentContent);
             }
+            GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+            GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
 
             log.info("Generate phase={}: produced {} valid patches ({} filtered out), {} files",
                 phaseId, validPatches.size(), pendingPatches.size() - validPatches.size(), modifiedFiles.size());
@@ -413,13 +644,24 @@ public class GenerateAction implements NodeAction {
         return updates;
     }
 
-    private Map<String, Object> handleUnstructuredResponse(String llmResponse, OverAllState state,
-                                                             String phaseId, Map<String, Object> updates) {
-        // If LLM returned plain text (not structured patches), emit it as a delta SSE event
-        // so the user at least sees the response
-        if (llmResponse != null && !llmResponse.isBlank()) {
-            GraphSseHelper.emitEvent(state, SseEvents.DELTA,
-                    Map.of("text", llmResponse));
+    private Map<String, Object> handleUnstructuredResponse(
+            String llmResponse,
+            OverAllState state,
+            String phaseId,
+            Map<String, Object> updates) {
+        return handleUnstructuredResponse(
+                llmResponse, state, phaseId, updates, false);
+    }
+
+    private Map<String, Object> handleUnstructuredResponse(
+            String llmResponse,
+            OverAllState state,
+            String phaseId,
+            Map<String, Object> updates,
+            boolean alreadyStreamed) {
+        String display = extractDisplayText(llmResponse);
+        if (!alreadyStreamed && display != null && !display.isBlank()) {
+            GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", display));
         }
         // B3 fix: use "textOutput" instead of "toolCalls" so the router skips
         // applyPatch/verify and goes directly to commit, avoiding wasted time
@@ -428,6 +670,40 @@ public class GenerateAction implements NodeAction {
         updates.put("pendingPatches", List.of());
         updates.put("modifiedFiles", List.of());
         return updates;
+    }
+
+    /** Prefer agentContent / textOutput from JSON envelopes over dumping raw JSON. */
+    private Patch parsePatchEntry(JsonNode patchNode) throws com.fasterxml.jackson.core.JsonProcessingException {
+        if (patchNode.has("path")) {
+            Patch.Edit edit = mapper.treeToValue(patchNode, Patch.Edit.class);
+            return new Patch(null, null, List.of(edit), null, null, null);
+        }
+        return mapper.treeToValue(patchNode, Patch.class);
+    }
+
+    private String extractDisplayText(String llmResponse) {
+        if (llmResponse == null || llmResponse.isBlank()) {
+            return null;
+        }
+        String stripped = GraphMarkerSanitizer.stripForDisplay(llmResponse).trim();
+        if (!stripped.startsWith("{") && !stripped.startsWith("[")) {
+            return stripped;
+        }
+        try {
+            String json = LlmJsonExtract.parseableJson(llmResponse);
+            JsonNode root = mapper.readTree(json);
+            JsonNode agentContent = root.get("agentContent");
+            if (agentContent != null && !agentContent.isNull() && !agentContent.asText("").isBlank()) {
+                return GraphMarkerSanitizer.stripForDisplay(agentContent.asText());
+            }
+            JsonNode textOutput = root.get("textOutput");
+            if (textOutput != null && !textOutput.isNull() && !textOutput.asText("").isBlank()) {
+                return GraphMarkerSanitizer.stripForDisplay(textOutput.asText());
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")
@@ -489,6 +765,19 @@ public class GenerateAction implements NodeAction {
         String result = (String) state.value("generateResult").orElse("toolCalls");
         boolean gatherExhausted = Boolean.TRUE.equals(state.value("gatherExhausted").orElse(false));
         int gatherCount = (int) state.value("gatherCount").orElse(0);
+        int failureRetries = (int) state.value("phaseFailureRetries").orElse(0);
+        boolean approachExhausted = ToolApproachTracker.isExhausted(state);
+        boolean escalationDone =
+                Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false));
+
+        if (approachExhausted) {
+            if (!escalationDone) {
+                return "reenter";
+            }
+            if ("textOutput".equals(result) || "failed".equals(result)) {
+                return "finalize";
+            }
+        }
 
         // ★ Anti-loop: when gather has already been executed and the LLM still
         // outputs infoRequests, force the route to commit (textOutput path) instead
@@ -496,18 +785,164 @@ public class GenerateAction implements NodeAction {
         // generate→gather→reenter→generate loop.
         // Hard limit: after 3 gathers, refuse to gather again.
         // Soft limit: after gatherExhausted, always refuse.
+        if (PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+            log.info("GenerateAction: step goal satisfied — routing to commit");
+            return "commit";
+        }
+
+        if ("infoRequests".equals(result) && approachExhausted) {
+            return escalationDone ? "finalize" : "reenter";
+        }
+
         if ("infoRequests".equals(result) && (gatherExhausted || gatherCount >= 3)) {
+            if (PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
+                log.warn(
+                        "GenerateAction: gather budget exceeded but tools failed — retrying generate");
+                return "reenter";
+            }
+            PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
+            if ((kind == PhaseGoalHelper.StepKind.ANALYZE
+                    || kind == PhaseGoalHelper.StepKind.SYNTHESIZE
+                    || kind == PhaseGoalHelper.StepKind.INSPECT
+                    || kind == PhaseGoalHelper.StepKind.DISCOVER)
+                    && !PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+                log.warn(
+                        "GenerateAction: gather budget exceeded on {} step without deliverable — reenter",
+                        kind);
+                return "reenter";
+            }
             log.warn("GenerateAction: LLM output infoRequests but gather budget exceeded "
                 + "(gatherCount={}, gatherExhausted={}). Forcing to commit.", gatherCount, gatherExhausted);
             return "commit";
         }
 
+        int generatePasses = (int) state.value("phaseGeneratePasses").orElse(0);
+        if ("directTools".equals(result)) {
+            if (approachExhausted) {
+                return escalationDone ? "finalize" : "reenter";
+            }
+            if (generatePasses >= 10) {
+                log.warn(
+                        "GenerateAction: phaseGeneratePasses cap ({}) on directTools — forcing commit",
+                        generatePasses);
+                return "commit";
+            }
+            int rounds = (int) state.value("directToolRound").orElse(0);
+            if (rounds < 3) {
+                return "reenter";
+            }
+            if (PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
+                log.warn("GenerateAction: directToolRound cap but tools failed — retrying generate");
+                return "reenter";
+            }
+            PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
+            if ((kind == PhaseGoalHelper.StepKind.ANALYZE
+                            || kind == PhaseGoalHelper.StepKind.SYNTHESIZE)
+                    && !PhaseGoalHelper.currentStepGoalSatisfied(state)
+                    && generatePasses < 10) {
+                log.warn(
+                        "GenerateAction: directToolRound cap on {} without deliverable — reenter",
+                        kind);
+                return "reenter";
+            }
+            log.warn("GenerateAction: directToolRound cap reached, forcing commit");
+            return "commit";
+        }
+
+        if ("textOutput".equals(result)) {
+            if (escalationDone) {
+                return "finalize";
+            }
+            PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
+            if ((kind == PhaseGoalHelper.StepKind.ANALYZE
+                    || kind == PhaseGoalHelper.StepKind.SYNTHESIZE
+                    || kind == PhaseGoalHelper.StepKind.INSPECT
+                    || kind == PhaseGoalHelper.StepKind.DISCOVER)
+                    && !PhaseGoalHelper.currentStepGoalSatisfied(state)
+                    && generatePasses < 10) {
+                log.warn("GenerateAction: textOutput on {} but goal not met — reenter", kind);
+                return "reenter";
+            }
+            if (generatePasses >= 10) {
+                log.warn("GenerateAction: phaseGeneratePasses cap on textOutput — forcing commit");
+                return "commit";
+            }
+        }
+
+        if ("textOutput".equals(result) && PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
+            log.warn("GenerateAction: textOutput while tools failed — staying on generate");
+            return "reenter";
+        }
+
         return switch (result) {
             case "infoRequests" -> "gather";
             case "askUser" -> "askUser";
+            case "retryGenerate" -> "reenter";
+            case "failed" -> "finalize";
             case "textOutput" -> "commit";  // B3 fix: skip applyPatch/verify for unstructured text
             default -> "applyPatch";
         };
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> deliverApproachEscalation(
+            OverAllState state, Map<String, Object> updates, String phaseId, String input) {
+        var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
+        var userPlan = (Map<String, Object>) state.value("userPlan").orElse(Map.of());
+        var gatheredInfo = (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
+        int stepIndex = UserPlanProgressHelper.currentStepIndex(state);
+        Map<String, Object> currentPhase =
+                phases.stream()
+                        .filter(p -> phaseId.equals(p.get("id")))
+                        .findFirst()
+                        .orElse(Map.of());
+
+        String template = promptRegistry.get("graph.approach-exhausted");
+        String gatheredContext =
+                gatheredInfo.isEmpty()
+                        ? ""
+                        : "[GATHERED CONTEXT]\n" + GatheredInfoFormatter.format(gatheredInfo);
+        String prompt =
+                template
+                        .replace("{{input}}", input)
+                        .replace(
+                                "{{currentPlanStep}}",
+                                formatCurrentPlanStep(state, userPlan, currentPhase, stepIndex))
+                        .replace(
+                                "{{triedApproaches}}",
+                                ToolApproachTracker.formatHistoryForEscalation(state))
+                        .replace("{{gatheredContext}}", gatheredContext)
+                        .replace("{{userLocale}}", "与用户输入语言一致");
+
+        GraphUiEmitter.transition(state, "generate");
+        UserPlanProgressHelper.emitForCurrentPhase(state, "in_progress");
+
+        String text = "";
+        try {
+            String modelId = (String) state.value("modelId").orElse(null);
+            String modelSourceName = (String) state.value("modelSource").orElse(null);
+            String userId = (String) state.value("userId").orElse(null);
+            ModelSource modelSource =
+                    modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
+            ChatClient chatClient =
+                    chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+            text = GraphLlmHelper.streamUserPromptToSse(chatClient, state, prompt, updates, false);
+        } catch (Exception e) {
+            log.error("Approach escalation LLM failed for phase={}", phaseId, e);
+            if (GraphFailurePolicy.handleGenerateLlmFailure(state, updates, phaseId, e)) {
+                return updates;
+            }
+        }
+
+        String display = GraphContentSanitizer.stripForDisplay(text != null ? text.trim() : "");
+        if (!display.isBlank()) {
+            GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", display));
+        }
+        updates.put("generateResult", "textOutput");
+        updates.put("approachEscalationDone", true);
+        updates.put("overallGoalUnmet", true);
+        updates.put("textOutput", display);
+        return updates;
     }
 
     // ── Interactive Agent helpers ──
@@ -541,40 +976,4 @@ public class GenerateAction implements NodeAction {
         return sb.toString();
     }
 
-    /**
-     * Fallback method for generating agent_writing text when LLM does not provide agentWriting.
-     * Uses rule-based formatting from the patch data.
-     */
-    private String buildWritingTextFallback(List<Map<String, Object>> files) {
-        if (files.isEmpty()) return "准备修改文件";
-
-        if (files.size() == 1) {
-            var f = files.get(0);
-            String path = String.valueOf(f.getOrDefault("path", "unknown"));
-            String op = String.valueOf(f.getOrDefault("op", "write"));
-            Object lineCount = f.get("lineCount");
-
-            String fileName = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
-
-            return switch (op) {
-                case "create" -> "想要创建新文件: " + fileName + (lineCount != null ? " +" + lineCount + "行" : "");
-                case "delete" -> "想要删除文件: " + fileName;
-                default -> "想要修改文件: " + fileName + (lineCount != null ? " +" + lineCount + "行" : "");
-            };
-        }
-
-        // Multiple files
-        StringBuilder sb = new StringBuilder("想要修改以下文件:\n");
-        for (var f : files) {
-            String path = String.valueOf(f.getOrDefault("path", "unknown"));
-            String op = String.valueOf(f.getOrDefault("op", "write"));
-            Object lineCount = f.get("lineCount");
-            String fileName = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
-            sb.append("  ").append(fileName);
-            if ("create".equals(op)) sb.append(" (新建)");
-            if (lineCount != null) sb.append(" +").append(lineCount).append("行");
-            sb.append("\n");
-        }
-        return sb.toString().trim();
-    }
 }

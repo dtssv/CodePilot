@@ -8,7 +8,12 @@ import { onPluginEvent, sendToPlugin } from '../bridge';
 import type { AgentStep } from '../components/AgentStepCard';
 import { notify } from '../notifications/desktop';
 import type { ChatMessage, ToolCallInfo } from './chatTypes';
+import { finalizeRunningTurns } from './chatStore';
+import { clearPendingNeedsInput } from './needsInputStore';
+import { isTerminalDoneReason } from '../utils/terminalDone';
 import { logConsole } from './consoleStore';
+import { normalizeAgentContentText } from '../utils/graphMarkers';
+import { deriveShellExecutionState } from '../utils/shellOutput';
 
 export interface LegacyChatBridgeRefs {
     activeReplyRef: MutableRefObject<boolean>;
@@ -21,6 +26,19 @@ export interface LegacyChatBridgeHandlers {
     setHasCheckpoint: (v: boolean) => void;
     setRecoveryMode: (v: 'exact' | 'soft' | 'none') => void;
     setIsResuming: (v: boolean) => void;
+}
+
+function formatShellOutput(result: Record<string, unknown>): string {
+    const stdout = String(result.stdout ?? '').trim();
+    const stderr = String(result.stderr ?? '').trim();
+    const exitCode = result.exitCode;
+    const parts: string[] = [];
+    if (stdout) parts.push(stdout);
+    if (stderr) parts.push(stderr);
+    if (exitCode != null && exitCode !== 0 && parts.length === 0) {
+        parts.push(`exit code: ${exitCode}`);
+    }
+    return parts.join('\n').trim();
 }
 
 function upsertTurnAssistant(
@@ -91,19 +109,65 @@ export function installLegacyChatBridge(
         onPluginEvent('delta', (p) => {
             if (v2Enabled) return;
             const { text } = p as { text: string };
-            logConsole('sse', 'delta', { text: text.substring(0, 100) + (text.length > 100 ? '...' : '') });
+            const cleaned = normalizeAgentContentText(text);
+            if (!cleaned) return;
+            logConsole('sse', 'delta', { text: cleaned.substring(0, 100) + (cleaned.length > 100 ? '...' : '') });
             setMessages((prev) => upsert(prev, (msg) => ({
                 ...msg,
-                content: (msg.content || '') + text,
+                content: (msg.content || '') + cleaned,
                 _streaming: true,
             })));
         }),
+        onPluginEvent('conversation_running', (payload) => {
+            const running = Boolean((payload as { running?: boolean }).running);
+            refs.activeReplyRef.current = running;
+            if (!running) {
+                refs.activeTurnIdRef.current = '';
+                finalizeRunningTurns();
+                setMessages((prev) => {
+                    let changed = false;
+                    const next = prev.map((msg) => {
+                        if (msg.role !== 'assistant') return msg;
+                        let msgChanged = false;
+                        const agentSteps = msg.agentSteps?.map((s) => {
+                            if (s.status !== 'running') return s;
+                            msgChanged = true;
+                            return { ...s, status: 'success' as const };
+                        });
+                        const planSteps = msg.planSteps?.map((s) => {
+                            if (s.status !== 'running' && s.status !== 'in_progress') return s;
+                            msgChanged = true;
+                            return { ...s, status: 'success' as const };
+                        });
+                        if (!msgChanged) return msg;
+                        changed = true;
+                        return {
+                            ...msg,
+                            _streaming: false,
+                            agentSteps,
+                            planSteps,
+                        };
+                    });
+                    return changed ? next : prev;
+                });
+            }
+        }),
         onPluginEvent('done', (p) => {
-            if (v2Enabled) return;
             const data = p as { reason?: string };
-            logConsole('sse', 'done', data);
             const reason = data.reason || 'final';
-            const isFinal = reason === 'final' || reason === 'failed' || reason === 'stopped' || reason === 'max_steps';
+            if (v2Enabled) {
+                if (isTerminalDoneReason(reason)) {
+                    finalizeRunningTurns();
+                }
+                return;
+            }
+            logConsole('sse', 'done', data);
+            const isFinal =
+                reason === 'final' ||
+                reason === 'failed' ||
+                reason === 'stopped' ||
+                reason === 'max_steps' ||
+                reason === 'partial';
             if (isFinal) notify(reason === 'final' ? 'CodePilot completed' : 'CodePilot stopped', `Reason: ${reason}`);
             if (!isFinal) return;
             if (!refs.activeReplyRef.current) return;
@@ -114,8 +178,12 @@ export function installLegacyChatBridge(
                 // Normalize plan steps: running/in_progress → success; completed → success
                 planSteps: msg.planSteps?.map((s) => ({
                     ...s,
-                    status: s.status === 'running' || s.status === 'in_progress' || s.status === 'completed'
-                        ? 'success' : s.status,
+                    status:
+                        s.status === 'failed' || s.status === 'error'
+                            ? 'failed'
+                            : s.status === 'running' || s.status === 'in_progress' || s.status === 'completed'
+                              ? 'success'
+                              : s.status,
                 })),
             })));
             refs.activeReplyRef.current = false;
@@ -144,9 +212,15 @@ export function installLegacyChatBridge(
         }),
         onPluginEvent('tool_result_ack', (p) => {
             if (v2Enabled) return;
-            const ack = p as { toolCallId?: string; ok?: boolean };
+            const ack = p as { toolCallId?: string; ok?: boolean; result?: Record<string, unknown> };
             const ackId = ack.toolCallId || '';
             if (!ackId) return;
+            const shellSucceeded = (result: Record<string, unknown> | undefined): boolean => {
+                if (!result) return true;
+                if (result.timedOut === true) return false;
+                const code = typeof result.exitCode === 'number' ? result.exitCode : -1;
+                return code === 0;
+            };
             setMessages((msgs) => {
                 let assistantIdx = -1;
                 for (let i = msgs.length - 1; i >= 0; i--) {
@@ -158,10 +232,48 @@ export function installLegacyChatBridge(
                 if (assistantIdx < 0) return msgs;
                 const updated = [...msgs];
                 const existing = updated[assistantIdx];
+                const matchedTool = existing.toolCalls?.find((tc) => tc.id === ackId);
+                const toolOk = Boolean(ack.ok) && shellSucceeded(ack.result);
+                const shellOut =
+                    matchedTool?.name === 'shell.exec' && ack.result
+                        ? formatShellOutput(ack.result)
+                        : undefined;
+                const nextStatus = toolOk ? 'success' : 'error';
+                const executionState =
+                    matchedTool?.name === 'shell.exec'
+                        ? deriveShellExecutionState(nextStatus, ack.result)
+                        : nextStatus;
                 updated[assistantIdx] = {
                     ...existing,
                     toolCalls: existing.toolCalls?.map((tc) =>
-                        tc.id === ackId ? { ...tc, status: ack.ok ? 'success' : 'error' } : tc),
+                        tc.id === ackId
+                            ? {
+                                  ...tc,
+                                  status: nextStatus,
+                                  result: ack.result ?? tc.result,
+                                  executionState,
+                              }
+                            : tc),
+                    agentSteps: shellOut
+                        ? existing.agentSteps?.map((step, idx, arr) => {
+                              const isLastRunning =
+                                  step.type === 'running' &&
+                                  idx === arr.length - 1 &&
+                                  step.status === 'running';
+                              if (!isLastRunning) return step;
+                              return {
+                                  ...step,
+                                  status: toolOk ? ('success' as const) : ('error' as const),
+                                  detail: {
+                                      ...step.detail,
+                                      command:
+                                          (matchedTool?.args?.command as string) ||
+                                          step.detail?.command,
+                                      output: shellOut,
+                                  },
+                              };
+                          })
+                        : existing.agentSteps,
                 };
                 return updated;
             });
@@ -180,17 +292,21 @@ export function installLegacyChatBridge(
         }),
         onPluginEvent('needs_input', (p) => {
             notify('CodePilot needs input', 'The agent is waiting for your response.');
-            const ni = p as ChatMessage['needsInput'];
+            const niMsg = p as ChatMessage['needsInput'];
             if (refs.activeReplyRef.current) {
-                setMessages((msgs) => upsert(msgs, (msg) => ({ ...msg, needsInput: ni, _streaming: true })));
+                setMessages((msgs) => upsert(msgs, (msg) => ({ ...msg, needsInput: niMsg, _streaming: true })));
                 return;
             }
-            setMessages((msgs) => [...msgs, { role: 'system', content: '', needsInput: ni }]);
+            setMessages((msgs) => [...msgs, { role: 'system', content: '', needsInput: niMsg }]);
         }),
         onPluginEvent('error', (p) => {
             const err = p as { code: number; message: string };
             logConsole('error', 'error', err);
-            notify('CodePilot failed', err.message || 'The current task failed.');
+            clearPendingNeedsInput();
+            if (err.code === 42901) {
+                return;
+            }
+            notify('CodePilot', err.message || 'The current task failed.');
             if (refs.activeReplyRef.current) {
                 setMessages((msgs) => upsert(msgs, (msg) => ({
                     ...msg,
@@ -299,11 +415,12 @@ export function installLegacyChatBridge(
         onPluginEvent('agent_running', (payload) => {
             if (v2Enabled) return;
             const data = payload as { text?: string; command?: string; output?: string };
+            const cmd = data.command?.trim() || '';
             const runningStep: AgentStep = {
                 type: 'running',
-                content: data.text || '运行命令',
+                content: cmd || data.text || '运行命令',
                 status: 'running',
-                detail: { command: data.command, output: data.output },
+                detail: { command: cmd || data.command, output: data.output },
             };
             setMessages((prev) => upsert(prev, (msg) => {
                 const steps = [...(msg.agentSteps || [])];
@@ -329,9 +446,16 @@ export function installLegacyChatBridge(
             const data = payload as { stepId?: string; stepIndex?: number; status?: string; completedSteps?: number };
             setMessages((prev) => upsert(prev, (msg) => {
                 if (!msg.planSteps?.length) return { ...msg };
+                const mapStatus = (raw: string | undefined) => {
+                    const s = (raw || 'in_progress').toLowerCase();
+                    if (s === 'failed' || s === 'error') return 'failed';
+                    if (s === 'completed' || s === 'done' || s === 'success') return 'success';
+                    if (s === 'in_progress' || s === 'running') return 'running';
+                    return raw || 'in_progress';
+                };
                 const updatedSteps = msg.planSteps.map((step, idx) => {
-                    if (data.stepId && step.id === data.stepId) return { ...step, status: data.status || 'in_progress' };
-                    if (data.stepIndex !== undefined && idx === data.stepIndex) return { ...step, status: data.status || 'in_progress' };
+                    if (data.stepId && step.id === data.stepId) return { ...step, status: mapStatus(data.status) };
+                    if (data.stepIndex !== undefined && idx === data.stepIndex) return { ...step, status: mapStatus(data.status) };
                     return step;
                 });
                 if (data.completedSteps !== undefined && data.completedSteps > 0) {

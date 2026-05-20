@@ -42,7 +42,10 @@ public class PromptRegistry {
           "guard.system",
           "chat.system",
           "graph.planning",
-          "graph.generate");
+          "graph.generate",
+          "graph.conversational",
+          "graph.intake",
+          "graph.approach-exhausted");
 
   private final Map<String, String> segments = new LinkedHashMap<>();
 

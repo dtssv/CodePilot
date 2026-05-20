@@ -93,6 +93,7 @@ class ShellPolicy(private val project: Project) {
         listOf(
             Rule("""^git (status|log|diff|show)( |$)""".toRegex(), Action.ALLOW),
             Rule("""^(pwd|echo|ls|dir)( |$)""".toRegex(), Action.ALLOW),
+            Rule("""^(mkdir|cmake|make|ninja|g\+\+|gcc|clang\+\+|clang|cargo|go|python3?|node|npm|mvn|gradle)( |$)""".toRegex(), Action.ALLOW),
             Rule("""(?i)\b(rm|del|format|shutdown|reboot)\b""".toRegex(), Action.DENY),
             Rule(""".*(>|>>|\|).*""".toRegex(), Action.ASK),
             Rule("""^curl( |$)|^wget( |$)""".toRegex(), Action.ASK),

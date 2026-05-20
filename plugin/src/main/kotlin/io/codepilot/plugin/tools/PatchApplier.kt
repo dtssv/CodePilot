@@ -60,13 +60,115 @@ class PatchApplier(
      * Medium: create (overwrite), write, replace
      * High: delete, move
      */
-    fun riskForTool(toolName: String): Risk = when (toolName) {
-        "fs.create" -> Risk.MEDIUM
-        "fs.write" -> Risk.MEDIUM
-        "fs.replace" -> Risk.MEDIUM
-        "fs.delete" -> Risk.HIGH
-        "fs.move" -> Risk.HIGH
-        else -> Risk.MEDIUM
+    fun riskForTool(toolName: String, path: String = ""): Risk {
+        if (autoApply) {
+            when (toolName) {
+                "fs.create", "fs.write", "fs.replace" -> return Risk.LOW
+            }
+        }
+        return when (toolName) {
+            "fs.create" -> if (path.startsWith("doc/") || path.startsWith("doc\\")) Risk.LOW else Risk.MEDIUM
+            "fs.write" -> Risk.MEDIUM
+            "fs.replace" -> Risk.MEDIUM
+            "fs.delete" -> Risk.HIGH
+            "fs.move" -> Risk.HIGH
+            else -> Risk.MEDIUM
+        }
+    }
+
+    data class ApplySyncResult(
+        val path: String,
+        val written: Boolean,
+        val lineCount: Int = 0,
+        val error: String? = null,
+    ) {
+        val ok: Boolean get() = error == null
+    }
+
+    /**
+     * Apply on the EDT (blocking), so graph tool_call ack reflects real disk writes.
+     * Auto-apply: writes immediately. Otherwise shows IDE diff + Apply/Reject (Cursor-style).
+     */
+    fun applySync(toolName: String, args: JsonNode): ApplySyncResult {
+        val path = args.path("path").asText("")
+        if (path.isBlank()) {
+            return ApplySyncResult("", false, error = "blank path")
+        }
+        val box = arrayOf(ApplySyncResult(path, false, lineCountFromPatch(args)))
+        ApplicationManager.getApplication().invokeAndWait {
+            try {
+                val written = applyFromToolArgs(toolName, args)
+                box[0] = ApplySyncResult(path, written, lineCountFromPatch(args))
+                if (written) {
+                    openFileInEditor(path)
+                }
+            } catch (t: ToolViolation) {
+                box[0] = ApplySyncResult(path, false, error = t.message)
+            } catch (t: Throwable) {
+                box[0] = ApplySyncResult(path, false, error = t.message ?: t.javaClass.simpleName)
+            }
+        }
+        return box[0]
+    }
+
+    private fun lineCountFromPatch(args: JsonNode): Int {
+        val content = args.path("newContent").asText(args.path("content").asText(""))
+        if (content.isEmpty()) return 0
+        return content.lines().size
+    }
+
+    private fun applyFromToolArgs(toolName: String, args: JsonNode): Boolean {
+        val mapper = com.fasterxml.jackson.databind.ObjectMapper()
+        return when (toolName) {
+            "fs.create" -> {
+                val rel = args.path("path").asText()
+                val content = args.path("content").asText(args.path("newContent").asText(""))
+                val edit =
+                    mapper.createObjectNode()
+                        .put("op", "create")
+                        .put("path", rel)
+                        .put("newContent", content)
+                        .put("overwrite", args.path("overwrite").asBoolean(true))
+                applyEdit(edit, riskForTool(toolName, rel))
+            }
+            "fs.write" -> {
+                var rel = args.path("path").asText()
+                if (!resolveFile(rel)) {
+                    matcher.matchFile(rel).firstOrNull()?.let { if (it.score > 0.7) rel = it.matched }
+                }
+                val content = args.path("content").asText(args.path("newContent").asText(""))
+                val edit =
+                    mapper.createObjectNode()
+                        .put("op", "write")
+                        .put("path", rel)
+                        .put("newContent", content)
+                applyEdit(edit, riskForTool(toolName, rel))
+            }
+            "fs.replace" -> {
+                val rel = args.path("path").asText()
+                val edit =
+                    mapper.createObjectNode()
+                        .put("op", "replace")
+                        .put("path", rel)
+                        .put("search", args.path("search").asText())
+                        .put("replace", args.path("replace").asText(""))
+                        .put("regex", args.path("regex").asBoolean(false))
+                        .put("ignoreCase", args.path("ignoreCase").asBoolean(false))
+                applyEdit(edit, riskForTool(toolName, rel))
+            }
+            "fs.delete" -> {
+                val rel = args.path("path").asText()
+                applyEdit(mapper.createObjectNode().put("op", "delete").put("path", rel), riskForTool(toolName, rel))
+            }
+            else -> false
+        }
+    }
+
+    private fun openFileInEditor(rel: String) {
+        runCatching {
+            val vf = PathGuard.resolve(project, rel)
+            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project).openFile(vf, true)
+        }
     }
 
     fun apply(
@@ -248,24 +350,29 @@ class PatchApplier(
         return result.joinToString("\n")
     }
 
-    /** Apply a single Edit object (per-file change). */
-    fun applyEdit(edit: JsonNode, risk: Risk = Risk.MEDIUM) {
+    /** Apply a single Edit object (per-file change). @return true if bytes were written to disk */
+    fun applyEdit(edit: JsonNode, risk: Risk = Risk.MEDIUM): Boolean {
         val op = edit.path("op").asText()
         val rel = edit.path("path").asText()
-        if (rel.isBlank()) return
-        try {
+        if (rel.isBlank()) return false
+        return try {
             when (op) {
                 "create" -> createFile(rel, edit, risk)
                 "write" -> writeFile(rel, edit, risk)
                 "replace" -> replaceFile(rel, edit, risk)
                 "delete" -> deleteFile(rel, risk)
                 "move" -> moveFile(rel, edit, risk)
-                else -> Messages.showWarningDialog(project, "Unknown patch op: $op", "CodePilot")
+                else -> {
+                    Messages.showWarningDialog(project, "Unknown patch op: $op", "CodePilot")
+                    false
+                }
             }
         } catch (t: ToolViolation) {
             Messages.showErrorDialog(project, t.message ?: "patch rejected", "CodePilot")
+            false
         } catch (t: Throwable) {
             Messages.showErrorDialog(project, t.message ?: t.javaClass.simpleName, "CodePilot")
+            false
         }
     }
 
@@ -320,25 +427,49 @@ class PatchApplier(
         rel: String,
         edit: JsonNode,
         risk: Risk = Risk.MEDIUM,
-    ) {
+    ): Boolean {
+        val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
+        if (looksLikeDirectoryCreate(rel, newContent)) {
+            return createDirectory(rel, risk)
+        }
         val target = PathGuard.resolveOrCreate(project, rel)
         if (Files.exists(target) && !edit.path("overwrite").asBoolean(false)) {
             throw ToolViolation("create rejected; file already exists: $rel")
         }
-        val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
-        if (!confirmIfNeeded(rel, "(new file)", newContent, "Create $rel", risk)) return
+        if (!confirmIfNeeded(rel, "", newContent, "Create $rel", risk)) return false
         WriteCommandAction.runWriteCommandAction(project) {
             Files.createDirectories(target.parent)
             Files.writeString(target, newContent)
             refreshAt(target)
         }
+        return true
+    }
+
+    /** True when path/content indicates mkdir (any folder path), not a regular file. */
+    private fun looksLikeDirectoryCreate(rel: String, content: String): Boolean {
+        val normalized = rel.trim().replace('\\', '/')
+        if (normalized.endsWith("/")) return true
+        if (content.isNotBlank()) return false
+        val name = normalized.substringAfterLast('/')
+        return !name.contains(".")
+    }
+
+    private fun createDirectory(rel: String, risk: Risk = Risk.MEDIUM): Boolean {
+        val dirRel = rel.trim().trimEnd('/', '\\')
+        if (!confirmIfNeeded(dirRel, "", "", "Create directory $dirRel", risk)) return false
+        WriteCommandAction.runWriteCommandAction(project) {
+            val target = PathGuard.resolveOrCreate(project, dirRel)
+            Files.createDirectories(target)
+            refreshAt(target)
+        }
+        return true
     }
 
     private fun writeFile(
         rel: String,
         edit: JsonNode,
         risk: Risk = Risk.MEDIUM,
-    ) {
+    ): Boolean {
         val vf = PathGuard.resolve(project, rel)
         val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
         val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
@@ -358,7 +489,7 @@ class PatchApplier(
                         "Cancel",
                         Messages.getWarningIcon(),
                     )
-                    if (proceed != Messages.OK) return
+                    if (proceed != Messages.OK) return false
                 }
                 mergeResult.merged
             } else {
@@ -368,19 +499,19 @@ class PatchApplier(
             newContent
         }
 
-        if (!confirmIfNeeded(rel, original, contentToApply, "Overwrite $rel", risk)) return
+        if (!confirmIfNeeded(rel, original, contentToApply, "Overwrite $rel", risk)) return false
         WriteCommandAction.runWriteCommandAction(project) {
             vf.setBinaryContent(contentToApply.toByteArray(StandardCharsets.UTF_8))
         }
-        // ★ Integration: Record patch for batch undo via PatchRecorder
         recorder.record("current", rel, "write", original, contentToApply)
+        return true
     }
 
     private fun replaceFile(
         rel: String,
         edit: JsonNode,
         risk: Risk = Risk.MEDIUM,
-    ) {
+    ): Boolean {
         val vf = PathGuard.resolve(project, rel)
         val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
         val regex = edit.path("regex").asBoolean(false)
@@ -396,15 +527,16 @@ class PatchApplier(
         }
         if (result.text == original) {
             Messages.showInfoMessage(project, "No occurrences of search pattern in $rel", "CodePilot")
-            return
+            return false
         }
-        if (!confirmIfNeeded(rel, original, result.text, "Replace in $rel", risk)) return
+        if (!confirmIfNeeded(rel, original, result.text, "Replace in $rel", risk)) return false
         WriteCommandAction.runWriteCommandAction(project) {
             vf.setBinaryContent(result.text.toByteArray(StandardCharsets.UTF_8))
         }
+        return true
     }
 
-    private fun deleteFile(rel: String, risk: Risk = Risk.HIGH) {
+    private fun deleteFile(rel: String, risk: Risk = Risk.HIGH): Boolean {
         val vf = PathGuard.resolve(project, rel)
         // HIGH risk: always require explicit confirmation regardless of auto-apply setting
         if (risk == Risk.HIGH) {
@@ -417,7 +549,7 @@ class PatchApplier(
                     "Cancel",
                     Messages.getWarningIcon(),
                 )
-            if (ok != Messages.OK) return
+            if (ok != Messages.OK) return false
         } else if (!autoApply) {
             val ok =
                 Messages.showOkCancelDialog(
@@ -428,16 +560,17 @@ class PatchApplier(
                     "Cancel",
                     Messages.getWarningIcon(),
                 )
-            if (ok != Messages.OK) return
+            if (ok != Messages.OK) return false
         }
         WriteCommandAction.runWriteCommandAction(project) { vf.delete(this) }
+        return true
     }
 
     private fun moveFile(
         rel: String,
         edit: JsonNode,
         risk: Risk = Risk.HIGH,
-    ) {
+    ): Boolean {
         val src = PathGuard.resolve(project, rel)
         val to = edit.path("to").asText()
         if (to.isBlank()) throw ToolViolation("missing 'to' for move")
@@ -453,7 +586,7 @@ class PatchApplier(
                     "Cancel",
                     Messages.getQuestionIcon(),
                 )
-            if (confirm != Messages.OK) return
+            if (confirm != Messages.OK) return false
         }
         WriteCommandAction.runWriteCommandAction(project) {
             Files.createDirectories(target.parent)
@@ -461,6 +594,7 @@ class PatchApplier(
             if (parent != null) src.move(this, parent)
             if (target.fileName.toString() != src.name) src.rename(this, target.fileName.toString())
         }
+        return true
     }
 
     // ----- helpers -----
@@ -489,17 +623,15 @@ class PatchApplier(
         val factory = DiffContentFactory.getInstance()
         val left = factory.create(before)
         val right = factory.create(after)
-        val request = SimpleDiffRequest(title, left, right, "Original", "CodePilot")
+        val request = SimpleDiffRequest(title, left, right, "修改前", "修改后")
         DiffManager.getInstance().showDiff(project, request)
-        // showDiff is non-blocking; we ask the user explicitly with a follow-up dialog so that
-        // the apply action remains under their control.
         val confirm =
             Messages.showOkCancelDialog(
                 project,
-                "Apply CodePilot's change to $rel?",
+                "将修改后的内容写入 $rel？",
                 "CodePilot",
-                "Apply",
-                "Reject",
+                "应用",
+                "取消",
                 Messages.getQuestionIcon(),
             )
         return confirm == Messages.OK
