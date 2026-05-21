@@ -31,7 +31,9 @@ public class ConversationRunReclaimer {
   public void reclaim() {
     if (!store.isDbBacked()) return;
     Instant cutoff = Instant.now().minus(properties.getStaleLeaseGrace());
-    List<ConversationRunStore.RunRow> rows = store.findReclaimable(cutoff, 8);
+    Instant interruptedSince = Instant.now().minus(properties.getInterruptedReclaimMaxAge());
+    List<ConversationRunStore.RunRow> rows =
+        store.findReclaimable(cutoff, interruptedSince, properties.getReclaimBatchSize());
     for (var row : rows) {
       if (worker.isExecuting(row.id())) continue;
       log.debug("Reclaim candidate runId={} status={}", row.id(), row.status());

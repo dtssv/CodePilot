@@ -30,7 +30,7 @@ class RulesService(private val project: Project) {
                 "alwaysApply" to alwaysApply,
                 "priority" to priority,
                 "body" to body,
-                "source" to source.name.toLowerCase(),
+                "source" to source.name.lowercase(),
             )
     }
 

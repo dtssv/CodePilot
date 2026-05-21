@@ -25,6 +25,10 @@ export type PluginEventType =
     | 'self_check'
     | 'done'
     | 'conversation_running'
+    | 'server_backoff'
+    | 'admission_queued'
+    | 'admission_retry_ask'
+    | 'admission_granted'
     | 'message_queued'
     | 'message_queue_updated'
     | 'chat_reset'
@@ -56,6 +60,7 @@ export type PluginEventType =
     | 'action_start'
     | 'action_done'
     | 'context_added'
+    | 'ui.focus_chat'
     | 'patch'
     | 'auth_state'
     | 'auth_methods'
@@ -69,9 +74,11 @@ export type PluginEventType =
     | 'notepad_list_result'
     | 'context_budget'
     | 'skill_list_result'
+    | 'skill_create_result'
     | 'marketplace.error'
     | 'composer_result'
     | 'ide_theme'
+    | 'app_locale'
     | 'branch_list'
     | 'session_cost'
     | 'session_interrupted'
@@ -104,6 +111,7 @@ export type PluginEventType =
     // P1-07 MCP/hooks
     | 'mcp.response'
     | 'mcp.confirm.request'
+    | 'mcp.install_result'
     | 'hooks.response'
     // P1-08 shell policy
     | 'shell.policy_response';

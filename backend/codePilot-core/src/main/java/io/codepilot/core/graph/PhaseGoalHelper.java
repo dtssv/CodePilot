@@ -54,19 +54,42 @@ public final class PhaseGoalHelper {
   public static final String INTENT_SYNTHESIZE = "synthesize";
   public static final String INTENT_CODE_CHANGE = "code-change";
 
+  /**
+   * After this many generate passes on a COMPILE/RUN step, allow phase commit even if shell tools
+   * failed — avoids infinite generate↔commit loops when the environment cannot compile (e.g. no
+   * cmake) but the agent already delivered files (tests, fixes).
+   */
+  public static final int STUCK_COMPILE_RUN_PASS_THRESHOLD = 8;
+
   @SuppressWarnings("unchecked")
   public static boolean currentStepGoalSatisfied(OverAllState state) {
     Map<String, Object> gathered =
         (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
-    if (gathered.isEmpty()) {
-      return false;
+    return currentStepGoalSatisfied(state, gathered);
+  }
+
+  /** Same as {@link #currentStepGoalSatisfied(OverAllState)} but uses a pending gathered map. */
+  public static boolean currentStepGoalSatisfied(
+      OverAllState state, Map<String, Object> gathered) {
+    if (gathered == null) {
+      gathered = Map.of();
     }
     StepKind kind = inferStepKind(state);
+    // ANALYZE/SYNTHESIZE can complete from IDE selection or pasted snippets in user input
+    // without fs.read entries in gatheredInfo.
+    if (gathered.isEmpty()) {
+      return switch (kind) {
+        case ANALYZE -> analyzeGoalMet(state, gathered);
+        case SYNTHESIZE -> synthesizeGoalMet(state);
+        case INSPECT -> inspectGoalMet(state, gathered);
+        default -> false;
+      };
+    }
     return switch (kind) {
       case COMPILE -> hasSuccessfulCompile(gathered);
       case RUN -> hasSuccessfulRun(gathered);
       case ANALYZE -> analyzeGoalMet(state, gathered);
-      case INSPECT -> SessionExecutionFacts.inspectGoalMet(state, gathered);
+      case INSPECT -> inspectGoalMet(state, gathered);
       case PREPARE -> hasSuccessfulPrepare(gathered) || hasSuccessfulCompile(gathered);
       case DISCOVER -> discoverGoalMet(state, gathered);
       case SYNTHESIZE -> synthesizeGoalMet(state);
@@ -82,6 +105,25 @@ public final class PhaseGoalHelper {
         Boolean.TRUE.equals(state.value("sessionHadSuccessfulCompile").orElse(false));
     boolean ran = Boolean.TRUE.equals(state.value("sessionHadSuccessfulRun").orElse(false));
     return compiled && ran;
+  }
+
+  /**
+   * COMPILE/RUN steps with failed shell tools normally block commit; after enough retries or when
+   * deliverable files were written, advance the plan with {@code overallGoalUnmet} instead of looping.
+   */
+  public static boolean shouldAdvanceCompileRunDespiteToolFailures(OverAllState state) {
+    StepKind kind = inferStepKind(state);
+    if (kind != StepKind.COMPILE && kind != StepKind.RUN) {
+      return false;
+    }
+    if (currentStepGoalSatisfied(state)) {
+      return false;
+    }
+    int passes = (int) state.value("phaseGeneratePasses").orElse(0);
+    if (passes >= STUCK_COMPILE_RUN_PASS_THRESHOLD) {
+      return true;
+    }
+    return kind == StepKind.COMPILE && SessionExecutionFacts.hasWrittenOutputs(state);
   }
 
   public static void recordSessionMilestones(
@@ -334,10 +376,30 @@ public final class PhaseGoalHelper {
 
   @SuppressWarnings("unchecked")
   public static boolean analyzeGoalMet(OverAllState state, Map<String, Object> gathered) {
-    if (!hasSuccessfulSourceRead(gathered) && !sessionHasSourceReads(state)) {
+    if (!Boolean.TRUE.equals(state.value("phaseHasAnalysisOutput").orElse(false))) {
       return false;
     }
-    return Boolean.TRUE.equals(state.value("phaseHasAnalysisOutput").orElse(false));
+    return hasSuccessfulSourceRead(gathered)
+        || sessionHasSourceReads(state)
+        || inputHasEmbeddedSource(state);
+  }
+
+  /**
+   * True when the user message already carries source text (IDE selection, pasted snippet, or
+   * action context) so an ANALYZE step does not require a redundant fs.read.
+   */
+  public static boolean inputHasEmbeddedSource(OverAllState state) {
+    String input = String.valueOf(state.value("input").orElse(""));
+    if (input.isBlank()) {
+      return false;
+    }
+    if (input.contains("```") && input.length() >= 120) {
+      return true;
+    }
+    if (input.contains("Context:") && SOURCE_FILE.matcher(input).find()) {
+      return true;
+    }
+    return input.length() >= 400 && SOURCE_FILE.matcher(input).find();
   }
 
   /** Report/format step: prior phase already read sources; deliverable is structured text. */
@@ -345,23 +407,71 @@ public final class PhaseGoalHelper {
     if (!sessionHasSourceReads(state)) {
       return false;
     }
-    return Boolean.TRUE.equals(state.value("phaseHasAnalysisOutput").orElse(false));
+    if (Boolean.TRUE.equals(state.value("phaseHasAnalysisOutput").orElse(false))) {
+      return true;
+    }
+    if (SessionExecutionFacts.hasWrittenOutputs(state)) {
+      return true;
+    }
+    String path = currentPhaseDeliverablePath(state);
+    return !path.isBlank() && SessionExecutionFacts.isFileWritten(state, path);
+  }
+
+  /**
+   * Inspect step: any tool failure in this phase blocks commit (partial reads are not enough).
+   */
+  public static boolean inspectGoalMet(OverAllState state, Map<String, Object> gathered) {
+    if (inferStepKind(state) == StepKind.INSPECT
+        && PhaseOutcomeHelper.gatheredHasFailures(gathered)) {
+      return false;
+    }
+    if (inferStepKind(state) == StepKind.INSPECT) {
+      return hasSuccessfulSourceRead(gathered) || sessionHasSourceReads(state);
+    }
+    return SessionExecutionFacts.inspectGoalMet(state, gathered);
+  }
+
+  @SuppressWarnings("unchecked")
+  static String currentPhaseDeliverablePath(OverAllState state) {
+    String phaseId = String.valueOf(state.value("phaseCursor").orElse(""));
+    if (phaseId.isBlank()) {
+      return "";
+    }
+    List<Map<String, Object>> phases =
+        (List<Map<String, Object>>) state.value("phases").orElse(List.of());
+    for (Map<String, Object> phase : phases) {
+      if (phaseId.equals(String.valueOf(phase.get("id")))) {
+        Object path = phase.get("deliverablePath");
+        return path != null ? path.toString().trim() : "";
+      }
+    }
+    return "";
   }
 
   public static boolean sessionHasSourceReads(OverAllState state) {
     return Boolean.TRUE.equals(state.value("sessionHasSourceReads").orElse(false));
   }
 
-  @SuppressWarnings("unchecked")
   public static boolean discoverGoalMet(OverAllState state, Map<String, Object> gathered) {
     if (!gatheredHasSuccessfulList(gathered)) {
       return false;
     }
-    String input = String.valueOf(state.value("input").orElse("")).toLowerCase(Locale.ROOT);
-    if (!input.contains("leetcode")) {
+    if (inferStepKind(state) != StepKind.DISCOVER) {
       return true;
     }
-    return listResultMatchesKeyword(gathered, "leetcode");
+    // Discover is satisfied by a non-empty listing; path correction uses [SESSION EXECUTION FACTS].
+    return true;
+  }
+
+  /** Whether a plan step/phase intent is a file deliverable (report/format) step. */
+  public static boolean isDeliverableWriteIntent(String intentSlug) {
+    String slug = normalizeIntentSlug(intentSlug);
+    return INTENT_SYNTHESIZE.equals(slug)
+        || "report".equals(slug)
+        || "deliver".equals(slug)
+        || "document".equals(slug)
+        || "format".equals(slug)
+        || "summarize".equals(slug);
   }
 
   /** Keep successful source reads in context across phase commits (bounded). */
@@ -433,40 +543,6 @@ public final class PhaseGoalHelper {
   }
 
   @SuppressWarnings("unchecked")
-  static boolean listResultMatchesKeyword(Map<String, Object> gathered, String keyword) {
-    String needle = keyword.toLowerCase(Locale.ROOT);
-    for (Object value : gathered.values()) {
-      if (!(value instanceof Map<?, ?> raw)) {
-        continue;
-      }
-      Map<String, Object> entry = (Map<String, Object>) raw;
-      if (!GatheredInfoFormatter.entrySucceeded(entry)
-          || !"fs.list".equals(String.valueOf(entry.get("kind")))) {
-        continue;
-      }
-      Object result = entry.get("result");
-      if (!(result instanceof Map<?, ?> m)) {
-        continue;
-      }
-      Object entries = ((Map<String, Object>) m).get("entries");
-      if (!(entries instanceof List<?> list)) {
-        continue;
-      }
-      for (Object item : list) {
-        if (item instanceof Map<?, ?> row) {
-          Object nameVal = row.get("name");
-          if (nameVal == null) nameVal = row.get("path");
-          String name = String.valueOf(nameVal);
-          if (name.toLowerCase(Locale.ROOT).contains(needle)) {
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  @SuppressWarnings("unchecked")
   private static boolean listResultEmpty(Map<String, Object> entry) {
     Object result = entry.get("result");
     if (!(result instanceof Map<?, ?> m)) {
@@ -507,6 +583,6 @@ public final class PhaseGoalHelper {
         + "Do NOT rerun compile/run/read probes. Use textOutput with a brief summary and move on.\n"
         + "Earlier [FAILED] entries used a different approach — ignore them if the goal is met.\n"
         + "Plan steps are guidance; the user's goal matters more than the exact command (cmake vs g++).\n"
-        + SessionExecutionFacts.adaptationDirective(state);
+        + GraphExecutionJournal.combinedContextDirective(state);
   }
 }

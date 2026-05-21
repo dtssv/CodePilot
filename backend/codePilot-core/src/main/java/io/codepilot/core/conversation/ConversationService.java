@@ -115,9 +115,14 @@ public class ConversationService {
     String continuation = UUID.randomUUID().toString();
     String redactedInput = redaction.redact(req.input());
 
+    boolean useGraphEngine =
+        req.mode() == ConversationMode.AGENT
+            && (req.policy() == null || !"legacy".equals(req.policy().engine()));
+
     List<ActivatedSkill> activated;
     try {
-      activated = skillRouter.route(req).skills();
+      // Graph engine activates Skills per node; chat/legacy still use full router upfront.
+      activated = useGraphEngine ? List.of() : skillRouter.route(req).skills();
     } catch (CodePilotException ex) {
       return Flux.just(
           sse.error(ex.code(), ex.getMessage()),
@@ -133,30 +138,40 @@ public class ConversationService {
     }
     ContextBudgeter.Result shape = budgeter.shape(req, assembled.systemText());
 
-    Flux<ServerSentEvent<String>> head =
-        Flux.just(
-            sse.event(
-                "model.requested",
-                Map.of(
-                    "modelId", req.modelId() != null ? req.modelId() : "default",
-                    "thinkingMode", req.policy() != null && req.policy().thinkingMode() != null ? req.policy().thinkingMode() : "",
-                    "maxOutputTokens", req.policy() != null && req.policy().maxOutputTokens() != null ? req.policy().maxOutputTokens() : 0,
-                    "maxMode", req.policy() != null && Boolean.TRUE.equals(req.policy().maxMode()))),
-            sse.event(
-                SseEvents.SKILLS_ACTIVATED,
-                Map.of(
-                    "items",
-                    activated.stream()
-                        .map(
-                            a ->
-                                Map.of(
-                                    "id", a.id(),
-                                    "version", a.version(),
-                                    "source", a.source(),
-                                    "scope", a.scope(),
-                                    "priority", a.priority(),
-                                    "tokens", a.tokens()))
-                        .toList())));
+    var headEvents = new java.util.ArrayList<ServerSentEvent<String>>();
+    headEvents.add(
+        sse.event(
+            "model.requested",
+            Map.of(
+                "modelId", req.modelId() != null ? req.modelId() : "default",
+                "thinkingMode",
+                    req.policy() != null && req.policy().thinkingMode() != null
+                        ? req.policy().thinkingMode()
+                        : "",
+                "maxOutputTokens",
+                    req.policy() != null && req.policy().maxOutputTokens() != null
+                        ? req.policy().maxOutputTokens()
+                        : 0,
+                "maxMode", req.policy() != null && Boolean.TRUE.equals(req.policy().maxMode()))));
+    if (!useGraphEngine && !activated.isEmpty()) {
+      headEvents.add(
+          sse.event(
+              SseEvents.SKILLS_ACTIVATED,
+              Map.of(
+                  "items",
+                  activated.stream()
+                      .map(
+                          a ->
+                              Map.of(
+                                  "id", a.id(),
+                                  "version", a.version(),
+                                  "source", a.source(),
+                                  "scope", a.scope(),
+                                  "priority", a.priority(),
+                                  "tokens", a.tokens()))
+                      .toList())));
+    }
+    Flux<ServerSentEvent<String>> head = Flux.fromIterable(headEvents);
 
     // Resolve the ChatClient based on modelId and modelSource (model group / system model / user's custom model)
     log.info("ConversationService resolving model: modelId={}, modelSource={}, userId={}",
@@ -170,7 +185,7 @@ public class ConversationService {
     // Graph engine handles planning, generate→verify→repair loop, gather, etc.
     // Legacy AgentLoop is kept only when explicitly requested via policy.engine=legacy
     if (req.mode() == ConversationMode.AGENT) {
-      boolean useLegacy = req.policy() != null && "legacy".equals(req.policy().engine());
+      boolean useLegacy = !useGraphEngine;
       Flux<ServerSentEvent<String>> agentBody;
       if (useLegacy) {
         AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
@@ -266,9 +281,9 @@ public class ConversationService {
           .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
           .onErrorResume(
               ex -> {
-                log.warn("LLM stream error", ex);
+                logLlmStreamError(ex);
                 safeEndRequest(resolved, false, 0);
-                return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+                return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, friendlyLlmErrorMessage(ex)));
               });
     } else {
       // Text-only mode — ★ include history messages as multi-turn context
@@ -288,9 +303,9 @@ public class ConversationService {
             .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
             .onErrorResume(
                 ex -> {
-                  log.warn("LLM stream error", ex);
+                  logLlmStreamError(ex);
                   safeEndRequest(resolved, false, 0);
-                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, friendlyLlmErrorMessage(ex)));
                 });
       } else {
         // No history — standard single-turn path
@@ -304,9 +319,9 @@ public class ConversationService {
             .map(text -> sse.event(SseEvents.DELTA, Map.of("text", text)))
             .onErrorResume(
                 ex -> {
-                  log.warn("LLM stream error", ex);
+                  logLlmStreamError(ex);
                   safeEndRequest(resolved, false, 0);
-                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, "Upstream error"));
+                  return Flux.just(sse.error(ErrorCodes.UPSTREAM_MODEL, friendlyLlmErrorMessage(ex)));
                 });
       }
     }
@@ -406,6 +421,8 @@ public class ConversationService {
         req.earlierToolCallsCount(),
         req.projectRootHash(),
         req.userSkills(),
+        req.userSkillRefs(),
+        req.userSkillBodies(),
         req.userMcps(),
         req.mcpTools(),
         req.userPlanEdits(),
@@ -432,6 +449,56 @@ public class ConversationService {
 
   private static OpenAiChatOptions requestOptions(ConversationRunRequest req) {
     return PolicyChatOptions.fromPolicy(req.policy(), req.modelId());
+  }
+
+  /**
+   * Logs LLM stream errors with appropriate detail level.
+   * For 4xx client errors, logs the response body to help diagnose parameter issues.
+   */
+  private void logLlmStreamError(Throwable ex) {
+    if (ex instanceof org.springframework.web.reactive.function.client.WebClientResponseException wcr) {
+      int status = wcr.getStatusCode().value();
+      if (status >= 400 && status < 500) {
+        log.warn("LLM stream error: HTTP {}, response body={}", status,
+            abbreviateForLog(wcr.getResponseBodyAsString(), 500));
+      } else {
+        log.warn("LLM stream error: HTTP {}", status, ex);
+      }
+    } else {
+      log.warn("LLM stream error", ex);
+    }
+  }
+
+  /**
+   * Returns a user-friendly error message based on the LLM error type.
+   * 4xx client errors (e.g. 400 Bad Request) usually indicate parameter issues.
+   * 5xx server errors and network errors indicate transient upstream issues.
+   */
+  private static String friendlyLlmErrorMessage(Throwable ex) {
+    if (ex instanceof org.springframework.web.reactive.function.client.WebClientResponseException wcr) {
+      int status = wcr.getStatusCode().value();
+      if (status == 400) {
+        return "模型请求参数异常，请检查模型配置后重试。";
+      }
+      if (status == 401 || status == 403) {
+        return "模型认证失败，请检查API Key配置。";
+      }
+      if (status == 404) {
+        return "请求的模型不存在，请检查模型配置。";
+      }
+      if (status == 429) {
+        return "模型请求过于频繁，请稍后重试。";
+      }
+      if (status >= 400 && status < 500) {
+        return "模型请求被拒绝，请检查模型配置后重试。";
+      }
+    }
+    return "上游模型服务异常，请稍后重试。";
+  }
+
+  private static String abbreviateForLog(String s, int maxLen) {
+    if (s == null) return "null";
+    return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...[truncated]";
   }
 
   /**

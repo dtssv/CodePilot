@@ -13,11 +13,15 @@ data class SseHttpError(
     val opType: String?,
 ) {
     val isRateLimited: Boolean
-        get() = httpStatus == 429 || apiCode == SseHttpErrors.API_CODE_RATE_LIMITED
+        get() =
+            httpStatus == 429
+                || apiCode == SseHttpErrors.API_CODE_RATE_LIMITED
+                || apiCode == SseHttpErrors.API_CODE_QUEUE_FULL
 }
 
 object SseHttpErrors {
     const val API_CODE_RATE_LIMITED = 42901
+    const val API_CODE_QUEUE_FULL = 42902
 
     fun parse(
         response: Response,
@@ -26,13 +30,20 @@ object SseHttpErrors {
         if (response.isSuccessful) return null
         val retryAfter = response.header("Retry-After")?.toIntOrNull()?.coerceIn(1, 600) ?: 60
         val opType = response.header("X-RateLimit-Type")
+        val queueFull = "queue-full" == response.header("X-RateLimit-Reason")
         val body =
             try {
                 response.peekBody(64 * 1024).string()
             } catch (_: Exception) {
                 ""
             }
-        val (apiCode, message) = parseApiEnvelope(body, mapper, response.code, response.message)
+        var (apiCode, message) = parseApiEnvelope(body, mapper, response.code, response.message)
+        if (queueFull || apiCode == API_CODE_QUEUE_FULL) {
+            apiCode = API_CODE_QUEUE_FULL
+            if (message.isBlank() || message.contains("频繁")) {
+                message = "服务端 Agent 队列已满，请稍后重试"
+            }
+        }
         return SseHttpError(
             httpStatus = response.code,
             apiCode = apiCode,

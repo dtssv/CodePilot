@@ -22,6 +22,8 @@ import java.nio.file.Path
 class PatchApplier(
     private val project: Project,
 ) {
+    private val log = com.intellij.openapi.diagnostic.Logger.getInstance(PatchApplier::class.java)
+
     /** Risk levels for write operations. */
     enum class Risk { LOW, MEDIUM, HIGH }
 
@@ -145,7 +147,11 @@ class PatchApplier(
                 applyEdit(edit, riskForTool(toolName, rel))
             }
             "fs.replace" -> {
-                val rel = args.path("path").asText()
+                // ★ Integration: Use SmartMatcher for fuzzy path resolution (same as fs.write)
+                var rel = args.path("path").asText()
+                if (!resolveFile(rel)) {
+                    matcher.matchFile(rel).firstOrNull()?.let { if (it.score > 0.7) rel = it.matched }
+                }
                 val edit =
                     mapper.createObjectNode()
                         .put("op", "replace")
@@ -215,12 +221,17 @@ class PatchApplier(
                     recorder.record("current", rel, "write", null, content)
                 }
                 "fs.replace" -> {
+                    // ★ Integration: Use SmartMatcher for fuzzy path resolution (same as fs.write)
+                    var rel = args.path("path").asText()
+                    if (!resolveFile(rel)) {
+                        matcher.matchFile(rel).firstOrNull()?.let { if (it.score > 0.7) rel = it.matched }
+                    }
                     val edit =
                         com.fasterxml.jackson.databind
                             .ObjectMapper()
                             .createObjectNode()
                             .put("op", "replace")
-                            .put("path", args.path("path").asText())
+                            .put("path", rel)
                             .put("search", args.path("search").asText())
                             .put("replace", args.path("replace").asText(""))
                             .put("regex", args.path("regex").asBoolean(false))
@@ -521,19 +532,100 @@ class PatchApplier(
         val replace = edit.path("replace").asText("")
         if (search.isEmpty()) throw ToolViolation("empty search")
 
-        val result = applyReplace(original, search, replace, regex, ignoreCase)
+        // ★ Normalize whitespace: CRLF→LF, trailing whitespace per line
+        val normalizedOriginal = original.replace("\r\n", "\n").trimTrailingLines()
+        val normalizedSearch = search.replace("\r\n", "\n").trimTrailingLines()
+
+        // Primary: exact match with normalized content
+        var result = applyReplace(normalizedOriginal, normalizedSearch, replace, regex, ignoreCase)
+        var usedNormalized = result.text != normalizedOriginal
+
+        // Fallback 1: if exact match failed, try with original (un-normalized) content
+        if (!usedNormalized) {
+            result = applyReplace(original, search, replace, regex, ignoreCase)
+            usedNormalized = result.text != original
+        }
+
+        // Fallback 2: if still no match and not regex, try fuzzy match ignoring leading whitespace differences
+        if (!usedNormalized && !regex) {
+            val fuzzyResult = fuzzyReplaceByLineContent(normalizedOriginal, normalizedSearch, replace)
+            if (fuzzyResult.text != normalizedOriginal) {
+                log.info("replaceFile: exact match failed for $rel, succeeded via fuzzy (whitespace-tolerant) match")
+                result = fuzzyResult
+                usedNormalized = true
+            }
+        }
+
         if (expectMatches >= 0 && result.matches != expectMatches) {
             throw ToolViolation("expectMatches=$expectMatches but found ${result.matches}")
         }
-        if (result.text == original) {
+        if (!usedNormalized) {
+            // ★ Diagnostic logging for unmatched search pattern
+            log.warn("replaceFile: search pattern not found in $rel — " +
+                "search.length=${search.length}, original.length=${original.length}, " +
+                "search.head=${search.take(80).replaceWhitespaceForLog()}, " +
+                "original.head=${original.take(80).replaceWhitespaceForLog()}")
             Messages.showInfoMessage(project, "No occurrences of search pattern in $rel", "CodePilot")
             return false
         }
-        if (!confirmIfNeeded(rel, original, result.text, "Replace in $rel", risk)) return false
+
+        // If we matched against normalized content, convert result back to original line endings
+        val finalText = if (original.contains("\r\n")) result.text.replace("\n", "\r\n") else result.text
+        if (!confirmIfNeeded(rel, original, finalText, "Replace in $rel", risk)) return false
         WriteCommandAction.runWriteCommandAction(project) {
-            vf.setBinaryContent(result.text.toByteArray(StandardCharsets.UTF_8))
+            vf.setBinaryContent(finalText.toByteArray(StandardCharsets.UTF_8))
         }
         return true
+    }
+
+    /** Trim trailing whitespace on each line (but keep the newline itself). */
+    private fun String.trimTrailingLines(): String =
+        lines().joinToString("\n") { it.trimEnd() }
+
+    /** Replace visible whitespace chars for log output (compact, readable). */
+    private fun String.replaceWhitespaceForLog(): String =
+        replace('\t', '⇥').replace('\r', '⏎').replace(' ', '·')
+
+    /**
+     * ★ Fuzzy match: find a contiguous block of lines whose stripped content matches
+     * the stripped lines of [searchText], then replace with [replaceText].
+     * This tolerates indentation differences (tabs vs spaces, different indent depths).
+     */
+    private fun fuzzyReplaceByLineContent(
+        original: String,
+        searchText: String,
+        replaceText: String,
+    ): ReplaceResult {
+        val searchLines = searchText.lines().map { it.trimEnd() }
+        if (searchLines.isEmpty()) return ReplaceResult(original, 0)
+
+        val originalLines = original.lines()
+        val strippedOriginal = originalLines.map { it.trimEnd() }
+
+        // Find the first contiguous block in original whose stripped lines match search stripped lines
+        var matchCount = 0
+        var matchStart = -1
+        for (i in strippedOriginal.indices) {
+            if (strippedOriginal.subList(i, minOf(i + searchLines.size, strippedOriginal.size)) == searchLines) {
+                matchStart = i
+                matchCount++
+            }
+        }
+
+        if (matchStart == -1) return ReplaceResult(original, 0)
+
+        // Build replacement: preserve the indentation style of the first matched line
+        val baseIndent = originalLines[matchStart].takeWhile { it == ' ' || it == '\t' }
+        val replacedLines = originalLines.toMutableList()
+        val replaceLines = replaceText.lines()
+        val indentedReplace = replaceLines.mapIndexed { idx, line ->
+            if (line.isBlank()) line
+            else baseIndent + line.trimEnd()
+        }
+        replacedLines.subList(matchStart, matchStart + searchLines.size).clear()
+        replacedLines.addAll(matchStart, indentedReplace)
+
+        return ReplaceResult(replacedLines.joinToString("\n"), matchCount)
     }
 
     private fun deleteFile(rel: String, risk: Risk = Risk.HIGH): Boolean {

@@ -10,7 +10,10 @@ import io.codepilot.plugin.actions.ClipboardBridge
 import io.codepilot.plugin.auth.LoginDialog
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.session.SessionStore
+import io.codepilot.plugin.hooks.HookEngine
+import io.codepilot.plugin.marketplace.SkillRefCollector
 import io.codepilot.plugin.settings.CodePilotSettings
+import io.codepilot.plugin.context.InlineContextExpander
 import io.codepilot.plugin.tools.PatchApplier
 import io.codepilot.plugin.tools.ToolDispatcher
 import io.codepilot.plugin.ui.NeedsInputDialog
@@ -30,11 +33,12 @@ import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
+import java.util.concurrent.ConcurrentHashMap
 
 /** Swing chat panel wiring the full SSE -> tool-dispatch -> patch-apply loop. */
 class CodePilotChatPanel(
     private val project: Project,
-) {
+) : QuickActionChatSink {
     private val settings = CodePilotSettings.getInstance()
     private val sessionStore = SessionStore.getInstance()
     private val client = ConversationClient()
@@ -48,9 +52,10 @@ class CodePilotChatPanel(
     private val stopButton = JButton("Stop").apply { isEnabled = false }
     private val signInButton = JButton("Sign in")
 
-    private val sessionHandle = sessionStore.newSession(workspaceHash(), modeBox.selectedItem as String, null)
-    private val dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
+    private var sessionHandle = sessionStore.newSession(workspaceHash(), modeBox.selectedItem as String, null)
+    private var dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
     private val patcher = PatchApplier(project)
+    private val quickContextStore = ConcurrentHashMap<String, String>()
 
     init {
         listOf(transcript, planView, ledgerView).forEach {
@@ -72,6 +77,64 @@ class CodePilotChatPanel(
         )
         // Load models from backend
         fetchModels()
+    }
+
+    private val inlineCtxCleanup = Regex("\u0001[^\u0001]*\u0001")
+
+    override fun storeContext(
+        id: String,
+        fullCode: String,
+    ) {
+        quickContextStore[id] = fullCode
+    }
+
+    override fun submitQuickUserMessage(
+        textWithInlineContextMarkers: String,
+        contextRefs: List<Map<String, Any?>>,
+        mode: String,
+    ) {
+        val fullText =
+            InlineContextExpander.expand(textWithInlineContextMarkers, quickContextStore, contextRefs)
+        SwingUtilities.invokeLater {
+            try {
+                modeBox.selectedItem = mode
+            } catch (_: Exception) {
+            }
+            val cleaned =
+                textWithInlineContextMarkers.replace(inlineCtxCleanup, "").trim()
+            appendTranscript("> $cleaned")
+
+            val userMsgExtra = mutableMapOf<String, Any?>()
+            if (contextRefs.isNotEmpty()) userMsgExtra["contextRefs"] = contextRefs
+            sessionStore.appendMessage(sessionHandle, "user", textWithInlineContextMarkers, userMsgExtra.toMap())
+
+            sendButton.isEnabled = false
+            stopButton.isEnabled = true
+
+            val payload = basePayload(fullText, intent = "new")
+            runConversationAfterHook(payload, panelListener(fullText))
+        }
+    }
+
+    override fun dispatchContextAdded(meta: Map<String, Any?>) {
+        val display = meta["display"]?.toString() ?: meta["id"]?.toString() ?: "context"
+        appendTranscript("[Context attached] $display")
+    }
+
+    override fun prepareFreshChatSession() {
+        fun run() {
+            quickContextStore.clear()
+            inputArea.text = ""
+            val mode = modeBox.selectedItem as String
+            sessionHandle = sessionStore.newSession(workspaceHash(), mode, null)
+            dispatcher = ToolDispatcher(project, client, sessionHandle.meta.id)
+            appendTranscript("\n--- New chat ---\n")
+        }
+        if (SwingUtilities.isEventDispatchThread()) {
+            run()
+        } else {
+            SwingUtilities.invokeLater { run() }
+        }
     }
 
     /** Data class for model dropdown items. */
@@ -166,7 +229,7 @@ class CodePilotChatPanel(
             stopButton.isEnabled = true
 
             val payload = basePayload(text, intent = "new")
-            client.run(payload, panelListener(text))
+            runConversationAfterHook(payload, panelListener(text))
         }
     }
 
@@ -218,9 +281,55 @@ class CodePilotChatPanel(
                     ),
             )
         base.putAll(extras)
-        base["userSkills"] = collectUserSkills()
-        base["projectRootHash"] = projectRootHash()
+        val rootHash = SkillRefCollector.projectRootHash(project)
+        base["projectRootHash"] = rootHash
+        // Chat mode: SkillRouter uses full userSkills (yaml). Agent + graph: only userSkillRefs /
+        // userSkillBodies are seeded into graph state (see IntakeAction); sending only userSkills
+        // would activate nothing in the default graph engine.
+        if (mode == "chat") {
+            base["userSkills"] = collectUserSkills()
+        } else {
+            val skillPayload = SkillRefCollector.collect(project, rootHash)
+            if (skillPayload.refs.isNotEmpty()) {
+                base["userSkillRefs"] = skillPayload.refs
+            }
+            if (skillPayload.bodies.isNotEmpty()) {
+                base["userSkillBodies"] = skillPayload.bodies
+            }
+        }
+        try {
+            val mcpTools = dispatcher.initMcpServers()
+            if (mcpTools.isNotEmpty()) {
+                base["mcpTools"] = mcpTools
+            }
+        } catch (_: Exception) {
+            /* same as CefChatPanel: MCP metadata is best-effort */
+        }
         return base
+    }
+
+    /**
+     * Runs [HookEngine] **beforeSubmitPrompt** then starts the SSE stream.
+     * Keeps behavior aligned with [CefChatPanel] so hooks configured in Integrations apply
+     * to the Swing fallback chat as well.
+     */
+    private fun runConversationAfterHook(
+        payload: Map<String, Any?>,
+        listener: ConversationClient.Listener,
+    ) {
+        val mode = payload["mode"] as? String ?: "agent"
+        val msg = (payload["input"] as? String)?.take(500) ?: ""
+        val hookResult =
+            HookEngine.getInstance(project).run(
+                "beforeSubmitPrompt",
+                mapOf("sessionId" to sessionHandle.meta.id, "mode" to mode, "message" to msg),
+            )
+        if (!hookResult.pass) {
+            appendTranscript("[hook blocked] ${hookResult.reason}")
+            resetButtons()
+            return
+        }
+        client.run(payload, listener)
     }
 
     private fun collectUserSkills(): List<Map<String, Any?>> {
@@ -233,22 +342,11 @@ class CodePilotChatPanel(
                 "version" to active.entry.version,
                 "source" to "user",
                 "scope" to active.scope,
-                "projectRootHash" to projectRootHash(),
+                "projectRootHash" to SkillRefCollector.projectRootHash(project),
                 "sha256" to active.entry.sha256,
                 "yaml" to store.readSkillBody(active),
             )
         }
-    }
-
-    private fun projectRootHash(): String {
-        val base = project.basePath ?: project.name
-        val digest =
-            java.security.MessageDigest
-                .getInstance("SHA-256")
-                .digest(base.toByteArray())
-        return java.util.HexFormat
-            .of()
-            .formatHex(digest)
     }
 
     private fun panelListener(originalInput: String): ConversationClient.Listener =
@@ -286,7 +384,7 @@ class CodePilotChatPanel(
                         val answers = dialog.answers()
                         if (answers.isNotEmpty()) {
                             val next = basePayload(originalInput, "answer", mapOf("answers" to answers))
-                            client.run(next, panelListener(originalInput))
+                            runConversationAfterHook(next, panelListener(originalInput))
                         }
                     }
                 }

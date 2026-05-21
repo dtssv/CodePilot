@@ -38,7 +38,7 @@ public class ServerToolExecutor {
    * Returns true if the given tool name is a server-side tool.
    */
   public boolean isServerTool(String toolName) {
-    return "rag.search".equals(toolName) || "mcp.call".equals(toolName);
+    return "rag.search".equals(toolName);
   }
 
   /**
@@ -52,7 +52,8 @@ public class ServerToolExecutor {
   public String execute(String toolName, JsonNode args, String sessionId) {
     return switch (toolName) {
       case "rag.search" -> executeRagSearch(args, sessionId);
-      case "mcp.call" -> executeMcpCall(args, sessionId);
+      case "mcp.call" ->
+          "{\"ok\":false,\"error\":\"mcp.call must run on the plugin client (gather/tool_call)\"}";
       default -> "{\"error\":\"Unknown server tool: " + toolName + "\"}";
     };
   }

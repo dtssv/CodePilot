@@ -30,6 +30,8 @@ public class FinalizeAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "finalize");
+        // Prevent the graph runner from re-routing on a stale generateResult after this terminal node.
+        updates.put("generateResult", null);
         boolean goalUnmet = Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))
                 || !PhaseGoalHelper.overallCompileRunGoalMet(state);
         // Always mark the graph run as finished; goalUnmet is informational for the client UI.
@@ -39,6 +41,8 @@ public class FinalizeAction implements NodeAction {
         String sessionId = (String) state.value("sessionId").orElse("");
         var phases = (List<Map<String, Object>>) state.value("phases").orElse(List.of());
         var completedToolCalls = (List<Map<String, Object>>) state.value("completedToolCalls").orElse(List.of());
+        var directToolsExecuted =
+                (List<Map<String, Object>>) state.value("directToolsExecuted").orElse(List.of());
         var taskLedger = (Map<String, Object>) state.value("taskLedger").orElse(Map.of());
         var patchResults = (List<Map<String, Object>>) state.value("patchResults").orElse(List.of());
 
@@ -49,18 +53,23 @@ public class FinalizeAction implements NodeAction {
             summary.append("Goal: ").append(goal).append("\n\n");
         }
 
-        // Summarize phase results
-        int completedPhases = 0;
+        // Summarize phase results (CommitAction records completed phase ids in state)
+        @SuppressWarnings("unchecked")
+        List<String> completedPhaseIds =
+                (List<String>) state.value("completedPhases").orElse(List.of());
+        int phasesDone = completedPhaseIds.size();
         int failedPhases = 0;
         List<String> changedFiles = new ArrayList<>();
         for (var phase : phases) {
             String status = (String) phase.getOrDefault("status", "unknown");
-            if ("completed".equals(status) || "success".equals(status)) {
-                completedPhases++;
-            } else if ("failed".equals(status)) {
+            if ("failed".equals(status)) {
                 failedPhases++;
             }
         }
+        if (phasesDone == 0 && !phases.isEmpty() && failedPhases == 0) {
+            phasesDone = phases.size();
+        }
+        int completedPhases = phasesDone;
 
         // Collect changed files from patch results
         for (var pr : patchResults) {
@@ -81,7 +90,8 @@ public class FinalizeAction implements NodeAction {
             summary.append("Files changed: ").append(String.join(", ", changedFiles)).append("\n");
         }
 
-        summary.append("Tool calls executed: ").append(completedToolCalls.size()).append("\n");
+        int toolCallCount = Math.max(completedToolCalls.size(), directToolsExecuted.size());
+        summary.append("Tool calls executed: ").append(toolCallCount).append("\n");
 
         if (goalUnmet && ShellCommandGate.isCompileRunIntent((String) state.value("input").orElse(""))) {
             summary.append("\n⚠ User goal (compile and run) was not fully verified.\n");
@@ -101,7 +111,7 @@ public class FinalizeAction implements NodeAction {
         sessionDigest.put("completedPhases", completedPhases);
         sessionDigest.put("totalPhases", phases.size());
         sessionDigest.put("changedFiles", changedFiles);
-        sessionDigest.put("completedToolCallsCount", completedToolCalls.size());
+        sessionDigest.put("completedToolCallsCount", toolCallCount);
         sessionDigest.put("timestamp", System.currentTimeMillis());
         updates.put("sessionDigest", sessionDigest);
 
@@ -109,7 +119,7 @@ public class FinalizeAction implements NodeAction {
         Map<String, Object> nextTurnSummary = new HashMap<>();
         nextTurnSummary.put("taskCompleted", true);
         nextTurnSummary.put("changedFiles", changedFiles);
-        nextTurnSummary.put("toolCallCount", completedToolCalls.size());
+        nextTurnSummary.put("toolCallCount", toolCallCount);
         nextTurnSummary.put("summaryText", summary.toString());
         updates.put("summaryForNextTurn", nextTurnSummary);
 
@@ -127,8 +137,12 @@ public class FinalizeAction implements NodeAction {
                 "totalPhases", phases.size()
             ));
 
-        log.info("Finalize: task completed. {} phases done, {} files changed, {} tool calls",
-            completedPhases, changedFiles.size(), completedToolCalls.size());
+        log.info(
+            "Finalize: task completed. {} phases done, {} files changed, {} tool calls (direct={})",
+            completedPhases,
+            changedFiles.size(),
+            toolCallCount,
+            directToolsExecuted.size());
         return updates;
     }
 }

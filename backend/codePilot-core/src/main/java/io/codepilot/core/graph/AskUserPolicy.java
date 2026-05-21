@@ -13,6 +13,26 @@ public final class AskUserPolicy {
   /**
    * Normalizes shape only (text key, trim). Language and wording come from LLM prompts.
    */
+  /** Accepts a structured map or a plain string (legacy / escalation text). */
+  public static Map<String, Object> normalizeQuestion(Object raw) {
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof String s) {
+      String text = s.trim();
+      if (text.isEmpty()) {
+        return null;
+      }
+      return Map.of("kind", "freeform", "text", text);
+    }
+    if (raw instanceof Map<?, ?> m) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> map = (Map<String, Object>) m;
+      return normalizeQuestionMap(map);
+    }
+    return null;
+  }
+
   public static Map<String, Object> normalizeQuestionMap(Map<String, Object> raw) {
     if (raw == null || raw.isEmpty()) {
       return null;

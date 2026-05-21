@@ -130,6 +130,53 @@ class PhaseGoalHelperTest {
   }
 
   @Test
+  void analyzeStepMetWithEmbeddedSelectionAndPhaseOutput() {
+    String input =
+        "请帮我重构这段选中的代码\n"
+            + "Context: buildTree106.cpp :1-69\n"
+            + "```C++\n"
+            + "#include <vector>\n"
+            + "struct TreeNode { int val; };\n"
+            + "```";
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p1");
+    data.put("input", input);
+    data.put("gatheredInfo", Map.of());
+    data.put("phaseHasAnalysisOutput", true);
+    data.put(
+        "userPlan",
+        Map.of("steps", List.of(step("s1", "分析现有代码问题", "in_progress", "analyze"))));
+    data.put(
+        "phases",
+        List.of(Map.of("id", "p1", "title", "分析", "intent", "analyze", "userStepIndex", 0)));
+    var state = new OverAllState(data);
+
+    assertTrue(PhaseGoalHelper.inputHasEmbeddedSource(state));
+    assertTrue(PhaseGoalHelper.analyzeGoalMet(state, Map.of()));
+    assertTrue(PhaseGoalHelper.currentStepGoalSatisfied(state));
+  }
+
+  @Test
+  void analyzeStepNotMetWithoutPhaseOutputEvenWithEmbeddedSource() {
+    String input = "Context: foo.cpp :1-10 ```cpp int x; ```";
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p1");
+    data.put("input", input);
+    data.put("gatheredInfo", Map.of());
+    data.put(
+        "userPlan",
+        Map.of("steps", List.of(step("s1", "分析", "in_progress", "analyze"))));
+    data.put(
+        "phases",
+        List.of(Map.of("id", "p1", "intent", "analyze", "userStepIndex", 0)));
+    var state = new OverAllState(data);
+
+    assertTrue(PhaseGoalHelper.inputHasEmbeddedSource(state));
+    assertFalse(PhaseGoalHelper.analyzeGoalMet(state, Map.of()));
+    assertFalse(PhaseGoalHelper.currentStepGoalSatisfied(state));
+  }
+
+  @Test
   void synthesizeStepNeedsSessionReadsAndPhaseOutput() {
     var data = new HashMap<String, Object>();
     data.put("phaseCursor", "p3");
@@ -147,49 +194,34 @@ class PhaseGoalHelperTest {
   }
 
   @Test
-  void discoverRequiresTargetFilesWhenInputMentionsLeetcode() {
-    Map<String, Object> gathered = new HashMap<>();
+  void inspectBlocksCommitWhenSourceReadFailed() {
+    var gathered = new HashMap<String, Object>();
     gathered.put(
-        "list1",
+        "read1",
         Map.of(
             "kind",
-            "fs.list",
+            "fs.read",
             "ok",
             true,
             "result",
-            Map.of(
-                "path",
-                ".",
-                "entries",
-                List.of(Map.of("name", "main.cpp", "path", "main.cpp")))));
-
+            Map.of("path", "leetcode42.cpp", "content", "int main(){}")));
+    gathered.put(
+        "read2",
+        Map.of("kind", "fs.read", "ok", false, "errorMessage", "timeout"));
     var data = new HashMap<String, Object>();
-    data.put("phaseCursor", "p1");
-    data.put("input", "分析 leetcode 算法复杂度");
+    data.put("phaseCursor", "p2");
     data.put("gatheredInfo", gathered);
-    data.put("userPlan", Map.of("steps", List.of(step("s1", "发现文件", "in_progress", "discover"))));
     data.put(
         "phases",
-        List.of(Map.of("id", "p1", "title", "发现文件", "intent", "discover", "userStepIndex", 0)));
-    var state = new OverAllState(data);
-
-    assertFalse(PhaseGoalHelper.currentStepGoalSatisfied(state));
-
-    gathered.put(
-        "list2",
+        List.of(Map.of("id", "p2", "intent", "inspect", "userStepIndex", 1)));
+    data.put(
+        "userPlan",
         Map.of(
-            "kind",
-            "fs.list",
-            "ok",
-            true,
-            "result",
-            Map.of(
-                "path",
-                ".",
-                "entries",
-                List.of(Map.of("name", "leetcode42.cpp", "path", "leetcode42.cpp")))));
-    data.put("gatheredInfo", gathered);
-    assertTrue(PhaseGoalHelper.currentStepGoalSatisfied(new OverAllState(data)));
+            "steps",
+            List.of(
+                step("s1", "发现", "completed", "discover"),
+                step("s2", "读取", "in_progress", "inspect"))));
+    assertFalse(PhaseGoalHelper.inspectGoalMet(new OverAllState(data), gathered));
   }
 
   @Test
@@ -206,6 +238,167 @@ class PhaseGoalHelperTest {
   void lsBuildIsNotProgramExecution() {
     assertFalse(PhaseGoalHelper.looksLikeProgramExecution("ls build"));
     assertTrue(PhaseGoalHelper.looksLikeProgramExecution("./main_test"));
+  }
+
+  @Test
+  void discoverStepMetWithNonemptyListing() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "list_out",
+        Map.of(
+            "kind",
+            "fs.list",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "path",
+                "reports",
+                "entries",
+                List.of(Map.of("name", "summary.md", "type", "file")))));
+
+    var state =
+        stateWithPlan(
+            "p-disc",
+            List.of(step("s1", "Discover project files", "in_progress", "discover")),
+            gathered);
+
+    assertTrue(PhaseGoalHelper.discoverGoalMet(state, gathered));
+  }
+
+  @Test
+  void failureRepairRoutesWhenToolsFailedAndGoalUnmet() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "sh",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            false,
+            "errorMessage",
+            "cmake: command not found",
+            "result",
+            Map.of("command", "cmake --build build", "stderr", "/bin/bash: cmake: command not found")));
+
+    var state =
+        stateWithPlan(
+            "p6",
+            List.of(step("s6", "编译测试", "in_progress", "compile")),
+            gathered);
+    state.data().put("phaseToolsHadFailure", true);
+
+    assertTrue(PhaseFailureRepairHelper.shouldRouteToRepair(state));
+    assertFalse(PhaseFailureRepairHelper.shouldAbandonPhase(state));
+  }
+
+  @Test
+  void failureRepairAbandonsAfterMaxAttempts() {
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p6");
+    data.put("phaseFailureRetries", 10);
+    data.put("phases", List.of(Map.of("id", "p6", "intent", "compile")));
+    data.put("userPlan", Map.of("steps", List.of(step("s6", "编译", "in_progress", "compile"))));
+    assertTrue(PhaseFailureRepairHelper.shouldAbandonPhase(new OverAllState(data)));
+  }
+
+  @Test
+  void compileStepEscapesWhenPassesHighDespiteShellFailure() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "shell1",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            false,
+            "errorMessage",
+            "cmake: command not found"));
+
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p6");
+    data.put("gatheredInfo", gathered);
+    data.put("phaseToolsHadFailure", true);
+    data.put("phaseGeneratePasses", 10);
+    data.put(
+        "userPlan",
+        Map.of(
+            "steps",
+            List.of(step("s6", "编译并测试", "in_progress", "compile")),
+            "status",
+            "in_progress"));
+    data.put(
+        "phases",
+        List.of(Map.of("id", "p6", "title", "编译并测试", "intent", "compile", "userStepIndex", 0)));
+    data.put("intakeIntent", Map.of("allowShellExec", true, "needsPlanning", true));
+    data.put("workflowCompileRun", true);
+
+    var state = new OverAllState(data);
+    assertEquals(PhaseGoalHelper.StepKind.COMPILE, PhaseGoalHelper.inferStepKind(state));
+    assertFalse(PhaseGoalHelper.currentStepGoalSatisfied(state));
+    assertTrue(PhaseGoalHelper.shouldAdvanceCompileRunDespiteToolFailures(state));
+  }
+
+  @Test
+  void compileStepEscapesWhenTestFilesWrittenDespiteShellFailure() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "gpp",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            false,
+            "errorMessage",
+            "exitCode=1"));
+
+    var facts = new HashMap<String, Object>();
+    SessionExecutionFacts.recordWrittenFile(facts, "test_rbtree.cpp");
+
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p6");
+    data.put("gatheredInfo", gathered);
+    data.put("phaseToolsHadFailure", true);
+    data.put("phaseGeneratePasses", 3);
+    data.put(SessionExecutionFacts.STATE_KEY, facts);
+    data.put(
+        "userPlan",
+        Map.of(
+            "steps",
+            List.of(step("s6", "编译并测试", "in_progress", "compile")),
+            "status",
+            "in_progress"));
+    data.put(
+        "phases",
+        List.of(Map.of("id", "p6", "title", "编译并测试", "intent", "compile", "userStepIndex", 0)));
+    data.put("intakeIntent", Map.of("allowShellExec", true, "needsPlanning", true));
+
+    var state = new OverAllState(data);
+    assertTrue(PhaseGoalHelper.shouldAdvanceCompileRunDespiteToolFailures(state));
+  }
+
+  @Test
+  void inspectStepRequiresSuccessfulSourceRead() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "read_fail",
+        Map.of(
+            "kind",
+            "fs.read",
+            "ok",
+            false,
+            "errorMessage",
+            "file does not exist: missing/module.cpp",
+            "result",
+            Map.of("path", "missing/module.cpp")));
+
+    var state =
+        stateWithPlan(
+            "p-analyze",
+            List.of(step("s1", "Read source files", "in_progress", "inspect")),
+            gathered);
+
+    assertFalse(PhaseGoalHelper.inspectGoalMet(state, gathered));
   }
 
   private static OverAllState stateWithFailureFlag(OverAllState base) {

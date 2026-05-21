@@ -10,6 +10,7 @@ import io.codepilot.core.graph.GraphExecutionLog;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.GraphToolWaitHelper;
 import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.SessionExecutionFacts;
 import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -151,14 +152,31 @@ public class ApplyPatchAction implements NodeAction {
         List<Map<String, Object>> allEdits = new ArrayList<>();
         for (Patch patch : patches) {
             for (Patch.Edit edit : patch.patches()) {
+                String path = edit.path() != null ? edit.path() : "";
+                if (!SessionExecutionFacts.allowWrittenFileOverwrite(state)
+                        && SessionExecutionFacts.isFileWritten(state, path)) {
+                    log.warn("ApplyPatch: skipping already-written file {}", path);
+                    continue;
+                }
                 allEdits.add(Map.<String, Object>of(
-                        "path", edit.path() != null ? edit.path() : "",
+                        "path", path,
                         "op", edit.op() != null ? edit.op().name().toLowerCase() : "replace",
                         "newContent", edit.newContent() != null ? edit.newContent() : "",
                         "search", edit.search() != null ? edit.search() : "",
                         "replace", edit.replace() != null ? edit.replace() : ""
                 ));
             }
+        }
+
+        if (allEdits.isEmpty()) {
+            log.info("ApplyPatch: no edits left after dedup — treating as success");
+            updates.put("patchResult", "success");
+            updates.put("patchResults", List.of());
+            updates.put("patchErrors", List.of());
+            updates.put("appliedCount", 0);
+            updates.put("failedCount", 0);
+            GraphExecutionLog.nodeExit(state, "applyPatch", updates);
+            return updates;
         }
 
         if (!allEdits.isEmpty()) {
@@ -204,30 +222,31 @@ public class ApplyPatchAction implements NodeAction {
                     GraphExecutionLog.toolResultAwait(
                             state, batchToolCallId, result.ok(), result.errorMessage());
                 }
-                if (result != null && result.ok()) {
+                if (patchApplySucceeded(result)) {
                     appliedCount = allEdits.size();
+                    List<String> writtenPaths = new ArrayList<>();
                     for (var edit : allEdits) {
                         String path = (String) edit.get("path");
                         toolResults.add(Map.of("toolCallId", batchToolCallId, "success", true, "path", path != null ? path : ""));
+                        if (path != null && !path.isBlank()) {
+                            writtenPaths.add(path);
+                        }
                     }
+                    SessionExecutionFacts.recordWrittenFiles(state, updates, writtenPaths);
                 } else {
                     String errMsg = result != null ? result.errorMessage() : "Timeout waiting for tool result";
                     log.warn("Batch applyPatch failed, falling back to individual edits: {}", errMsg);
-                    var individualResult = applyIndividualEdits(state, sessionId, patches);
-                    toolResults.addAll(individualResult.toolResults());
-                    errors.addAll(individualResult.errors());
-                    appliedCount = individualResult.appliedCount();
-                    failedCount = individualResult.failedCount();
+                    mergeIndividualFallback(state, updates, patches, sessionId, toolResults, errors);
+                    appliedCount = countSuccessful(toolResults);
+                    failedCount = errors.size();
                 }
             } catch (Exception e) {
                 ToolResultBus.unregisterFuture(sessionId, batchToolCallId);
                 String errMsg = "Batch tool result timeout: " + e.getMessage();
                 log.warn("{}. Falling back to individual edits.", errMsg);
-                var individualResult = applyIndividualEdits(state, sessionId, patches);
-                toolResults.addAll(individualResult.toolResults());
-                errors.addAll(individualResult.errors());
-                appliedCount = individualResult.appliedCount();
-                failedCount = individualResult.failedCount();
+                mergeIndividualFallback(state, updates, patches, sessionId, toolResults, errors);
+                appliedCount = countSuccessful(toolResults);
+                failedCount = errors.size();
             }
         }
 
@@ -263,6 +282,40 @@ public class ApplyPatchAction implements NodeAction {
         log.info("ApplyPatch: {} applied, {} failed out of {} patches", appliedCount, failedCount, patches.size());
         GraphExecutionLog.nodeExit(state, "applyPatch", updates);
         return updates;
+    }
+
+    /** Client may set ok=false while result body shows written=true — avoid double-apply fallback. */
+    @SuppressWarnings("unchecked")
+    private static boolean patchApplySucceeded(ToolResultEvent result) {
+        if (result == null) {
+            return false;
+        }
+        if (result.ok()) {
+            return true;
+        }
+        Object body = result.result();
+        if (!(body instanceof Map<?, ?> raw)) {
+            return false;
+        }
+        Map<String, Object> m = (Map<String, Object>) raw;
+        if (Boolean.TRUE.equals(m.get("written")) || Boolean.TRUE.equals(m.get("ok"))) {
+            return true;
+        }
+        Object results = m.get("results");
+        if (results instanceof List<?> list && !list.isEmpty()) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> row) {
+                    Map<String, Object> rowMap = (Map<String, Object>) row;
+                    if (!Boolean.TRUE.equals(rowMap.get("written")) && !Boolean.TRUE.equals(rowMap.get("ok"))) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     public String routeAfterApplyPatch(OverAllState state) {
@@ -309,6 +362,40 @@ public class ApplyPatchAction implements NodeAction {
         }
     }
 
+    private static void mergeIndividualFallback(
+            OverAllState state,
+            Map<String, Object> updates,
+            List<Patch> patches,
+            String sessionId,
+            List<Map<String, Object>> toolResults,
+            List<String> errors) {
+        IndividualResult individual = applyIndividualEdits(state, sessionId, patches);
+        toolResults.addAll(individual.toolResults());
+        errors.addAll(individual.errors());
+        List<String> written = new ArrayList<>();
+        for (Map<String, Object> tr : individual.toolResults()) {
+            if (Boolean.TRUE.equals(tr.get("success"))) {
+                Object path = tr.get("path");
+                if (path != null && !path.toString().isBlank()) {
+                    written.add(path.toString());
+                }
+            }
+        }
+        if (!written.isEmpty()) {
+            SessionExecutionFacts.recordWrittenFiles(state, updates, written);
+        }
+    }
+
+    private static int countSuccessful(List<Map<String, Object>> toolResults) {
+        int n = 0;
+        for (Map<String, Object> tr : toolResults) {
+            if (Boolean.TRUE.equals(tr.get("success"))) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     // ─── Individual Edit Fallback (for batch failure) ────────────────
 
     /**
@@ -316,7 +403,7 @@ public class ApplyPatchAction implements NodeAction {
      * Preserves backward compatibility and allows partial success.
      */
     @SuppressWarnings("unchecked")
-    private IndividualResult applyIndividualEdits(OverAllState state, String sessionId, List<Patch> patches) {
+    private static IndividualResult applyIndividualEdits(OverAllState state, String sessionId, List<Patch> patches) {
         List<Map<String, Object>> toolResults = new ArrayList<>();
         List<String> errors = new ArrayList<>();
         int appliedCount = 0;
@@ -324,6 +411,12 @@ public class ApplyPatchAction implements NodeAction {
 
         for (Patch patch : patches) {
             for (Patch.Edit edit : patch.patches()) {
+                String path = edit.path() != null ? edit.path() : "";
+                if (!SessionExecutionFacts.allowWrittenFileOverwrite(state)
+                        && SessionExecutionFacts.isFileWritten(state, path)) {
+                    log.warn("ApplyPatch individual: skipping already-written file {}", path);
+                    continue;
+                }
                 String toolCallId = UUID.randomUUID().toString();
                 var toolArgs = Map.<String, Object>of(
                         "id", toolCallId,
@@ -346,9 +439,9 @@ public class ApplyPatchAction implements NodeAction {
                             GraphToolWaitHelper.await(
                                     editFuture, state, "应用补丁中", Duration.ofSeconds(60));
 
-                    if (result != null && result.ok()) {
+                    if (patchApplySucceeded(result)) {
                         appliedCount++;
-                        toolResults.add(Map.of("toolCallId", toolCallId, "success", true, "path", edit.path() != null ? edit.path() : ""));
+                        toolResults.add(Map.of("toolCallId", toolCallId, "success", true, "path", path));
                     } else {
                         failedCount++;
                         String errMsg = result != null && result.errorMessage() != null ? result.errorMessage() : "Timeout";

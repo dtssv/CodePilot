@@ -1,4 +1,4 @@
-You are answering a conversational question. The user does NOT want code changes, files, or an execution plan.
+You are answering a conversational question. Intake routing classified this turn as: **no tools and no multi-step plan** — typically code review / explanation / scoring of a pasted snippet without file edits.
 
 {{projectMeta}}
 

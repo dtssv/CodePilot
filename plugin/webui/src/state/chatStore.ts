@@ -12,8 +12,8 @@ import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 import { isTerminalDoneReason } from '../utils/terminalDone';
 import { buildV2StateFromLegacyMessages, type LegacyHydrateMessage } from './chatHydrate';
-import { applyEnvelope } from './turnReducer';
-import { INITIAL_V2_STATE, type ChatV2State, type EventEnvelope } from './events';
+import { INITIAL_V2_STATE, type ChatV2State, type EventEnvelope, type SkillActivationRecord } from './events';
+import { applyEnvelope, reduceEnvelope } from './turnReducer';
 
 type Listener = (s: ChatV2State) => void;
 
@@ -35,6 +35,24 @@ function setState(next: ChatV2State) {
 
 export function getChatV2State(): ChatV2State {
     return state;
+}
+
+/** Prefer running turn; else last turn in the session (skills may arrive slightly after turn.end). */
+export function getTurnIdForSkillEvent(): string | null {
+    if (state.turns.length === 0) return null;
+    const running = [...state.turns].reverse().find((t) => t.status === 'running');
+    if (running) return running.turnId;
+    return state.turns[state.turns.length - 1]?.turnId ?? null;
+}
+
+export function appendTurnSkillActivation(turnId: string, record: SkillActivationRecord) {
+    const turns = state.turns.map((t) => {
+        if (t.turnId !== turnId) return t;
+        const prev = t.skillActivations ?? [];
+        return { ...t, skillActivations: [...prev, record] };
+    });
+    if (!turns.some((t) => t.turnId === turnId)) return;
+    setState({ ...state, turns });
 }
 
 /** True while any turn is still running (blocks destructive session hydration). */
@@ -92,10 +110,50 @@ export function finalizeRunningTurns() {
     });
 }
 
+/** Mark the latest running turn as interrupted (e.g. awaiting_user_input). */
+export function interruptRunningTurns() {
+    const hasRunningTurns = state.turns.some((t) => t.status === 'running');
+    if (!hasRunningTurns) return;
+    setState({
+        ...state,
+        turns: state.turns.map((t) =>
+            t.status === 'running'
+                ? { ...t, status: 'interrupted' as const, reason: 'awaiting_user_input' }
+                : t,
+        ),
+    });
+}
+
+/** Resume an interrupted turn back to running (e.g. after user answers askUser). */
+export function resumeInterruptedTurns() {
+    const hasInterruptedTurns = state.turns.some((t) => t.status === 'interrupted');
+    if (!hasInterruptedTurns) return;
+    setState({
+        ...state,
+        turns: state.turns.map((t) =>
+            t.status === 'interrupted'
+                ? { ...t, status: 'running' as const, reason: null }
+                : t,
+        ),
+    });
+}
+
 /** Restore v2 turn tree from legacy session_messages (Integrated → Productized). */
 export function hydrateChatV2FromLegacyMessages(messages: LegacyHydrateMessage[]) {
     suppressEnvelopesUntilTurnStart = false;
     setState(buildV2StateFromLegacyMessages(messages));
+}
+
+/** Restore v2 state by replaying persisted envelopes (exact chronological order). */
+export function hydrateChatV2FromEnvelopes(envelopes: EventEnvelope[]) {
+    suppressEnvelopesUntilTurnStart = false;
+    const sorted = [...envelopes].sort((a, b) => a.seq - b.seq);
+    let next = INITIAL_V2_STATE;
+    for (const ev of sorted) {
+        if (ev.seq <= next.lastSeq) continue;
+        next = reduceEnvelope(next, ev);
+    }
+    setState(next);
 }
 
 /**
@@ -148,6 +206,9 @@ export function installChatV2Bridge(): () => void {
         const reason = (payload as { reason?: string }).reason;
         if (isTerminalDoneReason(reason)) {
             finalizeRunningTurns();
+        } else if (reason === 'awaiting_user_input') {
+            // Turn is interrupted waiting for user input — mark as interrupted
+            interruptRunningTurns();
         }
     });
     const unsub = onPluginEvent('envelope', (payload) => {

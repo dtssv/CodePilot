@@ -3,9 +3,9 @@ package io.codepilot.plugin.actions
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindowManager
+import io.codepilot.plugin.i18n.CodePilotBundle
 import io.codepilot.plugin.toolwindow.CefChatPanelRegistry
 
 /**
@@ -21,38 +21,37 @@ class AddToNewChatAction : AnAction() {
 
         val contextItem = AddToChatAction.buildContextStatic(editor, psiFile, psiElement)
         if (contextItem == null) {
-            Messages.showInfoMessage(project, "Select code, a file, or a package first.", "CodePilot")
+            Messages.showInfoMessage(
+                project,
+                CodePilotBundle.message("contextMenu.addToChat.needSelection"),
+                "CodePilot",
+            )
             return
         }
 
         val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
+        if (tw.contentManager.contentCount == 0) {
+            tw.show(null)
+        }
         tw.show {
-            ApplicationManager.getApplication().invokeLater {
-                val panel = CefChatPanelRegistry.getInstance(project)
-                if (panel != null) {
-                    // First create a new session
-                    panel.handleNewSessionFromAction()
-                    // Store fullCode in contextStore, send compact ref to WebUI
-                    val ctxId =
-                        java.util.UUID
-                            .randomUUID()
-                            .toString()
-                    panel.storeContext(ctxId, contextItem.fullCode)
-                    panel.dispatchToWeb(
-                        "context_added",
-                        mapOf(
-                            "id" to ctxId,
-                            "type" to contextItem.type,
-                            "display" to contextItem.display,
-                            "filePath" to contextItem.filePath,
-                            "language" to contextItem.language,
-                            "startLine" to contextItem.startLine,
-                            "endLine" to contextItem.endLine,
-                        ),
-                    )
-                } else {
-                    ClipboardBridge.push(contextItem.fullCode, null)
-                }
+            CefChatPanelRegistry.withSink(
+                project,
+                onMissing = { ClipboardBridge.push(contextItem.fullCode, null) },
+            ) { sink ->
+                sink.prepareFreshChatSession()
+                val ctxId = java.util.UUID.randomUUID().toString()
+                sink.storeContext(ctxId, contextItem.fullCode)
+                sink.dispatchContextAdded(
+                    mapOf(
+                        "id" to ctxId,
+                        "type" to contextItem.type,
+                        "display" to contextItem.display,
+                        "filePath" to contextItem.filePath,
+                        "language" to contextItem.language,
+                        "startLine" to contextItem.startLine,
+                        "endLine" to contextItem.endLine,
+                    ),
+                )
             }
         }
     }

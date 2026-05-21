@@ -8,7 +8,21 @@ import java.util.Set;
 
 /** LLM-inferred intake routing: whether/how to use tools before the main agent loop. */
 public record IntakeIntent(
-    boolean needsTools, boolean needsPlanning, List<ToolHint> tools, String reason) {
+    boolean needsTools, boolean needsPlanning, List<ToolHint> tools, String reason,
+    /** How the graph should route after intake — determined by LLM classification + state. */
+    DispatchPath dispatchPath) {
+
+  /** Routing path after intake — determines whether the full graph pipeline is needed. */
+  public enum DispatchPath {
+    /** Full graph pipeline: planning → generate → applyPatch → verify → commit → finalize. */
+    GRAPH,
+    /** Direct conversational answer — no tools, no planning. Go straight to finalize. */
+    CONVERSATIONAL,
+    /** MCP tool matched — delegate to plugin for tool execution, then finalize. */
+    MCP_DIRECT,
+    /** Skill matched — inject skill prompt, then conversational generate + finalize. */
+    SKILL_DIRECT
+  }
 
   private static final Set<String> GATHER_TOOL_PREFIXES =
       Set.of("fs.read", "fs.list", "fs.grep", "fs.search", "fs.outline", "code.", "rag.search", "ide.");
@@ -17,12 +31,21 @@ public record IntakeIntent(
 
   /** Full agent pipeline when classification fails. */
   public static IntakeIntent defaults() {
-    return new IntakeIntent(false, true, List.of(), "");
+    return new IntakeIntent(false, true, List.of(), "", DispatchPath.GRAPH);
   }
 
   /** Direct text answer — no tools, no multi-step plan. */
   public boolean conversationalOnly() {
-    return !needsTools && !needsPlanning;
+    return dispatchPath == DispatchPath.CONVERSATIONAL
+        || (!needsTools && !needsPlanning);
+  }
+
+  public boolean isMcpDirect() {
+    return dispatchPath == DispatchPath.MCP_DIRECT;
+  }
+
+  public boolean isSkillDirect() {
+    return dispatchPath == DispatchPath.SKILL_DIRECT;
   }
 
   /** Read/search/diagnostic tools suggested — generate should gather real context. */
@@ -78,6 +101,7 @@ public record IntakeIntent(
     m.put("needsTools", needsTools);
     m.put("needsPlanning", needsPlanning);
     m.put("tools", toolsAsMaps());
+    m.put("dispatchPath", dispatchPath.name());
     if (reason != null && !reason.isBlank()) {
       m.put("reason", reason);
     }

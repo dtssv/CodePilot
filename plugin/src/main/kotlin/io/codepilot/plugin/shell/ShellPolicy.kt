@@ -55,8 +55,8 @@ class ShellPolicy(private val project: Project) {
 
     fun snapshot(): Map<String, Any?> =
         mapOf(
-            "defaultAction" to defaultAction.name.toLowerCase(),
-            "rules" to rules.map { mapOf("pattern" to it.pattern.pattern, "action" to it.action.name.toLowerCase()) },
+            "defaultAction" to defaultAction.name.lowercase(),
+            "rules" to rules.map { mapOf("pattern" to it.pattern.pattern, "action" to it.action.name.lowercase()) },
         )
 
     fun writePolicy(defaultAction: String, rules: List<Map<String, String>>) {
@@ -76,14 +76,14 @@ class ShellPolicy(private val project: Project) {
             p.toFile(),
             mapOf(
                 "defaultAction" to "ask",
-                "rules" to defaultRules().map { mapOf("pattern" to it.pattern.pattern, "action" to it.action.name.toLowerCase()) },
+                "rules" to defaultRules().map { mapOf("pattern" to it.pattern.pattern, "action" to it.action.name.lowercase()) },
                 "cwdWhitelist" to listOf("\${workspace}", "\${workspace}/**"),
             ),
         )
     }
 
     private fun parseAction(s: String): Action =
-        when (s.toLowerCase()) {
+        when (s.lowercase()) {
             "allow" -> Action.ALLOW
             "deny" -> Action.DENY
             else -> Action.ASK

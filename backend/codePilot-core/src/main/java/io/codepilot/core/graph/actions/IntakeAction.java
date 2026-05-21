@@ -5,11 +5,13 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.dto.ConversationRunRequest.Intent;
 import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.GraphExecutionLog;
 import io.codepilot.core.graph.IntakeIntent;
 import io.codepilot.core.graph.IntakeIntentClassifier;
-import io.codepilot.core.mcp.McpToolExecutor;
+import io.codepilot.core.graph.ProjectMetaHelper;
+import io.codepilot.core.graph.StuckStepRecovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -25,11 +27,9 @@ public class IntakeAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(IntakeAction.class);
 
-    private final McpToolExecutor mcpToolExecutor;
     private final IntakeIntentClassifier intakeIntentClassifier;
 
-    public IntakeAction(McpToolExecutor mcpToolExecutor, IntakeIntentClassifier intakeIntentClassifier) {
-        this.mcpToolExecutor = mcpToolExecutor;
+    public IntakeAction(IntakeIntentClassifier intakeIntentClassifier) {
         this.intakeIntentClassifier = intakeIntentClassifier;
     }
 
@@ -65,7 +65,7 @@ public class IntakeAction implements NodeAction {
             "verifyReport", "verifyResult",
             "clientDiagnostics", "testResults", "lintResults",
             // repair outputs
-            "repairResult", "askUserQuestion", "repairToolCalls",
+            "repairResult", "repairContext", "askUserQuestion", "repairToolCalls", "repairRetryToolCalls",
             "phaseOriginalCode", "appliedPatches",
             "graphVerifyPolicy", "graphRepairPolicy", "graphGatherPolicy",
             // gather outputs
@@ -85,6 +85,8 @@ public class IntakeAction implements NodeAction {
             "gatherExhausted", "verifyReportRaw", "resumeNextNode",
             // ── MCP integration keys ──
             "mcpTools",
+            // ── Skill per-node matching ──
+            "userSkillRefs", "userSkillBodies", "skillsConfig", "activeSkillIds",
             // ── Conversation history for multi-turn context ──
             "conversationHistory",
             // ── Max / thinking policy (propagated to graph LLM calls) ──
@@ -101,20 +103,55 @@ public class IntakeAction implements NodeAction {
             "sessionHadSuccessfulCompile",
             "sessionHadSuccessfulRun",
             "sessionExecutionFacts",
+            "graphExecutionJournal",
             "overallGoalUnmet",
             "intakeIntent",
             "needsTools",
             "needsPlanning",
             "intakeSuggestedTools",
             "toolApproachHistory",
+            "toolApproachesAttempted",
             "toolApproachExhausted",
             "approachEscalationDone",
             "approachRepeatBlocked",
             "sessionHasSourceReads",
             "sessionHasAnalysisOutput",
             "phaseHasAnalysisOutput",
-            "phaseGeneratePasses"
+            "phaseGeneratePasses",
+            "allowWrittenFileOverwrite",
+            // ── Intent dispatch (lightweight path routing) ──
+            "dispatchPath"
     );
+
+    /** Execution keys that must not carry over from a prior run when intent is NEW. */
+    private static final List<String> STALE_EXECUTION_KEYS =
+            List.of(
+                    "gatheredInfo",
+                    "phaseHasAnalysisOutput",
+                    "sessionHasSourceReads",
+                    "sessionHasAnalysisOutput",
+                    "sessionExecutionFacts",
+                    "graphExecutionJournal",
+                    "repairContext",
+                    "completedPhases",
+                    "phaseToolsHadFailure",
+                    "phaseCommitBlocked",
+                    "phaseGeneratePasses",
+                    "toolApproachHistory",
+                    "toolApproachesAttempted",
+                    "toolApproachExhausted",
+                    "approachEscalationDone",
+                    "approachRepeatBlocked",
+                    "pendingPatches",
+                    "generateResult",
+                    "patchResult",
+                    "patchResults",
+                    "allowWrittenFileOverwrite",
+                    "userPlan",
+                    "phases",
+                    "phaseCursor",
+                    "planningResult",
+                    "completedToolCalls");
 
     @Override
     public Map<String, Object> apply(OverAllState state) {
@@ -139,6 +176,7 @@ public class IntakeAction implements NodeAction {
             updates.put("needsTools", intent.needsTools());
             updates.put("needsPlanning", intent.needsPlanning());
             updates.put("intakeSuggestedTools", intent.toolsAsMaps());
+            updates.put("dispatchPath", intent.dispatchPath().name());
 
             if (intent.requireFileGather()) {
                 updates.put("requireFileGather", true);
@@ -170,7 +208,8 @@ public class IntakeAction implements NodeAction {
                 updates.put("phases", phases);
                 updates.put("phaseCursor", "p1");
                 updates.put("fastPathEnabled", true);
-                log.info("IntakeAction: LLM classified conversational-only → generate (no planning)");
+                log.info("IntakeAction: dispatchPath={}, conversationalOnly={}",
+                        intent.dispatchPath(), intent.conversationalOnly());
             }
         }
 
@@ -218,8 +257,27 @@ public class IntakeAction implements NodeAction {
         }
 
         if (Boolean.TRUE.equals(state.value("conversationalOnly").orElse(false))) {
-            log.info("IntakeAction route: direct answer → generate (no planning)");
-            return "generate";
+            log.info("IntakeAction route: direct answer → intentDispatch (conversational shortcut)");
+            return "intentDispatch";
+        }
+
+        // Check dispatchPath from intake intent classification
+        @SuppressWarnings("unchecked")
+        Map<String, Object> intakeIntent =
+                (Map<String, Object>) state.value("intakeIntent").orElse(Map.of());
+        String dispatchPathStr =
+                String.valueOf(intakeIntent.getOrDefault("dispatchPath", ""));
+        if ("MCP_DIRECT".equals(dispatchPathStr)) {
+            log.info("IntakeAction route: MCP tool direct → intentDispatch");
+            return "intentDispatch";
+        }
+        if ("SKILL_DIRECT".equals(dispatchPathStr)) {
+            log.info("IntakeAction route: Skill direct → intentDispatch");
+            return "intentDispatch";
+        }
+        if ("CONVERSATIONAL".equals(dispatchPathStr)) {
+            log.info("IntakeAction route: conversational → intentDispatch");
+            return "intentDispatch";
         }
 
         boolean needsTools = Boolean.TRUE.equals(state.value("needsTools").orElse(false));
@@ -312,19 +370,31 @@ public class IntakeAction implements NodeAction {
             initial.put("answers", req.answers());
         }
 
-        // ★ Register MCP configs and tool metadata for this session
-        if (req.userMcps() != null && !req.userMcps().isEmpty()) {
-            mcpToolExecutor.registerSession(req.sessionId(), req.userMcps());
-            // Register MCP tool metadata if provided by the plugin
-            if (req.mcpTools() != null && !req.mcpTools().isEmpty()) {
-                mcpToolExecutor.registerSessionTools(req.sessionId(), req.mcpTools());
-                initial.put("mcpTools", req.mcpTools());
-            } else {
-                // Fallback: build descriptors from registered session data
-                List<Map<String, Object>> mcpToolDescriptors = mcpToolExecutor.buildAvailableToolDescriptors(req.sessionId());
-                if (!mcpToolDescriptors.isEmpty()) {
-                    initial.put("mcpTools", mcpToolDescriptors);
-                }
+        if (req.intent() == Intent.NEW) {
+            clearStaleExecutionState(initial);
+        }
+        ProjectMetaHelper.seedFromProjectMeta(initial);
+        // ★ MCP tool metadata for prompts (execution is client-side via gather / tool_call)
+        if (req.mcpTools() != null && !req.mcpTools().isEmpty()) {
+            initial.put("mcpTools", req.mcpTools());
+        }
+
+        if (req.userSkillRefs() != null && !req.userSkillRefs().isEmpty()) {
+            initial.put("userSkillRefs", req.userSkillRefs());
+        }
+        if (req.userSkillBodies() != null && !req.userSkillBodies().isEmpty()) {
+            initial.put("userSkillBodies", req.userSkillBodies());
+        }
+        if (req.skills() != null) {
+            var skillsCfg = new java.util.LinkedHashMap<String, Object>();
+            if (req.skills().requested() != null) {
+                skillsCfg.put("requested", req.skills().requested());
+            }
+            if (req.skills().disabled() != null) {
+                skillsCfg.put("disabled", req.skills().disabled());
+            }
+            if (!skillsCfg.isEmpty()) {
+                initial.put("skillsConfig", skillsCfg);
             }
         }
 
@@ -341,6 +411,17 @@ public class IntakeAction implements NodeAction {
             state.data().keySet(),
             state.keyStrategies().keySet());
         return state;
+    }
+
+    /** Drop per-run execution state inherited from plugin graphState on a fresh conversation. */
+    static void clearStaleExecutionState(Map<String, Object> state) {
+        for (String key : STALE_EXECUTION_KEYS) {
+            state.remove(key);
+        }
+        state.put("gatheredInfo", Map.of());
+        state.put("phaseCursor", "");
+        state.put("phases", new ArrayList<>());
+        state.put("completedPhases", List.of());
     }
 
     /**
@@ -386,6 +467,14 @@ public class IntakeAction implements NodeAction {
         if (!answers.isEmpty()) {
             restored.put("answers", answers);
             recordAnsweredNotes(restored, answers);
+        }
+        StuckStepRecovery.applyAnsweredStuckStep(restored);
+        // Fresh user input on resume: drop stale failure budget from an earlier stuck step.
+        if (!answers.isEmpty()) {
+            Object retries = restored.get("phaseFailureRetries");
+            if (retries instanceof Number n && n.intValue() >= 3) {
+                StuckStepRecovery.clearStuckCounters(restored);
+            }
         }
 
         if (req.contexts() != null

@@ -6,11 +6,13 @@ import { onPluginEvent, sendToPlugin } from '../bridge';
 import type { SessionInfoV2 } from '../components/sessions/SessionSidebarV2';
 import {
     hasRunningTurn,
+    hydrateChatV2FromEnvelopes,
     hydrateChatV2FromLegacyMessages,
     isV2Enabled,
     resetChatV2,
     setChatV2LastSeq,
 } from './chatStore';
+import type { EventEnvelope } from './events';
 import type { LegacyHydrateMessage } from './chatHydrate';
 import {
     getActiveSessionId,
@@ -27,6 +29,8 @@ import type { ToolExecutionState } from './chatTypes';
 export interface SessionMessagesPayload {
     sessionId?: string;
     messages: LegacyHydrateMessage[];
+    /** Persisted v2 envelopes for chronological replay (preferred over legacy hydrate). */
+    envelopes?: EventEnvelope[];
     freshChat?: boolean;
     /** Plugin EventBus seq — prevents replay_since from duplicating turns after hydrate. */
     envelopeSeq?: number;
@@ -56,6 +60,8 @@ function normalizeToolCall(tc: NonNullable<LegacyHydrateMessage['toolCalls']>[nu
         status,
         result,
         executionState,
+        startedAt: tc.startedAt,
+        resultAt: tc.resultAt,
     };
 }
 
@@ -158,7 +164,12 @@ export function installSessionBridge(handlers: SessionBridgeHandlers): () => voi
             }
             const restored = normalizeMessages(data.messages ?? []);
             if (isV2Enabled()) {
-                hydrateChatV2FromLegacyMessages(restored);
+                const rawEnvelopes = (data as { envelopes?: EventEnvelope[] }).envelopes;
+                if (rawEnvelopes && rawEnvelopes.length > 0) {
+                    hydrateChatV2FromEnvelopes(rawEnvelopes);
+                } else {
+                    hydrateChatV2FromLegacyMessages(restored);
+                }
                 if (typeof data.envelopeSeq === 'number') {
                     setChatV2LastSeq(data.envelopeSeq);
                 }

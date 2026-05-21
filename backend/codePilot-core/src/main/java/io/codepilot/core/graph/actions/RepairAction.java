@@ -4,12 +4,17 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GraphExecutionJournal;
 import io.codepilot.core.graph.GraphFailurePolicy;
+import io.codepilot.core.graph.PhaseFailureRepairHelper;
+import io.codepilot.core.graph.PhaseOutcomeHelper;
 import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.GraphUiEmitter;
 import io.codepilot.core.graph.GraphUserMessages;
 import io.codepilot.core.graph.LlmJsonExtract;
+import io.codepilot.core.graph.skill.GraphSkillNode;
+import io.codepilot.core.graph.skill.GraphSkillSupport;
 import io.codepilot.core.graph.actions.VerifyAction.VerifyReport;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
@@ -44,11 +49,17 @@ public class RepairAction implements NodeAction {
     private final ChatClientFactory chatClientFactory;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
+    private final GraphSkillSupport graphSkillSupport;
 
-    public RepairAction(ChatClientFactory chatClientFactory, PromptRegistry promptRegistry, ObjectMapper mapper) {
+    public RepairAction(
+            ChatClientFactory chatClientFactory,
+            PromptRegistry promptRegistry,
+            ObjectMapper mapper,
+            GraphSkillSupport graphSkillSupport) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
+        this.graphSkillSupport = graphSkillSupport;
     }
 
     @Override
@@ -56,8 +67,26 @@ public class RepairAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "repair");
+        updates.put("allowWrittenFileOverwrite", true);
 
         String phaseId = (String) state.value("phaseCursor").orElse("");
+
+        if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+            log.warn(
+                    "RepairAction: phase {} abandoned after {} failure attempts",
+                    phaseId,
+                    PhaseFailureRepairHelper.failureAttempts(state));
+            PhaseFailureRepairHelper.clearPhaseAttemptCounters(updates);
+            updates.put("overallGoalUnmet", true);
+            updates.put("repairResult", "abandonStep");
+            return updates;
+        }
+
+        if (state.value("verifyReport").isEmpty()
+                && (PhaseOutcomeHelper.rawToolsHadFailure(state)
+                        || PhaseOutcomeHelper.hasToolFailures(state))) {
+            PhaseFailureRepairHelper.prepareRepairFromFailures(state, updates);
+        }
         var repairPolicy = (Map<String, Object>) state.value("graphRepairPolicy").orElse(null);
         int maxAttempts = repairPolicy != null && repairPolicy.containsKey("maxAttempts")
                 ? ((Number) repairPolicy.get("maxAttempts")).intValue()
@@ -104,7 +133,10 @@ public class RepairAction implements NodeAction {
         var originalCode = (String) state.value("phaseOriginalCode").orElse("");
         var appliedPatches = (List<Map<String, Object>>) state.value("appliedPatches").orElse(List.of());
 
-        String repairPrompt = buildRepairPrompt(verifyReport, originalCode, appliedPatches, phaseId);
+        var skillActivation = graphSkillSupport.activate(state, GraphSkillNode.REPAIR, updates);
+        String repairPrompt =
+                buildRepairPrompt(state, verifyReport, originalCode, appliedPatches, phaseId)
+                        + skillActivation.promptSection();
 
         GraphUiEmitter.transition(state, "repair");
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_REPAIR_PLAN,
@@ -137,26 +169,47 @@ public class RepairAction implements NodeAction {
         List<Map<String, Object>> repairToolCalls = parseRepairResponse(repairResponse);
         updates.put("repairToolCalls", repairToolCalls);
 
-        // ── B1 fix: Convert repair toolCalls to pendingPatches ──
-        // Without this, the repair→applyPatch loop re-sends the SAME original patches,
-        // causing infinite retry until budget exhaustion.
-        List<Patch> repairPatches = convertRepairToolCallsToPatches(repairToolCalls, repairResponse);
+        // ── Classify repair output: patches vs retry tool calls ──
+        // The repair LLM may produce either:
+        //   1. Code patches (fs.replace, op=create/replace/delete) → applyPatch path
+        //   2. Retry tool calls (shell.exec, fs.read, fs.grep, etc.) → retryGenerate path
+        //      These are direct tool calls that should be re-executed with different parameters,
+        //      e.g., trying an alternative command, reading more lines, etc.
+        List<Map<String, Object>> retryCalls = extractRetryToolCalls(repairToolCalls);
+        List<Patch> repairPatches =
+                convertRepairToolCallsToPatches(state, repairToolCalls, repairResponse);
+
         if (!repairPatches.isEmpty()) {
+            // Path 1: LLM produced code patches — apply them
             updates.put("pendingPatches", repairPatches);
             updates.put("repairResult", "toolCalls");
+            updates.put("repairRetryToolCalls", List.of());  // clear any stale retry calls
+        } else if (!retryCalls.isEmpty()) {
+            // Path 2: LLM produced retry tool calls (e.g., alternative shell command) —
+            // route back to generate for execution
+            log.info("Repair phase={}: LLM returned {} retry tool calls (no patches), routing to generate",
+                    phaseId, retryCalls.size());
+            updates.put("repairRetryToolCalls", retryCalls);
+            updates.put("repairResult", "retryGenerate");
         } else {
-            // Repair couldn't produce valid patches — escalate to askUser instead of
-            // looping back to applyPatch with stale pendingPatches
-            log.warn("Repair phase={}: could not parse patches from LLM response, escalating to askUser", phaseId);
+            // Repair couldn't produce valid patches or retry calls — escalate to askUser
+            log.warn("Repair phase={}: could not parse patches or retry calls from LLM response, escalating to askUser", phaseId);
             updates.put("repairResult", "askUser");
             updates.put(
                     "askUserQuestion",
                     GraphUserMessages.repairParseFailedQuestion(phaseId, count));
+            updates.put("repairRetryToolCalls", List.of());
         }
 
-        log.info("Repair phase={}: attempt={}/{}, responseLen={}, patchesProduced={}",
+        log.info("Repair phase={}: attempt={}/{}, responseLen={}, patchesProduced={}, retryCalls={}",
                 phaseId, count, maxAttempts, repairResponse != null ? repairResponse.length() : 0,
-                repairPatches.size());
+                repairPatches.size(), retryCalls.size());
+
+        GraphExecutionJournal.recordNodeOutcome(
+                state,
+                updates,
+                "repair",
+                (String) updates.getOrDefault("repairResult", "unknown"));
 
         return updates;
     }
@@ -165,8 +218,9 @@ public class RepairAction implements NodeAction {
         String result = (String) state.value("repairResult").orElse("toolCalls");
         return switch (result) {
             case "askUser" -> "askUser";
-            case "partialCommit" -> "commit";
+            case "partialCommit", "abandonStep" -> "commit";
             case "retryRepair" -> "repair";
+            case "retryGenerate" -> "generate";  // LLM produced retry tool calls → re-execute via generate
             case "failed" -> "finalize";
             default -> "applyPatch";  // "toolCalls" or any unknown → applyPatch
         };
@@ -175,6 +229,7 @@ public class RepairAction implements NodeAction {
     // ─── Repair Prompt Construction ───────────────────────────────────
 
     private String buildRepairPrompt(
+            OverAllState state,
             Object verifyReportObj,
             String originalCode,
             List<Map<String, Object>> appliedPatches,
@@ -184,8 +239,28 @@ public class RepairAction implements NodeAction {
         sb.append("[REPAIR TASK]\n");
         sb.append("Phase: ").append(phaseId).append("\n\n");
 
-        sb.append("The previous code change did not pass verification. ");
-        sb.append("Produce the MINIMAL patch to fix the issues below.\n\n");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> repairContext =
+                (Map<String, Object>) state.value("repairContext").orElse(null);
+        if (repairContext != null && !repairContext.isEmpty()) {
+            sb.append(String.valueOf(repairContext.getOrDefault("directive", ""))).append('\n');
+            String summary = String.valueOf(repairContext.getOrDefault("failureSummary", ""));
+            if (!summary.isBlank()) {
+                sb.append(summary).append("\n\n");
+            }
+            String stepLabel = String.valueOf(repairContext.getOrDefault("stepLabel", ""));
+            if (!stepLabel.isBlank()) {
+                sb.append("Step: ").append(stepLabel).append("\n");
+            }
+            Object attempt = repairContext.get("attempt");
+            Object max = repairContext.get("maxAttempts");
+            if (attempt != null && max != null) {
+                sb.append("Repair attempt ").append(attempt).append("/").append(max).append("\n\n");
+            }
+        }
+
+        sb.append("The previous step did not complete successfully. ");
+        sb.append("Diagnose the failure and produce the appropriate repair (code patch or retry command) below.\n\n");
 
         sb.append("[VERIFICATION FAILURES]\n");
         if (verifyReportObj instanceof VerifyReport report) {
@@ -231,11 +306,21 @@ public class RepairAction implements NodeAction {
         }
 
         sb.append("\n[REPAIR RULES]\n");
-        sb.append("1. Produce the MINIMAL change to fix the issue. Do NOT refactor unrelated code.\n");
-        sb.append("2. Preserve existing public APIs and method signatures.\n");
-        sb.append("3. Add only necessary imports.\n");
-        sb.append("4. Output as fs.replace tool calls in the standard envelope format.\n");
-        sb.append("5. If you cannot produce a valid fix, the system will escalate to the user automatically.\n");
+        sb.append("1. Diagnose the root cause from the failure context above.\n");
+        sb.append("2. Choose the appropriate repair strategy:\n");
+        sb.append("   - If the failure is a CODE DEFECT (compile error, wrong logic, typo), produce a MINIMAL fs.replace patch.\n");
+        sb.append("   - If the failure is a COMMAND EXECUTION ERROR (command not found, wrong path, missing tool), produce a shell.exec tool call with the corrected or alternative command.\n");
+        sb.append("   - If the failure is INSUFFICIENT OUTPUT (e.g. build log too short, need more context), produce a shell.exec or fs.read tool call with adjusted parameters (e.g. more lines, different range).\n");
+        sb.append("3. Prefer fs.replace on existing project files — do NOT use op=create for new test or helper files unless the step has no updatable target.\n");
+        sb.append("4. If a build tool is missing (e.g. cmake), use an alternative shell command (e.g. g++) instead of creating more files.\n");
+        sb.append("5. Preserve existing public APIs and method signatures.\n");
+        sb.append("6. Add only necessary imports.\n");
+        sb.append("7. Output as tool calls in the standard envelope format:\n");
+        sb.append("   - For code fixes: {\"toolCall\": {\"name\": \"fs.replace\", \"args\": {\"path\": \"...\", \"search\": \"...\", \"replace\": \"...\"}}}\n");
+        sb.append("   - For command retries: {\"toolCall\": {\"name\": \"shell.exec\", \"args\": {\"command\": \"...\"}}}\n");
+        sb.append("   - For more data: {\"toolCall\": {\"name\": \"fs.read\", \"args\": {\"path\": \"...\", \"offset\": N, \"limit\": M}}}\n");
+        sb.append("8. If you cannot produce a valid fix, the system will escalate to the user automatically.\n");
+        sb.append(GraphExecutionJournal.combinedContextDirective(state));
 
         return sb.toString();
     }
@@ -261,10 +346,37 @@ public class RepairAction implements NodeAction {
         ));
     }
 
+    // ─── Extract Retry Tool Calls from Repair Response ─────────────
+
+    /** Direct tools that can be re-executed via generate (not code patches). */
+    private static final Set<String> RETRYABLE_TOOLS =
+            Set.of("shell.exec", "fs.read", "fs.list", "fs.grep", "code.outline", "code.symbol", "code.usages");
+
+    /**
+     * Extracts tool calls from the repair response that are direct/executable tools
+     * (shell.exec, fs.read, etc.) rather than code patches (fs.replace, op=create/delete).
+     * These will be routed back to generate for re-execution.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> extractRetryToolCalls(List<Map<String, Object>> toolCalls) {
+        List<Map<String, Object>> retryCalls = new ArrayList<>();
+        for (Map<String, Object> tc : toolCalls) {
+            if ("repair_note".equals(tc.get("type"))) {
+                continue;
+            }
+            String name = (String) tc.getOrDefault("name", "");
+            if (RETRYABLE_TOOLS.contains(name)) {
+                retryCalls.add(tc);
+            }
+        }
+        return retryCalls;
+    }
+
     // ─── Convert Repair ToolCalls to Patches (B1 fix) ────────────────
 
     @SuppressWarnings("unchecked")
-    private List<Patch> convertRepairToolCallsToPatches(List<Map<String, Object>> toolCalls, String rawResponse) {
+    private List<Patch> convertRepairToolCallsToPatches(
+            OverAllState state, List<Map<String, Object>> toolCalls, String rawResponse) {
         List<Patch> patches = new ArrayList<>();
         for (Map<String, Object> tc : toolCalls) {
             if ("repair_note".equals(tc.get("type"))) {
@@ -287,6 +399,10 @@ public class RepairAction implements NodeAction {
                 case "delete" -> Patch.Edit.Op.DELETE;
                 default -> Patch.Edit.Op.WRITE;
             };
+            if (PhaseFailureRepairHelper.shouldPreferFixOverCreate(state, editOp)) {
+                log.warn("RepairAction: rejecting create patch path={} — fix existing files", path);
+                continue;
+            }
 
             patches.add(new Patch(
                 "Repair patch",

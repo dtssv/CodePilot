@@ -7,6 +7,14 @@
 ```
 - File path: {{filePath}}
 - User instruction: {{userInstruction}}
+- IDE file outline:
+```
+{{fileOutline}}
+```
+- Workspace / build hints (IDE-derived):
+```
+{{projectInfo}}
+```
 
 [REQUIREMENTS]
 1. Add comments that explain the "why" not just the "what".

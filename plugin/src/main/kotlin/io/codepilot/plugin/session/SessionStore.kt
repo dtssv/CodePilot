@@ -83,6 +83,35 @@ class SessionStore {
         )
     }
 
+    /** Persist a v2 [EventEnvelope] for session replay (chronological UI restore). */
+    fun appendEnvelope(
+        handle: SessionHandle,
+        env: io.codepilot.plugin.protocol.EventEnvelope,
+    ) {
+        appendNdjson(
+            handle.dir.resolve("envelopes.ndjson"),
+            mapOf(
+                "seq" to env.seq,
+                "turnId" to env.turnId,
+                "stepId" to env.stepId,
+                "parentStepId" to env.parentStepId,
+                "ts" to env.ts,
+                "type" to env.type,
+                "payload" to env.payload,
+            ),
+        )
+    }
+
+    /** Load persisted v2 envelopes for a session (sorted by seq). */
+    fun readEnvelopes(handle: SessionHandle): List<Map<String, Any>> {
+        val file = handle.dir.resolve("envelopes.ndjson")
+        if (!Files.exists(file)) return emptyList()
+        return Files.readAllLines(file).filter { it.isNotBlank() }.mapNotNull { line ->
+            @Suppress("UNCHECKED_CAST")
+            runCatching { mapper.readValue(line, Map::class.java) as Map<String, Any> }.getOrNull()
+        }.sortedBy { (it["seq"] as? Number)?.toLong() ?: 0L }
+    }
+
     fun savePlan(
         handle: SessionHandle,
         plan: Any?,
@@ -190,19 +219,30 @@ class SessionStore {
      * shows command, cwd, stdout/stderr, and deny/skip state after reload.
      */
     @Suppress("UNCHECKED_CAST")
-    fun mergeToolCallsFromSteps(steps: List<Map<String, Any>>): List<Map<String, Any>> {
+    fun mergeToolCallsFromSteps(
+        steps: List<Map<String, Any>>,
+        turnId: String? = null,
+    ): List<Map<String, Any>> {
+        val scoped =
+            if (turnId.isNullOrBlank()) {
+                steps
+            } else {
+                steps.filter { it["turnId"]?.toString() == turnId }
+            }
         val merged = linkedMapOf<String, MutableMap<String, Any?>>()
-        for (step in steps) {
+        for (step in scoped) {
             val id = step["toolCallId"] as? String ?: continue
             val entry = merged.getOrPut(id) { mutableMapOf("id" to id) }
             if (step["started"] == true) {
                 entry["name"] = step["toolName"] ?: "unknown"
                 step["args"]?.let { entry["args"] = it }
+                step["ts"]?.let { entry["startedAt"] = it.toString() }
             }
             if (step.containsKey("ok")) {
                 val ok = step["ok"] == true
                 entry["status"] = if (ok) "success" else "error"
                 step["result"]?.let { entry["result"] = it }
+                step["ts"]?.let { entry["resultAt"] = it.toString() }
                 entry["executionState"] = deriveExecutionState(ok, step["result"] as? Map<String, Any?>)
             }
         }

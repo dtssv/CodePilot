@@ -161,6 +161,7 @@ class GatherDispatcher(
                 ReadOnlyShellGuard.validate(args)
                 shellExecutor.execute(args)
             }
+            "mcp.call" -> io.codepilot.plugin.mcp.McpCallHelper.execute(project, args)
             else -> throw ToolViolation("unsupported gather kind: $kind (only client-side tools)")
         }
 }

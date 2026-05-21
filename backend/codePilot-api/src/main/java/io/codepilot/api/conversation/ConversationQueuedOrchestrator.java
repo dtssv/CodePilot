@@ -1,6 +1,8 @@
 package io.codepilot.api.conversation;
 
+import io.codepilot.common.api.ErrorCodes;
 import io.codepilot.core.conversation.SseFactory;
+import io.codepilot.core.run.ConversationRunAdmissionService;
 import io.codepilot.core.run.ConversationRunEventBus;
 import io.codepilot.core.run.ConversationRunEventBus.RunEventMessage;
 import io.codepilot.core.run.ConversationRunStatus;
@@ -25,25 +27,52 @@ public class ConversationQueuedOrchestrator {
   private final ConversationRunWorker worker;
   private final ConversationRunEventBus eventBus;
   private final SseFactory sse;
+  private final ConversationRunAdmissionService admission;
 
   public ConversationQueuedOrchestrator(
       ConversationRunStore store,
       ConversationRunWorker worker,
       ConversationRunEventBus eventBus,
-      SseFactory sse) {
+      SseFactory sse,
+      ConversationRunAdmissionService admission) {
     this.store = store;
     this.worker = worker;
     this.eventBus = eventBus;
     this.sse = sse;
+    this.admission = admission;
   }
 
   public Flux<ServerSentEvent<String>> run(io.codepilot.core.dto.ConversationRunRequest req, String userId) {
-    String runId = UUID.randomUUID().toString();
-    String requestJson = store.serializeRequest(req);
-    store.insertRun(runId, req.sessionId(), userId, requestJson, ConversationRunStatus.QUEUED);
-    log.info("Enqueued conversation run runId={} sessionId={}", runId, req.sessionId());
-    worker.startIfClaimed(runId);
-    return streamRun(runId, 0, true);
+    String uid = userId != null && !userId.isBlank() ? userId : "dev-user";
+    return admission
+        .tryAdmitEnqueue(uid)
+        .flatMapMany(
+            decision -> {
+              if (!decision.allowed()) {
+                log.warn(
+                    "Admission rejected enqueue sessionId={} userId={}",
+                    req.sessionId(),
+                    uid);
+                return Flux.just(
+                    sse.error(
+                        decision.errorCode() > 0 ? decision.errorCode() : ErrorCodes.QUEUE_FULL,
+                        decision.message()),
+                    sse.event(SseEvents.DONE, Map.of("reason", "failed")));
+              }
+              String runId = UUID.randomUUID().toString();
+              String requestJson = store.serializeRequest(req);
+              try {
+                store.insertRun(runId, req.sessionId(), uid, requestJson, ConversationRunStatus.QUEUED);
+              } catch (Exception e) {
+                admission.releaseQueued(uid).subscribe();
+                return Flux.just(
+                    sse.error(ErrorCodes.INTERNAL, "Failed to enqueue run"),
+                    sse.event(SseEvents.DONE, Map.of("reason", "failed")));
+              }
+              log.info("Enqueued conversation run runId={} sessionId={}", runId, req.sessionId());
+              worker.startIfClaimed(runId);
+              return streamRun(runId, 0, true);
+            });
   }
 
   public Flux<ServerSentEvent<String>> attach(String runId, int afterSeq) {

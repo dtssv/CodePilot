@@ -42,7 +42,14 @@ public final class PolicyChatOptions {
     if (tokens <= 0 && !maxMode && !hasReasoning && !hasAnthropicThinking) return null;
 
     OpenAiChatOptions.Builder builder = OpenAiChatOptions.builder();
-    if (tokens > 0) builder.maxTokens(tokens);
+    // ── Defensive: only set maxTokens when explicitly requested or in maxMode.
+    // Some upstream providers reject maxTokens for reasoning models or on
+    // endpoints that use max_completion_tokens instead. Setting maxTokens=0
+    // would produce an invalid request body, so we skip it entirely when
+    // the computed value is zero.
+    if (tokens > 0 && !hasReasoning) {
+      builder.maxTokens(tokens);
+    }
     ThinkingPolicyMapper.reasoningEffort(maxMode, thinkingMode, modelId)
         .ifPresent(builder::reasoningEffort);
     ThinkingPolicyMapper.anthropicThinkingExtra(maxMode, thinkingMode, modelId)

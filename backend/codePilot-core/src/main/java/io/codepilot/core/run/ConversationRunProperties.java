@@ -19,6 +19,12 @@ public class ConversationRunProperties {
 
   private Duration staleLeaseGrace = Duration.ofSeconds(15);
 
+  /** Only auto-reclaim {@code interrupted} runs updated within this window (avoids resurrecting stale checkpoints on boot). */
+  private Duration interruptedReclaimMaxAge = Duration.ofMinutes(30);
+
+  /** Max runs reclaimed per scheduler tick per pod. */
+  private int reclaimBatchSize = 32;
+
   public String getEnabled() {
     return enabled;
   }
@@ -57,5 +63,21 @@ public class ConversationRunProperties {
 
   public void setStaleLeaseGrace(Duration staleLeaseGrace) {
     this.staleLeaseGrace = staleLeaseGrace;
+  }
+
+  public Duration getInterruptedReclaimMaxAge() {
+    return interruptedReclaimMaxAge;
+  }
+
+  public void setInterruptedReclaimMaxAge(Duration interruptedReclaimMaxAge) {
+    this.interruptedReclaimMaxAge = interruptedReclaimMaxAge;
+  }
+
+  public int getReclaimBatchSize() {
+    return reclaimBatchSize;
+  }
+
+  public void setReclaimBatchSize(int reclaimBatchSize) {
+    this.reclaimBatchSize = reclaimBatchSize;
   }
 }

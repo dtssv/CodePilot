@@ -40,8 +40,8 @@ public class ToolResultController {
             req.errorCode(),
             req.errorMessage(),
             req.durationMs() == null ? 0 : req.durationMs());
-    GraphExecutionLog.toolResultIn(
-        req.sessionId(), req.toolCallId(), req.ok(), req.result(), req.errorMessage());
+    String logError = Boolean.TRUE.equals(req.ok()) ? null : req.errorMessage();
+    GraphExecutionLog.toolResultIn(req.sessionId(), req.toolCallId(), req.ok(), req.result(), logError);
     return bus.publish(req.sessionId(), event)
         .map(received -> ApiResponse.ok(new Ack(req.toolCallId(), "received")));
   }

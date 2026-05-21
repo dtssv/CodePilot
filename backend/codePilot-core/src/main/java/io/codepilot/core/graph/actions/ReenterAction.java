@@ -16,7 +16,7 @@ public class ReenterAction implements NodeAction {
         if (io.codepilot.core.graph.PhaseOutcomeHelper.rawToolsHadFailure(state)) {
             if (io.codepilot.core.graph.PhaseGoalHelper.currentStepGoalSatisfied(state)) {
                 updates.put("phaseToolsHadFailure", false);
-            } else {
+            } else if (!Boolean.TRUE.equals(state.value("approachRepeatBlocked").orElse(false))) {
                 int retries = (int) state.value("phaseFailureRetries").orElse(0) + 1;
                 updates.put("phaseFailureRetries", retries);
             }

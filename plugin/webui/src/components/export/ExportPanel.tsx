@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../../bridge';
+import { t, useTranslation } from '../../i18n';
 import { ShareViewer } from './ShareViewer';
 
 interface Props {
@@ -20,6 +21,7 @@ interface ShareResult {
 }
 
 export function ExportPanel({ sessionId }: Props) {
+    const { t: tr } = useTranslation();
     const [format, setFormat] = useState<Format>('markdown');
     const [includeTools, setIncludeTools] = useState(true);
     const [preview, setPreview] = useState('');
@@ -31,7 +33,9 @@ export function ExportPanel({ sessionId }: Props) {
     useEffect(() => {
         const offPreview = onPluginEvent('export.preview.result', (payload) => {
             const data = payload as { ok?: boolean; content?: string; error?: string };
-            setPreview(data.ok ? data.content ?? '' : `Export failed: ${data.error ?? 'unknown error'}`);
+            setPreview(
+                data.ok ? data.content ?? '' : t('panels.export.exportFailed', { error: data.error ?? 'unknown' }),
+            );
         });
         const offShare = onPluginEvent('share.create.result', (payload) => {
             const data = payload as ShareResult;
@@ -58,13 +62,13 @@ export function ExportPanel({ sessionId }: Props) {
 
     const shareLabel = () => {
         if (!share?.ok) return share?.error ?? '';
-        if (share.fallback === 'local-file') return `Local file: ${share.url ?? ''}`;
+        if (share.fallback === 'local-file') return tr('panels.export.localFile', { path: share.url ?? '' });
         return share.url ?? '';
     };
 
     const copyShare = () => {
         const url = shareLabel();
-        if (url && !url.startsWith('Share failed')) {
+        if (url) {
             navigator.clipboard?.writeText(url).catch(() => undefined);
         }
     };
@@ -76,37 +80,49 @@ export function ExportPanel({ sessionId }: Props) {
         }
     };
 
+    const subtitle =
+        tr('panels.export.subtitle') +
+        (persistBackend ? (persistBackend === 'db' ? tr('panels.export.subtitleBackendDb') : tr('panels.export.subtitleBackendFile')) : '');
+
     return (
         <div className="panel-base export-panel">
             <div className="panel-header">
                 <div className="panel-title-group">
-                    <h3 className="panel-title">📤 Share / Export</h3>
-                    <span className="panel-subtitle">
-                        Cloud share (remote-first) · local export fallback
-                        {persistBackend ? (persistBackend === 'db' ? ' · DB' : ' · file') : ''}
-                    </span>
+                    <h3 className="panel-title">{tr('panels.export.title')}</h3>
+                    <span className="panel-subtitle">{subtitle}</span>
                 </div>
-                <button type="button" className="panel-btn" onClick={() => sendToPlugin('export.preview', { sessionId, format, includeTools })}>Refresh</button>
+                <button type="button" className="panel-btn" onClick={() => sendToPlugin('export.preview', { sessionId, format, includeTools })}>
+                    {tr('common.refresh')}
+                </button>
             </div>
             <div className="panel-section">
                 <div className="panel-row">
                     <label className="panel-field">
-                        <span className="panel-label">Format</span>
+                        <span className="panel-label">{tr('panels.export.format')}</span>
                         <select className="panel-select" value={format} onChange={(e) => setFormat(e.target.value as Format)}>
-                            <option value="markdown">Markdown</option>
-                            <option value="pr_description">PR Description</option>
-                            <option value="json">JSON</option>
+                            <option value="markdown">{tr('panels.export.formatMarkdown')}</option>
+                            <option value="pr_description">{tr('panels.export.formatPr')}</option>
+                            <option value="json">{tr('panels.export.formatJson')}</option>
                         </select>
                     </label>
                     <label className="panel-check-row">
                         <input type="checkbox" checked={includeTools} onChange={(e) => setIncludeTools(e.target.checked)} />
-                        Include tool records
+                        {tr('panels.export.includeTools')}
                     </label>
                 </div>
                 <div className="panel-actions">
-                    <input className="panel-input" value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder="Target file path" />
-                    <button type="button" className="panel-btn panel-btn-primary" onClick={() => sendToPlugin('export.save_file', { sessionId, format, includeTools, path: targetPath })}>Save File</button>
-                    <button type="button" className="panel-btn" onClick={() => navigator.clipboard?.writeText(preview)}>Copy</button>
+                    <input
+                        className="panel-input"
+                        value={targetPath}
+                        onChange={(e) => setTargetPath(e.target.value)}
+                        placeholder={tr('panels.export.targetPathPlaceholder')}
+                    />
+                    <button type="button" className="panel-btn panel-btn-primary" onClick={() => sendToPlugin('export.save_file', { sessionId, format, includeTools, path: targetPath })}>
+                        {tr('panels.export.saveFile')}
+                    </button>
+                    <button type="button" className="panel-btn" onClick={() => navigator.clipboard?.writeText(preview)}>
+                        {tr('panels.copy')}
+                    </button>
                     <button
                         type="button"
                         className="panel-btn panel-btn-primary"
@@ -117,7 +133,7 @@ export function ExportPanel({ sessionId }: Props) {
                             sendToPlugin('share.create', { sessionId, expireDays: 7 }).catch(() => setSharing(false));
                         }}
                     >
-                        {sharing ? 'Creating…' : 'Create Share Link'}
+                        {sharing ? tr('panels.export.creating') : tr('panels.export.createShare')}
                     </button>
                 </div>
             </div>
@@ -126,24 +142,28 @@ export function ExportPanel({ sessionId }: Props) {
                     <strong>
                         {share.ok
                             ? share.source === 'cloud'
-                                ? `☁️ Cloud share${share.backend === 'db' ? ' · DB' : ''}`
-                                : '📁 Local fallback'
-                            : 'Share failed'}
+                                ? `${tr('panels.export.shareCloud')}${share.backend === 'db' ? tr('panels.export.subtitleBackendDb') : ''}`
+                                : tr('panels.export.shareLocal')
+                            : tr('panels.export.shareFailed')}
                     </strong>
                     <code className="share-url">{shareLabel()}</code>
-                    {share.expiresAt && <span className="share-expires">Expires: {share.expiresAt}</span>}
+                    {share.expiresAt && <span className="share-expires">{tr('panels.export.expires', { date: share.expiresAt })}</span>}
                     {share.ok && share.url && (
                         <div className="panel-actions share-actions">
-                            <button type="button" className="panel-btn" onClick={copyShare}>Copy link</button>
+                            <button type="button" className="panel-btn" onClick={copyShare}>
+                                {tr('panels.export.copyLink')}
+                            </button>
                             {(share.url.startsWith('http://') || share.url.startsWith('https://')) && (
-                                <button type="button" className="panel-btn" onClick={openShare}>Open</button>
+                                <button type="button" className="panel-btn" onClick={openShare}>
+                                    {tr('panels.open')}
+                                </button>
                             )}
                         </div>
                     )}
                 </div>
             )}
             <ShareViewer />
-            <pre className="panel-pre">{preview || 'No active session to export.'}</pre>
+            <pre className="panel-pre">{preview || tr('panels.export.noSession')}</pre>
         </div>
     );
 }

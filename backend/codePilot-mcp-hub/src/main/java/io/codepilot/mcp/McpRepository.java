@@ -19,6 +19,7 @@ public class McpRepository {
   private static final List<String> SYSTEM_MANIFEST_SAFE_KEYS =
       List.of(
           "id",
+          "source",
           "version",
           "title",
           "scope",

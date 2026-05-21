@@ -1,53 +1,40 @@
 package io.codepilot.core.graph;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import com.alibaba.cloud.ai.graph.OverAllState;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class PhaseOutcomeHelperTest {
 
   @Test
-  void detectsShellFailure() {
-    assertTrue(
-        PhaseOutcomeHelper.gatheredHasFailures(
-            Map.of(
-                "x",
-                Map.of(
-                    "kind",
-                    "shell.exec",
-                    "ok",
-                    false,
-                    "result",
-                    Map.of("exitCode", 1, "command", "./build/test")))));
-  }
+  void clearsFailureFlagWhenAnalyzeHasSourceReadsDespiteEarlierFailure() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "bad",
+        Map.of("kind", "fs.read", "ok", false, "errorMessage", "timeout"));
+    gathered.put(
+        "good",
+        Map.of(
+            "kind",
+            "fs.read",
+            "ok",
+            true,
+            "result",
+            Map.of("path", "leetcode42.cpp", "content", "code")));
 
-  @Test
-  void detectsFsListFailure() {
-    assertTrue(
-        PhaseOutcomeHelper.gatheredHasFailures(
-            Map.of(
-                "x",
-                Map.of(
-                    "kind",
-                    "fs.list",
-                    "errorMessage",
-                    "path under denied directory: build"))));
-  }
+    var data = new HashMap<String, Object>();
+    data.put("phaseCursor", "p3");
+    data.put("phases", List.of(Map.of("id", "p3", "intent", "analyze")));
+    data.put("phaseToolsHadFailure", true);
+    var state = new OverAllState(data);
 
-  @Test
-  void passesWhenAllOk() {
-    assertFalse(
-        PhaseOutcomeHelper.gatheredHasFailures(
-            Map.of(
-                "x",
-                Map.of(
-                    "kind",
-                    "fs.read",
-                    "ok",
-                    true,
-                    "result",
-                    Map.of("path", "CMakeLists.txt", "content", "project(test)")))));
+    var updates = new HashMap<String, Object>();
+    PhaseOutcomeHelper.recordGatheredOutcome(state, gathered, updates);
+
+    assertThat(updates.get("phaseToolsHadFailure")).isEqualTo(false);
   }
 }

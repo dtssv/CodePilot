@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { sendToPlugin } from '../bridge';
+import { markNeedsInputSubmitted, useNeedsInputSubmitted } from '../state/needsInputStore';
 
 /**
  * Full-featured needs_input card matching the design spec in 05-接口文档.md §3.2.1.
@@ -58,9 +59,12 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     const [freeformText, setFreeformText] = useState('');
     const [expandedOptions, setExpandedOptions] = useState<Record<string, boolean>>({});
     const [submitted, setSubmitted] = useState(false);
+    // Global submitted state — prevents double-submit from dock AND inline cards
+    const globallySubmitted = useNeedsInputSubmitted(payload.continuationToken);
+    const isSubmitted = submitted || globallySubmitted;
 
     const handleSelectOption = (questionId: string, optionId: string, kind: string) => {
-        if (submitted) return;
+        if (isSubmitted) return;
         setSelectedOptions(prev => {
             if (kind === 'multi-choice') {
                 const current = prev[questionId] || [];
@@ -108,9 +112,10 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     };
 
     const handleSubmit = () => {
-        if (submitted) return;
+        if (isSubmitted) return;
         const answers = buildAnswers();
         setSubmitted(true);
+        markNeedsInputSubmitted(payload.continuationToken);
 
         // Send to plugin which will call /v1/conversation/resume with intent=answer
         sendToPlugin('needs_input_response', {
@@ -142,9 +147,9 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                             type="text"
                             className="freeform-input"
                             placeholder={q.placeholder || 'Type your answer...'}
-                            disabled={submitted}
+                            disabled={isSubmitted}
                             onChange={e => {
-                                if (!submitted) {
+                                if (!isSubmitted) {
                                     setSelectedOptions(prev => ({
                                         ...prev,
                                         [q.id]: [e.target.value]
@@ -212,7 +217,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                         placeholder="输入你的回答..."
                         value={freeformText}
                         onChange={e => setFreeformText(e.target.value)}
-                        disabled={submitted}
+                        disabled={isSubmitted}
                         rows={2}
                     />
                 </div>
@@ -230,9 +235,9 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                 <button
                     className="submit-btn"
                     onClick={handleSubmit}
-                    disabled={submitted}
+                    disabled={isSubmitted}
                 >
-                    {submitted ? '已提交' : '提交回答'}
+                    {isSubmitted ? '已提交' : '提交回答'}
                 </button>
             </div>
         </div>

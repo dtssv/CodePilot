@@ -1,14 +1,16 @@
+import { useTranslation } from '../../i18n';
 import { useMessageQueue } from '../../state/messageQueueStore';
 
 export function MessageQueueBanner() {
+    const { t } = useTranslation();
     const queue = useMessageQueue();
     if (queue.length === 0) return null;
 
     return (
         <div className="message-queue-banner" role="status" aria-live="polite">
             <div className="message-queue-header">
-                <span className="message-queue-title">等待发送 ({queue.length})</span>
-                <span className="message-queue-hint">当前任务完成后将按顺序自动发送</span>
+                <span className="message-queue-title">{t('queue.title', { n: queue.length })}</span>
+                <span className="message-queue-hint">{t('queue.hint')}</span>
             </div>
             <ol className="message-queue-list">
                 {queue.map((item, idx) => (

@@ -3,6 +3,7 @@ package io.codepilot.core.dto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.codepilot.core.model.ModelSource;
+import io.codepilot.core.skill.SkillManifest;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.util.List;
@@ -30,6 +31,10 @@ public record ConversationRunRequest(
     Integer earlierToolCallsCount,
     String projectRootHash,
     List<UserSkill> userSkills,
+    /** Metadata-only Skill refs (triggers, no prompt body). Bodies in {@link #userSkillBodies}. */
+    List<UserSkillRef> userSkillRefs,
+    /** Prompt bodies keyed by {@code id@version} for workspace-matched user Skills. */
+    Map<String, String> userSkillBodies,
     List<UserMcp> userMcps,
     List<Map<String, Object>> mcpTools,
     List<PlanEdit> userPlanEdits,
@@ -78,6 +83,36 @@ public record ConversationRunRequest(
   public record UserSkill(
       String id, String version, String source, String scope, String projectRootHash,
       String sha256, String yaml) {}
+
+  /** User Skill metadata for graph per-node matching (no full yaml on the wire). */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public record UserSkillRef(
+      String id,
+      String version,
+      String source,
+      String scope,
+      String projectRootHash,
+      String sha256,
+      io.codepilot.core.skill.SkillManifest.Triggers triggers,
+      io.codepilot.core.skill.SkillManifest.Category category,
+      int priority) {
+
+    public SkillManifest toManifest() {
+      return new SkillManifest(
+          id,
+          version,
+          null,
+          source,
+          scope,
+          priority,
+          null,
+          triggers,
+          null,
+          null,
+          null,
+          category);
+    }
+  }
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record UserMcp(

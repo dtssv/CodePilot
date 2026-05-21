@@ -14,7 +14,7 @@ class SendMessageAction : AnAction("Send Message", "Send the current chat messag
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.getData(CommonDataKeys.PROJECT) ?: return
-        val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project) ?: return
+        val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getCefPanel(project) ?: return
         panel.dispatchToWeb("send_message", emptyMap<String, Any>())
     }
 

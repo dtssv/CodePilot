@@ -2,12 +2,15 @@ package io.codepilot.core.graph.actions;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
+import io.codepilot.core.graph.GraphExecutionJournal;
 import io.codepilot.core.graph.GraphPhaseCheckpointSaver;
 import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.PhaseFailureRepairHelper;
 import io.codepilot.core.graph.PhaseGoalHelper;
 import io.codepilot.core.graph.PhaseOutcomeHelper;
 import io.codepilot.core.graph.PhasePlanNormalizer;
 import io.codepilot.core.graph.SessionExecutionFacts;
+import io.codepilot.core.graph.ToolApproachTracker;
 import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -44,13 +47,46 @@ public class CommitAction implements NodeAction {
 
         PhaseGoalHelper.StepKind stepKind = PhaseGoalHelper.inferStepKind(state);
         boolean stepGoalMet = PhaseGoalHelper.currentStepGoalSatisfied(state);
-        if (((PhaseOutcomeHelper.rawToolsHadFailure(state)
-                        || PhaseOutcomeHelper.gatheredHasFailures(gathered))
-                && !stepGoalMet)
-            || (stepKind == PhaseGoalHelper.StepKind.RUN && !stepGoalMet)
-            || (stepKind == PhaseGoalHelper.StepKind.ANALYZE && !stepGoalMet)
-            || (stepKind == PhaseGoalHelper.StepKind.INSPECT && !stepGoalMet)
-            || (stepKind == PhaseGoalHelper.StepKind.DISCOVER && !stepGoalMet)) {
+        // When verify succeeded (no compile errors, no test failures), there are no
+        // actionable tool failures left — routing to repair would be pointless and can
+        // cause a commit→repair→commit infinite loop. Only consider tool failures when
+        // verify has not confirmed success.
+        String verifyResult = (String) state.value("verifyResult").orElse("");
+        boolean verifySucceeded = "success".equals(verifyResult);
+        boolean toolFailures = !verifySucceeded
+                && (PhaseOutcomeHelper.rawToolsHadFailure(state)
+                        || PhaseOutcomeHelper.gatheredHasFailures(gathered));
+
+        if (!stepGoalMet && PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+            int attempts = PhaseFailureRepairHelper.failureAttempts(state);
+            PhaseFailureRepairHelper.clearPhaseAttemptCounters(updates);
+            updates.put("overallGoalUnmet", true);
+            GraphExecutionJournal.recordPhaseBoundary(
+                    state, updates, phaseId, "commit", "abandon", gathered);
+            log.warn(
+                    "CommitAction: abandoning phase {} after {} failed attempts (kind={}, step {})",
+                    phaseId,
+                    attempts,
+                    stepKind,
+                    stepIdx + 1);
+        } else if (!stepGoalMet && toolFailures) {
+            GraphExecutionJournal.recordPhaseBoundary(
+                    state, updates, phaseId, "commit", "repair", gathered);
+            PhaseFailureRepairHelper.prepareRepairFromFailures(state, updates);
+            log.warn(
+                    "CommitAction: routing phase {} to repair (kind={}, attempt={}/{})",
+                    phaseId,
+                    stepKind,
+                    updates.get("phaseFailureRetries"),
+                    PhaseFailureRepairHelper.MAX_PHASE_FAILURE_ATTEMPTS);
+            return updates;
+        } else if (!stepGoalMet
+                && !verifySucceeded
+                && ((stepKind == PhaseGoalHelper.StepKind.RUN && !stepGoalMet)
+                        || (stepKind == PhaseGoalHelper.StepKind.ANALYZE && !stepGoalMet)
+                        || (stepKind == PhaseGoalHelper.StepKind.INSPECT && !stepGoalMet)
+                        || (stepKind == PhaseGoalHelper.StepKind.DISCOVER && !stepGoalMet)
+                        || (stepKind == PhaseGoalHelper.StepKind.SYNTHESIZE && !stepGoalMet))) {
             log.warn(
                     "CommitAction: blocking phase {} commit — step goal not met (kind={}, step {})",
                     phaseId,
@@ -73,8 +109,13 @@ public class CommitAction implements NodeAction {
                     state,
                     SseEvents.GRAPH_PHASE_DONE,
                     Map.of("phaseId", phaseId, "summary", "Phase blocked: tool failures", "ok", false));
+            GraphExecutionJournal.recordPhaseBoundary(
+                    state, updates, phaseId, "commit", "blocked", gathered);
             return updates;
         }
+
+        GraphExecutionJournal.recordPhaseBoundary(
+                state, updates, phaseId, "commit", "ok", gathered);
 
         // Emit graph_phase_done (execution layer)
         GraphSseHelper.emitEvent(
@@ -117,10 +158,13 @@ public class CommitAction implements NodeAction {
             updates.put("sessionHasAnalysisOutput", true);
         }
         PhaseOutcomeHelper.clearPhaseToolState(updates);
+        GraphExecutionJournal.clearEphemeralNodeState(updates);
         updates.put("phaseHasAnalysisOutput", false);
         SessionExecutionFacts.putInUpdates(
                 updates, SessionExecutionFacts.mergeFromGathered(state, gathered));
         updates.put("gatheredInfo", PhaseGoalHelper.retainSourceReadEntries(gathered));
+        updates.put("gatherCount", 0);
+        updates.put("gatherExhausted", false);
 
         if (!hasNext && !PhaseGoalHelper.overallCompileRunGoalMet(state)) {
             updates.put("overallGoalUnmet", true);
@@ -133,7 +177,12 @@ public class CommitAction implements NodeAction {
         if (hasNext) {
             String nextPhaseId = (String) phases.get(currentIdx + 1).get("id");
             updates.put("phaseCursor", nextPhaseId);
-            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "preCheck");
+            ToolApproachTracker.clearInPhase(updates);
+            updates.put("approachEscalationDone", false);
+            updates.put("overallGoalUnmet", false);
+            // Clear per-phase shell history so the LLM starts fresh in the next phase
+            SessionExecutionFacts.clearPhaseHistory(updates, state);
+            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "preCheck", updates);
             log.info(
                     "CommitAction: advancing phase {} → {} (step {}/{}, {} phases total)",
                     phaseId,
@@ -142,7 +191,7 @@ public class CommitAction implements NodeAction {
                     userSteps.size(),
                     phases.size());
         } else {
-            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "finalize");
+            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "finalize", updates);
             log.info(
                     "CommitAction: last phase {} done (step {}/{}, {} phases)",
                     phaseId,
@@ -192,7 +241,7 @@ public class CommitAction implements NodeAction {
 
     public String routeAfterCommit(OverAllState state) {
         if (Boolean.TRUE.equals(state.value("phaseCommitBlocked").orElse(false))) {
-            return "retryGenerate";
+            return "repair";
         }
         Boolean hasNext = (Boolean) state.value("hasNextPhase").orElse(false);
         return hasNext ? "preCheck" : "finalize";

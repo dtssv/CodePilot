@@ -25,7 +25,7 @@ class ToggleAgentAction : AnAction("Toggle Agent Mode", "Toggle between Chat and
         settings.state.conversationMode = newMode
 
         // Notify WebUI of mode change
-        val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
+        val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getCefPanel(project)
         panel?.dispatchToWeb("mode_changed", mapOf("mode" to newMode))
     }
 

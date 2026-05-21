@@ -7,6 +7,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
 import io.codepilot.core.graph.*;
+import io.codepilot.core.graph.skill.GraphSkillNode;
+import io.codepilot.core.graph.skill.GraphSkillSupport;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
@@ -37,11 +39,17 @@ public class GenerateAction implements NodeAction {
     private final ChatClientFactory chatClientFactory;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
+    private final GraphSkillSupport graphSkillSupport;
 
-    public GenerateAction(ChatClientFactory chatClientFactory, PromptRegistry promptRegistry, ObjectMapper mapper) {
+    public GenerateAction(
+            ChatClientFactory chatClientFactory,
+            PromptRegistry promptRegistry,
+            ObjectMapper mapper,
+            GraphSkillSupport graphSkillSupport) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
+        this.graphSkillSupport = graphSkillSupport;
     }
 
     @Override
@@ -53,6 +61,40 @@ public class GenerateAction implements NodeAction {
             updates.put("approachRepeatBlocked", false);
         }
         GraphExecutionLog.nodeEnter(state, "generate");
+
+        updates.putAll(StuckStepRecovery.consumeStuckAnswerIfPresent(state));
+        if ("failed".equals(updates.get("generateResult"))) {
+            GraphExecutionLog.nodeExit(state, "generate", updates);
+            return updates;
+        }
+
+        // ── Handle retry tool calls from repair ──
+        // When repair produces direct tool calls (e.g., alternative shell command),
+        // execute them directly without calling LLM again.
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> repairRetryCalls =
+                (List<Map<String, Object>>) state.value("repairRetryToolCalls").orElse(List.of());
+        if (!repairRetryCalls.isEmpty()) {
+            log.info("GenerateAction: executing {} retry tool calls from repair", repairRetryCalls.size());
+            updates.put("repairRetryToolCalls", List.of());  // consume — prevent re-execution
+
+            // Convert retry calls to a JSON structure that GraphDirectToolExecutor can process
+            var retryRoot = mapper.valueToTree(Map.of("toolCalls", repairRetryCalls));
+            if (GraphDirectToolExecutor.executeFromJson(state, retryRoot, mapper, updates)) {
+                if (maybeRouteToRepairAfterToolFailure(state, updates)) {
+                    GraphExecutionLog.nodeExit(state, "generate", updates);
+                    return updates;
+                }
+                updates.put("generateResult", "directTools");
+                updates.put("pendingPatches", List.of());
+            } else {
+                // Retry calls were blocked/duplicate — route to repair for another attempt
+                log.warn("GenerateAction: retry tool calls from repair were blocked, routing back to repair");
+                updates.put("generateResult", "repair");
+            }
+            GraphExecutionLog.nodeExit(state, "generate", updates);
+            return updates;
+        }
 
         String input = (String) state.value("input").orElse("");
         String phaseId = (String) state.value("phaseCursor").orElse("");
@@ -66,9 +108,7 @@ public class GenerateAction implements NodeAction {
             GraphExecutionLog.nodeExit(state, "generate", escalated);
             return escalated;
         }
-        if (failureRetries >= 3
-                && PhaseOutcomeHelper.rawToolsHadFailure(state)
-                && !PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+        if (StuckStepRecovery.shouldEscalateToAskUser(state)) {
             log.warn(
                     "GenerateAction: phase {} stuck after {} failure retries — escalating to askUser",
                     phaseId,
@@ -98,20 +138,22 @@ public class GenerateAction implements NodeAction {
         // requesting more information. This prevents infinite generate→gather→reenter→generate loops.
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
+        var skillActivation = graphSkillSupport.activate(state, GraphSkillNode.GENERATE, updates);
         String generatePrompt =
-                conversationalOnly
-                        ? buildConversationalPrompt(input, projectMeta)
-                        : buildGeneratePrompt(
-                                state,
-                                input,
-                                phaseId,
-                                currentPhase,
-                                userPlan,
-                                gatheredInfo,
-                                projectMeta,
-                                gatherCount,
-                                gatherExhausted,
-                                mcpTools);
+                (conversationalOnly
+                                ? buildConversationalPrompt(input, projectMeta)
+                                : buildGeneratePrompt(
+                                        state,
+                                        input,
+                                        phaseId,
+                                        currentPhase,
+                                        userPlan,
+                                        gatheredInfo,
+                                        projectMeta,
+                                        gatherCount,
+                                        gatherExhausted,
+                                        mcpTools))
+                        + skillActivation.promptSection();
 
         GraphUiEmitter.transition(state, "generate");
         if (!conversationalOnly) {
@@ -230,10 +272,11 @@ public class GenerateAction implements NodeAction {
                     "\n[MANDATORY] Your last toolCalls repeated an approach already listed above. "
                             + "Use a DIFFERENT tool, path, or query — do not resend the same fs.list/fs.read.\n";
         }
+        antiLoopDirective += StuckStepRecovery.analyzeTextOutputDirective(state, gatheredInfo);
         String taskDirective =
                 buildTaskDirective(state)
                         + CompileHintHelper.directive(projectMeta, input)
-                        + SessionExecutionFacts.adaptationDirective(state);
+                        + GraphExecutionJournal.combinedContextDirective(state);
         String proseBudget = "";
         if (planningProseStreamed || stepIndex > 0) {
             proseBudget =
@@ -422,6 +465,11 @@ public class GenerateAction implements NodeAction {
 
         if (GraphDirectToolExecutor.containsDirectToolCalls(root)) {
             if (GraphDirectToolExecutor.executeFromJson(state, root, mapper, updates)) {
+                if (maybeRouteToRepairAfterToolFailure(state, updates)) {
+                    GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                    GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                    return updates;
+                }
                 updates.put("generateResult", "directTools");
                 updates.put("pendingPatches", List.of());
                 GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
@@ -429,11 +477,35 @@ public class GenerateAction implements NodeAction {
                 return updates;
             }
             if (Boolean.TRUE.equals(updates.get("approachRepeatBlocked"))) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> gatheredAfterAbsorb =
+                        (Map<String, Object>) updates.getOrDefault(
+                                "gatheredInfo", state.value("gatheredInfo").orElse(Map.of()));
+                if (updates.containsKey("gatheredInfo")
+                        && PhaseGoalHelper.currentStepGoalSatisfied(state, gatheredAfterAbsorb)) {
+                    log.info(
+                            "GenerateAction: absorbed projectMeta root listing — step goal met");
+                    updates.put("generateResult", "directTools");
+                    updates.put("pendingPatches", List.of());
+                    GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                    GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                    return updates;
+                }
+                if (PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+                    log.info(
+                            "GenerateAction: duplicate toolCalls blocked but step goal already met — commit");
+                    updates.put("generateResult", "textOutput");
+                    GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                    GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                    return updates;
+                }
                 log.warn("GenerateAction: direct toolCalls blocked — duplicate approach");
                 updates.put("generateResult", "retryGenerate");
-                updates.put(
-                        "phaseFailureRetries",
-                        (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                if (PhaseOutcomeHelper.rawToolsHadFailure(state)) {
+                    updates.put(
+                            "phaseFailureRetries",
+                            (int) state.value("phaseFailureRetries").orElse(0) + 1);
+                }
                 GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
                 GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
                 return updates;
@@ -509,12 +581,21 @@ public class GenerateAction implements NodeAction {
                         PhaseGoalHelper.hasSuccessfulSourceRead(gatheredForAnalyze)
                                 || PhaseGoalHelper.sessionHasSourceReads(state);
                 int passes = (int) state.value("phaseGeneratePasses").orElse(0);
-                if ((!hasReads || textStr.trim().length() < 80)
+                // After 2+ generate passes with substantive text (≥80 chars), accept the
+                // textOutput even without source reads — the code may already be in the
+                // user's input context (IDE selection, pasted snippet) and doesn't require
+                // an explicit fs.read/grep. Without this, ANALYZE steps loop endlessly
+                // when the LLM provides analysis from context but has no gathered reads.
+                boolean substantiveText = textStr.trim().length() >= 80;
+                boolean acceptWithoutReads =
+                        passes >= 2 && substantiveText && PhaseGoalHelper.inputHasEmbeddedSource(state);
+                if ((!hasReads || !substantiveText)
+                        && !acceptWithoutReads
                         && passes < 10
                         && stepKind != PhaseGoalHelper.StepKind.SYNTHESIZE) {
                     log.warn(
-                            "GenerateAction: rejecting textOutput on {} step — need fs.read/grep of sources and substantive analysis",
-                            stepKind);
+                            "GenerateAction: rejecting textOutput on {} step — need fs.read/grep of sources and substantive analysis (passes={})",
+                            stepKind, passes);
                     updates.put("generateResult", "directTools");
                     updates.put(
                             "phaseFailureRetries",
@@ -534,6 +615,9 @@ public class GenerateAction implements NodeAction {
                     return updates;
                 }
                 updates.put("phaseHasAnalysisOutput", true);
+                if (!hasReads && acceptWithoutReads) {
+                    updates.put("sessionHasSourceReads", true);
+                }
             }
             log.info("GenerateAction: LLM returned textOutput for phase={}: {} chars", phaseId, textStr.length());
             GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
@@ -599,6 +683,19 @@ public class GenerateAction implements NodeAction {
                 List<Patch.Edit> validEdits = new ArrayList<>();
                 for (Patch.Edit edit : p.patches()) {
                     String path = edit.path();
+                    if (!SessionExecutionFacts.allowWrittenFileOverwrite(state)
+                            && SessionExecutionFacts.isFileWritten(state, path)) {
+                        log.warn(
+                                "GenerateAction: skipping patch to already-written file path={}",
+                                path);
+                        continue;
+                    }
+                    if (PhaseFailureRepairHelper.shouldPreferFixOverCreate(state, edit.op())) {
+                        log.warn(
+                                "GenerateAction: rejecting create patch on {} — fix existing files",
+                                path);
+                        continue;
+                    }
                     if (isValidPatchPath(path, edit)) {
                         validEdits.add(edit);
                         modifiedFiles.add(path);
@@ -618,9 +715,26 @@ public class GenerateAction implements NodeAction {
             }
 
             if (validPatches.isEmpty()) {
-                // All patches were invalid — treat as unstructured response
-                log.warn("GenerateAction: all patches were invalid (path=unknown/blank or empty content). "
-                    + "Treating as textOutput for phase={}", phaseId);
+                if (SessionExecutionFacts.hasWrittenOutputs(state)) {
+                    log.info(
+                            "GenerateAction: patches skipped — output file(s) already written; commit");
+                    if (!PhaseGoalHelper.currentStepGoalSatisfied(state)
+                            && PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+                        if (maybeRouteToRepairAfterToolFailure(state, updates)) {
+                            return updates;
+                        }
+                    }
+                    updates.put("generateResult", "textOutput");
+                    updates.put("pendingPatches", List.of());
+                    updates.put("modifiedFiles", List.of());
+                    GraphUiEmitter.contentIfPresent(state, agentContent, contentStreamed);
+                    GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
+                    return updates;
+                }
+                log.warn(
+                        "GenerateAction: all patches were invalid (path=unknown/blank or empty content). "
+                                + "Treating as textOutput for phase={}",
+                        phaseId);
                 return handleUnstructuredResponse(llmResponse, state, phaseId, updates);
             }
 
@@ -775,6 +889,9 @@ public class GenerateAction implements NodeAction {
                 return "reenter";
             }
             if ("textOutput".equals(result) || "failed".equals(result)) {
+                if (Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
+                    return "askUser";
+                }
                 return "finalize";
             }
         }
@@ -791,14 +908,25 @@ public class GenerateAction implements NodeAction {
         }
 
         if ("infoRequests".equals(result) && approachExhausted) {
+            if (escalationDone && Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
+                return "askUser";
+            }
             return escalationDone ? "finalize" : "reenter";
         }
 
+        if ("repair".equals(result)) {
+            return "repair";
+        }
+        if ("abandonStep".equals(result)) {
+            return "commit";
+        }
+
         if ("infoRequests".equals(result) && (gatherExhausted || gatherCount >= 3)) {
-            if (PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
-                log.warn(
-                        "GenerateAction: gather budget exceeded but tools failed — retrying generate");
-                return "reenter";
+            if (PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+                if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+                    return "commit";
+                }
+                return "repair";
             }
             PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
             if ((kind == PhaseGoalHelper.StepKind.ANALYZE
@@ -819,21 +947,23 @@ public class GenerateAction implements NodeAction {
         int generatePasses = (int) state.value("phaseGeneratePasses").orElse(0);
         if ("directTools".equals(result)) {
             if (approachExhausted) {
+                if (escalationDone && Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
+                    return "askUser";
+                }
                 return escalationDone ? "finalize" : "reenter";
             }
             if (generatePasses >= 10) {
-                log.warn(
-                        "GenerateAction: phaseGeneratePasses cap ({}) on directTools — forcing commit",
-                        generatePasses);
-                return "commit";
+                return routeWhenGeneratePassesCapped(state, generatePasses, "directTools");
             }
             int rounds = (int) state.value("directToolRound").orElse(0);
             if (rounds < 3) {
                 return "reenter";
             }
-            if (PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
-                log.warn("GenerateAction: directToolRound cap but tools failed — retrying generate");
-                return "reenter";
+            if (PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+                if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+                    return "commit";
+                }
+                return "repair";
             }
             PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
             if ((kind == PhaseGoalHelper.StepKind.ANALYZE
@@ -851,6 +981,9 @@ public class GenerateAction implements NodeAction {
 
         if ("textOutput".equals(result)) {
             if (escalationDone) {
+                if (Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
+                    return "askUser";
+                }
                 return "finalize";
             }
             PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
@@ -859,19 +992,27 @@ public class GenerateAction implements NodeAction {
                     || kind == PhaseGoalHelper.StepKind.INSPECT
                     || kind == PhaseGoalHelper.StepKind.DISCOVER)
                     && !PhaseGoalHelper.currentStepGoalSatisfied(state)
-                    && generatePasses < 10) {
-                log.warn("GenerateAction: textOutput on {} but goal not met — reenter", kind);
+                    && generatePasses < 10
+                    // After 2+ passes, accept textOutput to avoid infinite reenter loops.
+                    // The source code may already be in the user's input context (IDE selection,
+                    // pasted snippet) without explicit fs.read/grep in gatheredInfo.
+                    && generatePasses < 2
+                    && !(kind == PhaseGoalHelper.StepKind.ANALYZE
+                            && Boolean.TRUE.equals(
+                                    state.value("phaseHasAnalysisOutput").orElse(false)))) {
+                log.warn("GenerateAction: textOutput on {} but goal not met — reenter (passes={})", kind, generatePasses);
                 return "reenter";
             }
             if (generatePasses >= 10) {
-                log.warn("GenerateAction: phaseGeneratePasses cap on textOutput — forcing commit");
-                return "commit";
+                return routeWhenGeneratePassesCapped(state, generatePasses, "textOutput");
             }
         }
 
-        if ("textOutput".equals(result) && PhaseOutcomeHelper.hasToolFailures(state) && failureRetries < 2) {
-            log.warn("GenerateAction: textOutput while tools failed — staying on generate");
-            return "reenter";
+        if ("textOutput".equals(result) && PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+            if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+                return "commit";
+            }
+            return "repair";
         }
 
         return switch (result) {
@@ -879,9 +1020,59 @@ public class GenerateAction implements NodeAction {
             case "askUser" -> "askUser";
             case "retryGenerate" -> "reenter";
             case "failed" -> "finalize";
+            case "repair" -> "repair";
             case "textOutput" -> "commit";  // B3 fix: skip applyPatch/verify for unstructured text
             default -> "applyPatch";
         };
+    }
+
+    private static String routeWhenGeneratePassesCapped(
+            OverAllState state, int generatePasses, String result) {
+        log.warn(
+                "GenerateAction: phaseGeneratePasses cap ({}) on {} — commit (repair/abandon via CommitAction)",
+                generatePasses,
+                result);
+        return "commit";
+    }
+
+    /**
+     * After failed direct tools, prefer repair over another generate loop. Returns true when updates
+     * already contain a routing decision ({@code repair} or {@code abandonStep}).
+     */
+    private boolean maybeRouteToRepairAfterToolFailure(
+            OverAllState state, Map<String, Object> updates) {
+        if (!Boolean.TRUE.equals(updates.get("phaseToolsHadFailure"))) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> gathered =
+                    (Map<String, Object>) updates.getOrDefault(
+                            "gatheredInfo", state.value("gatheredInfo").orElse(Map.of()));
+            if (!PhaseGoalHelper.currentStepGoalSatisfied(state, gathered)
+                    && PhaseOutcomeHelper.gatheredHasFailures(gathered)
+                    && PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+                updates.put("phaseToolsHadFailure", true);
+            } else {
+                return false;
+            }
+        }
+        if (!PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
+            return false;
+        }
+        if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
+            log.warn(
+                    "GenerateAction: tool failures — abandoning phase after {} attempts",
+                    PhaseFailureRepairHelper.failureAttempts(state));
+            updates.put("generateResult", "abandonStep");
+            updates.put("pendingPatches", List.of());
+            return true;
+        }
+        log.warn(
+                "GenerateAction: tool failures — routing to repair (attempt {}/{})",
+                PhaseFailureRepairHelper.failureAttempts(state) + 1,
+                PhaseFailureRepairHelper.MAX_PHASE_FAILURE_ATTEMPTS);
+        PhaseFailureRepairHelper.prepareRepairFromFailures(state, updates);
+        updates.put("generateResult", "repair");
+        updates.put("pendingPatches", List.of());
+        return true;
     }
 
     @SuppressWarnings("unchecked")
@@ -935,13 +1126,19 @@ public class GenerateAction implements NodeAction {
         }
 
         String display = GraphContentSanitizer.stripForDisplay(text != null ? text.trim() : "");
-        if (!display.isBlank()) {
+        boolean alreadyStreamed = Boolean.TRUE.equals(updates.get("plainTextStreamed"));
+        if (!display.isBlank() && !alreadyStreamed) {
             GraphSseHelper.emitEvent(state, SseEvents.DELTA, Map.of("text", display));
         }
-        updates.put("generateResult", "textOutput");
+        updates.put("generateResult", "askUser");
         updates.put("approachEscalationDone", true);
         updates.put("overallGoalUnmet", true);
         updates.put("textOutput", display);
+        if (!display.isBlank()) {
+            updates.put(
+                    "askUserQuestion",
+                    Map.of("kind", "freeform", "text", display, "title", "需要您的确认以继续"));
+        }
         return updates;
     }
 

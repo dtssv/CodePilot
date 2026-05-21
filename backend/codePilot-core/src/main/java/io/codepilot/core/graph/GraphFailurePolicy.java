@@ -26,6 +26,10 @@ public final class GraphFailurePolicy {
   private static final String OPERATOR_MESSAGE =
       "当前请求处理失败，请稍后重试。若问题持续出现，请联系运营人员排查。";
 
+  /** User-friendly message for 4xx client errors (bad request, unsupported parameters, etc.). */
+  private static final String BAD_REQUEST_MESSAGE =
+      "模型请求参数异常，请检查模型配置后重试。若问题持续出现，请联系运营人员排查。";
+
   private GraphFailurePolicy() {}
 
   /**
@@ -48,6 +52,10 @@ public final class GraphFailurePolicy {
 
   /**
    * Transient upstream / network / overload — safe to retry the same LLM call.
+   *
+   * <p>400 Bad Request is generally NOT retryable (same request will produce the same error),
+   * but some providers return 400 for rate-limit or overload scenarios that ARE transient.
+   * We check the response body for such indicators.
    */
   public static boolean isRetryable(Throwable t) {
     if (t == null || isNonRetryable(t)) {
@@ -62,8 +70,16 @@ public final class GraphFailurePolicy {
       if (c instanceof IOException io && isTransientIo(io)) {
         return true;
       }
-      if (c instanceof WebClientResponseException wcr && wcr.getStatusCode().is5xxServerError()) {
-        return true;
+      if (c instanceof WebClientResponseException wcr) {
+        if (wcr.getStatusCode().is5xxServerError()) {
+          return true;
+        }
+        // Some providers return 400 for transient conditions (rate limit, overload, etc.)
+        if (wcr.getStatusCode().value() == 400 && isTransientBadRequest(wcr)) {
+          log.info("400 Bad Request with transient indicator, treating as retryable: {}",
+              abbreviate(wcr.getResponseBodyAsString(), 200));
+          return true;
+        }
       }
       String msg = (c.getMessage() != null ? c.getMessage() : "").toLowerCase();
       String type = c.getClass().getSimpleName().toLowerCase();
@@ -87,6 +103,43 @@ public final class GraphFailurePolicy {
     return false;
   }
 
+  /**
+   * Checks whether a 400 Bad Request response body contains indicators of a transient
+   * (retryable) condition rather than a permanent parameter error.
+   */
+  static boolean isTransientBadRequest(WebClientResponseException wcr) {
+    String body = wcr.getResponseBodyAsString();
+    if (body == null || body.isBlank()) return false;
+    String lower = body.toLowerCase();
+    // Common transient indicators in 400 responses from AI providers
+    return lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("quota exceeded")
+        || lower.contains("capacity")
+        || lower.contains("overloaded")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("please retry")
+        || lower.contains("please try again")
+        || lower.contains("service is busy");
+  }
+
+  /**
+   * Returns true if the exception is a non-retryable 4xx client error (e.g. 400 Bad Request
+   * with invalid parameters) that should NOT be retried with the same payload.
+   */
+  public static boolean isClientError(Throwable t) {
+    for (Throwable c = t; c != null; c = c.getCause()) {
+      if (c instanceof WebClientResponseException wcr) {
+        int status = wcr.getStatusCode().value();
+        // 4xx client errors, excluding 429 (rate limit) which is retryable
+        if (status >= 400 && status < 500 && status != 429) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private static boolean isTransientIo(IOException e) {
     String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
     return msg.contains("timeout")
@@ -95,16 +148,38 @@ public final class GraphFailurePolicy {
         || msg.contains("broken pipe");
   }
 
-  /** Emit user-safe error + terminal done; logs full cause server-side only. */
+  /**
+   * Emit user-safe error + terminal done; logs full cause server-side only.
+   * Provides differentiated messages for client errors (4xx) vs server errors (5xx/network).
+   */
   public static void emitTerminalFailure(OverAllState state, String logContext, Throwable cause) {
+    String userMessage = OPERATOR_MESSAGE;
     if (cause != null) {
       log.warn("{}: {}", logContext, cause.toString(), cause);
+      // Provide a more specific message for client errors (400 Bad Request, etc.)
+      if (isClientError(cause)) {
+        userMessage = BAD_REQUEST_MESSAGE;
+        // Log the response body for debugging — this is the key to diagnosing 400 errors
+        for (Throwable c = cause; c != null; c = c.getCause()) {
+          if (c instanceof WebClientResponseException wcr) {
+            log.warn("{}: 4xx response body={}", logContext,
+                abbreviate(wcr.getResponseBodyAsString(), 500));
+            break;
+          }
+        }
+      }
     } else {
       log.warn("{}", logContext);
     }
     GraphSseHelper.emitEvent(
-        state, SseEvents.ERROR, Map.of("code", ErrorCodes.UPSTREAM_MODEL, "message", OPERATOR_MESSAGE));
+        state, SseEvents.ERROR, Map.of("code", ErrorCodes.UPSTREAM_MODEL, "message", userMessage));
     GraphSseHelper.emitEvent(state, SseEvents.DONE, Map.of("reason", "failed"));
+  }
+
+  /** Truncates a string for safe logging (avoids dumping huge response bodies). */
+  private static String abbreviate(String s, int maxLen) {
+    if (s == null) return "null";
+    return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...[truncated]";
   }
 
   /**

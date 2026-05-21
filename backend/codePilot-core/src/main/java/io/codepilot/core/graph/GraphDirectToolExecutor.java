@@ -60,6 +60,17 @@ public final class GraphDirectToolExecutor {
     if (calls.isEmpty()) {
       if (!allCalls.isEmpty()) {
         updates.put("approachRepeatBlocked", true);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> gathered =
+            new LinkedHashMap<>(
+                (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of()));
+        if (ProjectMetaHelper.tryAbsorbRootListing(state, gathered, updates)) {
+          PhaseOutcomeHelper.recordGatheredOutcome(state, gathered, updates);
+          updates.put("directToolsExecuted", List.of(Map.of("name", "fs.list", "ok", true, "source", "projectMeta")));
+          int rounds = (int) state.value("directToolRound").orElse(0) + 1;
+          updates.put("directToolRound", rounds);
+          return true;
+        }
       }
       return false;
     }
@@ -159,15 +170,11 @@ public final class GraphDirectToolExecutor {
   }
 
   private static List<JsonNode> filterDuplicateApproaches(OverAllState state, List<JsonNode> calls) {
-    List<String> history = ToolApproachTracker.history(state);
-    if (history.isEmpty()) {
-      return calls;
-    }
     List<JsonNode> out = new ArrayList<>();
     for (JsonNode tc : calls) {
       String fp =
           ToolApproachTracker.fingerprintFromJson(resolveToolName(tc), tc.get("args"));
-      if (!history.contains(fp)) {
+      if (!ToolApproachTracker.alreadyAttempted(state, fp)) {
         out.add(tc);
       } else {
         log.warn("GraphDirectToolExecutor: skipping duplicate approach {}", fp);
@@ -240,7 +247,9 @@ public final class GraphDirectToolExecutor {
         return false;
       }
       Object entries = m.get("entries");
-      return entries instanceof List<?> list && !list.isEmpty();
+      // Empty directory is a valid result — the list call succeeded,
+      // the directory simply has no contents. Do NOT treat this as failure.
+      return entries instanceof List<?>;
     }
     if (!"shell.exec".equals(toolName)) {
       return result.ok();

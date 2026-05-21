@@ -3,9 +3,20 @@
 [CONTEXT]
 - Language: {{language}}
 - File: {{filePath}}
+- Selection (approx. lines {{startLine}}–{{endLine}} within the file; numbering is 1-based as in the editor)
 - Code:
 ```{{language}}
 {{selection}}
+```
+
+- IDE file outline (top-level declarations / JVM methods when available — may be partial):
+```
+{{fileOutline}}
+```
+
+- Workspace / build hints (IDE-derived from project root):
+```
+{{projectInfo}}
 ```
 
 [REVIEW DIMENSIONS]
@@ -37,3 +48,4 @@ If there are no issues requiring code changes, return an empty patches array.
 
 NOTE: The review report content should be in {{userLocale}} (default zh-CN). Translate headings accordingly.
 If fixes are too risky or unclear, prefer an empty patches array and describe the issue in the report instead.
+When running as a CodePilot Agent graph turn, prefer applying safe, small fixes through file tools (`fs.replace` / `apply_patch`) when offered; the JSON schema above is the logical contract, not a substitute for refusing to use tools.

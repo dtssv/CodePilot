@@ -36,6 +36,28 @@ public final class ToolApproachTracker {
     return Boolean.TRUE.equals(state.value("toolApproachExhausted").orElse(false));
   }
 
+  /** All tool fingerprints executed this step (success or failure) — used to block duplicate runs. */
+  @SuppressWarnings("unchecked")
+  public static List<String> attemptedFingerprints(OverAllState state) {
+    Object raw = state.value("toolApproachesAttempted").orElse(List.of());
+    if (raw instanceof List<?> list) {
+      List<String> out = new ArrayList<>();
+      for (Object o : list) {
+        if (o != null && !o.toString().isBlank()) {
+          out.add(o.toString());
+        }
+      }
+      return out;
+    }
+    return List.of();
+  }
+
+  public static boolean alreadyAttempted(OverAllState state, String fingerprint) {
+    return fingerprint != null
+        && !fingerprint.isBlank()
+        && attemptedFingerprints(state).contains(fingerprint);
+  }
+
   /** Fingerprint for deduplication — same path/kind/query counts as one approach. */
   public static String fingerprint(String kind, Map<String, Object> args) {
     if (kind == null || kind.isBlank()) {
@@ -157,6 +179,7 @@ public final class ToolApproachTracker {
       Map<String, Object> args =
           req.get("args") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
       String fp = fingerprint(kind, args);
+      recordAttemptedFingerprint(state, fp, updates);
       String reqId = String.valueOf(req.getOrDefault("id", ""));
       Map<String, Object> entry = findGatherEntry(gathered, reqId);
       boolean bad = entry == null || isUnsatisfactory(kind, entry);
@@ -176,21 +199,62 @@ public final class ToolApproachTracker {
     if (calls == null || calls.isEmpty()) {
       return;
     }
-    List<Map<String, Object>> round = new ArrayList<>();
+    List<String> badFingerprints = new ArrayList<>();
     for (JsonNode tc : calls) {
       String kind = resolveToolName(tc);
       String id = tc.path("id").asText("");
       String fp = fingerprintFromJson(kind, tc.get("args"));
+      recordAttemptedFingerprint(state, fp, updates);
       Map<String, Object> entry = findGatherEntry(gathered, "direct-" + id);
       if (entry == null) {
         entry = findGatherEntry(gathered, id);
       }
       boolean bad = entry == null || isUnsatisfactory(kind, entry);
       if (bad) {
-        round.add(Map.of("fingerprint", fp, "unsatisfactory", true));
+        badFingerprints.add(fp);
       }
     }
-    mergeHistory(state, round, updates);
+    if (!badFingerprints.isEmpty()) {
+      List<Map<String, Object>> round =
+          List.of(Map.of("fingerprint", collapseFailureFingerprints(badFingerprints), "unsatisfactory", true));
+      mergeHistory(state, round, updates);
+    }
+  }
+
+  /** One batch of parallel failures under the same directory counts as one approach. */
+  private static String collapseFailureFingerprints(List<String> fingerprints) {
+    if (fingerprints.isEmpty()) {
+      return "unknown";
+    }
+    if (fingerprints.size() == 1) {
+      return fingerprints.get(0);
+    }
+    Map<String, Integer> readsByDir = new LinkedHashMap<>();
+    for (String fp : fingerprints) {
+      if (!fp.startsWith("fs.read:")) {
+        continue;
+      }
+      String path = fp.substring("fs.read:".length()).replace('\\', '/');
+      String dir = parentDirOf(path);
+      readsByDir.merge(dir, 1, Integer::sum);
+    }
+    for (Map.Entry<String, Integer> e : readsByDir.entrySet()) {
+      if (e.getValue() >= 2) {
+        String dir = e.getKey();
+        String label = ".".equals(dir) ? "fs.read (project root)" : "fs.read:" + dir + "/";
+        return label + " (" + e.getValue() + " parallel failures)";
+      }
+    }
+    return fingerprints.get(0);
+  }
+
+  private static String parentDirOf(String path) {
+    String p = path.replace('\\', '/').replaceAll("^\\./", "");
+    int slash = p.lastIndexOf('/');
+    if (slash <= 0) {
+      return ".";
+    }
+    return p.substring(0, slash);
   }
 
   /** Prompt block listing tried approaches and requiring a different strategy. */
@@ -217,8 +281,9 @@ public final class ToolApproachTracker {
       sb.append("product decision (e.g. skip step) — not for retrying the same listing/read.\n");
     }
     sb.append(
-        "Examples of switching: fs.list \".\" failed → fs.grep \"leetcode\" or fs.read a known file; "
-            + "empty directory → ask user to paste content or confirm the path.\n");
+        "Examples of switching: fs.list on one path failed → fs.list a parent directory, fs.grep "
+            + "with a symbol, or fs.read a path from [SESSION EXECUTION FACTS]; "
+            + "empty listing → try another directory or askUser for the correct path.\n");
     return sb.toString();
   }
 
@@ -230,11 +295,31 @@ public final class ToolApproachTracker {
     return String.join("\n", history.stream().map(h -> "- " + h).toList());
   }
 
+  /** Records a fingerprint as attempted without executing a tool (e.g. projectMeta seed). */
+  public static void markAttempted(
+      OverAllState state, String fingerprint, Map<String, Object> updates) {
+    recordAttemptedFingerprint(state, fingerprint, updates);
+  }
+
   public static void clearInPhase(Map<String, Object> updates) {
     updates.put("toolApproachHistory", List.of());
+    updates.put("toolApproachesAttempted", List.of());
     updates.put("toolApproachExhausted", false);
     updates.put("approachEscalationDone", false);
     updates.put("approachRepeatBlocked", false);
+  }
+
+  private static void recordAttemptedFingerprint(
+      OverAllState state, String fingerprint, Map<String, Object> updates) {
+    if (fingerprint == null || fingerprint.isBlank()) {
+      return;
+    }
+    List<String> attempted = new ArrayList<>(attemptedFingerprints(state));
+    if (attempted.contains(fingerprint)) {
+      return;
+    }
+    attempted.add(fingerprint);
+    updates.put("toolApproachesAttempted", attempted);
   }
 
   @SuppressWarnings("unchecked")

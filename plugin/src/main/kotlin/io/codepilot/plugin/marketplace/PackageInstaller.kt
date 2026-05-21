@@ -1,6 +1,7 @@
 package io.codepilot.plugin.marketplace
 
 import com.intellij.openapi.diagnostic.Logger
+import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
 import java.nio.file.Files
 import java.nio.file.Path
@@ -35,10 +36,6 @@ class PackageInstaller(
         return try {
             // Step 1: Resolve
             val manifest = client.skillManifest(slug, version).get()
-            val source = manifest["source"] as? String ?: "user"
-            if ("system".equals(source, ignoreCase = true)) {
-                return InstallResult(false, slug, version, scope, "System Skills cannot be installed locally")
-            }
 
             // Step 2: Preflight
             val preflightError = preflight(manifest)
@@ -48,8 +45,14 @@ class PackageInstaller(
 
             // Step 3: Download + verify
             val downloadInfo = client.skillDownload(slug, version).get()
-            val downloadBytes = downloadFile(downloadInfo.url)
-            if (!verifySha256(downloadInfo.sha256, downloadBytes)) {
+            val artifactUrl =
+                resolveArtifactUrl(
+                    downloadInfo.url?.takeIf { it.isNotBlank() }
+                        ?: return InstallResult(false, slug, version, scope, "Server returned no artifact URL"),
+                )
+            val downloadBytes = downloadFile(artifactUrl)
+            val expectedSha = downloadInfo.sha256?.trim().orEmpty()
+            if (expectedSha.isNotEmpty() && !verifySha256(expectedSha, downloadBytes)) {
                 return InstallResult(false, slug, version, scope, "SHA-256 verification failed")
             }
 
@@ -63,11 +66,11 @@ class PackageInstaller(
             }
 
             // Step 5: Install path
-            val installDir = localStore.getInstallDir(slug, version, scope)
+            val installDir = localStore.getInstallDir(slug, version, scope, project)
 
             // Step 6: Extract
             extractZip(downloadBytes, installDir)
-            localStore.recordInstall(slug, version, scope, LocalMarketplaceStore.Source.OFFICIAL, manifest)
+            localStore.recordInstall(slug, version, scope, LocalMarketplaceStore.Source.OFFICIAL, manifest, project)
 
             // Step 7: Activate
             localStore.reloadIndex()
@@ -105,7 +108,7 @@ class PackageInstaller(
             val scope = LocalMarketplaceStore.Scope.PROJECT
 
             // Determine install directory
-            val installDir = localStore.getInstallDir(slug, "local", scope)
+            val installDir = localStore.getInstallDir(slug, "local", scope, project)
 
             // Extract archive
             extractZip(bytes, installDir)
@@ -117,7 +120,7 @@ class PackageInstaller(
                 "version" to "local",
                 "source" to "archive",
             )
-            localStore.recordInstall(slug, "local", scope, LocalMarketplaceStore.Source.LOCAL, manifest)
+            localStore.recordInstall(slug, "local", scope, LocalMarketplaceStore.Source.LOCAL, manifest, project)
             localStore.reloadIndex()
 
             InstallResult(true, slug, "local", scope)
@@ -185,6 +188,19 @@ class PackageInstaller(
                 entry = zis.nextEntry
             }
         }
+    }
+
+    /**
+     * Backend may return relative paths like `/v1/skills/packages/.../archive` alongside the site's base URL.
+     */
+    private fun resolveArtifactUrl(url: String): String {
+        val u = url.trim()
+        if (u.startsWith("http://", ignoreCase = true) || u.startsWith("https://", ignoreCase = true)) {
+            return u
+        }
+        val base = CodePilotSettings.getInstance().state.backendBaseUrl.trimEnd('/')
+        if (u.startsWith("/")) return base + u
+        return "$base/$u"
     }
 
     private fun downloadFile(url: String): ByteArray {

@@ -2,20 +2,23 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from './bridge';
 import type { BudgetBreakdown } from './components/ContextBudgetBar';
 import type { ContextChipData } from './components/ContextChip';
-import { AppTabBar } from './components/layout/AppTabBar';
-import { AppTopBar } from './components/layout/AppTopBar';
+import { AppHeader } from './components/layout/AppHeader';
 import { ChatInputSection } from './components/layout/ChatInputSection';
 import { ChatMainArea } from './components/layout/ChatMainArea';
 import { MessageQueueBanner } from './components/layout/MessageQueueBanner';
 import { LoginPage } from './components/LoginPage';
 import { McpConfirmDialog } from './components/mcp/McpConfirmDialog';
 import type { SessionCostInfo } from './components/SessionCostPanel';
+import { runAppTabEnter } from './config/appTabConfig';
+import { t } from './i18n';
+import { setAdmissionWaitState } from './state/admissionWaitStore';
 import {
     installAuthenticatedSettings,
     installContextEffects,
     installContextEstimateDebounce,
     installCoreBridges,
     installLegacyChatEffect,
+    installPanelBridges,
     installSessionEffects,
     installThemeBridge,
     installVisionErrorBridge,
@@ -33,6 +36,7 @@ import type { AppTab } from './types/appTabs';
 export type { ToolCallInfo } from './state/chatTypes';
 
 export function App() {
+    const [authChecked, setAuthChecked] = useState(false);
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
     const [activeTab, setActiveTab] = useState<AppTab>('chat');
@@ -71,6 +75,7 @@ export function App() {
 
     const bootstrapSetters = useMemo(
         () => ({
+            setAuthChecked,
             setAuthenticated,
             setModels,
             setSelectedModelId,
@@ -98,7 +103,15 @@ export function App() {
         [],
     );
 
-    useEffect(() => installCoreBridges(bootstrapRefs, bootstrapSetters), [bootstrapRefs, bootstrapSetters]);
+    useEffect(() => {
+        const off = installCoreBridges(bootstrapRefs, bootstrapSetters);
+        installPanelBridges();
+        runAppTabEnter('chat');
+        return off;
+    }, [bootstrapRefs, bootstrapSetters]);
+    useEffect(() => {
+        runAppTabEnter(activeTab);
+    }, [activeTab]);
     useEffect(() => installSessionEffects(bootstrapSetters, bootstrapRefs), [bootstrapSetters, bootstrapRefs]);
     useEffect(
         () => installLegacyChatEffect(v2Enabled, bootstrapRefs, bootstrapSetters),
@@ -110,20 +123,34 @@ export function App() {
     useEffect(() => installThemeBridge(setTheme), []);
     useEffect(() => installVisionErrorBridge(setSendError), []);
     useEffect(() => {
+        const offFocusChat = onPluginEvent('ui.focus_chat', () => setActiveTab('chat'));
         const offQueued = onPluginEvent('message_queued', (payload) => {
             const size = (payload as { queueSize?: number }).queueSize ?? 1;
-            setSendError(`上一条任务仍在执行，消息已加入队列（${size}）`);
+            setSendError(t('app.queueBlocked', { n: size }));
         });
         const offRunning = onPluginEvent('conversation_running', (payload) => {
             const running = Boolean((payload as { running?: boolean }).running);
-            if (!running) {
+            if (running) {
+                setAdmissionWaitState(null);
+                setSendError(null);
+            } else {
+                setAdmissionWaitState(null);
                 setSendError(null);
                 finalizeRunningTurns();
             }
         });
+        const offBackoff = onPluginEvent('server_backoff', (payload) => {
+            const data = payload as { message?: string };
+            const msg = data.message?.trim();
+            if (msg) {
+                setSendError(msg);
+            }
+        });
         return () => {
+            offFocusChat();
             offQueued();
             offRunning();
+            offBackoff();
         };
     }, []);
     useEffect(
@@ -167,6 +194,10 @@ export function App() {
         return () => document.removeEventListener('mousedown', handler);
     }, [historyOpen]);
 
+    if (!authChecked) {
+        return <LoginPage checkingSession />;
+    }
+
     if (!authenticated) {
         return <LoginPage />;
     }
@@ -176,11 +207,19 @@ export function App() {
             <McpConfirmDialog />
             <div className="app-layout">
                 <div className="main-area">
-                    <AppTopBar
+                    <AppHeader
+                        activeTab={activeTab}
+                        theme={theme}
+                        pendingMemoryCount={pendingMemoryCount}
+                        bgActiveCount={bgActiveCount}
                         historyOpen={historyOpen}
                         historyBtnRef={historyBtnRef}
                         sessions={sessions}
                         activeSessionId={activeSessionId}
+                        onTabChange={setActiveTab}
+                        onThemeCycle={() =>
+                            setTheme((t) => (t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark'))
+                        }
                         onToggleHistory={() => setHistoryOpen((o) => !o)}
                         onNewChat={() =>
                             sessionActions.handleNewSession(
@@ -212,9 +251,9 @@ export function App() {
                         onDismissAbnormal={() => setAbnormalTermination(false)}
                         onClearConsole={() => clearConsole()}
                     />
-                    <div className="input-section">
-                        {activeTab === 'chat' && <MessageQueueBanner />}
-                        {activeTab === 'chat' && (
+                    {activeTab === 'chat' && (
+                        <div className="input-section">
+                            <MessageQueueBanner />
                             <ChatInputSection
                                 contextTokens={contextTokens}
                                 totalTokens={totalTokens}
@@ -242,16 +281,8 @@ export function App() {
                                     sendToPlugin('update_auto_apply', { enabled });
                                 }}
                             />
-                        )}
-                        <AppTabBar
-                            activeTab={activeTab}
-                            theme={theme}
-                            pendingMemoryCount={pendingMemoryCount}
-                            bgActiveCount={bgActiveCount}
-                            onTabChange={setActiveTab}
-                            onThemeCycle={() => setTheme((t) => (t === 'dark' ? 'light' : t === 'light' ? 'high-contrast' : 'dark'))}
-                        />
-                    </div>
+                        </div>
+                    )}
                 </div>
             </div>
         </>

@@ -5,6 +5,8 @@ import io.codepilot.core.conversation.SseFactory;
 import io.codepilot.core.deploy.DeployDrainService;
 import io.codepilot.core.dto.ConversationMode;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.run.ConversationRunAdmissionProperties;
+import io.codepilot.core.run.ConversationRunAdmissionService;
 import io.codepilot.core.run.ConversationRunEventBus;
 import io.codepilot.core.run.ConversationRunProperties;
 import io.codepilot.core.run.ConversationRunStatus;
@@ -13,6 +15,7 @@ import io.codepilot.core.sse.SseEvents;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
@@ -35,6 +38,8 @@ public class ConversationRunWorker {
   private final ConversationRunProperties properties;
   private final WorkerIdentity workerIdentity;
   private final SseFactory sse;
+  private final ConversationRunAdmissionService admission;
+  private final Semaphore executionSlots;
   private final ConcurrentHashMap<String, Disposable> active = new ConcurrentHashMap<>();
 
   public ConversationRunWorker(
@@ -43,13 +48,18 @@ public class ConversationRunWorker {
       ConversationRunEventBus eventBus,
       ConversationRunProperties properties,
       WorkerIdentity workerIdentity,
-      SseFactory sse) {
+      SseFactory sse,
+      ConversationRunAdmissionService admission,
+      ConversationRunAdmissionProperties admissionProperties) {
     this.conversationService = conversationService;
     this.store = store;
     this.eventBus = eventBus;
     this.properties = properties;
     this.workerIdentity = workerIdentity;
     this.sse = sse;
+    this.admission = admission;
+    int slots = Math.max(1, admissionProperties.getMaxWorkerConcurrent());
+    this.executionSlots = new Semaphore(slots);
   }
 
   public boolean isExecuting(String runId) {
@@ -59,8 +69,13 @@ public class ConversationRunWorker {
   public void startIfClaimed(String runId) {
     if (!store.isDbBacked()) return;
     if (active.containsKey(runId)) return;
+    if (!executionSlots.tryAcquire()) {
+      log.debug("Worker at capacity — deferring runId={}", runId);
+      return;
+    }
     Instant leaseUntil = Instant.now().plus(properties.getLeaseDuration());
     if (!store.tryClaim(runId, workerIdentity.id(), leaseUntil)) {
+      executionSlots.release();
       return;
     }
     log.info("ConversationRunWorker claimed runId={} worker={}", runId, workerIdentity.id());
@@ -72,6 +87,7 @@ public class ConversationRunWorker {
                     execute(runId);
                   } finally {
                     active.remove(runId);
+                    executionSlots.release();
                   }
                 });
     active.put(runId, d);
@@ -81,6 +97,16 @@ public class ConversationRunWorker {
     var rowOpt = store.get(runId);
     if (rowOpt.isEmpty()) return;
     var row = rowOpt.get();
+    String userId = row.userId() != null ? row.userId() : "dev-user";
+    String statusAtStart = row.status() != null ? row.status() : "";
+    boolean incrAdmissionOnStart =
+        ConversationRunStatus.QUEUED.equals(statusAtStart)
+            || ConversationRunStatus.INTERRUPTED.equals(statusAtStart);
+    boolean decrAdmissionOnFinish =
+        incrAdmissionOnStart || ConversationRunStatus.RUNNING.equals(statusAtStart);
+    if (incrAdmissionOnStart) {
+      admission.onRunStarted(userId).block();
+    }
     AtomicInteger seq = new AtomicInteger(row.lastSeq());
     AtomicBoolean terminal = new AtomicBoolean(false);
 
@@ -107,6 +133,8 @@ public class ConversationRunWorker {
               base.earlierToolCallsCount(),
               base.projectRootHash(),
               base.userSkills(),
+              base.userSkillRefs(),
+              base.userSkillBodies(),
               base.userMcps(),
               base.mcpTools(),
               base.userPlanEdits(),
@@ -177,6 +205,9 @@ public class ConversationRunWorker {
       store.fail(runId, e.getMessage());
     } finally {
       leaseRenew.dispose();
+      if (decrAdmissionOnFinish) {
+        admission.onRunFinished(userId).block();
+      }
     }
   }
 

@@ -1,6 +1,7 @@
 import type { StepNode } from '../../../state/events';
 import type { ToolCallInfo } from '../../ToolCallCard';
 import type { ToolExecutionState } from '../../../state/chatTypes';
+import { classifyToolResult } from '../../../utils/toolResultClassify';
 import { deriveShellExecutionState } from '../../../utils/shellOutput';
 
 const WRITE_TOOLS = ['fs.write', 'fs.create', 'fs.replace', 'fs.applyPatch', 'fs.delete', 'fs.move'];
@@ -30,14 +31,30 @@ export function stepToToolCall(step: StepNode): ToolCallInfo | null {
             ? (step.toolCall.args as Record<string, unknown>)
             : {};
     const status = step.status === 'running' ? 'running' : step.status === 'error' ? 'error' : 'success';
-    const result = shellResultRecord(step);
-    const isShell = step.toolCall.tool.startsWith('shell.');
+    const toolName = step.toolCall.tool;
+    const isShell = toolName.startsWith('shell.');
+    const classified = step.toolResult
+        ? classifyToolResult(
+              toolName,
+              args,
+              step.toolResult.ok,
+              step.toolResult.result,
+              null,
+              step.toolResult.error,
+          )
+        : null;
+    const result =
+        isShell
+            ? shellResultRecord(step)
+            : classified && typeof classified === 'object' && !Array.isArray(classified)
+              ? (classified as Record<string, unknown>)
+              : undefined;
     const executionState: ToolExecutionState | undefined =
         step.executionState
         ?? (isShell ? deriveShellExecutionState(status, result) : status);
     return {
         id: step.stepId,
-        name: step.toolCall.tool,
+        name: toolName,
         args,
         status,
         result,

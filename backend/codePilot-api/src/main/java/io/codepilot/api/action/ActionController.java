@@ -11,6 +11,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
@@ -207,12 +208,39 @@ public class ActionController {
     Map<String, String> vars = new LinkedHashMap<>();
     vars.put("language", req.language() != null ? req.language() : "text");
     vars.put("filePath", req.filePath() != null ? req.filePath() : "<buffer>");
+    // Plain source text only — clients MUST NOT wrap with [action] headers or fenced blocks here;
+    // action.*.txt templates own the markdown structure (see docs in plugin ActionBase).
     vars.put("selection", req.context());
     vars.put("userInstruction", req.instruction() != null ? req.instruction() : "");
-    vars.put("testFramework", req.testFramework() != null ? req.testFramework() : "");
+    String tf = req.testFramework() != null ? req.testFramework() : "";
+    if ((tf.isEmpty()) && ("gentest".equals(action))) {
+      tf = inferTestFramework(vars.get("language"));
+    }
+    vars.put("testFramework", tf);
+    vars.put(
+        "existingTestsOutline",
+        req.existingTestsOutline() != null && !req.existingTestsOutline().isBlank()
+            ? req.existingTestsOutline()
+            : "(not provided — inspect repo conventions from path and sibling tests if needed)");
     vars.put("docTarget", req.docTarget() != null ? req.docTarget() : "");
     vars.put("audience", req.audience() != null ? req.audience() : "");
     vars.put("userLocale", "zh-CN");
+    vars.put(
+        "fileOutline",
+        req.fileOutline() != null && !req.fileOutline().isBlank()
+            ? req.fileOutline()
+            : "(not provided — infer structure from selection and path)");
+    vars.put(
+        "projectInfo",
+        req.projectMeta() != null && !req.projectMeta().isBlank()
+            ? req.projectMeta()
+            : "(not provided)");
+    int startLine =
+        req.startLine() != null && req.startLine() > 0 ? req.startLine() : 1;
+    int endLine =
+        req.endLine() != null && req.endLine() >= startLine ? req.endLine() : startLine + linesInText(req.context()) - 1;
+    vars.put("startLine", Integer.toString(startLine));
+    vars.put("endLine", Integer.toString(endLine));
 
     String input = loadPrompt(action, vars);
 
@@ -230,7 +258,7 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         req.sessionId(), mode, req.modelId(), req.modelSource() != null ? io.codepilot.core.model.ModelSource.valueOf(req.modelSource().toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, policy, null,
+        List.of(), null, null, null, null, null, null, null, null, null, null, policy, null,
         null, null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
@@ -254,15 +282,66 @@ public class ActionController {
     ConversationRunRequest runReq = new ConversationRunRequest(
         sessionId, mode, modelId, modelSource != null ? io.codepilot.core.model.ModelSource.valueOf(modelSource.toUpperCase()) : null, input,
         null, null, null, null, null, null, null, null,
-        List.of(), null, null, null, null, null, null, null, null, policy, null,
+        List.of(), null, null, null, null, null, null, null, null, null, null, policy, null,
         null, null, null, null);
     return leakFilter.guard(service.run(runReq, userId));
   }
 
+  /** Count lines in a {@code selection} fragment (minimum 1). */
+  private static int linesInText(String selection) {
+    if (selection == null || selection.isEmpty()) return 1;
+    int lines = 1;
+    for (int i = 0; i < selection.length(); i++) {
+      if (selection.charAt(i) == '\n') lines++;
+    }
+    return lines;
+  }
+
+  /** Fallback when the IDE client does not send testFramework (gentest only). */
+  private static String inferTestFramework(String language) {
+    if (language == null || language.isBlank()) return "";
+    String l = language.toLowerCase(Locale.ROOT);
+    if (l.contains("kotlin")) {
+      return "JUnit 5 (AssertJ optional) unless the repo clearly uses TestNG.";
+    }
+    if (l.contains("javascript") || l.contains("typescript") || l.contains("jsx") || l.contains("tsx")) {
+      return "Vitest/Jest depending on package.json hints.";
+    }
+    if (l.contains("java")) {
+      return "JUnit 5 (AssertJ optional) unless the repo clearly uses TestNG.";
+    }
+    if (l.contains("python")) {
+      return "pytest (unittest if the tree only uses unittest).";
+    }
+    if (l.contains("go") || l.contains("golang")) {
+      return "go test; testify/gomock if imports already exist.";
+    }
+    if (l.contains("c++")
+        || l.contains("cpp")
+        || "cuda".equals(l)
+        || l.contains("objc")
+        || "objectivec".equals(l)) {
+      return "GoogleTest / Catch2 — match CMakeLists/convention.";
+    }
+    if (l.contains("swift")) {
+      return "XCTest.";
+    }
+    if (l.contains("csharp") || l.contains("c#") || l.contains("vb.net") || "vb".equals(l)) {
+      return "xUnit / NUnit consistent with *.csproj.";
+    }
+    if (l.contains("rust")) {
+      return "cargo test + standard #[cfg(test)] modules.";
+    }
+    if (l.contains("ruby")) {
+      return "RSpec/Minitest as used in the Gemfile.";
+    }
+    return "";
+  }
+
   /**
-   * Load a prompt template from resources/prompts/action.<name>.txt,
+   * Load a prompt template from resources/prompts/action.&lt;name&gt;.txt,
    * substitute variables, and return the resolved prompt.
-   * Falls back to a simple [action:<name>] prefix if the template is missing.
+   * Falls back to a simple {@code [action:name]} prefix if the template is missing.
    */
   private String loadPrompt(String action, Map<String, String> vars) {
     if (promptLoader.exists(action)) {
@@ -298,7 +377,17 @@ public class ActionController {
        * graph=true, comment/gendoc default to graph=false unless the caller
        * sets this flag.
        */
-      Boolean useGraph) {}
+      Boolean useGraph,
+      /** 1-based start line of {@code context} within the editor file (optional). */
+      Integer startLine,
+      /** 1-based end line (inclusive) of {@code context} within the editor file (optional). */
+      Integer endLine,
+      /** Optional coarse symbol/file outline forwarded from the IDE. */
+      String fileOutline,
+      /** Optional workspace / project snippet (build tool, conventions). */
+      String projectMeta,
+      /** Optional neighbouring test file summary for gentest (IDE may omit). */
+      String existingTestsOutline) {}
 
   public record CommitMessageRequest(
       @NotBlank String sessionId,

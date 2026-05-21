@@ -117,6 +117,14 @@ public class ToolResultBus {
     return sessionId + ":" + toolCallId;
   }
 
+  private static String sessionIdFromChannel(String channel) {
+    if (channel == null || !channel.startsWith(CHANNEL_PREFIX)) {
+      return null;
+    }
+    String sessionId = channel.substring(CHANNEL_PREFIX.length());
+    return sessionId.isBlank() ? null : sessionId;
+  }
+
   // ─── Publish (called by ToolResultController) ──────────────────────────
 
   /**
@@ -165,27 +173,31 @@ public class ToolResultBus {
   private void subscribeAndBridge() {
     PatternTopic topic = new PatternTopic(CHANNEL_PREFIX + "*");
     container.receive(topic)
-        .map(message -> message.getMessage())
-        .map(this::parse)
         .subscribe(
-            event -> {
-              // Try to find and complete a matching in-process future.
-              // The Redis message contains toolCallId but not sessionId directly,
-              // so we scan PENDING_FUTURES for a key ending with ":toolCallId".
-              boolean matched = false;
-              for (var entry : PENDING_FUTURES.entrySet()) {
-                if (entry.getKey().endsWith(":" + event.toolCallId())) {
-                  var oldFuture = PENDING_FUTURES.remove(entry.getKey());
-                  if (oldFuture != null && !oldFuture.isDone()) {
-                    oldFuture.complete(event);
-                    log.info("ToolResultBus: Redis bridge completed future for key={}", entry.getKey());
-                  }
-                  matched = true;
-                  break;
-                }
+            message -> {
+              String channel = message.getChannel();
+              String sessionId = sessionIdFromChannel(channel);
+              if (sessionId == null) {
+                log.warn("ToolResultBus: Redis bridge ignored message on channel={}", channel);
+                return;
               }
-              if (!matched) {
-                log.debug("ToolResultBus: Redis bridge: no pending future for toolCallId={}", event.toolCallId());
+              ToolResultEvent event;
+              try {
+                event = parse(message.getMessage());
+              } catch (Exception e) {
+                log.warn("ToolResultBus: Redis bridge bad payload on channel={}", channel, e);
+                return;
+              }
+              String key = futureKey(sessionId, event.toolCallId());
+              var oldFuture = PENDING_FUTURES.remove(key);
+              if (oldFuture != null && !oldFuture.isDone()) {
+                oldFuture.complete(event);
+                log.info("ToolResultBus: Redis bridge completed future for key={}", key);
+              } else {
+                log.debug(
+                    "ToolResultBus: Redis bridge: no pending future for key={} (toolCallId={})",
+                    key,
+                    event.toolCallId());
               }
             },
             error -> log.error("ToolResultBus: Redis bridge subscription error", error)

@@ -11,7 +11,8 @@ class PolicyChatOptionsTest {
   void appliesMaxTokensAndReasoningForOseries() {
     OpenAiChatOptions opts = PolicyChatOptions.fromGraphState(true, "high", 4096, "o3-mini");
     assertThat(opts).isNotNull();
-    assertThat(opts.getMaxTokens()).isEqualTo(4096);
+    // Reasoning models should NOT set maxTokens (incompatible with reasoning_effort on some providers)
+    assertThat(opts.getMaxTokens()).isNull();
     assertThat(opts.getReasoningEffort()).isEqualTo("high");
   }
 
@@ -28,7 +29,8 @@ class PolicyChatOptionsTest {
     OpenAiChatOptions opts =
         PolicyChatOptions.fromGraphState(true, "high", 8192, "claude-sonnet-4-20250514");
     assertThat(opts).isNotNull();
-    assertThat(opts.getMaxTokens()).isEqualTo(8192);
+    // Anthropic thinking models also should not set maxTokens when using thinking extra
+    assertThat(opts.getMaxTokens()).isNull();
     assertThat(opts.getReasoningEffort()).isNull();
     assertThat(OpenAiChatOptionsComposer.readExtraBody(opts)).containsKey("thinking");
   }

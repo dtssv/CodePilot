@@ -94,20 +94,22 @@ public class ConversationRunStore {
     return rows.stream().findFirst();
   }
 
-  public List<RunRow> findReclaimable(Instant leaseCutoff, int limit) {
+  public List<RunRow> findReclaimable(Instant leaseCutoff, Instant interruptedSince, int limit) {
     if (!dbActive) return List.of();
     return jdbc.query(
         """
         SELECT id, session_id, user_id, status, request_json, continuation_token,
                worker_id, lease_until, last_seq, error_message
         FROM conversation_runs
-        WHERE status IN ('queued', 'interrupted')
+        WHERE status = 'queued'
+           OR (status = 'interrupted' AND updated_at >= :interruptedSince)
            OR (status = 'running' AND (lease_until IS NULL OR lease_until < :cutoff))
         ORDER BY updated_at ASC
         LIMIT :limit
         """,
         new MapSqlParameterSource()
             .addValue("cutoff", Timestamp.from(leaseCutoff))
+            .addValue("interruptedSince", Timestamp.from(interruptedSince))
             .addValue("limit", limit),
         this::mapRunRow);
   }
@@ -261,6 +263,54 @@ public class ConversationRunStore {
     return loadEventRecordsSince(runId, afterSeq).stream().map(RunEvent::toSse).toList();
   }
 
+  /**
+   * Counts runs that currently hold admission slots (queued + actively leased running +
+   * awaiting_input).
+   */
+  public AdmissionDbSnapshot countAdmissionSnapshot() {
+    if (!dbActive) {
+      return new AdmissionDbSnapshot(0, 0, List.of());
+    }
+    long globalQueued =
+        jdbc.queryForObject(
+            "SELECT COUNT(*) FROM conversation_runs WHERE status = 'queued'", Map.of(), Long.class);
+    long globalRunning =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*) FROM conversation_runs
+            WHERE status = 'awaiting_input'
+               OR (status = 'running'
+                   AND (lease_until IS NULL OR lease_until >= CURRENT_TIMESTAMP(3)))
+            """,
+            Map.of(),
+            Long.class);
+    List<UserAdmissionCounts> perUser =
+        jdbc.query(
+            """
+            SELECT user_id,
+                   SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                   SUM(
+                     CASE
+                       WHEN status = 'awaiting_input' THEN 1
+                       WHEN status = 'running'
+                            AND (lease_until IS NULL OR lease_until >= CURRENT_TIMESTAMP(3))
+                       THEN 1
+                       ELSE 0
+                     END
+                   ) AS running
+            FROM conversation_runs
+            WHERE status IN ('queued', 'running', 'awaiting_input')
+            GROUP BY user_id
+            """,
+            Map.of(),
+            (rs, rowNum) ->
+                new UserAdmissionCounts(
+                    rs.getString("user_id"),
+                    rs.getLong("queued"),
+                    rs.getLong("running")));
+    return new AdmissionDbSnapshot(globalQueued, globalRunning, perUser);
+  }
+
   public Map<String, Object> statusMap(String runId) {
     return get(runId)
         .map(
@@ -328,6 +378,10 @@ public class ConversationRunStore {
       return ServerSentEvent.<String>builder().event(eventName).data(payloadJson).build();
     }
   }
+
+  public record AdmissionDbSnapshot(long globalQueued, long globalRunning, List<UserAdmissionCounts> perUser) {}
+
+  public record UserAdmissionCounts(String userId, long queued, long running) {}
 
   public record RunRow(
       String id,

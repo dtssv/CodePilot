@@ -7,10 +7,13 @@ import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import io.codepilot.core.run.ConversationRunAdmissionService;
 
 /** Attach to a durable conversation run (replay + live). */
 @RestController
@@ -19,11 +22,28 @@ public class ConversationRunController {
 
   private final ConversationQueuedOrchestrator orchestrator;
   private final ConversationRunStore store;
+  private final ConversationRunAdmissionService admission;
+  private final ConversationRunAdmissionReconciler admissionReconciler;
 
   public ConversationRunController(
-      ConversationQueuedOrchestrator orchestrator, ConversationRunStore store) {
+      ConversationQueuedOrchestrator orchestrator,
+      ConversationRunStore store,
+      ConversationRunAdmissionService admission,
+      ConversationRunAdmissionReconciler admissionReconciler) {
     this.orchestrator = orchestrator;
     this.store = store;
+    this.admission = admission;
+    this.admissionReconciler = admissionReconciler;
+  }
+
+  /** Plugin polls this before starting SSE to avoid piling requests into the server queue. */
+  @GetMapping("/admission")
+  public Mono<ApiResponse<Map<String, Object>>> admission(
+      @RequestHeader(value = "X-User-Id", required = false) String userId) {
+    String uid = userId != null && !userId.isBlank() ? userId : "dev-user";
+    return admissionReconciler
+        .reconcileIfDrift(uid)
+        .then(admission.status(uid).map(st -> ApiResponse.ok(st.toMap())));
   }
 
   @GetMapping(value = "/{runId}/status")

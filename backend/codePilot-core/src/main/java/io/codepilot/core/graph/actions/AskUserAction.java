@@ -5,6 +5,7 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.dto.NeedsInput;
 import io.codepilot.core.graph.AskUserPolicy;
 import io.codepilot.core.graph.GraphCheckpointStore;
+import io.codepilot.core.graph.StuckStepRecovery;
 import io.codepilot.core.graph.GraphInterruptException;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.sse.SseEvents;
@@ -52,15 +53,13 @@ public class AskUserAction implements NodeAction {
                 rawQuestions.add(normalized);
             }
         }
-        @SuppressWarnings("unchecked")
-        var singleQuestion = (Map<String, Object>) state.value("askUserQuestion").orElse(null);
-        if (singleQuestion != null && !singleQuestion.isEmpty()) {
-            Map<String, Object> normalized = AskUserPolicy.normalizeQuestionMap(singleQuestion);
-            if (normalized != null) {
-                rawQuestions.add(normalized);
-            }
+        Object askRaw = state.value("askUserQuestion").orElse(null);
+        Map<String, Object> normalizedSingle = AskUserPolicy.normalizeQuestion(askRaw);
+        if (normalizedSingle != null) {
+            rawQuestions.add(normalizedSingle);
         }
-        var verifyReport = (Map<String, Object>) state.value("verifyReport").orElse(null);
+        Object verifyReportRaw = state.value("verifyReport").orElse(null);
+        Map<String, Object> verifyReport = (verifyReportRaw instanceof Map<?, ?>) ? (Map<String, Object>) verifyReportRaw : null;
         var repairAttempts = (int) state.value("repairAttempts").orElse(0);
         var taskLedger = (Map<String, Object>) state.value("taskLedger").orElse(Map.of());
         var answeredNotes = (List<String>) taskLedger.getOrDefault("notes", List.of());
@@ -86,6 +85,7 @@ public class AskUserAction implements NodeAction {
         if (questions.isEmpty()) {
             // All questions already answered, continue without asking
             // Route to the originating node so execution continues
+            updates.putAll(StuckStepRecovery.consumeStuckAnswerIfPresent(state));
             log.info("AskUser: no unanswered questions, routing to originating node");
             String priorNode = (String) state.value("currentNode").orElse("repair");
             String origin = switch (priorNode) {

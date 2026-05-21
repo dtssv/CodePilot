@@ -87,6 +87,20 @@ export interface TurnImage {
     description?: string;
 }
 
+/** One graph-node Skill activation batch (planning / generate / repair). */
+export interface SkillActivationRecord {
+    node: string;
+    skills: {
+        id: string;
+        version?: string;
+        source?: string;
+        scope?: string;
+        priority?: number;
+        tokens?: number;
+    }[];
+    ts: number;
+}
+
 export interface TurnNode {
     turnId: string;
     userMessage: string;
@@ -96,6 +110,8 @@ export interface TurnNode {
     forkMessageIndex?: number;
     riskNotices?: RiskNotice[];
     needsInput?: NeedsInputPayload;
+    /** Chronological Skill activations per graph node within this turn. */
+    skillActivations?: SkillActivationRecord[];
     status: TurnStatus;
     /** Root-level steps (parentStepId == null). */
     rootStepIds: string[];

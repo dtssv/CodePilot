@@ -1,6 +1,7 @@
 package io.codepilot.plugin.marketplace
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.readValue
 import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
@@ -144,20 +145,19 @@ class MarketplaceClient(
                 .newBuilder()
                 .addPathSegments("v1/skills/packages/$slug/versions/$version/download")
                 .build()
-        return execute(
+        return executeDownloadInfo(
             Request
                 .Builder()
                 .url(url)
                 .get()
                 .build(),
-            DownloadInfo::class.java,
         )
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class DownloadInfo(
-        val url: String,
-        val sha256: String,
+        val url: String?,
+        val sha256: String?,
         val signature: String?,
         val signedAtMs: Long?,
     )
@@ -168,6 +168,43 @@ class MarketplaceClient(
             .state.backendBaseUrl
             .trimEnd('/')
             .toHttpUrl()
+
+    private fun executeDownloadInfo(request: Request): CompletableFuture<DownloadInfo> {
+        val future = CompletableFuture<DownloadInfo>()
+        http.client().newCall(request).enqueue(
+            object : okhttp3.Callback {
+                override fun onFailure(
+                    call: okhttp3.Call,
+                    e: java.io.IOException,
+                ) {
+                    future.completeExceptionally(e)
+                }
+
+                override fun onResponse(
+                    call: okhttp3.Call,
+                    response: okhttp3.Response,
+                ) {
+                    response.use {
+                        if (!it.isSuccessful) {
+                            future.completeExceptionally(IllegalStateException("HTTP ${it.code}"))
+                            return
+                        }
+                        try {
+                            val mapper = http.mapper
+                            val root: JsonNode = mapper.readTree(it.body!!.bytes())
+                            val payload = root.get("data") ?: root
+                            val info = mapper.treeToValue(payload, DownloadInfo::class.java)
+                                ?: throw IllegalStateException("Empty download payload")
+                            future.complete(info)
+                        } catch (e: Exception) {
+                            future.completeExceptionally(e)
+                        }
+                    }
+                }
+            },
+        )
+        return future
+    }
 
     private fun <T> execute(
         request: Request,

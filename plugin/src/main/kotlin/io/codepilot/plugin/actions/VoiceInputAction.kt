@@ -72,7 +72,7 @@ class VoiceInputAction : AnAction("Voice Input", "Start voice input for chat (sp
      */
     private fun postTranscriptToChat(project: Project, transcript: String) {
         try {
-            val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
+            val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getCefPanel(project)
             if (panel != null) {
                 val jsonTranscript = com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(transcript)
                 panel.dispatchToWeb("set_input", mapOf("text" to transcript))

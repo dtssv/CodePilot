@@ -1,48 +1,52 @@
 package io.codepilot.plugin.completion
 
-import com.intellij.codeInsight.inline.completion.*
+import com.intellij.codeInsight.inline.completion.InlineCompletionEvent
+import com.intellij.codeInsight.inline.completion.InlineCompletionProvider
+import com.intellij.codeInsight.inline.completion.InlineCompletionProviderID
+import com.intellij.codeInsight.inline.completion.InlineCompletionRequest
 import com.intellij.codeInsight.inline.completion.elements.InlineCompletionGrayTextElement
+import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSingleSuggestion
+import com.intellij.codeInsight.inline.completion.suggestion.InlineCompletionSuggestion
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.project.Project
-import io.codepilot.plugin.settings.CodePilotSettings
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.delay
 
 /**
- * IntelliJ InlineCompletionProvider implementation for CodePilot.
- * Triggers on typing (with debounce managed by the platform) and shows gray ghost-text
- * suggestions that the user can accept with Tab.
+ * IntelliJ InlineCompletionProvider for CodePilot Tab (ghost text on typing).
+ *
+ * Uses the 2024.2+ suggestion API ([InlineCompletionSingleSuggestion]) — the legacy
+ * [InlineCompletionSuggestion.Default] factory was removed and prevented suggestions
+ * from appearing.
  */
 class CodePilotInlineCompletionProvider : InlineCompletionProvider {
     override val id: InlineCompletionProviderID
         get() = InlineCompletionProviderID("CodePilot")
 
-    override fun isEnabled(event: InlineCompletionEvent): Boolean = CodePilotSettings.getInstance().accessToken() != null
+    override val insertHandler = CodePilotInlineCompletionInsertHandler()
 
-    override suspend fun getSuggestion(request: InlineCompletionRequest): InlineCompletionSuggestion =
-        InlineCompletionSuggestion.Default(createElement(request))
+    override fun isEnabled(event: InlineCompletionEvent): Boolean = TabCompletionSupport.isEnabled()
 
-    private fun createElement(request: InlineCompletionRequest): Flow<InlineCompletionGrayTextElement> =
-        channelFlow {
-            val editor = request.editor
-            val project = editor.project ?: return@channelFlow
+    override suspend fun getSuggestion(request: InlineCompletionRequest): InlineCompletionSuggestion {
+        val editor = request.editor
+        val project = editor.project ?: return InlineCompletionSuggestion.Empty
 
-            val (prefix, suffix, language, filePath) =
+        return InlineCompletionSingleSuggestion.build { _ ->
+            delay(TabCompletionSupport.debounceMs())
+
+            val context =
                 readAction {
                     extractContext(editor, project)
-                } ?: return@channelFlow
+                } ?: return@build
 
-            // Skip very short prefixes (less than 3 chars on current line)
-            val lastLine = prefix.substringAfterLast('\n', prefix)
-            if (lastLine.trimStart().length < 3) return@channelFlow
+            if (!TabCompletionSupport.hasEnoughPrefix(context.prefix)) return@build
 
             val completionRequest =
                 InlineCompletionService.CompletionRequest(
-                    prefix = prefix,
-                    suffix = suffix,
-                    language = language,
-                    filePath = filePath,
+                    prefix = context.prefix,
+                    suffix = context.suffix,
+                    language = context.language,
+                    filePath = context.filePath,
                 )
 
             val t0 = System.currentTimeMillis()
@@ -50,28 +54,14 @@ class CodePilotInlineCompletionProvider : InlineCompletionProvider {
             if (result != null) {
                 TabFeedback.getInstance().recordSuggest(
                     project,
-                    filePath,
+                    context.filePath,
                     System.currentTimeMillis() - t0,
                     result.length,
                 )
-                send(InlineCompletionGrayTextElement(result))
-
-                // ★ Integration: After accepting completion, trigger CursorTabSuggester
-                // to predict additional edit positions and show ghost suggestions
-                try {
-                    val suggester = CursorTabSuggester.getInstance(project, editor)
-                    val suggestions = suggester.predictAdditionalEdits(
-                        editor.caretModel.offset,
-                        result,
-                    )
-                    if (suggestions.isNotEmpty()) {
-                        suggester.renderPredictions(editor.caretModel.offset, result)
-                    }
-                } catch (_: Exception) {
-                    // CursorTab suggestions are best-effort, don't block main completion
-                }
+                emit(InlineCompletionGrayTextElement(result))
             }
         }
+    }
 
     private fun extractContext(
         editor: Editor,
@@ -82,7 +72,6 @@ class CodePilotInlineCompletionProvider : InlineCompletionProvider {
         val text = document.text
         if (text.isEmpty()) return null
 
-        // Limit context window: 2000 chars before, 1000 chars after
         val prefixStart = maxOf(0, offset - 2000)
         val suffixEnd = minOf(text.length, offset + 1000)
         val prefix = text.substring(prefixStart, offset)

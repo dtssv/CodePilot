@@ -86,7 +86,7 @@ object VoiceInputService {
     private fun useWebSpeechApi(project: Project, future: CompletableFuture<String>) {
         ApplicationManager.getApplication().invokeLater {
             try {
-                val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
+                val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getCefPanel(project)
                 if (panel != null) {
                     // Set up a callback for the speech recognition result
                     val callbackJs = """

@@ -79,11 +79,11 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
   private int getLimitForOperation(String opType) {
     int baseLimit = props.rateLimit().userPerMinute();
     return switch (opType) {
-      case "agent" -> Math.min(baseLimit / 6, 10);      // 10 req/min for agent (expensive)
-      case "chat" -> Math.min(baseLimit / 2, 30);        // 30 req/min for chat
-      case "completion" -> Math.min(baseLimit * 2, 120); // 120 req/min for completions (cheap)
-      case "tools" -> Math.min(baseLimit, 60);            // 60 req/min for tools
-      default -> baseLimit;                                // Default from config
+      case "agent" -> Math.min(baseLimit, 50);       // 50 req/min for agent
+      case "chat" -> Math.min(baseLimit, 50);        // 50 req/min for chat
+      case "completion" -> Math.min(baseLimit, 50);  // 50 req/min for completions
+      case "tools" -> Math.min(baseLimit, 50);       // 50 req/min for tools
+      default -> Math.min(baseLimit, 50);            // 50 req/min default
     };
   }
 
@@ -116,7 +116,7 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
                       return WebErrors.write(
                           exchange,
                           ErrorCodes.RATE_LIMITED,
-                          "Rate limit exceeded for " + opType + " operations (" + limit + "/min)",
+                          "t exceeded for " + opType + " operations (" + limit + "/min)",
                           429);
                     }
                     // Add rate limit headers for client awareness

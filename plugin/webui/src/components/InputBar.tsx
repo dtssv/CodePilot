@@ -100,6 +100,9 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
         const offConversationRunning = onPluginEvent('conversation_running', (payload) => {
             setRunning(Boolean((payload as { running?: boolean }).running));
         });
+        const offBackoff = onPluginEvent('server_backoff', () => {
+            setRunning(false);
+        });
         const offVoice = onPluginEvent('voice_result', (payload) => appendTextToEditor((payload as { transcript?: string }).transcript ?? ''));
         const offVoiceV2 = onPluginEvent('voice.result', (payload) => appendTextToEditor((payload as { text?: string }).text ?? ''));
         const offSlash = onPluginEvent('slash.commands.loaded', (payload) => setCustomSlash(((payload as { commands?: CustomSlashSpec[] }).commands ?? [])));
@@ -121,6 +124,7 @@ export function InputBar({ onSend, onStop, contextChips, onRemoveChip, onPinCont
             offRateLimited();
             offDone();
             offConversationRunning();
+            offBackoff();
             offVoice();
             offVoiceV2();
             offSlash();

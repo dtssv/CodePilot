@@ -65,6 +65,7 @@ public class TriggerMatcher {
   private boolean intersectIfPresent(List<String> required, Set<String> available) {
     if (required == null || required.isEmpty()) return true;
     for (String r : required) {
+      if (r == null || r.isBlank()) continue;
       if (available.contains(r.toLowerCase())) return true;
     }
     return false;
@@ -74,21 +75,36 @@ public class TriggerMatcher {
     return probe.action() == null ? Set.of() : Set.of(probe.action());
   }
 
+  private static final String GLOB_PREFIX = "glob:";
+  private static final String REGEX_PREFIX = "regex:";
+
   private boolean matchesAnyGlob(List<String> globs, Set<String> paths) {
     if (globs == null || globs.isEmpty()) return true;
     if (paths == null || paths.isEmpty()) return false;
     for (String glob : globs) {
-      PathMatcher matcher = globCache.computeIfAbsent(
-          glob, FileSystems.getDefault()::getPathMatcher);
-      for (String p : paths) {
-        try {
-          Path path = Path.of(p);
-          if (matcher.matches(path) || matcher.matches(path.getFileName())) return true;
-        } catch (RuntimeException ignored) {
-          // malformed path; skip
+      if (glob == null || glob.isBlank()) continue;
+      String syntaxAndPattern = ensurePrefix(glob);
+      try {
+        PathMatcher matcher = globCache.computeIfAbsent(
+            syntaxAndPattern, FileSystems.getDefault()::getPathMatcher);
+        for (String p : paths) {
+          try {
+            Path path = Path.of(p);
+            if (matcher.matches(path) || matcher.matches(path.getFileName())) return true;
+          } catch (RuntimeException ignored) {
+            // malformed path; skip
+          }
         }
+      } catch (IllegalArgumentException | UnsupportedOperationException ignored) {
+        // invalid glob syntax; skip this pattern
       }
     }
     return false;
+  }
+
+  /** Ensure the pattern has a {@code glob:} or {@code regex:} prefix; default to {@code glob:}. */
+  private static String ensurePrefix(String pattern) {
+    if (pattern.startsWith(GLOB_PREFIX) || pattern.startsWith(REGEX_PREFIX)) return pattern;
+    return GLOB_PREFIX + pattern;
   }
 }

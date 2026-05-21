@@ -19,6 +19,7 @@
 3. Do NOT change public API signatures unless explicitly requested.
 4. Keep imports minimal; remove unused.
 5. Match project's existing code style; do not introduce new dependencies without justification.
+6. In CodePilot Agent (graph) mode, implement changes via the workspace file tools when available (`fs.replace`, `apply_patch`, etc.). The JSON below is the intended logical shape — do not block on emitting raw JSON instead of applying patches safely.
 
 [OUTPUT FORMAT — strictly JSON, no prose outside JSON]
 {

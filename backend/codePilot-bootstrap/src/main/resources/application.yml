@@ -72,6 +72,10 @@ management:
       probability: 1.0
 
 codepilot:
+  graph:
+    # Graph engine thread pool (per JVM). Scale horizontally; tune thread-cap ≈ expected concurrent agent runs per pod.
+    scheduler-thread-cap: ${CODEPILOT_GRAPH_THREADS:0}
+    scheduler-queue-size: ${CODEPILOT_GRAPH_QUEUE:0}
   conversation:
     queue:
       enabled: ${CODEPILOT_CONVERSATION_QUEUE:auto}
@@ -80,6 +84,15 @@ codepilot:
       lease-duration: 2m
       reclaim-interval-ms: 30000
       stale-lease-grace: 15s
+      reclaim-batch-size: 32
+    admission:
+      enabled: ${CODEPILOT_ADMISSION_ENABLED:true}
+      max-global-queued: ${CODEPILOT_ADMISSION_MAX_GLOBAL_QUEUED:5000}
+      max-global-running: ${CODEPILOT_ADMISSION_MAX_GLOBAL_RUNNING:800}
+      max-user-queued: ${CODEPILOT_ADMISSION_MAX_USER_QUEUED:8}
+      max-user-running: ${CODEPILOT_ADMISSION_MAX_USER_RUNNING:2}
+      max-worker-concurrent: ${CODEPILOT_ADMISSION_MAX_WORKER_CONCURRENT:32}
+      retry-after-seconds: ${CODEPILOT_ADMISSION_RETRY_AFTER:30}
   deploy:
     drain:
       enabled: ${CODEPILOT_DEPLOY_DRAIN_ENABLED:true}

@@ -7,13 +7,13 @@ import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
 import type { AgentStep } from '../components/AgentStepCard';
 import { notify } from '../notifications/desktop';
-import type { ChatMessage, ToolCallInfo } from './chatTypes';
-import { finalizeRunningTurns } from './chatStore';
-import { clearPendingNeedsInput } from './needsInputStore';
-import { isTerminalDoneReason } from '../utils/terminalDone';
-import { logConsole } from './consoleStore';
 import { normalizeAgentContentText } from '../utils/graphMarkers';
 import { deriveShellExecutionState } from '../utils/shellOutput';
+import { isTerminalDoneReason } from '../utils/terminalDone';
+import { finalizeRunningTurns, interruptRunningTurns, resumeInterruptedTurns } from './chatStore';
+import type { ChatMessage, ToolCallInfo } from './chatTypes';
+import { logConsole } from './consoleStore';
+import { clearPendingNeedsInput } from './needsInputStore';
 
 export interface LegacyChatBridgeRefs {
     activeReplyRef: MutableRefObject<boolean>;
@@ -92,7 +92,7 @@ export function installLegacyChatBridge(
 
     const unsubs = [
         onPluginEvent('user_message_saved', (payload) => {
-            if (v2Enabled || refs.activeReplyRef.current) return;
+            if (v2Enabled) return;
             const msg = payload as {
                 role: string;
                 content: string;
@@ -117,6 +117,25 @@ export function installLegacyChatBridge(
                 content: (msg.content || '') + cleaned,
                 _streaming: true,
             })));
+        }),
+        onPluginEvent('skills_activated', (payload) => {
+            if (v2Enabled) return;
+            const data = payload as {
+                node?: string;
+                items?: { id: string; version?: string; source?: string; scope?: string; priority?: number; tokens?: number }[];
+            };
+            const items = (data.items ?? []).filter((i) => i?.id);
+            if (items.length === 0) return;
+            const record = { node: data.node ?? 'UNKNOWN', skills: items, ts: Date.now() };
+            setMessages((prev) =>
+                upsert(prev, (msg) => ({
+                    ...msg,
+                    skillActivations: [...(msg.skillActivations ?? []), record],
+                })),
+            );
+        }),
+        onPluginEvent('server_backoff', () => {
+            refs.activeReplyRef.current = false;
         }),
         onPluginEvent('conversation_running', (payload) => {
             const running = Boolean((payload as { running?: boolean }).running);
@@ -182,8 +201,8 @@ export function installLegacyChatBridge(
                         s.status === 'failed' || s.status === 'error'
                             ? 'failed'
                             : s.status === 'running' || s.status === 'in_progress' || s.status === 'completed'
-                              ? 'success'
-                              : s.status,
+                                ? 'success'
+                                : s.status,
                 })),
             })));
             refs.activeReplyRef.current = false;
@@ -248,31 +267,31 @@ export function installLegacyChatBridge(
                     toolCalls: existing.toolCalls?.map((tc) =>
                         tc.id === ackId
                             ? {
-                                  ...tc,
-                                  status: nextStatus,
-                                  result: ack.result ?? tc.result,
-                                  executionState,
-                              }
+                                ...tc,
+                                status: nextStatus,
+                                result: ack.result ?? tc.result,
+                                executionState,
+                            }
                             : tc),
                     agentSteps: shellOut
                         ? existing.agentSteps?.map((step, idx, arr) => {
-                              const isLastRunning =
-                                  step.type === 'running' &&
-                                  idx === arr.length - 1 &&
-                                  step.status === 'running';
-                              if (!isLastRunning) return step;
-                              return {
-                                  ...step,
-                                  status: toolOk ? ('success' as const) : ('error' as const),
-                                  detail: {
-                                      ...step.detail,
-                                      command:
-                                          (matchedTool?.args?.command as string) ||
-                                          step.detail?.command,
-                                      output: shellOut,
-                                  },
-                              };
-                          })
+                            const isLastRunning =
+                                step.type === 'running' &&
+                                idx === arr.length - 1 &&
+                                step.status === 'running';
+                            if (!isLastRunning) return step;
+                            return {
+                                ...step,
+                                status: toolOk ? ('success' as const) : ('error' as const),
+                                detail: {
+                                    ...step.detail,
+                                    command:
+                                        (matchedTool?.args?.command as string) ||
+                                        step.detail?.command,
+                                    output: shellOut,
+                                },
+                            };
+                        })
                         : existing.agentSteps,
                 };
                 return updated;
@@ -349,6 +368,8 @@ export function installLegacyChatBridge(
                 setRecoveryMode(data.hasCheckpoint ? 'soft' : 'none');
             }
             setIsResuming(false);
+            // Mark running turn as interrupted in v2 store
+            interruptRunningTurns();
             setMessages((prev) => {
                 let lastAssistantIdx = -1;
                 for (let i = prev.length - 1; i >= 0; i--) {
@@ -364,7 +385,10 @@ export function installLegacyChatBridge(
         }),
         onPluginEvent('session_resuming', () => {
             refs.activeReplyRef.current = true;
+            setAbnormalTermination(false);
             setIsResuming(true);
+            // Resume interrupted turn in v2 store
+            resumeInterruptedTurns();
         }),
         onPluginEvent('agent_thinking', (payload) => {
             if (v2Enabled) return;

@@ -4,6 +4,11 @@ You are planning a task. Based on the user's request below, produce a JSON plan.
 
 User request: {{input}}
 
+[IDE scoped snippets]
+When the request includes "Context:" and/or a fenced code block right after a short imperative, that snippet is the
+primary subject. Align phases with the imperative (review vs refactor vs tests vs docs). Avoid planning repo-wide work
+unless the user asked for it or it is strictly required for correctness (missing imports/APIs).
+
 [OUTPUT MODE — pick exactly one]
 A) Simple chat / Q&A / explanation / scoring / review / comparison with NO code changes: reply in plain text only (no JSON, no markers).
 B) Code/agent task: wrap machine JSON in markers:
@@ -70,6 +75,12 @@ Do NOT rely on title wording for the engine — set intent explicitly per step.
 - When userPlan has 2+ steps, phases[] MUST have the SAME number of entries as steps[] (p1..pN ↔ s1..sN).
 - Each phase title should match its step title. The engine runs ONE phase at a time (generate→apply→verify per step).
 - Do NOT collapse all steps into a single phase.
+
+[DELIVERABLE FILES — analysis / report tasks]
+- Infer where inputs live vs where outputs belong from the user request and project layout; do not assume they share one directory.
+- Use at most ONE step with intent=synthesize for the final file deliverable; pick ONE output path and reuse it in every step description.
+- Do NOT plan multiple steps that each write a different report file.
+- Typical flow: discover → inspect (read inputs) → analyze (reasoning/textOutput) → synthesize (single patch to the chosen path).
 
 [ABOUT agentContent / agentThinking]
 - Stream detailed reasoning in <<<AGENT_CONTENT>>> (mode C). JSON agentContent may be null if already streamed.

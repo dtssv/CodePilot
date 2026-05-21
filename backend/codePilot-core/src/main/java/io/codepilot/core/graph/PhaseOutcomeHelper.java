@@ -50,11 +50,26 @@ public final class PhaseOutcomeHelper {
     PhaseGoalHelper.recordSessionMilestones(updates, gathered);
     if (goalSatisfiedWithGathered(state, gathered)) {
       updates.put("phaseToolsHadFailure", false);
+    } else if (shouldClearFailuresDespitePartialFailures(state, gathered)) {
+      updates.put("phaseToolsHadFailure", false);
     } else if (gatheredHasFailures(gathered) || ToolApproachTracker.gatheredHasUnsatisfactory(gathered)) {
       updates.put("phaseToolsHadFailure", true);
     } else if (Boolean.TRUE.equals(state.value("phaseToolsHadFailure").orElse(false))) {
       updates.put("phaseToolsHadFailure", true);
     }
+  }
+
+  /**
+   * When analyze/inspect already has successful source reads, do not keep the phase blocked by an
+   * earlier timeout or duplicate fs.list failure.
+   */
+  static boolean shouldClearFailuresDespitePartialFailures(
+      OverAllState state, Map<String, Object> gathered) {
+    if (!PhaseGoalHelper.hasSuccessfulSourceRead(gathered)) {
+      return false;
+    }
+    PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
+    return kind == PhaseGoalHelper.StepKind.ANALYZE || kind == PhaseGoalHelper.StepKind.INSPECT;
   }
 
   static boolean goalSatisfiedWithGathered(
@@ -67,11 +82,11 @@ public final class PhaseOutcomeHelper {
       case COMPILE -> PhaseGoalHelper.hasSuccessfulCompile(gathered);
       case RUN -> PhaseGoalHelper.hasSuccessfulRun(gathered);
       case ANALYZE -> PhaseGoalHelper.analyzeGoalMet(state, gathered);
-      case INSPECT -> SessionExecutionFacts.inspectGoalMet(state, gathered);
+      case INSPECT -> PhaseGoalHelper.inspectGoalMet(state, gathered);
       case PREPARE ->
           gatheredHasSuccessfulPrepare(gathered) || PhaseGoalHelper.hasSuccessfulCompile(gathered);
-      case DISCOVER -> PhaseGoalHelper.gatheredHasSuccessfulList(gathered);
-      case SYNTHESIZE -> PhaseGoalHelper.hasSuccessfulRun(gathered) || PhaseGoalHelper.hasSuccessfulCompile(gathered);
+      case DISCOVER -> PhaseGoalHelper.discoverGoalMet(state, gathered);
+      case SYNTHESIZE -> PhaseGoalHelper.synthesizeGoalMet(state);
       case GENERIC ->
           PhaseGoalHelper.hasSuccessfulCompile(gathered) || PhaseGoalHelper.hasSuccessfulRun(gathered);
     };
@@ -95,6 +110,7 @@ public final class PhaseOutcomeHelper {
     updates.put("phaseCommitBlocked", false);
     updates.put("directToolRound", 0);
     updates.put("phaseGeneratePasses", 0);
+    updates.put("allowWrittenFileOverwrite", false);
     ToolApproachTracker.clearInPhase(updates);
   }
 

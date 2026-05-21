@@ -17,10 +17,28 @@ public final class PhasePlanNormalizer {
 
   private PhasePlanNormalizer() {}
 
+  public record NormalizedPlan(List<Map<String, Object>> steps, List<Map<String, Object>> phases) {}
+
   @SuppressWarnings("unchecked")
   public static List<Map<String, Object>> normalize(
       List<Map<String, Object>> userSteps, List<Map<String, Object>> phases) {
-    if (userSteps == null || userSteps.size() <= 1) {
+    return normalizePlan(userSteps, phases).phases();
+  }
+
+  /** Align phases with user steps, then merge duplicate deliverable-write steps by intent. */
+  @SuppressWarnings("unchecked")
+  public static NormalizedPlan normalizePlan(
+      List<Map<String, Object>> userSteps, List<Map<String, Object>> phases) {
+    List<Map<String, Object>> steps =
+        userSteps == null ? List.of() : new ArrayList<>(userSteps);
+    List<Map<String, Object>> aligned = alignPhases(steps, phases);
+    return consolidateDeliverableSteps(steps, aligned);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> alignPhases(
+      List<Map<String, Object>> userSteps, List<Map<String, Object>> phases) {
+    if (userSteps.size() <= 1) {
       return phases == null ? List.of() : phases;
     }
     if (phases == null || phases.isEmpty()) {
@@ -46,12 +64,67 @@ public final class PhasePlanNormalizer {
       return linkPhasesToSteps(phases.subList(0, userSteps.size()), userSteps);
     }
 
-    // phases fewer than steps but > 1 — expand remaining steps
     log.info(
         "Expanding {} phases to {} to match user plan steps",
         phases.size(),
         userSteps.size());
     return expandFromSteps(userSteps, phases.get(0));
+  }
+
+  /**
+   * Collapse multiple synthesize / markdown-write steps into one final deliverable step.
+   */
+  static NormalizedPlan consolidateDeliverableSteps(
+      List<Map<String, Object>> steps, List<Map<String, Object>> phases) {
+    if (steps.size() <= 1 || phases.size() != steps.size()) {
+      return new NormalizedPlan(steps, phases);
+    }
+
+    List<Integer> writeIdx = new ArrayList<>();
+    for (int i = 0; i < steps.size(); i++) {
+      if (isDeliverableWriteStep(steps.get(i))) {
+        writeIdx.add(i);
+      }
+    }
+    if (writeIdx.size() <= 1) {
+      return new NormalizedPlan(steps, phases);
+    }
+
+    int keep = writeIdx.get(writeIdx.size() - 1);
+    log.info(
+        "Merging {} deliverable-write steps into step index {} (1-based step {})",
+        writeIdx.size(),
+        keep,
+        keep + 1);
+
+    List<Map<String, Object>> newSteps = new ArrayList<>();
+    List<Map<String, Object>> newPhases = new ArrayList<>();
+    for (int i = 0; i < steps.size(); i++) {
+      if (writeIdx.contains(i) && i != keep) {
+        continue;
+      }
+      Map<String, Object> step = new LinkedHashMap<>(steps.get(i));
+      Map<String, Object> phase = new LinkedHashMap<>(phases.get(i));
+      if (i == keep) {
+        step.put("intent", PhaseGoalHelper.INTENT_SYNTHESIZE);
+        phase.put("intent", PhaseGoalHelper.INTENT_SYNTHESIZE);
+      }
+      newSteps.add(step);
+      newPhases.add(phase);
+    }
+
+    for (int i = 0; i < newPhases.size(); i++) {
+      Map<String, Object> phase = new LinkedHashMap<>(newPhases.get(i));
+      phase.put("id", "p" + (i + 1));
+      attachStep(phase, i, newSteps.get(i));
+      newPhases.set(i, phase);
+    }
+
+    return new NormalizedPlan(newSteps, newPhases);
+  }
+
+  private static boolean isDeliverableWriteStep(Map<String, Object> step) {
+    return PhaseGoalHelper.isDeliverableWriteIntent(String.valueOf(step.getOrDefault("intent", "")));
   }
 
   private static Map<String, Object> defaultPhaseTemplate() {

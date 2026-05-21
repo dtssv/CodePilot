@@ -1,20 +1,22 @@
 import { sendToPlugin } from '../../bridge';
+import { useTranslation } from '../../i18n';
+import type { ModelOption, ModelRouteInfo } from '../../state/modelAuthBridge';
+import type { BranchInfo } from '../../state/sessionUiStore';
+import { BranchTreeView } from '../branches/BranchTreeView';
 import type { BudgetBreakdown } from '../ContextBudgetBar';
 import ContextBudgetBar from '../ContextBudgetBar';
 import type { ContextChipData } from '../ContextChip';
-import { BranchTreeView } from '../branches/BranchTreeView';
+import type { ImageData } from '../ImageAttachment';
 import { InputBar } from '../InputBar';
-import { ModelSelector } from '../ModelSelector';
 import { McpActivityBanner } from '../mcp/McpActivityBanner';
-import { MaxModeHint } from './MaxModeHint';
+import { ModelSelector } from '../ModelSelector';
 import { NeedsInputDock } from '../NeedsInputDock';
-import { RateLimitBanner } from './RateLimitBanner';
-import type { ModelRouteInfo } from '../../state/modelAuthBridge';
 import type { SessionCostInfo } from '../SessionCostPanel';
 import { SessionCostPanel } from '../SessionCostPanel';
-import type { ModelOption } from '../../state/modelAuthBridge';
-import type { BranchInfo } from '../../state/sessionUiStore';
-import type { ImageData } from '../ImageAttachment';
+import { ActiveSkillsBar } from '../skills/ActiveSkillsBar';
+import { AdmissionWaitBanner } from './AdmissionWaitBanner';
+import { MaxModeHint } from './MaxModeHint';
+import { RateLimitBanner } from './RateLimitBanner';
 
 export interface ChatInputSectionProps {
     contextTokens: number;
@@ -65,6 +67,8 @@ export function ChatInputSection({
     onMaxModeChange,
     onAutoApplyChange,
 }: ChatInputSectionProps) {
+    const { t } = useTranslation();
+
     return (
         <>
             <ContextBudgetBar
@@ -81,8 +85,10 @@ export function ChatInputSection({
             />
             <SessionCostPanel costInfo={sessionCost} />
             <MaxModeHint maxMode={maxMode} lastRoute={lastRoute} />
+            <ActiveSkillsBar />
             <McpActivityBanner />
             <RateLimitBanner />
+            <AdmissionWaitBanner />
             <NeedsInputDock />
             <InputBar
                 onSend={onSend}
@@ -97,8 +103,8 @@ export function ChatInputSection({
             />
             <div className="input-bottom-row">
                 <select className="opt-select" value={mode} onChange={(e) => onModeChange(e.target.value as 'agent' | 'chat')}>
-                    <option value="agent">Agent</option>
-                    <option value="chat">Chat</option>
+                    <option value="agent">{t('input.modeAgent')}</option>
+                    <option value="chat">{t('input.modeChat')}</option>
                 </select>
                 <ModelSelector
                     models={models}
@@ -111,13 +117,13 @@ export function ChatInputSection({
                     <span>Max</span>
                 </label>
                 {mode === 'agent' && (
-                    <label className="auto-apply-toggle" title="勾选后直接写入磁盘；未勾选时在 IDE 中对比修改后再应用">
+                    <label className="auto-apply-toggle" title={t('input.autoApplyTitle')}>
                         <input
                             type="checkbox"
                             checked={autoApply}
                             onChange={(e) => onAutoApplyChange(e.target.checked)}
                         />
-                        <span className="auto-apply-label">自动写入</span>
+                        <span className="auto-apply-label">{t('input.autoApply')}</span>
                     </label>
                 )}
             </div>

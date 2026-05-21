@@ -7,12 +7,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.components.service
-import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.transport.HttpClientService
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Optional model-backed tab predictions via `POST /v1/tab/predict`.
@@ -44,9 +39,10 @@ class TabPredictionClient(private val project: Project) {
         cursorLine: Int,
         cursorColumn: Int,
         cursorOffset: Int,
+        currentLinePrefix: String = "",
+        currentLineSuffix: String = "",
     ): PredictResult {
-        val baseUrl = CodePilotSettings.getInstance().state.backendBaseUrl.trim()
-        if (baseUrl.isBlank()) return PredictResult(emptyList())
+        if (!TabCompletionSupport.isEnabled()) return PredictResult(emptyList())
         return try {
             val http = HttpClientService.getInstance()
             val body =
@@ -57,19 +53,13 @@ class TabPredictionClient(private val project: Project) {
                     "suffix" to suffix,
                     "cursorLine" to cursorLine,
                     "cursorColumn" to cursorColumn,
+                    "currentLinePrefix" to currentLinePrefix,
+                    "currentLineSuffix" to currentLineSuffix,
                 )
-            val payload = mapper.writeValueAsBytes(body)
-            val req =
-                Request
-                    .Builder()
-                    .url((baseUrl.trimEnd('/') + "/v1/tab/predict").toHttpUrl())
-                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .header("Accept", "application/json")
-                    .build()
-            http.client().newCall(req).execute().use { resp ->
+            http.client().newCall(http.postJson("/v1/tab/predict", body)).execute().use { resp ->
                 if (!resp.isSuccessful) return PredictResult(emptyList())
                 val root = mapper.readTree(resp.body?.bytes() ?: return PredictResult(emptyList()))
-                parseResult(root.path("data"), filePath, cursorOffset)
+                parseResult(root.path("data"), cursorOffset, cursorLine, prefix, suffix)
             }
         } catch (e: Exception) {
             log.warn("[TabPredict] ${e.message}")
@@ -85,17 +75,36 @@ class TabPredictionClient(private val project: Project) {
         cursorLine: Int,
         cursorColumn: Int,
         cursorOffset: Int,
+        currentLinePrefix: String = "",
+        currentLineSuffix: String = "",
         onResult: (PredictResult) -> Unit,
     ) {
         ApplicationManager.getApplication().executeOnPooledThread {
-            val result = predict(filePath, language, prefix, suffix, cursorLine, cursorColumn, cursorOffset)
+            val result =
+                predict(
+                    filePath,
+                    language,
+                    prefix,
+                    suffix,
+                    cursorLine,
+                    cursorColumn,
+                    cursorOffset,
+                    currentLinePrefix,
+                    currentLineSuffix,
+                )
             ApplicationManager.getApplication().invokeLater {
                 if (!project.isDisposed) onResult(result)
             }
         }
     }
 
-    private fun parseResult(data: JsonNode, filePath: String, cursorOffset: Int): PredictResult {
+    private fun parseResult(
+        data: JsonNode,
+        cursorOffset: Int,
+        cursorLine: Int,
+        prefix: String,
+        suffix: String,
+    ): PredictResult {
         val apiSource = data.path("source").asText("model")
         val edits = data.path("edits")
         if (!edits.isArray) return PredictResult(emptyList(), apiSource)
@@ -104,34 +113,89 @@ class TabPredictionClient(private val project: Project) {
             val confidence = node.path("confidence").asDouble(0.0)
             if (confidence < MIN_CONFIDENCE) continue
             val newText = node.path("newText").asText("")
-            if (newText.isBlank()) continue
-            val path = node.path("path").asText(filePath)
+            val aligned = alignInsertWithContext(prefix, suffix, newText)
+            if (!isAcceptableTabInsert(aligned)) continue
+            val path = node.path("path").asText("")
             val range = node.path("range")
-            val startLine = range.path("startLine").asInt(0)
+            val startLine = range.path("startLine").asInt(-1)
+            val rangeOffset = if (range.has("offset")) range.path("offset").asInt(-1) else -1
             val offset =
-                if (range.has("offset")) {
-                    range.path("offset").asInt(cursorOffset)
-                } else {
-                    cursorOffset
-                }
+                resolveInsertOffset(
+                    cursorOffset = cursorOffset,
+                    cursorLine = cursorLine,
+                    startLine = startLine,
+                    rangeOffset = rangeOffset,
+                )
             out.add(
                 PredictedEdit(
                     path = path,
                     offset = offset,
-                    newText = newText,
+                    newText = aligned,
                     confidence = confidence,
                     source = apiSource,
                 ),
             )
-            if (startLine > 0 && !range.has("offset")) {
-                // keep offset at cursor when API only sends line numbers
-            }
         }
         return PredictResult(out, apiSource)
     }
 
+    /** Tab/FIM completions are always insert-at-caret unless API sends a positive absolute offset on another line. */
+    private fun resolveInsertOffset(
+        cursorOffset: Int,
+        cursorLine: Int,
+        startLine: Int,
+        rangeOffset: Int,
+    ): Int {
+        if (rangeOffset > 0 && startLine >= 0 && startLine == cursorLine) {
+            return rangeOffset
+        }
+        return cursorOffset
+    }
+
+    private fun isAcceptableTabInsert(newText: String): Boolean {
+        if (newText.isBlank()) return false
+        val lines = newText.lines()
+        if (lines.size > MAX_GHOST_LINES) return false
+        if (newText.length > MAX_GHOST_CHARS) return false
+        if (newText.startsWith("# ") && lines.size > 2) return false
+        if (newText.contains("\n## ") && lines.size > 2) return false
+        if (newText.contains("```") || newText.contains("**")) return false
+        if (newText.trimStart().startsWith("{") &&
+            (newText.contains("\"predictions\"") || newText.contains("\"insertText\""))
+        ) {
+            return false
+        }
+        if (newText.contains("代码分析") || newText.startsWith("这是一个") || newText.contains("我来")) return false
+        val lower = newText.lowercase()
+        if (lower.startsWith("the output") || lower.contains("would be:")) return false
+        val hanCount = newText.count { it.code in 0x4E00..0x9FFF }
+        val hasCodeToken =
+            newText.any { it in ";{}<>=:" } || "<<" in newText || ">>" in newText || "::" in newText
+        if (hanCount >= 6 && !hasCodeToken) return false
+        return true
+    }
+
+    /** Drop insertions that repeat PREFIX/SUFFIX or duplicate a prior statement on the line. */
+    private fun alignInsertWithContext(
+        prefix: String,
+        suffix: String,
+        insert: String,
+    ): String {
+        val t = insert.trim()
+        if (t.isEmpty()) return ""
+        if (prefix.endsWith(t) || suffix.startsWith(t)) return ""
+        val lastLine = prefix.substringAfterLast('\n')
+        if (t.length >= 4 && lastLine.contains(t)) return ""
+        if (t.startsWith("<<") && prefix.contains("<<") && prefix.contains(t.removePrefix("<").trim())) {
+            return ""
+        }
+        return t
+    }
+
     companion object {
         private const val MIN_CONFIDENCE = 0.35
+        private const val MAX_GHOST_CHARS = 120
+        private const val MAX_GHOST_LINES = 3
 
         fun getInstance(project: Project): TabPredictionClient = project.service()
     }

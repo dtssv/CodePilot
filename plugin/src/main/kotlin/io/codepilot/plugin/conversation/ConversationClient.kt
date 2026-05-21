@@ -164,6 +164,12 @@ class ConversationClient(
         retriesLeft: Int,
         onEvent: (eventType: String, data: Any?) -> Unit,
     ) {
+        // Track whether a clean done event was received before onClosed fires.
+        // Without this, the stream closing after a normal done(failed) would
+        // trigger an unnecessary reconnect with intent=continue, causing the
+        // backend to re-execute the graph from scratch.
+        var cleanDoneReceived = false
+
         run(
             payload.toMap(),
             object : Listener {
@@ -196,11 +202,17 @@ class ConversationClient(
                 override fun onDone(
                     reason: String,
                     payload: JsonNode,
-                ) = onEvent("done", mapOf("reason" to reason))
+                ) {
+                    cleanDoneReceived = true
+                    onEvent("done", mapOf("reason" to reason))
+                }
 
                 override fun onClosed() {
-                    // Auto-reconnect: if the stream was dropped unexpectedly (not a clean done),
-                    // retry with intent=continue
+                    // Auto-reconnect: only if the stream was dropped unexpectedly
+                    // (i.e. no clean done event was received). If the server sent
+                    // a proper done(failed/stopped/final), reconnecting would
+                    // cause a full re-execution from scratch.
+                    if (cleanDoneReceived) return
                     if (retriesLeft > 0) {
                         val retryPayload = payload.toMutableMap().apply { put("intent", "continue") }
                         Thread.sleep(1000L * (4 - retriesLeft)) // exponential-ish backoff
@@ -217,6 +229,10 @@ class ConversationClient(
     ): Request {
         val settings = CodePilotSettings.getInstance()
         val url = (settings.state.backendBaseUrl.trimEnd('/') + path).toHttpUrl()
+        @Suppress("UNCHECKED_CAST")
+        val fields = body as? Map<String, Any?>
+        val mode = fields?.get("mode")?.toString()?.trim()
+        val sessionId = fields?.get("sessionId")?.toString()?.trim()
         val payload = http.mapper.writeValueAsBytes(body).toRequestBody("application/json".toMediaType())
         val builder =
             Request
@@ -224,6 +240,12 @@ class ConversationClient(
                 .url(url)
                 .post(payload)
                 .header("Accept", "text/event-stream")
+        if (!mode.isNullOrBlank()) {
+            builder.header("X-Conversation-Mode", mode)
+        }
+        if (!sessionId.isNullOrBlank()) {
+            builder.header("X-Session-Id", sessionId)
+        }
         // ★ Privacy Mode header: inform backend to skip telemetry/logging
         if (settings.state.privacyMode) {
             builder.header("X-Privacy-Mode", "true")

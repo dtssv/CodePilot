@@ -6,21 +6,20 @@ import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiMethod
+import io.codepilot.plugin.i18n.CodePilotBundle
+import io.codepilot.plugin.settings.CodePilotSettings
 import io.codepilot.plugin.toolwindow.CefChatPanelRegistry
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.UUID
 
 /**
- * Base action for PSI-element-scoped actions (class or method level).
- * Extracts the element's source code, opens the chat panel, and dispatches
- * the action prompt so the LLM can generate the requested artifact.
+ * PSI-element-scoped quick actions — same UX as [ActionBase]: i18n short prompt +
+ * `\u0001` context ref → normal conversation run (no dedicated `/v1/actions/` routes on this path).
  */
 abstract class PsiElementActionBase(
-    private val action: String,
-    private val instruction: String,
+    private val quickActionId: String,
 ) : AnAction() {
     override fun update(e: AnActionEvent) {
         val element = e.getData(CommonDataKeys.PSI_ELEMENT)
@@ -44,128 +43,49 @@ abstract class PsiElementActionBase(
                 else -> "element"
             }
         val lang = element.language?.id ?: "java"
-
-        val input = "[$action] $kind: $name\n$instruction\n\n```$lang\n$code\n```"
+        val containing = element.containingFile ?: return
+        val vf = containing.virtualFile
+        val fileName = vf?.name ?: "<buffer>"
+        val path = vf?.path ?: ""
+        val doc = PsiDocumentManager.getInstance(project).getDocument(containing) ?: return
+        val range = element.textRange
+        val startLine = doc.getLineNumber(range.startOffset) + 1
+        val endLine = (doc.getLineNumber(range.endOffset) + 1).coerceAtLeast(startLine)
+        val kindLabel = CodePilotBundle.message("psiKind.$kind")
+        val display = "$kindLabel «$name» — $fileName"
 
         val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
-        tw.show {
-            ApplicationManager.getApplication().invokeLater {
-                val panel = CefChatPanelRegistry.getInstance(project)
-                if (panel != null) {
-                    panel.dispatchToWeb(
-                        "action_start",
-                        mapOf(
-                            "action" to action,
-                            "display" to "$action: $kind $name",
-                            "instruction" to instruction,
-                        ),
-                    )
-                    // Use ActionBase's SSE call mechanism by creating a simple SSE call
-                    callActionSse(panel, input, lang, name)
-                } else {
-                    ClipboardBridge.push(input, null)
-                }
-            }
+        if (tw.contentManager.contentCount == 0) {
+            tw.show(null)
         }
-    }
-
-    private fun callActionSse(
-        panel: io.codepilot.plugin.toolwindow.CefChatPanel,
-        input: String,
-        lang: String,
-        elementName: String,
-    ) {
-        val settings =
-            io.codepilot.plugin.settings.CodePilotSettings
-                .getInstance()
-        val http =
-            io.codepilot.plugin.transport.HttpClientService
-                .getInstance()
-        val mapper =
-            com.fasterxml.jackson.databind
-                .ObjectMapper()
-        val sessionId =
-            java.util.UUID
-                .randomUUID()
-                .toString()
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
-                val url =
-                    (settings.state.backendBaseUrl.trimEnd('/') + "/v1/actions/$action")
-                        .toHttpUrl()
-                val body =
-                    mapper.writeValueAsString(
-                        mapOf(
-                            "sessionId" to sessionId,
-                            "modelId" to null,
-                            "modelSource" to null,
-                            "context" to input,
-                            "instruction" to instruction,
-                            "language" to lang,
-                        ),
-                    )
-                val request =
-                    okhttp3.Request
-                        .Builder()
-                        .url(url)
-                        .post(body.toRequestBody("application/json".toMediaType()))
-                        .header("Accept", "text/event-stream")
-                        .build()
-
-                val collector = StringBuilder()
-
-                http.openSse(
-                    request,
-                    object : okhttp3.sse.EventSourceListener() {
-                        override fun onEvent(
-                            eventSource: okhttp3.sse.EventSource,
-                            id: String?,
-                            type: String?,
-                            data: String,
-                        ) {
-                            val node = mapper.readTree(data.ifEmpty { "{}" })
-                            when (type) {
-                                "delta" -> {
-                                    val text = node.path("text").asText("")
-                                    if (text.isNotEmpty()) {
-                                        collector.append(text)
-                                        panel.dispatchToWeb("delta", mapOf("text" to text))
-                                    }
-                                }
-                                "patch" -> {
-                                    val patchData = mapper.treeToValue(node, Map::class.java)
-                                    panel.dispatchToWeb("patch", patchData)
-                                }
-                                "error" -> {
-                                    val code = node.path("code").asInt(50001)
-                                    val msg = node.path("message").asText("")
-                                    panel.dispatchToWeb("error", mapOf("code" to code, "message" to msg))
-                                }
-                                "done" -> {
-                                    panel.dispatchToWeb("done", mapOf("reason" to node.path("reason").asText("final")))
-                                }
-                            }
-                        }
-
-                        override fun onClosed(eventSource: okhttp3.sse.EventSource) {
-                            if (collector.isNotEmpty()) {
-                                panel.dispatchToWeb("action_done", mapOf("action" to action, "result" to collector.toString()))
-                            }
-                        }
-
-                        override fun onFailure(
-                            eventSource: okhttp3.sse.EventSource,
-                            t: Throwable?,
-                            response: okhttp3.Response?,
-                        ) {
-                            response?.close()
-                            panel.dispatchToWeb("error", mapOf("code" to 50002, "message" to (t?.message ?: "SSE failed")))
-                        }
-                    },
+        val prompt = CodePilotBundle.message("contextMenu.quick.psi.$quickActionId.symbol", kindLabel, name)
+        tw.show {
+            val ctxId = UUID.randomUUID().toString()
+            val refs =
+                listOf(
+                    mapOf(
+                        "id" to ctxId,
+                        "display" to display,
+                        "type" to "symbol",
+                        "language" to lang,
+                        "filePath" to path,
+                        "startLine" to startLine,
+                        "endLine" to endLine,
+                    ),
                 )
-            } catch (e: Exception) {
-                panel.dispatchToWeb("error", mapOf("code" to 50001, "message" to (e.message ?: "Unknown error")))
+            CefChatPanelRegistry.withSink(
+                project,
+                onMissing = {
+                    ClipboardBridge.push("${prompt}\n\n${code}", CodePilotSettings.getInstance().state.preferredLocale)
+                },
+            ) { sink ->
+                sink.focusChatTab()
+                sink.storeContext(ctxId, code)
+                val text = "${prompt.trim()}\n\u0001${ctxId}\u0001"
+                // Move the blocking network call (waitForCapacity / SSE) off the EDT.
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    sink.submitQuickUserMessage(text, refs)
+                }
             }
         }
     }
@@ -173,15 +93,12 @@ abstract class PsiElementActionBase(
 
 /** Generate unit tests for the selected class or method. */
 class PsiGenTestAction :
-    PsiElementActionBase("gentest", "Generate unit tests covering happy-path and edge cases. Return a Patch JSON creating the test file.")
+    PsiElementActionBase("gentest")
 
 /** Generate documentation for the selected class or method. */
 class PsiGenDocAction :
-    PsiElementActionBase(
-        "gendoc",
-        "Produce developer documentation (KDoc/Javadoc) for the following element. Return a Patch JSON with the comments inserted.",
-    )
+    PsiElementActionBase("gendoc")
 
 /** Generate comments for the selected class or method. */
 class PsiCommentAction :
-    PsiElementActionBase("comment", "Add idiomatic inline comments and doc comments without altering executable code. Return a Patch JSON.")
+    PsiElementActionBase("comment")

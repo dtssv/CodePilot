@@ -454,7 +454,7 @@ class InlineEditController(private val project: Project) {
                 ?: readStringProperty(highlightInfo, "description")
                 ?: ""
             val line = editor.document.getLineNumber(startOffset) + 1
-            return "L$line [${severity.toLowerCase()}] $description"
+            return "L$line [${severity.lowercase()}] $description"
         }
 
         val tooltip = highlighter.errorStripeTooltip?.toString()?.takeIf { it.isNotBlank() } ?: return null
@@ -479,7 +479,7 @@ class InlineEditController(private val project: Project) {
             highlightInfo.javaClass.methods.firstOrNull { it.name == "getSeverity" }?.invoke(highlightInfo)
         }.getOrNull()
 
-        return severity?.toString()?.substringAfterLast('.')?.toUpperCase()
+        return severity?.toString()?.substringAfterLast('.')?.uppercase()
     }
 
     private fun readIntProperty(instance: Any, name: String): Int? =

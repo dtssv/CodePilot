@@ -292,13 +292,18 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             if (!p?.stepId) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
+            const errFromPayload =
+                p.error
+                ?? (p.result && typeof p.result === 'object' && !Array.isArray(p.result)
+                    ? String((p.result as { errorMessage?: string }).errorMessage ?? '') || null
+                    : null);
             return {
                 ...base,
                 steps: {
                     ...state.steps,
                     [p.stepId]: {
                         ...cur,
-                        toolResult: { ok: p.ok, result: p.result, error: p.error ?? null },
+                        toolResult: { ok: p.ok, result: p.result, error: errFromPayload },
                         // tool.result is informational; final status comes from step.end.
                     },
                 },

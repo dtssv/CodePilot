@@ -16,8 +16,8 @@ class NewChatAction : AnAction("New Chat", "Start a new CodePilot chat session",
         val project = e.getData(CommonDataKeys.PROJECT) ?: return
         val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
         tw.show {
-            val panel = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
-            panel?.handleNewSessionFromAction()
+            val sink = io.codepilot.plugin.toolwindow.CefChatPanelRegistry.getInstance(project)
+            sink?.prepareFreshChatSession()
         }
     }
 

@@ -7,7 +7,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtil
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.marketplace.LocalMarketplaceStore
-import io.codepilot.plugin.mcp.McpConfirmGate
 import io.codepilot.plugin.mcp.McpProcessManager
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -28,7 +27,7 @@ class ToolDispatcher(
     private val sessionId: String,
     private val graphStateStore: GraphStateStore? = null,
     /** Optional callback invoked after each tool execution completes, for UI feedback. */
-    private val onToolResult: ((toolCallId: String, ok: Boolean, result: Any?) -> Unit)? = null,
+    private val onToolResult: ((toolCallId: String, ok: Boolean, result: Any?, errorCode: String?, errorMessage: String?) -> Unit)? = null,
     /** When set (e.g. background worktree), all fs/shell paths resolve under this root. */
     private val workspaceRoot: java.nio.file.Path? = null,
 ) {
@@ -167,7 +166,7 @@ class ToolDispatcher(
                         // ★ Integration: NotepadService for Agent working memory
                         name == "notepad.write" -> notepadWrite(args)
                         name == "notepad.read" -> notepadRead(args)
-                        name.startsWith("mcp.") -> dispatchMcp(name, args)
+                        name.startsWith("mcp.") -> io.codepilot.plugin.mcp.McpCallHelper.dispatchMcp(project, name, args)
                         else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
                     }
 
@@ -189,7 +188,15 @@ class ToolDispatcher(
                             "cmd=${m?.get("command")}",
                     )
                 }
-                respond(id, ok, result, if (ok) null else "shell_failed", shellErrorMessage(result), started)
+                val errMsg =
+                    if (ok) {
+                        null
+                    } else if (name == "shell.exec" || name == "shell.session") {
+                        shellErrorMessage(result)
+                    } else {
+                        null
+                    }
+                respond(id, ok, result, if (ok) null else "tool_failed", errMsg, started)
             } catch (v: ToolViolation) {
                 respond(id, false, null, "path_violation", v.message, started)
             } catch (t: Throwable) {
@@ -266,8 +273,9 @@ class ToolDispatcher(
                 for (server in installed) {
                     try {
                         val toolsResult = mcpManager.call(server.id, "tools/list", null, timeoutSeconds = 10)
-                        if (toolsResult.isArray) {
-                            toolsResult.forEach { tool ->
+                        val toolsArray = toolsResult.path("tools")
+                        if (toolsArray.isArray) {
+                            toolsArray.forEach { tool ->
                                 tools.add(
                                     mapOf(
                                         "name" to "mcp.${server.id}.${tool.path("name").asText()}",
@@ -353,29 +361,6 @@ class ToolDispatcher(
         } else {
             mapOf("error" to "Notepad '$name' not found")
         }
-    }
-
-    private fun dispatchMcp(
-        fullName: String,
-        args: JsonNode,
-    ): Map<String, Any?> {
-        // Parse: mcp.<serverId>.<toolName>
-        val parts = fullName.removePrefix("mcp.").split(".", limit = 2)
-        if (parts.size < 2) throw ToolViolation("Invalid MCP tool name: $fullName")
-        val serverId = parts[0]
-        val toolName = parts[1]
-
-        if (!McpConfirmGate.getInstance(project).ensureGranted(serverId, toolName, fullName, args)) {
-            throw ToolViolation("MCP tool call denied: $fullName")
-        }
-
-        val mcpManager = McpProcessManager.getInstance()
-        if (!mcpManager.isRunning(serverId)) {
-            throw ToolViolation("MCP server not running: $serverId")
-        }
-
-        val result = mcpManager.call(serverId, "tools/call", mapOf("name" to toolName, "arguments" to args))
-        return mapOf("mcpResult" to result.toString())
     }
 
     // ---------- PatchApplier routing ----------
@@ -644,7 +629,7 @@ class ToolDispatcher(
     ) {
         val durationMs = (System.nanoTime() - startedNs) / 1_000_000
         // Notify UI callback about tool result for real-time status update
-        onToolResult?.invoke(toolCallId, ok, result)
+        onToolResult?.invoke(toolCallId, ok, result, errorCode, errorMessage)
         client.submitToolResult(
             mutableMapOf<String, Any?>(
                 "sessionId" to sessionId,

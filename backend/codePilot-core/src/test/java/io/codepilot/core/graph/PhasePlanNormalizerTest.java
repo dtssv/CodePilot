@@ -48,6 +48,30 @@ class PhasePlanNormalizerTest {
   }
 
   @Test
+  void mergesMultipleDeliverableWriteSteps() {
+    var userSteps =
+        List.of(
+            Map.of("id", "s1", "title", "List sources", "intent", "discover"),
+            Map.of("id", "s2", "title", "Read sources", "intent", "inspect"),
+            Map.of("id", "s3", "title", "Analyze", "intent", "analyze"),
+            Map.of("id", "s4", "title", "Write report A", "intent", "synthesize"),
+            Map.of("id", "s5", "title", "Write report B", "intent", "synthesize"));
+    var phases =
+        List.of(
+            Map.of("id", "p1", "intent", "discover"),
+            Map.of("id", "p2", "intent", "inspect"),
+            Map.of("id", "p3", "intent", "analyze"),
+            Map.of("id", "p4", "intent", "synthesize"),
+            Map.of("id", "p5", "intent", "synthesize"));
+
+    var normalized = PhasePlanNormalizer.normalizePlan(userSteps, phases);
+
+    assertThat(normalized.steps()).hasSize(4);
+    assertThat(normalized.phases()).hasSize(4);
+    assertThat(normalized.phases().get(3).get("intent")).isEqualTo("synthesize");
+  }
+
+  @Test
   void keepsOneToOnePhases() {
     var userSteps =
         List.of(Map.of("id", "s1", "title", "A"), Map.of("id", "s2", "title", "B"));

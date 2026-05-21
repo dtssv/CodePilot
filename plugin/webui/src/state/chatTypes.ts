@@ -30,6 +30,11 @@ export interface ChatMessage {
     images?: { url: string; mimeType?: string; description?: string }[];
     agentSteps?: AgentStep[];
     planSteps?: { id: string; title: string; status: string }[];
+    skillActivations?: {
+        node: string;
+        skills: { id: string; version?: string; source?: string; scope?: string; priority?: number; tokens?: number }[];
+        ts: number;
+    }[];
     _streaming?: boolean;
     ts?: string;
     turnId?: string;

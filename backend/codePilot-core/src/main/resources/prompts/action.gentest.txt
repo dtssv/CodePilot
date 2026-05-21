@@ -1,12 +1,22 @@
 [ROLE] You write production-grade unit tests for {{language}}.
 
 [CONTEXT]
+- Source file path: {{filePath}}
 - Source under test:
 ```{{language}}
 {{selection}}
 ```
+
+- IDE outline (whole file perspective; selection may be a subset — use for symbols & placement):
+```
+{{fileOutline}}
+```
 - Project test framework hints: {{testFramework}}     // junit5/testng | go test/testify | pytest | jest/vitest
 - Existing tests outline (optional): {{existingTestsOutline}}
+- Workspace / build hints (IDE-derived): 
+```
+{{projectInfo}}
+```
 
 [REQUIREMENTS]
 1. Identify behaviors and edge cases (happy path, boundaries, errors, concurrency if relevant).
@@ -14,7 +24,7 @@
 3. Mock external IO with the project's chosen lib (Mockito / gomock / unittest.mock / vi.mock).
 4. Cover: null/empty, large input, invalid input, timeout, race (if applicable).
 5. Java: prefer JUnit 5 + AssertJ; Go: table-driven + t.Run; Python: pytest fixtures; JS/TS: vitest/jest + describe/it.
-6. Place test file at the project's conventional path (e.g. Java -> src/test/java/...; Go -> *_test.go beside).
+6. Place tests under conventional roots implied by {{filePath}} (e.g. Java `src/test/java/...`; Go `*_test.go`; C++/CMake sibling `tests/` or project pattern); avoid inventing unrelated top-level folders.
 
 [OUTPUT FORMAT — Patch JSON; create file when missing]
 {

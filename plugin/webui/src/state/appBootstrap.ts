@@ -7,21 +7,28 @@ import { onPluginEvent } from '../bridge';
 import type { BudgetBreakdown } from '../components/ContextBudgetBar';
 import type { ContextChipData } from '../components/ContextChip';
 import type { SessionCostInfo } from '../components/SessionCostPanel';
-import type { ChatMessage } from './chatTypes';
+import { clearActiveSkills, installActiveSkillsBridge } from './activeSkillsStore';
+import { setAdmissionWaitState } from './admissionWaitStore';
 import { installAppSettingsBridge } from './appSettingsBridge';
 import { installIdeThemeBridge } from './appShellBridge';
 import { installChatV2Bridge } from './chatStore';
+import type { ChatMessage } from './chatTypes';
+import { installCodebaseBridge } from './codebase';
 import { installContextBridge, requestContextEstimate } from './contextBridge';
 import { installLegacyChatBridge } from './legacyChatBridge';
-import { installMcpConfirmBridge } from './mcpConfirm';
-import { bootstrapAuthenticatedSession, installModelAuthBridge, type ModelOption } from './modelAuthBridge';
+import { installLocaleBridge } from './localeBridge';
 import { clearMcpActivity, installMcpActivityBridge } from './mcpActivityStore';
-import { installNeedsInputBridge } from './needsInputStore';
-import { installRateLimitBridge } from './rateLimitStore';
+import { installMcpConfirmBridge } from './mcpConfirm';
+import { installMcpHooksBridge } from './mcpHooks';
 import { installMessageQueueBridge } from './messageQueueStore';
-import { installShellAskBridge } from './shellAskStore';
+import { bootstrapAuthenticatedSession, installModelAuthBridge, type ModelOption } from './modelAuthBridge';
+import { installNeedsInputBridge } from './needsInputStore';
 import { installPendingBridge } from './pending';
+import { installRateLimitBridge } from './rateLimitStore';
+import { installRulesMemoryBridge } from './rulesMemory';
 import { installSessionBridge } from './sessionBridge';
+import { installShellAskBridge } from './shellAskStore';
+import { installShellPolicyBridge } from './shellPolicy';
 
 export interface AppBootstrapRefs {
     activeReplyRef: MutableRefObject<boolean>;
@@ -30,6 +37,7 @@ export interface AppBootstrapRefs {
 }
 
 export interface AppBootstrapSetters {
+    setAuthChecked: (v: boolean) => void;
     setAuthenticated: (v: boolean) => void;
     setModels: Dispatch<SetStateAction<ModelOption[]>>;
     setSelectedModelId: Dispatch<SetStateAction<string>>;
@@ -50,6 +58,14 @@ export interface AppBootstrapSetters {
     setSendError: Dispatch<SetStateAction<string | null>>;
 }
 
+/** Register panel event bridges once at startup so tabs work before first visit. */
+export function installPanelBridges(): void {
+    installMcpHooksBridge();
+    installCodebaseBridge();
+    installRulesMemoryBridge();
+    installShellPolicyBridge();
+}
+
 export function installCoreBridges(refs: AppBootstrapRefs, setters: AppBootstrapSetters): () => void {
     installChatV2Bridge();
     const offMessageQueue = installMessageQueueBridge();
@@ -58,8 +74,12 @@ export function installCoreBridges(refs: AppBootstrapRefs, setters: AppBootstrap
     installMcpConfirmBridge();
     const offNeedsInput = installNeedsInputBridge();
     const offRateLimit = installRateLimitBridge();
+    const offAdmission = installAdmissionBridge();
     const offMcpActivity = installMcpActivityBridge();
+    const offActiveSkills = installActiveSkillsBridge();
+    const offLocale = installLocaleBridge();
     const offAuth = installModelAuthBridge({
+        setAuthChecked: setters.setAuthChecked,
         setAuthenticated: setters.setAuthenticated,
         setModels: setters.setModels,
         setSelectedModelId: setters.setSelectedModelId,
@@ -71,8 +91,59 @@ export function installCoreBridges(refs: AppBootstrapRefs, setters: AppBootstrap
         offShellAsk();
         offNeedsInput();
         offRateLimit();
+        offAdmission();
         offMcpActivity();
+        offActiveSkills();
+        offLocale();
         offAuth();
+    };
+}
+
+/** Bridge for admission queue events (admission_queued, admission_retry_ask, admission_granted). */
+function installAdmissionBridge(): () => void {
+    const offQueued = onPluginEvent('admission_queued', (payload) => {
+        const p = payload as Record<string, unknown>;
+        setAdmissionWaitState({
+            message: String(p.message ?? ''),
+            attempt: Number(p.attempt ?? 1),
+            maxAttempts: Number(p.maxAttempts ?? 3),
+            retryAfterSec: Number(p.retryAfterSec ?? 30),
+            userQueued: Number(p.userQueued ?? 0),
+            userRunning: Number(p.userRunning ?? 0),
+            globalQueued: Number(p.globalQueued ?? 0),
+            globalRunning: Number(p.globalRunning ?? 0),
+            askRetry: false,
+        });
+    });
+    const offAsk = onPluginEvent('admission_retry_ask', (payload) => {
+        const p = payload as Record<string, unknown>;
+        setAdmissionWaitState({
+            message: String(p.message ?? '是否继续重试？'),
+            attempt: Number(p.attempt ?? 3),
+            maxAttempts: Number(p.maxAttempts ?? 3),
+            retryAfterSec: 0,
+            askRetry: true,
+        });
+    });
+    const offGranted = onPluginEvent('admission_granted', () => {
+        setAdmissionWaitState(null);
+    });
+    // Also handle legacy server_backoff — clear admission state
+    const offBackoff = onPluginEvent('server_backoff', () => {
+        // Keep existing behavior — just show a generic backoff state
+        setAdmissionWaitState({
+            message: '服务端繁忙，正在等待…',
+            attempt: 0,
+            maxAttempts: 3,
+            retryAfterSec: 30,
+            askRetry: false,
+        });
+    });
+    return () => {
+        offQueued();
+        offAsk();
+        offGranted();
+        offBackoff();
     };
 }
 
@@ -87,6 +158,7 @@ export function installSessionEffects(setters: AppBootstrapSetters, refs: AppBoo
             refs.activeReplyRef.current = false;
             refs.activeTurnIdRef.current = '';
             clearMcpActivity();
+            clearActiveSkills();
         },
         onSessionMessages: (data) => {
             setters.setMessages(data.messages as ChatMessage[]);

@@ -15,6 +15,7 @@ Return ONLY one JSON object (no markdown):
   "needsTools": false,
   "needsPlanning": true,
   "tools": [],
+  "dispatchPath": "GRAPH",
   "reason": "<one short sentence in the user's language>"
 }
 
@@ -28,6 +29,34 @@ needsPlanning (boolean)
   true if the task needs multi-step agent work: code edits, multi-file changes, phased delivery, or combining tools + patches.
   false for simple tool-then-answer OR pure chat with no tools and no code changes.
 
+dispatchPath (enum — pick exactly one)
+  Determines the execution pipeline. This is the KEY routing decision — choose carefully to avoid unnecessary work.
+  
+  CONVERSATIONAL — Use when:
+  - The user is making small talk, greetings, asking about the agent itself ("你好", "你是谁", "what can you do")
+  - Pure conceptual Q&A that needs NO tools and NO code changes (explaining concepts, comparing approaches, general advice)
+  - Code review / analysis / scoring of a pasted snippet with NO request to edit files
+  - Any input where a direct text answer fully satisfies the user
+  
+  MCP_DIRECT — Use when:
+  - The user's request is SOLELY about invoking an MCP tool listed in [MCP TOOLS] above
+  - Example: booking flights (if MCP travel tool exists), searching web (if MCP search tool exists), sending email (if MCP email tool exists)
+  - The MCP tool can complete the task WITHOUT needing the code-editing pipeline
+  - If NO matching MCP tool exists in the catalog, do NOT choose this — fall back to CONVERSATIONAL or GRAPH
+  
+  SKILL_DIRECT — Use when:
+  - The user's request matches a Skill that can handle it with a direct conversational response
+  - Example: "润色这段文字" / "polish this text" when a writing Skill is available
+  - The Skill provides instructions/enhancements to the LLM answer but does NOT need code editing
+  - If NO matching Skill exists, do NOT choose this — fall back to CONVERSATIONAL or GRAPH
+  
+  GRAPH — Use when:
+  - Code edits, file creation/modification, refactoring, bug fixes, test generation
+  - Multi-step tasks requiring the full planning → generate → apply → verify pipeline
+  - Any task that needs shell.exec (compile, run, build)
+  - Tasks where the user explicitly requests code changes or file modifications
+  - When unsure whether lightweight paths suffice, prefer GRAPH (safe default)
+
 tools (array)
   When needsTools is true, list the specific tools to run FIRST, in sensible order.
   Each item: {"name": "<exact tool name from catalog>", "why": "<brief purpose>"}
@@ -37,6 +66,29 @@ tools (array)
   - compile/run: ordered steps toward user goal (read build config if needed → build → run → check output); each command must justify itself against the user's request
   - semantic search: rag.search
   - code changes later: still list read/diagnostic tools first; needsPlanning handles patches
+
+[IDE quick actions — scoped snippet pattern]
+Clients (e.g. JetBrains plugin "send to chat") often send ONE message shaped like:
+  (1) a short imperative in the user's language (review / refactor / generate tests / add comments / write docs, etc.),
+  (2) optional line "Context: <path> :<lineRange>",
+  (3) one fenced code block with the relevant snippet.
+Treat (1) as the task contract and (3) as primary evidence. Do NOT ignore the imperative in favor of generic Q&A.
+
+Routing (pick carefully — this determines whether the graph skips planning):
+- Code review / explain / analyze / score / compare the pasted snippet with NO request to edit files or add tests
+  → needsTools=false, needsPlanning=false, tools=[] (answer from snippet + project meta).
+- Refactor / optimize / fix bugs / extract / rename / change implementation / apply patches
+  → needsPlanning=true. Set needsTools=false unless you must read files not present in the message (e.g. imports, interfaces).
+- Generate tests / unit tests / add test cases
+  → needsPlanning=true. needsTools=false unless discovering test placement requires listing/reading dirs.
+- Add comments / Javadoc / annotations / documentation in source
+  → needsPlanning=true.
+- Produce a NEW doc/README/markdown deliverable file
+  → needsPlanning=true (multi-step placement is normal).
+
+Hard rule:
+- NEVER set needsPlanning=false when the user clearly asked for code edits, new tests, or new production/doc files —
+  even if a large code snippet is pasted. Pure review/explain tasks are the only common case for needsPlanning=false here.
 
 Consistency rules:
 - needsTools false → tools must be []

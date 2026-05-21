@@ -4,5 +4,9 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-@EnableConfigurationProperties(ConversationRunProperties.class)
+@EnableConfigurationProperties({
+  ConversationRunProperties.class,
+  GraphEngineProperties.class,
+  ConversationRunAdmissionProperties.class
+})
 public class ConversationRunConfig {}

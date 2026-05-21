@@ -8,6 +8,7 @@ import com.intellij.openapi.editor.event.EditorFactoryEvent
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 import io.codepilot.plugin.actions.CodePilotSelectionHint
+import io.codepilot.plugin.completion.TabCompletionEditorSetup
 import io.codepilot.plugin.indexer.IndexScheduler
 import io.codepilot.plugin.reset.ResetEngine
 import io.codepilot.plugin.update.UpdateService
@@ -48,17 +49,30 @@ class CodePilotStartupActivity : ProjectActivity {
             } catch (_: Exception) { /* Non-critical: sync failure should not block startup */ }
         }, "codepilot-session-sync").apply { isDaemon = true; start() }
 
-        // Install selection hint on all future editors
-        EditorFactory.getInstance().addEditorFactoryListener(
+        val editorFactory = EditorFactory.getInstance()
+        for (editor in editorFactory.allEditors) {
+            if (editor.project == project) {
+                CodePilotSelectionHint.install(editor, project)
+                TabCompletionEditorSetup.install(editor, project)
+            }
+        }
+
+        editorFactory.addEditorFactoryListener(
             object : EditorFactoryAdapter() {
                 override fun editorCreated(event: EditorFactoryEvent) {
                     val editor = event.editor
                     val proj = editor.project ?: return
+                    if (proj != project) return
                     CodePilotSelectionHint.install(editor, proj)
+                    TabCompletionEditorSetup.install(editor, proj)
                 }
 
                 override fun editorReleased(event: EditorFactoryEvent) {
                     CodePilotSelectionHint.uninstall()
+                    val editor = event.editor
+                    val proj = editor.project ?: return
+                    if (proj != project) return
+                    TabCompletionEditorSetup.release(editor, proj)
                 }
             },
             project,

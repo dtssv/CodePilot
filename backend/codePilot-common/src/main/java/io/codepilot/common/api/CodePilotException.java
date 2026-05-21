@@ -7,6 +7,8 @@ package io.codepilot.common.api;
  */
 public class CodePilotException extends RuntimeException {
 
+    private static final long serialVersionUID = 358440714544329970L;
+
     private final int code;
 
     public CodePilotException(int code, String userFacingMessage) {

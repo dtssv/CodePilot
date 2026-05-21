@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../../bridge';
+import { useTranslation } from '../../i18n';
 import { setBackgroundActiveCount } from '../../state/bgTasksStore';
 
 interface BgTask {
@@ -15,7 +16,14 @@ interface BgTask {
     outputs?: { commits?: string[]; diffStat?: string; prUrl?: string; logPath?: string };
 }
 
+function bgStatusLabel(t: (k: string) => string, status: BgTask['status']): string {
+    const key = `panels.background.status.${status}`;
+    const v = t(key);
+    return v === key ? status : v;
+}
+
 function BgNeedsInputReply({ taskId }: { taskId: string }) {
+    const { t } = useTranslation();
     const [answer, setAnswer] = useState('');
     const [sent, setSent] = useState(false);
 
@@ -28,23 +36,24 @@ function BgNeedsInputReply({ taskId }: { taskId: string }) {
 
     return (
         <div className="bg-needs-input-reply panel-section">
-            <p className="panel-section-title">Agent needs your input</p>
+            <p className="panel-section-title">{t('panels.background.needsInputTitle')}</p>
             <textarea
                 className="panel-textarea"
                 rows={3}
-                placeholder="Type your answer to resume this background task…"
+                placeholder={t('panels.background.needsInputPh')}
                 value={answer}
                 disabled={sent}
                 onChange={(e) => setAnswer(e.target.value)}
             />
             <button type="button" className="panel-btn panel-btn-primary" disabled={sent || !answer.trim()} onClick={submit}>
-                {sent ? 'Sent' : 'Send & resume'}
+                {sent ? t('panels.background.sent') : t('panels.background.sendResume')}
             </button>
         </div>
     );
 }
 
 export function BackgroundTasksPanel() {
+    const { t } = useTranslation();
     const [tasks, setTasks] = useState<BgTask[]>([]);
     const [cloudSync, setCloudSync] = useState(false);
     const [cloudCount, setCloudCount] = useState(0);
@@ -64,10 +73,10 @@ export function BackgroundTasksPanel() {
             const next = data.tasks ?? [];
             setTasks(next);
             setCloudSync(Boolean(data.cloudSync));
-            setCloudCount(data.cloudCount ?? next.filter((t) => t.source === 'cloud').length);
+            setCloudCount(data.cloudCount ?? next.filter((tsk) => tsk.source === 'cloud').length);
             if (data.persistBackend) setPersistBackend(data.persistBackend);
             setBackgroundActiveCount(
-                next.filter((t) => t.status === 'queued' || t.status === 'running' || t.status === 'needs_input').length,
+                next.filter((tsk) => tsk.status === 'queued' || tsk.status === 'running' || tsk.status === 'needs_input').length,
             );
         });
         const offLog = onPluginEvent('bg.log', (payload) => {
@@ -86,7 +95,7 @@ export function BackgroundTasksPanel() {
     }, []);
 
     useEffect(() => {
-        const hasActive = tasks.some((t) => t.status === 'queued' || t.status === 'running' || t.status === 'needs_input');
+        const hasActive = tasks.some((tsk) => tsk.status === 'queued' || tsk.status === 'running' || tsk.status === 'needs_input');
         const intervalMs = hasActive ? 8000 : 30000;
         const id = window.setInterval(() => {
             sendToPlugin('bg.list', {}).catch(() => undefined);
@@ -101,62 +110,86 @@ export function BackgroundTasksPanel() {
         setPrompt('');
     };
 
+    let subtitle = t('panels.background.subtitle');
+    if (cloudSync) {
+        subtitle += t('panels.background.subtitleCloud');
+        if (cloudCount > 0) subtitle += t('panels.background.cloudCount', { n: cloudCount });
+        if (persistBackend === 'db') subtitle += t('panels.db');
+        else if (persistBackend === 'file') subtitle += t('panels.export.subtitleBackendFile');
+    }
+
     return (
         <div className="panel-base background-panel">
             <div className="panel-header">
                 <div className="panel-title-group">
-                    <h3 className="panel-title">🤖 Background Agents</h3>
-                    <span className="panel-subtitle">
-                        Parallel task execution in isolated worktrees
-                        {cloudSync
-                            ? ` · cloud sync${cloudCount > 0 ? ` (${cloudCount})` : ''}${persistBackend === 'db' ? ' · DB' : persistBackend === 'file' ? ' · file' : ''}`
-                            : ''}
-                    </span>
+                    <h3 className="panel-title">{t('panels.background.title')}</h3>
+                    <span className="panel-subtitle">{subtitle}</span>
                 </div>
-                <button type="button" className="panel-btn" onClick={() => sendToPlugin('bg.list', {})}>Refresh</button>
+                <button type="button" className="panel-btn" onClick={() => sendToPlugin('bg.list', {})}>
+                    {t('common.refresh')}
+                </button>
             </div>
             <div className="panel-section">
-                <input className="panel-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Task title" />
-                <textarea className="panel-textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Describe the background task..." />
-                <button type="button" className="panel-btn panel-btn-primary" onClick={submit}>Start in worktree</button>
+                <input className="panel-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('panels.background.taskTitlePh')} />
+                <textarea
+                    className="panel-textarea"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder={t('panels.background.taskPromptPh')}
+                />
+                <button type="button" className="panel-btn panel-btn-primary" onClick={submit}>
+                    {t('panels.background.startWorktree')}
+                </button>
             </div>
-            {tasks.length === 0 && <div className="panel-empty">No background tasks yet.</div>}
+            {tasks.length === 0 && <div className="panel-empty">{t('panels.background.empty')}</div>}
             {tasks.map((task) => (
                 <details key={task.id} className={`panel-details panel-card status-${task.status}`} open={task.status === 'running' || task.status === 'needs_input'}>
                     <summary className="panel-card-header">
                         <span className={`bg-status-dot ${task.status}`} />
                         <strong>{task.title}</strong>
                         <span className="panel-card-meta">
-                            {task.status} · {task.branchName}
-                            {task.source === 'cloud' && <span className="panel-badge">cloud</span>}
-                            {task.status === 'needs_input' && <span className="panel-badge panel-badge-warn">input</span>}
+                            {bgStatusLabel(t, task.status)} · {task.branchName}
+                            {task.source === 'cloud' && <span className="panel-badge">{t('panels.cloud')}</span>}
+                            {task.status === 'needs_input' && <span className="panel-badge panel-badge-warn">{t('panels.input')}</span>}
                         </span>
                     </summary>
                     <div className="panel-card-body">
-                        <div><strong>Worktree:</strong> <code>{task.worktreePath}</code></div>
-                        <div><strong>Prompt:</strong> {task.prompt}</div>
-                        {task.status === 'needs_input' && (
-                            <BgNeedsInputReply key={`reply-${task.id}-${task.status}`} taskId={task.id} />
-                        )}
+                        <div>
+                            <strong>{t('panels.background.worktree')}</strong> <code>{task.worktreePath}</code>
+                        </div>
+                        <div>
+                            <strong>{t('panels.background.prompt')}</strong> {task.prompt}
+                        </div>
+                        {task.status === 'needs_input' && <BgNeedsInputReply key={`reply-${task.id}-${task.status}`} taskId={task.id} />}
                         {task.outputs?.diffStat && <pre className="panel-pre">{task.outputs.diffStat}</pre>}
-                        {task.outputs?.logPath && <div><strong>Log:</strong> <code>{task.outputs.logPath}</code></div>}
+                        {task.outputs?.logPath && (
+                            <div>
+                                <strong>{t('panels.background.log')}</strong> <code>{task.outputs.logPath}</code>
+                            </div>
+                        )}
                         <div className="panel-actions">
                             {(task.status === 'queued' || task.status === 'running') && (
-                                <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('bg.cancel', { id: task.id })}>Cancel</button>
+                                <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('bg.cancel', { id: task.id })}>
+                                    {t('panels.background.cancel')}
+                                </button>
                             )}
                             {task.status === 'completed' && task.source !== 'cloud' && (
                                 <>
-                                    <button type="button" className="panel-btn panel-btn-primary" onClick={() => sendToPlugin('bg.merge', { id: task.id, strategy: 'squash' })}>Squash Merge</button>
-                                    <button type="button" className="panel-btn" onClick={() => sendToPlugin('bg.open_worktree', { id: task.id })}>Open Worktree</button>
+                                    <button type="button" className="panel-btn panel-btn-primary" onClick={() => sendToPlugin('bg.merge', { id: task.id, strategy: 'squash' })}>
+                                        {t('panels.background.squashMerge')}
+                                    </button>
+                                    <button type="button" className="panel-btn" onClick={() => sendToPlugin('bg.open_worktree', { id: task.id })}>
+                                        {t('panels.background.openWorktree')}
+                                    </button>
                                 </>
                             )}
                             {task.source !== 'cloud' && (
-                                <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('bg.discard', { id: task.id })}>Discard</button>
+                                <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('bg.discard', { id: task.id })}>
+                                    {t('panels.background.discard')}
+                                </button>
                             )}
                         </div>
-                        {(logs[task.id]?.length ?? 0) > 0 && (
-                            <pre className="panel-pre">{logs[task.id].join('\n')}</pre>
-                        )}
+                        {(logs[task.id]?.length ?? 0) > 0 && <pre className="panel-pre">{logs[task.id].join('\n')}</pre>}
                     </div>
                 </details>
             ))}

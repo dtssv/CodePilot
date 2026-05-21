@@ -87,6 +87,12 @@ class LegacyEventAdapter(
     }
 
     fun onToolCall(toolCallId: String, toolName: String, args: com.fasterxml.jackson.databind.JsonNode?) {
+        // Close the open LLM segment so this tool appears *after* prior output in the timeline.
+        // The next text delta will open a fresh LLM step below the tool card.
+        llmStepId?.let { prev ->
+            bus.endStep(turnId, prev, StepStatuses.SUCCESS)
+            llmStepId = null
+        }
         // Use backend toolCallId as envelope stepId so shell.ask aligns with the tool card.
         val sid = toolCallId
         toolSteps[toolCallId] = sid

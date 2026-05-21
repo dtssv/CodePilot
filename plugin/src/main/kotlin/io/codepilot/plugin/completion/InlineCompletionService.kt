@@ -209,11 +209,25 @@ object InlineCompletionService {
                 synchronized(cache) {
                     cache[cacheKey] = result
                 }
-                result.primary
+                sanitizeInlineSuggestion(result.primary)
             }
         } catch (_: IOException) {
             null
         }
+    }
+
+    /**
+     * Drop document-scale completions; inline ghost text must be a small insert at the caret.
+     */
+    private fun sanitizeInlineSuggestion(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        val trimmed = text.trim()
+        val lines = trimmed.lines()
+        if (lines.size > 8) return null
+        if (trimmed.length > 512) return null
+        if (trimmed.startsWith("# ") && lines.size > 3) return null
+        if (trimmed.contains("\n## ") && lines.size > 3) return null
+        return trimmed
     }
 
     fun cancelPending() {

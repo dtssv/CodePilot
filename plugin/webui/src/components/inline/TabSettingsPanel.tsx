@@ -1,13 +1,9 @@
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../../bridge';
+import { useTranslation } from '../../i18n';
 
 /**
  * P0-04 — Tab completion settings + acceptance metrics.
- *
- * Layout: enable toggle (mirrors plugin settings.codeCompletionEnabled if you
- * wire it through later), live counters that come from
- * `EventTypes.TAB_SUGGEST/ACCEPT/DISMISS` envelopes, and a "refresh" that asks
- * the plugin for an authoritative snapshot.
  */
 
 export interface TabStats {
@@ -29,6 +25,7 @@ const ZERO: TabStats = {
 };
 
 export function TabSettingsPanel() {
+    const { t } = useTranslation();
     const [stats, setStats] = useState<TabStats>(ZERO);
     const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
 
@@ -45,8 +42,6 @@ export function TabSettingsPanel() {
                 byPredictSource: s.byPredictSource,
             });
         });
-        // Also accumulate from envelopes so the UI is responsive even between
-        // explicit snapshot fetches.
         const offEnv = onPluginEvent('envelope', (envRaw) => {
             const env = envRaw as { type?: string; payload?: Record<string, unknown> };
             if (env?.type === 'tab.suggest') {
@@ -79,59 +74,56 @@ export function TabSettingsPanel() {
         <div className="panel-base tab-settings">
             <header className="panel-header">
                 <div className="panel-title-group">
-                    <h3 className="panel-title">↹ Tab Completion</h3>
-                    <span className="panel-subtitle">Inline suggestion metrics</span>
+                    <h3 className="panel-title">{t('panels.tab.title')}</h3>
+                    <span className="panel-subtitle">{t('panels.tab.subtitle')}</span>
                 </div>
                 <div className="panel-actions">
                     <button type="button" className="panel-btn" onClick={() => sendToPlugin('tab.get_stats', {})}>
-                        Refresh
+                        {t('common.refresh')}
                     </button>
                     <button type="button" className="panel-btn panel-btn-danger" onClick={() => sendToPlugin('tab.reset_stats', {})}>
-                        Reset
+                        {t('panels.reset')}
                     </button>
                 </div>
             </header>
             <div className="panel-stats-grid">
                 <div className="panel-stat-card">
-                    <div className="panel-stat-label">Suggestions</div>
+                    <div className="panel-stat-label">{t('panels.tab.suggestions')}</div>
                     <div className="panel-stat-value">{stats.suggestCount}</div>
                 </div>
                 <div className="panel-stat-card">
-                    <div className="panel-stat-label">Accepted</div>
+                    <div className="panel-stat-label">{t('panels.tab.accepted')}</div>
                     <div className="panel-stat-value">{stats.acceptCount}</div>
                 </div>
                 <div className="panel-stat-card">
-                    <div className="panel-stat-label">Dismissed</div>
+                    <div className="panel-stat-label">{t('panels.tab.dismissed')}</div>
                     <div className="panel-stat-value">{stats.dismissCount}</div>
                 </div>
                 <div className="panel-stat-card">
-                    <div className="panel-stat-label">Accept rate</div>
+                    <div className="panel-stat-label">{t('panels.tab.acceptRate')}</div>
                     <div className="panel-stat-value">{stats.suggestCount === 0 ? '—' : `${pct}%`}</div>
                 </div>
                 <div className="panel-stat-card">
-                    <div className="panel-stat-label">Avg latency</div>
+                    <div className="panel-stat-label">{t('panels.tab.avgLatency')}</div>
                     <div className="panel-stat-value">{stats.avgLatencyMs}ms</div>
                 </div>
                 {lastLatencyMs !== null && (
                     <div className="panel-stat-card">
-                        <div className="panel-stat-label">Last latency</div>
+                        <div className="panel-stat-label">{t('panels.tab.lastLatency')}</div>
                         <div className="panel-stat-value">{lastLatencyMs}ms</div>
                     </div>
                 )}
             </div>
             {(stats.lastPredictSource || stats.byPredictSource) && (
                 <div className="panel-section">
-                    <h4 className="panel-section-title">Prediction source</h4>
-                    <p className="panel-hint muted">
-                        Last backend route: <strong>{stats.lastPredictSource ?? '—'}</strong>
-                        {' '}(heuristics → fim → model)
-                    </p>
+                    <h4 className="panel-section-title">{t('panels.tab.predictionSource')}</h4>
+                    <p className="panel-hint muted">{t('panels.tab.routeHint', { route: stats.lastPredictSource ?? '—' })}</p>
                     {stats.byPredictSource && Object.keys(stats.byPredictSource).length > 0 && (
                         <div className="panel-table">
                             {Object.entries(stats.byPredictSource).map(([src, n]) => (
                                 <div key={src} className="panel-table-row">
                                     <span className="panel-table-cell-name">{src}</span>
-                                    <span>{n} hits</span>
+                                    <span>{t('panels.hits', { n })}</span>
                                 </div>
                             ))}
                         </div>

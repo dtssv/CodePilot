@@ -45,8 +45,32 @@ public final class GatheredInfoFormatter {
     return sb.toString();
   }
 
+  /** Only failed gathered entries — for repair / failure context. */
   @SuppressWarnings("unchecked")
-  static boolean entrySucceeded(Map<String, Object> map) {
+  public static String formatFailures(Map<String, Object> gatheredInfo) {
+    if (gatheredInfo == null || gatheredInfo.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    sb.append("[FAILED TOOL / BUILD OUTPUT]\n");
+    for (var entry : gatheredInfo.entrySet()) {
+      Object value = entry.getValue();
+      if (!(value instanceof Map<?, ?> rawMap)) {
+        continue;
+      }
+      Map<String, Object> map = (Map<String, Object>) rawMap;
+      if (entrySucceeded(map)) {
+        continue;
+      }
+      String kind = String.valueOf(map.getOrDefault("kind", "unknown"));
+      String id = String.valueOf(map.getOrDefault("id", entry.getKey()));
+      appendFailure(sb, kind, id, map);
+    }
+    return sb.toString().trim();
+  }
+
+  @SuppressWarnings("unchecked")
+  public static boolean entrySucceeded(Map<String, Object> map) {
     if (map.containsKey("ok")) {
       return Boolean.TRUE.equals(map.get("ok"));
     }

@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { sendToPlugin } from '../bridge';
+import { useNeedsInputSubmitted, usePendingNeedsInput } from '../state/needsInputStore';
 import { AgentContentRenderer } from './AgentContentRenderer';
 import { AgentStep, AgentStepCard } from './AgentStepCard';
 import { BranchTimeline } from './BranchTimeline';
@@ -11,6 +12,7 @@ import { IncrementalMarkdown } from './IncrementalMarkdown';
 import { MessageImages } from './MessageImages';
 import { NeedsInputCard } from './NeedsInputCard';
 import { RiskNoticeCard } from './RiskNoticeCard';
+import { TurnSkillHistory } from './skills/TurnSkillHistory';
 import { ToolCallCard, ToolCallInfo } from './ToolCallCard';
 
 export interface ChatMessage {
@@ -30,6 +32,11 @@ export interface ChatMessage {
     agentSteps?: AgentStep[];
     /** Plan steps shown in the response (from user_plan event) */
     planSteps?: { id: string; title: string; status: string }[];
+    skillActivations?: {
+        node: string;
+        skills: { id: string; version?: string; source?: string }[];
+        ts: number;
+    }[];
     _streaming?: boolean;
     tokenMeta?: {
         inputTokens: number;
@@ -98,6 +105,8 @@ function parseInlineRefs(content: string, contextRefs?: { id?: string; display: 
 
 export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
+    // Dedup needsInput: when dock is showing the active form, don't duplicate in message stream
+    const dockPayload = usePendingNeedsInput();
 
     useEffect(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -131,7 +140,7 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                         {msg.riskNotice ? (
                             <RiskNoticeCard {...msg.riskNotice} />
                         ) : msg.needsInput ? (
-                            <NeedsInputCard payload={msg.needsInput as any} />
+                            <InlineNeedsInputCard needsInput={msg.needsInput} dockPayload={dockPayload} />
                         ) : msg.diff ? (
                             <DiffCard path={msg.diff.path} hunks={msg.diff.hunks} />
                         ) : msg.role === 'user' && msg.contextRefs && msg.contextRefs.length > 0 ? (
@@ -142,6 +151,9 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                             // ★ Assistant message: unified rendering pipeline
                             // All sections coexist: planSteps + agentSteps + content + toolCalls
                             <>
+                                {msg.skillActivations && msg.skillActivations.length > 0 && (
+                                    <TurnSkillHistory activations={msg.skillActivations} />
+                                )}
                                 {/* Plan steps: always show when present, auto-advance stalled steps */}
                                 {msg.planSteps && msg.planSteps.length > 0 && (() => {
                                     // Auto-advance: if a step has been running but a later step
@@ -307,4 +319,16 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
             ))}
         </div>
     );
+}
+
+/** Inline needsInput card in message stream — hidden when dock has the active form. */
+function InlineNeedsInputCard({ needsInput, dockPayload }: {
+    needsInput: NonNullable<ChatMessage['needsInput']>;
+    dockPayload: ReturnType<typeof usePendingNeedsInput>;
+}) {
+    const isSubmitted = useNeedsInputSubmitted(needsInput.continuationToken);
+    const dockHasActiveForm = dockPayload != null && !isSubmitted;
+    // When dock is showing the active form, don't duplicate it inline
+    if (dockHasActiveForm && !isSubmitted) return null;
+    return <NeedsInputCard payload={needsInput as any} />;
 }

@@ -3,10 +3,15 @@
  */
 
 import { sendToPlugin } from '../../../bridge';
+import { useTranslation } from '../../../i18n';
+import { useAdmissionWaitState } from '../../../state/admissionWaitStore';
 import { useChatV2 } from '../../../state/chatStore';
 import type { RiskNotice, StepNode, TurnNode } from '../../../state/events';
+import { useNeedsInputSubmitted, usePendingNeedsInput } from '../../../state/needsInputStore';
 import { planStatusCssClass, planStatusIcon } from '../../../state/planNormalize';
 import { useBranches } from '../../../state/sessionUiStore';
+import { normalizeAgentContentText, stripGraphMarkers } from '../../../utils/graphMarkers';
+import { sortStepsChronologically } from '../../../utils/timelineSort';
 import { AgentContentRenderer } from '../../AgentContentRenderer';
 import { AgentStepCard, type AgentStep } from '../../AgentStepCard';
 import { BranchTimeline } from '../../BranchTimeline';
@@ -14,12 +19,12 @@ import { ContextRefChips } from '../../ContextRefChips';
 import { MessageImages } from '../../MessageImages';
 import { NeedsInputCard } from '../../NeedsInputCard';
 import { ShellStepCard, type ShellStepState } from '../../shell/ShellStepCard';
-import { ToolCallCard as LegacyToolCallCard } from '../../ToolCallCard';
-import { normalizeAgentContentText, stripGraphMarkers } from '../../../utils/graphMarkers';
-import { sortStepsChronologically } from '../../../utils/timelineSort';
+import { TurnSkillHistory } from '../../skills/TurnSkillHistory';
+import { ToolCallCard } from '../../ToolCallCard';
 import { shouldHideToolStep, stepToToolCall } from './stepToToolCall';
 
 export function ChatViewV2() {
+    const { t } = useTranslation();
     const turns = useChatV2((s) => s.turns);
     const steps = useChatV2((s) => s.steps);
     const { branches, activeBranchId } = useBranches();
@@ -29,8 +34,8 @@ export function ChatViewV2() {
             <div className="chat-view chat-view-v2 empty">
                 <div className="chat-empty">
                     <div className="chat-empty-icon">◇</div>
-                    <div className="chat-empty-title">CodePilot</div>
-                    <p className="chat-empty-hint">Start a conversation to see agent steps, tools, and plans here.</p>
+                    <div className="chat-empty-title">{t('chat.emptyTitle')}</div>
+                    <p className="chat-empty-hint">{t('chat.emptyHint')}</p>
                 </div>
             </div>
         );
@@ -67,13 +72,20 @@ export function ChatViewV2() {
 function TurnAlerts({ turn }: { turn: TurnNode }) {
     const notices = turn.riskNotices ?? [];
     const needs = turn.needsInput;
-    if (notices.length === 0 && !needs) return null;
+    // If NeedsInputDock (above input bar) is showing the active form,
+    // don't duplicate it here in the message stream.
+    // Once submitted, the dock clears and this inline card shows "已提交".
+    const dockPayload = usePendingNeedsInput();
+    const isSubmitted = useNeedsInputSubmitted(needs?.continuationToken);
+    const dockHasActiveForm = dockPayload != null && !isSubmitted;
+    const showInlineNeedsInput = needs && (!dockHasActiveForm || isSubmitted);
+    if (notices.length === 0 && !showInlineNeedsInput) return null;
     return (
         <div className="turn-alerts">
             {notices.map((n, i) => (
                 <RiskBanner key={`risk-${i}`} notice={n} />
             ))}
-            {needs && (
+            {showInlineNeedsInput && (
                 <div className="turn-needs-input">
                     <NeedsInputCard payload={needs as Parameters<typeof NeedsInputCard>[0]['payload']} />
                 </div>
@@ -95,11 +107,15 @@ function RiskBanner({ notice }: { notice: RiskNotice }) {
 }
 
 function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepNode> }) {
+    const { t } = useTranslation();
+    const admissionWait = useAdmissionWaitState();
     const stepList = sortStepsChronologically(turn.stepIds, steps);
-
-    // Merge all plan steps from all plan-type steps into a single unified plan view.
-    // Earlier plan steps provide base entries; later ones update status progressively.
-    const mergedPlanSteps = mergePlanSteps(stepList);
+    const statusLabel =
+        turn.status === 'running' && admissionWait
+            ? t('chat.waitingAdmission')
+            : turn.status === 'interrupted'
+                ? t('chat.waitingForInput')
+                : turn.status;
 
     return (
         <article className={`turn turn-${turn.status}`}>
@@ -115,14 +131,14 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
                         <button
                             type="button"
                             className="msg-fork-btn turn-fork-btn"
-                            title="Fork conversation from this message"
+                            title={t('chat.forkFromMessage')}
                             onClick={() =>
                                 sendToPlugin('fork_from_message', { messageIndex: turn.forkMessageIndex }).catch(
                                     () => undefined,
                                 )
                             }
                         >
-                            ↗ Fork
+                            ↗ {t('common.fork')}
                         </button>
                     )}
                 </div>
@@ -133,19 +149,16 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
                 </div>
                 <div className="msg msg-assistant">
                     <TurnAlerts turn={turn} />
-                    {/* Unified plan progress — always at top when present */}
-                    {mergedPlanSteps && mergedPlanSteps.length > 0 && (
-                        <PlanStepsView steps={mergedPlanSteps} />
+                    {turn.skillActivations && turn.skillActivations.length > 0 && (
+                        <TurnSkillHistory activations={turn.skillActivations} />
                     )}
                     <div className="turn-steps">
-                        {stepList.map((step) => {
-                            // Plan steps are rendered above as a unified view; skip individual ones
-                            if (step.kind === 'plan') return null;
-                            return renderStep(step, stepList, true);
-                        })}
+                        {stepList.map((step) => renderStep(step, stepList, true))}
                     </div>
                     <footer className="turn-footer">
-                        <span className={`turn-status status-${turn.status}`}>{turn.status}</span>
+                        <span className={`turn-status status-${turn.status}${admissionWait && turn.status === 'running' ? ' status-waiting' : ''}`}>
+                            {statusLabel}
+                        </span>
                         {turn.endedAt && (
                             <span className="muted">{Math.round((turn.endedAt - turn.startedAt) / 100) / 10}s</span>
                         )}
@@ -214,12 +227,20 @@ function renderStep(step: StepNode, allSteps: StepNode[], suppressFilePreviews: 
     if (shouldHideStep(step, allSteps)) return null;
 
     switch (step.kind) {
+        case 'plan': {
+            if (!step.plan?.length) return null;
+            return (
+                <div key={step.stepId} className="plan-steps-inline">
+                    <PlanStepsView steps={step.plan} />
+                </div>
+            );
+        }
         case 'tool': {
-            const tc = stepToToolCall(step);
-            if (!tc) return null;
+            const call = stepToToolCall(step);
+            if (!call) return null;
             return (
                 <div key={step.stepId} className="msg-tool-calls">
-                    <LegacyToolCallCard toolCall={tc} />
+                    <ToolCallCard toolCall={call} />
                 </div>
             );
         }
@@ -278,41 +299,12 @@ function ThinkingStep({ step }: { step: StepNode }) {
 
 
 
-/** Merge plan steps from all plan-type steps into a single unified view.
- *  Later plan updates override the status of earlier steps with the same id,
- *  ensuring plan progress is tracked correctly across multiple plan events. */
-function mergePlanSteps(stepList: StepNode[]): import('../../../state/events').PlanStep[] | null {
-    const planSteps = stepList.filter((s) => s.kind === 'plan' && s.plan?.length);
-    if (planSteps.length === 0) return null;
-
-    // Start with the first plan's steps, then merge subsequent updates
-    const merged = new Map<string, import('../../../state/events').PlanStep>();
-    for (const ps of planSteps) {
-        for (const step of ps.plan ?? []) {
-            const existing = merged.get(step.id);
-            if (!existing) {
-                merged.set(step.id, { ...step });
-            } else {
-                // Later updates take precedence for status; keep the original title
-                // Only override status if the new status is more advanced
-                const statusOrder: Record<string, number> = { pending: 0, running: 1, success: 2, error: 2, skipped: 2 };
-                const curOrder = statusOrder[existing.status] ?? 0;
-                const newOrder = statusOrder[step.status] ?? 0;
-                if (newOrder >= curOrder) {
-                    merged.set(step.id, { ...existing, status: step.status });
-                }
-            }
-        }
-    }
-
-    return Array.from(merged.values());
-}
-
-/** Render a unified plan steps view with proper progress tracking. */
+/** Render plan steps inline in the chronological timeline. */
 function PlanStepsView({ steps }: { steps: import('../../../state/events').PlanStep[] }) {
+    const { t } = useTranslation();
     return (
         <div className="plan-steps-container">
-            <div className="plan-steps-header">📋 执行计划</div>
+            <div className="plan-steps-header">📋 {t('chat.planHeader')}</div>
             {steps.map((s, idx) => (
                 <div key={s.id || idx} className="plan-step-item">
                     <span className={`plan-step-status plan-step-${planStatusCssClass(s.status)}`}>

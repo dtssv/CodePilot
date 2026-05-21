@@ -8,6 +8,7 @@ import io.codepilot.core.conversation.SseFactory;
 import io.codepilot.core.conversation.StopSignalBus;
 import io.codepilot.core.deploy.DeployDrainService;
 import io.codepilot.core.dto.ConversationRunRequest;
+import io.codepilot.core.run.GraphEngineProperties;
 import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.actions.*;
 import io.codepilot.core.sse.SseEvents;
@@ -42,14 +43,10 @@ public class GraphEngineService {
 
     private static final Logger log = LoggerFactory.getLogger(GraphEngineService.class);
 
-    /** Dedicated scheduler for graph engine execution — avoids blocking the ForkJoinPool.commonPool()
-     *  and provides bounded elasticity for concurrent agent requests. */
-    private final Scheduler graphScheduler = Schedulers.newBoundedElastic(
-            Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE,
-            Schedulers.DEFAULT_BOUNDED_ELASTIC_QUEUESIZE,
-            "graph-engine", 60, true);
+    private final Scheduler graphScheduler;
 
     private final IntakeAction intakeAction;
+    private final IntentDispatchAction intentDispatchAction;
     private final PlanningAction planningAction;
     private final PreCheckAction preCheckAction;
     private final GenerateAction generateAction;
@@ -70,6 +67,7 @@ public class GraphEngineService {
 
     public GraphEngineService(
             IntakeAction intakeAction,
+            IntentDispatchAction intentDispatchAction,
             PlanningAction planningAction,
             PreCheckAction preCheckAction,
             GenerateAction generateAction,
@@ -86,8 +84,20 @@ public class GraphEngineService {
             SseFactory sse,
             GraphCheckpointStore checkpointStore,
             StopSignalBus stopBus,
-            DeployDrainService deployDrainService) {
+            DeployDrainService deployDrainService,
+            GraphEngineProperties graphProperties) {
+        int threadCap =
+                graphProperties.getSchedulerThreadCap() > 0
+                        ? graphProperties.getSchedulerThreadCap()
+                        : Schedulers.DEFAULT_BOUNDED_ELASTIC_SIZE;
+        int queueSize =
+                graphProperties.getSchedulerQueueSize() > 0
+                        ? graphProperties.getSchedulerQueueSize()
+                        : Schedulers.DEFAULT_BOUNDED_ELASTIC_QUEUESIZE;
+        this.graphScheduler =
+                Schedulers.newBoundedElastic(threadCap, queueSize, "graph-engine", 60, true);
         this.intakeAction = intakeAction;
+        this.intentDispatchAction = intentDispatchAction;
         this.planningAction = planningAction;
         this.preCheckAction = preCheckAction;
         this.generateAction = generateAction;
@@ -299,6 +309,7 @@ public class GraphEngineService {
 
         // ── Define Nodes ──
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
+        graph.addNode("intentDispatch", AsyncNodeAction.node_async(intentDispatchAction));
         graph.addNode("planning", AsyncNodeAction.node_async(planningAction));
         graph.addNode("preCheck", AsyncNodeAction.node_async(preCheckAction));
         graph.addNode("generate", AsyncNodeAction.node_async(generateAction));
@@ -314,14 +325,19 @@ public class GraphEngineService {
         // ── Define Edges ──
         graph.addEdge(StateGraph.START, "intake");
 
-        // Intake: on fresh run goes to planning; on resume (has resumeNextNode) jumps to the target node
+        // Intake: on fresh run goes to planning/intentDispatch; on resume (has resumeNextNode) jumps to the target node
         graph.addConditionalEdges("intake",
                 AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
                 Map.of("planning", "planning", "preCheck", "preCheck",
                         "generate", "generate", "applyPatch", "applyPatch",
                         "repair", "repair", "gather", "gather",
                         "askUser", "askUser", "verify", "verify",
-                        "commit", "commit"));
+                        "commit", "commit", "intentDispatch", "intentDispatch"));
+
+        // IntentDispatch → always finalize (short-circuit path)
+        graph.addConditionalEdges("intentDispatch",
+                AsyncEdgeAction.edge_async(intentDispatchAction::routeAfterIntentDispatch),
+                Map.of("finalize", "finalize"));
 
         // Planning → may need info or proceed to phase loop
         graph.addConditionalEdges("planning",
@@ -338,7 +354,8 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
                 Map.of("applyPatch", "applyPatch", "gather", "gather",
                         "askUser", "askUser", "commit", "commit",
-                        "reenter", "reenter"));
+                        "reenter", "reenter", "repair", "repair",
+                        "finalize", "finalize"));
 
         // ApplyPatch → may succeed or fail; fast-path can skip verify (C1)
         graph.addConditionalEdges("applyPatch",
@@ -350,11 +367,11 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(verifyAction::routeAfterVerify),
                 Map.of("commit", "commit", "repair", "repair", "askUser", "askUser"));
 
-        // Repair → may need info, retry verify, or partial commit (M3)
+        // Repair → may need info, retry verify, partial commit (M3), or retry with different tool calls
         graph.addConditionalEdges("repair",
                 AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
                 Map.of("applyPatch", "applyPatch", "askUser", "askUser",
-                        "commit", "commit"));
+                        "commit", "commit", "generate", "generate"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
@@ -365,7 +382,7 @@ public class GraphEngineService {
                 Map.of("planning", "planning", "preCheck", "preCheck",
                         "generate", "generate", "repair", "repair"));
 
-        // Commit → next phase or finalize
+        // Commit → next phase, finalize, or repair (when phaseCommitBlocked)
         graph.addConditionalEdges("commit",
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
                 Map.of(
@@ -374,7 +391,9 @@ public class GraphEngineService {
                         "finalize",
                         "finalize",
                         "retryGenerate",
-                        "generate"));
+                        "generate",
+                        "repair",
+                        "repair"));
 
         // AskUser: can route to a target node (resume after user answers) or END (terminal)
         graph.addConditionalEdges("askUser",
@@ -402,6 +421,7 @@ public class GraphEngineService {
 
         // Nodes
         graph.addNode("intake", AsyncNodeAction.node_async(intakeAction));
+        graph.addNode("intentDispatch", AsyncNodeAction.node_async(intentDispatchAction));
         graph.addNode("planning", AsyncNodeAction.node_async(planningAction));
         graph.addNode("preCheck", AsyncNodeAction.node_async(preCheckAction));
         graph.addNode("generate", AsyncNodeAction.node_async(generateAction));
@@ -412,6 +432,8 @@ public class GraphEngineService {
         graph.addNode("synthesize", AsyncNodeAction.node_async(synthesizeAction));
         graph.addNode("askUser", AsyncNodeAction.node_async(askUserAction));
         graph.addNode("finalize", AsyncNodeAction.node_async(finalizeAction));
+        // Repair node — same as main graph, supports retryGenerate → generate
+        graph.addNode("repair", AsyncNodeAction.node_async(repairAction));
 
         // Edges
         graph.addEdge(StateGraph.START, "intake");
@@ -421,17 +443,26 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
                 Map.of("planning", "planning", "generate", "generate",
                         "gather", "gather", "askUser", "askUser",
-                        "repair", "repair", "verify", "verify"));
+                        "repair", "repair", "verify", "verify",
+                        "intentDispatch", "intentDispatch"));
 
         // Planning → generate first sub-question's search queries, or gather if need info first
         graph.addConditionalEdges("planning",
                 AsyncEdgeAction.edge_async(planningAction::routeAfterPlanning),
                 Map.of("preCheck", "generate", "gather", "gather", "finalize", "finalize"));
 
-        // Generate → produce search queries, then gather
+        // IntentDispatch → always finalize (short-circuit path)
+        graph.addConditionalEdges("intentDispatch",
+                AsyncEdgeAction.edge_async(intentDispatchAction::routeAfterIntentDispatch),
+                Map.of("finalize", "finalize"));
+
+        // Generate → produce search queries, then gather; may also route to repair/reenter/commit/finalize
         graph.addConditionalEdges("generate",
                 AsyncEdgeAction.edge_async(generateAction::routeAfterGenerate),
-                Map.of("applyPatch", "gather", "gather", "gather", "askUser", "askUser"));
+                Map.of("applyPatch", "gather", "gather", "gather",
+                        "askUser", "askUser", "commit", "commit",
+                        "reenter", "reenter", "repair", "repair",
+                        "finalize", "finalize"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
@@ -444,10 +475,17 @@ public class GraphEngineService {
                 AsyncEdgeAction.edge_async(searchEvaluateAction::routeAfterEvaluate),
                 Map.of("commit", "commit", "generate", "generate", "askUser", "askUser"));
 
-        // Commit → next sub-question (generate) or all done (synthesize)
+        // Commit → next sub-question (generate), all done (synthesize), or repair (when phaseCommitBlocked)
         graph.addConditionalEdges("commit",
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
-                Map.of("preCheck", "generate", "finalize", "synthesize", "retryGenerate", "generate"));
+                Map.of("preCheck", "generate", "finalize", "synthesize",
+                        "retryGenerate", "generate", "repair", "repair"));
+
+        // Repair → applyPatch, askUser, commit, or retryGenerate (retry tool calls via generate)
+        graph.addConditionalEdges("repair",
+                AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
+                Map.of("applyPatch", "gather", "askUser", "askUser",
+                        "commit", "commit", "generate", "generate"));
 
         // Synthesize → finalize
         graph.addEdge("synthesize", "finalize");

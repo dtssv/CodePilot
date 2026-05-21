@@ -97,55 +97,23 @@ class NewSkillPanel(
         val id = idField.text.trim()
         val version = versionField.text.trim()
         val prompt = promptArea.text
-        if (id.isEmpty() || version.isEmpty() || prompt.isBlank()) {
-            Messages.showErrorDialog(project, "id, version and prompt are required.", "CodePilot")
-            return
-        }
         val scope = if (scopeBox.selectedItem == "global") LocalMarketplaceStore.Scope.GLOBAL else LocalMarketplaceStore.Scope.PROJECT
-        val yaml =
-            buildYaml(
-                id,
-                version,
-                titleField.text.trim().ifEmpty { id },
-                scope.value,
-                prompt,
-                languageField.text.trim().ifEmpty { null },
-                actionField.text.trim().ifEmpty { null },
-            )
-        runCatching {
-            store.installSkill(scope, project, id, version, LocalMarketplaceStore.Source.BUILTIN_IDE, yaml)
-        }.onSuccess {
+        LocalSkillCreator.create(
+            project,
+            id,
+            version,
+            titleField.text.trim(),
+            scope,
+            languageField.text.trim().ifEmpty { null },
+            actionField.text.trim().ifEmpty { null },
+            prompt,
+        ).onSuccess {
             Messages.showInfoMessage(project, "Created $id@$version under ${scope.value}.", "CodePilot")
             onChanged()
         }.onFailure {
             Messages.showErrorDialog(project, it.message ?: "create failed", "CodePilot")
         }
     }
-
-    private fun buildYaml(
-        id: String,
-        version: String,
-        title: String,
-        scope: String,
-        prompt: String,
-        language: String?,
-        action: String?,
-    ): String =
-        buildString {
-            appendLine("id: $id")
-            appendLine("version: $version")
-            appendLine("title: \"${title.replace("\"", "\\\"")}\"")
-            appendLine("source: user")
-            appendLine("scope: $scope")
-            if (!language.isNullOrBlank() || !action.isNullOrBlank()) {
-                appendLine("triggers:")
-                appendLine("  any:")
-                language?.let { appendLine("    - language: [$it]") }
-                action?.let { appendLine("    - action: [$it]") }
-            }
-            appendLine("systemPrompt: |")
-            prompt.lineSequence().forEach { appendLine("  $it") }
-        }
 
     private fun addRow(
         parent: JPanel,

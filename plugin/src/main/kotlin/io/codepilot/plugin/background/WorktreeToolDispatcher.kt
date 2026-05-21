@@ -22,7 +22,7 @@ class WorktreeToolDispatcher(
         client = client,
         sessionId = sessionId,
         workspaceRoot = worktree,
-        onToolResult = { id, ok, _ -> log("tool_result ${if (ok) "ok" else "error"} $id") },
+        onToolResult = { id, ok, _, _, _ -> log("tool_result ${if (ok) "ok" else "error"} $id") },
     )
 
     fun dispatch(toolCall: JsonNode) {

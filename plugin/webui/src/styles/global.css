@@ -1682,7 +1682,136 @@ pre {
     position: relative;
 }
 
-/* Top bar with history and new chat buttons */
+/* Unified header: session controls + section nav */
+.app-header {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    z-index: 2;
+}
+
+.app-header-session {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 3px;
+}
+
+/* Section nav: one compact row; groups separated by dividers (saves vertical space vs stacked 工作/工具/监控) */
+.app-shell-nav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0;
+    padding: 2px 8px 6px;
+    min-width: 0;
+}
+
+.app-shell-nav-inner {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 5px;
+    flex: 1;
+    min-width: 0;
+}
+
+.app-shell-nav-sep {
+    width: 1px;
+    height: 18px;
+    flex-shrink: 0;
+    align-self: center;
+    margin: 0 3px;
+    background: color-mix(in srgb, var(--border) 75%, transparent);
+    border-radius: 1px;
+}
+
+.app-shell-nav-chunk {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px;
+}
+
+.app-shell-nav-toolbar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    padding-left: 6px;
+    margin-left: auto;
+}
+
+.app-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 7px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+    position: relative;
+}
+
+.app-nav-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border-color: var(--border);
+}
+
+.app-nav-btn-active {
+    color: var(--text-primary);
+    font-weight: 500;
+    background: var(--bg-tertiary);
+    border-color: var(--border);
+}
+
+.app-nav-icon {
+    font-size: 11px;
+    line-height: 1;
+}
+
+.app-nav-label {
+    font-size: 10px;
+}
+
+/* Narrow tool window: icon + tooltip only to keep one dense row */
+@media (max-width: 380px) {
+    .app-nav-label {
+        display: none;
+    }
+
+    .app-nav-btn {
+        padding: 4px 6px;
+    }
+}
+
+.app-nav-badge {
+    min-width: 14px;
+    height: 14px;
+    padding: 0 4px;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 14px;
+    text-align: center;
+    color: #fff;
+    background: var(--warning, #d29922);
+    border-radius: 7px;
+}
+
+.app-nav-theme {
+    flex-shrink: 0;
+}
+
+/* Legacy top bar (unused) */
 .top-bar {
     display: flex;
     align-items: center;
@@ -1728,13 +1857,14 @@ pre {
     flex: 1;
 }
 
-/* History popup (absolute positioned, drops down from history button) */
+/* History popup — below full header (height varies with stacked nav) */
 .history-popup {
     position: absolute;
-    top: 36px;
-    left: 0;
-    right: 0;
-    max-height: 70vh;
+    top: 100%;
+    left: 8px;
+    right: 8px;
+    margin-top: 4px;
+    max-height: min(70vh, calc(100vh - 120px));
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -1991,7 +2121,7 @@ pre {
     flex-shrink: 0;
 }
 
-.session-sidebar-actions button {
+.session-sidebar-actions .session-sidebar-btn-primary {
     background: transparent;
     color: var(--accent);
     font-size: 11px;
@@ -2003,12 +2133,12 @@ pre {
     transition: all 0.15s;
 }
 
-.session-sidebar-actions button:hover {
+.session-sidebar-actions .session-sidebar-btn-primary:hover {
     background: var(--accent);
     color: white;
 }
 
-.session-sidebar-actions input {
+.session-sidebar-actions .session-sidebar-search {
     flex: 1;
     min-width: 0;
     padding: 5px 8px;
@@ -2021,15 +2151,15 @@ pre {
     transition: border-color 0.15s;
 }
 
-.session-sidebar-actions input:focus {
+.session-sidebar-actions .session-sidebar-search:focus {
     border-color: var(--accent);
 }
 
-.session-sidebar-actions input::placeholder {
+.session-sidebar-actions .session-sidebar-search::placeholder {
     color: var(--text-secondary);
 }
 
-.session-sidebar-actions label {
+.session-sidebar-actions .session-sidebar-archived {
     display: flex;
     align-items: center;
     gap: 3px;
@@ -2039,12 +2169,124 @@ pre {
     white-space: nowrap;
 }
 
-.session-sidebar-actions label input[type="checkbox"] {
+.session-sidebar-actions .session-sidebar-archived input[type="checkbox"] {
     width: 12px;
     height: 12px;
     accent-color: var(--accent);
     min-width: 12px;
     flex: none;
+}
+
+.session-sidebar-bulk {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 12px 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    flex-shrink: 0;
+}
+
+.session-sidebar-link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 10px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.session-sidebar-link-btn:hover {
+    color: var(--accent-hover);
+}
+
+.session-sidebar-bulk-sep {
+    color: var(--text-secondary);
+    font-size: 10px;
+    user-select: none;
+}
+
+/* Collapsible session groups */
+.session-sidebar-module {
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.session-sidebar-module:last-of-type {
+    border-bottom: none;
+}
+
+.session-sidebar-module-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 12px;
+    margin: 0;
+    background: color-mix(in srgb, var(--bg-tertiary) 35%, transparent);
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    transition: background 0.12s;
+}
+
+.session-sidebar-module-header:hover {
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+}
+
+.session-sidebar-module-chevron {
+    font-size: 8px;
+    color: var(--text-secondary);
+    width: 10px;
+    flex-shrink: 0;
+}
+
+.session-sidebar-module-title {
+    flex: 1;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.session-sidebar-module-count {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--bg-primary) 80%, var(--border));
+    padding: 1px 7px;
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+
+.session-sidebar-module-body {
+    display: flex;
+    flex-direction: column;
+}
+
+.session-row-action-icon {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.15s;
+}
+
+.session-row-action-icon:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.session-row-action-icon.session-row-action-danger:hover {
+    color: var(--error);
 }
 
 /* Session row V2 */
@@ -2123,27 +2365,6 @@ pre {
 
 .session-row-v2:hover .session-row-actions {
     opacity: 1;
-}
-
-.session-row-actions button {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 10px;
-    padding: 2px 4px;
-    cursor: pointer;
-    border-radius: 3px;
-    white-space: nowrap;
-    transition: all 0.15s;
-}
-
-.session-row-actions button:hover {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-}
-
-.session-row-actions button:last-child:hover {
-    color: var(--error);
 }
 
 /* ===== Input Bar ===== */
@@ -2931,6 +3152,28 @@ button:disabled {
 
 .login-btn:hover {
     background: var(--accent-hover);
+}
+
+.login-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.login-btn-secondary {
+    margin-top: 12px;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+}
+
+.login-btn-secondary:hover {
+    background: var(--bg-primary);
+}
+
+.login-dev-section {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
 }
 
 .login-status {
@@ -3766,6 +4009,157 @@ button:disabled {
     opacity: 0.9;
 }
 
+/* Language selector (header / login) */
+.language-selector {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    font-size: 12px;
+}
+
+.language-selector-icon {
+    opacity: 0.75;
+}
+
+.language-selector-select {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle, #30363d);
+    background: var(--bg-tertiary, #0d1117);
+    color: inherit;
+    cursor: pointer;
+}
+
+.login-lang-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+}
+
+/* Graph node active Skills */
+.active-skills-bar {
+    margin: 8px 12px 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle, #30363d);
+    background: var(--bg-secondary, #161b22);
+    font-size: 12px;
+}
+
+.active-skills-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+    color: var(--text-secondary, #8b949e);
+}
+
+.active-skills-icon {
+    color: var(--accent, #58a6ff);
+    font-size: 11px;
+}
+
+.active-skills-node {
+    font-weight: 600;
+    color: var(--accent, #58a6ff);
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(88, 166, 255, 0.12);
+    font-size: 11px;
+}
+
+.active-skills-label {
+    color: var(--text-secondary, #8b949e);
+}
+
+.active-skills-count {
+    margin-left: auto;
+    font-size: 11px;
+    opacity: 0.75;
+}
+
+.active-skills-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.active-skill-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #0d1117);
+    border: 1px solid var(--border-subtle, #30363d);
+    font-size: 11px;
+    max-width: 100%;
+}
+
+.active-skill-chip.source-system {
+    border-color: rgba(88, 166, 255, 0.35);
+}
+
+.active-skill-chip.source-user {
+    border-color: rgba(163, 113, 247, 0.35);
+}
+
+.active-skill-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.active-skill-source {
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 3px;
+    opacity: 0.85;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+/* Per-turn Skill history in chat */
+.turn-skill-history {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-subtle, #30363d);
+    background: rgba(88, 166, 255, 0.04);
+    font-size: 12px;
+}
+
+.turn-skill-history-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary, #8b949e);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.turn-skill-history-entry {
+    margin-bottom: 8px;
+}
+
+.turn-skill-history-entry:last-child {
+    margin-bottom: 0;
+}
+
+.turn-skill-history-entry-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.turn-skill-history-count {
+    font-size: 11px;
+    color: var(--text-secondary, #8b949e);
+}
+
 /* Marketplace */
 .marketplace-toast {
     display: flex;
@@ -3988,6 +4382,18 @@ button:disabled {
     display: flex;
     flex-direction: column;
     gap: 4px;
+}
+
+/* Tool call row: avoid path + "N 行" visually merging (e.g. Foo.cpp69 行) */
+.tool-call-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+}
+
+.tool-call-card .tool-call-desc {
+    word-break: break-all;
 }
 
 .chat-view-v2 .step-thinking {
@@ -4330,4 +4736,142 @@ button:disabled {
 
 .shell-ask-btn-skip {
     opacity: 0.9;
+}
+
+/* Integrations: Skills + MCP (single nav entry) */
+.integrations-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    height: 100%;
+    min-height: 0;
+    padding: 0 4px 8px;
+}
+
+.integrations-intro {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    padding: 0 4px;
+}
+
+.integrations-subnav {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 0 2px;
+}
+
+.integrations-subtab {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.integrations-subtab:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.integrations-subtab-active {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-tertiary));
+    border-color: var(--accent);
+}
+
+.integrations-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.create-skill-panel .create-skill-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.create-skill-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.create-skill-field span {
+    font-weight: 600;
+}
+
+.create-skill-span2 {
+    grid-column: span 2;
+}
+
+.create-skill-textarea {
+    min-height: 140px;
+    resize: vertical;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+}
+
+.create-skill-flash {
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-tertiary));
+}
+
+.create-skill-flash-error {
+    border-color: color-mix(in srgb, #d33 55%, var(--border));
+    background: color-mix(in srgb, #d33 12%, var(--bg-tertiary));
+}
+
+.mcp-install-json-section {
+    margin-bottom: 14px;
+}
+
+.mcp-install-json-section > label > span {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.mcp-json-textarea {
+    width: 100%;
+    min-height: 120px;
+    margin-bottom: 8px;
+}
+
+.mcp-install-json-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+.mcp-install-json-row .panel-input {
+    flex: 1;
+    min-width: 140px;
+}
+
+.mcp-install-result {
+    margin-top: 8px;
+    font-size: 11px;
+}
+
+.mcp-install-result-error {
+    color: color-mix(in srgb, #d44 88%, var(--text-primary));
 }

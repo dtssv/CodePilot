@@ -289,9 +289,27 @@ open class LocalMarketplaceStore {
         scope: Scope,
         source: Source,
         manifest: Map<String, Any?>,
+        project: Project? = null,
     ) {
-        val yaml = manifest["yaml"] as? String ?: ""
-        installSkill(scope, null, slug, version, source, yaml)
+        var yaml = (manifest["yaml"] as? String)?.trim().orEmpty()
+        if (yaml.isBlank()) {
+            yaml =
+                yamlFromInstalledDir(slug, version, scope, project).orEmpty()
+        }
+        require(scope != Scope.PROJECT || project != null) { "project required for PROJECT scope" }
+        installSkill(scope, project, slug, version, source, yaml)
+    }
+
+    private fun yamlFromInstalledDir(
+        slug: String,
+        version: String,
+        scope: Scope,
+        project: Project?,
+    ): String? {
+        val dir = getInstallDir(slug, version, scope, project)
+        val f = dir.resolve("skill.yaml")
+        if (!Files.exists(f)) return null
+        return Files.readString(f, StandardCharsets.UTF_8)
     }
 
     /** Reload the index from disk (clears cache). */
@@ -310,7 +328,11 @@ open class LocalMarketplaceStore {
         slug: String,
         version: String,
         scope: Scope,
-    ): Path = root(scope, null).resolve("skills/installed/$slug@$version")
+        project: Project? = null,
+    ): Path {
+        require(scope != Scope.PROJECT || project != null) { "project required for PROJECT scope" }
+        return root(scope, project).resolve("skills/installed/$slug@$version")
+    }
 
     companion object {
         @JvmStatic fun getInstance(): LocalMarketplaceStore = service()

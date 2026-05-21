@@ -3,6 +3,8 @@
   <name>CodePilot</name>
   <vendor>CodePilot</vendor>
 
+  <resource-bundle>messages.CodePilotBundle</resource-bundle>
+
   <depends>com.intellij.modules.platform</depends>
   <depends optional="true" config-file="codepilot-git.xml">Git4Idea</depends>
 
@@ -41,12 +43,16 @@
     <postStartupActivity implementation="io.codepilot.plugin.keymap.CodePilotKeymap"/>
     <notificationGroup id="CodePilot" displayType="BALLOON"/>
 
-    <inlineCompletionProvider implementation="io.codepilot.plugin.completion.CodePilotInlineCompletionProvider"/>
+    <inlineCompletionProvider id="CodePilot"
+                              implementation="io.codepilot.plugin.completion.CodePilotInlineCompletionProvider"/>
   </extensions>
 
-  <actions>
-    <!-- ===== Unified CodePilot group — registered in all right-click menus ===== -->
-    <group id="CodePilot.MainGroup" text="CodePilot" popup="true">
+  <actions resource-bundle="messages.CodePilotBundle">
+    <!-- ===== Unified CodePilot group — registered in all right-click menus =====
+         Text/description for actions and groups come from CodePilotBundle.properties
+         (action.<id>.text / group.<id>.text); do not use text="%key" here — it is not
+         resolved for <action>/<group> and would show literally in the UI. -->
+    <group id="CodePilot.MainGroup" popup="true">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
       <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
@@ -54,8 +60,7 @@
 
     <!-- Add to Chat / Add to New Chat — top-level (not inside popup, always visible) -->
     <action id="CodePilot.AddToChat"
-            class="io.codepilot.plugin.actions.AddToChatAction"
-            text="Add to CodePilot Chat">
+            class="io.codepilot.plugin.actions.AddToChatAction">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
       <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
@@ -63,8 +68,7 @@
     </action>
 
     <action id="CodePilot.AddToNewChat"
-            class="io.codepilot.plugin.actions.AddToNewChatAction"
-            text="Add to New CodePilot Chat">
+            class="io.codepilot.plugin.actions.AddToNewChatAction">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
       <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
@@ -72,54 +76,45 @@
 
     <!-- Actions inside the CodePilot popup group -->
     <action id="CodePilot.Refactor"
-            class="io.codepilot.plugin.actions.RefactorAction"
-            text="Refactor selection"
-            description="Refactor the selection or file with CodePilot">
+            class="io.codepilot.plugin.actions.RefactorAction">
       <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt R" keymap="$default"/>
       <keyboard-shortcut first-keystroke="meta alt R" keymap="Mac OS X 10.5+"/>
     </action>
     <action id="CodePilot.Review"
-            class="io.codepilot.plugin.actions.ReviewAction"
-            text="Review code">
+            class="io.codepilot.plugin.actions.ReviewAction">
       <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt V" keymap="$default"/>
     </action>
     <action id="CodePilot.Comment"
-            class="io.codepilot.plugin.actions.CommentAction"
-            text="Generate comments">
+            class="io.codepilot.plugin.actions.CommentAction">
       <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
     </action>
     <action id="CodePilot.GenTest"
-            class="io.codepilot.plugin.actions.GenTestAction"
-            text="Generate tests">
+            class="io.codepilot.plugin.actions.GenTestAction">
       <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
       <keyboard-shortcut first-keystroke="control alt T" keymap="$default"/>
     </action>
     <action id="CodePilot.GenDoc"
-            class="io.codepilot.plugin.actions.GenDocAction"
-            text="Generate documentation">
+            class="io.codepilot.plugin.actions.GenDocAction">
       <add-to-group group-id="CodePilot.MainGroup" anchor="last"/>
     </action>
 
     <!-- PSI element (class/method) right-click -->
-    <group id="CodePilot.PsiElementActions" text="CodePilot" popup="true">
+    <group id="CodePilot.PsiElementActions" popup="true">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
     </group>
 
     <action id="CodePilot.PsiGenTest"
-            class="io.codepilot.plugin.actions.PsiGenTestAction"
-            text="Generate Tests">
+            class="io.codepilot.plugin.actions.PsiGenTestAction">
       <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
     </action>
     <action id="CodePilot.PsiGenDoc"
-            class="io.codepilot.plugin.actions.PsiGenDocAction"
-            text="Generate Documentation">
+            class="io.codepilot.plugin.actions.PsiGenDocAction">
       <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
     </action>
     <action id="CodePilot.PsiComment"
-            class="io.codepilot.plugin.actions.PsiCommentAction"
-            text="Generate Comments">
+            class="io.codepilot.plugin.actions.PsiCommentAction">
       <add-to-group group-id="CodePilot.PsiElementActions" anchor="last"/>
     </action>
 
@@ -149,15 +144,17 @@
       <keyboard-shortcut first-keystroke="alt R" keymap="$default"/>
     </action>
 
-    <action id="CodePilot.CursorTab.Accept"
-            class="io.codepilot.plugin.completion.AcceptCursorTabSuggestionAction"
-            text="CodePilot Cursor Tab: Accept Next Suggestion">
+    <action id="CodePilot.Tab.Accept"
+            class="io.codepilot.plugin.completion.AcceptCodePilotTabSuggestionAction"
+            text="CodePilot Tab: Accept Next Suggestion">
+      <keyboard-shortcut first-keystroke="TAB" keymap="$default"/>
+      <keyboard-shortcut first-keystroke="TAB" keymap="Mac OS X 10.5+"/>
       <keyboard-shortcut first-keystroke="alt ENTER" keymap="$default"/>
       <keyboard-shortcut first-keystroke="alt ENTER" keymap="Mac OS X 10.5+"/>
     </action>
-    <action id="CodePilot.CursorTab.Dismiss"
-            class="io.codepilot.plugin.completion.DismissCursorTabSuggestionAction"
-            text="CodePilot Cursor Tab: Dismiss Suggestion">
+    <action id="CodePilot.Tab.Dismiss"
+            class="io.codepilot.plugin.completion.DismissCodePilotTabSuggestionAction"
+            text="CodePilot Tab: Dismiss Suggestion">
       <keyboard-shortcut first-keystroke="ESCAPE" keymap="$default"/>
       <keyboard-shortcut first-keystroke="ESCAPE" keymap="Mac OS X 10.5+"/>
     </action>

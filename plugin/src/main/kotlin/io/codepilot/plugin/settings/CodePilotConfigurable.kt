@@ -40,8 +40,12 @@ class CodePilotConfigurable : Configurable {
                     }
                 }
                 group("Context & UX") {
-                    row("Preferred locale:") {
-                        textField().bindText({ state.preferredLocale }, { state.preferredLocale = it })
+                    row("Display language (Web UI):") {
+                        comboBox(listOf(LocaleHelper.EN, LocaleHelper.ZH))
+                            .bindItem(
+                                { LocaleHelper.normalize(state.preferredLocale) },
+                                { selected -> state.preferredLocale = LocaleHelper.normalize(selected) },
+                            )
                     }
                     row("Context budget (tokens):") {
                         intTextField().bindIntText({ state.contextBudgetTokens }, { state.contextBudgetTokens = it })

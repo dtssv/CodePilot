@@ -23,6 +23,7 @@ export interface ModelRouteInfo {
 }
 
 export interface ModelAuthBridgeHandlers {
+    setAuthChecked: (v: boolean) => void;
     setAuthenticated: (v: boolean) => void;
     setModels: (models: ModelOption[]) => void;
     setSelectedModelId: (id: string) => void;
@@ -36,14 +37,18 @@ export function installModelAuthBridge(h: ModelAuthBridgeHandlers): () => void {
     const unsubs = [
         onPluginEvent('auth_state', (payload) => {
             const state = payload as { authenticated: boolean };
+            h.setAuthChecked(true);
             h.setAuthenticated(state.authenticated);
+            if (state.authenticated) {
+                bootstrapAuthenticatedSession();
+            }
         }),
         onPluginEvent('auth_login_result', (payload) => {
             const result = payload as { success: boolean };
             if (result.success) {
+                h.setAuthChecked(true);
                 h.setAuthenticated(true);
-                sendToPlugin('fetch_models', {}).catch(() => undefined);
-                sendToPlugin('list_sessions', {}).catch(() => undefined);
+                bootstrapAuthenticatedSession();
             }
         }),
         onPluginEvent('models_loaded', (payload) => {

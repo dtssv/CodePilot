@@ -3,12 +3,15 @@ package io.codepilot.plugin.actions
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiDirectory
+import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
+import com.intellij.psi.PsiMethod
+import io.codepilot.plugin.i18n.CodePilotBundle
 import io.codepilot.plugin.toolwindow.CefChatPanelRegistry
 
 /**
@@ -33,37 +36,37 @@ class AddToChatAction : AnAction() {
         // Try to determine context type and build display / fullCode
         val contextItem = buildContextStatic(editor, psiFile, psiElement)
         if (contextItem == null) {
-            Messages.showInfoMessage(project, "Select code, a file, or a package first.", "CodePilot")
+            Messages.showInfoMessage(
+                project,
+                CodePilotBundle.message("contextMenu.addToChat.needSelection"),
+                "CodePilot",
+            )
             return
         }
 
         val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
+        if (tw.contentManager.contentCount == 0) {
+            tw.show(null)
+        }
         tw.show {
-            ApplicationManager.getApplication().invokeLater {
-                val panel = CefChatPanelRegistry.getInstance(project)
-                if (panel != null) {
-                    // Store fullCode in the panel's contextStore (not in the message)
-                    val ctxId =
-                        java.util.UUID
-                            .randomUUID()
-                            .toString()
-                    panel.storeContext(ctxId, contextItem.fullCode)
-                    // Only send compact reference to WebUI
-                    panel.dispatchToWeb(
-                        "context_added",
-                        mapOf(
-                            "id" to ctxId,
-                            "type" to contextItem.type,
-                            "display" to contextItem.display,
-                            "filePath" to contextItem.filePath,
-                            "language" to contextItem.language,
-                            "startLine" to contextItem.startLine,
-                            "endLine" to contextItem.endLine,
-                        ),
-                    )
-                } else {
-                    ClipboardBridge.push(contextItem.fullCode, null)
-                }
+            CefChatPanelRegistry.withSink(
+                project,
+                onMissing = { ClipboardBridge.push(contextItem.fullCode, null) },
+            ) { sink ->
+                sink.focusChatTab()
+                val ctxId = java.util.UUID.randomUUID().toString()
+                sink.storeContext(ctxId, contextItem.fullCode)
+                sink.dispatchContextAdded(
+                    mapOf(
+                        "id" to ctxId,
+                        "type" to contextItem.type,
+                        "display" to contextItem.display,
+                        "filePath" to contextItem.filePath,
+                        "language" to contextItem.language,
+                        "startLine" to contextItem.startLine,
+                        "endLine" to contextItem.endLine,
+                    ),
+                )
             }
         }
     }
@@ -76,7 +79,7 @@ class AddToChatAction : AnAction() {
     }
 
     data class ContextItem(
-        val type: String, // "code" | "file" | "package"
+        val type: String, // "code" | "file" | "package" | "symbol"
         val display: String, // compact label for the chip
         val fullCode: String, // complete text sent to backend
         val filePath: String,
@@ -118,7 +121,43 @@ class AddToChatAction : AnAction() {
                 )
             }
 
-            // 2. Package / directory (from Project View)
+            // 2. Class or method under caret (editor, no selection)
+            if (editor != null && psiFile != null && selectedText.isNullOrBlank()) {
+                val elem = psiElement as? PsiElement
+                if (elem != null && elem.containingFile == psiFile && (elem is PsiClass || elem is PsiMethod)) {
+                    val doc = editor.document
+                    val range = elem.textRange
+                    val startLine = doc.getLineNumber(range.startOffset) + 1
+                    val endLine = (doc.getLineNumber(range.endOffset) + 1).coerceAtLeast(startLine)
+                    val fileName = psiFile.virtualFile?.name ?: psiFile.name
+                    val lang = psiFile.language?.id ?: "text"
+                    val path = psiFile.virtualFile?.path ?: ""
+                    val name =
+                        when (elem) {
+                            is PsiClass -> elem.name ?: "Class"
+                            is PsiMethod -> elem.name ?: "Method"
+                            else -> "Symbol"
+                        }
+                    val kind =
+                        when (elem) {
+                            is PsiClass -> "class"
+                            is PsiMethod -> "method"
+                            else -> "symbol"
+                        }
+                    val kindLabel = CodePilotBundle.message("psiKind.$kind")
+                    return ContextItem(
+                        type = "symbol",
+                        display = "$kindLabel «$name» — $fileName :$startLine-$endLine",
+                        fullCode = elem.text,
+                        filePath = path,
+                        language = lang,
+                        startLine = startLine,
+                        endLine = endLine,
+                    )
+                }
+            }
+
+            // 3. Package / directory (from Project View)
             if (psiElement is PsiDirectory) {
                 val dirName = psiElement.name ?: "package"
                 val vPath = psiElement.virtualFile?.path ?: ""
@@ -135,7 +174,7 @@ class AddToChatAction : AnAction() {
                 )
             }
 
-            // 3. Whole file (no selection, from Project View or editor)
+            // 4. Whole file (no selection, from Project View or editor)
             if (psiFile != null && psiFile.text.isNotBlank()) {
                 val fileName = psiFile.virtualFile?.name ?: psiFile.name
                 val lang = psiFile.language?.id ?: "text"

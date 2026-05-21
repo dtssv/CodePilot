@@ -9,10 +9,10 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Dispatches info requests to either client-side (via tool_call SSE) or
- * server-side (RAG, HTTP fetch, MCP read-only) executors.
+ * server-side (RAG, HTTP fetch) executors.
  *
- * Client-side requests are sent via SSE and awaited via ToolResultBus.
- * Server-side requests are executed in parallel on the backend.
+ * <p>MCP tool calls ({@code mcp.call}) are always routed to the plugin so stdio
+ * and local process transports work reliably.
  */
 @Component
 public class InfoRequestDispatcher {
@@ -20,11 +20,12 @@ public class InfoRequestDispatcher {
     private static final Set<String> CLIENT_SIDE_KINDS = Set.of(
             "fs.read", "fs.list", "fs.grep",
             "code.outline", "code.symbol", "code.usages",
-            "shell.exec"
+            "shell.exec",
+            "mcp.call"
     );
 
     private static final Set<String> SERVER_SIDE_KINDS = Set.of(
-            "rag.search", "mcp.call", "http.fetch"
+            "rag.search", "http.fetch"
     );
 
     private final ServerToolExecutor serverToolExecutor;

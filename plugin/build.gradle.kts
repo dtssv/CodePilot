@@ -1,7 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.1.21"
     id("org.jetbrains.intellij.platform") version "2.1.0"
     id("org.jlleitschuh.gradle.ktlint") version "12.1.1"
 }
@@ -12,9 +12,17 @@ version = providers.gradleProperty("codePilotVersion").getOrElse("1.0.0-SNAPSHOT
 // Dev token: set CODEPILOT_DEV_TOKEN env var to embed a dev bypass token in the build.
 // Empty string (default) means production build with no dev bypass.
 val codePilotDevToken = providers.environmentVariable("CODEPILOT_DEV_TOKEN").getOrElse("")
+/** When false, hides dev sign-in in WebUI (set CODEPILOT_DEV_LOGIN_UI=false at build time). */
+val codePilotDevLoginUi = providers.environmentVariable("CODEPILOT_DEV_LOGIN_UI").getOrElse("true")
 
 kotlin {
     jvmToolchain(21)
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
 }
 
 repositories {
@@ -91,6 +99,7 @@ val webUiBuild by tasks.registering(Exec::class) {
     description = "Build WebUI (vite)"
     dependsOn(webUiInstall)
     workingDir = webUiDir
+    environment("CODEPILOT_DEV_LOGIN_UI", codePilotDevLoginUi)
     commandLine(npmExecutable, "run", "build")
     inputs.dir(webUiDir.resolve("src"))
     inputs.file(webUiDir.resolve("index.html"))
@@ -115,11 +124,14 @@ val generateDevProps by tasks.registering {
         val dir = outDir.get().asFile
         dir.mkdirs()
         val file = File(dir, "codepilot-dev.properties")
-        if (codePilotDevToken.isNotEmpty()) {
-            file.writeText("devToken=$codePilotDevToken\n")
-        } else {
-            file.writeText("")
-        }
+        file.writeText(
+            buildString {
+                if (codePilotDevToken.isNotEmpty()) {
+                    appendLine("devToken=$codePilotDevToken")
+                }
+                appendLine("devLoginEnabled=$codePilotDevLoginUi")
+            },
+        )
     }
 }
 

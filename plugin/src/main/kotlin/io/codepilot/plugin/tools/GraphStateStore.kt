@@ -165,6 +165,10 @@ class GraphStateStore(
             state.put("resumeNextNode", it)
         }
         data.path("kind").asText(null)?.let { state.put("lastCheckpointKind", it) }
+        val journal = data.path("graphExecutionJournal")
+        if (!journal.isMissingNode && journal.isObject) {
+            state.set<JsonNode>("graphExecutionJournal", journal.deepCopy())
+        }
         persist()
     }
 

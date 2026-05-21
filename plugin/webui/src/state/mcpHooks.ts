@@ -64,6 +64,8 @@ export const mcpApi = {
     setGranted: (server: string, tool: string, granted: boolean) =>
         sendToPlugin('mcp.set_granted', { server, tool, granted }),
     editConfig: (content: string) => sendToPlugin('mcp.edit_config', { content }),
+    installJson: (json: string, defaultName?: string) =>
+        sendToPlugin('mcp.install_json', { json, ...(defaultName ? { defaultName } : {}) }),
 };
 
 export const hooksApi = {

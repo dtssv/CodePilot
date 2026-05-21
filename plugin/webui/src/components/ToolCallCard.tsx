@@ -299,6 +299,11 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                 {status === 'error' && '✗'}
             </span>
             )}
+            {status === 'error' && typeof toolCall.result?.errorMessage === 'string' && (
+                <span className="tool-call-detail muted" title={toolCall.result.errorMessage}>
+                    {toolCall.result.errorMessage}
+                </span>
+            )}
             {toolCall.name === 'shell.exec' && shellAsk && (
                 <ShellAskBar ask={shellAsk} />
             )}

@@ -11,20 +11,49 @@ public final class LlmJsonExtract {
     if (response == null) {
       return "{}";
     }
-    String trimmed = GraphMarkerSanitizer.stripForDisplay(response).trim();
-    if (trimmed.contains(GraphStreamProcessor.MARKER_GRAPH)) {
-      int start = trimmed.indexOf(GraphStreamProcessor.MARKER_GRAPH)
+    // Search for <<<GRAPH_JSON>>> in the ORIGINAL response first —
+    // stripForDisplay removes all markers, making the check below impossible.
+    if (response.contains(GraphStreamProcessor.MARKER_GRAPH)) {
+      int start = response.indexOf(GraphStreamProcessor.MARKER_GRAPH)
           + GraphStreamProcessor.MARKER_GRAPH.length();
-      int end = trimmed.indexOf(GraphStreamProcessor.MARKER_END, start);
-      String body = end > start ? trimmed.substring(start, end).trim() : trimmed.substring(start).trim();
+      int end = response.indexOf(GraphStreamProcessor.MARKER_END, start);
+      String body = end > start ? response.substring(start, end).trim() : response.substring(start).trim();
       return extractJsonObject(body);
     }
+    String trimmed = GraphMarkerSanitizer.stripForDisplay(response).trim();
     if (trimmed.startsWith("```")) {
-      int start = trimmed.indexOf('\n') + 1;
+      // Find the end of the opening fence line (``` or ```json etc.)
+      int newlineIdx = trimmed.indexOf('\n');
+      int start;
+      if (newlineIdx >= 0) {
+        // Normal case: ```json\n{...}\n```
+        start = newlineIdx + 1;
+      } else {
+        // Inline case: ```json{"a":1}```  — skip the opening ``` and optional lang tag
+        start = 3; // past opening ```
+        // skip optional language tag (e.g. "json", "JSON") that is not part of the JSON body
+        // JSON must start with '{' or '['
+        int jsonStart = -1;
+        for (int i = start; i < trimmed.length(); i++) {
+          char c = trimmed.charAt(i);
+          if (c == '{' || c == '[') {
+            jsonStart = i;
+            break;
+          }
+          // skip letters/digits of the lang tag
+          if (!Character.isLetterOrDigit(c) && c != '_' && c != '-') {
+            break;
+          }
+        }
+        if (jsonStart >= 0) start = jsonStart;
+      }
       int end = trimmed.lastIndexOf("```");
-      if (end > start) {
+      // Ensure the closing ``` is different from the opening one
+      if (end > 3) {
         return extractJsonObject(trimmed.substring(start, end).trim());
       }
+      // No closing fence — extract from start to end of string
+      return extractJsonObject(trimmed.substring(start).trim());
     }
     return extractJsonObject(trimmed);
   }
@@ -77,7 +106,36 @@ public final class LlmJsonExtract {
   }
 
   public static String parseableJson(String response) {
-    return sanitizeControlChars(extractJson(response));
+    String json = extractJson(response);
+    json = stripPreJsonProse(json);
+    return sanitizeControlChars(json);
+  }
+
+  /**
+   * When LLM outputs mixed format (AGENT_CONTENT prose + GRAPH_JSON), the extracted JSON
+   * may still have residual Markdown prose before the first {@code {}. Strip it so Jackson
+   * can parse the JSON object correctly.
+   */
+  static String stripPreJsonProse(String text) {
+    if (text == null || text.isBlank()) {
+      return text;
+    }
+    int firstBrace = text.indexOf('{');
+    if (firstBrace <= 0) {
+      return text;
+    }
+    // Only strip if the text before { is clearly not JSON (contains letters/symbols)
+    String prefix = text.substring(0, firstBrace).trim();
+    if (prefix.isEmpty()) {
+      return text;
+    }
+    // If prefix looks like prose/markdown (has non-JSON characters), strip it
+    // Keep the JSON object starting from {
+    if (prefix.chars().anyMatch(c -> Character.isLetter(c) && c != 'n' && c != 't'
+        && c != 'r' && c != 'u' && c != 'f' && c != 'a' && c != 'e')) {
+      return text.substring(firstBrace);
+    }
+    return text;
   }
 
   /** First balanced {@code {...}} object in text (skips prose before JSON). */

@@ -1,6 +1,12 @@
 [GENERATE TASK]
 {{projectMeta}}
 User goal: {{input}}
+
+[IDE scoped snippets]
+When the goal starts with a short imperative and includes a pasted snippet (often after "Context:"), implement THAT task
+only for THIS snippet/step; do not reflow unrelated modules. Match intent: review-style tasks in a phase with intent
+analyze/synthesize use textOutput; code-change phases use minimal patches.
+
 Current phase: {{phaseId}}
 Phase title: {{phaseTitle}}
 Phase intent: {{phaseIntent}}
@@ -67,6 +73,8 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 - For modifying existing files, use op="replace" with search/replace pairs.
 - If the code already exists and no changes are needed, or you want to provide an explanation instead of code, set "textOutput" to your response text:
   {"textOutput": "Your explanation or status here"}
+- If [SESSION EXECUTION FACTS] lists files under "already written", do NOT emit patches recreating those paths with new analysis — the deliverable exists; use textOutput to summarize or confirm.
+- On compile/run/code-change steps after a tool or build failure, the system routes to **repair**: fix existing source files (fs.replace) or switch build commands (e.g. g++ instead of cmake). Do NOT create new test/helper files unless the step has no file to update.
 - If you need user confirmation or decision, set askUser to a structured question:
   {"text": "question text", "kind": "single-choice|yes-no|freeform", "options": [{"id": "opt1", "label": "Option 1"}]}
 - askUser is ONLY for product decisions the user must make (which approach, skip step, confirm risk). Do NOT use askUser to report backend/HTTP/model failures — those are handled by the system.
@@ -86,7 +94,7 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
   - Reading the same file repeatedly — if it was already gathered, it's in [GATHERED CONTEXT]
 - If you do need infoRequests, use this format:
   [{"id": "unique-id", "kind": "fs.read|fs.list|code.outline|code.symbol|code.usages|ide.diagnostics|mcp.call", "args": {"path": "..."}}]
-  - kind options: fs.read (read a single file), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors), mcp.call (call an MCP server tool)
+  - kind options: fs.read (read a single file), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors), mcp.call (call an MCP server tool — executed on the IDE plugin)
   - IMPORTANT: fs.read only works on individual files. To explore directory structure, use kind="fs.list". Do NOT use fs.read with a directory path.
   - Only request files that actually exist per the project meta. Do NOT guess file names.
 - For mcp.call kind, args must include: {"fullName": "mcp.<serverId>.<toolName>", "arguments": {...}}

@@ -65,10 +65,9 @@ public final class ShellCommandGate {
       }
       if (stepKind == PhaseGoalHelper.StepKind.COMPILE
           && isRepeatedFailedShell(gathered, norm)
-          && norm.contains("cmake")
-          && !norm.contains("--build")) {
+          && looksLikeConfigure(norm)) {
         return Optional.of(
-            "Skipped: cmake configure already failed. Use g++/make or another build tool, "
+            "Skipped: this configure/setup command already failed. Try a different build or compile approach, "
                 + "or use textOutput if compile already succeeded via another command.");
       }
     }
@@ -153,5 +152,17 @@ public final class ShellCommandGate {
 
   private static boolean looksLikeRun(String norm) {
     return norm.startsWith("./") || norm.contains(" ./") || norm.contains("./main");
+  }
+
+  /** Heuristic: command looks like a project configure/setup step (not a build invocation). */
+  private static boolean looksLikeConfigure(String norm) {
+    // cmake without --build = configure; autogen/configure/autoreconf are also configure steps
+    if (norm.contains("cmake") && !norm.contains("--build")) {
+      return true;
+    }
+    return norm.contains("./configure")
+        || norm.contains("autoreconf")
+        || norm.contains("autogen")
+        || norm.contains("meson setup");
   }
 }

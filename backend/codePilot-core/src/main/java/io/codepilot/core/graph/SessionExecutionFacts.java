@@ -32,8 +32,15 @@ public final class SessionExecutionFacts {
   private static final String KEY_SUCCESSFUL = "successfulOutcomes";
   private static final String KEY_PRIMARY_TARGETS = "primaryTargets";
   private static final String KEY_TOUCHED_PATHS = "touchedPaths";
+  /** Output files successfully written via fs.applyPatch this session (normalized paths). */
+  private static final String KEY_WRITTEN_FILES = "writtenFiles";
   private static final String KEY_SUCCESSFUL_FAMILIES = "successfulFamilies";
   private static final String KEY_FAILED_FAMILIES = "failedFamilies";
+  /** Shell execution history for LLM context: each entry is "family|command|exitCode|ok|errorSnippet".
+   *  Covers all scenarios: tool-missing (exit!=0), compilation errors (exit!=0),
+   *  successful-but-unsatisfied (exit=0, e.g. tail -n 10 found nothing), etc.
+   *  The LLM evaluates these and decides: switch command, fix source and retry, or expand scope. */
+  private static final String KEY_FAILED_DETAILS = "shellHistory";
 
   /** Shell CLI flag shape (-o / --output), not natural-language step titles. */
   private static final Pattern SHELL_OUTPUT_FLAG =
@@ -46,10 +53,20 @@ public final class SessionExecutionFacts {
       Pattern.compile(
           "(?:[\\w.-]+/)+[\\w.-]+|(?:\\./)?[\\w.-]+\\.(?:cpp|hpp|h|c|java|kt|py|js|ts|go|rs|md|json|ya?ml|xml|gradle|toml)|build/|src/|dist/|target/");
 
+  /** Common source extensions — used only to prioritize paths from listings, not to match filenames. */
+  private static final Pattern SOURCE_FILE_EXT =
+      Pattern.compile(
+          "(?i).+\\.(cpp|hpp|h|c|cc|cxx|java|kt|py|js|ts|tsx|jsx|go|rs|rb|php|cs|swift|m|mm|scala|vue|svelte)$");
+
+  private static final int MAX_TARGETS_FROM_LIST = 32;
+
   private SessionExecutionFacts() {}
 
   @SuppressWarnings("unchecked")
   public static Map<String, Object> fromState(OverAllState state) {
+    if (state == null) {
+      return new LinkedHashMap<>();
+    }
     Object raw = state.value(STATE_KEY).orElse(null);
     if (raw instanceof Map<?, ?> m) {
       return migrateLegacyKeys(new LinkedHashMap<>((Map<String, Object>) m));
@@ -71,6 +88,16 @@ public final class SessionExecutionFacts {
     if (facts != null && !facts.isEmpty()) {
       updates.put(STATE_KEY, facts);
     }
+  }
+
+  /** Clear per-phase history (shellHistory) when advancing to the next phase.
+   *  This allows the LLM to start fresh in a new phase without being constrained
+   *  by stale command history from previous phases. Persistent facts (failedFamilies,
+   *  successFamilies, primaryTargets, planPivot) are retained across phases. */
+  public static void clearPhaseHistory(Map<String, Object> updates, OverAllState state) {
+    Map<String, Object> facts = fromState(state);
+    facts.put(KEY_FAILED_DETAILS, List.of());
+    putInUpdates(updates, facts);
   }
 
   public static boolean planPivot(OverAllState state) {
@@ -100,10 +127,37 @@ public final class SessionExecutionFacts {
         "The checklist was drafted before tools ran. Prefer these facts over stale plan paths, "
             + "commands, or assumptions from earlier steps.\n");
     if (!failed.isEmpty()) {
-      sb.append("- Failed attempts (do not retry blindly):\n");
+      sb.append("- Failed attempts (review before deciding next action):\n");
       for (String f : failed) {
         sb.append("  • ").append(f).append('\n');
       }
+    }
+    List<String> shellHistory = stringList(facts, KEY_FAILED_DETAILS);
+    if (!shellHistory.isEmpty()) {
+      sb.append("- Shell command history — evaluate each result to decide your next action:\n");
+      for (String h : shellHistory) {
+        // Format: "family|command|exitCode|ok|errorSnippet"
+        String[] parts = h.split("\\|", 5);
+        String family = parts.length > 0 ? parts[0] : "?";
+        String cmd = parts.length > 1 ? parts[1] : "?";
+        String exitCode = parts.length > 2 ? parts[2] : "?";
+        String ok = parts.length > 3 ? parts[3] : "?";
+        String err = parts.length > 4 ? parts[4] : "";
+        sb.append("  • ").append(family).append(": `").append(cmd).append("` exit=").append(exitCode);
+        if ("false".equals(ok) && !err.isEmpty()) {
+          sb.append(" ✗ error=").append(err);
+        } else if ("true".equals(ok)) {
+          sb.append(" ✓");
+        }
+        sb.append('\n');
+      }
+      sb.append("  Decide your next action based on each command's result:\n");
+      sb.append("  - Command failed to execute or produced errors: diagnose the cause from the error output, then either\n");
+      sb.append("    switch to a different approach, or fix the underlying issue and retry with a modified command.\n");
+      sb.append("  - Command succeeded but the output did not meet expectations: adjust the command parameters\n");
+      sb.append("    (e.g., increase scope, change filters, use different options) or try a different approach.\n");
+      sb.append("  - Command succeeded and goal met: proceed to the next step, do not rerun.\n");
+      sb.append("  Do NOT repeat the exact same command that already failed — always modify it.\n");
     }
     if (!successful.isEmpty()) {
       sb.append("- Successful outcomes:\n");
@@ -128,7 +182,60 @@ public final class SessionExecutionFacts {
     if (!resolved.isBlank()) {
       sb.append("- Resolved action for this step: ").append(resolved).append('\n');
     }
+    List<String> written = writtenFiles(state);
+    if (!written.isEmpty()) {
+      sb.append("- Files already written this session (do NOT recreate with different content):\n");
+      for (String path : written) {
+        sb.append("  • ").append(path).append('\n');
+      }
+      sb.append(
+          "  If the deliverable exists, use textOutput to confirm completion — do not emit patches "
+              + "that rewrite these paths unless fixing a verify/repair failure.\n");
+    }
     return sb.toString();
+  }
+
+  public static boolean allowWrittenFileOverwrite(OverAllState state) {
+    return Boolean.TRUE.equals(state.value("allowWrittenFileOverwrite").orElse(false));
+  }
+
+  public static List<String> writtenFiles(OverAllState state) {
+    return stringList(fromState(state), KEY_WRITTEN_FILES);
+  }
+
+  public static boolean hasWrittenOutputs(OverAllState state) {
+    return !writtenFiles(state).isEmpty();
+  }
+
+  public static boolean isFileWritten(OverAllState state, String path) {
+    if (path == null || path.isBlank()) {
+      return false;
+    }
+    String norm = normalizePath(path);
+    for (String written : writtenFiles(state)) {
+      if (norm.equals(normalizePath(written))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public static void recordWrittenFile(Map<String, Object> facts, String path) {
+    if (path == null || path.isBlank()) {
+      return;
+    }
+    Set<String> written = new LinkedHashSet<>(stringList(facts, KEY_WRITTEN_FILES));
+    written.add(normalizePath(path));
+    facts.put(KEY_WRITTEN_FILES, new ArrayList<>(written));
+  }
+
+  public static void recordWrittenFiles(
+      OverAllState state, Map<String, Object> updates, Iterable<String> paths) {
+    Map<String, Object> facts = fromState(state);
+    for (String path : paths) {
+      recordWrittenFile(facts, path);
+    }
+    putInUpdates(updates, facts);
   }
 
   public static String resolvedStepAction(OverAllState state) {
@@ -199,28 +306,30 @@ public final class SessionExecutionFacts {
     return gatheredHasGenericInspect(gathered);
   }
 
-  /** Block probes that repeat failed approaches or stale plan paths after a pivot. */
+  /** Block probes that follow stale plan paths after a pivot.
+   *  Command-family-level blocking (failedFamilies) was previously used to hard-block retries,
+   *  but this is too aggressive — it prevents the LLM from retrying with modified commands after
+   *  fixing source code, using different flags, or reading more content. Instead, all failure
+   *  details are now provided to the LLM via [SESSION EXECUTION FACTS] (see failedDetails),
+   *  and the LLM decides whether a different approach can succeed. Only stale-path blocking
+   *  (referencing files that no longer match the primary target) remains here. */
   public static java.util.Optional<String> staleProbeBlockReason(
       String command, OverAllState state) {
     if (command == null || command.isBlank()) {
       return java.util.Optional.empty();
     }
     Map<String, Object> facts = fromState(state);
-    if (!planPivot(state) && stringList(facts, KEY_FAILED_FAMILIES).isEmpty()) {
+    if (!planPivot(state)) {
       return java.util.Optional.empty();
     }
 
     String norm = ShellCommandGate.normalize(command);
-    String family = commandFamily(norm);
 
-    for (String failedFamily : stringList(facts, KEY_FAILED_FAMILIES)) {
-      if (family.equals(failedFamily) || norm.contains(failedFamily)) {
-        return java.util.Optional.of(
-            "Skipped: `"
-                + failedFamily
-                + "` already failed this session — use [SESSION EXECUTION FACTS].");
-      }
-    }
+    // NOTE: failedFamilies blocking is intentionally removed here. Previously, any command
+    // whose family matched a previous failure was hard-blocked. This prevented the LLM from
+    // retrying with modifications (e.g., fixed source, different flags, more content) that
+    // could succeed. The LLM now receives full failure context in [SESSION EXECUTION FACTS]
+    // and can decide for itself whether to retry, switch approach, or expand search scope.
 
     List<String> targets = stringList(facts, KEY_PRIMARY_TARGETS);
     if (targets.isEmpty()) {
@@ -251,6 +360,7 @@ public final class SessionExecutionFacts {
     Set<String> touched = new LinkedHashSet<>(stringList(facts, KEY_TOUCHED_PATHS));
     Set<String> failedFamilies = new LinkedHashSet<>(stringList(facts, KEY_FAILED_FAMILIES));
     Set<String> successFamilies = new LinkedHashSet<>(stringList(facts, KEY_SUCCESSFUL_FAMILIES));
+    List<String> failedDetails = new ArrayList<>(stringList(facts, KEY_FAILED_DETAILS));
     String priorSuccessFamily = successFamilies.isEmpty() ? "" : successFamilies.iterator().next();
 
     for (Object value : gathered.values()) {
@@ -267,7 +377,13 @@ public final class SessionExecutionFacts {
           touched.add(path);
           if (ok) {
             successful.add(kind + ": " + path);
+          } else {
+            String err = stringOr(entry.get("errorMessage"), stringOr(entry.get("error"), "failed"));
+            failed.add(kind + ": " + path + " — " + err);
           }
+        }
+        if ("fs.list".equals(kind) && ok) {
+          absorbListedFilePathsFromList(entry, targets);
         }
         continue;
       }
@@ -291,6 +407,19 @@ public final class SessionExecutionFacts {
         if (!family.isBlank()) {
           failedFamilies.add(family);
         }
+      }
+      // Record ALL shell results (both success and failure) in shellHistory so the LLM
+      // has full context to decide next action. This covers:
+      //   - Tool-missing (exit!=0): LLM may switch to an alternative command
+      //   - Compilation/runtime error (exit!=0): LLM may fix source and retry
+      //   - Successful but unsatisfied (exit=0, e.g. tail -n 10 found nothing):
+      //     LLM may expand scope (more lines, broader search)
+      //   - Successful and satisfied (exit=0): LLM knows this worked
+      int exitCode = exitCodeFromEntry(entry);
+      String errSnippet = ok ? "" : truncate(stringOr(entry.get("errorMessage"), "exit=" + exitCode), 120);
+      failedDetails.add(family + "|" + truncate(cmd, 80) + "|" + exitCode + "|" + ok + "|" + errSnippet);
+
+      if (!ok) {
         continue;
       }
 
@@ -320,6 +449,9 @@ public final class SessionExecutionFacts {
     facts.put(KEY_TOUCHED_PATHS, new ArrayList<>(touched));
     facts.put(KEY_FAILED_FAMILIES, new ArrayList<>(failedFamilies));
     facts.put(KEY_SUCCESSFUL_FAMILIES, new ArrayList<>(successFamilies));
+    facts.put(KEY_FAILED_DETAILS, new ArrayList<>(failedDetails));
+
+    detectReadPathMismatchPivot(facts, gathered, targets);
 
     if (!Boolean.TRUE.equals(facts.get(KEY_PLAN_PIVOT))) {
       detectPivotFromFailures(facts, failedFamilies, successFamilies, targets);
@@ -645,6 +777,139 @@ public final class SessionExecutionFacts {
 
   // ── shared utilities ─────────────────────────────────────────────────────
 
+  /** Record file paths from a successful directory listing (extension-based, capped). */
+  @SuppressWarnings("unchecked")
+  private static void absorbListedFilePathsFromList(
+      Map<String, Object> entry, Set<String> targets) {
+    Object result = entry.get("result");
+    if (!(result instanceof Map<?, ?> raw)) {
+      return;
+    }
+    Object entries = ((Map<String, Object>) raw).get("entries");
+    if (!(entries instanceof List<?> list)) {
+      return;
+    }
+    String base = pathFromResult(entry).replace('\\', '/').replaceAll("^\\./", "");
+    int added = 0;
+    for (Object item : list) {
+      if (added >= MAX_TARGETS_FROM_LIST) {
+        break;
+      }
+      if (!(item instanceof Map<?, ?> ent)) {
+        continue;
+      }
+      Map<String, Object> em = (Map<String, Object>) ent;
+      if (!"file".equals(String.valueOf(em.getOrDefault("type", "")))) {
+        continue;
+      }
+      String name = String.valueOf(em.getOrDefault("name", "")).trim();
+      if (name.isBlank() || !SOURCE_FILE_EXT.matcher(name).matches()) {
+        continue;
+      }
+      String full = base.isBlank() ? name : base + "/" + name;
+      targets.add(normalizeListedPath(full));
+      added++;
+    }
+  }
+
+  /**
+   * When many reads under directory D fail but listings discovered source files outside D,
+   * record a plan pivot so later steps use discovered paths instead of stale plan assumptions.
+   */
+  @SuppressWarnings("unchecked")
+  private static void detectReadPathMismatchPivot(
+      Map<String, Object> facts, Map<String, Object> gathered, Set<String> targets) {
+    Map<String, Integer> failedReadsByDir = failedReadCountsByParentDir(gathered);
+    if (failedReadsByDir.isEmpty() || targets.isEmpty()) {
+      return;
+    }
+    String hotFailedDir =
+        failedReadsByDir.entrySet().stream()
+            .filter(e -> e.getValue() >= 2)
+            .map(Map.Entry::getKey)
+            .findFirst()
+            .orElse(null);
+    if (hotFailedDir == null) {
+      return;
+    }
+    List<String> alternates =
+        targets.stream()
+            .filter(t -> looksLikeSourceFile(t) && !isUnderDirectory(t, hotFailedDir))
+            .limit(3)
+            .toList();
+    if (alternates.isEmpty()) {
+      return;
+    }
+    facts.put(KEY_PLAN_PIVOT, true);
+    facts.put(
+        KEY_PIVOT_SUMMARY,
+        "Multiple fs.read attempts under `"
+            + hotFailedDir
+            + "` failed (paths not found). "
+            + "Use files discovered from successful fs.list — e.g. `"
+            + alternates.get(0)
+            + "`.");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Integer> failedReadCountsByParentDir(Map<String, Object> gathered) {
+    Map<String, Integer> counts = new LinkedHashMap<>();
+    for (Object value : gathered.values()) {
+      if (!(value instanceof Map<?, ?> raw)) {
+        continue;
+      }
+      Map<String, Object> entry = (Map<String, Object>) raw;
+      if (!"fs.read".equals(String.valueOf(entry.get("kind")))
+          || GatheredInfoFormatter.entrySucceeded(entry)) {
+        continue;
+      }
+      String path = pathFromResult(entry).replace('\\', '/').replaceAll("^\\./", "");
+      if (path.isBlank()) {
+        continue;
+      }
+      String dir = parentDirectory(path);
+      counts.merge(dir, 1, Integer::sum);
+    }
+    return counts;
+  }
+
+  private static boolean looksLikeSourceFile(String path) {
+    if (path == null || path.isBlank()) {
+      return false;
+    }
+    String name = path.replace('\\', '/');
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) {
+      name = name.substring(slash + 1);
+    }
+    return SOURCE_FILE_EXT.matcher(name).matches();
+  }
+
+  private static boolean isUnderDirectory(String path, String directory) {
+    if (path == null || directory == null || directory.isBlank()) {
+      return false;
+    }
+    String normPath = path.replace('\\', '/').replaceAll("^\\./", "");
+    String normDir = directory.replace('\\', '/').replaceAll("^\\./", "").replaceAll("/$", "");
+    if (normDir.isEmpty() || ".".equals(normDir)) {
+      return !normPath.contains("/");
+    }
+    return normPath.equals(normDir) || normPath.startsWith(normDir + "/");
+  }
+
+  private static String parentDirectory(String path) {
+    String p = path.replace('\\', '/').replaceAll("^\\./", "");
+    int slash = p.lastIndexOf('/');
+    if (slash <= 0) {
+      return ".";
+    }
+    return p.substring(0, slash);
+  }
+
+  private static String normalizeListedPath(String path) {
+    return path.replace('\\', '/').replaceAll("^\\./", "");
+  }
+
   private static String pathFromResult(Map<String, Object> entry) {
     Object result = entry.get("result");
     if (result instanceof Map<?, ?> m) {
@@ -698,4 +963,20 @@ public final class SessionExecutionFacts {
     }
     return List.of();
   }
+
+  /** Extract exit code from a gathered shell.exec entry's result map. */
+  private static int exitCodeFromEntry(Map<String, Object> entry) {
+    Object result = entry.get("result");
+    if (result instanceof Map<?, ?> m) {
+      Object ec = m.get("exitCode");
+      if (ec instanceof Number n) {
+        return n.intValue();
+      }
+      if (ec != null) {
+        try { return Integer.parseInt(ec.toString()); } catch (NumberFormatException ignored) {}
+      }
+    }
+    return -1; // unknown
+  }
+
 }

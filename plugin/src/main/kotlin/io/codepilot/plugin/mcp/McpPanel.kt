@@ -10,6 +10,8 @@ import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
+import io.codepilot.plugin.hooks.HookConfigPanel
+import io.codepilot.plugin.i18n.CodePilotBundle
 import io.codepilot.plugin.marketplace.LocalMarketplaceStore
 import java.awt.BorderLayout
 import java.awt.FlowLayout
@@ -74,8 +76,9 @@ class McpPanel(
         JPanel(BorderLayout()).apply {
             border = JBUI.Borders.empty(4)
             val tabs = JBTabbedPane()
-            tabs.addTab("Install MCP Server", buildInstallPane())
-            tabs.addTab("Installed", buildInstalledPane())
+            tabs.addTab(CodePilotBundle.message("mcpPanel.tabInstall"), buildInstallPane())
+            tabs.addTab(CodePilotBundle.message("mcpPanel.tabInstalled"), buildInstalledPane())
+            tabs.addTab(CodePilotBundle.message("mcpPanel.tabHooks"), HookConfigPanel(project).component)
             add(tabs, BorderLayout.CENTER)
             add(status, BorderLayout.SOUTH)
         }
@@ -190,133 +193,17 @@ class McpPanel(
             Messages.showWarningDialog(project, "Please paste a JSON configuration.", "CodePilot")
             return
         }
-        try {
-            val entries = parseJsonConfig(raw)
-            if (entries.isEmpty()) {
-                Messages.showErrorDialog(
-                    project,
-                    "Could not parse any MCP server from the JSON.\nExpected format: {\"mcpServers\":{\"name\":{\"command\":\"...\",\"args\":[...]}}}",
-                    "CodePilot",
-                )
-                return
-            }
-            var installed = 0
-            for (entry in entries) {
-                store.installMcp(entry)
-                installed++
-            }
-            status.text = "Installed $installed MCP server(s)."
-            refreshInstalled()
-            Messages.showInfoMessage(project, "Installed $installed MCP server(s): ${entries.joinToString { it.id }}", "CodePilot")
-        } catch (e: Exception) {
-            Messages.showErrorDialog(project, "Failed to parse JSON: ${e.message}", "CodePilot")
-        }
-    }
-
-    /**
-     * Parses MCP JSON config. Supports three transport modes and multiple formats:
-     *
-     * Transport modes:
-     * - stdio: {"command":"npx","args":[...],"env":{...}}
-     * - SSE:   {"url":"https://..."}
-     * - Streamable HTTP: {"url":"https://..."}
-     *
-     * Formats:
-     * 1. Standard: {"mcpServers":{"name":{...}}}
-     * 2. Single server: {"command":"..."} or {"url":"..."}
-     * 3. Direct map: {"name":{...}}
-     */
-    private fun parseJsonConfig(raw: String): List<LocalMarketplaceStore.McpEntry> {
-        val node = mapper.readTree(raw)
-        val results = mutableListOf<LocalMarketplaceStore.McpEntry>()
-
-        if (node.has("mcpServers")) {
-            val servers = node["mcpServers"]
-            servers.fieldNames().forEach { name ->
-                val server = servers[name]
-                results.add(parseSingleServer(name, server))
-            }
-        } else if (node.has("command") || node.has("url")) {
-            // Single server format (stdio or SSE/HTTP)
-            val name = nameField.text.trim().ifEmpty { "mcp-server" }
-            results.add(parseSingleServer(name, node))
-        } else {
-            // Try as a map of servers directly: {"name": {"command":"..."|"url":"..."}}
-            node.fieldNames().forEach { name ->
-                val server = node[name]
-                if (server.isObject && (server.has("command") || server.has("url"))) {
-                    results.add(parseSingleServer(name, server))
-                }
-            }
-        }
-        return results
-    }
-
-    private fun parseSingleServer(
-        name: String,
-        node: com.fasterxml.jackson.databind.JsonNode,
-    ): LocalMarketplaceStore.McpEntry {
-        val url = node["url"]?.asText()
-        val command = node["command"]?.asText()
-
-        // Determine transport mode
-        val transport = when {
-            url != null && command == null -> detectTransportFromUrl(url)
-            else -> LocalMarketplaceStore.McpTransport.STDIO
-        }
-
-        // Parse common fields
-        val env = mutableMapOf<String, String>()
-        node["env"]?.fields()?.forEach { (k, v) -> env[k] = v.asText("") }
-        val headers = mutableMapOf<String, String>()
-        node["headers"]?.fields()?.forEach { (k, v) -> headers[k] = v.asText("") }
-
-        if (transport == LocalMarketplaceStore.McpTransport.STDIO) {
-            // stdio mode: command is required
-            val cmd = command ?: error("Missing 'command' field for stdio server '$name'")
-            val args = mutableListOf<String>()
-            node["args"]?.forEach { args.add(it.asText()) }
-            val cwd = node["cwd"]?.asText()
-            return LocalMarketplaceStore.McpEntry(
-                id = name,
-                argv = buildList {
-                    add(cmd)
-                    addAll(args)
-                },
-                cwd = cwd,
-                env = env,
-                transport = transport,
-                url = url,
-                headers = headers,
-                installedAt = java.time.Instant
-                    .now()
-                    .toString(),
-            )
-        } else {
-            // SSE / Streamable HTTP mode: url is required
-            val serverUrl = url ?: error("Missing 'url' field for remote server '$name'")
-            return LocalMarketplaceStore.McpEntry(
-                id = name,
-                argv = emptyList(),
-                env = env,
-                transport = transport,
-                url = serverUrl,
-                headers = headers,
-                installedAt = java.time.Instant
-                    .now()
-                    .toString(),
-            )
-        }
-    }
-
-    /** Detect transport mode from URL pattern. SSE typically uses /sse endpoint. */
-    private fun detectTransportFromUrl(url: String): LocalMarketplaceStore.McpTransport {
-        val lower = url.lowercase()
-        return if (lower.contains("/sse") || lower.contains("eventsource")) {
-            LocalMarketplaceStore.McpTransport.SSE
-        } else {
-            LocalMarketplaceStore.McpTransport.STREAMABLE_HTTP
-        }
+        val defaultName = nameField.text.trim().ifEmpty { "mcp-server" }
+        McpJsonInstaller.parseAndPersist(raw, defaultName).fold(
+            onSuccess = { (installed, ids) ->
+                status.text = "Installed $installed MCP server(s)."
+                refreshInstalled()
+                Messages.showInfoMessage(project, "Installed $installed MCP server(s): ${ids.joinToString()}", "CodePilot")
+            },
+            onFailure = { e ->
+                Messages.showErrorDialog(project, e.message ?: "Failed to parse or install MCP JSON.", "CodePilot")
+            },
+        )
     }
 
     private fun refreshInstalled() {

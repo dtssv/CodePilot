@@ -1,6 +1,28 @@
 # CodePilot — IntelliJ Platform Plugin
 
-Kotlin 2.0 + IntelliJ Platform Gradle Plugin 2.x. Targets IDEA 2024.2+.
+Kotlin 2.1 + IntelliJ Platform Gradle Plugin 2.x. Targets IDEA 2024.2+.
+
+## JDK for Gradle / Kotlin compilation
+
+Kotlin targets **Java 21** bytecode (`kotlin.jvmToolchain` + `java.toolchain`). Gradle also uses a **JDK 21** toolchain for compilation workers when available.
+
+Kotlin’s compiler bundles `JavaVersion` parsing that historically **mis-handles running Gradle on very new JDKs** (you may see `IllegalArgumentException: 25.x` or Kotlin daemon incremental-cache crashes on `proto.tab`). **`JAVA_HOME` should point at JDK 21 while building this module**, even if day-to-day tooling uses JDK 25+:
+
+```bash
+export JAVA_HOME="$(/usr/libexec/java_home -v 21)"   # macOS example
+```
+
+Or set `org.gradle.java.home=/path/to/jdk-21` in `plugin/gradle.properties` for this checkout only.
+
+If you previously hit Kotlin daemon incremental-cache corruption:
+
+```bash
+./gradlew --stop
+rm -rf build/kotlin
+./gradlew clean compileKotlin
+```
+
+**Integrations UX:** With the WebUI (JCEF) chat enabled, Skill + MCP are configured only inside the embedded app nav (**集成**). A second IDE tool-window tab named integrations is registered only when JCEF is off (Swing chat fallback).
 
 ## Build & run
 

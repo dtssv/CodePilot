@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -13,11 +15,14 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 /** Applies graph policy (Max / output budget) to ChatClient calls. */
 public final class GraphLlmHelper {
 
   private GraphLlmHelper() {}
+
+  private static final Logger log = LoggerFactory.getLogger(GraphLlmHelper.class);
 
   @SuppressWarnings("unchecked")
   public static String completeUserPrompt(ChatClient chatClient, OverAllState state, String userPrompt) {
@@ -128,17 +133,29 @@ public final class GraphLlmHelper {
   private static String collectStream(
       reactor.core.publisher.Flux<ChatResponse> flux, Consumer<String> onChunk) {
     var acc = new StringBuilder();
-    flux.map(GraphLlmHelper::deltaFromChatResponse)
-        .filter(s -> !s.isBlank())
-        .doOnNext(
-            chunk -> {
-              acc.append(chunk);
-              if (onChunk != null) {
-                onChunk.accept(chunk);
-              }
-            })
-        .blockLast();
+    try {
+      flux.map(GraphLlmHelper::deltaFromChatResponse)
+          .filter(s -> !s.isBlank())
+          .doOnNext(
+              chunk -> {
+                acc.append(chunk);
+                if (onChunk != null) {
+                  onChunk.accept(chunk);
+                }
+              })
+          .blockLast();
+    } catch (WebClientResponseException e) {
+      // Log detailed error info for 4xx client errors to help diagnose bad request causes
+      log.error("LLM API returned HTTP {}: response body={}",
+          e.getStatusCode().value(), abbreviateForLog(e.getResponseBodyAsString(), 500));
+      throw e;
+    }
     return acc.toString();
+  }
+
+  private static String abbreviateForLog(String s, int maxLen) {
+    if (s == null) return "null";
+    return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...[truncated]";
   }
 
   private static String deltaFromChatResponse(ChatResponse r) {

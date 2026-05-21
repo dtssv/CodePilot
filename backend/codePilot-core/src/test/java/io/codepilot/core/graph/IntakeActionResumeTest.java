@@ -53,6 +53,10 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
+            null,
+            null,
+            null,
+            null,
             null);
 
     OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
@@ -99,6 +103,9 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
+            null,
+            null,
+            null,
             Map.of("awaiting", Map.of("continuationToken", "nested-token")),
             null);
 
@@ -120,6 +127,11 @@ class IntakeActionResumeTest {
             ConversationRunRequest.Intent.ANSWER,
             "token",
             answers,
+            null,
+            null,
+            null,
+            null,
+            null,
             null,
             null,
             null,

@@ -94,7 +94,43 @@ public class IntakeIntentClassifier {
     if (needsTools && tools.isEmpty()) {
       needsPlanning = true;
     }
-    return new IntakeIntent(needsTools, needsPlanning, tools, reason);
+    IntakeIntent.DispatchPath dispatchPath = parseDispatchPath(root, needsTools, needsPlanning, tools);
+    return new IntakeIntent(needsTools, needsPlanning, tools, reason, dispatchPath);
+  }
+
+  /**
+   * Resolves the dispatch path from the LLM classification response.
+   * The LLM may explicitly suggest a dispatchPath; if not, we infer it from
+   * needsTools/needsPlanning and tool types (MCP vs skill vs built-in).
+   */
+  private IntakeIntent.DispatchPath parseDispatchPath(
+          JsonNode root, boolean needsTools, boolean needsPlanning,
+          List<IntakeIntent.ToolHint> tools) {
+    // 1. Explicit LLM suggestion takes priority
+    JsonNode dpNode = root.get("dispatchPath");
+    if (dpNode != null && !dpNode.isNull()) {
+      String dp = dpNode.asText("").trim().toUpperCase();
+      try {
+        return IntakeIntent.DispatchPath.valueOf(dp);
+      } catch (IllegalArgumentException ignored) {
+        // fall through to inference
+      }
+    }
+    // 2. Infer from classification fields
+    if (!needsTools && !needsPlanning) {
+      return IntakeIntent.DispatchPath.CONVERSATIONAL;
+    }
+    // 3. If all suggested tools are MCP tools, route to MCP_DIRECT
+    if (needsTools && !tools.isEmpty() && tools.stream().allMatch(t -> t.name().startsWith("mcp."))) {
+      return IntakeIntent.DispatchPath.MCP_DIRECT;
+    }
+    // 4. If all suggested tools are MCP or the task is single-MCP, also MCP_DIRECT
+    if (needsTools && tools.stream().anyMatch(t -> t.name().startsWith("mcp."))
+        && !needsPlanning && tools.size() <= 2) {
+      return IntakeIntent.DispatchPath.MCP_DIRECT;
+    }
+    // 5. Default: full graph pipeline
+    return IntakeIntent.DispatchPath.GRAPH;
   }
 
   private List<IntakeIntent.ToolHint> parseTools(JsonNode arr) {

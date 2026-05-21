@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../../bridge';
+import { useTranslation } from '../../i18n';
 
 interface AggBucket {
     count: number;
@@ -21,6 +22,7 @@ interface UsageState {
 const EMPTY: UsageState = { byDay: {}, byModel: {} };
 
 export function UsagePanel() {
+    const { t } = useTranslation();
     const [usage, setUsage] = useState<UsageState>(EMPTY);
     const [quotaInput, setQuotaInput] = useState('');
     const [quotaSaved, setQuotaSaved] = useState(false);
@@ -33,36 +35,47 @@ export function UsagePanel() {
     const todayBucket = usage.byDay[today];
     const modelRows = Object.entries(usage.byModel);
     const dayRows = Object.entries(usage.byDay).sort(([a], [b]) => a.localeCompare(b)).slice(-30);
+
+    const subtitle =
+        t('panels.usage.subtitleTokens') +
+        (usage.persisted ? (usage.backend === 'db' ? t('panels.usage.subtitleDb') : t('panels.synced')) : '');
+
     return (
         <div className="panel-base usage-panel">
             <header className="panel-header">
                 <div className="panel-title-group">
-                    <h3 className="panel-title">📊 Usage</h3>
-                    <span className="panel-subtitle">
-                        Token & cost tracking
-                        {usage.persisted ? (usage.backend === 'db' ? ' · DB' : ' · synced') : ''}
-                    </span>
+                    <h3 className="panel-title">{t('panels.usage.title')}</h3>
+                    <span className="panel-subtitle">{subtitle}</span>
                 </div>
                 <button type="button" className="panel-btn" onClick={() => sendToPlugin('usage.get', {}).catch(() => undefined)}>
-                    Refresh
+                    {t('common.refresh')}
                 </button>
             </header>
             {usage.quotaWarnings && usage.quotaWarnings.length > 0 && (
                 <div className="panel-banner panel-banner-warn">
-                    Approaching daily quota (${usage.quotaWarnings[0].dailyLimitUsd?.toFixed(2) ?? '—'} limit)
+                    {t('panels.usage.quotaWarn', {
+                        limit: usage.quotaWarnings[0].dailyLimitUsd?.toFixed(2) ?? '—',
+                    })}
                 </div>
             )}
             <div className="panel-section panel-quota-form">
-                <h4 className="panel-section-title">Daily quota (USD)</h4>
+                <h4 className="panel-section-title">{t('panels.usage.dailyQuota')}</h4>
                 <div className="panel-row">
                     <input
                         className="panel-input"
                         type="number"
                         min={0}
                         step={0.5}
-                        placeholder={usage.quotaWarnings?.[0]?.dailyLimitUsd != null ? String(usage.quotaWarnings[0].dailyLimitUsd) : 'e.g. 10'}
+                        placeholder={
+                            usage.quotaWarnings?.[0]?.dailyLimitUsd != null
+                                ? String(usage.quotaWarnings[0].dailyLimitUsd)
+                                : t('panels.usage.quotaPlaceholder')
+                        }
                         value={quotaInput}
-                        onChange={(e) => { setQuotaInput(e.target.value); setQuotaSaved(false); }}
+                        onChange={(e) => {
+                            setQuotaInput(e.target.value);
+                            setQuotaSaved(false);
+                        }}
                     />
                     <button
                         type="button"
@@ -74,26 +87,28 @@ export function UsagePanel() {
                             setQuotaSaved(true);
                         }}
                     >
-                        {quotaSaved ? 'Saved' : 'Set quota'}
+                        {quotaSaved ? t('panels.usage.saved') : t('panels.usage.setQuota')}
                     </button>
                 </div>
-                <p className="panel-hint muted">Warns when today&apos;s spend reaches 90% of this limit (requires backend).</p>
+                <p className="panel-hint muted">{t('panels.usage.quotaHint')}</p>
             </div>
             <div className="panel-stats-grid">
-                <UsageCard title="Today cost" value={`${(todayBucket?.costUsd ?? 0).toFixed(4)}`} />
-                <UsageCard title="Today tokens" value={formatTokens((todayBucket?.inputTokens ?? 0) + (todayBucket?.outputTokens ?? 0))} />
-                <UsageCard title="Requests" value={String(todayBucket?.count ?? 0)} />
+                <UsageCard title={t('panels.usage.todayCost')} value={`${(todayBucket?.costUsd ?? 0).toFixed(4)}`} />
+                <UsageCard title={t('panels.usage.todayTokens')} value={formatTokens((todayBucket?.inputTokens ?? 0) + (todayBucket?.outputTokens ?? 0))} />
+                <UsageCard title={t('panels.usage.requests')} value={String(todayBucket?.count ?? 0)} />
             </div>
             <div className="panel-section">
-                <h4 className="panel-section-title">By Model</h4>
-                {modelRows.length === 0 ? <div className="panel-empty">No usage yet.</div> : (
+                <h4 className="panel-section-title">{t('panels.usage.byModel')}</h4>
+                {modelRows.length === 0 ? (
+                    <div className="panel-empty">{t('panels.usage.emptyUsage')}</div>
+                ) : (
                     <div className="panel-table">
                         {modelRows.map(([model, bucket]) => (
                             <div key={model} className="panel-table-row">
                                 <span className="panel-table-cell-name">{model}</span>
-                                <span>{bucket.count} req</span>
-                                <span>{formatTokens(bucket.inputTokens)} in</span>
-                                <span>{formatTokens(bucket.outputTokens)} out</span>
+                                <span>{t('panels.req', { n: bucket.count })}</span>
+                                <span>{t('panels.tokensIn', { n: formatTokens(bucket.inputTokens) })}</span>
+                                <span>{t('panels.tokensOut', { n: formatTokens(bucket.outputTokens) })}</span>
                                 <span className="panel-table-cell-cost">${bucket.costUsd.toFixed(4)}</span>
                             </div>
                         ))}
@@ -101,7 +116,7 @@ export function UsagePanel() {
                 )}
             </div>
             <div className="panel-section">
-                <h4 className="panel-section-title">Last 30 Days</h4>
+                <h4 className="panel-section-title">{t('panels.usage.last30Days')}</h4>
                 <Sparkline data={dayRows.map(([day, bucket]) => ({ day, cost: bucket.costUsd }))} />
             </div>
         </div>
@@ -109,11 +124,17 @@ export function UsagePanel() {
 }
 
 function UsageCard({ title, value }: { title: string; value: string }) {
-    return <div className="panel-stat-card"><div className="panel-stat-label">{title}</div><div className="panel-stat-value">{value}</div></div>;
+    return (
+        <div className="panel-stat-card">
+            <div className="panel-stat-label">{title}</div>
+            <div className="panel-stat-value">{value}</div>
+        </div>
+    );
 }
 
 function Sparkline({ data }: { data: { day: string; cost: number }[] }) {
-    if (data.length === 0) return <div className="muted">No daily data yet.</div>;
+    const { t } = useTranslation();
+    if (data.length === 0) return <div className="muted">{t('panels.usage.noDailyData')}</div>;
     const max = Math.max(...data.map((d) => d.cost), 0.0001);
     const width = 480;
     const height = 80;

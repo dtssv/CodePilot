@@ -13,6 +13,8 @@ import io.codepilot.core.graph.GraphUiEmitter;
 import io.codepilot.core.graph.PhasePlanNormalizer;
 import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
+import io.codepilot.core.graph.skill.GraphSkillNode;
+import io.codepilot.core.graph.skill.GraphSkillSupport;
 import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
@@ -45,11 +47,17 @@ public class PlanningAction implements NodeAction {
     private final ChatClientFactory chatClientFactory;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
+    private final GraphSkillSupport graphSkillSupport;
 
-    public PlanningAction(ChatClientFactory chatClientFactory, PromptRegistry promptRegistry, ObjectMapper mapper) {
+    public PlanningAction(
+            ChatClientFactory chatClientFactory,
+            PromptRegistry promptRegistry,
+            ObjectMapper mapper,
+            GraphSkillSupport graphSkillSupport) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
+        this.graphSkillSupport = graphSkillSupport;
     }
 
     @Override
@@ -65,7 +73,9 @@ public class PlanningAction implements NodeAction {
         String projectMeta = (String) state.value("projectMeta").orElse("");
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
-        String planningPrompt = buildPlanningPrompt(input, mode, projectMeta, mcpTools);
+        var skillActivation = graphSkillSupport.activate(state, GraphSkillNode.PLANNING, updates);
+        String planningPrompt =
+                buildPlanningPrompt(input, mode, projectMeta, mcpTools) + skillActivation.promptSection();
 
         GraphUiEmitter.transition(state, "planning");
 
@@ -114,8 +124,8 @@ public class PlanningAction implements NodeAction {
         }
     }
 
-    private String buildPlanningPrompt(String input, String mode, String projectMeta,
-                                        List<Map<String, Object>> mcpTools) {
+    private String buildPlanningPrompt(
+            String input, String mode, String projectMeta, List<Map<String, Object>> mcpTools) {
         String template = promptRegistry.get("graph.planning");
         String projectMetaSection = projectMeta.isBlank() ? ""
                 : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
@@ -246,7 +256,12 @@ public class PlanningAction implements NodeAction {
             );
         }
 
-        phases = PhasePlanNormalizer.normalize(userSteps, phases);
+        var normalizedPlan = PhasePlanNormalizer.normalizePlan(userSteps, phases);
+        userSteps = normalizedPlan.steps();
+        phases = normalizedPlan.phases();
+        userPlan = new LinkedHashMap<>(userPlan);
+        userPlan.put("steps", userSteps);
+        updates.put("userPlan", userPlan);
         updates.put("userPlanStepCursor", 0);
 
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PLAN,
