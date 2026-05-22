@@ -131,6 +131,7 @@ export function App() {
         const offRunning = onPluginEvent('conversation_running', (payload) => {
             const running = Boolean((payload as { running?: boolean }).running);
             if (running) {
+                setIsResuming(false);
                 setAdmissionWaitState(null);
                 setSendError(null);
             } else {

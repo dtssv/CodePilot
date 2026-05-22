@@ -163,6 +163,8 @@ export const en = {
         resuming: 'Resuming task…',
         waitingAdmission: 'waiting',
         waitingForInput: 'Waiting for your response',
+        needsInputUseChatHint: 'Reply in the chat input below to continue',
+        needsInputSubmitted: 'Answered',
         admissionRetryProgress: 'Retry {{attempt}}/{{maxAttempts}}',
         admissionRetryContinue: 'Continue retrying',
         admissionRetryCancel: 'Cancel',

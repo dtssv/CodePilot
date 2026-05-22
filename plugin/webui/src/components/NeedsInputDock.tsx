@@ -3,13 +3,18 @@
  */
 
 import { NeedsInputCard } from './NeedsInputCard';
-import { clearPendingNeedsInput, usePendingNeedsInput } from '../state/needsInputStore';
+import {
+    clearPendingNeedsInput,
+    useNeedsInputSubmitted,
+    usePendingNeedsInput,
+} from '../state/needsInputStore';
 
 type NeedsInputCardPayload = Parameters<typeof NeedsInputCard>[0]['payload'];
 
 export function NeedsInputDock() {
     const payload = usePendingNeedsInput();
-    if (!payload) return null;
+    const submitted = useNeedsInputSubmitted(payload?.continuationToken);
+    if (!payload || submitted) return null;
 
     return (
         <div className="needs-input-dock">

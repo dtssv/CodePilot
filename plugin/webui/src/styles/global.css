@@ -3393,6 +3393,24 @@ button:disabled {
     color: var(--error);
 }
 
+.needs-input-chat-hint {
+    margin-top: 10px;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    border: 1px dashed var(--border);
+}
+
+.needs-input-chat-hint.muted {
+    margin-top: 6px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    font-size: 11px;
+}
+
 .freeform-section {
     margin-top: 10px;
     padding-top: 8px;

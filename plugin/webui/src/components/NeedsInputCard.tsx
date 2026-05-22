@@ -1,16 +1,11 @@
 import { useState } from 'react';
 import { sendToPlugin } from '../bridge';
+import { useTranslation } from '../i18n';
 import { markNeedsInputSubmitted, useNeedsInputSubmitted } from '../state/needsInputStore';
 
 /**
- * Full-featured needs_input card matching the design spec in 05-接口文档.md §3.2.1.
- *
- * Supports:
- * - Multiple questions with different kinds (single-choice, multi-choice, yes-no, freeform)
- * - Options with impact/pros/cons details
- * - Default option highlighting
- * - Free-form text input for answering by number or free text
- * - Submit all answers at once as structured answers[]
+ * needs_input card — choice questions use option cards (auto-submit for single-choice / yes-no).
+ * Free-text answers use the main chat input bar (see ChatInputSection), not an inline field.
  */
 interface Question {
     id: string;
@@ -55,26 +50,32 @@ interface Answer {
 }
 
 export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
+    const { t } = useTranslation();
     const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
-    const [freeformText] = useState('');
     const [expandedOptions, setExpandedOptions] = useState<Record<string, boolean>>({});
     const [submitted, setSubmitted] = useState(false);
-    // Global submitted state — prevents double-submit from dock AND inline cards
     const globallySubmitted = useNeedsInputSubmitted(payload.continuationToken);
     const isSubmitted = submitted || globallySubmitted;
+
+    const hasChoiceQuestions = payload.questions.some(
+        (q) => q.kind !== 'freeform' && (q.options?.length ?? 0) > 0,
+    );
+    const hasFreeformOnly = payload.questions.some(
+        (q) => q.kind === 'freeform' || !(q.options?.length),
+    );
 
     const handleSelectOption = (questionId: string, optionId: string, kind: string) => {
         if (isSubmitted) return;
         const newSelected = kind === 'multi-choice'
             ? {
-                ...selectedOptions, [questionId]: ((selectedOptions[questionId] || []).includes(optionId)
-                    ? (selectedOptions[questionId] || []).filter(id => id !== optionId)
-                    : [...(selectedOptions[questionId] || []), optionId])
+                ...selectedOptions,
+                [questionId]: ((selectedOptions[questionId] || []).includes(optionId)
+                    ? (selectedOptions[questionId] || []).filter((id) => id !== optionId)
+                    : [...(selectedOptions[questionId] || []), optionId]),
             }
             : { ...selectedOptions, [questionId]: [optionId] };
         setSelectedOptions(newSelected);
 
-        // For single-choice / yes-no, auto-submit immediately after selection
         if (kind === 'single-choice' || kind === 'yes-no') {
             setSubmitted(true);
             markNeedsInputSubmitted(payload.continuationToken);
@@ -87,33 +88,21 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     };
 
     const toggleExpand = (key: string) => {
-        setExpandedOptions(prev => ({ ...prev, [key]: !prev[key] }));
+        setExpandedOptions((prev) => ({ ...prev, [key]: !prev[key] }));
     };
 
     const buildAnswers = (): Answer[] => {
-        // First check if user typed free-form text
-        if (freeformText.trim()) {
-            return parseFreeformAnswers(freeformText, payload.questions);
-        }
-
-        // Build answers from selected options
         const answers: Answer[] = [];
         for (const q of payload.questions) {
             const selected = selectedOptions[q.id];
             if (selected && selected.length > 0) {
                 if (q.kind === 'multi-choice') {
-                    // For multi-choice, submit the first selected as primary
-                    answers.push({ questionId: q.id, optionId: selected[0] });
-                    // Additional selections as freeform
-                    for (let i = 1; i < selected.length; i++) {
-                        answers.push({ questionId: q.id, optionId: selected[i] });
+                    for (const optionId of selected) {
+                        answers.push({ questionId: q.id, optionId });
                     }
                 } else {
                     answers.push({ questionId: q.id, optionId: selected[0] });
                 }
-            } else if (q.kind === 'freeform') {
-                // Freeform questions should be answered via the text field
-                // (handled by parseFreeformAnswers)
             }
         }
         return answers;
@@ -122,17 +111,19 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     const handleSubmit = () => {
         if (isSubmitted) return;
         const answers = buildAnswers();
+        if (answers.length === 0) return;
         setSubmitted(true);
         markNeedsInputSubmitted(payload.continuationToken);
-
-        // Send to plugin which will call /v1/conversation/resume with intent=answer
         sendToPlugin('needs_input_response', {
             answers,
             continuationToken: payload.continuationToken || null,
         });
-
         onAnswered?.(answers);
     };
+
+    if (isSubmitted) {
+        return <div className="needs-input-submitted">{t('chat.needsInputSubmitted')}</div>;
+    }
 
     return (
         <div className="needs-input-card">
@@ -141,7 +132,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                 {payload.reason && <p className="needs-input-reason">{payload.reason}</p>}
             </div>
 
-            {payload.questions.map(q => (
+            {payload.questions.map((q) => (
                 <div key={q.id} className="needs-input-question">
                     <div className="question-header">
                         <span className="question-index">Q{q.index}</span>
@@ -150,24 +141,9 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                     </div>
                     {q.why && <p className="question-why">{q.why}</p>}
 
-                    {q.kind === 'freeform' ? (
-                        <input
-                            type="text"
-                            className="freeform-input"
-                            placeholder={q.placeholder || 'Type your answer...'}
-                            disabled={isSubmitted}
-                            onChange={e => {
-                                if (!isSubmitted) {
-                                    setSelectedOptions(prev => ({
-                                        ...prev,
-                                        [q.id]: [e.target.value]
-                                    }));
-                                }
-                            }}
-                        />
-                    ) : (
+                    {(q.options?.length ?? 0) > 0 ? (
                         <div className="options-list">
-                            {q.options?.map(opt => {
+                            {q.options?.map((opt) => {
                                 const isSelected = (selectedOptions[q.id] || []).includes(opt.id);
                                 const isDefault = q.defaultOptionId === opt.id;
                                 const expandKey = `${q.id}-${opt.id}`;
@@ -183,13 +159,19 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                                             <span className={`option-radio ${isSelected ? 'checked' : ''}`} />
                                             <span className="option-label">{opt.label}</span>
                                             {isDefault && <span className="default-badge">推荐</span>}
-                                            {opt.impact && <span className={`impact-badge impact-${opt.impact}`}>{opt.impact}</span>}
+                                            {opt.impact && (
+                                                <span className={`impact-badge impact-${opt.impact}`}>{opt.impact}</span>
+                                            )}
                                         </div>
 
                                         {(opt.pros || opt.cons) && (
                                             <button
+                                                type="button"
                                                 className="expand-btn"
-                                                onClick={e => { e.stopPropagation(); toggleExpand(expandKey); }}
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    toggleExpand(expandKey);
+                                                }}
                                             >
                                                 {isExpanded ? '▾' : '▸'} 详情
                                             </button>
@@ -199,12 +181,16 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                                             <div className="option-details">
                                                 {opt.pros && opt.pros.length > 0 && (
                                                     <div className="pros">
-                                                        {opt.pros.map((p, i) => <span key={i} className="pro-item">+ {p}</span>)}
+                                                        {opt.pros.map((p, i) => (
+                                                            <span key={i} className="pro-item">+ {p}</span>
+                                                        ))}
                                                     </div>
                                                 )}
                                                 {opt.cons && opt.cons.length > 0 && (
                                                     <div className="cons">
-                                                        {opt.cons.map((c, i) => <span key={i} className="con-item">- {c}</span>)}
+                                                        {opt.cons.map((c, i) => (
+                                                            <span key={i} className="con-item">- {c}</span>
+                                                        ))}
                                                     </div>
                                                 )}
                                             </div>
@@ -213,14 +199,16 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                                 );
                             })}
                         </div>
-                    )}
+                    ) : null}
                 </div>
             ))}
 
-            {payload.freeformAllowed && (
-                <div className="freeform-section">
-                    <p className="freeform-label">你也可以直接在下方输入框中回答</p>
-                </div>
+            {(hasFreeformOnly || payload.freeformAllowed) && !hasChoiceQuestions && (
+                <p className="needs-input-chat-hint">{t('chat.needsInputUseChatHint')}</p>
+            )}
+
+            {hasChoiceQuestions && (hasFreeformOnly || payload.freeformAllowed) && (
+                <p className="needs-input-chat-hint muted">{t('chat.needsInputUseChatHint')}</p>
             )}
 
             {payload.notesForUser && payload.notesForUser.length > 0 && (
@@ -231,56 +219,13 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                 </div>
             )}
 
-            <div className="needs-input-actions">
-                {payload.questions.some(q => q.kind === 'multi-choice') && (
-                    <button
-                        className="submit-btn"
-                        onClick={handleSubmit}
-                        disabled={isSubmitted}
-                    >
-                        {isSubmitted ? '已提交' : '提交回答'}
+            {payload.questions.some((q) => q.kind === 'multi-choice') && (
+                <div className="needs-input-actions">
+                    <button type="button" className="submit-btn" onClick={handleSubmit}>
+                        提交回答
                     </button>
-                )}
-            </div>
+                </div>
+            )}
         </div>
     );
-}
-
-/**
- * Parse free-form text answers like "1: b; 2: a; 3: 600" into structured answers.
- * Falls back to a single freeform answer if parsing fails.
- */
-function parseFreeformAnswers(text: string, questions: Question[]): Answer[] {
-    const trimmed = text.trim();
-    if (!trimmed) return [];
-
-    // Try to parse "1: b; 2: a; 3: 600" format
-    const numberedPattern = /(\d+)\s*[:：]\s*([^;；]+)/g;
-    const answers: Answer[] = [];
-    let match;
-    let hasNumbered = false;
-
-    while ((match = numberedPattern.exec(trimmed)) !== null) {
-        hasNumbered = true;
-        const index = parseInt(match[1], 10);
-        const value = match[2].trim();
-        const question = questions.find(q => q.index === index);
-
-        if (question) {
-            // Check if value matches an option id
-            const matchingOption = question.options?.find(o => o.id === value);
-            if (matchingOption) {
-                answers.push({ questionId: question.id, optionId: value });
-            } else {
-                answers.push({ questionId: question.id, freeform: value });
-            }
-        }
-    }
-
-    // If no numbered pattern found, treat entire text as a freeform answer
-    if (!hasNumbered) {
-        answers.push({ questionId: '', freeform: trimmed });
-    }
-
-    return answers;
 }

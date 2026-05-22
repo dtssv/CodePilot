@@ -140,6 +140,9 @@ export function installLegacyChatBridge(
         onPluginEvent('conversation_running', (payload) => {
             const running = Boolean((payload as { running?: boolean }).running);
             refs.activeReplyRef.current = running;
+            if (running) {
+                setIsResuming(false);
+            }
             if (!running) {
                 refs.activeTurnIdRef.current = '';
                 finalizeRunningTurns();
@@ -178,6 +181,8 @@ export function installLegacyChatBridge(
                 if (isTerminalDoneReason(reason)) {
                     finalizeRunningTurns();
                 }
+                // Resume after askUser clears the banner; awaiting_user_input means paused again.
+                setIsResuming(false);
                 return;
             }
             logConsole('sse', 'done', data);

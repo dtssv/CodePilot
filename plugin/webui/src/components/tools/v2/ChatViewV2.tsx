@@ -70,6 +70,7 @@ export function ChatViewV2() {
 }
 
 function TurnAlerts({ turn }: { turn: TurnNode }) {
+    const { t } = useTranslation();
     const notices = turn.riskNotices ?? [];
     const needs = turn.needsInput;
     const isSubmitted = useNeedsInputSubmitted(needs?.continuationToken);
@@ -83,7 +84,7 @@ function TurnAlerts({ turn }: { turn: TurnNode }) {
             {showInlineNeedsInput && (
                 <div className="turn-needs-input">
                     {isSubmitted ? (
-                        <div className="needs-input-submitted">已回复</div>
+                        <div className="needs-input-submitted">{t('chat.needsInputSubmitted')}</div>
                     ) : (
                         <NeedsInputCard payload={needs as Parameters<typeof NeedsInputCard>[0]['payload']} />
                     )}

@@ -2265,68 +2265,216 @@ class CefChatPanel(
         }
 
         // Call /v1/conversation/resume which triggers GraphEngine.resume()
-        // Use the same listener pattern as the initial run to handle SSE events
-        // ★ Notify WebUI that the session is resuming so it clears the "interrupted" banner
+        // ★ Notify WebUI that resume is starting (clears interrupted banner)
         dispatchToWeb("session_resuming", mapOf("sessionId" to sid))
+        synchronized(conversationLock) {
+            conversationInFlight = true
+        }
+        activeStreamGeneration++
+        val resumeStreamGen = activeStreamGeneration
+        val resumeStreamSessionId = sid
+        sessionStore.updateMeta(handle) { meta ->
+            meta.running = true
+            meta.abnormalTermination = false
+        }
+        dispatchToWeb("conversation_running", mapOf("running" to true))
+
         ApplicationManager.getApplication().executeOnPooledThread {
             val assistantBuilder = StringBuilder()
-            // ★ Guard to prevent duplicate assistant message persistence on double done events
             var assistantPersisted = false
-            val resumeStreamGen = activeStreamGeneration
+            var terminalDoneReceived = false
             var resumeRateLimited = false
+            val adapter = legacyAdapter
+            fun isStaleResumeStream(): Boolean =
+                resumeStreamGen != activeStreamGeneration || sessionHandle?.meta?.id != resumeStreamSessionId
+
             client.resume(
                 fullPayload.toMap(),
                 object : ConversationClient.Listener {
                     override fun onDelta(text: String) {
+                        if (isStaleResumeStream()) return
                         assistantBuilder.append(text)
                         dispatchToWeb("delta", mapOf("text" to text))
+                        adapter?.onTextDelta(text)
                     }
+
                     override fun onToolCall(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         val data = mapper.treeToValue(payload, Map::class.java)
                         dispatchToWeb("tool_call", data)
                         val toolName = payload.path("name").asText(null)
                         val toolCallId = payload.path("id").asText(null)
                         if (toolName != null && toolCallId != null) {
+                            adapter?.onToolCall(toolCallId, toolName, payload.path("args"))
                             currentDispatcher.dispatch(payload)
                         }
                     }
-                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) =
+
+                    override fun onNeedsInput(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         dispatchToWeb("needs_input", mapper.treeToValue(payload, Map::class.java))
-                    override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) =
+                        adapter?.onNeedsInput(mapper.treeToValue(payload, Map::class.java))
+                    }
+
+                    override fun onGraphPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         currentGraphStateStore.applyGraphPlan(payload)
-                    override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) =
+                    }
+
+                    override fun onGraphTransition(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         currentGraphStateStore.applyTransition(payload)
+                        adapter?.onGraphTransition(mapper.treeToValue(payload, Map::class.java))
+                    }
+
                     override fun onGraphInfoRequest(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         val toolCallId = payload.path("toolCallId").asText("gather-batch")
                         currentGatherDispatcher?.dispatchBatch(payload.path("requests"), toolCallId)
                     }
+
+                    override fun onGraphVerify(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        currentGraphStateStore.applyVerify(payload)
+                        adapter?.onGraphVerify(mapper.treeToValue(payload, Map::class.java))
+                    }
+
+                    override fun onGraphPhaseDone(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        currentGraphStateStore.applyPhaseDone(payload)
+                        adapter?.onGraphPhaseDone(mapper.treeToValue(payload, Map::class.java))
+                    }
+
+                    override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        adapter?.onPlanUpdate(mapper.treeToValue(payload, Map::class.java))
+                        dispatchToWeb("user_plan", mapper.treeToValue(payload, Map::class.java))
+                    }
+
+                    override fun onUserPlanProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        adapter?.onPlanProgress(mapper.treeToValue(payload, Map::class.java))
+                        dispatchToWeb("user_plan_progress", mapper.treeToValue(payload, Map::class.java))
+                    }
+
+                    override fun onAgentThinking(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_thinking", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentThinking(payload.path("text").asText(null))
+                    }
+
+                    override fun onAgentReading(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_reading", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentReading(payload.path("summary").asText(null))
+                    }
+
+                    override fun onAgentWriting(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_writing", mapper.treeToValue(payload, Map::class.java))
+                        val filesNode = payload.path("files")
+                        val files =
+                            if (filesNode.isArray) {
+                                filesNode.mapNotNull { node ->
+                                    val path = node.path("path").asText(null) ?: return@mapNotNull null
+                                    buildMap<String, Any?> {
+                                        put("path", path)
+                                        node.path("op").asText(null)?.let { put("op", it) }
+                                        if (node.has("lineCount")) put("lineCount", node.path("lineCount").asInt())
+                                        node.path("preview").asText(null)?.let { put("preview", it) }
+                                    }
+                                }
+                            } else {
+                                emptyList()
+                            }
+                        adapter?.onAgentWriting(payload.path("text").asText(null), files)
+                    }
+
+                    override fun onAgentRunning(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
+                        adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
+
                     override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
                         dispatchToWeb("done", mapOf("reason" to reason))
+                        adapter?.onDone(reason)
                         if (reason == "awaiting_user_input" || reason == "phase_done") {
                             currentGraphStateStore.applyAwaiting(payload)
                         } else if (reason != "deploy_draining") {
                             currentGraphStateStore.clearAwaiting()
                         }
+                        val isTerminalDone = TerminalDoneReasons.isTerminal(reason)
+                        val isAwaitingUserInput = reason == "awaiting_user_input"
+                        if (isTerminalDone) {
+                            terminalDoneReceived = true
+                        }
+                        if (isTerminalDone && !assistantPersisted) {
+                            assistantPersisted = true
+                            val fullResponse = assistantBuilder.toString()
+                            if (fullResponse.isNotBlank()) {
+                                sessionStore.appendMessage(handle, "assistant", fullResponse)
+                            }
+                            sessionStore.updateMeta(handle) { meta ->
+                                meta.running = false
+                                meta.abnormalTermination = false
+                            }
+                            sessionStore.touchLastMessage(handle)
+                            dispatchSessionList()
+                        }
+                        if (isTerminalDone) {
+                            finishConversationAndDrainQueue()
+                        }
+                        if (isAwaitingUserInput) {
+                            terminalDoneReceived = true
+                            sessionStore.updateMeta(handle) { meta ->
+                                meta.running = false
+                                meta.abnormalTermination = false
+                            }
+                        }
                     }
+
                     override fun onRateLimited(
                         code: Int,
                         message: String,
                         retryAfterSec: Int,
                         opType: String?,
                     ) {
+                        if (isStaleResumeStream()) return
                         resumeRateLimited = true
                         handleStreamRateLimited(resumeStreamGen, code, message, retryAfterSec, opType)
                     }
 
                     override fun onError(code: Int, message: String) {
+                        if (isStaleResumeStream()) return
                         dispatchToWeb("error", mapOf("code" to code, "message" to message))
-                        if (!resumeRateLimited) {
+                        adapter?.onError(code, message)
+                        if (!resumeRateLimited && !terminalDoneReceived) {
+                            terminalDoneReceived = true
+                            adapter?.onDone("failed")
                             finishConversationAndDrainQueue()
                         }
                     }
 
                     override fun onClosed() {
-                        if (!resumeRateLimited) {
+                        if (isStaleResumeStream()) return
+                        adapter?.onAbnormalClose()
+                        val isRunning = sessionHandle?.meta?.running == true
+                        if (isRunning) {
+                            sessionHandle?.let { h ->
+                                sessionStore.updateMeta(h) { meta ->
+                                    meta.running = false
+                                    meta.abnormalTermination = true
+                                }
+                                val partialResponse = assistantBuilder.toString()
+                                if (partialResponse.isNotEmpty()) {
+                                    sessionStore.appendMessage(h, "assistant", partialResponse)
+                                }
+                                dispatchSessionInterrupted(h, currentGraphStateStore)
+                            }
+                        }
+                        if (!resumeRateLimited && !terminalDoneReceived) {
                             finishConversationAndDrainQueue()
                         }
                     }

@@ -164,6 +164,8 @@ export const zh = {
         resuming: '正在恢复任务…',
         waitingAdmission: '等待中',
         waitingForInput: '等待你的回复',
+        needsInputUseChatHint: '请在下方输入框中回复以继续',
+        needsInputSubmitted: '已回复',
         admissionRetryProgress: '第 {attempt}/{maxAttempts} 次重试',
         admissionRetryContinue: '继续重试',
         admissionRetryCancel: '取消',
