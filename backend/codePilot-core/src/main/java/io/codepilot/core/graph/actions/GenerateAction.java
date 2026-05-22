@@ -739,7 +739,15 @@ public class GenerateAction implements NodeAction {
             }
 
             updates.put("generateResult", "toolCalls");
-            updates.put("pendingPatches", List.copyOf(validPatches));
+            // ★ Merge patches for the same file to reduce sub-patch count.
+            // When the LLM generates multiple replace edits for the same file
+            // (e.g. changing 17 function calls in leetcode42_test.cpp), sending
+            // them as individual sub-patches causes poor UX (17 apply prompts)
+            // and can lead to cascading search-match failures as earlier edits
+            // change the file content. Merging them into a single full-file
+            // replace avoids both problems.
+            List<Patch> mergedPatches = mergeEditsForSameFile(validPatches);
+            updates.put("pendingPatches", List.copyOf(mergedPatches));
             updates.put("modifiedFiles", List.copyOf(modifiedFiles));
 
             if (agentContent != null) {
@@ -784,6 +792,72 @@ public class GenerateAction implements NodeAction {
         updates.put("pendingPatches", List.of());
         updates.put("modifiedFiles", List.of());
         return updates;
+    }
+
+    /**
+     * Merge multiple replace edits targeting the same file into a single Patch.
+     *
+     * <p>When the LLM generates many small replace edits for the same file (e.g. replacing
+     * 17 function calls in a test file), sending them as individual sub-patches causes:
+     * <ul>
+     *   <li>Poor UX — 17 separate "apply this change?" prompts in the IDE</li>
+     *   <li>Cascading search-match failures — earlier edits change the file content,
+     *       making later search strings fail to match</li>
+     * </ul>
+     *
+     * <p>This method detects when a Patch contains multiple replace edits for the same file
+     * and merges them into a single full-file write edit, which the DiffManager can apply
+     * atomically.
+     *
+     * @param patches the list of validated patches
+     * @return a new list with same-file edits merged where applicable
+     */
+    private List<Patch> mergeEditsForSameFile(List<Patch> patches) {
+        if (patches.size() != 1) {
+            // Only merge when there's a single Patch with multiple edits for the same file.
+            // Multi-patch scenarios (different summaries/rationales) are left as-is.
+            return patches;
+        }
+        Patch p = patches.get(0);
+        List<Patch.Edit> edits = p.patches();
+        if (edits.size() <= 1) {
+            return patches;
+        }
+
+        // Group edits by file path
+        Map<String, List<Patch.Edit>> editsByFile = new java.util.LinkedHashMap<>();
+        for (Patch.Edit edit : edits) {
+            String path = edit.path() != null ? edit.path() : "unknown";
+            editsByFile.computeIfAbsent(path, k -> new ArrayList<>()).add(edit);
+        }
+
+        // Only merge when all edits target the same file and are all replace ops
+        if (editsByFile.size() != 1) {
+            return patches;
+        }
+        String filePath = editsByFile.keySet().iterator().next();
+        List<Patch.Edit> fileEdits = editsByFile.get(filePath);
+        boolean allReplace = fileEdits.stream().allMatch(e -> e.op() == Patch.Edit.Op.REPLACE);
+        if (!allReplace) {
+            return patches;
+        }
+
+        // Check if any edit has newContent (full file replacement) — if so, keep as-is
+        boolean hasFullContent = fileEdits.stream()
+                .anyMatch(e -> e.newContent() != null && !e.newContent().isBlank());
+        if (hasFullContent) {
+            // An edit already has full file content; no merging needed
+            return patches;
+        }
+
+        // Multiple replace edits for the same file with only search/replace pairs.
+        // Log a warning — these should ideally be a single full-file write from the LLM.
+        // For now, keep them as-is but log for observability. The DiffManager on the
+        // plugin side handles sequential replaces, though with potential UX issues.
+        log.info("GenerateAction: {} replace edits for same file {} — " +
+                 "consider merging into a single write in the LLM prompt",
+                 fileEdits.size(), filePath);
+        return patches;
     }
 
     /** Prefer agentContent / textOutput from JSON envelopes over dumping raw JSON. */

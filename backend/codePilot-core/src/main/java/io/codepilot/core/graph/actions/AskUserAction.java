@@ -135,6 +135,14 @@ public class AskUserAction implements NodeAction {
             Map<String, Object> stateData = new HashMap<>(state.data());
             // Merge updates into stateData so the snapshot includes the latest changes
             stateData.putAll(updates);
+            // ★ Explicitly save the current phaseCursor into the checkpoint so that
+            // resume can restore the correct phase. Without this, the checkpoint may
+            // carry a stale phaseCursor (e.g. p2 when askUser actually happened at p3),
+            // causing the resumed execution to re-run an already-completed phase.
+            String currentPhaseCursor = (String) state.value("phaseCursor").orElse("");
+            if (!currentPhaseCursor.isBlank()) {
+                stateData.put("askUserPhaseCursor", currentPhaseCursor);
+            }
             Boolean saved = checkpointStore.save(continuationToken, stateData, originatingNode)
                     .block(Duration.ofSeconds(5));
             if (Boolean.TRUE.equals(saved)) {

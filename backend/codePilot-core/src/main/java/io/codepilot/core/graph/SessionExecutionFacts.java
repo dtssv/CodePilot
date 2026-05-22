@@ -81,6 +81,15 @@ public final class SessionExecutionFacts {
       return facts;
     }
     mergeGatheredInto(facts, gathered);
+    // ★ Re-prioritize primaryTargets: files modified in the current session
+    // (from "modifiedFiles" state key) should take precedence over files
+    // discovered from directory listings. Without this, a directory listing
+    // may place unrelated files (e.g. LRU.h) ahead of the user's actual
+    // target (e.g. leetcode42.cpp), causing staleProbeBlockReason to
+    // incorrectly block shell commands that reference the real target.
+    if (state != null) {
+      reprioritizeTargetsFromModifiedFiles(state, facts);
+    }
     return facts;
   }
 
@@ -324,6 +333,15 @@ public final class SessionExecutionFacts {
   public static java.util.Optional<String> staleProbeBlockReason(
       String command, OverAllState state) {
     if (command == null || command.isBlank()) {
+      return java.util.Optional.empty();
+    }
+    // ★ Skip stale-path blocking when resuming from an askUser checkpoint.
+    // After askUser resume, primaryTargets may be stale or incorrectly inferred
+    // (e.g. phase rollback causes re-merge of directory listings that push
+    // unrelated files to the top of primaryTargets). Blocking based on potentially
+    // incorrect primaryTargets would prevent legitimate shell commands from running.
+    String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
+    if (!resumeNextNode.isBlank()) {
       return java.util.Optional.empty();
     }
     Map<String, Object> facts = fromState(state);
@@ -784,6 +802,76 @@ public final class SessionExecutionFacts {
   }
 
   // ── shared utilities ─────────────────────────────────────────────────────
+
+  /**
+   * Re-prioritize primaryTargets so that files modified in the current session
+   * (from "modifiedFiles" state key) appear first. This prevents unrelated files
+   * discovered from directory listings (e.g. LRU.h) from being treated as the
+   * primary target when the user is actually working on a different file
+   * (e.g. leetcode42.cpp).
+   */
+  @SuppressWarnings("unchecked")
+  private static void reprioritizeTargetsFromModifiedFiles(
+      OverAllState state, Map<String, Object> facts) {
+    Object modifiedRaw = state.value("modifiedFiles").orElse(null);
+    if (modifiedRaw == null) {
+      return;
+    }
+    Set<String> modified;
+    if (modifiedRaw instanceof List<?> list) {
+      modified = new LinkedHashSet<>();
+      for (Object item : list) {
+        if (item != null) {
+          modified.add(item.toString().replace('\\', '/').replaceAll("^\\./", ""));
+        }
+      }
+    } else if (modifiedRaw instanceof Set<?> set) {
+      modified = new LinkedHashSet<>();
+      for (Object item : set) {
+        if (item != null) {
+          modified.add(item.toString().replace('\\', '/').replaceAll("^\\./", ""));
+        }
+      }
+    } else {
+      return;
+    }
+    if (modified.isEmpty()) {
+      return;
+    }
+    List<String> currentTargets = stringList(facts, KEY_PRIMARY_TARGETS);
+    if (currentTargets.isEmpty()) {
+      return;
+    }
+    // Build reordered list: modified files first (in order), then remaining targets
+    List<String> reordered = new ArrayList<>();
+    Set<String> added = new LinkedHashSet<>();
+    for (String modFile : modified) {
+      for (String target : currentTargets) {
+        String normTarget = target.replace('\\', '/').replaceAll("^\\./", "");
+        if (!added.contains(target) && (normTarget.equals(modFile) || normTarget.startsWith(modFile.replace(".h", "").replace(".cpp", "")))) {
+          reordered.add(target);
+          added.add(target);
+        }
+      }
+    }
+    // Also add modified files that are not yet in targets
+    for (String modFile : modified) {
+      String withPrefix = "./" + modFile;
+      if (!added.contains(modFile) && !added.contains(withPrefix)) {
+        reordered.add(0, withPrefix);
+        added.add(withPrefix);
+      }
+    }
+    // Add remaining targets that were not modified
+    for (String target : currentTargets) {
+      if (!added.contains(target)) {
+        reordered.add(target);
+      }
+    }
+    if (!reordered.equals(currentTargets)) {
+      facts.put(KEY_PRIMARY_TARGETS, reordered);
+    }
+  }
 
   /** Record file paths from a successful directory listing (extension-based, capped). */
   @SuppressWarnings("unchecked")

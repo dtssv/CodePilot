@@ -526,6 +526,14 @@ public class IntakeAction implements NodeAction {
         // Checkpoint nextNode wins over stale graphState fields
         restored.put("currentNode", snapshot.nextNode());
         restored.put("resumeNextNode", snapshot.nextNode());
+        // ★ Restore phaseCursor from askUser checkpoint if present.
+        // AskUserAction explicitly saves the current phaseCursor as "askUserPhaseCursor"
+        // to prevent stale phaseCursor values from causing the resumed execution to
+        // re-run already-completed phases (e.g. resuming at p2 instead of p3).
+        Object askUserPhaseCursor = restored.remove("askUserPhaseCursor");
+        if (askUserPhaseCursor instanceof String pc && !pc.isBlank()) {
+            restored.put("phaseCursor", pc);
+        }
         restored.remove("doneReason");
         restored.remove("awaiting");
 
