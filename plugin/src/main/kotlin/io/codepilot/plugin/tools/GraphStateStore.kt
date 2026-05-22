@@ -169,7 +169,37 @@ class GraphStateStore(
         if (!journal.isMissingNode && journal.isObject) {
             state.set<JsonNode>("graphExecutionJournal", journal.deepCopy())
         }
+        val facts = data.path("sessionExecutionFacts")
+        if (!facts.isMissingNode && facts.isObject) {
+            state.set<JsonNode>("sessionExecutionFacts", facts.deepCopy())
+        }
+        val nextTurn = data.path("summaryForNextTurn")
+        if (!nextTurn.isMissingNode && nextTurn.isObject) {
+            state.set<JsonNode>("summaryForNextTurn", nextTurn.deepCopy())
+        }
         persist()
+    }
+
+    /** Persist session-scoped memory from terminal done(final) for the next graph run. */
+    fun applyRunComplete(donePayload: JsonNode) {
+        val facts = donePayload.path("sessionExecutionFacts")
+        if (!facts.isMissingNode && facts.isObject) {
+            state.set<JsonNode>("sessionExecutionFacts", facts.deepCopy())
+        }
+        val nextTurn = donePayload.path("summaryForNextTurn")
+        if (!nextTurn.isMissingNode && nextTurn.isObject) {
+            state.set<JsonNode>("summaryForNextTurn", nextTurn.deepCopy())
+        }
+        persist()
+    }
+
+    /** True when a prior agent run left graph history or execution facts on disk. */
+    fun hasPersistedSessionContext(): Boolean {
+        val facts = state.path("sessionExecutionFacts")
+        if (facts.isObject && facts.size() > 0) return true
+        if (state.path("history").size() > 0) return true
+        if (state.path("completedPhases").size() > 0) return true
+        return version > 0
     }
 
     /** Apply awaiting state (from done.reason=awaiting_user_input). */

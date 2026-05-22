@@ -22,7 +22,6 @@ import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -106,16 +105,21 @@ public class RepairAction implements NodeAction {
             GraphSseHelper.emitEvent(state, SseEvents.GRAPH_BUDGET_ALERT,
                     Map.of("phaseId", phaseId, "kind", "attempts", "value", count, "limit", maxAttempts));
 
-            // M3: Degradation strategy — check if any patches were partially applied
+            // M3: Degradation strategy — commit partial results only when the latest apply succeeded
             var patchResults = (List<Map<String, Object>>) state.value("patchResults").orElse(List.of());
             long appliedCount = patchResults.stream()
                     .filter(r -> Boolean.TRUE.equals(r.get("success")))
                     .count();
+            String lastPatchResult = (String) state.value("patchResult").orElse("");
+            boolean recentApplySucceeded =
+                    "success".equals(lastPatchResult) || "partial".equals(lastPatchResult);
 
-            if (appliedCount > 0) {
+            if (appliedCount > 0 && recentApplySucceeded) {
                 // Partial success: commit what succeeded, mark phase as partial
                 log.info("Repair budget exhausted but {} patches were applied — committing partial results", appliedCount);
                 updates.put("repairResult", "partialCommit");
+                // Clear failure counters to prevent commit→repair infinite loop
+                PhaseFailureRepairHelper.clearPhaseAttemptCounters(updates);
                 updates.put(
                         "askUserQuestion",
                         GraphUserMessages.repairBudgetQuestion(phaseId, count, true, appliedCount));
@@ -150,10 +154,10 @@ public class RepairAction implements NodeAction {
             String userId = (String) state.value("userId").orElse(null);
             ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
             log.info("RepairAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
-            ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
             repairResponse =
                 GraphLlmHelper.streamSystemUserToSse(
-                    chatClient,
+                    resolved,
                     state,
                     promptRegistry.get("agent.system"),
                     repairPrompt,
@@ -216,7 +220,7 @@ public class RepairAction implements NodeAction {
 
     public String routeAfterRepair(OverAllState state) {
         String result = (String) state.value("repairResult").orElse("toolCalls");
-        return switch (result) {
+        String target = switch (result) {
             case "askUser" -> "askUser";
             case "partialCommit", "abandonStep" -> "commit";
             case "retryRepair" -> "repair";
@@ -224,6 +228,8 @@ public class RepairAction implements NodeAction {
             case "failed" -> "finalize";
             default -> "applyPatch";  // "toolCalls" or any unknown → applyPatch
         };
+        log.info("Repair routing: repairResult={}, routing to {}", result, target);
+        return target;
     }
 
     // ─── Repair Prompt Construction ───────────────────────────────────
@@ -329,8 +335,11 @@ public class RepairAction implements NodeAction {
 
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> parseRepairResponse(String response) {
+        if (response == null || response.isBlank()) {
+            return List.of();
+        }
         try {
-            var node = mapper.readTree(response);
+            var node = mapper.readTree(LlmJsonExtract.parseableJson(response));
             if (node.has("toolCall")) {
                 return List.of(mapper.convertValue(node.get("toolCall"), Map.class));
             }
@@ -382,14 +391,28 @@ public class RepairAction implements NodeAction {
             if ("repair_note".equals(tc.get("type"))) {
                 continue;
             }
+            String toolName = (String) tc.getOrDefault("name", "");
             var args = (Map<String, Object>) tc.getOrDefault("args", tc);
-            String path = (String) args.getOrDefault("path", "");
-            String op = (String) args.getOrDefault("op", "replace");
-            String newContent = (String) args.getOrDefault("newContent", "");
-            String search = (String) args.getOrDefault("search", "");
-            String replace = (String) args.getOrDefault("replace", "");
+            String path = stringArg(args, "path");
+            String op = stringArg(args, "op");
+            if (op.isBlank()) {
+                op = "replace";
+            }
+            String newContent = firstNonBlank(
+                    stringArg(args, "newContent"),
+                    stringArg(args, "content"),
+                    stringArg(args, "text"));
+            String search = firstNonBlank(stringArg(args, "search"), stringArg(args, "old_string"));
+            String replace = firstNonBlank(stringArg(args, "replace"), stringArg(args, "new_string"));
 
-            if (path.isEmpty() && newContent.isEmpty()) {
+            boolean hasContent =
+                    !newContent.isBlank() || !search.isBlank() || !replace.isBlank();
+            if (path.isBlank() || !hasContent) {
+                log.warn(
+                        "RepairAction: skipping toolCall with no usable content — tool={}, path={}, op={}",
+                        toolName,
+                        path,
+                        op);
                 continue;
             }
 
@@ -404,10 +427,16 @@ public class RepairAction implements NodeAction {
                 continue;
             }
 
+            var edit = new Patch.Edit(path, editOp, null, null, search, replace, newContent, null, null, null, null, null, null);
+            log.info("RepairAction: created patch edit — path={}, op={}, hasSearch={}, hasReplace={}, hasNewContent={}",
+                    path, editOp,
+                    search != null && !search.isBlank(),
+                    replace != null && !replace.isBlank(),
+                    newContent != null && !newContent.isBlank());
             patches.add(new Patch(
                 "Repair patch",
                 List.of("repair"),
-                List.of(new Patch.Edit(path, editOp, null, null, search, replace, newContent, null, null, null, null, null, null)),
+                List.of(edit),
                 null, null, null
             ));
         }
@@ -433,6 +462,20 @@ public class RepairAction implements NodeAction {
         }
 
         return patches;
+    }
+
+    private static String stringArg(Map<String, Object> args, String key) {
+        Object v = args.get(key);
+        return v != null ? v.toString().trim() : "";
+    }
+
+    private static String firstNonBlank(String... values) {
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v.trim();
+            }
+        }
+        return "";
     }
 
     private String extractJson(String response) {

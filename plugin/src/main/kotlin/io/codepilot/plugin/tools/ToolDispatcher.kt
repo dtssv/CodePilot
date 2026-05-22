@@ -459,6 +459,19 @@ class ToolDispatcher(
             hasNewContent -> "fs.write"
             else -> "fs.replace"
         }
+
+        // ★ Debug logging: record patch routing decision and field contents
+        log.warn("[applySinglePatch-DEBUG] path=$path, op=$op, hasSearchReplace=$hasSearchReplace, " +
+            "hasNewContent=$hasNewContent, routedAs=$effectiveToolName, " +
+            "search.length=${patch.path("search").asText().length}, " +
+            "newContent.length=${patch.path("newContent").asText().length}, " +
+            "replace.length=${patch.path("replace").asText().length}")
+        if (hasSearchReplace) {
+            log.warn("[applySinglePatch-DEBUG] path=$path — search head (3 lines): ${patch.path("search").asText().lines().take(3)}")
+        }
+        if (hasNewContent) {
+            log.warn("[applySinglePatch-DEBUG] path=$path — newContent head (3 lines): ${patch.path("newContent").asText().lines().take(3)}")
+        }
         val staged = tryStage(effectiveToolName, patch)
         if (staged != null) {
             return mapOf(

@@ -1,10 +1,12 @@
 import { sendToPlugin } from '../../bridge';
+import { useTranslation } from '../../i18n';
 import type { ChatMessage } from '../../state/chatTypes';
 import type { AppTab } from '../../types/appTabs';
 import { BackgroundTasksPanel } from '../background/BackgroundTasksPanel';
 import { ChatView } from '../ChatView';
 import { CodebasePanel } from '../codebase/CodebasePanel';
 import { ComposerPanel } from '../ComposerPanel';
+import type { ConsoleEntry } from '../ConsolePanel';
 import { ConsolePanel } from '../ConsolePanel';
 import { ExportPanel } from '../export/ExportPanel';
 import { InlineEditTimeline } from '../inline/InlineEditTimeline';
@@ -17,8 +19,6 @@ import { ShellPolicyPanel } from '../shell/ShellPolicyPanel';
 import { TemplatesPanel } from '../templates/TemplatesPanel';
 import { ChatViewV2 } from '../tools/v2/ChatViewV2';
 import { UsagePanel } from '../usage/UsagePanel';
-import { useTranslation } from '../../i18n';
-import type { ConsoleEntry } from '../ConsolePanel';
 
 export interface ChatMainAreaProps {
     activeTab: AppTab;
@@ -54,7 +54,8 @@ export function ChatMainArea({
     const { t } = useTranslation();
 
     return (
-        <div className="chat-area">
+        <>
+            {/* Sticky banners above chat-area — do not scroll with content */}
             {activeTab === 'chat' && abnormalTermination && !isResuming && recoveryMode !== 'none' && (
                 <div className="session-recovery-banner">
                     <div className="recovery-banner-content">
@@ -85,32 +86,34 @@ export function ChatMainArea({
                     <button type="button" onClick={onDismissSendError} aria-label="Dismiss">×</button>
                 </div>
             )}
-            {activeTab === 'chat' && (
-                <>
-                    <InlineEditTimeline />
-                    {v2Enabled ? (
-                        <ChatViewV2 />
-                    ) : (
-                        <ChatView
-                            messages={messages}
-                            onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })}
-                        />
-                    )}
-                </>
-            )}
-            {activeTab === 'composer' && <ComposerPanel />}
-            {activeTab === 'integrations' && <IntegrationsPanel />}
-            {activeTab === 'notepads' && <NotepadsPanel />}
-            {activeTab === 'codebase' && <CodebasePanel />}
-            {activeTab === 'rules' && <RulesMemoryPanel />}
-            {activeTab === 'shell' && <ShellPolicyPanel />}
-            {activeTab === 'tab' && <TabSettingsPanel />}
-            {activeTab === 'usage' && <UsagePanel />}
-            {activeTab === 'templates' && <TemplatesPanel />}
-            {activeTab === 'background' && <BackgroundTasksPanel />}
-            {activeTab === 'export' && <ExportPanel sessionId={activeSessionId} />}
-            {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={onClearConsole} />}
-            <MultiFileDiffPanel />
-        </div>
+            <div className="chat-area">
+                {activeTab === 'chat' && (
+                    <>
+                        <InlineEditTimeline />
+                        {v2Enabled ? (
+                            <ChatViewV2 />
+                        ) : (
+                            <ChatView
+                                messages={messages}
+                                onForkFromMessage={(idx) => sendToPlugin('fork_from_message', { messageIndex: idx })}
+                            />
+                        )}
+                    </>
+                )}
+                {activeTab === 'composer' && <ComposerPanel />}
+                {activeTab === 'integrations' && <IntegrationsPanel />}
+                {activeTab === 'notepads' && <NotepadsPanel />}
+                {activeTab === 'codebase' && <CodebasePanel />}
+                {activeTab === 'rules' && <RulesMemoryPanel />}
+                {activeTab === 'shell' && <ShellPolicyPanel />}
+                {activeTab === 'tab' && <TabSettingsPanel />}
+                {activeTab === 'usage' && <UsagePanel />}
+                {activeTab === 'templates' && <TemplatesPanel />}
+                {activeTab === 'background' && <BackgroundTasksPanel />}
+                {activeTab === 'export' && <ExportPanel sessionId={activeSessionId} />}
+                {activeTab === 'console' && <ConsolePanel entries={consoleEntries} onClear={onClearConsole} />}
+                <MultiFileDiffPanel />
+            </div>
+        </>
     );
 }

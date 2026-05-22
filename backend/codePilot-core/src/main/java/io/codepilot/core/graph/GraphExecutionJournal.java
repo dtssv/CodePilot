@@ -198,8 +198,17 @@ public final class GraphExecutionJournal {
     return (List<Map<String, Object>>) journal.get(KEY_STAGES);
   }
 
+  /** Returns a mutable copy of stages so appends never mutate lists still referenced by graph state. */
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> mutableStagesCopy(Map<String, Object> journal) {
+    ensureStagesList(journal);
+    List<Map<String, Object>> copy = new ArrayList<>(stages(journal));
+    journal.put(KEY_STAGES, copy);
+    return copy;
+  }
+
   private static void appendStage(Map<String, Object> journal, Map<String, Object> stage) {
-    List<Map<String, Object>> list = stages(journal);
+    List<Map<String, Object>> list = mutableStagesCopy(journal);
     list.add(stage);
     while (list.size() > MAX_STAGES) {
       list.remove(0);

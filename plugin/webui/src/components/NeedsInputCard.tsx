@@ -56,7 +56,7 @@ interface Answer {
 
 export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
-    const [freeformText, setFreeformText] = useState('');
+    const [freeformText] = useState('');
     const [expandedOptions, setExpandedOptions] = useState<Record<string, boolean>>({});
     const [submitted, setSubmitted] = useState(false);
     // Global submitted state — prevents double-submit from dock AND inline cards
@@ -65,17 +65,25 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
 
     const handleSelectOption = (questionId: string, optionId: string, kind: string) => {
         if (isSubmitted) return;
-        setSelectedOptions(prev => {
-            if (kind === 'multi-choice') {
-                const current = prev[questionId] || [];
-                const next = current.includes(optionId)
-                    ? current.filter(id => id !== optionId)
-                    : [...current, optionId];
-                return { ...prev, [questionId]: next };
+        const newSelected = kind === 'multi-choice'
+            ? {
+                ...selectedOptions, [questionId]: ((selectedOptions[questionId] || []).includes(optionId)
+                    ? (selectedOptions[questionId] || []).filter(id => id !== optionId)
+                    : [...(selectedOptions[questionId] || []), optionId])
             }
-            // single-choice / yes-no
-            return { ...prev, [questionId]: [optionId] };
-        });
+            : { ...selectedOptions, [questionId]: [optionId] };
+        setSelectedOptions(newSelected);
+
+        // For single-choice / yes-no, auto-submit immediately after selection
+        if (kind === 'single-choice' || kind === 'yes-no') {
+            setSubmitted(true);
+            markNeedsInputSubmitted(payload.continuationToken);
+            sendToPlugin('needs_input_response', {
+                answers: [{ questionId, optionId }],
+                continuationToken: payload.continuationToken || null,
+            });
+            onAnswered?.([{ questionId, optionId }]);
+        }
     };
 
     const toggleExpand = (key: string) => {
@@ -211,15 +219,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
 
             {payload.freeformAllowed && (
                 <div className="freeform-section">
-                    <p className="freeform-label">或者直接输入你的回答（支持 "1: b; 2: a; 3: 600" 格式）：</p>
-                    <textarea
-                        className="freeform-textarea"
-                        placeholder="输入你的回答..."
-                        value={freeformText}
-                        onChange={e => setFreeformText(e.target.value)}
-                        disabled={isSubmitted}
-                        rows={2}
-                    />
+                    <p className="freeform-label">你也可以直接在下方输入框中回答</p>
                 </div>
             )}
 
@@ -232,13 +232,15 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
             )}
 
             <div className="needs-input-actions">
-                <button
-                    className="submit-btn"
-                    onClick={handleSubmit}
-                    disabled={isSubmitted}
-                >
-                    {isSubmitted ? '已提交' : '提交回答'}
-                </button>
+                {payload.questions.some(q => q.kind === 'multi-choice') && (
+                    <button
+                        className="submit-btn"
+                        onClick={handleSubmit}
+                        disabled={isSubmitted}
+                    >
+                        {isSubmitted ? '已提交' : '提交回答'}
+                    </button>
+                )}
             </div>
         </div>
     );

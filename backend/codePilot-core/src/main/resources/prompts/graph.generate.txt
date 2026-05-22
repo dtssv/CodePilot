@@ -71,6 +71,7 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 - Produce actual, complete, working code. No placeholders, no TODOs, no "...".
 - For NEW files, use op="create" with full file content in newContent.
 - For modifying existing files, use op="replace" with search/replace pairs.
+- ★ CRITICAL: The "search" field for op="replace" must be a **verbatim, contiguous snippet** that exists exactly in the target file — copy it character-for-character from [GATHERED CONTEXT]. Do NOT paraphrase, simplify, reorder, or omit lines. The patch engine performs exact string matching; any deviation (missing lines, reordered includes, inlined calls, omitted comments) causes the patch to fail with "No occurrences of search pattern". If you want to replace a large region, include ALL lines between the first and last line you intend to change — never skip middle lines or rearrange #include order.
 - If the code already exists and no changes are needed, or you want to provide an explanation instead of code, set "textOutput" to your response text:
   {"textOutput": "Your explanation or status here"}
 - If [SESSION EXECUTION FACTS] lists files under "already written", do NOT emit patches recreating those paths with new analysis — the deliverable exists; use textOutput to summarize or confirm.

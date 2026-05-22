@@ -10,8 +10,10 @@ import io.codepilot.core.graph.GraphCheckpointStore;
 import io.codepilot.core.graph.GraphExecutionLog;
 import io.codepilot.core.graph.IntakeIntent;
 import io.codepilot.core.graph.IntakeIntentClassifier;
+import io.codepilot.core.graph.PhaseOutcomeHelper;
 import io.codepilot.core.graph.ProjectMetaHelper;
 import io.codepilot.core.graph.StuckStepRecovery;
+import io.codepilot.core.graph.ToolApproachTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -123,14 +125,22 @@ public class IntakeAction implements NodeAction {
             "dispatchPath"
     );
 
-    /** Execution keys that must not carry over from a prior run when intent is NEW. */
+    /** Session-scoped keys preserved across graph runs in the same conversation (CONTINUE / graphState). */
+    private static final List<String> SESSION_PERSISTENT_KEYS =
+            List.of(
+                    "sessionExecutionFacts",
+                    "sessionHasSourceReads",
+                    "sessionHasAnalysisOutput",
+                    "sessionHadSuccessfulCompile",
+                    "sessionHadSuccessfulRun",
+                    "summaryForNextTurn",
+                    "sessionDigest");
+
+    /** Per-run execution keys cleared on NEW; phase keys also cleared on CONTINUE. */
     private static final List<String> STALE_EXECUTION_KEYS =
             List.of(
                     "gatheredInfo",
                     "phaseHasAnalysisOutput",
-                    "sessionHasSourceReads",
-                    "sessionHasAnalysisOutput",
-                    "sessionExecutionFacts",
                     "graphExecutionJournal",
                     "repairContext",
                     "completedPhases",
@@ -314,7 +324,7 @@ public class IntakeAction implements NodeAction {
         initial.put("phases", new ArrayList<>());
         initial.put("attempts", new HashMap<String, Integer>());
         initial.put("gathered", new ArrayList<>());
-        initial.put("sseEvents", new ArrayList<Map<String, Object>>());
+        initial.put("sseEvents", new java.util.concurrent.CopyOnWriteArrayList<Map<String, Object>>());
         initial.put("gatherResumeTo", "");
         initial.put("gatherLoopCount", 0);
         initial.put("doneReason", "final");
@@ -372,6 +382,8 @@ public class IntakeAction implements NodeAction {
 
         if (req.intent() == Intent.NEW) {
             clearStaleExecutionState(initial);
+        } else if (req.intent() == Intent.CONTINUE) {
+            clearPhaseExecutionState(initial);
         }
         ProjectMetaHelper.seedFromProjectMeta(initial);
         // ★ MCP tool metadata for prompts (execution is client-side via gather / tool_call)
@@ -413,8 +425,13 @@ public class IntakeAction implements NodeAction {
         return state;
     }
 
-    /** Drop per-run execution state inherited from plugin graphState on a fresh conversation. */
+    /** Drop per-run execution state on NEW; session facts stay if plugin merged them via graphState. */
     static void clearStaleExecutionState(Map<String, Object> state) {
+        clearPhaseExecutionState(state);
+    }
+
+    /** Clear phase/run state but keep session execution facts for multi-turn CONTINUE. */
+    static void clearPhaseExecutionState(Map<String, Object> state) {
         for (String key : STALE_EXECUTION_KEYS) {
             state.remove(key);
         }
@@ -422,6 +439,16 @@ public class IntakeAction implements NodeAction {
         state.put("phaseCursor", "");
         state.put("phases", new ArrayList<>());
         state.put("completedPhases", List.of());
+    }
+
+    /** After the user answers askUser, allow generate to proceed instead of re-asking. */
+    static void clearAskUserResumeEscalation(Map<String, Object> restored) {
+        restored.put("overallGoalUnmet", false);
+        restored.remove("askUserQuestion");
+        restored.remove("textOutput");
+        restored.remove("generateResult");
+        ToolApproachTracker.clearInPhase(restored);
+        PhaseOutcomeHelper.clearPhaseToolState(restored);
     }
 
     /**
@@ -471,6 +498,7 @@ public class IntakeAction implements NodeAction {
         StuckStepRecovery.applyAnsweredStuckStep(restored);
         // Fresh user input on resume: drop stale failure budget from an earlier stuck step.
         if (!answers.isEmpty()) {
+            clearAskUserResumeEscalation(restored);
             Object retries = restored.get("phaseFailureRetries");
             if (retries instanceof Number n && n.intValue() >= 3) {
                 StuckStepRecovery.clearStuckCounters(restored);
@@ -518,7 +546,7 @@ public class IntakeAction implements NodeAction {
      * Builds answers for resume: structured {@code answers[]} from the client, or a single
      * freeform answer synthesized from {@code input} when the user typed in the chat box.
      */
-    static List<ConversationRunRequest.Answer> resolveResumeAnswers(ConversationRunRequest req) {
+    public static List<ConversationRunRequest.Answer> resolveResumeAnswers(ConversationRunRequest req) {
         if (req.answers() != null && !req.answers().isEmpty()) {
             return req.answers();
         }

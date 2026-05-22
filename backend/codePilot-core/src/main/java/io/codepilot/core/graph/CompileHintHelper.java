@@ -1,16 +1,24 @@
 package io.codepilot.core.graph;
 
+import com.alibaba.cloud.ai.graph.OverAllState;
+
 /** Injects intent-aligned compile/run workflow guidance for the LLM. */
 public final class CompileHintHelper {
 
   private CompileHintHelper() {}
 
   public static String directive(String projectMeta, String userInput) {
+    return directive(projectMeta, userInput, null);
+  }
+
+  public static String directive(String projectMeta, String userInput, OverAllState state) {
     if (!ShellCommandGate.isCompileRunIntent(userInput)) {
       return "";
     }
     String meta = projectMeta == null ? "" : projectMeta;
     boolean hasCMake = containsFile(meta, "CMakeLists.txt");
+    boolean cmakeUnavailable =
+        state != null && SessionExecutionFacts.commandFamilyFailed(state, "cmake");
     boolean hasMakefile = containsFile(meta, "Makefile");
     boolean hasMainCpp = containsFile(meta, "main.cpp");
 
@@ -23,7 +31,15 @@ public final class CompileHintHelper {
         "Prefer the shortest path: read build config when needed → build → run → check output if the user cares about results.\n");
     sb.append("One tool per generate response. Use [PROJECT CONTEXT] and [GATHERED CONTEXT] — do not rediscover what you already know.\n");
     sb.append("\nTypical progression (adapt to project; stop when the goal is met):\n");
-    if (hasCMake) {
+    if (cmakeUnavailable) {
+      sb.append(
+          "  • CMake is NOT available in this environment (see [SESSION EXECUTION FACTS]).\n");
+      sb.append(
+          "  • Read CMakeLists.txt with fs.read only to learn targets; build with g++/clang++ directly.\n");
+      sb.append(
+          "  • Example: g++ -std=c++20 -o test_binary leetcode42.cpp leetcode42_test.cpp && ./test_binary\n");
+      sb.append("  • Do NOT run cmake or cmake --build.\n");
+    } else if (hasCMake) {
       sb.append(
           "  • Unknown target/binary: fs.read CMakeLists.txt (or cmake --build with verbose output).\n");
       sb.append(

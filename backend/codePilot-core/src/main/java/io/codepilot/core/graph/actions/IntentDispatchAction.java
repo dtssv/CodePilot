@@ -11,7 +11,6 @@ import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -233,10 +232,10 @@ public class IntentDispatchAction implements NodeAction {
             String userId = (String) state.value("userId").orElse(null);
             ModelSource modelSource =
                     modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-            ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
 
             GraphExecutionLog.llmRequest(state, "intentDispatch", prompt);
-            String response = GraphLlmHelper.completeUserPrompt(chatClient, state, prompt);
+            String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
             GraphExecutionLog.llmResponse(state, "intentDispatch", response, Map.of());
             return response;
         } catch (Exception e) {

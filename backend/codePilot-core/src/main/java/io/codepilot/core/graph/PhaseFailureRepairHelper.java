@@ -74,7 +74,18 @@ public final class PhaseFailureRepairHelper {
     String failureSummary = GatheredInfoFormatter.formatFailures(gathered);
 
     Map<String, Object> context = new LinkedHashMap<>();
-    context.put("directive", GENERIC_REPAIR_DIRECTIVE);
+    String directive = GENERIC_REPAIR_DIRECTIVE;
+    if (linkerMissingMain(failureSummary)) {
+      directive +=
+          """
+
+          [LINKER HINT]
+          Undefined symbol `_main` usually means you linked a library/solution .cpp without a program entry.
+          Fix by either: (1) shell.exec with g++ including BOTH the solution and a test/driver .cpp that defines main,
+          or (2) fs.replace adding a minimal main in an existing test file — do NOT emit empty fs.replace patches.
+          """;
+    }
+    context.put("directive", directive);
     context.put("failureSummary", failureSummary);
     context.put("stepLabel", PhaseGoalHelper.currentStepLabel(state));
     context.put("attempt", failureAttempts(state) + 1);
@@ -105,6 +116,15 @@ public final class PhaseFailureRepairHelper {
       return false;
     }
     return true;
+  }
+
+  private static boolean linkerMissingMain(String failureSummary) {
+    if (failureSummary == null || failureSummary.isBlank()) {
+      return false;
+    }
+    String lower = failureSummary.toLowerCase();
+    return lower.contains("undefined symbols")
+        && (lower.contains("_main") || lower.contains("symbol(s) not found"));
   }
 
   @SuppressWarnings("unchecked")

@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
 import { sendToPlugin } from '../bridge';
-import { useNeedsInputSubmitted, usePendingNeedsInput } from '../state/needsInputStore';
+import { useNeedsInputSubmitted } from '../state/needsInputStore';
 import { AgentContentRenderer } from './AgentContentRenderer';
 import { AgentStep, AgentStepCard } from './AgentStepCard';
 import { BranchTimeline } from './BranchTimeline';
@@ -105,8 +105,6 @@ function parseInlineRefs(content: string, contextRefs?: { id?: string; display: 
 
 export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
-    // Dedup needsInput: when dock is showing the active form, don't duplicate in message stream
-    const dockPayload = usePendingNeedsInput();
 
     useEffect(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -139,8 +137,6 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                     <div className={`msg msg-${msg.role} ${msg._streaming ? 'streaming' : ''}`}>
                         {msg.riskNotice ? (
                             <RiskNoticeCard {...msg.riskNotice} />
-                        ) : msg.needsInput ? (
-                            <InlineNeedsInputCard needsInput={msg.needsInput} dockPayload={dockPayload} />
                         ) : msg.diff ? (
                             <DiffCard path={msg.diff.path} hunks={msg.diff.hunks} />
                         ) : msg.role === 'user' && msg.contextRefs && msg.contextRefs.length > 0 ? (
@@ -244,6 +240,9 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
                                         </div>
                                     ) : null;
                                 })()}
+                                {msg.needsInput ? (
+                                    <InlineNeedsInputCard needsInput={msg.needsInput} />
+                                ) : null}
                             </>
                         ) : (
                             msg._streaming ? (
@@ -321,14 +320,13 @@ export function ChatView({ messages, onForkFromMessage }: ChatViewProps) {
     );
 }
 
-/** Inline needsInput card in message stream — hidden when dock has the active form. */
-function InlineNeedsInputCard({ needsInput, dockPayload }: {
+/** Inline needsInput card in message stream — always rendered (no dock duplication). */
+function InlineNeedsInputCard({ needsInput }: {
     needsInput: NonNullable<ChatMessage['needsInput']>;
-    dockPayload: ReturnType<typeof usePendingNeedsInput>;
 }) {
     const isSubmitted = useNeedsInputSubmitted(needsInput.continuationToken);
-    const dockHasActiveForm = dockPayload != null && !isSubmitted;
-    // When dock is showing the active form, don't duplicate it inline
-    if (dockHasActiveForm && !isSubmitted) return null;
+    if (isSubmitted) {
+        return <div className="needs-input-submitted">已回复</div>;
+    }
     return <NeedsInputCard payload={needsInput as any} />;
 }

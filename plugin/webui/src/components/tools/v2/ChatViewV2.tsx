@@ -7,7 +7,7 @@ import { useTranslation } from '../../../i18n';
 import { useAdmissionWaitState } from '../../../state/admissionWaitStore';
 import { useChatV2 } from '../../../state/chatStore';
 import type { RiskNotice, StepNode, TurnNode } from '../../../state/events';
-import { useNeedsInputSubmitted, usePendingNeedsInput } from '../../../state/needsInputStore';
+import { useNeedsInputSubmitted } from '../../../state/needsInputStore';
 import { planStatusCssClass, planStatusIcon } from '../../../state/planNormalize';
 import { useBranches } from '../../../state/sessionUiStore';
 import { normalizeAgentContentText, stripGraphMarkers } from '../../../utils/graphMarkers';
@@ -72,13 +72,8 @@ export function ChatViewV2() {
 function TurnAlerts({ turn }: { turn: TurnNode }) {
     const notices = turn.riskNotices ?? [];
     const needs = turn.needsInput;
-    // If NeedsInputDock (above input bar) is showing the active form,
-    // don't duplicate it here in the message stream.
-    // Once submitted, the dock clears and this inline card shows "已提交".
-    const dockPayload = usePendingNeedsInput();
     const isSubmitted = useNeedsInputSubmitted(needs?.continuationToken);
-    const dockHasActiveForm = dockPayload != null && !isSubmitted;
-    const showInlineNeedsInput = needs && (!dockHasActiveForm || isSubmitted);
+    const showInlineNeedsInput = !!needs;
     if (notices.length === 0 && !showInlineNeedsInput) return null;
     return (
         <div className="turn-alerts">
@@ -87,7 +82,11 @@ function TurnAlerts({ turn }: { turn: TurnNode }) {
             ))}
             {showInlineNeedsInput && (
                 <div className="turn-needs-input">
-                    <NeedsInputCard payload={needs as Parameters<typeof NeedsInputCard>[0]['payload']} />
+                    {isSubmitted ? (
+                        <div className="needs-input-submitted">已回复</div>
+                    ) : (
+                        <NeedsInputCard payload={needs as Parameters<typeof NeedsInputCard>[0]['payload']} />
+                    )}
                 </div>
             )}
         </div>
@@ -148,13 +147,13 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
                     ✦
                 </div>
                 <div className="msg msg-assistant">
-                    <TurnAlerts turn={turn} />
                     {turn.skillActivations && turn.skillActivations.length > 0 && (
                         <TurnSkillHistory activations={turn.skillActivations} />
                     )}
                     <div className="turn-steps">
                         {stepList.map((step) => renderStep(step, stepList, true))}
                     </div>
+                    <TurnAlerts turn={turn} />
                     <footer className="turn-footer">
                         <span className={`turn-status status-${turn.status}${admissionWait && turn.status === 'running' ? ' status-waiting' : ''}`}>
                             {statusLabel}

@@ -21,7 +21,6 @@ import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -87,9 +86,9 @@ public class PlanningAction implements NodeAction {
             String userId = (String) state.value("userId").orElse(null);
             ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
             log.info("PlanningAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
-            ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
 
-            llmResponse = GraphLlmHelper.streamUserPromptToSse(chatClient, state, planningPrompt, updates);
+            llmResponse = GraphLlmHelper.streamUserPromptToSse(resolved, state, planningPrompt, updates);
         } catch (Exception e) {
             log.error("LLM planning call failed", e);
             var fallback = buildFallbackPlan(state, input, updates);

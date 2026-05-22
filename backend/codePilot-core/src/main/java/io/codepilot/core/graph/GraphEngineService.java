@@ -244,13 +244,13 @@ public class GraphEngineService {
                         log.info("GraphEngine resume: token={}, nextNode={}, restoredStateKeys={}",
                                 continuationToken, snapshot.nextNode(), restoredState.data().keySet());
 
-                        // Register session sink for SSE
-                        String sid = req.sessionId();
-                        GraphSseHelper.registerSessionSink(sid, liveSink, sse);
-
                         // Schedule graph execution on dedicated scheduler
+                        // ★ Register session sink INSIDE the scheduled task (same pattern as run())
+                        // to ensure the sink is available before graph.invoke() starts emitting.
+                        String sid = req.sessionId();
                         graphScheduler.schedule(() -> {
                             GraphSseHelper.setLiveSink(liveSink, sse);
+                            GraphSseHelper.registerSessionSink(sid, liveSink, sse);
                             AtomicBoolean stopHandled = new AtomicBoolean(false);
                             Disposable stopSub =
                                 stopBus

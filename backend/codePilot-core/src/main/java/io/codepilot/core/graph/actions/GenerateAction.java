@@ -15,7 +15,6 @@ import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -168,11 +167,11 @@ public class GenerateAction implements NodeAction {
             String userId = (String) state.value("userId").orElse(null);
             ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
             log.info("GenerateAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
-            ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
 
             llmResponse =
                     GraphLlmHelper.streamUserPromptToSse(
-                            chatClient, state, generatePrompt, updates, !conversationalOnly);
+                            resolved, state, generatePrompt, updates, !conversationalOnly);
         } catch (Exception e) {
             log.error("LLM generate call failed for phase={}", phaseId, e);
             if (GraphFailurePolicy.handleGenerateLlmFailure(state, updates, phaseId, e)) {
@@ -275,7 +274,7 @@ public class GenerateAction implements NodeAction {
         antiLoopDirective += StuckStepRecovery.analyzeTextOutputDirective(state, gatheredInfo);
         String taskDirective =
                 buildTaskDirective(state)
-                        + CompileHintHelper.directive(projectMeta, input)
+                        + CompileHintHelper.directive(projectMeta, input, state)
                         + GraphExecutionJournal.combinedContextDirective(state);
         String proseBudget = "";
         if (planningProseStreamed || stepIndex > 0) {
@@ -540,6 +539,7 @@ public class GenerateAction implements NodeAction {
             if (question != null) {
                 updates.put("generateResult", "askUser");
                 updates.put("askUserQuestion", question);
+                updates.put("askUserOrigin", "generate");
             }
             return updates;
         }
@@ -884,16 +884,24 @@ public class GenerateAction implements NodeAction {
         boolean escalationDone =
                 Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false));
 
+        if ("askUser".equals(result)) {
+            return "askUser";
+        }
+
         if (approachExhausted) {
             if (!escalationDone) {
                 return "reenter";
             }
-            if ("textOutput".equals(result) || "failed".equals(result)) {
+            if ("textOutput".equals(result) || "failed".equals(result) || "askUser".equals(result)) {
                 if (Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
                     return "askUser";
                 }
                 return "finalize";
             }
+        }
+
+        if (escalationDone && Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
+            return "askUser";
         }
 
         // ★ Anti-loop: when gather has already been executed and the LLM still
@@ -1115,9 +1123,8 @@ public class GenerateAction implements NodeAction {
             String userId = (String) state.value("userId").orElse(null);
             ModelSource modelSource =
                     modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-            ChatClient chatClient =
-                    chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
-            text = GraphLlmHelper.streamUserPromptToSse(chatClient, state, prompt, updates, false);
+            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
+            text = GraphLlmHelper.streamUserPromptToSse(resolved, state, prompt, updates, false);
         } catch (Exception e) {
             log.error("Approach escalation LLM failed for phase={}", phaseId, e);
             if (GraphFailurePolicy.handleGenerateLlmFailure(state, updates, phaseId, e)) {
@@ -1133,6 +1140,7 @@ public class GenerateAction implements NodeAction {
         updates.put("generateResult", "askUser");
         updates.put("approachEscalationDone", true);
         updates.put("overallGoalUnmet", true);
+        updates.put("askUserOrigin", "generate");
         updates.put("textOutput", display);
         if (!display.isBlank()) {
             updates.put(

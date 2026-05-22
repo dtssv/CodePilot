@@ -52,6 +52,18 @@ class GraphFailurePolicyTest {
   }
 
   @Test
+  void jdCloudRateLimit400IsRetryable() {
+    String body =
+        "{\"error\":{\"code\":400,\"message\":\"{\\\"detail\\\":\\\"Rate limit reached for"
+            + " requests\\\"}\",\"status\":\"FAILED_RESPONSE\"}}";
+    WebClientResponseException jdLimit =
+        WebClientResponseException.create(400, "Bad Request", null, body.getBytes(), null);
+    assertTrue(GraphFailurePolicy.isTransientBadRequest(jdLimit));
+    assertTrue(GraphFailurePolicy.isRetryable(jdLimit));
+    assertTrue(GraphFailurePolicy.isRateLimited(jdLimit));
+  }
+
+  @Test
   void transientBadRequestIsRetryable() {
     // 400 with transient indicators should be retryable
     WebClientResponseException rateLimit400 =

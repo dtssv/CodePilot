@@ -62,8 +62,16 @@ public class GraphPhaseCheckpointSaver {
                                 if (journal != null) {
                                     checkpointPayload.put(GraphExecutionJournal.STATE_KEY, journal);
                                 }
-                                GraphSseHelper.emitEvent(
-                                        state, SseEvents.GRAPH_CHECKPOINT, checkpointPayload);
+                                Object facts = stateData.get(SessionExecutionFacts.STATE_KEY);
+                                if (facts != null) {
+                                    checkpointPayload.put(SessionExecutionFacts.STATE_KEY, facts);
+                                }
+                                Object nextTurn = stateData.get("summaryForNextTurn");
+                                if (nextTurn != null) {
+                                    checkpointPayload.put("summaryForNextTurn", nextTurn);
+                                }
+                                GraphSseHelper.emitLiveOnly(
+                                        sessionId, SseEvents.GRAPH_CHECKPOINT, checkpointPayload);
                             } else {
                                 log.warn("Phase checkpoint save returned false: token={}", token);
                             }

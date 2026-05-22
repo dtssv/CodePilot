@@ -6,10 +6,10 @@ import io.codepilot.core.sse.SseEvents;
 import org.springframework.http.codec.ServerSentEvent;
 import reactor.core.publisher.Sinks;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Utility to accumulate SSE events into the graph OverAllState during node execution,
@@ -94,13 +94,33 @@ public final class GraphSseHelper {
         SSE_FACTORY.remove();
     }
 
+    /**
+     * Emits to the live SSE sink only (no graph state mutation). Safe from async callbacks
+     * while the graph engine is cloning/serializing state.
+     */
+    public static void emitLiveOnly(String sessionId, String eventType, Object data) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        var sink = SESSION_SINKS.get(sessionId);
+        var sse = SESSION_SSE_FACTORIES.get(sessionId);
+        if (sink == null || sse == null) {
+            return;
+        }
+        try {
+            sink.tryEmitNext(sse.event(eventType, data));
+        } catch (Exception ignored) {
+            // sink may be closed or terminated
+        }
+    }
+
     @SuppressWarnings("unchecked")
     public static void emitEvent(OverAllState state, String eventType, Object data) {
         GraphExecutionLog.sseEmit(state, eventType, data);
-        // 1. Accumulate in state for backward compatibility
-        var events = (List<Map<String, Object>>) state.value("sseEvents")
-                .orElseGet(ArrayList::new);
-        events.add(Map.of("event", eventType, "data", data));
+        // 1. Accumulate in state for backward compat. OverAllState.data() is unmodifiable — mutate
+        //    the list in place. IntakeAction seeds CopyOnWriteArrayList for safe concurrent append
+        //    during checkpoint clone/serialization (see emitLiveOnly for async callbacks).
+        appendSseEvent(state, eventType, data);
 
         // 2. Get sink: try sessionId-based lookup first (M1 fix — survives thread switches),
         //    then ThreadLocal fallback
@@ -141,6 +161,23 @@ public final class GraphSseHelper {
     }
     emitEvent(state, SseEvents.DELTA, Map.of("text", cleaned));
   }
+
+    @SuppressWarnings("unchecked")
+    private static void appendSseEvent(OverAllState state, String eventType, Object data) {
+        List<Map<String, Object>> events =
+                (List<Map<String, Object>>) state.value("sseEvents").orElse(null);
+        if (events == null) {
+            return;
+        }
+        Map<String, Object> entry = Map.of("event", eventType, "data", data);
+        if (events instanceof CopyOnWriteArrayList) {
+            events.add(entry);
+        } else {
+            synchronized (events) {
+                events.add(entry);
+            }
+        }
+    }
 
     /** Announces graph node entry (transition only; user text comes from the model). */
     public static void emitNodeStarted(OverAllState state, String node) {

@@ -1266,6 +1266,7 @@ class CefChatPanel(
         graphStateStore =
             io.codepilot.plugin.tools
                 .GraphStateStore(project, handle.dir)
+        graphStateStore!!.loadLatest()
 
         ApplicationManager.getApplication().executeOnPooledThread {
             // Capture nullable class members as local non-null vals for safe usage in listener
@@ -1273,13 +1274,44 @@ class CefChatPanel(
             val disp = dispatcher!!
             val gd = gatherDispatcher!!
 
+            val messageCount = sessionStore.readMessages(handle).size
+            val webUiHistoryPreview =
+                historyMessages.takeLast(10).map { msg ->
+                    mapOf("role" to msg["role"], "content" to msg["content"]?.take(2000))
+                }
+
+            // Resume from graph askUser interrupt: use /resume with checkpoint token
+            var useGraphResume = false
+            if (mode == "agent") {
+                val continuationToken =
+                    gss.snapshot().path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
+                if (gss.isAwaiting() && continuationToken != null) {
+                    useGraphResume = true
+                }
+            }
+            val effectiveFreshChat = freshChat && !useGraphResume
+
+            val runIntent =
+                when {
+                    useGraphResume -> "answer"
+                    mode == "agent" &&
+                        !effectiveFreshChat &&
+                        (webUiHistoryPreview.isNotEmpty() || messageCount > 1) &&
+                        gss.hasPersistedSessionContext() -> "continue"
+                    else -> "new"
+                }
+
             val payload =
                 mutableMapOf<String, Any?>(
                     "sessionId" to handle.meta.id,
                     "mode" to mode,
                     "input" to fullText,
-                    "intent" to "new",
+                    "intent" to runIntent,
                 )
+            if (runIntent == "continue") {
+                @Suppress("UNCHECKED_CAST")
+                payload["graphState"] = mapper.convertValue(gss.snapshot(), Map::class.java) as Map<String, Any?>
+            }
             if (effectiveModelId != null && effectiveModelId != "auto") payload["modelId"] = effectiveModelId
             if (effectiveModelSource != null) payload["modelSource"] = effectiveModelSource
 
@@ -1322,15 +1354,10 @@ class CefChatPanel(
                 }
             }
 
-            // Resume from graph askUser interrupt: use /resume with checkpoint token
-            var useGraphResume = false
-            if (mode == "agent") {
-                gss.loadLatest()
+            if (useGraphResume) {
                 val continuationToken =
                     gss.snapshot().path("continuationToken").asText(null)?.trim()?.takeIf { it.isNotBlank() }
-                if (gss.isAwaiting() && continuationToken != null) {
-                    useGraphResume = true
-                    payload["intent"] = "answer"
+                if (continuationToken != null) {
                     payload["continuationToken"] = continuationToken
                     payload["graphState"] = gss.snapshot()
                     if (fullText.isNotBlank()) {
@@ -1378,18 +1405,14 @@ class CefChatPanel(
             // ★ Build recent messages: merge WebUI-provided history with local session messages
             // WebUI history takes priority as it contains the full conversation context
             // Local session messages serve as fallback when WebUI history is empty
-            val webUiHistory = historyMessages.takeLast(10).map { msg ->
-                mapOf("role" to msg["role"], "content" to msg["content"]?.take(2000))
-            }
             val localRecent = lastMessages.takeLast(6).map { msg ->
                 mapOf("role" to msg["role"], "content" to (msg["content"] as? String)?.take(2000))
             }
             // Use WebUI history if available, otherwise fall back to local session messages
-            val messageCount = sessionStore.readMessages(handle).size
             val recentMessages =
                 when {
-                    freshChat -> emptyList()
-                    webUiHistory.isNotEmpty() -> webUiHistory
+                    effectiveFreshChat -> emptyList()
+                    webUiHistoryPreview.isNotEmpty() -> webUiHistoryPreview
                     messageCount <= 1 -> emptyList()
                     else -> localRecent
                 }
@@ -1780,6 +1803,9 @@ class CefChatPanel(
                         val isAwaitingUserInput = reason == "awaiting_user_input"
                         if (isTerminalDone) {
                             terminalDoneReceived = true
+                            if (reason == "final") {
+                                gss.applyRunComplete(payload)
+                            }
                         }
                         if (isTerminalDone && !assistantPersisted) {
                             assistantPersisted = true

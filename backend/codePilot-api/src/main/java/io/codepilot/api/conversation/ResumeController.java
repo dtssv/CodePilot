@@ -4,6 +4,7 @@ import io.codepilot.core.conversation.ConversationService;
 import io.codepilot.core.dto.ConversationRunRequest;
 import io.codepilot.core.safety.SystemPromptLeakOutputFilter;
 import jakarta.validation.Valid;
+import java.time.Duration;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -53,8 +54,16 @@ public class ResumeController {
       @RequestBody @Valid ConversationRunRequest req) {
     // Delegate to ConversationService.resume() which checks continuationToken
     // and routes to graphEngine.resume() or graphEngine.run() accordingly
+    // ★ share() + heartbeat — same pattern as ConversationController.run()
+    // to prevent proxy idle-close and double-subscription issues during resume.
     Flux<ServerSentEvent<String>> raw =
-        runGate.useQueue(req) ? queuedOrchestrator.run(req, userId) : service.resume(req, userId);
-    return leakFilter.guard(raw);
+        (runGate.useQueue(req) ? queuedOrchestrator.run(req, userId) : service.resume(req, userId))
+            .share();
+    Flux<ServerSentEvent<String>> heartbeat =
+        Flux.interval(Duration.ofSeconds(20))
+            .map(i -> ServerSentEvent.<String>builder().comment("keep-alive " + i).build());
+    return leakFilter
+        .guard(raw)
+        .mergeWith(heartbeat.takeUntilOther(raw.ignoreElements()));
   }
 }

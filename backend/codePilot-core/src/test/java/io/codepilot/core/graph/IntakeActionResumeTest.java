@@ -106,6 +106,7 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
+            null,
             Map.of("awaiting", Map.of("continuationToken", "nested-token")),
             null);
 
@@ -148,10 +149,74 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
-            null,
             null);
 
     assertEquals(answers, IntakeAction.resolveResumeAnswers(req));
     assertFalse(IntakeAction.resolveResumeAnswers(req).isEmpty());
+  }
+
+  @Test
+  void restoreFromCheckpoint_clearsAskUserEscalationAfterAnswer() {
+    var snapshot =
+        new GraphCheckpointStore.CheckpointSnapshot(
+            "token-2",
+            "generate",
+            new HashMap<>(
+                Map.of(
+                    "sessionId",
+                    "s1",
+                    "doneReason",
+                    "awaiting_user_input",
+                    "overallGoalUnmet",
+                    true,
+                    "approachEscalationDone",
+                    true,
+                    "toolApproachExhausted",
+                    true,
+                    "askUserQuestion",
+                    Map.of("kind", "freeform", "text", "pick one"),
+                    "generateResult",
+                    "askUser")),
+            System.currentTimeMillis());
+
+    var req =
+        new ConversationRunRequest(
+            "s1",
+            ConversationMode.AGENT,
+            "model",
+            ModelSource.GROUP,
+            "use g++ to compile",
+            ConversationRunRequest.Intent.ANSWER,
+            "token-2",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+
+    OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
+
+    assertFalse(Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false)));
+    assertFalse(Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false)));
+    assertFalse(Boolean.TRUE.equals(state.value("toolApproachExhausted").orElse(false)));
+    assertTrue(state.value("askUserQuestion").isEmpty());
   }
 }

@@ -12,7 +12,6 @@ import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
 /** Uses a small LLM call to infer tool/plan needs from user intent (any language). */
@@ -47,7 +46,7 @@ public class IntakeIntentClassifier {
       String userId = (String) state.value("userId").orElse(null);
       ModelSource modelSource =
           modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-      ChatClient chatClient = chatClientFactory.resolve(modelId, modelSource, userId).chatClient();
+      var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
 
       String projectMeta = (String) state.value("projectMeta").orElse("");
       String projectMetaSection =
@@ -67,7 +66,7 @@ public class IntakeIntentClassifier {
               .replace("{{mcpTools}}", formatMcpToolsSection(mcpTools));
 
       GraphExecutionLog.llmRequest(state, "intake-intent", prompt);
-      String response = GraphLlmHelper.completeUserPrompt(chatClient, state, prompt);
+      String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
       GraphExecutionLog.llmResponse(state, "intake-intent", response, Map.of());
 
       IntakeIntent intent = parseResponse(response);

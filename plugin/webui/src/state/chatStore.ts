@@ -81,9 +81,12 @@ export function resetChatV2(replayBaseline?: number, opts?: ResetChatV2Options) 
     });
 }
 
-/** After hydrating history, align seq cursor so replay_since does not replay live buffer. */
+/** After hydrating history, align seq cursor so replay_since does not replay live buffer.
+ *  Takes the max of the current lastSeq and the provided seq to avoid regressing
+ *  the cursor (which would cause duplicate envelope replay and layout thrashing). */
 export function setChatV2LastSeq(seq: number) {
     if (typeof seq !== 'number' || seq < 0) return;
+    if (seq <= state.lastSeq) return;
     setState({ ...state, lastSeq: seq });
 }
 

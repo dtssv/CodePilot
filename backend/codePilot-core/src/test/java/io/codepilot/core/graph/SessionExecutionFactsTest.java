@@ -212,6 +212,15 @@ class SessionExecutionFactsTest {
   }
 
   @Test
+  void commandFamilyFailed_detectsCmakeInFailedFamilies() {
+    Map<String, Object> facts = new HashMap<>();
+    facts.put("failedFamilies", List.of("cmake"));
+    var state = new OverAllState(Map.of(SessionExecutionFacts.STATE_KEY, facts));
+    assertTrue(SessionExecutionFacts.commandFamilyFailed(state, "cmake"));
+    assertFalse(SessionExecutionFacts.commandFamilyFailed(state, "g++"));
+  }
+
+  @Test
   void staleProbeNoLongerBlocksFailedFamily() {
     // staleProbeBlockReason no longer hard-blocks commands based on failedFamilies.
     // The LLM receives shell history via [SESSION EXECUTION FACTS] and decides itself.

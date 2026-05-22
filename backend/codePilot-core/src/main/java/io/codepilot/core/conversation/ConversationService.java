@@ -178,8 +178,6 @@ public class ConversationService {
         req.modelId(), req.modelSource(), userId);
     ChatClientFactory.ResolvedClient resolved = chatClientFactory.resolve(req.modelId(), req.modelSource(), userId);
     ChatClient resolvedClient = resolved.chatClient();
-    // Track request lifecycle for load balancing and circuit-breaker
-    resolved.startRequest();
 
     // ── Agent mode: always use Graph engine ──
     // Graph engine handles planning, generate→verify→repair loop, gather, etc.
@@ -188,9 +186,12 @@ public class ConversationService {
       boolean useLegacy = !useGraphEngine;
       Flux<ServerSentEvent<String>> agentBody;
       if (useLegacy) {
+        // Legacy loop: one acquire/release for the whole agent run
+        resolved.startRequest();
         AgentLoop loop = new AgentLoop(resolvedClient, parser, bus, stopBus, mapper, sse, serverToolExecutor);
         agentBody = loop.run(req, assembled.systemText(), redactedInput);
       } else {
+        // Graph engine tracks each LLM call via GraphLlmHelper + ResolvedClient
         String resumeToken = resolveContinuationToken(req);
         if (shouldResumeFromCheckpoint(req, resumeToken)) {
           log.info(
@@ -206,13 +207,17 @@ public class ConversationService {
       // ★ Agent engines (both Graph and Legacy) emit their own done(final) events.
       // Do NOT append an extra done here — it causes duplicate done(final) events
       // which lead to duplicate message persistence and split assistant replies in the UI.
-      return trackSession(
-          req.sessionId(),
-          useLegacy ? "legacy" : "graph",
-          head.concatWith(agentBody)
-              .doOnComplete(() -> safeEndRequest(resolved, true, 0))
-              .doOnError(e -> safeEndRequest(resolved, false, 0)));
+      Flux<ServerSentEvent<String>> tracked =
+          useLegacy
+              ? head.concatWith(agentBody)
+                  .doOnComplete(() -> safeEndRequest(resolved, true, 0))
+                  .doOnError(e -> safeEndRequest(resolved, false, 0))
+              : head.concatWith(agentBody);
+      return trackSession(req.sessionId(), useLegacy ? "legacy" : "graph", tracked);
     }
+
+    // Chat mode: single streaming turn — track request lifecycle for load balancing
+    resolved.startRequest();
 
     // chat mode: single streaming turn.
     // Apply context budget digest if available (e.g., when history is too long)
@@ -354,10 +359,30 @@ public class ConversationService {
     if (req.mode() == ConversationMode.AGENT && resumeToken != null && !resumeToken.isBlank()) {
       log.info("ConversationService.resume: resuming from checkpoint, token={}, sessionId={}",
           resumeToken, req.sessionId());
+
+      // ★ Emit model.requested head event (same as run() — the client expects this
+      // event at the start of every SSE stream to initialize the UI state).
+      var headEvents = new java.util.ArrayList<ServerSentEvent<String>>();
+      headEvents.add(
+          sse.event(
+              "model.requested",
+              Map.of(
+                  "modelId", req.modelId() != null ? req.modelId() : "default",
+                  "thinkingMode",
+                      req.policy() != null && req.policy().thinkingMode() != null
+                          ? req.policy().thinkingMode()
+                          : "",
+                  "maxOutputTokens",
+                      req.policy() != null && req.policy().maxOutputTokens() != null
+                          ? req.policy().maxOutputTokens()
+                          : 0,
+                  "maxMode", req.policy() != null && Boolean.TRUE.equals(req.policy().maxMode()))));
+      Flux<ServerSentEvent<String>> head = Flux.fromIterable(headEvents);
+
       return trackSession(
           req.sessionId(),
           "graph-resume",
-          graphEngine.resume(withContinuationToken(req, resumeToken), userId));
+          head.concatWith(graphEngine.resume(withContinuationToken(req, resumeToken), userId)));
     }
     // Fallback: no checkpoint, just do a normal run
     return run(req, userId);
@@ -368,7 +393,7 @@ public class ConversationService {
    * The plugin may send the token only inside {@code graphState} when the user replies
    * in the main chat input instead of the structured needs_input card.
    */
-  static String resolveContinuationToken(ConversationRunRequest req) {
+  public static String resolveContinuationToken(ConversationRunRequest req) {
     if (req.continuationToken() != null && !req.continuationToken().isBlank()) {
       return req.continuationToken();
     }
@@ -390,7 +415,7 @@ public class ConversationService {
   }
 
   /** True when the client is answering an askUser interrupt and should reload the checkpoint. */
-  static boolean shouldResumeFromCheckpoint(ConversationRunRequest req, String token) {
+  public static boolean shouldResumeFromCheckpoint(ConversationRunRequest req, String token) {
     if (token == null || token.isBlank() || req.mode() != ConversationMode.AGENT) {
       return false;
     }

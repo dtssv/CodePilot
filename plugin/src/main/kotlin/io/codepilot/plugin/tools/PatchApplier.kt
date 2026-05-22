@@ -536,14 +536,37 @@ class PatchApplier(
         val normalizedOriginal = original.replace("\r\n", "\n").trimTrailingLines()
         val normalizedSearch = search.replace("\r\n", "\n").trimTrailingLines()
 
+        // ★ Debug logging: record search/original overview before match attempts
+        log.warn("[replaceFile-DEBUG] $rel — search.length=${search.length}, original.length=${original.length}, " +
+            "normalizedSearch.length=${normalizedSearch.length}, normalizedOriginal.length=${normalizedOriginal.length}, " +
+            "regex=$regex, ignoreCase=$ignoreCase")
+        log.warn("[replaceFile-DEBUG] $rel — search first 5 lines: ${search.lines().take(5)}")
+        log.warn("[replaceFile-DEBUG] $rel — original first 5 lines: ${original.lines().take(5)}")
+        log.warn("[replaceFile-DEBUG] $rel — search last 5 lines: ${search.lines().takeLast(5)}")
+        log.warn("[replaceFile-DEBUG] $rel — original last 5 lines: ${original.lines().takeLast(5)}")
+        // Log character-level difference at the first diverging position
+        val firstDiffPos = search.indices.firstOrNull { it >= original.length || search[it] != original[it] }
+        if (firstDiffPos != null && firstDiffPos < search.length) {
+            val ctxStart = maxOf(0, firstDiffPos - 20)
+            val ctxEnd = minOf(search.length, firstDiffPos + 20)
+            log.warn("[replaceFile-DEBUG] $rel — first char diff at pos=$firstDiffPos: " +
+                "search[${ctxStart}..${ctxEnd}]=${search.substring(ctxStart, ctxEnd).replaceWhitespaceForLog()}, " +
+                "original[${ctxStart}..${minOf(original.length, ctxEnd)}]=${if (firstDiffPos < original.length) original.substring(ctxStart, minOf(original.length, ctxEnd)).replaceWhitespaceForLog() else "<EOF>"}")
+        } else if (search.length != original.length) {
+            log.warn("[replaceFile-DEBUG] $rel — length mismatch: search=${search.length} vs original=${original.length}, " +
+                "no char diff in common prefix of length ${minOf(search.length, original.length)}")
+        }
+
         // Primary: exact match with normalized content
         var result = applyReplace(normalizedOriginal, normalizedSearch, replace, regex, ignoreCase)
         var usedNormalized = result.text != normalizedOriginal
+        log.warn("[replaceFile-DEBUG] $rel — attempt1 (normalized exact): matches=${result.matches}, usedNormalized=$usedNormalized")
 
         // Fallback 1: if exact match failed, try with original (un-normalized) content
         if (!usedNormalized) {
             result = applyReplace(original, search, replace, regex, ignoreCase)
             usedNormalized = result.text != original
+            log.warn("[replaceFile-DEBUG] $rel — attempt2 (raw exact): matches=${result.matches}, usedNormalized=$usedNormalized")
         }
 
         // Fallback 2: if still no match and not regex, try fuzzy match ignoring leading whitespace differences
@@ -554,17 +577,47 @@ class PatchApplier(
                 result = fuzzyResult
                 usedNormalized = true
             }
+            log.warn("[replaceFile-DEBUG] $rel — attempt3 (fuzzy): matches=${fuzzyResult.matches}, usedNormalized=$usedNormalized")
+        }
+
+        // Fallback 3: if still no match and not regex, try subsequence match
+        // (search lines appear in order within original, but intermediate lines may be omitted by LLM)
+        if (!usedNormalized && !regex) {
+            val subseqResult = subsequenceReplace(normalizedOriginal, normalizedSearch, replace)
+            if (subseqResult.text != normalizedOriginal) {
+                log.info("replaceFile: exact+fuzzy match failed for $rel, succeeded via subsequence (omitted-line-tolerant) match")
+                result = subseqResult
+                usedNormalized = true
+            }
+            log.warn("[replaceFile-DEBUG] $rel — attempt4 (subsequence): matches=${subseqResult.matches}, usedNormalized=$usedNormalized")
         }
 
         if (expectMatches >= 0 && result.matches != expectMatches) {
             throw ToolViolation("expectMatches=$expectMatches but found ${result.matches}")
         }
         if (!usedNormalized) {
-            // ★ Diagnostic logging for unmatched search pattern
-            log.warn("replaceFile: search pattern not found in $rel — " +
-                "search.length=${search.length}, original.length=${original.length}, " +
-                "search.head=${search.take(80).replaceWhitespaceForLog()}, " +
-                "original.head=${original.take(80).replaceWhitespaceForLog()}")
+            // ★ Diagnostic logging for unmatched search pattern — dump full content for diff analysis
+            log.warn("[replaceFile-DEBUG] $rel — ALL 4 MATCH ATTEMPTS FAILED, dumping full content for comparison:")
+            log.warn("[replaceFile-DEBUG] $rel — FULL SEARCH >>>\n$search\n<<< END SEARCH")
+            log.warn("[replaceFile-DEBUG] $rel — FULL ORIGINAL >>>\n$original\n<<< END ORIGINAL")
+            // Line-by-line diff for first 50 lines
+            val searchLines = search.lines()
+            val originalLines = original.lines()
+            val diffLineCount = minOf(searchLines.size, originalLines.size, 50)
+            for (i in 0 until diffLineCount) {
+                if (searchLines[i] != originalLines[i]) {
+                    log.warn("[replaceFile-DEBUG] $rel — line ${i + 1} DIFFERS: " +
+                        "search=${searchLines[i].take(120).replaceWhitespaceForLog()}, " +
+                        "original=${originalLines[i].take(120).replaceWhitespaceForLog()}")
+                }
+            }
+            if (searchLines.size != originalLines.size) {
+                log.warn("[replaceFile-DEBUG] $rel — line count differs: search=${searchLines.size}, original=${originalLines.size}")
+                val extraInSearch = searchLines.drop(minOf(searchLines.size, originalLines.size)).take(5)
+                val extraInOriginal = originalLines.drop(minOf(searchLines.size, originalLines.size)).take(5)
+                if (extraInSearch.isNotEmpty()) log.warn("[replaceFile-DEBUG] $rel — extra search lines (first 5): $extraInSearch")
+                if (extraInOriginal.isNotEmpty()) log.warn("[replaceFile-DEBUG] $rel — extra original lines (first 5): $extraInOriginal")
+            }
             Messages.showInfoMessage(project, "No occurrences of search pattern in $rel", "CodePilot")
             return false
         }
@@ -626,6 +679,165 @@ class PatchApplier(
         replacedLines.addAll(matchStart, indentedReplace)
 
         return ReplaceResult(replacedLines.joinToString("\n"), matchCount)
+    }
+
+    /**
+     * ★ Subsequence match: find the best mapping where each search line (after trimEnd)
+     * appears in order within original, but intermediate lines may be omitted.
+     *
+     * This handles the common LLM pattern of generating a "simplified" search block
+     * that skips comments, unrelated functions, or reorders #include lines.
+     *
+     * Algorithm:
+     * 1. For each search line, find ALL candidate matches in original (by trimEnd equality)
+     * 2. Find the "tightest" monotonic assignment that minimizes the span width
+     * 3. Require a minimum match ratio (≥ 60% of search lines must match)
+     * 4. Replace the entire span in original (from first matched line to last matched line)
+     *    with the replace text
+     */
+    private fun subsequenceReplace(
+        original: String,
+        searchText: String,
+        replaceText: String,
+    ): ReplaceResult {
+        val searchLines = searchText.lines().map { it.trimEnd() }
+        if (searchLines.isEmpty()) return ReplaceResult(original, 0)
+        // Skip if search is too short for meaningful subsequence matching
+        if (searchLines.size < 3) return ReplaceResult(original, 0)
+
+        val originalLines = original.lines()
+        val trimmedOriginal = originalLines.map { it.trimEnd() }
+
+        // Step 1: Build candidate lists — for each non-blank search line,
+        // find ALL original line indices where trimEnd matches
+        val nonBlankIndices = searchLines.indices.filter { !searchLines[it].isBlank() }
+        val candidates = mutableListOf<List<Int>>()
+        for (sIdx in nonBlankIndices) {
+            val sLine = searchLines[sIdx]
+            val matches = trimmedOriginal.indices.filter { trimmedOriginal[it] == sLine }
+            if (matches.isEmpty()) {
+                candidates.add(emptyList())
+            } else {
+                candidates.add(matches)
+            }
+        }
+
+        if (nonBlankIndices.isEmpty()) return ReplaceResult(original, 0)
+
+        // Step 2: Find the tightest monotonic assignment via DP.
+        // We want to choose one index from each candidate list such that:
+        //   - indices are strictly increasing (monotonic)
+        //   - the span (last - first) is minimized
+        // This is a constrained optimization; we use a greedy + local-search approach:
+        //   a) First, greedy: assign the earliest possible match for each search line
+        //   b) Then, try to tighten: for each assignment from right to left,
+        //      shift to the latest possible candidate that still allows all subsequent assignments
+        val greedyAssignment = greedyMonotonicAssign(candidates)
+        if (greedyAssignment == null) {
+            log.warn("[subsequenceReplace] no monotonic assignment possible")
+            return ReplaceResult(original, 0)
+        }
+
+        // Tighten from right to left: shift each assignment to the latest candidate
+        // that doesn't exceed the next assignment
+        val tightened = tightenAssignment(candidates, greedyAssignment)
+
+        // Step 3: Check match quality
+        val matchedCount = tightened.count { it >= 0 }
+        val matchRatio = matchedCount.toDouble() / nonBlankIndices.size
+
+        // Require at least 60% of non-blank search lines to match
+        if (matchRatio < 0.6 || matchedCount < 3) {
+            log.warn("[subsequenceReplace] match ratio too low: $matchRatio ($matchedCount/${nonBlankIndices.size}), requires ≥0.6")
+            return ReplaceResult(original, 0)
+        }
+
+        // Step 4: Find the span in original to replace
+        val validIndices = tightened.filter { it >= 0 }
+        if (validIndices.isEmpty()) return ReplaceResult(original, 0)
+
+        val spanStart = validIndices.first()
+        val spanEnd = validIndices.last()
+        val spanWidth = spanEnd - spanStart + 1
+
+        log.info("[subsequenceReplace] matched $matchedCount/${nonBlankIndices.size} lines (${(matchRatio * 100).toInt()}%), span=[$spanStart..$spanEnd] ($spanWidth lines) in original")
+
+        // Safety: if the span is more than 3x the search block size, the match is too loose
+        if (spanWidth > searchLines.size * 3) {
+            log.warn("[subsequenceReplace] span too wide ($spanWidth > ${searchLines.size * 3}), rejecting as unreliable")
+            return ReplaceResult(original, 0)
+        }
+
+        // Step 5: Build replacement — replace the entire span with replaceText
+        val baseIndent = originalLines[spanStart].takeWhile { it == ' ' || it == '\t' }
+        val replacedLines = originalLines.toMutableList()
+        val replaceLines = replaceText.lines()
+        val indentedReplace = replaceLines.map { line ->
+            if (line.isBlank()) line
+            else baseIndent + line.trimEnd()
+        }
+        replacedLines.subList(spanStart, spanEnd + 1).clear()
+        replacedLines.addAll(spanStart, indentedReplace)
+
+        return ReplaceResult(replacedLines.joinToString("\n"), 1)
+    }
+
+    /**
+     * Greedy monotonic assignment: for each candidate list, pick the earliest
+     * index that is strictly greater than the previous assignment.
+     * Returns null if no valid assignment exists.
+     */
+    private fun greedyMonotonicAssign(candidates: List<List<Int>>): IntArray? {
+        val assignment = IntArray(candidates.size) { -1 }
+        var lastIdx = -1
+        for (i in candidates.indices) {
+            if (candidates[i].isEmpty()) {
+                assignment[i] = -1
+                continue
+            }
+            val chosen = candidates[i].firstOrNull { it > lastIdx }
+            if (chosen == null) return null  // cannot maintain monotonicity
+            assignment[i] = chosen
+            lastIdx = chosen
+        }
+        // Must have at least 3 valid assignments
+        if (assignment.count { it >= 0 } < 3) return null
+        return assignment
+    }
+
+    /**
+     * Tighten assignment from right to left: for each position, shift to the
+     * latest candidate that doesn't exceed the next position's assignment.
+     * This produces a tighter span (closer to the actual code region).
+     */
+    private fun tightenAssignment(candidates: List<List<Int>>, greedy: IntArray): IntArray {
+        val result = greedy.copyOf()
+        // Process from second-to-last down to first
+        for (i in (candidates.size - 2) downTo 0) {
+            if (candidates[i].isEmpty() || result[i] < 0) continue
+            // Find the next valid assignment to the right
+            var upperBound = Int.MAX_VALUE
+            for (j in (i + 1) until candidates.size) {
+                if (result[j] >= 0) {
+                    upperBound = result[j]
+                    break
+                }
+            }
+            if (upperBound == Int.MAX_VALUE) continue  // no constraint from right
+            // Pick the largest candidate that is < upperBound and > previous assignment
+            var lowerBound = -1
+            for (j in 0 until i) {
+                if (result[j] >= 0) {
+                    lowerBound = result[j]
+                }
+            }
+            val finalLower = lowerBound
+            val best = candidates[i].lastOrNull { it > finalLower && it < upperBound }
+            if (best != null) {
+                result[i] = best
+            }
+        }
+        return result
     }
 
     private fun deleteFile(rel: String, risk: Risk = Risk.HIGH): Boolean {
@@ -792,6 +1004,23 @@ class PatchApplier(
                 count++
                 replace
             }
+        // ★ Debug logging: record match result
+        if (count == 0) {
+            log.warn("[applyReplace-DEBUG] NO MATCH — search.length=${search.length}, original.length=${original.length}, " +
+                "regex=$regex, ignoreCase=$ignoreCase, " +
+                "search.head(60)=${search.take(60).replaceWhitespaceForLog()}, " +
+                "original.head(60)=${original.take(60).replaceWhitespaceForLog()}")
+            // Check if search appears as a substring of original with slight differences
+            val searchFirstLine = search.lines().firstOrNull() ?: ""
+            val originalLines = original.lines()
+            val matchingLineIndices = originalLines.indices.filter { originalLines[it].trimEnd() == searchFirstLine.trimEnd() }
+            if (matchingLineIndices.isNotEmpty()) {
+                log.warn("[applyReplace-DEBUG] first search line found in original at line(s) ${matchingLineIndices.map { it + 1 }} " +
+                    "but full search block does not match — likely content drift in subsequent lines")
+            } else {
+                log.warn("[applyReplace-DEBUG] first search line NOT found in original at all (even after trimEnd)")
+            }
+        }
         return ReplaceResult(replaced, count)
     }
 

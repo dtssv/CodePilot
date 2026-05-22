@@ -311,6 +311,25 @@ public class ConversationRunStore {
     return new AdmissionDbSnapshot(globalQueued, globalRunning, perUser);
   }
 
+  /** Mark all stale-lease running runs as interrupted so the plugin can resume them on attach. */
+  public int markStaleRunningInterrupted(Instant leaseCutoff) {
+    if (!dbActive) return 0;
+    int n =
+        jdbc.update(
+            """
+            UPDATE conversation_runs
+            SET status = 'interrupted', worker_id = NULL, lease_until = NULL,
+                updated_at = CURRENT_TIMESTAMP(3)
+            WHERE status = 'running' AND (lease_until IS NULL OR lease_until < :cutoff)
+            """,
+            new MapSqlParameterSource()
+                .addValue("cutoff", Timestamp.from(leaseCutoff)));
+    if (n > 0) {
+      log.info("Marked {} stale-lease running runs as interrupted (leaseCutoff={})", n, leaseCutoff);
+    }
+    return n;
+  }
+
   public Map<String, Object> statusMap(String runId) {
     return get(runId)
         .map(

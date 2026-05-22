@@ -10,12 +10,12 @@ class PhasePlanNormalizerTest {
 
   @Test
   void expandsSinglePhaseToMatchUserSteps() {
-    var userSteps =
+    List<Map<String, Object>> userSteps =
         List.of(
             Map.of("id", "s1", "title", "Create doc dir"),
             Map.of("id", "s2", "title", "Write design doc"),
             Map.of("id", "s3", "title", "Write prompts"));
-    var phases = List.of(Map.of("id", "p1", "intent", "code-change"));
+    List<Map<String, Object>> phases = List.of(Map.of("id", "p1", "intent", "code-change"));
 
     var normalized = PhasePlanNormalizer.normalize(userSteps, phases);
 
@@ -28,14 +28,14 @@ class PhasePlanNormalizerTest {
 
   @Test
   void expandsPartialPhasesToMatchFiveSteps() {
-    var userSteps =
+    List<Map<String, Object>> userSteps =
         List.of(
             Map.of("id", "s1", "title", "A"),
             Map.of("id", "s2", "title", "B"),
             Map.of("id", "s3", "title", "C"),
             Map.of("id", "s4", "title", "D"),
             Map.of("id", "s5", "title", "E"));
-    var phases =
+    List<Map<String, Object>> phases =
         List.of(
             Map.of("id", "p1", "intent", "code-change"),
             Map.of("id", "p2", "intent", "code-change"),
@@ -49,14 +49,14 @@ class PhasePlanNormalizerTest {
 
   @Test
   void mergesMultipleDeliverableWriteSteps() {
-    var userSteps =
+    List<Map<String, Object>> userSteps =
         List.of(
             Map.of("id", "s1", "title", "List sources", "intent", "discover"),
             Map.of("id", "s2", "title", "Read sources", "intent", "inspect"),
             Map.of("id", "s3", "title", "Analyze", "intent", "analyze"),
             Map.of("id", "s4", "title", "Write report A", "intent", "synthesize"),
             Map.of("id", "s5", "title", "Write report B", "intent", "synthesize"));
-    var phases =
+    List<Map<String, Object>> phases =
         List.of(
             Map.of("id", "p1", "intent", "discover"),
             Map.of("id", "p2", "intent", "inspect"),
@@ -73,9 +73,9 @@ class PhasePlanNormalizerTest {
 
   @Test
   void keepsOneToOnePhases() {
-    var userSteps =
+    List<Map<String, Object>> userSteps =
         List.of(Map.of("id", "s1", "title", "A"), Map.of("id", "s2", "title", "B"));
-    var phases =
+    List<Map<String, Object>> phases =
         List.of(Map.of("id", "p1", "intent", "code-change"), Map.of("id", "p2", "intent", "code-change"));
 
     var normalized = PhasePlanNormalizer.normalize(userSteps, phases);

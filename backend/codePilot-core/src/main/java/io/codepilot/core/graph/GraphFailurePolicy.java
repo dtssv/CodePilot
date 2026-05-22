@@ -30,6 +30,9 @@ public final class GraphFailurePolicy {
   private static final String BAD_REQUEST_MESSAGE =
       "模型请求参数异常，请检查模型配置后重试。若问题持续出现，请联系运营人员排查。";
 
+  private static final String RATE_LIMIT_MESSAGE =
+      "模型服务请求过于频繁，请稍后再试。若问题持续出现，请联系运营人员排查。";
+
   private GraphFailurePolicy() {}
 
   /**
@@ -113,6 +116,8 @@ public final class GraphFailurePolicy {
     String lower = body.toLowerCase();
     // Common transient indicators in 400 responses from AI providers
     return lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("rate limit reached")
         || lower.contains("too many requests")
         || lower.contains("quota exceeded")
         || lower.contains("capacity")
@@ -152,12 +157,28 @@ public final class GraphFailurePolicy {
    * Emit user-safe error + terminal done; logs full cause server-side only.
    * Provides differentiated messages for client errors (4xx) vs server errors (5xx/network).
    */
+  public static boolean isRateLimited(Throwable t) {
+    for (Throwable c = t; c != null; c = c.getCause()) {
+      if (c instanceof WebClientResponseException wcr) {
+        if (wcr.getStatusCode().value() == 429 || isTransientBadRequest(wcr)) {
+          return true;
+        }
+      }
+      String msg = (c.getMessage() != null ? c.getMessage() : "").toLowerCase();
+      if (msg.contains("rate limit") || msg.contains("too many requests")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public static void emitTerminalFailure(OverAllState state, String logContext, Throwable cause) {
     String userMessage = OPERATOR_MESSAGE;
     if (cause != null) {
       log.warn("{}: {}", logContext, cause.toString(), cause);
-      // Provide a more specific message for client errors (400 Bad Request, etc.)
-      if (isClientError(cause)) {
+      if (isRateLimited(cause)) {
+        userMessage = RATE_LIMIT_MESSAGE;
+      } else if (isClientError(cause)) {
         userMessage = BAD_REQUEST_MESSAGE;
         // Log the response body for debugging — this is the key to diagnosing 400 errors
         for (Throwable c = cause; c != null; c = c.getCause()) {
@@ -176,6 +197,17 @@ public final class GraphFailurePolicy {
     GraphSseHelper.emitEvent(state, SseEvents.DONE, Map.of("reason", "failed"));
   }
 
+  private static void backoffBeforeGraphRetry(int retryNumber, String context) {
+    long backoffMs = GraphLlmHelper.INLINE_BASE_BACKOFF_MS * (1L << Math.max(0, retryNumber - 1));
+    log.info("{}: backing off {}ms before graph-level LLM retry", context, backoffMs);
+    try {
+      Thread.sleep(backoffMs);
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Graph LLM retry interrupted: " + context, ie);
+    }
+  }
+
   /** Truncates a string for safe logging (avoids dumping huge response bodies). */
   private static String abbreviate(String s, int maxLen) {
     if (s == null) return "null";
@@ -189,6 +221,7 @@ public final class GraphFailurePolicy {
       OverAllState state, Map<String, Object> updates, String phaseId, Exception e) {
     int retries = (int) state.value("generateLlmRetries").orElse(0);
     if (isRetryable(e) && retries < MAX_LLM_RETRIES) {
+      backoffBeforeGraphRetry(retries + 1, "GenerateAction phase=" + phaseId);
       updates.put("generateLlmRetries", retries + 1);
       updates.put("generateResult", "retryGenerate");
       log.info(
@@ -208,6 +241,7 @@ public final class GraphFailurePolicy {
       OverAllState state, Map<String, Object> updates, String phaseId, Exception e) {
     int retries = (int) state.value("repairLlmRetries").orElse(0);
     if (isRetryable(e) && retries < MAX_LLM_RETRIES) {
+      backoffBeforeGraphRetry(retries + 1, "RepairAction phase=" + phaseId);
       updates.put("repairLlmRetries", retries + 1);
       updates.put("repairResult", "retryRepair");
       log.info(

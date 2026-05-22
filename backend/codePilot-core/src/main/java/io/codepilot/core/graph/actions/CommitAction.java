@@ -53,7 +53,12 @@ public class CommitAction implements NodeAction {
         // verify has not confirmed success.
         String verifyResult = (String) state.value("verifyResult").orElse("");
         boolean verifySucceeded = "success".equals(verifyResult);
-        boolean toolFailures = !verifySucceeded
+        // When repair returned partialCommit (budget exhausted but some patches applied),
+        // we must NOT route back to repair — that would cause an infinite loop.
+        // Clear the stale failure state so the commit can proceed.
+        String repairResult = (String) state.value("repairResult").orElse("");
+        boolean partialCommit = "partialCommit".equals(repairResult);
+        boolean toolFailures = !verifySucceeded && !partialCommit
                 && (PhaseOutcomeHelper.rawToolsHadFailure(state)
                         || PhaseOutcomeHelper.gatheredHasFailures(gathered));
 
@@ -69,6 +74,13 @@ public class CommitAction implements NodeAction {
                     attempts,
                     stepKind,
                     stepIdx + 1);
+        } else if (partialCommit) {
+            // Repair budget exhausted with partial results — clear stale failure state
+            // and advance to the next phase instead of looping back to repair.
+            log.info("CommitAction: partialCommit for phase {} — clearing failure state and advancing", phaseId);
+            PhaseFailureRepairHelper.clearPhaseAttemptCounters(updates);
+            updates.put("verifyResult", "success");
+            updates.put("phaseToolsHadFailure", false);
         } else if (!stepGoalMet && toolFailures) {
             GraphExecutionJournal.recordPhaseBoundary(
                     state, updates, phaseId, "commit", "repair", gathered);

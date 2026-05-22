@@ -329,9 +329,17 @@ public class ApplyPatchAction implements NodeAction {
             return "commit";
         }
 
+        log.info("ApplyPatch routing: patchResult={}, routing to {}",
+                result, switch (result) {
+                    case "success", "partial" -> "verify";
+                    case "skipped" -> "repair";   // All patches invalid → repair needed, not verify
+                    case "shadow_failed" -> "repair";
+                    default -> "repair";
+                });
+
         return switch (result) {
             case "success", "partial" -> "verify";
-            case "skipped" -> "verify";
+            case "skipped" -> "repair";   // All patches invalid → repair needed, not verify
             case "shadow_failed" -> "repair";
             default -> "repair";
         };

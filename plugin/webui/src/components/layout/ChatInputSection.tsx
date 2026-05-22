@@ -1,6 +1,7 @@
 import { sendToPlugin } from '../../bridge';
 import { useTranslation } from '../../i18n';
 import type { ModelOption, ModelRouteInfo } from '../../state/modelAuthBridge';
+import { clearPendingNeedsInput, getPendingNeedsInput, isNeedsInputSubmitted, markNeedsInputSubmitted } from '../../state/needsInputStore';
 import type { BranchInfo } from '../../state/sessionUiStore';
 import { BranchTreeView } from '../branches/BranchTreeView';
 import type { BudgetBreakdown } from '../ContextBudgetBar';
@@ -10,7 +11,6 @@ import type { ImageData } from '../ImageAttachment';
 import { InputBar } from '../InputBar';
 import { McpActivityBanner } from '../mcp/McpActivityBanner';
 import { ModelSelector } from '../ModelSelector';
-import { NeedsInputDock } from '../NeedsInputDock';
 import type { SessionCostInfo } from '../SessionCostPanel';
 import { SessionCostPanel } from '../SessionCostPanel';
 import { ActiveSkillsBar } from '../skills/ActiveSkillsBar';
@@ -89,9 +89,21 @@ export function ChatInputSection({
             <McpActivityBanner />
             <RateLimitBanner />
             <AdmissionWaitBanner />
-            <NeedsInputDock />
             <InputBar
-                onSend={onSend}
+                onSend={(text, chips, images) => {
+                    // If there's a pending needs_input, treat user input as needsInput answer
+                    const pending = getPendingNeedsInput();
+                    if (pending && pending.continuationToken && !isNeedsInputSubmitted(pending.continuationToken)) {
+                        markNeedsInputSubmitted(pending.continuationToken);
+                        sendToPlugin('needs_input_response', {
+                            answers: [{ questionId: '', freeform: text }],
+                            continuationToken: pending.continuationToken,
+                        });
+                        clearPendingNeedsInput();
+                        return;
+                    }
+                    onSend(text, chips, images);
+                }}
                 onStop={onStop}
                 contextChips={contextChips}
                 onRemoveChip={onRemoveChip}

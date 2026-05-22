@@ -104,6 +104,14 @@ public final class SessionExecutionFacts {
     return Boolean.TRUE.equals(fromState(state).get(KEY_PLAN_PIVOT));
   }
 
+  /** True when a shell command family already failed this session (e.g. cmake missing). */
+  public static boolean commandFamilyFailed(OverAllState state, String family) {
+    if (state == null || family == null || family.isBlank()) {
+      return false;
+    }
+    return stringList(fromState(state), KEY_FAILED_FAMILIES).contains(family);
+  }
+
   public static List<String> primaryTargets(OverAllState state) {
     return stringList(fromState(state), KEY_PRIMARY_TARGETS);
   }

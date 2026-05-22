@@ -6,10 +6,11 @@ import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { sendToPlugin } from '../bridge';
 import type { ContextChipData } from '../components/ContextChip';
 import type { ImageData } from '../components/ImageAttachment';
-import type { ModelOption } from './modelAuthBridge';
+import { resetChatV2 } from './chatStore';
 import type { ChatMessage } from './chatTypes';
 import { logConsole } from './consoleStore';
-import { resetChatV2 } from './chatStore';
+import type { ModelOption } from './modelAuthBridge';
+import { getPendingNeedsInput } from './needsInputStore';
 import { getActiveSessionId, getChatClearEpoch, isPendingNewChat, markPendingNewChat } from './sessionUiStore';
 import { validateVisionSend } from './visionValidate';
 
@@ -77,14 +78,19 @@ export function createSendHandlers(deps: SendBridgeDeps) {
         }));
 
         const freshChat = isPendingNewChat();
-        const includeHistory = !freshChat && getActiveSessionId() !== '';
+        // ★ When there's a pending needs_input (askUser), the user is answering a previous
+        //   turn — not starting a new chat. Clear freshChat so so that history is included
+        //   and the Kotlin side can detect the awaiting state for resume.
+        const hasPendingAskUser = getPendingNeedsInput() !== null;
+        const effectiveFreshChat = freshChat && !hasPendingAskUser;
+        const includeHistory = !effectiveFreshChat && getActiveSessionId() !== '';
         const historyMessages = includeHistory
             ? messages
-                  .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
-                  .map((msg) => ({
-                      role: msg.role,
-                      content: msg.content.length > 4000 ? msg.content.substring(0, 4000) + '...' : msg.content,
-                  }))
+                .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
+                .map((msg) => ({
+                    role: msg.role,
+                    content: msg.content.length > 4000 ? msg.content.substring(0, 4000) + '...' : msg.content,
+                }))
             : [];
 
         const msgPayload = {
@@ -101,7 +107,7 @@ export function createSendHandlers(deps: SendBridgeDeps) {
             maxMode,
             images: images?.map((img) => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
             historyMessages,
-            freshChat,
+            effectiveFreshChat,
             ...(freshChat ? { chatClearEpoch: getChatClearEpoch() } : {}),
         };
         logConsole('bridge', 'sendToPlugin:user_message', {

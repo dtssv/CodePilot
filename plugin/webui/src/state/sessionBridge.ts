@@ -4,6 +4,7 @@
 
 import { onPluginEvent, sendToPlugin } from '../bridge';
 import type { SessionInfoV2 } from '../components/sessions/SessionSidebarV2';
+import type { LegacyHydrateMessage } from './chatHydrate';
 import {
     hasRunningTurn,
     hydrateChatV2FromEnvelopes,
@@ -12,19 +13,18 @@ import {
     resetChatV2,
     setChatV2LastSeq,
 } from './chatStore';
+import type { ToolExecutionState } from './chatTypes';
 import type { EventEnvelope } from './events';
-import type { LegacyHydrateMessage } from './chatHydrate';
 import {
+    completeFreshChat,
     getActiveSessionId,
     isPendingNewChat,
-    completeFreshChat,
     markPendingNewChat,
     setActiveSessionId,
     setBranchList,
     setSessionList,
     type BranchInfo,
 } from './sessionUiStore';
-import type { ToolExecutionState } from './chatTypes';
 
 export interface SessionMessagesPayload {
     sessionId?: string;
@@ -173,13 +173,23 @@ export function installSessionBridge(handlers: SessionBridgeHandlers): () => voi
                 if (typeof data.envelopeSeq === 'number') {
                     setChatV2LastSeq(data.envelopeSeq);
                 }
+                // v2 enabled: skip legacy setMessages to avoid unnecessary App rerender.
+                // v2 store already has the data via hydrateChatV2From* above.
+                // Only pass metadata (abnormalTermination, hasCheckpoint, recoveryMode).
+                handlers.onSessionMessages({
+                    messages: [],
+                    abnormalTermination: data.abnormalTermination,
+                    hasCheckpoint: data.hasCheckpoint,
+                    envelopeSeq: data.envelopeSeq,
+                });
+            } else {
+                handlers.onSessionMessages({
+                    messages: restored,
+                    abnormalTermination: data.abnormalTermination,
+                    hasCheckpoint: data.hasCheckpoint,
+                    envelopeSeq: data.envelopeSeq,
+                });
             }
-            handlers.onSessionMessages({
-                messages: restored,
-                abnormalTermination: data.abnormalTermination,
-                hasCheckpoint: data.hasCheckpoint,
-                envelopeSeq: data.envelopeSeq,
-            });
         }),
     ];
     return () => unsubs.forEach((u) => u());

@@ -4,6 +4,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.PhaseGoalHelper;
+import io.codepilot.core.graph.SessionExecutionFacts;
 import io.codepilot.core.graph.ShellCommandGate;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -127,15 +128,20 @@ public class FinalizeAction implements NodeAction {
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PHASE_DONE,
             Map.of("phaseId", "finalize", "summary", summary.toString()));
 
-        GraphSseHelper.emitEvent(state, SseEvents.DONE,
-            Map.of(
-                "reason", "final",
-                "goalUnmet", goalUnmet,
-                "summary", summary.toString(),
-                "changedFiles", changedFiles,
-                "completedPhases", completedPhases,
-                "totalPhases", phases.size()
-            ));
+        Map<String, Object> donePayload = new HashMap<>();
+        donePayload.put("reason", "final");
+        donePayload.put("goalUnmet", goalUnmet);
+        donePayload.put("summary", summary.toString());
+        donePayload.put("changedFiles", changedFiles);
+        donePayload.put("completedPhases", completedPhases);
+        donePayload.put("totalPhases", phases.size());
+        state.value(SessionExecutionFacts.STATE_KEY)
+                .filter(v -> v instanceof Map<?, ?> m && !m.isEmpty())
+                .ifPresent(v -> donePayload.put(SessionExecutionFacts.STATE_KEY, v));
+        state.value("summaryForNextTurn")
+                .filter(v -> v != null)
+                .ifPresent(v -> donePayload.put("summaryForNextTurn", v));
+        GraphSseHelper.emitEvent(state, SseEvents.DONE, donePayload);
 
         log.info(
             "Finalize: task completed. {} phases done, {} files changed, {} tool calls (direct={})",
