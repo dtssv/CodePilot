@@ -233,6 +233,14 @@ public class ApplyPatchAction implements NodeAction {
                         }
                     }
                     SessionExecutionFacts.recordWrittenFiles(state, updates, writtenPaths);
+                    // ── Record change lineage for each written file ──
+
+                    for (String writtenPath : writtenPaths) {
+                        io.codepilot.core.memory.ChangeLineageTracker.recordChange(
+                                state, updates, writtenPath, "",
+                                "applyPatch in phase " + phaseId,
+                                "", phaseId, 0);
+                    }
                 } else {
                     String errMsg = result != null ? result.errorMessage() : "Timeout waiting for tool result";
                     log.warn("Batch applyPatch failed, falling back to individual edits: {}", errMsg);

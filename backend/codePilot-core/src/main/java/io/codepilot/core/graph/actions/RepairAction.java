@@ -225,7 +225,7 @@ public class RepairAction implements NodeAction {
             case "partialCommit", "abandonStep" -> "commit";
             case "retryRepair" -> "repair";
             case "retryGenerate" -> "generate";  // LLM produced retry tool calls → re-execute via generate
-            case "failed" -> "finalize";
+            case "failed" -> "summarize";
             default -> "applyPatch";  // "toolCalls" or any unknown → applyPatch
         };
         log.info("Repair routing: repairResult={}, routing to {}", result, target);

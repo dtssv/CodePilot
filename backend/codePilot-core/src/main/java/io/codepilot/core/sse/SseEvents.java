@@ -34,6 +34,8 @@ public final class SseEvents {
   /** Phase-boundary soft checkpoint (Redis + plugin local token). */
   public static final String GRAPH_CHECKPOINT = "graph_checkpoint";
   public static final String GRAPH_BUDGET_ALERT = "graph_budget_alert";
+  /** Structured change summary emitted before finalize (module-grouped, priority-ranked). */
+  public static final String GRAPH_SUMMARIZE = "graph_summarize";
 
   // ── Dual-layer plan events ──
   public static final String USER_PLAN = "user_plan";
@@ -48,6 +50,14 @@ public final class SseEvents {
   public static final String AGENT_WRITING = "agent_writing";
   /** Agent declares a command execution (e.g., "Verifying compilation and running tests"). */
   public static final String AGENT_RUNNING = "agent_running";
+
+  // ── Memory system events (four-layer memory architecture) ──
+  /** Memory consistency conflict detected — carries anomaly descriptions for UI display. */
+  public static final String MEMORY_CONFLICT = "memory.conflict";
+  /** Memory candidate suggested for user approval — carries StructuredMemory proposals. */
+  public static final String MEMORY_CANDIDATE = "memory.candidate";
+  /** Memory compacted/compressed notification — carries audit info about what was compressed. */
+  public static final String MEMORY_COMPACTED = "memory.compacted";
 
   private SseEvents() {}
 }

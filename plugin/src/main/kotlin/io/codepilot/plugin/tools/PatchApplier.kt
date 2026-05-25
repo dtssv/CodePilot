@@ -559,20 +559,20 @@ class PatchApplier(
 
         // Primary: exact match with normalized content
         var result = applyReplace(normalizedOriginal, normalizedSearch, replace, regex, ignoreCase)
-        var usedNormalized = result.text != normalizedOriginal
+        var usedNormalized = result.matches > 0
         log.warn("[replaceFile-DEBUG] $rel — attempt1 (normalized exact): matches=${result.matches}, usedNormalized=$usedNormalized")
 
         // Fallback 1: if exact match failed, try with original (un-normalized) content
         if (!usedNormalized) {
             result = applyReplace(original, search, replace, regex, ignoreCase)
-            usedNormalized = result.text != original
+            usedNormalized = result.matches > 0
             log.warn("[replaceFile-DEBUG] $rel — attempt2 (raw exact): matches=${result.matches}, usedNormalized=$usedNormalized")
         }
 
         // Fallback 2: if still no match and not regex, try fuzzy match ignoring leading whitespace differences
         if (!usedNormalized && !regex) {
             val fuzzyResult = fuzzyReplaceByLineContent(normalizedOriginal, normalizedSearch, replace)
-            if (fuzzyResult.text != normalizedOriginal) {
+            if (fuzzyResult.matches > 0) {
                 log.info("replaceFile: exact match failed for $rel, succeeded via fuzzy (whitespace-tolerant) match")
                 result = fuzzyResult
                 usedNormalized = true
@@ -584,7 +584,7 @@ class PatchApplier(
         // (search lines appear in order within original, but intermediate lines may be omitted by LLM)
         if (!usedNormalized && !regex) {
             val subseqResult = subsequenceReplace(normalizedOriginal, normalizedSearch, replace)
-            if (subseqResult.text != normalizedOriginal) {
+            if (subseqResult.matches > 0) {
                 log.info("replaceFile: exact+fuzzy match failed for $rel, succeeded via subsequence (omitted-line-tolerant) match")
                 result = subseqResult
                 usedNormalized = true

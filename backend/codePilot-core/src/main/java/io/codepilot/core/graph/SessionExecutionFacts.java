@@ -102,10 +102,17 @@ public final class SessionExecutionFacts {
   /** Clear per-phase history (shellHistory) when advancing to the next phase.
    *  This allows the LLM to start fresh in a new phase without being constrained
    *  by stale command history from previous phases. Persistent facts (failedFamilies,
-   *  successFamilies, primaryTargets, planPivot) are retained across phases. */
+   *  successFamilies, primaryTargets, planPivot) are retained across phases.
+   *  <p>Also clears writtenFiles so that subsequent phases can modify files
+   *  that were written in earlier phases. Multi-step plans (e.g. refactoring
+   *  multiple functions in the same file) require each phase to be able to
+   *  patch the same file. The "already-written" guard is still effective within
+   *  a single phase to prevent duplicate writes, but should not block
+   *  legitimate incremental edits across phases. */
   public static void clearPhaseHistory(Map<String, Object> updates, OverAllState state) {
     Map<String, Object> facts = fromState(state);
     facts.put(KEY_FAILED_DETAILS, List.of());
+    facts.put(KEY_WRITTEN_FILES, List.of());
     putInUpdates(updates, facts);
   }
 
@@ -342,6 +349,14 @@ public final class SessionExecutionFacts {
     // incorrect primaryTargets would prevent legitimate shell commands from running.
     String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
     if (!resumeNextNode.isBlank()) {
+      return java.util.Optional.empty();
+    }
+    // ★ Skip stale-path blocking during repair. Repair is explicitly trying to fix
+    // previous failures — blocking its shell commands based on stale paths prevents
+    // the repair from executing alternative approaches (e.g., retrying compilation
+    // with different flags after source code has been fixed).
+    String generateResult = (String) state.value("generateResult").orElse("");
+    if ("repair".equals(generateResult)) {
       return java.util.Optional.empty();
     }
     Map<String, Object> facts = fromState(state);

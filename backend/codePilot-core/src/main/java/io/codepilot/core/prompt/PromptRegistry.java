@@ -45,7 +45,10 @@ public class PromptRegistry {
           "graph.generate",
           "graph.conversational",
           "graph.intake",
-          "graph.approach-exhausted");
+          "graph.approach-exhausted",
+          "graph.memoryLoad",
+          "graph.memoryCompact",
+          "graph.memoryConflict");
 
   private final Map<String, String> segments = new LinkedHashMap<>();
 

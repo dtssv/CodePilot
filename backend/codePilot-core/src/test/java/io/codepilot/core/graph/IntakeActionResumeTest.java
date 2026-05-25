@@ -57,6 +57,7 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
+            null,
             null);
 
     OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
@@ -108,6 +109,7 @@ class IntakeActionResumeTest {
             null,
             null,
             Map.of("awaiting", Map.of("continuationToken", "nested-token")),
+            null,
             null);
 
     assertEquals("nested-token", ConversationService.resolveContinuationToken(req));
@@ -149,10 +151,82 @@ class IntakeActionResumeTest {
             null,
             null,
             null,
+            null,
             null);
 
     assertEquals(answers, IntakeAction.resolveResumeAnswers(req));
     assertFalse(IntakeAction.resolveResumeAnswers(req).isEmpty());
+  }
+
+  @Test
+  void restoreFromCheckpoint_preservesOriginalInputForStructuredOptionAnswers() {
+    // When the user selects a structured option (optionId="manual"), the `input`
+    // field should NOT be overwritten with the optionId — the original request
+    // must be preserved so the LLM has correct context.
+    var snapshot =
+        new GraphCheckpointStore.CheckpointSnapshot(
+            "token-struct",
+            "repair",
+            Map.of(
+                "sessionId", "s1",
+                "doneReason", "awaiting_user_input",
+                "input", "请帮我重构这个文件"),
+            System.currentTimeMillis());
+
+    var answers =
+        List.of(new ConversationRunRequest.Answer("repair-decision", "manual", null, null));
+    var req =
+        new ConversationRunRequest(
+            "s1",
+            ConversationMode.AGENT,
+            "model",
+            ModelSource.GROUP,
+            "manual",  // plugin sends optionId as input (the bug)
+            ConversationRunRequest.Intent.ANSWER,
+            "token-struct",
+            answers,
+            null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null, null, null, null,
+            null, null, null);
+
+    OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
+
+    // input should retain the original user request from the checkpoint,
+    // NOT be overwritten with "manual" (the optionId)
+    assertEquals("请帮我重构这个文件", state.value("input").orElse(""));
+  }
+
+  @Test
+  void restoreFromCheckpoint_allowsFreeformInputOverride() {
+    // When the user types freeform text (no optionId), the `input` field
+    // SHOULD be overwritten with the freeform text.
+    var snapshot =
+        new GraphCheckpointStore.CheckpointSnapshot(
+            "token-free",
+            "repair",
+            Map.of(
+                "sessionId", "s1",
+                "doneReason", "awaiting_user_input",
+                "input", "original request"),
+            System.currentTimeMillis());
+
+    var req =
+        new ConversationRunRequest(
+            "s1",
+            ConversationMode.AGENT,
+            "model",
+            ModelSource.GROUP,
+            "please try a different approach",
+            ConversationRunRequest.Intent.ANSWER,
+            "token-free",
+            null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null, null, null, null,
+            null, null, null, null);
+
+    OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
+
+    // freeform text should override the saved input
+    assertEquals("please try a different approach", state.value("input").orElse(""));
   }
 
   @Test
@@ -188,6 +262,7 @@ class IntakeActionResumeTest {
             "use g++ to compile",
             ConversationRunRequest.Intent.ANSWER,
             "token-2",
+            null,
             null,
             null,
             null,

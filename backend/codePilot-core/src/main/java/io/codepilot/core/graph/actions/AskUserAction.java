@@ -291,7 +291,7 @@ public class AskUserAction implements NodeAction {
             // Validate that nextNode is in the conditional edge mapping
             String validated = switch (nextNode) {
                 case "repair", "generate", "planning", "preCheck",
-                     "verify", "gather", "commit", "finalize" -> nextNode;
+                     "verify", "gather", "commit", "summarize" -> nextNode;
                 default -> {
                     log.warn("AskUser route: invalid nextNode={}, falling back to repair", nextNode);
                     yield "repair";
@@ -304,9 +304,9 @@ public class AskUserAction implements NodeAction {
 
         // First-time askUser with no answers: the graph will be suspended
         // (DONE event emitted with awaiting_user_input reason).
-        // Route to finalize as a safe fallback — the graph won't actually
+        // Route to summarize as a safe fallback — the graph won't actually
         // continue because the GraphInterruptException halts execution.
         log.info("AskUser route: no answers yet, graph will suspend (awaiting_user_input)");
-        return "finalize";
+        return "summarize";
     }
 }

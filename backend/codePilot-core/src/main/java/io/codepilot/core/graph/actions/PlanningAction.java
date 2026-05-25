@@ -342,7 +342,7 @@ public class PlanningAction implements NodeAction {
 
         return switch (result) {
             case "infoRequests" -> "gather";
-            case "error" -> "finalize";
+            case "error" -> "summarize";
             default -> "preCheck";
         };
     }

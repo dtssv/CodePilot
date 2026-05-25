@@ -2253,7 +2253,12 @@ class CefChatPanel(
         }
 
         // Build resume payload using SessionStore (includes graphState, completedToolCalls, etc.)
-        val userInput = answers.joinToString("; ") { a -> a["freeform"]?.toString() ?: a["optionId"]?.toString() ?: "" }
+        // ★ FIX: Only use freeform text as input — never fall back to optionId.
+        // When the user selects a structured option (e.g. optionId="manual"), using the
+        // optionId as `input` causes the LLM to misinterpret it (e.g. "manual" → "user manual"
+        // instead of "I'll handle it manually"). The optionId semantics are carried by the
+        // structured `answers` list; the `input` field should only contain freeform text.
+        val userInput = answers.mapNotNull { a -> a["freeform"]?.toString() }.filter { it.isNotBlank() }.joinToString("; ")
         val resumePayload = sessionStore.buildResumePayload(handle, userInput, handle.meta.modelId ?: "default")
         // Override with the actual answers and continuationToken from this response
         val fullPayload = resumePayload.toMutableMap()

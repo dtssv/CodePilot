@@ -268,10 +268,10 @@ public class IntentDispatchAction implements NodeAction {
     }
 
     /**
-     * Route after intentDispatch — always goes to finalize since this is a
-     * terminal shortcut node.
+     * Route after intentDispatch — always goes to summarize since this is a
+     * terminal shortcut node (summarize then finalize).
      */
     public String routeAfterIntentDispatch(OverAllState state) {
-        return "finalize";
+        return "summarize";
     }
 }

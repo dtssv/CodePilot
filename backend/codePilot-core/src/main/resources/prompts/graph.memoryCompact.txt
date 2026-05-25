@@ -1,0 +1,12 @@
+[MEMORY COMPACTION]
+The context is under pressure. Compress the following memories into a concise summary:
+- IMMORTAL memories: preserve verbatim (table structures, API contracts, architecture decisions)
+- PROTECTED memories: retain key facts and decisions as 1-line summaries
+- DEGRADABLE memories: compress to essential keywords only
+- VOLATILE memories: discard entirely
+
+Output a structured summary with these sections:
+## IMMORTAL (preserve exactly)
+## DECISIONS (1-line each)
+## FILES CHANGED (path + reason only)
+## REJECTED APPROACHES (1-line each)

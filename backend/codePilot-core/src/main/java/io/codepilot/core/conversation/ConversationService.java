@@ -457,7 +457,8 @@ public class ConversationService {
         req.projectRules(),
         req.images(),
         req.graphState(),
-        req.projectMeta());
+        req.projectMeta(),
+        req.projectMemories());
   }
 
   private static String deltaFromChatResponse(ChatResponse r) {

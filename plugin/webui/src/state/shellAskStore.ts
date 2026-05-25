@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { onPluginEvent, sendToPlugin } from '../bridge';
-import { hasRunningTurn } from './chatStore';
+import { hasRunningTurn, subscribeChatV2 } from './chatStore';
 import type { EventEnvelope } from './events';
 
 export type ShellGrantDecision = 'allow' | 'deny' | 'skip';
@@ -67,7 +67,11 @@ export function useIsConversationRunning(): boolean {
         tick((n) => n + 1);
         const off1 = subscribeShellAsk(() => tick((n) => n + 1));
         const off2 = subscribeConversationRunning(() => tick((n) => n + 1));
-        return () => { off1(); off2(); };
+        // ★ Subscribe to chatStore changes so hasRunningTurn() is re-evaluated
+        // when envelope events update turn status (e.g. shell.ask arriving while
+        // turn is running but conversationRunning is still false).
+        const off3 = subscribeChatV2(() => tick((n) => n + 1));
+        return () => { off1(); off2(); off3(); };
     }, []);
     return isConversationRunning();
 }
@@ -138,11 +142,31 @@ export function installShellAskBridge(): () => void {
             reason === 'failed' ||
             reason === 'stopped' ||
             reason === 'max_steps' ||
-            reason === 'partial';
-        if (isTerminal && conversationRunning) {
+            reason === 'partial' ||
+            reason === 'deploy_draining';
+        const isAwaitingInput = reason === 'awaiting_user_input';
+        if (isTerminal) {
+            // ★ Always set conversationRunning to false on terminal done,
+            //   even if it was already false (e.g. conversation_running(false)
+            //   arrived first from a concurrent event). This ensures shell
+            //   asks are always cleared and listeners are notified.
+            const prev = conversationRunning;
             conversationRunning = false;
-            notifyConversation();
+            if (prev !== conversationRunning) {
+                notifyConversation();
+            }
             clearStaleShellAsks();
+        }
+        // ★ awaiting_user_input means the stream paused but the graph will resume;
+        //   keep conversationRunning true so shell.ask action buttons remain visible.
+        //   However, if hasRunningTurn() is false (v2 turn was finalized/interrupted),
+        //   fall back to false to avoid stuck state.
+        if (isAwaitingInput) {
+            const shouldRun = hasRunningTurn();
+            if (conversationRunning !== shouldRun) {
+                conversationRunning = shouldRun;
+                notifyConversation();
+            }
         }
     });
     const offInterrupted = onPluginEvent('session_interrupted', () => {

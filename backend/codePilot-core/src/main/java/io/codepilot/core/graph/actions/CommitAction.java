@@ -92,6 +92,37 @@ public class CommitAction implements NodeAction {
                     updates.get("phaseFailureRetries"),
                     PhaseFailureRepairHelper.MAX_PHASE_FAILURE_ATTEMPTS);
             return updates;
+        } else if (!stepGoalMet && verifySucceeded
+                && (stepKind == PhaseGoalHelper.StepKind.COMPILE
+                        || stepKind == PhaseGoalHelper.StepKind.RUN)) {
+            // Verify passed (0 IDE diagnostics) but the RUN/COMPILE step goal is still unmet:
+            // no successful shell.exec run/compile in gatheredInfo. The patches may have fixed
+            // compilation errors, but the test was never re-executed to validate the fix.
+            // Route back to generate so the LLM re-runs the test command.
+            int generatePasses = (int) state.value("phaseGeneratePasses").orElse(0);
+            if (generatePasses >= PhaseGoalHelper.STUCK_COMPILE_RUN_PASS_THRESHOLD) {
+                // Safety valve: after enough retries, stop looping and advance with overallGoalUnmet
+                log.warn(
+                        "CommitAction: RUN/COMPILE step goal still unmet after {} generate passes "
+                                + "(kind={}) — advancing with overallGoalUnmet",
+                        generatePasses,
+                        stepKind);
+                updates.put("overallGoalUnmet", true);
+                GraphExecutionJournal.recordPhaseBoundary(
+                        state, updates, phaseId, "commit", "goal_unmet_advance", gathered);
+            } else {
+                log.info(
+                        "CommitAction: verify succeeded but {} step goal not met — "
+                                + "routing to retryGenerate (pass {}/{})",
+                        stepKind,
+                        generatePasses,
+                        PhaseGoalHelper.STUCK_COMPILE_RUN_PASS_THRESHOLD);
+                updates.put("phaseCommitBlocked", true);
+                updates.put("hasNextPhase", false);
+                GraphExecutionJournal.recordPhaseBoundary(
+                        state, updates, phaseId, "commit", "retry_generate", gathered);
+                return updates;
+            }
         } else if (!stepGoalMet
                 && !verifySucceeded
                 && ((stepKind == PhaseGoalHelper.StepKind.RUN && !stepGoalMet)
@@ -178,6 +209,24 @@ public class CommitAction implements NodeAction {
         updates.put("gatherCount", 0);
         updates.put("gatherExhausted", false);
 
+        // ── Memory compression: compact gatheredInfo into memory candidates ──
+        // At phase boundaries, extract structured memory candidates from gathered context
+        // so that key information survives across phases even when gatheredInfo is trimmed.
+        var memoryCandidates = extractMemoryCandidates(state, gathered, phaseId);
+        if (!memoryCandidates.isEmpty()) {
+            updates.put("memoryCandidates", memoryCandidates.stream()
+                    .map(io.codepilot.core.memory.StructuredMemory::toMap).toList());
+            // Emit memory.candidate SSE for UI approval
+            var candidatePayload = new java.util.HashMap<String, Object>();
+            candidatePayload.put("candidates", memoryCandidates.stream()
+                    .map(io.codepilot.core.memory.StructuredMemory::toMap).toList());
+            candidatePayload.put("phaseId", phaseId);
+            io.codepilot.core.graph.GraphSseHelper.emitEvent(state,
+                    io.codepilot.core.sse.SseEvents.MEMORY_CANDIDATE,
+                    candidatePayload);
+            log.info("CommitAction: extracted {} memory candidates for phase {}", memoryCandidates.size(), phaseId);
+        }
+
         if (!hasNext && !PhaseGoalHelper.overallCompileRunGoalMet(state)) {
             updates.put("overallGoalUnmet", true);
             log.warn(
@@ -203,7 +252,7 @@ public class CommitAction implements NodeAction {
                     userSteps.size(),
                     phases.size());
         } else {
-            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "finalize", updates);
+            phaseCheckpointSaver.saveAfterPhase(state, phaseId, "summarize", updates);
             log.info(
                     "CommitAction: last phase {} done (step {}/{}, {} phases)",
                     phaseId,
@@ -221,6 +270,21 @@ public class CommitAction implements NodeAction {
         return (List<Map<String, Object>>)
                 ((Map<String, Object>) state.value("userPlan").orElse(Map.of()))
                         .getOrDefault("steps", List.of());
+    }
+
+    /**
+     * Extract structured memory candidates from the gathered context of this phase.
+     * These candidates are proposed for user approval and, once approved, persisted
+     * as long-term project memories.
+     *
+     * <p>Delegates to {@link io.codepilot.core.graph.MemoryContentClassifier}
+     * which uses a rule-driven strategy: kind rules + protection/type rules +
+     * tag extractors + result metadata hints, instead of hard-coded keyword matching.
+     */
+    private List<io.codepilot.core.memory.StructuredMemory> extractMemoryCandidates(
+            OverAllState state, Map<String, Object> gathered, String phaseId) {
+        return io.codepilot.core.graph.MemoryContentClassifier
+                .classifyAll(gathered, phaseId, 3);
     }
 
     @SuppressWarnings("unchecked")
@@ -253,9 +317,21 @@ public class CommitAction implements NodeAction {
 
     public String routeAfterCommit(OverAllState state) {
         if (Boolean.TRUE.equals(state.value("phaseCommitBlocked").orElse(false))) {
+            // When the RUN/COMPILE step goal is unmet but verify succeeded (0 IDE diagnostics),
+            // route back to generate so the LLM re-runs the test, instead of routing to repair
+            // which would be pointless (verify already confirmed no compile errors).
+            String verifyResult = (String) state.value("verifyResult").orElse("");
+            boolean verifySucceeded = "success".equals(verifyResult);
+            PhaseGoalHelper.StepKind stepKind = PhaseGoalHelper.inferStepKind(state);
+            boolean stepGoalMet = PhaseGoalHelper.currentStepGoalSatisfied(state);
+            if (verifySucceeded && !stepGoalMet
+                    && (stepKind == PhaseGoalHelper.StepKind.COMPILE
+                            || stepKind == PhaseGoalHelper.StepKind.RUN)) {
+                return "retryGenerate";
+            }
             return "repair";
         }
         Boolean hasNext = (Boolean) state.value("hasNextPhase").orElse(false);
-        return hasNext ? "preCheck" : "finalize";
+        return hasNext ? "preCheck" : "summarize";
     }
 }

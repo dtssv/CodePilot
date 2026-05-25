@@ -2,10 +2,7 @@ package io.codepilot.core.graph.actions;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
-import io.codepilot.core.graph.GraphSseHelper;
-import io.codepilot.core.graph.PhaseGoalHelper;
-import io.codepilot.core.graph.SessionExecutionFacts;
-import io.codepilot.core.graph.ShellCommandGate;
+import io.codepilot.core.graph.*;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +22,12 @@ import java.util.*;
 @Component
 public class FinalizeAction implements NodeAction {
     private static final Logger log = LoggerFactory.getLogger(FinalizeAction.class);
+
+    private final io.codepilot.core.memory.ProjectMemoryStore projectMemoryStore;
+
+    public FinalizeAction(io.codepilot.core.memory.ProjectMemoryStore projectMemoryStore) {
+        this.projectMemoryStore = projectMemoryStore;
+    }
 
     @Override
     @SuppressWarnings("unchecked")
@@ -105,7 +108,7 @@ public class FinalizeAction implements NodeAction {
             summary.append("Try running the binary directly (e.g. ./main_program or ./build/test).\n");
         }
 
-        // 2. Build session digest for persistence
+        // 2. Build session digest for persistence (enriched with structured fields)
         Map<String, Object> sessionDigest = new HashMap<>();
         sessionDigest.put("summary", summary.toString());
         sessionDigest.put("goal", goal);
@@ -114,15 +117,58 @@ public class FinalizeAction implements NodeAction {
         sessionDigest.put("changedFiles", changedFiles);
         sessionDigest.put("completedToolCallsCount", toolCallCount);
         sessionDigest.put("timestamp", System.currentTimeMillis());
+        // ── Enriched structured fields (four-layer memory) ──
+        // Extract architecture decisions from journal
+        List<String> archDecisions = extractArchitectureDecisions(state);
+        if (!archDecisions.isEmpty()) {
+            sessionDigest.put("architectureDecisions", archDecisions);
+        }
+        // Extract rejected approaches from journal
+        List<String> rejectedApproaches = extractRejectedApproaches(state);
+        if (!rejectedApproaches.isEmpty()) {
+            sessionDigest.put("rejectedApproaches", rejectedApproaches);
+        }
+        // Change lineage
+        List<Map<String, Object>> changeLineage =
+                (List<Map<String, Object>>) state.value("changeLineage").orElse(List.of());
+        if (!changeLineage.isEmpty()) {
+            sessionDigest.put("changeLineage", changeLineage.stream()
+                    .map(e -> {
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("path", e.getOrDefault("filePath", ""));
+                        m.put("reason", e.getOrDefault("patchContent", ""));
+                        m.put("phaseId", e.getOrDefault("phaseId", ""));
+                        return m;
+                    })
+                    .toList());
+        }
+        // Memory anomalies
+        List<String> anomalies =
+                (List<String>) state.value("memoryAnomalies").orElse(List.of());
+        if (!anomalies.isEmpty()) {
+            sessionDigest.put("detectedAnomalies", anomalies);
+        }
         updates.put("sessionDigest", sessionDigest);
 
-        // 3. Build summaryForNextTurn for bidirectional memory
+        // 3. Build summaryForNextTurn (enriched with structured data)
         Map<String, Object> nextTurnSummary = new HashMap<>();
         nextTurnSummary.put("taskCompleted", true);
         nextTurnSummary.put("changedFiles", changedFiles);
         nextTurnSummary.put("toolCallCount", toolCallCount);
         nextTurnSummary.put("summaryText", summary.toString());
+        if (!archDecisions.isEmpty()) {
+            nextTurnSummary.put("architectureDecisions", archDecisions);
+        }
+        if (!rejectedApproaches.isEmpty()) {
+            nextTurnSummary.put("rejectedApproaches", rejectedApproaches);
+        }
         updates.put("summaryForNextTurn", nextTurnSummary);
+
+        // 3b. Memory sedimentation: persist approved memory candidates to long-term store
+        // Memory candidates from CommitAction are proposed for user approval.
+        // Here we auto-approve IMMORTAL/PROTECTED candidates and persist them.
+        // (Full approval flow requires UI interaction — this handles the auto-approve path.)
+        sedimentMemories(state, changedFiles, goal);
 
         // 4. Emit finalize events
         GraphSseHelper.emitEvent(state, SseEvents.GRAPH_PHASE_DONE,
@@ -150,5 +196,114 @@ public class FinalizeAction implements NodeAction {
             toolCallCount,
             directToolsExecuted.size());
         return updates;
+    }
+
+    // ── Memory sedimentation helpers ──
+
+    /**
+     * Persist memory candidates and session facts to long-term project memory store.
+     * Auto-approves IMMORTAL and PROTECTED candidates; skips VOLATILE ones.
+     */
+    @SuppressWarnings("unchecked")
+    private void sedimentMemories(OverAllState state, List<String> changedFiles, String goal) {
+        String projectRootHash = (String) state.value("projectRootHash").orElse("");
+        if (projectRootHash.isBlank()) {
+            log.debug("FinalizeAction: no projectRootHash, skipping memory sedimentation");
+            return;
+        }
+
+        List<io.codepilot.core.memory.StructuredMemory> toPersist = new java.util.ArrayList<>();
+
+        // 1. Auto-approve memory candidates from CommitAction
+        List<Map<String, Object>> candidates =
+                (List<Map<String, Object>>) state.value("memoryCandidates").orElse(List.of());
+        for (Map<String, Object> m : candidates) {
+            io.codepilot.core.memory.StructuredMemory memory = io.codepilot.core.memory.StructuredMemory.fromMap(m);
+            // Only auto-approve IMMORTAL and PROTECTED; VOLATILE/DEGRADABLE need user approval
+            if (memory.protection() == io.codepilot.core.memory.ProtectionLevel.IMMORTAL
+                    || memory.protection() == io.codepilot.core.memory.ProtectionLevel.PROTECTED) {
+                toPersist.add(memory);
+            }
+        }
+
+        // 2. Create goal memory if meaningful
+        if (goal != null && !goal.isBlank()) {
+            toPersist.add(io.codepilot.core.memory.StructuredMemory.of(
+                    io.codepilot.core.memory.MemoryLayer.LONG_TERM,
+                    io.codepilot.core.memory.ProtectionLevel.PROTECTED,
+                    io.codepilot.core.memory.MemoryType.DECISION,
+                    "Task goal: " + goal,
+                    goal,
+                    java.util.List.of("session", "goal"),
+                    ""));
+        }
+
+        // 3. Create changed-file memories
+        if (!changedFiles.isEmpty()) {
+            toPersist.add(io.codepilot.core.memory.StructuredMemory.of(
+                    io.codepilot.core.memory.MemoryLayer.LONG_TERM,
+                    io.codepilot.core.memory.ProtectionLevel.PROTECTED,
+                    io.codepilot.core.memory.MemoryType.FACT,
+                    "Files modified: " + String.join(", ", changedFiles),
+                    String.join("\n", changedFiles),
+                    java.util.List.of("session", "files"),
+                    ""));
+        }
+
+        // Persist batch
+        if (!toPersist.isEmpty()) {
+            try {
+                Long saved = projectMemoryStore.saveAll(projectRootHash, toPersist).block();
+                log.info("FinalizeAction: sedimented {} memories to long-term store (project={})", saved, projectRootHash);
+            } catch (Exception e) {
+                log.warn("FinalizeAction: memory sedimentation failed (non-fatal): {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Extract architecture decisions from the execution journal.
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> extractArchitectureDecisions(OverAllState state) {
+        Map<String, Object> journal =
+                (Map<String, Object>) state.value(GraphExecutionJournal.STATE_KEY).orElse(Map.of());
+        List<Map<String, Object>> stages =
+                (List<Map<String, Object>>) journal.getOrDefault("stages", List.of());
+        List<String> decisions = new java.util.ArrayList<>();
+        for (Map<String, Object> stage : stages) {
+            String outcome = String.valueOf(stage.getOrDefault("outcome", ""));
+            String summary = String.valueOf(stage.getOrDefault("summary", ""));
+            if ("ok".equals(outcome) && !summary.isBlank()
+                    && (summary.toLowerCase().contains("decided")
+                        || summary.toLowerCase().contains("chose")
+                        || summary.toLowerCase().contains("architecture")
+                        || summary.toLowerCase().contains("implemented"))) {
+                decisions.add(summary);
+            }
+        }
+        return decisions;
+    }
+
+    /**
+     * Extract rejected/failed approaches from the execution journal.
+     */
+    @SuppressWarnings("unchecked")
+    private List<String> extractRejectedApproaches(OverAllState state) {
+        Map<String, Object> journal =
+                (Map<String, Object>) state.value(GraphExecutionJournal.STATE_KEY).orElse(Map.of());
+        List<Map<String, Object>> stages =
+                (List<Map<String, Object>>) journal.getOrDefault("stages", List.of());
+        List<String> rejected = new java.util.ArrayList<>();
+        for (Map<String, Object> stage : stages) {
+            String outcome = String.valueOf(stage.getOrDefault("outcome", ""));
+            String summary = String.valueOf(stage.getOrDefault("summary", ""));
+            if ("blocked".equals(outcome) || "abandon".equals(outcome) || "repair".equals(outcome)) {
+                if (!summary.isBlank()) {
+                    rejected.add(summary);
+                }
+            }
+        }
+        return rejected;
     }
 }

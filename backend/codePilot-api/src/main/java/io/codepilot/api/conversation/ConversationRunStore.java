@@ -311,23 +311,63 @@ public class ConversationRunStore {
     return new AdmissionDbSnapshot(globalQueued, globalRunning, perUser);
   }
 
-  /** Mark all stale-lease running runs as interrupted so the plugin can resume them on attach. */
+  /**
+   * Mark all stale-lease running runs as interrupted so the plugin can resume them on attach.
+   *
+   * <p>Uses a <b>find-then-update-one-by-one</b> strategy instead of a single bulk UPDATE
+   * to avoid InnoDB deadlocks.  A bulk UPDATE on {@code WHERE status='running' AND lease_until < :cutoff}
+   * can acquire row locks in one order while concurrent operations ({@link #tryClaim},
+   * {@link #renewLease}, {@link #markInterrupted}) acquire locks on the same rows in a different
+   * order, producing a deadlock cycle.
+   *
+   * <p>By first SELECTing the candidate run IDs (lock-free snapshot read) and then UPDATEing
+   * each one individually with a narrow {@code WHERE id = :id AND status = 'running'} condition,
+   * we limit each transaction to a single row lock and eliminate the deadlock window.
+   * Individual UPDATE failures (row changed between SELECT and UPDATE) are silently tolerated
+   * because the run is no longer stale in its current state.
+   */
   public int markStaleRunningInterrupted(Instant leaseCutoff) {
     if (!dbActive) return 0;
-    int n =
-        jdbc.update(
+
+    // Step 1: Find stale-lease run IDs (non-locking read — no row locks acquired)
+    List<String> staleRunIds =
+        jdbc.queryForList(
             """
-            UPDATE conversation_runs
-            SET status = 'interrupted', worker_id = NULL, lease_until = NULL,
-                updated_at = CURRENT_TIMESTAMP(3)
+            SELECT id FROM conversation_runs
             WHERE status = 'running' AND (lease_until IS NULL OR lease_until < :cutoff)
             """,
             new MapSqlParameterSource()
-                .addValue("cutoff", Timestamp.from(leaseCutoff)));
-    if (n > 0) {
-      log.info("Marked {} stale-lease running runs as interrupted (leaseCutoff={})", n, leaseCutoff);
+                .addValue("cutoff", Timestamp.from(leaseCutoff)),
+            String.class);
+
+    if (staleRunIds.isEmpty()) return 0;
+
+    // Step 2: UPDATE each run individually — single row lock per statement, no deadlock window
+    int marked = 0;
+    for (String runId : staleRunIds) {
+      try {
+        int updated =
+            jdbc.update(
+                """
+                UPDATE conversation_runs
+                SET status = 'interrupted', worker_id = NULL, lease_until = NULL,
+                    updated_at = CURRENT_TIMESTAMP(3)
+                WHERE id = :id AND status = 'running'
+                """,
+                new MapSqlParameterSource()
+                    .addValue("id", runId));
+        marked += updated;
+      } catch (DataAccessException e) {
+        // Concurrent modification or transient error — skip this row; it will be
+        // retried on the next reclaim cycle if still stale.
+        log.debug("markStaleRunningInterrupted: skipped runId={} due to concurrent modification", runId);
+      }
     }
-    return n;
+
+    if (marked > 0) {
+      log.info("Marked {} stale-lease running runs as interrupted (leaseCutoff={})", marked, leaseCutoff);
+    }
+    return marked;
   }
 
   public Map<String, Object> statusMap(String runId) {

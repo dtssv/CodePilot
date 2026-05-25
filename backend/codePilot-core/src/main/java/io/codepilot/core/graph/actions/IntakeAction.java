@@ -122,7 +122,15 @@ public class IntakeAction implements NodeAction {
             "phaseGeneratePasses",
             "allowWrittenFileOverwrite",
             // ── Intent dispatch (lightweight path routing) ──
-            "dispatchPath"
+            "dispatchPath",
+            // ── Four-layer memory keys ──
+            "activeMemories", "instantMemories", "shortTermMemories",
+            "projectMemories", "globalMemories", "memoryAnomalies",
+            "memoryCandidates", "changeLineage", "memoryBudget", "memoryNeedsCompact",
+            // ── Summarize outputs ──
+            "summarizeResult",
+            // ── Request-level keys (from ConversationRunRequest, must be registered) ──
+            "projectRootHash", "projectRules"
     );
 
     /** Session-scoped keys preserved across graph runs in the same conversation (CONTINUE / graphState). */
@@ -484,7 +492,18 @@ public class IntakeAction implements NodeAction {
             restored.put("modelSource", req.modelSource().name());
         }
         if (req.input() != null && !req.input().isBlank()) {
-            restored.put("input", req.input());
+            // ★ FIX: When resuming from an askUser interrupt with structured option answers
+            // (optionId-based, not freeform text), do NOT override the saved `input` with the
+            // optionId. The optionId is a machine identifier (e.g. "manual", "retry", "skip")
+            // that the LLM may misinterpret as a brand-new user request (e.g. "manual" →
+            // "create a user manual"). Structured answer semantics are carried by the `answers`
+            // list; the `input` field must retain the original user request for context.
+            boolean hasStructuralOptionAnswers = req.answers() != null
+                    && !req.answers().isEmpty()
+                    && req.answers().stream().allMatch(a -> a.optionId() != null && a.freeform() == null);
+            if (!hasStructuralOptionAnswers) {
+                restored.put("input", req.input());
+            }
         }
         if (req.intent() != null) {
             restored.put("intent", req.intent().name());

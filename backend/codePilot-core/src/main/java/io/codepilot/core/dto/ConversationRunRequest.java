@@ -48,7 +48,9 @@ public record ConversationRunRequest(
     // ★ 新增：Graph状态快照（插件端上传，用于断点恢复）
     Map<String, Object> graphState,
     // ★ 新增：项目元信息（语言、根目录文件列表），由插件端注入，供 LLM 了解项目上下文
-    String projectMeta) {
+    String projectMeta,
+    // ★ 新增：插件端上传的项目记忆（来自 .codepilot/memories.json），供 MemoryLoadAction 消费
+    List<Map<String, Object>> projectMemories) {
 
   public enum Intent {
     @JsonProperty("new") NEW,
@@ -70,7 +72,14 @@ public record ConversationRunRequest(
 
     public record PinnedItem(String kind, String path, String range, String sha1, String reason) {}
 
-    public record RecentMessage(String role, String content, String summary, Long seq) {}
+    /** Recent message with optional protection level for memory-aware context budgeting. */
+    public record RecentMessage(String role, String content, String summary, Long seq,
+                                String protectionLevel) {
+      /** Backward-compatible constructor without protectionLevel. */
+      public RecentMessage(String role, String content, String summary, Long seq) {
+        this(role, content, summary, seq, null);
+      }
+    }
 
     public record Ref(String path, Boolean outlineOnly, String range, String sha1) {}
   }

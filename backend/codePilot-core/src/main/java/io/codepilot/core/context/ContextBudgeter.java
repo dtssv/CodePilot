@@ -61,9 +61,14 @@ public class ContextBudgeter {
     String localDigest = null;
     boolean refsDowngraded = false;
 
-    // Phase 2: Drop oldest recent messages (keep at least MIN_RECENT_KEEP)
-    while (total > budget && recent.size() > MIN_RECENT_KEEP) {
-      recent.remove(0);
+    // Phase 2: Drop lowest-protection messages first (replaces FIFO)
+    // Messages are sorted by protection level (VOLATILE first → IMMORTAL last)
+    // and only VOLATILE/DEGRADABLE messages are eligible for dropping.
+    // IMMORTAL messages are never dropped.
+    while (total > budget && hasDroppableMessages(recent)) {
+      int dropIdx = findLowestProtectionIndex(recent);
+      if (dropIdx < 0) break;
+      recent.remove(dropIdx);
       dropped++;
       total = sysTokens + mustKeepTokens + countRecent(recent) + countRefs(refs);
     }
@@ -281,4 +286,53 @@ public class ContextBudgeter {
       boolean refsDowngraded,
       boolean needCompact,
       Map<String, Integer> audit) {}
+
+  // ─── Protection-level aware eviction helpers ──
+
+  /**
+   * Check if there are any messages eligible for dropping
+   * (VOLATILE or DEGRADABLE protection level, and more than MIN_RECENT_KEEP total).
+   */
+  private boolean hasDroppableMessages(List<ConversationRunRequest.Contexts.RecentMessage> recent) {
+    if (recent.size() <= MIN_RECENT_KEEP) return false;
+    return recent.stream().anyMatch(m -> {
+      String pl = m.protectionLevel();
+      return pl == null // null = default DEGRADABLE
+          || "VOLATILE".equals(pl)
+          || "DEGRADABLE".equals(pl);
+    });
+  }
+
+  /**
+   * Find the index of the message with the lowest protection level.
+   * VOLATILE (3) is dropped first, then DEGRADABLE (2).
+   * PROTECTED (1) and IMMORTAL (0) are never dropped.
+   * Among equal protection levels, older messages are dropped first.
+   */
+  private int findLowestProtectionIndex(List<ConversationRunRequest.Contexts.RecentMessage> recent) {
+    int lowestOrd = Integer.MAX_VALUE;
+    int lowestIdx = -1;
+    for (int i = 0; i < recent.size(); i++) {
+      String pl = recent.get(i).protectionLevel();
+      int ord = protectionOrdinal(pl);
+      // Only consider VOLATILE and DEGRADABLE for dropping
+      if (ord >= 2 && ord < lowestOrd) {
+        lowestOrd = ord;
+        lowestIdx = i;
+      }
+    }
+    return lowestIdx;
+  }
+
+  /** Convert protection level string to ordinal (lower = higher protection). */
+  private int protectionOrdinal(String protectionLevel) {
+    if (protectionLevel == null) return 2; // default DEGRADABLE
+    return switch (protectionLevel) {
+      case "IMMORTAL" -> 0;
+      case "PROTECTED" -> 1;
+      case "DEGRADABLE" -> 2;
+      case "VOLATILE" -> 3;
+      default -> 2; // unknown = DEGRADABLE
+    };
+  }
 }

@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Generate node: calls the LLM to produce code changes (patches/toolCalls)
@@ -275,7 +276,9 @@ public class GenerateAction implements NodeAction {
         String taskDirective =
                 buildTaskDirective(state)
                         + CompileHintHelper.directive(projectMeta, input, state)
-                        + GraphExecutionJournal.combinedContextDirective(state);
+                        + GraphExecutionJournal.combinedContextDirective(state)
+                        + buildMemoryDirective(state)
+                        + io.codepilot.core.memory.ChangeLineageTracker.promptDirective(state);
         String proseBudget = "";
         if (planningProseStreamed || stepIndex > 0) {
             proseBudget =
@@ -970,7 +973,7 @@ public class GenerateAction implements NodeAction {
                 if (Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
                     return "askUser";
                 }
-                return "finalize";
+                return "summarize";
             }
         }
 
@@ -993,7 +996,7 @@ public class GenerateAction implements NodeAction {
             if (escalationDone && Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
                 return "askUser";
             }
-            return escalationDone ? "finalize" : "reenter";
+            return escalationDone ? "summarize" : "reenter";
         }
 
         if ("repair".equals(result)) {
@@ -1032,7 +1035,7 @@ public class GenerateAction implements NodeAction {
                 if (escalationDone && Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
                     return "askUser";
                 }
-                return escalationDone ? "finalize" : "reenter";
+                return escalationDone ? "summarize" : "reenter";
             }
             if (generatePasses >= 10) {
                 return routeWhenGeneratePassesCapped(state, generatePasses, "directTools");
@@ -1066,7 +1069,7 @@ public class GenerateAction implements NodeAction {
                 if (Boolean.TRUE.equals(state.value("overallGoalUnmet").orElse(false))) {
                     return "askUser";
                 }
-                return "finalize";
+                return "summarize";
             }
             PhaseGoalHelper.StepKind kind = PhaseGoalHelper.inferStepKind(state);
             if ((kind == PhaseGoalHelper.StepKind.ANALYZE
@@ -1101,7 +1104,7 @@ public class GenerateAction implements NodeAction {
             case "infoRequests" -> "gather";
             case "askUser" -> "askUser";
             case "retryGenerate" -> "reenter";
-            case "failed" -> "finalize";
+            case "failed" -> "summarize";
             case "repair" -> "repair";
             case "textOutput" -> "commit";  // B3 fix: skip applyPatch/verify for unstructured text
             default -> "applyPatch";
@@ -1224,7 +1227,72 @@ public class GenerateAction implements NodeAction {
         return updates;
     }
 
-    // ── Interactive Agent helpers ──
+    /**
+     * Build memory context directive from activeMemories and memoryAnomalies.
+     * Uses prompt templates graph.memoryLoad and graph.memoryConflict for
+     * structured injection of memory context and anomaly resolution directives.
+     */
+    @SuppressWarnings("unchecked")
+    private String buildMemoryDirective(OverAllState state) {
+        StringBuilder sb = new StringBuilder();
+
+        // ── Active memories (from all four layers, orchestrated by ContextOrchestrator) ──
+        List<Map<String, Object>> activeMemories =
+                (List<Map<String, Object>>) state.value("activeMemories").orElse(List.of());
+
+        if (!activeMemories.isEmpty()) {
+            // Inject the memory context rules template (graph.memoryLoad)
+            sb.append("\n\n").append(promptRegistry.get("graph.memoryLoad")).append("\n");
+
+            // Separate by layer for structured data injection
+            List<Map<String, Object>> shortTerm = activeMemories.stream()
+                    .filter(m -> "SHORT_TERM".equals(m.get("layer")))
+                    .toList();
+            List<Map<String, Object>> longTerm = activeMemories.stream()
+                    .filter(m -> "LONG_TERM".equals(m.get("layer")))
+                    .toList();
+
+            // [SESSION CONTEXT] — short-term memory
+            if (!shortTerm.isEmpty()) {
+                sb.append("\n[SESSION CONTEXT — key facts from this session]\n");
+                for (Map<String, Object> m : shortTerm) {
+                    String summary = String.valueOf(m.getOrDefault("summary", ""));
+                    String protection = String.valueOf(m.getOrDefault("protection", "DEGRADABLE"));
+                    sb.append("- ").append(summary);
+                    if ("IMMORTAL".equals(protection)) sb.append(" [IMMORTAL — never override]");
+                    sb.append("\n");
+                }
+            }
+
+            // [PROJECT MEMORY] — long-term memory
+            if (!longTerm.isEmpty()) {
+                sb.append("\n[PROJECT MEMORY — accumulated project knowledge]\n");
+                for (Map<String, Object> m : longTerm) {
+                    String summary = String.valueOf(m.getOrDefault("summary", ""));
+                    String type = String.valueOf(m.getOrDefault("type", "FACT"));
+                    sb.append("- [").append(type).append("] ").append(summary).append("\n");
+                }
+            }
+        }
+
+        // ── Memory anomalies — use graph.memoryConflict template for resolution directives ──
+        List<String> anomalies =
+                (List<String>) state.value("memoryAnomalies").orElse(List.of());
+        if (!anomalies.isEmpty()) {
+            String conflictTemplate = promptRegistry.get("graph.memoryConflict");
+            String anomalyList = anomalies.stream()
+                    .map(a -> "- " + a)
+                    .collect(Collectors.joining("\n"));
+            sb.append("\n\n").append(conflictTemplate.replace("{{anomalies}}", anomalyList));
+        }
+
+        // ── Memory compaction hint (if ContextOrchestrator indicated budget pressure) ──
+        if (Boolean.TRUE.equals(state.value("memoryNeedsCompact").orElse(false))) {
+            sb.append("\n\n").append(promptRegistry.get("graph.memoryCompact"));
+        }
+
+        return sb.toString();
+    }
 
     /**
      * Builds a prompt section describing available MCP tools.

@@ -144,7 +144,8 @@ public class ConversationRunWorker {
               base.projectRules(),
               base.images(),
               base.graphState(),
-              base.projectMeta());
+              base.projectMeta(),
+              base.projectMemories());
     }
 
     Flux<ServerSentEvent<String>> flux;
