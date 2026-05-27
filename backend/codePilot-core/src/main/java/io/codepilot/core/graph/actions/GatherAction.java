@@ -150,15 +150,40 @@ public class GatherAction implements NodeAction {
                 }
             }
 
-            if (result != null && result.ok() && result.result() != null) {
-                // Merge client results into gatheredInfo
+            if (result != null && result.result() != null) {
+                // ★ FIX: Merge client results even when ok=false (partial failure).
+                // The plugin sets ok=false if ANY sub-request fails, but successful
+                // sub-results are still in result.gathered[]. We must not discard them.
                 mergeClientResults(gatheredInfo, result.result());
-                log.info("Gather: received client results for {} requests via toolCallId={}",
-                        clientRequests.size(), gatherToolCallId);
+
+                // Count successes and failures from the per-request results
+                int successCount = 0;
+                int failCount = 0;
+                if (result.result() instanceof Map<?, ?> resultMap
+                        && resultMap.get("gathered") instanceof List<?> gathered) {
+                    for (Object item : gathered) {
+                        if (item instanceof Map<?, ?> g) {
+                            Object okVal = g.get("ok");
+                            if (Boolean.TRUE.equals(okVal)) {
+                                successCount++;
+                            } else {
+                                failCount++;
+                            }
+                        }
+                    }
+                }
+
+                if (result.ok()) {
+                    log.info("Gather: received client results for {} requests via toolCallId={}",
+                            clientRequests.size(), gatherToolCallId);
+                } else {
+                    log.warn("Gather: partial failure — {} succeeded, {} failed out of {} requests (toolCallId={})",
+                            successCount, failCount, clientRequests.size(), gatherToolCallId);
+                }
 
                 // ★ Interactive Agent: emit agent_reading with human-readable summary
                 String readingSummary = buildGatherReadingSummary(clientRequests, result.result());
-                // Build file list for the frontend
+                // Build file list for the frontend (only from successful fs.read/fs.list)
                 List<Map<String, String>> readingFiles = clientRequests.stream()
                     .filter(r -> "fs.read".equals(r.get("kind")) || "fs.list".equals(r.get("kind")))
                     .map(r -> {
@@ -172,12 +197,14 @@ public class GatherAction implements NodeAction {
                     })
                     .filter(f -> !f.get("path").isEmpty())
                     .toList();
-                GraphSseHelper.emitEvent(state, SseEvents.AGENT_READING,
-                    Map.of("summary", readingSummary, "files", readingFiles, "fileCount", clientRequests.size(), "phaseId", phaseId));
+                if (successCount > 0) {
+                    GraphSseHelper.emitEvent(state, SseEvents.AGENT_READING,
+                        Map.of("summary", readingSummary, "files", readingFiles, "fileCount", successCount, "phaseId", phaseId));
+                }
             } else {
                 String errMsg = result != null ? result.errorMessage() : "Timeout waiting for gather results";
                 log.warn("Gather: client results failed or timed out: {}", errMsg);
-                // Mark failed requests as errors in gatheredInfo
+                // Mark ALL requests as errors only when there is NO result at all (full timeout/failure)
                 for (var req : clientRequests) {
                     String reqId = (String) req.getOrDefault("id", UUID.randomUUID().toString());
                     gatheredInfo.put(reqId, Map.of(

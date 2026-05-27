@@ -108,6 +108,7 @@ export type PluginEventType =
     // P1-06 rules/memories
     | 'rules.response'
     | 'memory.response'
+    | 'memory.compacted'
     // P1-07 MCP/hooks
     | 'mcp.response'
     | 'mcp.confirm.request'

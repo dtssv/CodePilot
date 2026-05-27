@@ -83,7 +83,8 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 
 [ABOUT infoRequests]
 - Set infoRequests to null by default. Most code generation tasks do NOT need to read files first.
-- CRITICAL: If [GATHERED CONTEXT] is present above, you already have information. You MUST set infoRequests to null.
+- CRITICAL: If [GATHERED CONTEXT] is present above, you already have information. You MUST set infoRequests to null for file-based workflows.
+  For the deep-research workflow, you MAY set infoRequests to kind="rag.search" to fetch additional evidence.
 - ONLY set infoRequests when you have a SPECIFIC, concrete reason, such as:
   - You need to read a header file to know the exact API signature before calling it
   - You need to read an import/included file to know its exported types or functions
@@ -94,9 +95,10 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
   - "Understanding the codebase" or "getting context" — use the project meta and gathered context above
   - Reading the same file repeatedly — if it was already gathered, it's in [GATHERED CONTEXT]
 - If you do need infoRequests, use this format:
-  [{"id": "unique-id", "kind": "fs.read|fs.list|code.outline|code.symbol|code.usages|ide.diagnostics|mcp.call", "args": {"path": "..."}}]
-  - kind options: fs.read (read a single file), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors), mcp.call (call an MCP server tool — executed on the IDE plugin)
+  [{"id": "unique-id", "kind": "fs.read|fs.list|code.outline|code.symbol|code.usages|ide.diagnostics|mcp.call|rag.search", "args": {"path": "..."}}]
+  - kind options: fs.read (read a single file), fs.list (list directory entries), code.outline (file structure), code.symbol (find symbol), code.usages (find references), ide.diagnostics (IDE errors), mcp.call (call an MCP server tool — executed on the IDE plugin), rag.search (server-side semantic search)
   - IMPORTANT: fs.read only works on individual files. To explore directory structure, use kind="fs.list". Do NOT use fs.read with a directory path.
+  - For rag.search, args must include: {"query": "<search query>", "topK": 8} (topK optional).
   - Only request files that actually exist per the project meta. Do NOT guess file names.
 - For mcp.call kind, args must include: {"fullName": "mcp.<serverId>.<toolName>", "arguments": {...}}
 {{mcpTools}}
@@ -108,6 +110,14 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 - At most ONE shell.exec per response. Do not chain mkdir+cmake+make in one JSON if you need to inspect failures between steps.
 - Omit "cwd" or use "." — the client resolves it to the project root automatically.
 - Supported name values: shell.exec, fs.read, fs.list, fs.grep, code.outline, code.symbol, code.usages
+- ★ CRITICAL for shell.exec: you MUST include "purpose" in args to declare what the command does:
+  - "compile" — building/compiling source code (g++, cmake --build, make, mvn, npm run build, cargo build, etc.)
+  - "run" — executing a built binary or running the program (./binary, node server.js, python main.py, etc.)
+  - "probe" — discovering/checking environment (which g++, ls, find, cat, echo, type, etc.)
+  - "configure" — project setup without building (cmake without --build, ./configure, meson setup, etc.)
+  - "other" — anything else (git, curl, rm, etc.)
+  Example: {"name": "shell.exec", "args": {"command": "which g++", "purpose": "probe"}}
+  This classification is ESSENTIAL — the system uses it to track whether compile/run goals are met.
 - Analysis / complexity / report steps: fs.list alone does NOT finish the step — fs.read or fs.grep the source files, then textOutput with the actual analysis (≥80 chars).
 - If [TOOL APPROACH] lists failed strategies, you MUST NOT repeat them. Try at most 3 distinct approaches per step (different path, tool kind, or query). Empty fs.list results do not count as success.
 - NEVER paste the raw JSON object into AGENT_CONTENT or chat — only inside <<<GRAPH_JSON>>> … <<<END>>>.

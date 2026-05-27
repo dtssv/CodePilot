@@ -13,6 +13,174 @@ import org.junit.jupiter.api.Test;
 class PhaseGoalHelperTest {
 
   @Test
+  void purposeCompileOverridesRegexMatch() {
+    // "which g++" with purpose="compile" should count as successful compile
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "build",
+        Map.of(
+            "kind", "shell.exec",
+            "ok", true,
+            "purpose", "compile",
+            "result", Map.of("command", "which g++", "exitCode", 0, "stdout", "/usr/bin/g++")));
+    assertTrue(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
+  void purposeProbePreventsCompileEvenWithGppCommand() {
+    // "g++ -o test main.cpp" with purpose="probe" should NOT count as successful compile
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "probe",
+        Map.of(
+            "kind", "shell.exec",
+            "ok", true,
+            "purpose", "probe",
+            "result", Map.of("command", "g++ -o test main.cpp", "exitCode", 0, "stdout", "")));
+    assertFalse(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
+  void purposeRunOverridesLooksLikeProgramExecution() {
+    // "dotnet run" with purpose="run" should count as successful run
+    // (dotnet run would not match RUN_CMD regex)
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "run1",
+        Map.of(
+            "kind", "shell.exec",
+            "ok", true,
+            "purpose", "run",
+            "result", Map.of("command", "dotnet run", "exitCode", 0, "stdout", "Hello World")));
+    assertTrue(PhaseGoalHelper.hasSuccessfulRun(gathered));
+  }
+
+  @Test
+  void purposeProbePreventsRun() {
+    // "ls -la build/" with purpose="probe" should NOT count as successful run
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "probe",
+        Map.of(
+            "kind", "shell.exec",
+            "ok", true,
+            "purpose", "probe",
+            "result", Map.of("command", "./main", "exitCode", 0, "stdout", "output")));
+    assertFalse(PhaseGoalHelper.hasSuccessfulRun(gathered));
+  }
+
+  @Test
+  void purposeAbsentFallsBackToRegex() {
+    // No purpose field — should fall back to COMPILE_CMD regex
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "build",
+        Map.of(
+            "kind", "shell.exec",
+            "ok", true,
+            "result", Map.of("command", "g++ -o test main.cpp", "exitCode", 0, "stdout", "")));
+    assertTrue(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
+  void whichGppIsNotSuccessfulCompile() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "probe",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "command",
+                "which g++",
+                "exitCode",
+                0,
+                "stdout",
+                "/usr/bin/g++")));
+
+    var state =
+        stateWithPlan(
+            "p3",
+            List.of(
+                step("s1", "检查编译器", "completed", "inspect"),
+                step("s2", "编译项目", "in_progress", "compile"),
+                step("s3", "运行可执行文件", "pending", "run")),
+            gathered);
+
+    assertEquals(PhaseGoalHelper.StepKind.COMPILE, PhaseGoalHelper.inferStepKind(state));
+    assertFalse(PhaseGoalHelper.currentStepGoalSatisfied(state));
+  }
+
+  @Test
+  void echoGppIsNotSuccessfulCompile() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "probe",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "command",
+                "echo g++",
+                "exitCode",
+                0,
+                "stdout",
+                "g++")));
+
+    assertFalse(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
+  void typeClangIsNotSuccessfulCompile() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "probe",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "command",
+                "type clang++",
+                "exitCode",
+                0,
+                "stdout",
+                "clang++ is /usr/bin/clang++")));
+
+    assertFalse(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
+  void pipedCompileCommandIsSuccessfulCompile() {
+    Map<String, Object> gathered = new HashMap<>();
+    gathered.put(
+        "build",
+        Map.of(
+            "kind",
+            "shell.exec",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "command",
+                "cmake .. && make -j4",
+                "exitCode",
+                0,
+                "stdout",
+                "Build complete")));
+
+    assertTrue(PhaseGoalHelper.hasSuccessfulCompile(gathered));
+  }
+
+  @Test
   void compileStepSatisfiedWhenGppSucceededAfterCmakeFailed() {
     Map<String, Object> gathered = new HashMap<>();
     gathered.put(
@@ -117,7 +285,17 @@ class PhaseGoalHelperTest {
     Map<String, Object> gathered = new HashMap<>();
     gathered.put(
         "list1",
-        Map.of("kind", "fs.list", "ok", true, "result", Map.of("path", ".")));
+        Map.of(
+            "kind",
+            "fs.list",
+            "ok",
+            true,
+            "result",
+            Map.of(
+                "path",
+                ".",
+                "entries",
+                List.of(Map.of("name", "main.cpp", "type", "file", "path", "main.cpp")))));
 
     var state =
         stateWithPlan(
@@ -286,7 +464,6 @@ class PhaseGoalHelperTest {
             "p6",
             List.of(step("s6", "编译测试", "in_progress", "compile")),
             gathered);
-    state.data().put("phaseToolsHadFailure", true);
 
     assertTrue(PhaseFailureRepairHelper.shouldRouteToRepair(state));
     assertFalse(PhaseFailureRepairHelper.shouldAbandonPhase(state));
@@ -414,22 +591,27 @@ class PhaseGoalHelperTest {
     data.put("gatheredInfo", gathered);
     data.put("phaseToolsHadFailure", true);
     data.put("userPlan", Map.of("steps", steps, "status", "in_progress"));
+
+    String intent = "code-change";
+    int stepIdx = 0;
+    String title = "Step";
+    for (int i = 0; i < steps.size(); i++) {
+      Map<String, Object> st = steps.get(i);
+      if ("in_progress".equals(st.get("status"))) {
+        intent = String.valueOf(st.getOrDefault("intent", "code-change"));
+        title = String.valueOf(st.getOrDefault("title", "Step"));
+        stepIdx = i;
+        break;
+      }
+    }
     data.put(
         "phases",
         List.of(
-            Map.of("id", "p3", "title", "编译项目", "intent", "compile", "userStepIndex", 2),
-            Map.of("id", "p4", "title", "运行可执行文件", "intent", "run", "userStepIndex", 3),
             Map.of(
-                "id",
-                "p-run",
-                "title",
-                "检查 build 目录中的可执行文件",
-                "intent",
-                "run",
-                "userStepIndex",
-                1),
-            Map.of("id", "p-analyze", "title", "Step", "intent", "analyze", "userStepIndex", 0),
-            Map.of("id", "p-disc", "title", "Step", "intent", "discover", "userStepIndex", 0)));
+                "id", phaseId,
+                "title", title,
+                "intent", intent,
+                "userStepIndex", stepIdx)));
     data.put(
         "intakeIntent",
         Map.of("allowShellExec", true, "needsPlanning", true, "needsTools", true));

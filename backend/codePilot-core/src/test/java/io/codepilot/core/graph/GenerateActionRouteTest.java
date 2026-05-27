@@ -1,7 +1,6 @@
 package io.codepilot.core.graph;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import io.codepilot.core.graph.actions.GenerateAction;
@@ -14,7 +13,7 @@ class GenerateActionRouteTest {
 
   @Test
   void routeAfterGenerate_askUserResultRoutesBeforeSatisfiedCommit() {
-    var action = new GenerateAction(null, null, null, null);
+    var action = new GenerateAction(null, null, null, null, null, null);
     var state =
         new OverAllState(
             Map.of(
@@ -35,7 +34,7 @@ class GenerateActionRouteTest {
 
   @Test
   void routeAfterGenerate_escalationUnmetRoutesToAskUserNotCommit() {
-    var action = new GenerateAction(null, null, null, null);
+    var action = new GenerateAction(null, null, null, null, null, null);
     var data = new HashMap<String, Object>();
     data.put("generateResult", "textOutput");
     data.put("overallGoalUnmet", true);

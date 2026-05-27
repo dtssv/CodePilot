@@ -19,16 +19,20 @@ import java.util.*;
  * Intent dispatch node: handles lightweight paths that do NOT need the full
  * graph pipeline (planning → generate → applyPatch → verify → commit).
  *
- * <p>Routes after intake based on {@link IntakeIntent.DispatchPath}:
+ * <p>Routes after intake based on {@link IntakeIntent.DispatchPath},
+ * which is determined by <b>task complexity</b>, not tool type:
  * <ul>
- *   <li>{@code CONVERSATIONAL} — pure Q&A, calls LLM directly, streams answer, then finalize</li>
- *   <li>{@code MCP_DIRECT} — delegates MCP tool invocation to the plugin via SSE,
- *       then finalize</li>
- *   <li>{@code SKILL_DIRECT} — activates matching skill, calls LLM with skill prompt,
- *       streams answer, then finalize</li>
+ *   <li>{@code CONVERSATIONAL} — pure Q&A, no tools, no planning</li>
+ *   <li>{@code SIMPLE} — needs tools but no multi-step plan; MCP tools
+ *       and Skills are injected as <b>execution resources</b>, not routing targets</li>
  * </ul>
  *
- * <p>If none of the above applies, the graph routes to the normal pipeline
+ * <p>Design principle: MCP tools and Skills are resources available during
+ * execution, not routing destinations. The SIMPLE path may use MCP tools,
+ * Skills, built-in tools, or any combination — the dispatch decision is based
+ * on whether the task needs multi-step planning, not on tool type.
+ *
+ * <p>If the task needs planning, the graph routes to the normal pipeline
  * (planning → …) instead of entering this node.
  */
 @Component
@@ -76,8 +80,7 @@ public class IntentDispatchAction implements NodeAction {
 
         switch (dispatchPath) {
             case CONVERSATIONAL -> handleConversational(state, updates, input, projectMeta);
-            case MCP_DIRECT -> handleMcpDirect(state, updates, input);
-            case SKILL_DIRECT -> handleSkillDirect(state, updates, input, projectMeta);
+            case SIMPLE -> handleSimple(state, updates, input, projectMeta);
             default -> {
                 // Should not reach here — GRAPH path bypasses this node entirely
                 log.warn("IntentDispatchAction: unexpected GRAPH dispatch, falling back to finalize");
@@ -116,85 +119,107 @@ public class IntentDispatchAction implements NodeAction {
     }
 
     /**
-     * MCP tool direct — emit an MCP tool_call SSE so the plugin executes the tool,
-     * then finalize. The plugin will send the tool result back on the next turn.
+     * Simple tool-assisted execution — needs tools but no multi-step plan.
+     *
+     * <p>This path handles tasks that require tool assistance (MCP, Skill,
+     * built-in tools) but don't need multi-step planning. MCP tools and Skills
+     * are treated as <b>execution resources</b> — they are injected into the
+     * prompt/tool execution, not used as routing targets.
+     *
+     * <p>Strategy:
+     * <ol>
+     *   <li>If intent-suggested tools are exclusively MCP tools → emit tool_call SSE
+     *       for the plugin to execute (fastest path for "query this API" tasks)</li>
+     *   <li>Otherwise → call LLM with tool descriptions + skill prompt injected,
+     *       let LLM decide how to use the available resources</li>
+     * </ol>
      */
     @SuppressWarnings("unchecked")
-    private void handleMcpDirect(
-            OverAllState state, Map<String, Object> updates, String input) {
-
-        GraphUiEmitter.transition(state, "mcp_direct");
-
-        // Get MCP tool hints from intake classification
-        @SuppressWarnings("unchecked")
-        Map<String, Object> intakeIntent =
-                (Map<String, Object>) state.value("intakeIntent").orElse(Map.of());
-        List<Map<String, Object>> tools =
-                (List<Map<String, Object>>) intakeIntent.getOrDefault("tools", List.of());
-
-        // Get available MCP tool definitions from state (provided by plugin)
-        List<Map<String, Object>> mcpTools =
-                (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
-
-        // Find the matching MCP tool definition
-        List<Map<String, Object>> matchedMcpTools = new ArrayList<>();
-        Set<String> hintedNames = new HashSet<>();
-        for (Map<String, Object> t : tools) {
-            String name = String.valueOf(t.getOrDefault("name", ""));
-            if (name.startsWith("mcp.")) {
-                hintedNames.add(name);
-            }
-        }
-        for (Map<String, Object> mcp : mcpTools) {
-            String name = String.valueOf(mcp.getOrDefault("name", ""));
-            if (hintedNames.contains(name)) {
-                matchedMcpTools.add(mcp);
-            }
-        }
-
-        if (matchedMcpTools.isEmpty()) {
-            // No matching MCP tool found — fall back to conversational answer
-            log.warn("IntentDispatchAction: MCP_DIRECT but no matching MCP tool found, falling back to conversational");
-            String projectMeta = (String) state.value("projectMeta").orElse("");
-            handleConversational(state, updates, input, projectMeta);
-            return;
-        }
-
-        // Emit tool_call SSE for each matched MCP tool so the plugin executes them
-        for (Map<String, Object> mcpTool : matchedMcpTools) {
-            String toolName = String.valueOf(mcpTool.getOrDefault("name", ""));
-            Map<String, Object> args = extractMcpArgs(mcpTool, input);
-            String callId = "mcp-" + UUID.randomUUID().toString().substring(0, 8);
-
-            Map<String, Object> toolCall = new LinkedHashMap<>();
-            toolCall.put("id", callId);
-            toolCall.put("name", toolName);
-            toolCall.put("args", args);
-
-            GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, toolCall);
-            log.info("IntentDispatchAction: emitted MCP tool_call name={}, callId={}", toolName, callId);
-        }
-
-        updates.put("doneReason", "mcp_direct");
-        updates.put("generateResult", "toolCalls");
-        log.info("IntentDispatchAction: MCP direct dispatch completed, {} tools emitted", matchedMcpTools.size());
-    }
-
-    /**
-     * Skill direct — activate matching skills, call LLM with skill-augmented prompt,
-     * stream the response, then finalize.
-     */
-    private void handleSkillDirect(
+    private void handleSimple(
             OverAllState state, Map<String, Object> updates,
             String input, String projectMeta) {
 
-        GraphUiEmitter.transition(state, "skill_direct");
+        GraphUiEmitter.transition(state, "simple_dispatch");
 
-        // Activate skills for the INTAKE node scope
+        // ── Collect available execution resources ──
+        // 1. MCP tools (from plugin request)
+        List<Map<String, Object>> mcpTools =
+                (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
+
+        // 2. Intent-suggested tools (from LLM classification)
+        Map<String, Object> intakeIntent =
+                (Map<String, Object>) state.value("intakeIntent").orElse(Map.of());
+        List<Map<String, Object>> suggestedTools =
+                (List<Map<String, Object>>) intakeIntent.getOrDefault("tools", List.of());
+
+        // 3. Skills (activated for this context)
         var skillActivation = graphSkillSupport.activate(state, GraphSkillNode.INTAKE, updates);
-        String skillSection = skillActivation.promptSection();
 
+        // ── Fast path: if ALL suggested tools are MCP tools, emit tool_call SSE directly ──
+        // This preserves the low-latency path for "query this API" type tasks.
+        boolean allMcpTools = !suggestedTools.isEmpty()
+                && suggestedTools.stream().allMatch(t ->
+                        String.valueOf(t.getOrDefault("name", "")).startsWith("mcp."));
+
+        if (allMcpTools) {
+            Set<String> hintedNames = suggestedTools.stream()
+                    .map(t -> String.valueOf(t.getOrDefault("name", "")))
+                    .filter(n -> n.startsWith("mcp."))
+                    .collect(java.util.stream.Collectors.toSet());
+
+            List<Map<String, Object>> matchedMcpTools = new ArrayList<>();
+            for (Map<String, Object> mcp : mcpTools) {
+                String name = String.valueOf(mcp.getOrDefault("name", ""));
+                if (hintedNames.contains(name)) {
+                    matchedMcpTools.add(mcp);
+                }
+            }
+
+            if (!matchedMcpTools.isEmpty()) {
+                // Emit tool_call SSE for each matched MCP tool
+                for (Map<String, Object> mcpTool : matchedMcpTools) {
+                    String toolName = String.valueOf(mcpTool.getOrDefault("name", ""));
+                    Map<String, Object> args = extractMcpArgs(mcpTool, input);
+                    String callId = "mcp-" + UUID.randomUUID().toString().substring(0, 8);
+
+                    Map<String, Object> toolCall = new LinkedHashMap<>();
+                    toolCall.put("id", callId);
+                    toolCall.put("name", toolName);
+                    toolCall.put("args", args);
+
+                    GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, toolCall);
+                    log.info("IntentDispatchAction: emitted MCP tool_call name={}, callId={}", toolName, callId);
+                }
+
+                updates.put("doneReason", "simple_mcp");
+                updates.put("generateResult", "toolCalls");
+                log.info("IntentDispatchAction: simple dispatch completed (MCP fast path), {} tools emitted",
+                        matchedMcpTools.size());
+                return;
+            }
+        }
+
+        // ── General path: call LLM with all resources injected ──
+        // Build prompt with: project context + tool descriptions + skill instructions
         String prompt = buildConversationalPrompt(input, projectMeta);
+
+        // Inject MCP tool descriptions as available resources
+        if (!mcpTools.isEmpty()) {
+            prompt += "\n\n[AVAILABLE TOOLS]\nYou have the following tools available:\n";
+            for (Map<String, Object> tool : mcpTools) {
+                String fullName = String.valueOf(tool.getOrDefault("name", "unknown"));
+                String desc = String.valueOf(tool.getOrDefault("description", ""));
+                prompt += "  - " + fullName;
+                if (!desc.isEmpty() && !"null".equals(desc)) {
+                    prompt += ": " + desc;
+                }
+                prompt += "\n";
+            }
+            prompt += "If you need to use any of these tools, describe what you would call and why.\n";
+        }
+
+        // Inject skill instructions as context
+        String skillSection = skillActivation.promptSection();
         if (!skillSection.isBlank()) {
             prompt += "\n\n[SKILL INSTRUCTIONS]\n" + skillSection;
         }
@@ -208,10 +233,10 @@ public class IntentDispatchAction implements NodeAction {
             }
         }
 
-        updates.put("doneReason", "skill_direct");
+        updates.put("doneReason", "simple");
         updates.put("generateResult", "textOutput");
-        log.info("IntentDispatchAction: skill direct answer completed, skills={}",
-                skillActivation.skills().stream().map(s -> s.id()).toList());
+        log.info("IntentDispatchAction: simple dispatch completed (LLM path, skills={}, mcpTools={})",
+                skillActivation.skills().size(), mcpTools.size());
     }
 
     // ── Helpers ──

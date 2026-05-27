@@ -184,6 +184,47 @@ public class PreCheckAction implements NodeAction {
             }
         }
 
+        // Check 4: Product dependency verification (LLM-declared structured requiredProducts)
+        List<io.codepilot.core.graph.PhaseMemoryHelper.ProductRequirement> requirements =
+                io.codepilot.core.graph.PhaseMemoryHelper.productRequirements(currentPhase);
+        if (!requirements.isEmpty()) {
+            @SuppressWarnings("unchecked")
+            List<String> allModifiedFiles =
+                    (List<String>) state.value("modifiedFiles").orElse(List.of());
+
+            for (var req : requirements) {
+                String productKey = req.product();
+                List<String> patternsForProduct = req.patterns();
+
+                if (patternsForProduct.isEmpty()) {
+                    checkResults.add(new CheckResult("product_dependency:" + productKey, true,
+                            "No patterns declared for " + productKey + " — cannot verify"));
+                    continue;
+                }
+
+                boolean productExists = allModifiedFiles.stream()
+                        .anyMatch(f -> patternsForProduct.stream()
+                                .anyMatch(pattern -> matchesPattern(f, pattern)));
+
+                checkResults.add(new CheckResult("product_dependency:" + productKey,
+                        productExists,
+                        productExists
+                                ? productKey + " files exist from previous phases"
+                                : "No " + productKey + " files found matching declared patterns"));
+
+                if (!productExists) {
+                    for (String searchPath : req.searchPaths()) {
+                        infoRequests.add(Map.of(
+                                "id", "precheck-product-" + productKey.hashCode() + "-" + searchPath.hashCode(),
+                                "kind", "fs.list",
+                                "args", Map.of("path", searchPath),
+                                "why", "Find " + productKey + " files matching " + patternsForProduct,
+                                "priority", 2));
+                    }
+                }
+            }
+        }
+
         // Determine overall result
         boolean allPassed = failures.isEmpty();
         String overallStatus;
@@ -204,5 +245,19 @@ public class PreCheckAction implements NodeAction {
                 .filter(p -> phaseId.equals(p.get("id")))
                 .findFirst()
                 .orElse(null);
+    }
+
+    /**
+     * Simple glob-like pattern matching for file paths.
+     * Supports * wildcard (matches any sequence of characters).
+     * All matching is case-insensitive.
+     */
+    private boolean matchesPattern(String filePath, String pattern) {
+        if (pattern == null || pattern.isBlank() || filePath == null) return false;
+        // Convert glob pattern to regex: * → .*
+        String regex = pattern.toLowerCase()
+                .replace(".", "\\.")
+                .replace("*", ".*");
+        return filePath.toLowerCase().matches(regex);
     }
 }

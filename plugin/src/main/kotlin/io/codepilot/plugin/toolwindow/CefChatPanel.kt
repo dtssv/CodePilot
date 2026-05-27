@@ -1653,6 +1653,25 @@ class CefChatPanel(
                         adapter?.onGraphBudgetAlert(data)
                     }
 
+                    // ── Memory system events ──
+                    override fun onMemoryCompacted(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("memory.compacted", data)
+                        // Persist compacted marker into local session digest for recovery
+                        val compacted = data["__COMPACTED__"] as? Boolean == true
+                        if (compacted) {
+                            val summary = data["summary"] as? String
+                            if (summary != null) {
+                                sessionStore.saveDigest(handle, mapOf(
+                                    "compactedSummary" to summary,
+                                    "__COMPACTED__" to true,
+                                    "phaseId" to (data["phaseId"] ?: ""),
+                                    "compressedCount" to (data["compressedCount"] ?: 0),
+                                ))
+                            }
+                        }
+                    }
+
                     // ── User-facing plan events (shown in Plan panel) ──
                     override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
                         if (isStaleStream()) return

@@ -1,0 +1,20 @@
+Expand the current macro-phase into executable micro-phases.
+
+Original task: {{input}}
+Current macro-phase: {{macroTitle}} (intent: {{macroIntent}})
+Previously completed phases: {{completedPhases}}
+{{projectMeta}}
+{{contextShards}}
+
+Return JSON: {"phases": [ ... ]}
+
+Each phase MUST include:
+- id, title, intent (discover|inspect|analyze|synthesize|prepare|compile|run|code-change)
+- tags: semantic retrieval tags for THIS micro-phase (required)
+- memoryHints: optional extra retrieval phrases
+- loadShardMode: "tags" | "all" | "none" (default tags)
+- requiredProducts: optional [{"product":"entity","patterns":["*Entity.java"],"searchPaths":["src/..."]}]
+- requiredFiles: optional file paths that must exist
+- entry: [], exit: [], budget: {"attempts": 3, "skipVerify": false}
+
+Split so each micro-phase fits one LLM generate call (typically 3-10 files). Order by dependency.

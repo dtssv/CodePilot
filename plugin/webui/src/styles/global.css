@@ -490,9 +490,17 @@
     line-height: 1.35;
 }
 
-.agent-content-markdown h1 { font-size: 1.35em; }
-.agent-content-markdown h2 { font-size: 1.2em; }
-.agent-content-markdown h3 { font-size: 1.08em; }
+.agent-content-markdown h1 {
+    font-size: 1.35em;
+}
+
+.agent-content-markdown h2 {
+    font-size: 1.2em;
+}
+
+.agent-content-markdown h3 {
+    font-size: 1.08em;
+}
 
 .agent-content-markdown p {
     margin: 0.45em 0;
@@ -523,7 +531,7 @@
     font-size: 0.92em;
 }
 
-.agent-content-markdown :not(pre) > code {
+.agent-content-markdown :not(pre)>code {
     padding: 0.1em 0.35em;
     border-radius: 4px;
     background: color-mix(in srgb, var(--bg-tertiary) 90%, var(--accent) 5%);
@@ -4298,7 +4306,9 @@ button:disabled {
 }
 
 @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .resuming-text {
@@ -4408,14 +4418,17 @@ button:disabled {
     margin: 4px 0;
     object-fit: contain;
 }
+
 .msg-image-desc {
     font-size: 11px;
     opacity: 0.65;
     margin-top: 2px;
 }
+
 .turn-fork-btn {
     margin-top: 6px;
 }
+
 .chat-view-v2 .branch-timeline {
     margin: 0 12px 12px;
 }
@@ -4475,6 +4488,25 @@ button:disabled {
 
 .chat-view-v2 .turn-alerts {
     margin: 6px 0;
+}
+
+/* ── Memory compaction alert in turn alerts ── */
+.chat-view-v2 .turn-alert-compaction {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--info, #3b82f6) 35%, var(--border-subtle, #333));
+    background: color-mix(in srgb, var(--info, #3b82f6) 6%, var(--bg-secondary));
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.chat-view-v2 .turn-alert-compaction strong {
+    color: var(--info, #3b82f6);
+    white-space: nowrap;
 }
 
 .chat-view-v2 .step-llm {
@@ -4555,6 +4587,37 @@ button:disabled {
 }
 
 .rate-limit-countdown {
+    margin: 0;
+    font-size: 11px;
+}
+
+/* ── Memory compaction banner ── */
+.input-section .memory-compaction-banner {
+    margin: 0 12px 8px;
+    flex-shrink: 0;
+}
+
+.memory-compaction-banner {
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--info, #3b82f6) 45%, var(--border-subtle, #333));
+    background: color-mix(in srgb, var(--info, #3b82f6) 8%, var(--bg-secondary, #1a1a1a));
+    font-size: 12px;
+}
+
+.memory-compaction-title {
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--info, #3b82f6);
+}
+
+.memory-compaction-message {
+    margin: 0 0 4px;
+    line-height: 1.45;
+}
+
+.memory-compaction-hint {
     margin: 0;
     font-size: 11px;
 }
@@ -4754,8 +4817,13 @@ button:disabled {
     font-size: 11px;
 }
 
-.shell-exit.ok { color: var(--accent, #4ec9b0); }
-.shell-exit.err { color: #f48771; }
+.shell-exit.ok {
+    color: var(--accent, #4ec9b0);
+}
+
+.shell-exit.err {
+    color: #f48771;
+}
 
 .tool-exec-badge {
     font-size: 11px;
@@ -4944,7 +5012,7 @@ button:disabled {
     margin-bottom: 14px;
 }
 
-.mcp-install-json-section > label > span {
+.mcp-install-json-section>label>span {
     display: block;
     font-size: 11px;
     font-weight: 600;

@@ -1,0 +1,29 @@
+You distill durable memories from tool results gathered in the current graph phase.
+
+Phase id: {{phaseId}}
+User task (abbreviated): {{input}}
+
+[GATHERED TOOL RESULTS]
+{{gathered}}
+
+Return ONLY JSON:
+{
+  "candidates": [
+    {
+      "layer": "SHORT_TERM or LONG_TERM",
+      "protection": "IMMORTAL or PROTECTED or DEGRADABLE or VOLATILE",
+      "type": "FACT or DECISION or ARCHITECTURE or API_CONTRACT or BUG_FIX or PREFERENCE",
+      "summary": "one line for prompt lists",
+      "detail": "optional longer text (max 800 chars)",
+      "tags": ["semantic", "tags"]
+    }
+  ]
+}
+
+Rules:
+1. Emit 0-5 candidates. Only facts supported by gathered results — never invent.
+2. Use IMMORTAL only for schemas, API contracts, architecture the project must not violate.
+3. Use PROTECTED for decisions and conventions worth keeping across phases.
+4. Use DEGRADABLE/VOLATILE for tool noise and retry details.
+5. tags must be specific (entity names, module names) for later retrieval — not generic words like "content".
+6. If nothing is worth remembering, return {"candidates": []}.

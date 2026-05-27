@@ -192,6 +192,9 @@ class ConversationClient(
 
                 override fun onDigest(payload: JsonNode) = onEvent("digest", http.mapper.treeToValue(payload, Map::class.java))
 
+                // ── Memory system events ──
+                override fun onMemoryCompacted(payload: JsonNode) = onEvent("memory.compacted", http.mapper.treeToValue(payload, Map::class.java))
+
                 override fun onSelfCheck(payload: JsonNode) = onEvent("self_check", http.mapper.treeToValue(payload, Map::class.java))
 
                 override fun onError(
@@ -307,6 +310,11 @@ class ConversationClient(
 
         fun onUsage(payload: JsonNode) {}
 
+        // ── Memory system events (four-layer memory architecture) ──
+        /** Memory compacted/compressed notification — carries audit info about what was compressed.
+         *  The payload contains __COMPACTED__ marker, phaseId, compressedCount, preservedCount, and summary. */
+        fun onMemoryCompacted(payload: JsonNode) {}
+
         fun onError(
             code: Int,
             message: String,
@@ -401,6 +409,8 @@ class ConversationClient(
                 "delta" -> listener.onDelta(node.path("text").asText(""))
                 "patch" -> listener.onPatch(node)
                 "usage" -> listener.onUsage(node)
+                // ── Memory system events ──
+                "memory.compacted" -> listener.onMemoryCompacted(node)
                 "error" ->
                     listener.onError(node.path("code").asInt(50001), node.path("message").asText(""))
                 "done" -> listener.onDone(node.path("reason").asText("final"), node)

@@ -48,7 +48,12 @@ public class PromptRegistry {
           "graph.approach-exhausted",
           "graph.memoryLoad",
           "graph.memoryCompact",
-          "graph.memoryConflict");
+          "graph.memoryConflict",
+          "graph.memoryDistill-gather",
+          "graph.memoryCompact-llm",
+          "graph.context-split",
+          "graph.plan-expand",
+          "memory.distill");
 
   private final Map<String, String> segments = new LinkedHashMap<>();
 
@@ -64,6 +69,26 @@ public class PromptRegistry {
     String body = segments.get(name);
     if (body == null) throw new IllegalStateException("Unknown prompt segment: " + name);
     return body;
+  }
+
+  /** Optional segment (e.g. graph.context-split) — null if not on classpath. */
+  public String getOptional(String name) {
+    if (segments.containsKey(name)) {
+      return segments.get(name);
+    }
+    String resource = "prompts/" + name + ".txt";
+    URL url = Thread.currentThread().getContextClassLoader().getResource(resource);
+    if (url == null) {
+      return null;
+    }
+    try {
+      String body = Resources.toString(url, StandardCharsets.UTF_8);
+      segments.put(name, body);
+      return body;
+    } catch (IOException e) {
+      log.warn("Failed to load optional prompt {}: {}", name, e.getMessage());
+      return null;
+    }
   }
 
   private static String loadOrThrow(String name) {

@@ -15,10 +15,10 @@ class GraphContentSanitizerTest {
             + "1.如果项目中有非标准命名。\n"
             + "1.输出目录lc可能已存在。";
     String out = GraphContentSanitizer.fixRepeatedOrderedListOnes(in);
-    assertThat(out).contains("1.某些文件");
-    assertThat(out).contains("2.复杂度分析");
-    assertThat(out).contains("3.如果项目中");
-    assertThat(out).contains("4.输出目录lc");
+    assertThat(out).contains("1. 某些文件");
+    assertThat(out).contains("2. 复杂度分析");
+    assertThat(out).contains("3. 如果项目中");
+    assertThat(out).contains("4. 输出目录lc");
   }
 
   @Test
@@ -61,7 +61,7 @@ class GraphContentSanitizerTest {
             + "潜在风险：\n\n1.第一项。\n1.第二项。";
     String out = GraphContentSanitizer.normalizeMarkdown(in);
     assertThat(out).contains("\n\n第五步：");
-    assertThat(out).contains("1.第一项");
-    assertThat(out).contains("2.第二项");
+    assertThat(out).contains("1. 第一项");
+    assertThat(out).contains("2. 第二项");
   }
 }

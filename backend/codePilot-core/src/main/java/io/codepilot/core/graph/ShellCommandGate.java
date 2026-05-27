@@ -36,48 +36,61 @@ public final class ShellCommandGate {
   }
 
   /**
+   * @return reason to skip execution when the same command would not add new information
+   */
+  @SuppressWarnings("unchecked")
+  public static Optional<String> blockReason(
+      String command, String projectMeta, String userInput, Map<String, Object> gathered,
+      PhaseGoalHelper.StepKind stepKind) {
+    return blockReason(command, projectMeta, userInput, gathered, stepKind, null);
+  }
+
+  /**
    * @param stepKind active plan step kind (from {@link PhaseGoalHelper}); when set, blocks redundant
    *     compile/run after the step goal is already satisfied
+   * @param purpose LLM-declared purpose for this shell.exec (compile/run/probe/configure/other);
+   *     when set, used instead of command-shape heuristics for classification
    */
   public static Optional<String> blockReason(
       String command,
       String projectMeta,
       String userInput,
       Map<String, Object> gathered,
-      PhaseGoalHelper.StepKind stepKind) {
+      PhaseGoalHelper.StepKind stepKind,
+      String purpose) {
     if (command == null || command.isBlank()) {
       return Optional.empty();
     }
     String norm = normalize(command);
     if (stepKind != null && gathered != null && !gathered.isEmpty()) {
-      if (stepKind == PhaseGoalHelper.StepKind.COMPILE
+      if ((stepKind == PhaseGoalHelper.StepKind.COMPILE || stepKind == PhaseGoalHelper.StepKind.VERIFY)
           && PhaseGoalHelper.hasSuccessfulCompile(gathered)
-          && looksLikeCompile(norm)) {
+          && looksLikeCompile(norm, purpose)) {
         return Optional.of(
             "Skipped: compile for this step already succeeded in [GATHERED CONTEXT]. "
                 + "Use textOutput to summarize and proceed — do not rebuild.");
       }
-      if (stepKind == PhaseGoalHelper.StepKind.RUN
+      if ((stepKind == PhaseGoalHelper.StepKind.RUN || stepKind == PhaseGoalHelper.StepKind.VERIFY)
           && PhaseGoalHelper.hasSuccessfulRun(gathered)
-          && looksLikeRun(norm)) {
+          && looksLikeRun(norm, purpose)) {
         return Optional.of(
             "Skipped: run for this step already succeeded. Use textOutput to summarize and proceed.");
       }
-      if (stepKind == PhaseGoalHelper.StepKind.COMPILE
+      if ((stepKind == PhaseGoalHelper.StepKind.COMPILE || stepKind == PhaseGoalHelper.StepKind.VERIFY)
           && isRepeatedFailedShell(gathered, norm)
-          && looksLikeConfigure(norm)) {
+          && looksLikeConfigure(norm, purpose)) {
         return Optional.of(
             "Skipped: this configure/setup command already failed. Try a different build or compile approach, "
                 + "or use textOutput if compile already succeeded via another command.");
       }
     }
-    if (isDuplicateShell(gathered, norm)) {
-      return Optional.of(
-          "Skipped: this exact command already ran in this turn. Read [GATHERED CONTEXT] and choose the next step toward the user's goal.");
-    }
     if (isRepeatedFailedShell(gathered, norm)) {
       return Optional.of(
           "Skipped: this command already failed in this turn. Read stderr in [GATHERED CONTEXT] and try a different approach — do not rerun the same command.");
+    }
+    if (isDuplicateShell(gathered, norm)) {
+      return Optional.of(
+          "Skipped: this exact command already ran in this turn. Read [GATHERED CONTEXT] and choose the next step toward the user's goal.");
     }
     return Optional.empty();
   }
@@ -91,7 +104,10 @@ public final class ShellCommandGate {
       if (!"shell.exec".equals(String.valueOf(entry.get("kind")))) {
         continue;
       }
-      if (normalizedCommand.equals(normalize(shellCommandFromEntry(entry)))) {
+      if (!normalizedCommand.equals(normalize(shellCommandFromEntry(entry)))) {
+        continue;
+      }
+      if (GatheredInfoFormatter.entrySucceeded((Map<String, Object>) entry)) {
         return true;
       }
     }
@@ -142,6 +158,14 @@ public final class ShellCommandGate {
   }
 
   private static boolean looksLikeCompile(String norm) {
+    return looksLikeCompile(norm, null);
+  }
+
+  private static boolean looksLikeCompile(String norm, String purpose) {
+    // Model-declared purpose takes priority over command-shape heuristics
+    if (purpose != null && !purpose.isBlank()) {
+      return "compile".equalsIgnoreCase(purpose) || "configure".equalsIgnoreCase(purpose);
+    }
     return norm.contains("g++")
         || norm.contains("clang++")
         || norm.contains("cmake --build")
@@ -151,11 +175,26 @@ public final class ShellCommandGate {
   }
 
   private static boolean looksLikeRun(String norm) {
+    return looksLikeRun(norm, null);
+  }
+
+  private static boolean looksLikeRun(String norm, String purpose) {
+    if (purpose != null && !purpose.isBlank()) {
+      return "run".equalsIgnoreCase(purpose);
+    }
     return norm.startsWith("./") || norm.contains(" ./") || norm.contains("./main");
   }
 
   /** Heuristic: command looks like a project configure/setup step (not a build invocation). */
   private static boolean looksLikeConfigure(String norm) {
+    return looksLikeConfigure(norm, null);
+  }
+
+  /** Heuristic: command looks like a project configure/setup step (not a build invocation). */
+  private static boolean looksLikeConfigure(String norm, String purpose) {
+    if (purpose != null && !purpose.isBlank()) {
+      return "configure".equalsIgnoreCase(purpose);
+    }
     // cmake without --build = configure; autogen/configure/autoreconf are also configure steps
     if (norm.contains("cmake") && !norm.contains("--build")) {
       return true;

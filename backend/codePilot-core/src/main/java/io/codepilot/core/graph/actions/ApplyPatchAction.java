@@ -277,9 +277,9 @@ public class ApplyPatchAction implements NodeAction {
         // Fast-path: request quick IDE diagnostics (best-effort, non-blocking)
         // This is done in apply() rather than routeAfterApplyPatch() because
         // route functions should be side-effect-free.
-        boolean fastPath = Boolean.TRUE.equals(state.value("fastPathEnabled").orElse(false));
         String patchResult = (String) updates.getOrDefault("patchResult", "failed");
-        if (fastPath && ("success".equals(patchResult) || "partial".equals(patchResult))) {
+        if (io.codepilot.core.graph.PhaseMemoryHelper.skipVerify(state)
+                && ("success".equals(patchResult) || "partial".equals(patchResult))) {
             requestQuickDiagnostics(state);
         }
 
@@ -329,11 +329,9 @@ public class ApplyPatchAction implements NodeAction {
     public String routeAfterApplyPatch(OverAllState state) {
         String result = (String) state.value("patchResult").orElse("failed");
 
-        // C1 fast-path: if policy allows, skip verify for simple tasks
-        // (IDE diagnostics already requested in apply() via requestQuickDiagnostics)
-        boolean fastPath = Boolean.TRUE.equals(state.value("fastPathEnabled").orElse(false));
-        if (fastPath && ("success".equals(result) || "partial".equals(result))) {
-            log.info("ApplyPatch fast-path: skipping verify, routing directly to commit");
+        if (io.codepilot.core.graph.PhaseMemoryHelper.skipVerify(state)
+                && ("success".equals(result) || "partial".equals(result))) {
+            log.info("ApplyPatch: phase budget skipVerify=true, routing directly to commit");
             return "commit";
         }
 

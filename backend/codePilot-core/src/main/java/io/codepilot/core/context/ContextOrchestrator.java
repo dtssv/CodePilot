@@ -35,14 +35,28 @@ public class ContextOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(ContextOrchestrator.class);
     private final TokenMeter meter;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
-    /** Default token budget for memory context (separate from LLM context budget). */
-    private static final int DEFAULT_MEMORY_BUDGET = 6000;
-    /** Maximum tokens for a single memory's detail when mounted. */
-    private static final int MAX_DETAIL_TOKENS = 800;
+    /** Fallback default when no config is provided (backward compatibility). */
+    private static final int FALLBACK_MEMORY_BUDGET = 6000;
+    private static final int FALLBACK_MAX_DETAIL_TOKENS = 800;
 
-    public ContextOrchestrator(TokenMeter meter) {
+    public ContextOrchestrator(TokenMeter meter,
+                               io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.meter = meter;
+        this.graphProperties = graphProperties;
+    }
+
+    /** Resolve max detail tokens from config or fallback. */
+    private int resolveMaxDetailTokens() {
+        int configured = graphProperties.getMaxDetailTokens();
+        return configured > 0 ? configured : FALLBACK_MAX_DETAIL_TOKENS;
+    }
+
+    /** Resolve default memory budget from config or fallback. */
+    private int resolveDefaultMemoryBudget() {
+        int configured = graphProperties.getMemoryBudget();
+        return configured > 0 ? configured : FALLBACK_MEMORY_BUDGET;
     }
 
     /**
@@ -76,9 +90,9 @@ public class ContextOrchestrator {
      */
     public OrchestrationResult orchestrate(List<StructuredMemory> allMemories, int budget) {
         if (allMemories == null || allMemories.isEmpty()) {
-            return new OrchestrationResult(List.of(), 0, 0, 0, budget > 0 ? budget : DEFAULT_MEMORY_BUDGET, false);
+            return new OrchestrationResult(List.of(), 0, 0, 0, budget > 0 ? budget : resolveDefaultMemoryBudget(), false);
         }
-        int effectiveBudget = budget > 0 ? budget : DEFAULT_MEMORY_BUDGET;
+        int effectiveBudget = budget > 0 ? budget : resolveDefaultMemoryBudget();
 
         // Phase 1: Separate hot/warm/cold
         List<StructuredMemory> hot = new ArrayList<>();
@@ -186,9 +200,9 @@ public class ContextOrchestrator {
     private int countTokens(StructuredMemory m) {
         int n = meter.count(m.summary());
         if (m.detail() != null && !m.detail().isBlank()) {
-            // Cap detail contribution to MAX_DETAIL_TOKENS
+            // Cap detail contribution to configured max detail tokens
             int detailTokens = meter.count(m.detail());
-            n += Math.min(detailTokens, MAX_DETAIL_TOKENS);
+            n += Math.min(detailTokens, resolveMaxDetailTokens());
         }
         return n;
     }

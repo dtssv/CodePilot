@@ -1,0 +1,136 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.cyclonedx",
+    "module": "cyclonedx-gradle-plugin",
+    "version": "1.9.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "files": [
+        {
+          "name": "cyclonedx-gradle-plugin-1.9.0.jar",
+          "url": "cyclonedx-gradle-plugin-1.9.0.jar",
+          "size": 32422,
+          "sha512": "a7775d01e29d3c0b820f39aecba2b86741cd585b1e4253213f1b83c479e4a82ca7ce70461f5db554814050383fe974c0d037b7c7b5e8d6a2a1d5ff6c25b78679",
+          "sha256": "a5ab7ba742057188695cfa78ac754e3b4c3b1274bc094a7da022aba9ca75380e",
+          "sha1": "46149468d5dc9a2b1b85a8534b9f378121dd5992",
+          "md5": "fa84571cdd902249aeedb67d191c424c"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.cyclonedx",
+          "module": "cyclonedx-core-java",
+          "version": {
+            "requires": "9.0.4"
+          },
+          "excludes": [
+            {
+              "group": "org.apache.logging.log4j",
+              "module": "log4j-slf4j-impl"
+            }
+          ]
+        },
+        {
+          "group": "commons-codec",
+          "module": "commons-codec",
+          "version": {
+            "requires": "1.17.1"
+          }
+        },
+        {
+          "group": "commons-io",
+          "module": "commons-io",
+          "version": {
+            "requires": "2.16.1"
+          }
+        },
+        {
+          "group": "org.apache.maven",
+          "module": "maven-core",
+          "version": {
+            "requires": "3.9.8"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "cyclonedx-gradle-plugin-1.9.0.jar",
+          "url": "cyclonedx-gradle-plugin-1.9.0.jar",
+          "size": 32422,
+          "sha512": "a7775d01e29d3c0b820f39aecba2b86741cd585b1e4253213f1b83c479e4a82ca7ce70461f5db554814050383fe974c0d037b7c7b5e8d6a2a1d5ff6c25b78679",
+          "sha256": "a5ab7ba742057188695cfa78ac754e3b4c3b1274bc094a7da022aba9ca75380e",
+          "sha1": "46149468d5dc9a2b1b85a8534b9f378121dd5992",
+          "md5": "fa84571cdd902249aeedb67d191c424c"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "cyclonedx-gradle-plugin-1.9.0-javadoc.jar",
+          "url": "cyclonedx-gradle-plugin-1.9.0-javadoc.jar",
+          "size": 37938,
+          "sha512": "e91496ee12439f1b921157bd71778208652332b0f7063efde48885a6f2347592defd0a679fa5092ab3fb7094006b75b0b4ce8aa596d043af77b652d1463acb46",
+          "sha256": "e498ecbb6429109ffba6f85d09a81b8fc157bd9c91359d7bd8d8896e65f0eb0a",
+          "sha1": "3193b74e367c29c1b08b3ecb592cec81f6e38d98",
+          "md5": "bae04539e2228be4596e6b7c8b027b5d"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "cyclonedx-gradle-plugin-1.9.0-sources.jar",
+          "url": "cyclonedx-gradle-plugin-1.9.0-sources.jar",
+          "size": 18992,
+          "sha512": "5ebb403a8b696a31b800b0e5010348678ed4214b1ddff8ca17716ee22d219f4dab427889133669128cb8e5f548526c355f73689639b6e97aec1325c8403cc2a3",
+          "sha256": "2a81dc00ee380ca5d732bae1489932c01245b5a2e2946dad1bac984494df36e0",
+          "sha1": "a508abcff4e31c01fd133e5f1ec17bb40b71d43d",
+          "md5": "ebb75ce3745289480767edbbad590dcf"
+        }
+      ]
+    }
+  ]
+}

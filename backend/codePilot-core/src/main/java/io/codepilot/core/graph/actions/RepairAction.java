@@ -323,7 +323,7 @@ public class RepairAction implements NodeAction {
         sb.append("6. Add only necessary imports.\n");
         sb.append("7. Output as tool calls in the standard envelope format:\n");
         sb.append("   - For code fixes: {\"toolCall\": {\"name\": \"fs.replace\", \"args\": {\"path\": \"...\", \"search\": \"...\", \"replace\": \"...\"}}}\n");
-        sb.append("   - For command retries: {\"toolCall\": {\"name\": \"shell.exec\", \"args\": {\"command\": \"...\"}}}\n");
+        sb.append("   - For command retries: {\"toolCall\": {\"name\": \"shell.exec\", \"args\": {\"command\": \"...\", \"purpose\": \"compile|run|probe|configure|other\"}}}\n");
         sb.append("   - For more data: {\"toolCall\": {\"name\": \"fs.read\", \"args\": {\"path\": \"...\", \"offset\": N, \"limit\": M}}}\n");
         sb.append("8. If you cannot produce a valid fix, the system will escalate to the user automatically.\n");
         sb.append(GraphExecutionJournal.combinedContextDirective(state));
@@ -361,6 +361,11 @@ public class RepairAction implements NodeAction {
     private static final Set<String> RETRYABLE_TOOLS =
             Set.of("shell.exec", "fs.read", "fs.list", "fs.grep", "code.outline", "code.symbol", "code.usages");
 
+    /** Read-only tools that should NEVER be converted to file patches.
+     *  These tools produce data for context, not code changes. */
+    private static final Set<String> READ_ONLY_TOOLS =
+            Set.of("fs.read", "fs.list", "fs.grep", "fs.search", "code.outline", "code.symbol", "code.usages");
+
     /**
      * Extracts tool calls from the repair response that are direct/executable tools
      * (shell.exec, fs.read, etc.) rather than code patches (fs.replace, op=create/delete).
@@ -392,11 +397,31 @@ public class RepairAction implements NodeAction {
                 continue;
             }
             String toolName = (String) tc.getOrDefault("name", "");
+            // Read-only tools (fs.read, fs.list, etc.) provide context, not code changes.
+            // Skip them entirely — they should be routed as retry tool calls instead.
+            if (READ_ONLY_TOOLS.contains(toolName)) {
+                log.debug("RepairAction: skipping read-only toolCall — tool={}", toolName);
+                continue;
+            }
             var args = (Map<String, Object>) tc.getOrDefault("args", tc);
             String path = stringArg(args, "path");
             String op = stringArg(args, "op");
+            // When op is blank and toolName is not a write tool (fs.applyPatch, fs.replace, fs.write),
+            // default to "replace" only if there is actual patch content (search/replace/newContent).
+            // Otherwise skip — this toolCall was likely a read-only context fetch misclassified by the LLM.
             if (op.isBlank()) {
-                op = "replace";
+                String search = firstNonBlank(stringArg(args, "search"), stringArg(args, "old_string"));
+                String replace = firstNonBlank(stringArg(args, "replace"), stringArg(args, "new_string"));
+                String newContent = firstNonBlank(
+                        stringArg(args, "newContent"),
+                        stringArg(args, "content"),
+                        stringArg(args, "text"));
+                if (!search.isBlank() || !replace.isBlank() || !newContent.isBlank()) {
+                    op = "replace";
+                } else {
+                    log.debug("RepairAction: skipping toolCall with blank op and no patch content — tool={}", toolName);
+                    continue;
+                }
             }
             String newContent = firstNonBlank(
                     stringArg(args, "newContent"),

@@ -30,9 +30,12 @@ public class IntakeAction implements NodeAction {
     private static final Logger log = LoggerFactory.getLogger(IntakeAction.class);
 
     private final IntakeIntentClassifier intakeIntentClassifier;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
-    public IntakeAction(IntakeIntentClassifier intakeIntentClassifier) {
+    public IntakeAction(IntakeIntentClassifier intakeIntentClassifier,
+                        io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.intakeIntentClassifier = intakeIntentClassifier;
+        this.graphProperties = graphProperties;
     }
 
     /**
@@ -52,9 +55,13 @@ public class IntakeAction implements NodeAction {
             "currentNode", "phaseCursor", "phases",
             "attempts", "gathered", "sseEvents",
             "gatherResumeTo", "gatherLoopCount", "doneReason",
+            // deep-research outputs
+            "searchRound",
             "answers", "graphTemplate",
             // planning outputs
             "userPlan", "planningResult",
+            // deep-research outputs
+            "evaluateResult",
             // preCheck outputs
             "preCheckPassed", "preCheckResult", "preCheckInfoRequests",
             "completedPhases", "modifiedFiles", "existingFiles",
@@ -74,8 +81,6 @@ public class IntakeAction implements NodeAction {
             "gatheredInfo", "infoRequests",
             // commit outputs
             "commitResult", "hasNextPhase",
-            // fast-path
-            "fastPathEnabled",
             // finalize outputs
             "donePayload", "sessionDigest", "summaryForNextTurn",
             "completedToolCalls", "taskLedger",
@@ -130,7 +135,23 @@ public class IntakeAction implements NodeAction {
             // ── Summarize outputs ──
             "summarizeResult",
             // ── Request-level keys (from ConversationRunRequest, must be registered) ──
-            "projectRootHash", "projectRules"
+            "projectRootHash", "projectRules",
+            // ── Config-level keys (propagated from GraphEngineProperties for runtime access) ──
+            "maxPhaseFailureAttempts", "maxGeneratePassesPerPhase", "stateArchiveThreshold",
+            // ── Hierarchical planning keys ──
+            "macroPhases", "macroPhaseCursor", "hierarchicalPlan",
+            // ── Batch generation keys ──
+            "accumulatedPatches",
+            // ── State archiving keys ──
+            "archivedPhaseCount",
+            // ── Dynamic plan expand keys ──
+            "expandResult",
+            // ── PreCheck product dependency keys (LLM-declared phase metadata) ──
+            "requiredProducts", "productPatterns", "productSearchPaths",
+            // ── Context split keys ──
+            "contextSplitResult", "contextSourceId", "contextShardCount", "loadShardMode",
+            // ── Compacted context key (for session recovery from compressed context) ──
+            "compactedSummary"
     );
 
     /** Session-scoped keys preserved across graph runs in the same conversation (CONTINUE / graphState). */
@@ -184,6 +205,24 @@ public class IntakeAction implements NodeAction {
         // Carry over projectMeta so it survives across graph iterations.
         state.<String>value("projectMeta").ifPresent(v -> updates.put("projectMeta", v));
 
+        // ★ Carry over resumeNextNode so it survives the intake→contextSplit→memoryLoad path.
+        // Without this, the key may be lost when OverAllState.updateState merges the
+        // partial updates (intake's updates only contain ~9 keys, and the framework's
+        // overAllState.updateState(partialState) only writes keys present in partialState).
+        // If resumeNextNode is missing from overAllState after intake, routeAfterMemoryLoad
+        // will always fall through to "planning", defeating the resume shortcut.
+        state.<String>value("resumeNextNode").ifPresent(v -> {
+            if (!v.isBlank()) updates.put("resumeNextNode", v);
+        });
+
+        // ── Inject runtime config from GraphEngineProperties into state ──
+        // This allows static helpers (PhaseFailureRepairHelper, PhaseGoalHelper) to read
+        // configurable thresholds without needing Spring injection.
+        updates.put("maxPhaseFailureAttempts", graphProperties.getMaxPhaseFailureAttempts());
+        updates.put("maxGeneratePassesPerPhase", graphProperties.getMaxGeneratePassesPerPhase());
+        updates.put("stateArchiveThreshold", graphProperties.getStateArchiveThreshold());
+        updates.put("memoryBudget", graphProperties.getMemoryBudget());
+
         String input = (String) state.value("input").orElse("");
         String mode = (String) state.value("mode").orElse("AGENT");
         String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
@@ -222,10 +261,9 @@ public class IntakeAction implements NodeAction {
                                         "exit",
                                         List.of(),
                                         "budget",
-                                        Map.of("attempts", 1)));
+                                        Map.of("attempts", 1, "skipVerify", true)));
                 updates.put("phases", phases);
                 updates.put("phaseCursor", "p1");
-                updates.put("fastPathEnabled", true);
                 log.info("IntakeAction: dispatchPath={}, conversationalOnly={}",
                         intent.dispatchPath(), intent.conversationalOnly());
             }
@@ -280,21 +318,17 @@ public class IntakeAction implements NodeAction {
         }
 
         // Check dispatchPath from intake intent classification
+        // DispatchPath is determined by task complexity, not tool type:
+        // CONVERSATIONAL → intentDispatch (pure Q&A)
+        // SIMPLE → intentDispatch (tool-assisted, no multi-step plan)
+        // GRAPH → planning → generate → ... (full pipeline)
         @SuppressWarnings("unchecked")
         Map<String, Object> intakeIntent =
                 (Map<String, Object>) state.value("intakeIntent").orElse(Map.of());
         String dispatchPathStr =
                 String.valueOf(intakeIntent.getOrDefault("dispatchPath", ""));
-        if ("MCP_DIRECT".equals(dispatchPathStr)) {
-            log.info("IntakeAction route: MCP tool direct → intentDispatch");
-            return "intentDispatch";
-        }
-        if ("SKILL_DIRECT".equals(dispatchPathStr)) {
-            log.info("IntakeAction route: Skill direct → intentDispatch");
-            return "intentDispatch";
-        }
-        if ("CONVERSATIONAL".equals(dispatchPathStr)) {
-            log.info("IntakeAction route: conversational → intentDispatch");
+        if ("CONVERSATIONAL".equals(dispatchPathStr) || "SIMPLE".equals(dispatchPathStr)) {
+            log.info("IntakeAction route: {} → intentDispatch", dispatchPathStr);
             return "intentDispatch";
         }
 
@@ -323,6 +357,12 @@ public class IntakeAction implements NodeAction {
         initial.put("input", req.input());
         initial.put("mode", req.mode().name());
         initial.put("intent", req.intent() != null ? req.intent().name() : "NEW");
+        // Used by prompts to specialize behavior (e.g. deep-research loops).
+        initial.put(
+                "graphTemplate",
+                req.policy() != null && req.policy().graphTemplate() != null
+                        ? req.policy().graphTemplate()
+                        : "default");
         initial.put("modelId", req.modelId());
         initial.put("modelSource", req.modelSource() != null ? req.modelSource().name() : null);
         initial.put("userId", userId);
@@ -335,6 +375,7 @@ public class IntakeAction implements NodeAction {
         initial.put("sseEvents", new java.util.concurrent.CopyOnWriteArrayList<Map<String, Object>>());
         initial.put("gatherResumeTo", "");
         initial.put("gatherLoopCount", 0);
+        initial.put("searchRound", 0);
         initial.put("doneReason", "final");
         if (req.policy() != null) {
             initial.put("maxMode", Boolean.TRUE.equals(req.policy().maxMode()));
@@ -352,17 +393,39 @@ public class IntakeAction implements NodeAction {
         // Convert RecentMessage records to Map<String, String> so downstream consumers
         // can safely cast to List<Map<String, String>> without ClassCastException.
         if (req.contexts() != null && req.contexts().recent() != null && !req.contexts().recent().isEmpty()) {
-            var historyMaps = req.contexts().recent().stream()
-                .map(m -> {
-                    var map = new java.util.LinkedHashMap<String, String>();
-                    map.put("role", m.role());
-                    map.put("content", m.content());
-                    if (m.summary() != null) map.put("summary", m.summary());
-                    if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
-                    return map;
-                })
-                .toList();
-            initial.put("conversationHistory", historyMaps);
+            // ── Compacted context recovery ──
+            // When a previous session produced a compactedSummary (via CommitAction.compactActiveMemories),
+            // the sessionDigest carries the __COMPACTED__ marker. On session recovery, we detect this
+            // and restore context from the compacted summary instead of replaying the full conversation
+            // history. This prevents loading potentially huge conversation history for super-complex tasks
+            // that ran hundreds of phases.
+            String compactedSummary = resolveCompactedSummary(req);
+            if (compactedSummary != null && !compactedSummary.isBlank()) {
+                // Use compacted summary as the sole conversation context — skip full history
+                var compactedHistory = new java.util.ArrayList<Map<String, String>>();
+                var systemMap = new java.util.LinkedHashMap<String, String>();
+                systemMap.put("role", "system");
+                systemMap.put("content", "[COMPACTED SESSION CONTEXT — restored from compressed summary]\n" + compactedSummary);
+                compactedHistory.add(systemMap);
+                initial.put("conversationHistory", compactedHistory);
+                initial.put("compactedSummary", compactedSummary);
+                log.info("IntakeAction: detected compacted session context ({} chars), " +
+                                "restoring from compressed summary instead of full history ({} messages skipped)",
+                        compactedSummary.length(), req.contexts().recent().size());
+            } else {
+                // Normal path: no compaction marker — load full conversation history
+                var historyMaps = req.contexts().recent().stream()
+                    .map(m -> {
+                        var map = new java.util.LinkedHashMap<String, String>();
+                        map.put("role", m.role());
+                        map.put("content", m.content());
+                        if (m.summary() != null) map.put("summary", m.summary());
+                        if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
+                        return map;
+                    })
+                    .toList();
+                initial.put("conversationHistory", historyMaps);
+            }
         } else {
             initial.put("conversationHistory", List.of());
         }
@@ -449,14 +512,86 @@ public class IntakeAction implements NodeAction {
         state.put("completedPhases", List.of());
     }
 
-    /** After the user answers askUser, allow generate to proceed instead of re-asking. */
+    /** After the user answers askUser, allow generate to proceed instead of re-asking.
+     *
+     * <p>Preserves askUser context (the question text and the agent's proposals) in
+     * {@code taskLedger.notes} so the LLM can understand the user's answer (e.g.
+     * "按方案1推进吧" references "方案1" from the askUser question). Without this,
+     * the LLM would see the user's answer but not know what options were proposed.
+     */
+    @SuppressWarnings("unchecked")
     static void clearAskUserResumeEscalation(Map<String, Object> restored) {
+        // ★ Before removing askUserQuestion and textOutput, save their content to taskLedger.notes
+        // so the LLM can understand the user's answer in context of the original question.
+        String askUserContextNote = buildAskUserContextNote(restored);
+        if (!askUserContextNote.isBlank()) {
+            var ledger = new HashMap<>(
+                    (Map<String, Object>) restored.getOrDefault("taskLedger", Map.of()));
+            var notes = new ArrayList<>((List<String>) ledger.getOrDefault("notes", List.of()));
+            notes.add(askUserContextNote);
+            ledger.put("notes", notes);
+            restored.put("taskLedger", ledger);
+        }
+
         restored.put("overallGoalUnmet", false);
         restored.remove("askUserQuestion");
         restored.remove("textOutput");
         restored.remove("generateResult");
         ToolApproachTracker.clearInPhase(restored);
         PhaseOutcomeHelper.clearPhaseToolState(restored);
+    }
+
+    /**
+     * Build a context note from the askUser question and textOutput so the LLM
+     * can understand the user's answer in context.
+     */
+    @SuppressWarnings("unchecked")
+    private static String buildAskUserContextNote(Map<String, Object> restored) {
+        StringBuilder sb = new StringBuilder("askUserContext:");
+        Object askUserQuestion = restored.get("askUserQuestion");
+        if (askUserQuestion instanceof Map<?, ?> qMap) {
+            // Structured question with options
+            Object title = qMap.get("title");
+            Object text = qMap.get("text");
+            if (title != null) sb.append(" title=").append(title);
+            if (text != null) sb.append(" text=").append(truncateForNote(String.valueOf(text), 500));
+            Object questions = qMap.get("questions");
+            if (questions instanceof List<?> qList) {
+                for (Object q : qList) {
+                    if (q instanceof Map<?, ?> qItem) {
+                        Object qPrompt = qItem.get("prompt");
+                        Object qOptions = qItem.get("options");
+                        if (qPrompt != null) sb.append(" question=").append(truncateForNote(String.valueOf(qPrompt), 200));
+                        if (qOptions instanceof List<?> opts) {
+                            for (Object opt : opts) {
+                                if (opt instanceof Map<?, ?> optMap) {
+                                    Object optId = optMap.get("id");
+                                    Object optLabel = optMap.get("label");
+                                    if (optId != null && optLabel != null) {
+                                        sb.append(" option[").append(optId).append("]=").append(truncateForNote(String.valueOf(optLabel), 100));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (askUserQuestion != null) {
+            sb.append(" question=").append(truncateForNote(String.valueOf(askUserQuestion), 500));
+        }
+
+        Object textOutput = restored.get("textOutput");
+        if (textOutput != null) {
+            String textStr = truncateForNote(String.valueOf(textOutput), 800);
+            sb.append(" agentProposal=").append(textStr);
+        }
+
+        return sb.length() > "askUserContext:".length() ? sb.toString() : "";
+    }
+
+    private static String truncateForNote(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     /**
@@ -492,16 +627,33 @@ public class IntakeAction implements NodeAction {
             restored.put("modelSource", req.modelSource().name());
         }
         if (req.input() != null && !req.input().isBlank()) {
-            // ★ FIX: When resuming from an askUser interrupt with structured option answers
-            // (optionId-based, not freeform text), do NOT override the saved `input` with the
-            // optionId. The optionId is a machine identifier (e.g. "manual", "retry", "skip")
-            // that the LLM may misinterpret as a brand-new user request (e.g. "manual" →
-            // "create a user manual"). Structured answer semantics are carried by the `answers`
-            // list; the `input` field must retain the original user request for context.
-            boolean hasStructuralOptionAnswers = req.answers() != null
-                    && !req.answers().isEmpty()
-                    && req.answers().stream().allMatch(a -> a.optionId() != null && a.freeform() == null);
-            if (!hasStructuralOptionAnswers) {
+            // ★ FIX: When resuming from an askUser interrupt, do NOT override the saved
+            // `input` with the user's reply text. The user's reply (e.g. "按方案1推进吧")
+            // references context from the askUser question (e.g. option 1/2/3), and replacing
+            // the original input causes the LLM to treat the reply as a brand-new task.
+            //
+            // Previously we only skipped override for structured optionId answers. Now we also
+            // skip for freeform answers when the checkpoint has a preserved original input,
+            // because:
+            // 1. The freeform text references the askUser question's context (options, proposals)
+            // 2. Replacing input loses the original task description
+            // 3. The answers list already carries the user's reply semantics
+            //
+            // The freeform text is preserved in taskLedger.notes via recordAnsweredNotes()
+            // and injected into the generate prompt via buildAskUserAnswersDirective().
+            boolean hasAnswers = req.answers() != null && !req.answers().isEmpty();
+            boolean isAnswerIntent = req.intent() == ConversationRunRequest.Intent.ANSWER;
+            boolean checkpointHasInput = restored.containsKey("input")
+                    && restored.get("input") instanceof String savedInput
+                    && !savedInput.isBlank();
+            if (hasAnswers || (isAnswerIntent && checkpointHasInput)) {
+                // The user is answering an askUser question and the checkpoint has the
+                // original input preserved — keep the original input from the checkpoint.
+                // The user's reply semantics are carried by the `answers` list.
+                log.info("restoreFromCheckpoint: preserving original input from checkpoint, "
+                        + "user reply is carried by answers (hasAnswers={}, isAnswerIntent={}, checkpointHasInput={})",
+                        hasAnswers, isAnswerIntent, checkpointHasInput);
+            } else {
                 restored.put("input", req.input());
             }
         }
@@ -527,19 +679,37 @@ public class IntakeAction implements NodeAction {
         if (req.contexts() != null
                 && req.contexts().recent() != null
                 && !req.contexts().recent().isEmpty()) {
-            var historyMaps =
-                    req.contexts().recent().stream()
-                            .map(
-                                    m -> {
-                                        var map = new java.util.LinkedHashMap<String, String>();
-                                        map.put("role", m.role());
-                                        map.put("content", m.content());
-                                        if (m.summary() != null) map.put("summary", m.summary());
-                                        if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
-                                        return map;
-                                    })
-                            .toList();
-            restored.put("conversationHistory", historyMaps);
+            // ── Compacted context recovery on checkpoint resume ──
+            // Same logic as buildInitialState: if the session has compactedSummary,
+            // restore from it instead of replaying full conversation history.
+            String compactedSummary = resolveCompactedSummary(req);
+            if (compactedSummary != null && !compactedSummary.isBlank()) {
+                var compactedHistory = new java.util.ArrayList<Map<String, String>>();
+                var systemMap = new java.util.LinkedHashMap<String, String>();
+                systemMap.put("role", "system");
+                systemMap.put("content", "[COMPACTED SESSION CONTEXT — restored from compressed summary]\n" + compactedSummary);
+                compactedHistory.add(systemMap);
+                restored.put("conversationHistory", compactedHistory);
+                restored.put("compactedSummary", compactedSummary);
+                log.info("restoreFromCheckpoint: detected compacted session context ({} chars), " +
+                                "restoring from compressed summary instead of full history",
+                        compactedSummary.length());
+            } else {
+                // Normal path: load full conversation history
+                var historyMaps =
+                        req.contexts().recent().stream()
+                                .map(
+                                        m -> {
+                                            var map = new java.util.LinkedHashMap<String, String>();
+                                            map.put("role", m.role());
+                                            map.put("content", m.content());
+                                            if (m.summary() != null) map.put("summary", m.summary());
+                                            if (m.seq() != null) map.put("seq", String.valueOf(m.seq()));
+                                            return map;
+                                        })
+                                .toList();
+                restored.put("conversationHistory", historyMaps);
+            }
         }
 
         // Checkpoint nextNode wins over stale graphState fields
@@ -610,5 +780,22 @@ public class IntakeAction implements NodeAction {
         }
         ledger.put("notes", notes);
         restored.put("taskLedger", ledger);
+    }
+
+    /**
+     * Resolve compacted summary from the request's session digest.
+     * If the previous session had its context compressed (via CommitAction.compactActiveMemories),
+     * the sessionDigest will carry a {@code compactedSummary} field with the compressed context.
+     * This allows session recovery to restore from the compacted context instead of
+     * replaying the full conversation history — critical for super-complex tasks where
+     * the full history could be hundreds of messages long.
+     *
+     * @return the compacted summary string, or null if no compaction occurred
+     */
+    private static String resolveCompactedSummary(ConversationRunRequest req) {
+        if (req.sessionDigest() == null) return null;
+        // sessionDigest is a Digest record — check for compactedSummary field
+        String compacted = req.sessionDigest().compactedSummary();
+        return (compacted != null && !compacted.isBlank()) ? compacted : null;
     }
 }

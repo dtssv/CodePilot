@@ -10,6 +10,7 @@ import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.GraphStreamProcessor;
 import io.codepilot.core.graph.GraphUiEmitter;
+import io.codepilot.core.graph.PhaseMemoryHelper;
 import io.codepilot.core.graph.PhasePlanNormalizer;
 import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
@@ -47,16 +48,25 @@ public class PlanningAction implements NodeAction {
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final GraphSkillSupport graphSkillSupport;
+    private final io.codepilot.core.graph.ContextShardStore shardStore;
+    private final io.codepilot.core.graph.PhaseAwareMemoryLoader phaseAwareMemoryLoader;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
     public PlanningAction(
             ChatClientFactory chatClientFactory,
             PromptRegistry promptRegistry,
             ObjectMapper mapper,
-            GraphSkillSupport graphSkillSupport) {
+            GraphSkillSupport graphSkillSupport,
+            io.codepilot.core.graph.ContextShardStore shardStore,
+            io.codepilot.core.graph.PhaseAwareMemoryLoader phaseAwareMemoryLoader,
+            io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.graphSkillSupport = graphSkillSupport;
+        this.shardStore = shardStore;
+        this.phaseAwareMemoryLoader = phaseAwareMemoryLoader;
+        this.graphProperties = graphProperties;
     }
 
     @Override
@@ -74,7 +84,7 @@ public class PlanningAction implements NodeAction {
         List<Map<String, Object>> mcpTools = (List<Map<String, Object>>) state.value("mcpTools").orElse(List.of());
         var skillActivation = graphSkillSupport.activate(state, GraphSkillNode.PLANNING, updates);
         String planningPrompt =
-                buildPlanningPrompt(input, mode, projectMeta, mcpTools) + skillActivation.promptSection();
+                buildPlanningPrompt(state, input, mode, projectMeta, mcpTools) + skillActivation.promptSection();
 
         GraphUiEmitter.transition(state, "planning");
 
@@ -124,7 +134,7 @@ public class PlanningAction implements NodeAction {
     }
 
     private String buildPlanningPrompt(
-            String input, String mode, String projectMeta, List<Map<String, Object>> mcpTools) {
+            OverAllState state, String input, String mode, String projectMeta, List<Map<String, Object>> mcpTools) {
         String template = promptRegistry.get("graph.planning");
         String projectMetaSection = projectMeta.isBlank() ? ""
                 : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
@@ -132,11 +142,91 @@ public class PlanningAction implements NodeAction {
         // ★ Build MCP tools section for prompt injection
         String mcpToolsSection = buildMcpToolsSection(mcpTools);
 
+        // ── For super-complex tasks with split context, inject shard summaries instead of full input ──
+        // When input has been split into shards by ContextSplitAction, the full input would
+        // exceed LLM context limits. We inject a structured summary of available shards
+        // so the planner LLM can understand the task scope without reading every detail.
+        String contextSection = buildContextSectionForPlanning(state, input);
+
         return template
                 .replace("{{projectMeta}}", projectMetaSection)
-                .replace("{{input}}", input)
+                .replace("{{input}}", contextSection)
                 .replace("{{userLocale}}", "与用户输入语言一致")
                 .replace("{{mcpTools}}", mcpToolsSection);
+    }
+
+    /**
+     * Build the context section for the planning prompt.
+     *
+     * <p>When the input has been split into shards (contextSplitResult="split"),
+     * inject a structured summary of available shards instead of the full input.
+     * This prevents the prompt from exceeding LLM context limits on super-complex tasks.
+     *
+     * <p>When no shards exist, return the raw input unchanged.
+     */
+    @SuppressWarnings("unchecked")
+    private String buildContextSectionForPlanning(OverAllState state, String rawInput) {
+        String splitResult = (String) state.value("contextSplitResult").orElse("");
+        if (!"split".equals(splitResult)) {
+            return rawInput;
+        }
+
+        String projectRootHash = (String) state.value("projectRootHash").orElse("");
+        String contextSourceId = (String) state.value("contextSourceId").orElse("");
+        if (projectRootHash.isBlank() || contextSourceId.isBlank()) {
+            return rawInput;
+        }
+
+        // Load all shards to build a structured summary
+        List<io.codepilot.core.graph.ContextShardStore.ContextShard> shards;
+        try {
+            shards = shardStore.loadAll(projectRootHash, contextSourceId).block();
+            if (shards == null || shards.isEmpty()) {
+                return rawInput;
+            }
+        } catch (Exception e) {
+            log.warn("PlanningAction: failed to load context shards for planning prompt (falling back to raw input): {}",
+                    e.getMessage());
+            return rawInput;
+        }
+
+        // Build structured summary: for each shard, show id + tags + first 200 chars of content
+        int shardCount = shards.size();
+        StringBuilder sb = new StringBuilder();
+        sb.append("[LARGE INPUT — split into ").append(shardCount).append(" context sections]\n");
+        sb.append("The user's input has been split into ").append(shardCount)
+                .append(" sections for processing. Each section is described below.\n");
+        sb.append("When planning phases, reference sections by their ID/tags so the execution engine\n");
+        sb.append("can load only the relevant sections for each phase.\n\n");
+
+        int totalChars = 0;
+        int maxChars = graphProperties.getPlanningShardSummaryMaxChars() > 0
+                ? graphProperties.getPlanningShardSummaryMaxChars() : 32000;
+        for (var shard : shards) {
+            if (totalChars > maxChars) {
+                sb.append("(... ").append(shardCount - shards.indexOf(shard))
+                        .append(" more sections truncated for budget)\n");
+                break;
+            }
+            sb.append("── Section: ").append(shard.id()).append(" ──\n");
+            sb.append("  Tags: ").append(String.join(", ", shard.tags())).append("\n");
+            sb.append("  Type: ").append(shard.contentType()).append("\n");
+            // Use LLM-generated summary if available, otherwise first 300 chars as preview
+            String preview;
+            if (shard.summary() != null && !shard.summary().isBlank()) {
+                preview = shard.summary();
+            } else if (shard.content().length() > 300) {
+                preview = shard.content().substring(0, 300) + "...";
+            } else {
+                preview = shard.content();
+            }
+            sb.append("  Preview: ").append(preview).append("\n\n");
+            totalChars += preview.length() + 100;
+        }
+
+        log.info("PlanningAction: injected {} shard summaries ({} chars) instead of raw input ({} chars)",
+                shardCount, totalChars, rawInput.length());
+        return sb.toString();
     }
 
     /**
@@ -257,7 +347,7 @@ public class PlanningAction implements NodeAction {
 
         var normalizedPlan = PhasePlanNormalizer.normalizePlan(userSteps, phases);
         userSteps = normalizedPlan.steps();
-        phases = normalizedPlan.phases();
+        phases = applyPhaseDefaults(normalizedPlan.phases());
         userPlan = new LinkedHashMap<>(userPlan);
         userPlan.put("steps", userSteps);
         updates.put("userPlan", userPlan);
@@ -268,16 +358,64 @@ public class PlanningAction implements NodeAction {
         updates.put("phases", phases);
         updates.put("phaseCursor", phases.get(0).get("id"));
 
-        // C1 fast-path: for simple single-phase tasks, skip preCheck/verify to reduce latency
-        boolean isSimpleTask = phases.size() == 1
-                && "code-change".equals(String.valueOf(phases.get(0).getOrDefault("intent", "code-change")));
-        updates.put("fastPathEnabled", isSimpleTask);
-        if (isSimpleTask) {
-            log.info("Planning: fast-path enabled for single-phase code-change task");
+        // ── Hierarchical planning support ──
+        // When phases contain macroPhase=true markers, store the full macro plan
+        // and only expand the first macro-phase's micro-phases for execution.
+        // Remaining macro-phases are expanded dynamically by DynamicPlanExpandAction.
+        List<Map<String, Object>> macroPhases = phases.stream()
+                .filter(p -> Boolean.TRUE.equals(p.get("macroPhase")))
+                .toList();
+        if (!macroPhases.isEmpty()) {
+            log.info("PlanningAction: hierarchical plan detected — {} macro-phases, expanding first", macroPhases.size());
+            // Store the full macro plan for later expansion
+            updates.put("macroPhases", macroPhases);
+            updates.put("macroPhaseCursor", 0);
+            updates.put("hierarchicalPlan", true);
+
+            // Extract micro-phases from the first macro-phase (if any embedded)
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> firstMicroPhases =
+                    (List<Map<String, Object>>) macroPhases.get(0).getOrDefault("microPhases", List.of());
+            if (!firstMicroPhases.isEmpty()) {
+                // Mark first micro-phases as internal (user-invisible) — same as
+                // DynamicPlanExpandAction does for subsequent macro-phases.
+                List<Map<String, Object>> markedFirstMicro = new ArrayList<>();
+                for (Map<String, Object> mp : firstMicroPhases) {
+                    Map<String, Object> marked = new LinkedHashMap<>(PhaseMemoryHelper.withDefaults(mp));
+                    marked.put("internalPhase", true);
+                    marked.put("macroPhaseIndex", 0);
+                    markedFirstMicro.add(marked);
+                }
+                // Replace phases with the first macro-phase's micro-phases
+                var normalizedMicro = PhasePlanNormalizer.normalizePlan(userSteps, markedFirstMicro);
+                updates.put("phases", normalizedMicro.phases());
+                updates.put("phaseCursor", normalizedMicro.phases().get(0).get("id"));
+                log.info("PlanningAction: expanded first macro-phase into {} micro-phases", normalizedMicro.phases().size());
+            }
+        } else {
+            updates.put("hierarchicalPlan", false);
+        }
+
+        // Load project memory + shards for the first execution phase (memoryLoad runs before planning).
+        if (!phases.isEmpty()) {
+            String firstPhaseId = String.valueOf(phases.get(0).get("id"));
+            try {
+                phaseAwareMemoryLoader.loadForNextPhase(state, updates, firstPhaseId);
+            } catch (Exception e) {
+                log.warn("PlanningAction: first-phase memory load failed (non-fatal): {}", e.getMessage());
+            }
         }
 
         updates.put("planningResult", "phases");
         return updates;
+    }
+
+    private static List<Map<String, Object>> applyPhaseDefaults(List<Map<String, Object>> phases) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> phase : phases) {
+            out.add(PhaseMemoryHelper.withDefaults(phase));
+        }
+        return out;
     }
 
     private Map<String, Object> buildFallbackPlan(OverAllState state, String input, Map<String, Object> updates) {
@@ -299,7 +437,6 @@ public class PlanningAction implements NodeAction {
             Map.of("phases", phases, "graphId", "gph-" + UUID.randomUUID().toString().substring(0, 8)));
         updates.put("phases", phases);
         updates.put("phaseCursor", "p1");
-        updates.put("fastPathEnabled", true);
         updates.put("planningResult", "phases");
         return updates;
     }

@@ -305,14 +305,18 @@ public final class SessionExecutionFacts {
    * Generic inspect/prep step satisfaction: any tool type, respects plan pivots and primary targets.
    */
   public static boolean inspectGoalMet(OverAllState state, Map<String, Object> gathered) {
-    if (gathered == null || gathered.isEmpty()) {
-      return false;
+    if (gathered == null) {
+      gathered = Map.of();
     }
     Map<String, Object> facts = fromState(state);
     String label = PhaseGoalHelper.currentStepLabel(state);
 
     if (isObsoleteExploratoryStep(state, facts)) {
       return true;
+    }
+
+    if (gathered.isEmpty()) {
+      return false;
     }
 
     if (PhaseGoalHelper.inferStepKind(state) == PhaseGoalHelper.StepKind.RUN

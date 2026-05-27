@@ -41,7 +41,17 @@ Optional one-line status (e.g. "开始制定分步计划")
     "status": "in_progress"
   },
   "phases": [
-    {"id": "p1", "title": "<same as step 1 title>", "intent": "<same slug as step 1 intent>", "entry": [], "exit": [], "budget": {"attempts": 3}}
+    {
+      "id": "p1",
+      "title": "<same as step 1 title>",
+      "intent": "<same slug as step 1 intent>",
+      "tags": ["<semantic tags for memory/shard retrieval — REQUIRED when task is large or multi-module>"],
+      "memoryHints": ["<optional extra retrieval phrases>"],
+      "loadShardMode": "tags",
+      "entry": [],
+      "exit": [],
+      "budget": {"attempts": 3, "skipVerify": false}
+    }
   ],
   "infoRequests": null,
   "agentThinking": null,
@@ -75,6 +85,13 @@ Do NOT rely on title wording for the engine — set intent explicitly per step.
 - When userPlan has 2+ steps, phases[] MUST have the SAME number of entries as steps[] (p1..pN ↔ s1..sN).
 - Each phase title should match its step title. The engine runs ONE phase at a time (generate→apply→verify per step).
 - Do NOT collapse all steps into a single phase.
+
+[PHASE MEMORY & CONTEXT — required for non-trivial tasks]
+- tags: semantic strings used to load only relevant context shards and project memories for THIS phase (e.g. module/entity names). Use distinct tags per phase.
+- memoryHints: optional extra retrieval phrases (not duplicated in tags).
+- loadShardMode: "tags" (default) | "all" (only if this phase truly needs every shard) | "none" (no shard injection).
+- budget.skipVerify: true only for trivial single-file edits where IDE verify is unnecessary; default false.
+- requiredProducts (optional): [{"product": "entity", "patterns": ["*Entity.java"], "searchPaths": ["src/.../entity/"]}] when later phases depend on earlier outputs.
 
 [DELIVERABLE FILES — analysis / report tasks]
 - Infer where inputs live vs where outputs belong from the user request and project layout; do not assume they share one directory.

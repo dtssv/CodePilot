@@ -81,6 +81,7 @@ public final class PhaseOutcomeHelper {
     return switch (kind) {
       case COMPILE -> PhaseGoalHelper.hasSuccessfulCompile(gathered);
       case RUN -> PhaseGoalHelper.hasSuccessfulRun(gathered);
+      case VERIFY -> PhaseGoalHelper.hasSuccessfulCompile(gathered) && PhaseGoalHelper.hasSuccessfulRun(gathered);
       case ANALYZE -> PhaseGoalHelper.analyzeGoalMet(state, gathered);
       case INSPECT -> PhaseGoalHelper.inspectGoalMet(state, gathered);
       case PREPARE ->

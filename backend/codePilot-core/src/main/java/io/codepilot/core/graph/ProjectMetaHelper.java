@@ -109,14 +109,13 @@ public final class ProjectMetaHelper {
     List<Map<String, Object>> entries = new ArrayList<>();
     String[] lines = projectMeta.substring(lineStart + 1).split("\n");
     for (String raw : lines) {
-      String line = raw.strip();
-      if (line.isEmpty()) {
+      if (raw.isBlank()) {
         break;
       }
-      if (!line.startsWith("  ")) {
+      if (!raw.startsWith("  ")) {
         break;
       }
-      String name = line.substring(2).strip();
+      String name = raw.substring(2).strip();
       if (name.isEmpty()) {
         continue;
       }

@@ -6,22 +6,46 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** LLM-inferred intake routing: whether/how to use tools before the main agent loop. */
+/**
+ * LLM-inferred intake routing: determines the execution strategy for a task.
+ *
+ * <p>Design principle: dispatchPath is determined by <b>task complexity</b>,
+ * not by tool type. MCP tools and Skills are <b>execution resources</b>
+ * available during task execution — not routing destinations. The LLM decides
+ * when to use them within the GRAPH pipeline (via generate→gather→mcp.call)
+ * or the SIMPLE pipeline (via intentDispatch with tool injection).
+ *
+ * <p>Three dispatch paths:
+ * <ul>
+ *   <li>{@link DispatchPath#CONVERSATIONAL} — pure Q&A, no tools, no planning</li>
+ *   <li>{@link DispatchPath#SIMPLE} — needs tools but no multi-step plan</li>
+ *   <li>{@link DispatchPath#GRAPH} — needs multi-step planning and execution</li>
+ * </ul>
+ */
 public record IntakeIntent(
     boolean needsTools, boolean needsPlanning, List<ToolHint> tools, String reason,
-    /** How the graph should route after intake — determined by LLM classification + state. */
+    /** How the graph should route after intake — determined by task complexity. */
     DispatchPath dispatchPath) {
 
-  /** Routing path after intake — determines whether the full graph pipeline is needed. */
+  /**
+   * Routing path after intake — determined by task complexity, NOT by tool type.
+   *
+   * <p>MCP tools and Skills are available as resources in both SIMPLE and GRAPH paths.
+   * The difference is whether the task needs multi-step planning:
+   * <ul>
+   *   <li>CONVERSATIONAL: no tools, no planning → direct LLM answer</li>
+   *   <li>SIMPLE: needs tools, no planning → LLM + tool execution in one round</li>
+   *   <li>GRAPH: needs planning → full pipeline with phases</li>
+   * </ul>
+   */
   public enum DispatchPath {
     /** Full graph pipeline: planning → generate → applyPatch → verify → commit → finalize. */
     GRAPH,
     /** Direct conversational answer — no tools, no planning. Go straight to finalize. */
     CONVERSATIONAL,
-    /** MCP tool matched — delegate to plugin for tool execution, then finalize. */
-    MCP_DIRECT,
-    /** Skill matched — inject skill prompt, then conversational generate + finalize. */
-    SKILL_DIRECT
+    /** Single-round tool-assisted execution — needs tools but no multi-step plan.
+     *  MCP tools and Skills are injected as resources, not as routing targets. */
+    SIMPLE
   }
 
   private static final Set<String> GATHER_TOOL_PREFIXES =
@@ -40,12 +64,25 @@ public record IntakeIntent(
         || (!needsTools && !needsPlanning);
   }
 
-  public boolean isMcpDirect() {
-    return dispatchPath == DispatchPath.MCP_DIRECT;
+  /** Single-round tool-assisted execution — needs tools but no multi-step plan. */
+  public boolean isSimple() {
+    return dispatchPath == DispatchPath.SIMPLE;
   }
 
+  /**
+   * @deprecated Use {@link #isSimple()} instead. MCP is a resource, not a routing path.
+   */
+  @Deprecated(since = "0.9", forRemoval = true)
+  public boolean isMcpDirect() {
+    return false;
+  }
+
+  /**
+   * @deprecated Use {@link #isSimple()} instead. Skill is a resource, not a routing path.
+   */
+  @Deprecated(since = "0.9", forRemoval = true)
   public boolean isSkillDirect() {
-    return dispatchPath == DispatchPath.SKILL_DIRECT;
+    return false;
   }
 
   /** Read/search/diagnostic tools suggested — generate should gather real context. */

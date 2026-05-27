@@ -25,9 +25,25 @@ export interface MemoryItem {
 interface State {
     rules: RuleItem[];
     memories: MemoryItem[];
+    /** Last memory compaction notification — shows when context was compressed */
+    lastCompaction: CompactionInfo | null;
 }
 
-let state: State = { rules: [], memories: [] };
+/** Memory compaction notification data from backend CommitAction. */
+export interface CompactionInfo {
+    /** Marker set by backend to identify this as a compaction event */
+    __COMPACTED__: boolean;
+    /** Phase ID where compaction occurred */
+    phaseId: string;
+    /** Number of DEGRADABLE/VOLATILE memories compressed */
+    compressedCount: number;
+    /** Number of IMMORTAL/PROTECTED memories preserved */
+    preservedCount: number;
+    /** The compressed summary text */
+    summary: string;
+}
+
+let state: State = { rules: [], memories: [], lastCompaction: null };
 const listeners = new Set<(state: State) => void>();
 
 function setState(next: Partial<State>) {
@@ -52,6 +68,17 @@ export function installRulesMemoryBridge() {
         const r = raw as { memories?: MemoryItem[] };
         if (r.memories) setState({ memories: r.memories });
     });
+    // ── Memory compaction notification ──
+    // Backend CommitAction emits memory.compacted when DEGRADABLE/VOLATILE memories
+    // are compressed into a single summary at phase boundaries. This notification
+    // lets the user know context was compressed, and carries the __COMPACTED__ marker
+    // for session recovery detection.
+    onPluginEvent('memory.compacted', (raw) => {
+        const data = raw as CompactionInfo;
+        if (data.__COMPACTED__) {
+            setState({ lastCompaction: data });
+        }
+    });
 }
 
 export function getRulesMemoryState(): State { return state; }
@@ -75,6 +102,18 @@ export function usePendingMemoryCount(): number {
         });
     }, []);
     return count;
+}
+
+/** Hook to get the latest compaction notification (null if none occurred). */
+export function useMemoryCompaction(): CompactionInfo | null {
+    const [compaction, setCompaction] = useState<CompactionInfo | null>(state.lastCompaction);
+    useEffect(() => {
+        installRulesMemoryBridge();
+        return subscribeRulesMemory((s) => {
+            setCompaction(s.lastCompaction);
+        });
+    }, []);
+    return compaction;
 }
 
 export const rulesApi = {

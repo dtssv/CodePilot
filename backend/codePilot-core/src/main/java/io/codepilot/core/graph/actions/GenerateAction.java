@@ -40,16 +40,22 @@ public class GenerateAction implements NodeAction {
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final GraphSkillSupport graphSkillSupport;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
+    private final io.codepilot.core.graph.ContextShardStore shardStore;
 
     public GenerateAction(
             ChatClientFactory chatClientFactory,
             PromptRegistry promptRegistry,
             ObjectMapper mapper,
-            GraphSkillSupport graphSkillSupport) {
+            GraphSkillSupport graphSkillSupport,
+            io.codepilot.core.run.GraphEngineProperties graphProperties,
+            io.codepilot.core.graph.ContextShardStore shardStore) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.graphSkillSupport = graphSkillSupport;
+        this.graphProperties = graphProperties;
+        this.shardStore = shardStore;
     }
 
     @Override
@@ -57,6 +63,14 @@ public class GenerateAction implements NodeAction {
     public Map<String, Object> apply(OverAllState state) {
         var updates = new HashMap<String, Object>();
         updates.put("currentNode", "generate");
+        // ★ Consume resumeNextNode: once generate runs, the resume shortcut has been
+        // consumed — clear it so subsequent graph iterations don't incorrectly jump
+        // back to generate.
+        String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
+        if (!resumeNextNode.isBlank()) {
+            updates.put("resumeNextNode", "");
+            log.info("GenerateAction: consumed resumeNextNode='{}', clearing to prevent re-routing", resumeNextNode);
+        }
         if (Boolean.TRUE.equals(state.value("approachRepeatBlocked").orElse(false))) {
             updates.put("approachRepeatBlocked", false);
         }
@@ -88,9 +102,12 @@ public class GenerateAction implements NodeAction {
                 updates.put("generateResult", "directTools");
                 updates.put("pendingPatches", List.of());
             } else {
-                // Retry calls were blocked/duplicate — route to repair for another attempt
-                log.warn("GenerateAction: retry tool calls from repair were blocked, routing back to repair");
-                updates.put("generateResult", "repair");
+                // Retry calls were blocked/duplicate — instead of routing back to repair (which
+                // would cause a generate→repair→generate death loop), reenter generate with a
+                // fresh LLM call. The LLM will see the failure context and can produce patches
+                // or alternative approaches instead of repeating blocked tool calls.
+                log.warn("GenerateAction: retry tool calls from repair were blocked, routing to reenter for fresh LLM call");
+                updates.put("generateResult", "reenter");
             }
             GraphExecutionLog.nodeExit(state, "generate", updates);
             return updates;
@@ -209,6 +226,34 @@ public class GenerateAction implements NodeAction {
         }
     }
 
+    /**
+     * Load context shards relevant to the current phase and format them
+     * as a [RELEVANT CONTEXT] section for the generate prompt.
+     *
+     * <p>Retrieval is driven by LLM-provided phase metadata (tags, memoryHints).
+     * If shards are available but the phase has no tags, all shards are loaded
+     * (the LLM can filter what's relevant during generation).
+     */
+    private String loadContextShardSection(OverAllState state, Map<String, Object> currentPhase) {
+        String projectRootHash = (String) state.value("projectRootHash").orElse("");
+        String contextSourceId = (String) state.value("contextSourceId").orElse("");
+        List<String> queryTags = PhaseMemoryHelper.queryTagsFromPhase(currentPhase);
+        PhaseMemoryHelper.LoadShardMode mode = PhaseMemoryHelper.LoadShardMode.fromPhase(currentPhase);
+        int maxShardChars = graphProperties.getMemoryBudget() > 0
+                ? Math.max(graphProperties.getMemoryBudget() * 2, 8000) : 8000;
+        var resolved =
+                ContextShardResolver.resolveForPrompt(
+                        shardStore, projectRootHash, contextSourceId, queryTags, mode, maxShardChars);
+        if (!resolved.promptSection().isBlank()) {
+            log.info(
+                    "GenerateAction: injected {} context shards ({} chars) for phase {}",
+                    resolved.shards().size(),
+                    resolved.charsUsed(),
+                    currentPhase.getOrDefault("id", "?"));
+        }
+        return resolved.promptSection();
+    }
+
     private String buildConversationalPrompt(String input, String projectMeta) {
         String template = promptRegistry.get("graph.conversational");
         String projectMetaSection =
@@ -244,7 +289,9 @@ public class GenerateAction implements NodeAction {
         // This prevents the generate→gather→reenter→generate infinite loop where the
         // LLM keeps requesting the same files instead of producing code.
         String antiLoopDirective = "";
-        if (gatherCount > 0 && !gatheredInfo.isEmpty()) {
+        boolean deepResearch = "deep-research".equalsIgnoreCase(
+                String.valueOf(state.value("graphTemplate").orElse("default")));
+        if (!deepResearch && gatherCount > 0 && !gatheredInfo.isEmpty()) {
             antiLoopDirective = "\n\n[MANDATORY — DO NOT IGNORE]\n"
                 + "You have already gathered information (see [GATHERED CONTEXT] above). "
                 + "You MUST NOT set infoRequests to anything other than null. "
@@ -275,6 +322,7 @@ public class GenerateAction implements NodeAction {
         antiLoopDirective += StuckStepRecovery.analyzeTextOutputDirective(state, gatheredInfo);
         String taskDirective =
                 buildTaskDirective(state)
+                        + buildAskUserAnswersDirective(state)
                         + CompileHintHelper.directive(projectMeta, input, state)
                         + GraphExecutionJournal.combinedContextDirective(state)
                         + buildMemoryDirective(state)
@@ -287,6 +335,9 @@ public class GenerateAction implements NodeAction {
                             + "AGENT_CONTENT: at most 2 short sentences about what you will do in THIS step only.\n"
                             + "Prefer toolCalls over long prose when compile/run is needed.\n";
         }
+        // ── Load context shards for this phase ──
+        String contextShardSection = loadContextShardSection(state, currentPhase);
+
         return template
                 .replace("{{projectMeta}}", projectMetaSection)
                 .replace("{{input}}", input)
@@ -300,6 +351,7 @@ public class GenerateAction implements NodeAction {
                 .replace("{{gatheredContext}}", gatheredContext)
                 .replace("{{userLocale}}", "与用户输入语言一致")
                 .replace("{{mcpTools}}", mcpToolsSection)
+                + contextShardSection
                 + taskDirective
                 + proseBudget
                 + antiLoopDirective;
@@ -331,6 +383,74 @@ public class GenerateAction implements NodeAction {
                             + "tool results.\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Build a directive section from the user's askUser answers and the askUser context
+     * (the question/proposals that were asked), so the LLM can understand the user's
+     * reply in context (e.g. "按方案1推进吧" references "方案1" from the question).
+     */
+    @SuppressWarnings("unchecked")
+    private String buildAskUserAnswersDirective(OverAllState state) {
+        StringBuilder sb = new StringBuilder();
+
+        // 1. Inject user answers
+        List<?> rawAnswers = (List<?>) state.value("answers").orElse(List.of());
+        if (!rawAnswers.isEmpty()) {
+            sb.append("\n\n[USER ANSWERS — resume from askUser]\n");
+            sb.append("The user answered a question that was asked during execution. ");
+            sb.append("Here are their answers:\n");
+            sb.append("You MUST interpret their answer in context of the original askUser question below ");
+            sb.append("and proceed accordingly, choosing the option/strategy the user selected.\n\n");
+            for (Object a : rawAnswers) {
+                if (a instanceof Map<?, ?> answer) {
+                    Object optIdRaw = answer.get("optionId");
+                    Object freeformRaw = answer.get("freeform");
+                    String optionId = optIdRaw != null ? String.valueOf(optIdRaw) : "";
+                    String freeform = freeformRaw != null ? String.valueOf(freeformRaw) : "";
+                    if (!optionId.isBlank() && !"null".equals(optionId)) {
+                        sb.append("  - Answer: optionId=").append(optionId);
+                        if (!freeform.isBlank() && !"null".equals(freeform)) {
+                            sb.append(", freeform=\"").append(truncateForDisplay(freeform, 200)).append("\"");
+                        }
+                    } else if (!freeform.isBlank() && !"null".equals(freeform)) {
+                        sb.append("  - Answer (freeform): ").append(truncateForDisplay(freeform, 200));
+                    }
+                } else {
+                    sb.append("  - Answer: ").append(a);
+                }
+                sb.append("\n");
+            }
+        }
+
+        // 2. Extract askUser context from taskLedger.notes (saved by clearAskUserResumeEscalation)
+        Map<String, Object> taskLedger =
+                (Map<String, Object>) state.value("taskLedger").orElse(Map.of());
+        List<String> notes = (List<String>) taskLedger.getOrDefault("notes", List.of());
+        for (String note : notes) {
+            if (note != null && note.startsWith("askUserContext:")) {
+                sb.append("\n[ASKUSER CONTEXT — the question/proposals the user is answering]\n");
+                String context = note.substring("askUserContext:".length());
+                // Parse key=value pairs separated by spaces (respecting option[id] keys)
+                // Format: title=xxx text=xxx question=xxx option[id]=label agentProposal=xxx
+                String[] tokens = context.split(" (?=(?:option\\[|title=|text=|question=|agentProposal=))");
+                for (String token : tokens) {
+                    String trimmed = token.trim();
+                    if (!trimmed.isBlank()) {
+                        sb.append("  ").append(trimmed).append("\n");
+                    }
+                }
+                sb.append("\n");
+                break; // Only need the first askUserContext entry
+            }
+        }
+
+        return sb.toString();
+    }
+
+    private static String truncateForDisplay(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     @SuppressWarnings("unchecked")
@@ -501,8 +621,13 @@ public class GenerateAction implements NodeAction {
                     GraphUiEmitter.thinkingIfPresent(state, agentThinking, phaseId, thinkingEmitted);
                     return updates;
                 }
-                log.warn("GenerateAction: direct toolCalls blocked — duplicate approach");
-                updates.put("generateResult", "retryGenerate");
+                log.warn("GenerateAction: direct toolCalls blocked — duplicate approach; routing to reenter for fresh LLM call");
+                // Use "reenter" instead of "retryGenerate" to avoid the generate→repair→generate
+                // death loop when retry tool calls are all duplicates. "reenter" triggers a fresh
+                // LLM call with the full prompt (including failure context), giving the LLM a
+                // chance to produce patches or alternative tool calls instead of repeating the
+                // same blocked approach.
+                updates.put("generateResult", "reenter");
                 if (PhaseOutcomeHelper.rawToolsHadFailure(state)) {
                     updates.put(
                             "phaseFailureRetries",
@@ -557,17 +682,17 @@ public class GenerateAction implements NodeAction {
                     (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
             PhaseGoalHelper.StepKind stepKind = PhaseGoalHelper.inferStepKind(state);
             String userInput = (String) state.value("input").orElse("");
-            if (stepKind == PhaseGoalHelper.StepKind.RUN
+            if ((stepKind == PhaseGoalHelper.StepKind.RUN || stepKind == PhaseGoalHelper.StepKind.VERIFY)
                     && !PhaseGoalHelper.hasSuccessfulRun(gatheredNow)) {
                 log.warn(
-                        "GenerateAction: rejecting textOutput on RUN step — need shell.exec to run the binary");
+                        "GenerateAction: rejecting textOutput on RUN/VERIFY step — need shell.exec to run the binary");
                 updates.put("generateResult", "directTools");
                 updates.put(
                         "phaseFailureRetries", (int) state.value("phaseFailureRetries").orElse(0) + 1);
                 return updates;
             }
             if (PhaseGoalHelper.sessionExpectsCompileRunWorkflow(state)
-                    && stepKind == PhaseGoalHelper.StepKind.RUN
+                    && (stepKind == PhaseGoalHelper.StepKind.RUN || stepKind == PhaseGoalHelper.StepKind.VERIFY)
                     && !PhaseGoalHelper.overallCompileRunGoalMet(state)) {
                 log.warn("GenerateAction: compile+run goal unmet — rejecting textOutput");
                 updates.put("generateResult", "directTools");
@@ -752,6 +877,44 @@ public class GenerateAction implements NodeAction {
             List<Patch> mergedPatches = mergeEditsForSameFile(validPatches);
             updates.put("pendingPatches", List.copyOf(mergedPatches));
             updates.put("modifiedFiles", List.copyOf(modifiedFiles));
+
+            // ── Batch generation support ──
+            // When the LLM signals hasMore=true (more content to generate in this phase),
+            // accumulate patches in state and route back to generate for the next batch.
+            // This enables super-complex phases (e.g., 10+ API endpoints per table)
+            // to be generated across multiple LLM calls without exceeding output limits.
+            boolean hasMore = root.has("hasMore") && root.get("hasMore").asBoolean(false);
+            if (hasMore) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> existingPatches =
+                        (List<Map<String, Object>>) state.value("accumulatedPatches").orElse(List.of());
+                List<Map<String, Object>> allPatches = new ArrayList<>(existingPatches);
+                for (Patch p : mergedPatches) {
+                    allPatches.add(mapper.convertValue(p, new TypeReference<Map<String, Object>>() {}));
+                }
+                updates.put("accumulatedPatches", allPatches);
+                updates.put("generateResult", "continueGenerate");
+                log.info("Generate phase={}: hasMore=true, accumulated {} total patches, routing back to generate",
+                        phaseId, allPatches.size());
+            } else {
+                // Merge any previously accumulated patches with current batch
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> existingPatches =
+                        (List<Map<String, Object>>) state.value("accumulatedPatches").orElse(List.of());
+                if (!existingPatches.isEmpty()) {
+                    List<Patch> allPatches = new ArrayList<>();
+                    for (Map<String, Object> pm : existingPatches) {
+                        Patch p = mapper.convertValue(pm, Patch.class);
+                        if (p != null) allPatches.add(p);
+                    }
+                    allPatches.addAll(mergedPatches);
+                    updates.put("pendingPatches", List.copyOf(mergeEditsForSameFile(allPatches)));
+                    updates.put("accumulatedPatches", List.of()); // Clear accumulator
+                    log.info("Generate phase={}: hasMore=false, merged {} accumulated + {} new patches = {} total",
+                            phaseId, existingPatches.size(), mergedPatches.size(),
+                            allPatches.size());
+                }
+            }
 
             if (agentContent != null) {
                 agentContent = GraphContentSanitizer.stripForDisplay(agentContent);
@@ -956,10 +1119,24 @@ public class GenerateAction implements NodeAction {
         String result = (String) state.value("generateResult").orElse("toolCalls");
         boolean gatherExhausted = Boolean.TRUE.equals(state.value("gatherExhausted").orElse(false));
         int gatherCount = (int) state.value("gatherCount").orElse(0);
+        boolean deepResearch =
+                "deep-research".equalsIgnoreCase(String.valueOf(state.value("graphTemplate").orElse("default")));
         int failureRetries = (int) state.value("phaseFailureRetries").orElse(0);
         boolean approachExhausted = ToolApproachTracker.isExhausted(state);
         boolean escalationDone =
                 Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false));
+
+        // ── Batch generation: continue generating more patches in this phase ──
+        if ("continueGenerate".equals(result)) {
+            int passes = (int) state.value("phaseGeneratePasses").orElse(0);
+            if (passes < resolveMaxGeneratePasses()) {
+                log.info("GenerateAction: routing back to generate for batch continuation (pass {})", passes);
+                return "reenter";
+            } else {
+                log.warn("GenerateAction: batch generation hit max passes, forcing applyPatch with accumulated patches");
+                return "applyPatch";
+            }
+        }
 
         if ("askUser".equals(result)) {
             return "askUser";
@@ -1006,7 +1183,7 @@ public class GenerateAction implements NodeAction {
             return "commit";
         }
 
-        if ("infoRequests".equals(result) && (gatherExhausted || gatherCount >= 3)) {
+        if ("infoRequests".equals(result) && (gatherExhausted || (!deepResearch && gatherCount >= 3))) {
             if (PhaseFailureRepairHelper.shouldRouteToRepair(state)) {
                 if (PhaseFailureRepairHelper.shouldAbandonPhase(state)) {
                     return "commit";
@@ -1037,7 +1214,7 @@ public class GenerateAction implements NodeAction {
                 }
                 return escalationDone ? "summarize" : "reenter";
             }
-            if (generatePasses >= 10) {
+            if (generatePasses >= resolveMaxGeneratePasses()) {
                 return routeWhenGeneratePassesCapped(state, generatePasses, "directTools");
             }
             int rounds = (int) state.value("directToolRound").orElse(0);
@@ -1054,7 +1231,7 @@ public class GenerateAction implements NodeAction {
             if ((kind == PhaseGoalHelper.StepKind.ANALYZE
                             || kind == PhaseGoalHelper.StepKind.SYNTHESIZE)
                     && !PhaseGoalHelper.currentStepGoalSatisfied(state)
-                    && generatePasses < 10) {
+                    && generatePasses < resolveMaxGeneratePasses()) {
                 log.warn(
                         "GenerateAction: directToolRound cap on {} without deliverable — reenter",
                         kind);
@@ -1088,7 +1265,7 @@ public class GenerateAction implements NodeAction {
                 log.warn("GenerateAction: textOutput on {} but goal not met — reenter (passes={})", kind, generatePasses);
                 return "reenter";
             }
-            if (generatePasses >= 10) {
+            if (generatePasses >= resolveMaxGeneratePasses()) {
                 return routeWhenGeneratePassesCapped(state, generatePasses, "textOutput");
             }
         }
@@ -1252,25 +1429,17 @@ public class GenerateAction implements NodeAction {
                     .filter(m -> "LONG_TERM".equals(m.get("layer")))
                     .toList();
 
-            // [SESSION CONTEXT] — short-term memory
             if (!shortTerm.isEmpty()) {
                 sb.append("\n[SESSION CONTEXT — key facts from this session]\n");
                 for (Map<String, Object> m : shortTerm) {
-                    String summary = String.valueOf(m.getOrDefault("summary", ""));
-                    String protection = String.valueOf(m.getOrDefault("protection", "DEGRADABLE"));
-                    sb.append("- ").append(summary);
-                    if ("IMMORTAL".equals(protection)) sb.append(" [IMMORTAL — never override]");
-                    sb.append("\n");
+                    appendMemoryLine(sb, m);
                 }
             }
 
-            // [PROJECT MEMORY] — long-term memory
             if (!longTerm.isEmpty()) {
                 sb.append("\n[PROJECT MEMORY — accumulated project knowledge]\n");
                 for (Map<String, Object> m : longTerm) {
-                    String summary = String.valueOf(m.getOrDefault("summary", ""));
-                    String type = String.valueOf(m.getOrDefault("type", "FACT"));
-                    sb.append("- [").append(type).append("] ").append(summary).append("\n");
+                    appendMemoryLine(sb, m);
                 }
             }
         }
@@ -1292,6 +1461,27 @@ public class GenerateAction implements NodeAction {
         }
 
         return sb.toString();
+    }
+
+    private static void appendMemoryLine(StringBuilder sb, Map<String, Object> m) {
+        String summary = String.valueOf(m.getOrDefault("summary", ""));
+        String protection = String.valueOf(m.getOrDefault("protection", "DEGRADABLE"));
+        String type = String.valueOf(m.getOrDefault("type", "FACT"));
+        sb.append("- [").append(type).append("] ").append(summary);
+        if ("IMMORTAL".equals(protection)) {
+            sb.append(" [IMMORTAL — never override]");
+        }
+        sb.append("\n");
+        Object detail = m.get("detail");
+        if (detail != null
+                && !detail.toString().isBlank()
+                && ("IMMORTAL".equals(protection) || "PROTECTED".equals(protection))) {
+            String d = detail.toString();
+            if (d.length() > 400) {
+                d = d.substring(0, 400) + "...";
+            }
+            sb.append("  ").append(d).append("\n");
+        }
     }
 
     /**
@@ -1321,6 +1511,12 @@ public class GenerateAction implements NodeAction {
         }
         sb.append("Example infoRequest for MCP: {\"id\": \"mcp-1\", \"kind\": \"mcp.call\", \"args\": {\"fullName\": \"mcp.<serverId>.<toolName>\", \"arguments\": {}}}\n");
         return sb.toString();
+    }
+
+    /** Resolve max generate passes per phase from config or fallback. */
+    private int resolveMaxGeneratePasses() {
+        int configured = graphProperties.getMaxGeneratePassesPerPhase();
+        return configured > 0 ? configured : 10;
     }
 
 }

@@ -1,0 +1,160 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.springframework.boot",
+    "module": "spring-boot-starter-data-redis-reactive",
+    "version": "3.3.4",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "7.6.4"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-starter",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "io.lettuce",
+          "module": "lettuce-core",
+          "version": {
+            "requires": "6.3.2.RELEASE"
+          }
+        },
+        {
+          "group": "io.projectreactor",
+          "module": "reactor-core",
+          "version": {
+            "requires": "3.6.10"
+          }
+        },
+        {
+          "group": "org.springframework.data",
+          "module": "spring-data-redis",
+          "version": {
+            "requires": "3.3.4"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "spring-boot-starter-data-redis-reactive-3.3.4.jar",
+          "url": "spring-boot-starter-data-redis-reactive-3.3.4.jar",
+          "size": 4794,
+          "sha512": "a5efa237bc958de4d8565f9eb54bfe3578129c59420ad764b4bce5536b1320466a7fd850a5c86193f19b056034e1ecdc14ccb74d58d8ba17f3b706aa321e6d43",
+          "sha256": "2a17a3da10dbc65bb18dbdcd49767b7751f7285f5ea251d1689baecfeecf2b10",
+          "sha1": "76eb44e652bc53ca33612e840cac591bd866a0a3",
+          "md5": "b20eaee430aede2030d1820e2e9d841c"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-starter",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "io.lettuce",
+          "module": "lettuce-core",
+          "version": {
+            "requires": "6.3.2.RELEASE"
+          }
+        },
+        {
+          "group": "io.projectreactor",
+          "module": "reactor-core",
+          "version": {
+            "requires": "3.6.10"
+          }
+        },
+        {
+          "group": "org.springframework.data",
+          "module": "spring-data-redis",
+          "version": {
+            "requires": "3.3.4"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "spring-boot-starter-data-redis-reactive-3.3.4.jar",
+          "url": "spring-boot-starter-data-redis-reactive-3.3.4.jar",
+          "size": 4794,
+          "sha512": "a5efa237bc958de4d8565f9eb54bfe3578129c59420ad764b4bce5536b1320466a7fd850a5c86193f19b056034e1ecdc14ccb74d58d8ba17f3b706aa321e6d43",
+          "sha256": "2a17a3da10dbc65bb18dbdcd49767b7751f7285f5ea251d1689baecfeecf2b10",
+          "sha1": "76eb44e652bc53ca33612e840cac591bd866a0a3",
+          "md5": "b20eaee430aede2030d1820e2e9d841c"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "spring-boot-starter-data-redis-reactive-3.3.4-javadoc.jar",
+          "url": "spring-boot-starter-data-redis-reactive-3.3.4-javadoc.jar",
+          "size": 4757,
+          "sha512": "60decc7a412da4a6155dcc5044a4cd769d145d2cd055f74cb36eb171d53bf3b8a65004a45910addcb3eaa45c52bf1c2b0e9e48d831204a809ae0cce87f1e6b2a",
+          "sha256": "655706e5a3f5ee2de57a296d01746bbd02d12ac544cc29539fc71b39d8247a74",
+          "sha1": "77dc99faa7adecb9d15768bd308942ddfdc45ab3",
+          "md5": "9c107d92ddcb6307cd24944d5c8b827b"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "spring-boot-starter-data-redis-reactive-3.3.4-sources.jar",
+          "url": "spring-boot-starter-data-redis-reactive-3.3.4-sources.jar",
+          "size": 4755,
+          "sha512": "0662c79c97b948a5c41107871132c7987b48a325411961fb8db0584282940ed4222ef96fd01bb43b63a61356284fbaab2d56a0af36804ef9a349eddbd48c57e3",
+          "sha256": "018748c4517ad43c446d5874481f0d759e3f8c2e44ba886c1264678bc28c9a98",
+          "sha1": "c5262da58900fb36121fce631fee0f17f3c226fc",
+          "md5": "24a333af2e0431e1700dfc520b471eb3"
+        }
+      ]
+    }
+  ]
+}

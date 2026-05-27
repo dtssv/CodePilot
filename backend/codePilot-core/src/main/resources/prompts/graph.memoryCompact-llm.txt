@@ -1,0 +1,18 @@
+Compress the following active memories for the next execution phase. Preserve all IMMORTAL and PROTECTED facts.
+
+Phase completed: {{phaseId}}
+
+[MEMORIES TO COMPRESS]
+{{memories}}
+
+Return ONLY JSON:
+{
+  "summary": "structured markdown with sections: ## IMMORTAL, ## DECISIONS, ## CONTEXT (compressed)",
+  "preservedIds": ["memory ids that must stay verbatim in full form — IMMORTAL only"]
+}
+
+Rules:
+1. Never drop IMMORTAL content — copy exactly into ## IMMORTAL.
+2. Merge redundant DEGRADABLE/VOLATILE lines into short bullets under ## CONTEXT.
+3. Keep summary under {{maxChars}} characters.
+4. Use the same language as the memory summaries.

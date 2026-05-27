@@ -27,7 +27,7 @@ class PhasePlanNormalizerTest {
   }
 
   @Test
-  void expandsPartialPhasesToMatchFiveSteps() {
+  void keepsPlannerPhaseCountWhenFewerThanUserSteps() {
     List<Map<String, Object>> userSteps =
         List.of(
             Map.of("id", "s1", "title", "A"),
@@ -43,8 +43,8 @@ class PhasePlanNormalizerTest {
 
     var normalized = PhasePlanNormalizer.normalize(userSteps, phases);
 
-    assertThat(normalized).hasSize(5);
-    assertThat(normalized.get(4).get("userStepId")).isEqualTo("s5");
+    assertThat(normalized).hasSize(3);
+    assertThat(normalized.get(2).get("id")).isEqualTo("p3");
   }
 
   @Test

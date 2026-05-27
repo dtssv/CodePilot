@@ -1,0 +1,118 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.opentelemetry",
+    "module": "opentelemetry-api-incubator",
+    "version": "1.41.0-alpha",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-api-incubator-1.41.0-alpha.jar",
+          "url": "opentelemetry-api-incubator-1.41.0-alpha.jar",
+          "size": 42944,
+          "sha512": "56a2fac1084f58c71ba3d3ea9cdea39c338c03273fa5d34320431a9ed1b75d51c2364ff6185bfd527ab4497b1dc6372cf5103c9190b55dabbc72be4d30ca6d55",
+          "sha256": "9dd36c6744b73c4d85e669cb646fa1f8b8c1888a4e3c0b9d04d2eebf24f3a875",
+          "sha1": "fd387313cc37a6e93062e9a80a2526634d22cb19",
+          "md5": "c5d64e5794b54cc8177a07019b863c0e"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-api-incubator-1.41.0-alpha.jar",
+          "url": "opentelemetry-api-incubator-1.41.0-alpha.jar",
+          "size": 42944,
+          "sha512": "56a2fac1084f58c71ba3d3ea9cdea39c338c03273fa5d34320431a9ed1b75d51c2364ff6185bfd527ab4497b1dc6372cf5103c9190b55dabbc72be4d30ca6d55",
+          "sha256": "9dd36c6744b73c4d85e669cb646fa1f8b8c1888a4e3c0b9d04d2eebf24f3a875",
+          "sha1": "fd387313cc37a6e93062e9a80a2526634d22cb19",
+          "md5": "c5d64e5794b54cc8177a07019b863c0e"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-api-incubator-1.41.0-alpha-javadoc.jar",
+          "url": "opentelemetry-api-incubator-1.41.0-alpha-javadoc.jar",
+          "size": 183061,
+          "sha512": "6dde4e3b6b7c3cfa4b9f8f6b92f92e88e2642861dcebe0429c8533e7d5bb7b458c2e9af965d2689ce2826421baf2f6acd07f20f9a2d3e3282209ae49d93bcb03",
+          "sha256": "9cc710e1e2ef093a401668083033434f6bece168352bf001f13e546e4955220b",
+          "sha1": "a5efb6988ce0c5590e90390006f9a3aa12b10bef",
+          "md5": "7ea5f7351b7a25677bbb130fb9dfcc5e"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-api-incubator-1.41.0-alpha-sources.jar",
+          "url": "opentelemetry-api-incubator-1.41.0-alpha-sources.jar",
+          "size": 32451,
+          "sha512": "49d21b83090f35f3cce338feaee2270e7e19516174d569ac76f7bdeeddb1803da0332fd905c212a4d66d1fb95ef0a4d7b40deff32963a99b539795fb9cbdd0da",
+          "sha256": "588f6467bb01972c582a5eb65179010a527284c71be961da07ff2a238de07d91",
+          "sha1": "70c6f1dbecbe91dc099e63d699359f47d348cce1",
+          "md5": "07e336f7cd1db8868c2088d7efb63f62"
+        }
+      ]
+    }
+  ]
+}

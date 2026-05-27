@@ -40,19 +40,20 @@ public class MemoryLoadAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryLoadAction.class);
 
-    /** Maximum number of project memories to load per run. */
-    private static final int MAX_PROJECT_MEMORIES = 20;
-
-    /** Default token budget for memory context orchestration. */
-    private static final int DEFAULT_MEMORY_BUDGET = 6000;
+    /** Fallback default when no config is provided (backward compatibility). */
+    private static final int FALLBACK_MEMORY_BUDGET = 6000;
+    private static final int FALLBACK_MAX_PROJECT_MEMORIES = 20;
 
     private final ProjectMemoryStore projectMemoryStore;
     private final ContextOrchestrator contextOrchestrator;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
     public MemoryLoadAction(ProjectMemoryStore projectMemoryStore,
-                            ContextOrchestrator contextOrchestrator) {
+                            ContextOrchestrator contextOrchestrator,
+                            io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.projectMemoryStore = projectMemoryStore;
         this.contextOrchestrator = contextOrchestrator;
+        this.graphProperties = graphProperties;
     }
 
     @Override
@@ -71,7 +72,7 @@ public class MemoryLoadAction implements NodeAction {
         allMemories.addAll(shortTermMemories);
         updates.put("shortTermMemories", shortTermMemories.stream().map(StructuredMemory::toMap).toList());
 
-        // ── Layer 3: Long-term memory (project memories from Redis) ──
+        // ── Layer 3: Long-term project memory (tag-driven only; no input keyword inference) ──
         List<StructuredMemory> projectMemories = loadLongTermMemory(state);
         allMemories.addAll(projectMemories);
         updates.put("projectMemories", projectMemories.stream().map(StructuredMemory::toMap).toList());
@@ -122,6 +123,25 @@ public class MemoryLoadAction implements NodeAction {
      * memoryLoad still runs (to populate anomalies) but routes accordingly.
      */
     public String routeAfterMemoryLoad(OverAllState state) {
+        // ★ Resume mode: if resuming from a checkpoint (resumeNextNode is set),
+        // route directly to the target node instead of re-running planning.
+        // Without this, resume always goes through planning, which discards the
+        // previous plan and creates a new one from scratch — losing all context
+        // about what was already done and what the user's answer referred to.
+        String resumeNextNode = (String) state.value("resumeNextNode").orElse("");
+        log.info("routeAfterMemoryLoad: resumeNextNode='{}', stateKeys={}", resumeNextNode, state.data().keySet());
+        if (!resumeNextNode.isBlank()) {
+            // Validate that the target node exists in the graph
+            return switch (resumeNextNode) {
+                case "planning", "preCheck", "generate", "applyPatch", "repair",
+                     "gather", "askUser", "verify", "commit" -> resumeNextNode;
+                default -> {
+                    log.warn("routeAfterMemoryLoad: invalid resumeNextNode={}, falling back to planning", resumeNextNode);
+                    yield "planning";
+                }
+            };
+        }
+
         // Follow the same routing as intake — the memoryLoad node is transparent
         // to the routing logic; it just enriches state before planning.
         if (Boolean.TRUE.equals(state.value("conversationalOnly").orElse(false))) {
@@ -135,16 +155,26 @@ public class MemoryLoadAction implements NodeAction {
     }
 
     /**
-     * Resolve the memory token budget from state (if provided by intake/config)
-     * or fall back to the default.
+     * Resolve the memory token budget: priority is state value → config property → fallback default.
      */
     private int resolveMemoryBudget(OverAllState state) {
+        // 1. State-level override (e.g. set by intake from per-request config)
         Object budgetObj = state.value("memoryBudget").orElse(null);
         if (budgetObj instanceof Number num) {
             int budget = num.intValue();
-            return budget > 0 ? budget : DEFAULT_MEMORY_BUDGET;
+            if (budget > 0) return budget;
         }
-        return DEFAULT_MEMORY_BUDGET;
+        // 2. Config-level default (GraphEngineProperties)
+        int configured = graphProperties.getMemoryBudget();
+        if (configured > 0) return configured;
+        // 3. Hardcoded fallback
+        return FALLBACK_MEMORY_BUDGET;
+    }
+
+    /** Resolve max project memories from config or fallback. */
+    private int resolveMaxProjectMemories() {
+        int configured = graphProperties.getMaxProjectMemories();
+        return configured > 0 ? configured : FALLBACK_MAX_PROJECT_MEMORIES;
     }
 
     // ── Layer loaders ──
@@ -240,22 +270,40 @@ public class MemoryLoadAction implements NodeAction {
         return memories;
     }
 
-    /** Load long-term project memories from Redis. */
+    /**
+     * Load long-term project memories only when planner/resume already provided phase tags.
+     * Initial memoryLoad runs before planning — project memory is loaded after planning
+     * via {@link io.codepilot.core.graph.PhaseAwareMemoryLoader}.
+     */
+    @SuppressWarnings("unchecked")
     private List<StructuredMemory> loadLongTermMemory(OverAllState state) {
         String projectRootHash = (String) state.value("projectRootHash").orElse("");
         if (projectRootHash.isBlank()) {
             return List.of();
         }
 
-        // Extract query tags from the current input for semantic retrieval
-        String input = (String) state.value("input").orElse("");
-        List<String> queryTags = io.codepilot.core.graph.MemoryContentClassifier.extractTags(input);
+        List<String> queryTags = new ArrayList<>();
+        List<Map<String, Object>> phases =
+                (List<Map<String, Object>>) state.value("phases").orElse(List.of());
+        String phaseCursor = (String) state.value("phaseCursor").orElse("");
+        if (!phases.isEmpty()) {
+            Map<String, Object> phase =
+                    phaseCursor.isBlank()
+                            ? phases.get(0)
+                            : io.codepilot.core.graph.PhaseMemoryHelper.findPhase(phases, phaseCursor);
+            queryTags = io.codepilot.core.graph.PhaseMemoryHelper.queryTagsFromPhase(phase);
+        }
+
+        if (queryTags.isEmpty()) {
+            log.info("MemoryLoadAction: no phase tags yet — skipping long-term project memory preload");
+            return List.of();
+        }
 
         try {
-            // Blocking call — acceptable in graph node context (runs on dedicated scheduler)
-            List<StructuredMemory> result = projectMemoryStore
-                    .loadByTags(projectRootHash, queryTags, MAX_PROJECT_MEMORIES)
-                    .block();
+            List<StructuredMemory> result =
+                    projectMemoryStore
+                            .loadByTags(projectRootHash, queryTags, resolveMaxProjectMemories())
+                            .block();
             return result != null ? result : List.of();
         } catch (Exception e) {
             log.warn("Failed to load project memories from Redis (non-fatal): {}", e.getMessage());

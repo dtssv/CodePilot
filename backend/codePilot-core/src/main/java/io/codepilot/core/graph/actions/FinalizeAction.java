@@ -24,9 +24,13 @@ public class FinalizeAction implements NodeAction {
     private static final Logger log = LoggerFactory.getLogger(FinalizeAction.class);
 
     private final io.codepilot.core.memory.ProjectMemoryStore projectMemoryStore;
+    private final io.codepilot.core.memory.SessionMemoryDistillService sessionMemoryDistillService;
 
-    public FinalizeAction(io.codepilot.core.memory.ProjectMemoryStore projectMemoryStore) {
+    public FinalizeAction(
+            io.codepilot.core.memory.ProjectMemoryStore projectMemoryStore,
+            io.codepilot.core.memory.SessionMemoryDistillService sessionMemoryDistillService) {
         this.projectMemoryStore = projectMemoryStore;
+        this.sessionMemoryDistillService = sessionMemoryDistillService;
     }
 
     @Override
@@ -148,6 +152,15 @@ public class FinalizeAction implements NodeAction {
         if (!anomalies.isEmpty()) {
             sessionDigest.put("detectedAnomalies", anomalies);
         }
+        // ── Compacted context marker ──
+        // If compactActiveMemories was triggered during this session,
+        // the compactedSummary carries the compressed context. The frontend
+        // should check for this field on session recovery: if present,
+        // restore from compacted context instead of replaying full history.
+        String compactedSummary = (String) state.value("compactedSummary").orElse("");
+        if (!compactedSummary.isBlank()) {
+            sessionDigest.put("compactedSummary", compactedSummary);
+        }
         updates.put("sessionDigest", sessionDigest);
 
         // 3. Build summaryForNextTurn (enriched with structured data)
@@ -214,17 +227,38 @@ public class FinalizeAction implements NodeAction {
 
         List<io.codepilot.core.memory.StructuredMemory> toPersist = new java.util.ArrayList<>();
 
-        // 1. Auto-approve memory candidates from CommitAction
         List<Map<String, Object>> candidates =
-                (List<Map<String, Object>>) state.value("memoryCandidates").orElse(List.of());
-        for (Map<String, Object> m : candidates) {
-            io.codepilot.core.memory.StructuredMemory memory = io.codepilot.core.memory.StructuredMemory.fromMap(m);
-            // Only auto-approve IMMORTAL and PROTECTED; VOLATILE/DEGRADABLE need user approval
-            if (memory.protection() == io.codepilot.core.memory.ProtectionLevel.IMMORTAL
-                    || memory.protection() == io.codepilot.core.memory.ProtectionLevel.PROTECTED) {
-                toPersist.add(memory);
+                new ArrayList<>((List<Map<String, Object>>) state.value("memoryCandidates").orElse(List.of()));
+
+        // Session-level distill when user explicitly asked to remember (memory.distill.txt)
+        try {
+            String input = (String) state.value("input").orElse("");
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> history =
+                    (List<Map<String, String>>) state.value("conversationHistory").orElse(List.of());
+            List<io.codepilot.core.memory.StructuredMemory> existing =
+                    projectMemoryStore.loadAll(projectRootHash).block();
+            if (existing == null) {
+                existing = List.of();
             }
+            String sessionId = (String) state.value("sessionId").orElse("");
+            var sessionDistilled =
+                    sessionMemoryDistillService.distillSession(
+                            (String) state.value("modelId").orElse(null),
+                            (String) state.value("modelSource").orElse(null),
+                            (String) state.value("userId").orElse(null),
+                            projectRootHash,
+                            sessionId,
+                            "zh",
+                            input,
+                            history,
+                            existing);
+            sessionDistilled.stream().map(io.codepilot.core.memory.StructuredMemory::toMap).forEach(candidates::add);
+        } catch (Exception e) {
+            log.warn("FinalizeAction: session memory distill failed (non-fatal): {}", e.getMessage());
         }
+
+        toPersist.addAll(io.codepilot.core.memory.ProjectMemorySedimentHelper.forProjectPersistence(candidates));
 
         // 2. Create goal memory if meaningful
         if (goal != null && !goal.isBlank()) {

@@ -33,7 +33,16 @@ public record Digest(
     /** Files modified with change context: path + why it was changed. */
     List<ChangedFile> changeLineage,
     /** Memory anomalies detected during the session. */
-    List<String> detectedAnomalies) {
+    List<String> detectedAnomalies,
+    /**
+     * Compacted context summary produced by CommitAction's compactActiveMemories().
+     * When present, this field signals that the session has compressed context.
+     * On session recovery, the frontend should check for this field: if non-null,
+     * restore context from this compacted summary instead of replaying the full
+     * conversation history. The marker is set by the backend when DEGRADABLE/VOLATILE
+     * memories are compressed at phase boundaries during super-complex tasks.
+     */
+    String compactedSummary) {
 
   public record KeyFile(String path, String why) {}
 

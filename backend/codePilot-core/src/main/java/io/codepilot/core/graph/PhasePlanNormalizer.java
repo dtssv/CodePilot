@@ -8,8 +8,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Aligns graph {@code phases[]} with {@code userPlan.steps} so each checklist item runs as its own
- * generate→apply→verify cycle.
+ * Normalizes planner output: links phases to user steps, fills defaults, optionally merges
+ * duplicate synthesize deliverable steps. Does <b>not</b> expand or trim phase count when the
+ * planner already returned multiple phases — execution structure is model-owned.
  */
 public final class PhasePlanNormalizer {
 
@@ -49,26 +50,27 @@ public final class PhasePlanNormalizer {
       return linkPhasesToSteps(phases, userSteps);
     }
 
-    if (phases.size() == 1) {
+    // Legacy fallback: planner returned a single template phase for a multi-step user plan.
+    if (phases.size() == 1 && userSteps.size() > 1) {
       log.info(
-          "Expanding 1 execution phase into {} phases (one per user plan step)",
+          "Planner returned 1 phase for {} user steps — expanding from step template (fallback only)",
           userSteps.size());
       return expandFromSinglePhase(phases.get(0), userSteps);
     }
 
     if (phases.size() > userSteps.size()) {
       log.info(
-          "Trimming {} phases to {} to match user plan steps",
+          "Keeping {} planner phases (user plan has {} steps) — no engineering trim",
           phases.size(),
           userSteps.size());
-      return linkPhasesToSteps(phases.subList(0, userSteps.size()), userSteps);
+      return linkPhasesToSteps(phases, userSteps);
     }
 
     log.info(
-        "Expanding {} phases to {} to match user plan steps",
+        "Keeping {} planner phases (user plan has {} steps) — no engineering expand",
         phases.size(),
         userSteps.size());
-    return expandFromSteps(userSteps, phases.get(0));
+    return linkPhasesToSteps(phases, userSteps);
   }
 
   /**
@@ -165,7 +167,7 @@ public final class PhasePlanNormalizer {
 
   private static Map<String, Object> buildPhaseForStep(
       int index, Map<String, Object> step, Map<String, Object> template) {
-    Map<String, Object> phase = new LinkedHashMap<>();
+    Map<String, Object> phase = new LinkedHashMap<>(template); // preserve ALL LLM-declared fields
     phase.put("id", "p" + (index + 1));
     Object title = step.get("title");
     phase.put("title", title != null && !title.toString().isBlank() ? title : "Step " + (index + 1));

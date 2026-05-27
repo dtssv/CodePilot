@@ -76,7 +76,9 @@ class StuckStepRecoveryTest {
                 Map.of("path", "foo.cpp", "content", "int main(){}"))));
     var state = new OverAllState(data);
 
-    String directive = StuckStepRecovery.analyzeTextOutputDirective(state, data);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> gathered = (Map<String, Object>) data.get("gatheredInfo");
+    String directive = StuckStepRecovery.analyzeTextOutputDirective(state, gathered);
     assertThat(directive).contains("textOutput");
   }
 }

@@ -62,6 +62,8 @@ public class GraphEngineService {
     private final SearchEvaluateAction searchEvaluateAction;
     private final SynthesizeAction synthesizeAction;
     private final SummarizeAction summarizeAction;
+    private final DynamicPlanExpandAction dynamicPlanExpandAction;
+    private final ContextSplitAction contextSplitAction;
     private final SseFactory sse;
     private final GraphCheckpointStore checkpointStore;
     private final StopSignalBus stopBus;
@@ -85,6 +87,8 @@ public class GraphEngineService {
             SearchEvaluateAction searchEvaluateAction,
             SynthesizeAction synthesizeAction,
             SummarizeAction summarizeAction,
+            DynamicPlanExpandAction dynamicPlanExpandAction,
+            ContextSplitAction contextSplitAction,
             SseFactory sse,
             GraphCheckpointStore checkpointStore,
             StopSignalBus stopBus,
@@ -117,6 +121,8 @@ public class GraphEngineService {
         this.searchEvaluateAction = searchEvaluateAction;
         this.synthesizeAction = synthesizeAction;
         this.summarizeAction = summarizeAction;
+        this.dynamicPlanExpandAction = dynamicPlanExpandAction;
+        this.contextSplitAction = contextSplitAction;
         this.sse = sse;
         this.checkpointStore = checkpointStore;
         this.stopBus = stopBus;
@@ -329,25 +335,38 @@ public class GraphEngineService {
         graph.addNode("askUser", AsyncNodeAction.node_async(askUserAction));
         graph.addNode("summarize", AsyncNodeAction.node_async(summarizeAction));
         graph.addNode("finalize", AsyncNodeAction.node_async(finalizeAction));
+        graph.addNode("dynamicPlanExpand", AsyncNodeAction.node_async(dynamicPlanExpandAction));
+        graph.addNode("contextSplit", AsyncNodeAction.node_async(contextSplitAction));
 
         // ── Define Edges ──
         graph.addEdge(StateGraph.START, "intake");
 
-        // Intake: on fresh run goes to memoryLoad (which then routes to planning/intentDispatch/generate);
-        // on resume (has resumeNextNode) jumps to the target node, skipping memoryLoad
+        // Intake: on fresh run goes to contextSplit (which splits large context then routes to memoryLoad);
+        // on resume (has resumeNextNode) jumps to the target node, skipping contextSplit
         graph.addConditionalEdges("intake",
                 AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
-                Map.of("planning", "memoryLoad", "preCheck", "memoryLoad",
-                        "generate", "memoryLoad", "applyPatch", "memoryLoad",
-                        "repair", "memoryLoad", "gather", "memoryLoad",
-                        "askUser", "memoryLoad", "verify", "memoryLoad",
-                        "commit", "memoryLoad", "intentDispatch", "memoryLoad"));
+                Map.of("planning", "contextSplit", "preCheck", "contextSplit",
+                        "generate", "contextSplit", "applyPatch", "contextSplit",
+                        "repair", "contextSplit", "gather", "contextSplit",
+                        "askUser", "contextSplit", "verify", "contextSplit",
+                        "commit", "contextSplit", "intentDispatch", "contextSplit"));
 
-        // MemoryLoad: routes to planning/intentDispatch/generate based on mode and intent
+        // contextSplit: always routes to memoryLoad after splitting large context
+        graph.addConditionalEdges("contextSplit",
+                AsyncEdgeAction.edge_async(contextSplitAction::routeAfterContextSplit),
+                Map.of("memoryLoad", "memoryLoad"));
+
+        // MemoryLoad: routes to planning/intentDispatch/generate based on mode and intent;
+        // on resume from askUser checkpoint, routes directly to the checkpoint's target node
+        // (e.g. "generate") to preserve the previous plan and execution context.
         graph.addConditionalEdges("memoryLoad",
                 AsyncEdgeAction.edge_async(memoryLoadAction::routeAfterMemoryLoad),
                 Map.of("planning", "planning", "generate", "generate",
-                        "intentDispatch", "intentDispatch"));
+                        "intentDispatch", "intentDispatch",
+                        "preCheck", "preCheck", "applyPatch", "applyPatch",
+                        "repair", "repair", "gather", "gather",
+                        "askUser", "askUser", "verify", "verify",
+                        "commit", "commit"));
 
         // IntentDispatch → always summarize (short-circuit path, then finalize)
         graph.addConditionalEdges("intentDispatch",
@@ -403,6 +422,8 @@ public class GraphEngineService {
                 Map.of(
                         "preCheck",
                         "preCheck",
+                        "dynamicPlanExpand",
+                        "dynamicPlanExpand",
                         "summarize",
                         "summarize",
                         "retryGenerate",
@@ -420,6 +441,11 @@ public class GraphEngineService {
 
         // Summarize → finalize (summarize runs before finalize to produce change digest)
         graph.addEdge("summarize", "finalize");
+
+        // DynamicPlanExpand → preCheck (start new micro-phases) or summarize (all done)
+        graph.addConditionalEdges("dynamicPlanExpand",
+                AsyncEdgeAction.edge_async(dynamicPlanExpandAction::routeAfterDynamicPlanExpand),
+                Map.of("preCheck", "preCheck", "summarize", "summarize"));
 
         graph.addEdge("finalize", StateGraph.END);
 
@@ -452,19 +478,25 @@ public class GraphEngineService {
         graph.addNode("askUser", AsyncNodeAction.node_async(askUserAction));
         graph.addNode("summarize", AsyncNodeAction.node_async(summarizeAction));
         graph.addNode("finalize", AsyncNodeAction.node_async(finalizeAction));
+        graph.addNode("dynamicPlanExpand", AsyncNodeAction.node_async(dynamicPlanExpandAction));
+        graph.addNode("contextSplit", AsyncNodeAction.node_async(contextSplitAction));
         // Repair node — same as main graph, supports retryGenerate → generate
         graph.addNode("repair", AsyncNodeAction.node_async(repairAction));
 
         // Edges
         graph.addEdge(StateGraph.START, "intake");
 
-        // Intake: on fresh run goes to memoryLoad; on resume jumps to target node
+        // Intake: fresh run → contextSplit (large input) then memoryLoad; resume jumps to target
         graph.addConditionalEdges("intake",
                 AsyncEdgeAction.edge_async(intakeAction::routeAfterIntake),
-                Map.of("planning", "memoryLoad", "generate", "memoryLoad",
-                        "gather", "memoryLoad", "askUser", "memoryLoad",
-                        "repair", "memoryLoad", "verify", "memoryLoad",
-                        "intentDispatch", "memoryLoad"));
+                Map.of("planning", "contextSplit", "generate", "contextSplit",
+                        "gather", "contextSplit", "askUser", "contextSplit",
+                        "repair", "contextSplit", "verify", "contextSplit",
+                        "intentDispatch", "contextSplit"));
+
+        graph.addConditionalEdges("contextSplit",
+                AsyncEdgeAction.edge_async(contextSplitAction::routeAfterContextSplit),
+                Map.of("memoryLoad", "memoryLoad"));
 
         // MemoryLoad → planning/intentDispatch/generate based on mode
         graph.addConditionalEdges("memoryLoad",
@@ -502,10 +534,12 @@ public class GraphEngineService {
                 Map.of("commit", "commit", "generate", "generate", "askUser", "askUser"));
 
         // Commit → next sub-question (generate), all done (synthesize), or repair (when phaseCommitBlocked)
+        // Also supports hierarchical planning: dynamicPlanExpand for macro-phase transitions
         graph.addConditionalEdges("commit",
                 AsyncEdgeAction.edge_async(commitAction::routeAfterCommit),
                 Map.of("preCheck", "generate", "summarize", "synthesize",
-                        "retryGenerate", "generate", "repair", "repair"));
+                        "retryGenerate", "generate", "repair", "repair",
+                        "dynamicPlanExpand", "dynamicPlanExpand"));
 
         // Repair → applyPatch, askUser, commit, or retryGenerate (retry tool calls via generate)
         graph.addConditionalEdges("repair",

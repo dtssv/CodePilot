@@ -25,7 +25,7 @@ public final class GraphContentSanitizer {
   /** Tool-card style file summaries that must not appear in model prose (shown via agent_writing / tool UI). */
   private static final Pattern FILE_TOOL_PREVIEW =
       Pattern.compile(
-          "(?:^|\\s|>)\\s*(?:想要)?(?:新建|创建|修改|删除|写入)(?:文件)?[:：]\\s*\\S+(?:\\s*\\+\\d+\\s*行)?",
+          "(?:^|\\s|>|[。！？!?])\\s*(?:想要)?(?:新建文件|新建|创建|修改|删除|写入)(?:文件)?[:：]\\s*\\S+(?:\\s*\\+\\d+\\s*行)?",
           Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
 
   private GraphContentSanitizer() {}
@@ -48,6 +48,7 @@ public final class GraphContentSanitizer {
     s = s.replaceAll("(?i)<plan-[^>\\n]*", "");
     s = s.replaceAll("(?i)<plan\\s+[^>\\n]*", "");
     s = s.replaceAll("(?i)<plan[^>\\n]*", "");
+    s = stripFileToolPreviews(s);
     s = GraphMarkerSanitizer.stripForDisplay(s);
     s = stripFileToolPreviews(s);
     s = stripSimulatedShellOutput(s);
@@ -77,10 +78,10 @@ public final class GraphContentSanitizer {
   private static final Pattern HEADING_NO_SPACE =
       Pattern.compile("^(#{1,6})([^\\s#].*)$", Pattern.MULTILINE);
 
-  /** {@code 设计文档. md} → {@code 设计文档.md}. */
+  /** {@code 设计文档. md} / {@code 设计文档 .md} → {@code 设计文档.md}. */
   private static final Pattern SPACED_EXTENSION =
       Pattern.compile(
-          "([\\w\\u4e00-\\u9fff\\-]+)\\s+\\.\\s*(md|txt|cpp|hpp|h|cc|c|java|kt|json|yaml|yml|xml|gradle|cmake)\\b",
+          "([\\w\\u4e00-\\u9fff\\-]+)\\s*\\.\\s+(md|txt|cpp|hpp|h|cc|c|java|kt|json|yaml|yml|xml|gradle|cmake)\\b",
           Pattern.CASE_INSENSITIVE);
 
   /** {@code 。 -第五步：} → newline before {@code 第五步：}. */
@@ -93,7 +94,7 @@ public final class GraphContentSanitizer {
       Pattern.compile("(?<=[\\u4e00-\\u9fff）)])\\s*[-–—]\\s*(第[一二三四五六七八九十百千万0-9]+步\\s*[：:])");
 
   private static final Pattern ORDERED_LIST_LINE =
-      Pattern.compile("^(\\s*)(\\d+)\\.\\s+(.*)$");
+      Pattern.compile("^(\\s*)(\\d+)\\.\\s*(.*)$");
 
   /** Ensure blank lines before headings/lists so markdown parsers structure content correctly. */
   public static String normalizeMarkdown(String text) {
@@ -104,10 +105,10 @@ public final class GraphContentSanitizer {
     s = s.replaceAll("(?i)<br\\s*/?>", "\n");
     s = HASHES_BEFORE_ORDERED_LIST.matcher(s).replaceAll("");
     s = HEADING_THAT_IS_ORDERED_LIST.matcher(s).replaceAll("$1");
+    s = SPACED_EXTENSION.matcher(s).replaceAll("$1.$2");
     s = GLUED_HEADING_CJK.matcher(s).replaceAll("$1\n\n$2$3 $4");
     s = GLUED_HEADING_PERIOD.matcher(s).replaceAll(".\n\n$1$2 $3");
     s = HEADING_NO_SPACE.matcher(s).replaceAll("$1 $2");
-    s = SPACED_EXTENSION.matcher(s).replaceAll("$1.$2");
     s = s.replaceAll("([^\\n])\\n(#{1,6}\\s)", "$1\n\n$2");
     s = s.replaceAll("([^\\n])\\n(\\s*[-*+]\\s)", "$1\n\n$2");
     s = s.replaceAll("([^\\n])\\n(\\s*\\d+\\.\\s)", "$1\n\n$2");
@@ -117,6 +118,8 @@ public final class GraphContentSanitizer {
     s = GLUED_CHINESE_STEP.matcher(s).replaceAll("$1\n\n$2");
     s = DASH_CHINESE_STEP.matcher(s).replaceAll("\n\n$1");
     s = fixRepeatedOrderedListOnes(s);
+    // Do not insert blank lines between consecutive ordered-list items
+    s = s.replaceAll("(?m)(\\d+\\.\\s+.*)\\n\\n+(\\d+\\.\\s)", "$1\n$2");
     s = s.replaceAll("\\*{3,}", "**");
     s = s.replaceAll("```(\\w*)([^\\n`])", "```$1\n$2");
     s = s.replaceAll("\\n{3,}", "\n\n");

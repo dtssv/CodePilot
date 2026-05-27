@@ -95,9 +95,10 @@ public final class GraphDirectToolExecutor {
         String userInput = (String) state.value("input").orElse("");
         String projectMeta = (String) state.value("projectMeta").orElse("");
         String command = String.valueOf(args.getOrDefault("command", ""));
+        String purpose = args.get("purpose") != null ? String.valueOf(args.get("purpose")) : null;
         var block =
             ShellCommandGate.blockReason(
-                command, projectMeta, userInput, gathered, PhaseGoalHelper.inferStepKind(state));
+                command, projectMeta, userInput, gathered, PhaseGoalHelper.inferStepKind(state), purpose);
         if (block.isEmpty()) {
           block = SessionExecutionFacts.staleProbeBlockReason(command, state);
         }
@@ -132,6 +133,13 @@ public final class GraphDirectToolExecutor {
         Map<String, Object> entry = new HashMap<>();
         entry.put("kind", name);
         entry.put("id", reqId);
+        // Preserve the LLM-declared purpose for shell.exec (compile / run / probe / configure / other)
+        if ("shell.exec".equals(name)) {
+          Object purpose = args.get("purpose");
+          if (purpose != null && !purpose.toString().isBlank()) {
+            entry.put("purpose", purpose.toString());
+          }
+        }
         boolean toolOk = toolSucceeded(name, result);
         entry.put("ok", toolOk);
         if (toolOk && result != null && result.result() != null) {

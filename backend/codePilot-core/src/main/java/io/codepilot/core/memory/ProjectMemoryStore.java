@@ -91,7 +91,7 @@ public class ProjectMemoryStore {
      */
     public Mono<List<StructuredMemory>> loadByTags(String projectRootHash, List<String> queryTags, int limit) {
         if (queryTags == null || queryTags.isEmpty()) {
-            return loadAll(projectRootHash).map(list -> list.stream().limit(limit).toList());
+            return Mono.just(List.of());
         }
         Set<String> querySet = new HashSet<>(queryTags);
         return loadAll(projectRootHash).map(memories ->

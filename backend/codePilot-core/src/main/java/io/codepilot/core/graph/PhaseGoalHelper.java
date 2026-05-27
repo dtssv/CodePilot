@@ -14,10 +14,15 @@ import java.util.regex.Pattern;
  */
 public final class PhaseGoalHelper {
 
-  /** Shell command shape: build tools (language-agnostic command tokens, not plan titles). */
+  /**
+   * Shell command shape: build tools (language-agnostic command tokens, not plan titles).
+   * Must appear at command start or after a pipe / logical-operator so that probe commands
+   * like {@code which g++}, {@code type clang++}, {@code echo g++} are NOT matched.
+   */
   private static final Pattern COMPILE_CMD =
       Pattern.compile(
-          "(?i)(g\\+\\+|clang\\+\\+|cmake\\s+--build|\\bmake\\b|mvn\\s|gradle\\s|npm\\s+run\\s+build|cargo\\s+build)");
+          "(?i)(?:^|[|&;]{1,2}\\s*)"
+              + "(?:g\\+\\+|clang\\+\\+|cmake\\s+--build|\\bmake\\b|mvn\\s|gradle\\s|npm\\s+run\\s+build|cargo\\s+build)");
   /** Shell command shape: executing a built artifact path. */
   private static final Pattern RUN_CMD =
       Pattern.compile(
@@ -26,12 +31,19 @@ public final class PhaseGoalHelper {
   private static final Pattern SOURCE_FILE =
       Pattern.compile("(?i)\\.(cpp|cc|c|h|hpp|java|py|go|rs|ts|js|kt|rb|cs|swift)$");
 
+  /** Source path in user input (IDE context lines may include {@code :line} suffix). */
+  private static final Pattern SOURCE_FILE_IN_INPUT =
+      Pattern.compile(
+          "(?i)[\\w./\\-]+\\.(cpp|cc|c|h|hpp|java|py|go|rs|ts|js|kt|rb|cs|swift)(?:\\s*:\\s*\\d+)?\\b");
+
   private PhaseGoalHelper() {}
 
   /** Step kinds aligned with planner {@code phases[].intent} slugs. */
   public enum StepKind {
     COMPILE,
     RUN,
+    /** Compile-then-run verification step: both compile and run must succeed. */
+    VERIFY,
     ANALYZE,
     INSPECT,
     PREPARE,
@@ -47,6 +59,8 @@ public final class PhaseGoalHelper {
    */
   public static final String INTENT_COMPILE = "compile";
   public static final String INTENT_RUN = "run";
+  /** Compile + run verification (e.g. "compile-verify", "test", "validate"). */
+  public static final String INTENT_VERIFY = "verify";
   public static final String INTENT_ANALYZE = "analyze";
   public static final String INTENT_INSPECT = "inspect";
   public static final String INTENT_PREPARE = "prepare";
@@ -55,11 +69,15 @@ public final class PhaseGoalHelper {
   public static final String INTENT_CODE_CHANGE = "code-change";
 
   /**
-   * After this many generate passes on a COMPILE/RUN step, allow phase commit even if shell tools
+   * After this many generate passes on a COMPILE/RUN/VERIFY step, allow phase commit even if shell tools
    * failed — avoids infinite generate↔commit loops when the environment cannot compile (e.g. no
    * cmake) but the agent already delivered files (tests, fixes).
+   *
+   * <p>Reduced from 8 to 5: each retry accumulates prompt history (growing from ~27k to ~43k chars),
+   * wasting ~25k tokens per retry. 5 retries is enough to try alternative approaches before
+   * advancing with overallGoalUnmet.
    */
-  public static final int STUCK_COMPILE_RUN_PASS_THRESHOLD = 8;
+  public static final int STUCK_COMPILE_RUN_PASS_THRESHOLD = 5;
 
   @SuppressWarnings("unchecked")
   public static boolean currentStepGoalSatisfied(OverAllState state) {
@@ -82,12 +100,15 @@ public final class PhaseGoalHelper {
         case ANALYZE -> analyzeGoalMet(state, gathered);
         case SYNTHESIZE -> synthesizeGoalMet(state);
         case INSPECT -> inspectGoalMet(state, gathered);
+        // VERIFY needs both compile AND run results; cannot be satisfied with empty gathered
+        case VERIFY, COMPILE, RUN -> false;
         default -> false;
       };
     }
     return switch (kind) {
       case COMPILE -> hasSuccessfulCompile(gathered);
       case RUN -> hasSuccessfulRun(gathered);
+      case VERIFY -> hasSuccessfulCompile(gathered) && hasSuccessfulRun(gathered);
       case ANALYZE -> analyzeGoalMet(state, gathered);
       case INSPECT -> inspectGoalMet(state, gathered);
       case PREPARE -> hasSuccessfulPrepare(gathered) || hasSuccessfulCompile(gathered);
@@ -113,7 +134,7 @@ public final class PhaseGoalHelper {
    */
   public static boolean shouldAdvanceCompileRunDespiteToolFailures(OverAllState state) {
     StepKind kind = inferStepKind(state);
-    if (kind != StepKind.COMPILE && kind != StepKind.RUN) {
+    if (kind != StepKind.COMPILE && kind != StepKind.RUN && kind != StepKind.VERIFY) {
       return false;
     }
     if (currentStepGoalSatisfied(state)) {
@@ -123,7 +144,8 @@ public final class PhaseGoalHelper {
     if (passes >= STUCK_COMPILE_RUN_PASS_THRESHOLD) {
       return true;
     }
-    return kind == StepKind.COMPILE && SessionExecutionFacts.hasWrittenOutputs(state);
+    return (kind == StepKind.COMPILE || kind == StepKind.VERIFY)
+        && SessionExecutionFacts.hasWrittenOutputs(state);
   }
 
   public static void recordSessionMilestones(
@@ -137,8 +159,29 @@ public final class PhaseGoalHelper {
   }
 
   /**
+   * For VERIFY steps: record session milestones from the combined gathered info,
+   * and also set a session-level flag so the workflow position inference can
+   * correctly detect that compile has been done (even if run has not).
+   */
+  public static void recordVerifySessionMilestones(
+      OverAllState state, Map<String, Object> updates, Map<String, Object> gathered) {
+    recordSessionMilestones(updates, gathered);
+    // If this is a VERIFY step and compile succeeded but run did not,
+    // mark the workflow position so next iteration infers RUN (not COMPILE again).
+    StepKind kind = inferStepKind(state);
+    if (kind == StepKind.VERIFY && hasSuccessfulCompile(gathered) && !hasSuccessfulRun(gathered)) {
+      updates.put("sessionHadSuccessfulCompile", true);
+    }
+  }
+
+  /**
    * Resolve step kind from structured plan metadata first, then session workflow position, then
    * GENERIC. Never matches free-text step titles.
+   *
+   * <p>Important: when the current phase has an explicit code-change intent (meaning it is a
+   * code modification step, not a compile/run step), the workflow-based inference should NOT
+   * override it to COMPILE/RUN. This prevents the commit loop where a code-change phase
+   * is incorrectly forced to satisfy a compile goal before advancing.
    */
   public static StepKind inferStepKind(OverAllState state) {
     StepKind fromPhase = stepKindFromIntentField(currentPhaseIntent(state));
@@ -149,11 +192,29 @@ public final class PhaseGoalHelper {
     if (fromStep != null) {
       return fromStep;
     }
+    // When the phase intent is explicitly code-change, the phase's job is to produce
+    // patches — compile/run verification belongs to a later phase. Do NOT let the
+    // workflow inference override code-change to COMPILE/RUN.
+    if (isCodeChangePhase(state)) {
+      return StepKind.GENERIC;
+    }
     StepKind fromWorkflow = stepKindFromCompileRunWorkflow(state);
     if (fromWorkflow != null) {
       return fromWorkflow;
     }
     return StepKind.GENERIC;
+  }
+
+  /** Returns true when the current phase intent indicates a code modification step. */
+  static boolean isCodeChangePhase(OverAllState state) {
+    String phaseIntent = normalizeIntentSlug(currentPhaseIntent(state));
+    if (INTENT_CODE_CHANGE.equals(phaseIntent) || "implement".equals(phaseIntent)
+        || "code".equals(phaseIntent) || "refactor".equals(phaseIntent)) {
+      return true;
+    }
+    String stepIntent = normalizeIntentSlug(currentUserStepIntent(state));
+    return INTENT_CODE_CHANGE.equals(stepIntent) || "implement".equals(stepIntent)
+        || "code".equals(stepIntent) || "refactor".equals(stepIntent);
   }
 
   /** Normalize planner / API intent strings to a canonical slug. */
@@ -176,10 +237,14 @@ public final class PhaseGoalHelper {
     return switch (slug) {
       case INTENT_COMPILE, "build", "build-project" -> StepKind.COMPILE;
       case INTENT_RUN, "execute", "run-program" -> StepKind.RUN;
+      case INTENT_VERIFY, "compile-verify", "test", "validate", "compile-and-test",
+          "compile-test", "compile-run" -> StepKind.VERIFY;
       case INTENT_ANALYZE, "analysis", "review", "explain" -> StepKind.ANALYZE;
       case INTENT_SYNTHESIZE, "report", "format", "summarize", "document", "deliver" ->
           StepKind.SYNTHESIZE;
-      case INTENT_INSPECT, "read", "verify", "check" -> StepKind.INSPECT;
+      // "verify" as a read-only inspection maps to INSPECT; for compile+run verification
+      // planners should use "compile-verify" or "test" instead.
+      case INTENT_INSPECT, "read", "check" -> StepKind.INSPECT;
       case INTENT_PREPARE, "configure", "setup", "config" -> StepKind.PREPARE;
       case INTENT_DISCOVER, "list", "enumerate", "scan" -> StepKind.DISCOVER;
       case INTENT_CODE_CHANGE, "generic", "implement", "code" -> null;
@@ -305,6 +370,15 @@ public final class PhaseGoalHelper {
       if (cmd.isBlank()) {
         continue;
       }
+      // Model-declared purpose takes priority; regex is fallback only when purpose is absent
+      String purpose = entryPurpose(entry);
+      if (purpose != null) {
+        if (isCompilePurpose(entry)) {
+          return true;
+        }
+        // purpose exists but is not compile/configure → this entry is NOT a compile, skip it
+        continue;
+      }
       if (COMPILE_CMD.matcher(cmd).find()) {
         return true;
       }
@@ -327,6 +401,15 @@ public final class PhaseGoalHelper {
       }
       String cmd = shellCommand(entry);
       if (cmd.isBlank()) {
+        continue;
+      }
+      // Model-declared purpose takes priority; regex is fallback only when purpose is absent
+      String purpose = entryPurpose(entry);
+      if (purpose != null) {
+        if (isRunPurpose(entry)) {
+          return true;
+        }
+        // purpose exists but is not run → this entry is NOT a program execution, skip it
         continue;
       }
       if (looksLikeProgramExecution(cmd)) {
@@ -361,8 +444,17 @@ public final class PhaseGoalHelper {
 
   /** True for executing a built binary, not cmake/make/compile-only or directory listing. */
   public static boolean looksLikeProgramExecution(String cmd) {
+    return looksLikeProgramExecution(cmd, null);
+  }
+
+  /** True for executing a built binary, not cmake/make/compile-only or directory listing. */
+  public static boolean looksLikeProgramExecution(String cmd, String purpose) {
     if (cmd == null || cmd.isBlank()) {
       return false;
+    }
+    // Model-declared purpose takes priority over command-shape heuristics
+    if (purpose != null && !purpose.isBlank()) {
+      return "run".equalsIgnoreCase(purpose);
     }
     String t = cmd.trim();
     if (COMPILE_CMD.matcher(t).find()) {
@@ -396,10 +488,10 @@ public final class PhaseGoalHelper {
     if (input.contains("```") && input.length() >= 120) {
       return true;
     }
-    if (input.contains("Context:") && SOURCE_FILE.matcher(input).find()) {
+    if (input.contains("Context:") && SOURCE_FILE_IN_INPUT.matcher(input).find()) {
       return true;
     }
-    return input.length() >= 400 && SOURCE_FILE.matcher(input).find();
+    return input.length() >= 400 && SOURCE_FILE_IN_INPUT.matcher(input).find();
   }
 
   /** Report/format step: prior phase already read sources; deliverable is structured text. */
@@ -474,10 +566,17 @@ public final class PhaseGoalHelper {
         || "summarize".equals(slug);
   }
 
-  /** Keep successful source reads in context across phase commits (bounded). */
+  /** Keep successful source reads in context across phase commits (bounded).
+   *  @param gathered     the gathered info map from the current phase
+   *  @param charsBudget  maximum total characters to retain; entries exceeding
+   *                      this budget have their content truncated. Pass 0 or
+   *                      negative to use the default budget (24000 chars).
+   */
   @SuppressWarnings("unchecked")
-  public static Map<String, Object> retainSourceReadEntries(Map<String, Object> gathered) {
+  public static Map<String, Object> retainSourceReadEntries(Map<String, Object> gathered, int charsBudget) {
+    int effectiveBudget = charsBudget > 0 ? charsBudget : 24000;
     Map<String, Object> kept = new LinkedHashMap<>();
+    int totalChars = 0;
     for (Map.Entry<String, Object> e : gathered.entrySet()) {
       if (!(e.getValue() instanceof Map<?, ?> raw)) {
         continue;
@@ -487,19 +586,52 @@ public final class PhaseGoalHelper {
         continue;
       }
       String kind = String.valueOf(entry.get("kind"));
+      boolean shouldKeep = false;
       if ("fs.grep".equals(kind) || "code.outline".equals(kind)) {
-        kept.put(e.getKey(), entry);
+        shouldKeep = true;
       } else if ("fs.read".equals(kind)) {
         String path = pathFromGatherEntry(entry);
         if (SOURCE_FILE.matcher(path).find()) {
-          kept.put(e.getKey(), entry);
+          shouldKeep = true;
         }
       }
+      if (!shouldKeep) continue;
+
+      // Truncate content if this entry would push us over budget
+      Map<String, Object> keptEntry = entry;
+      Object resultObj = entry.get("result");
+      if (resultObj instanceof Map<?, ?> resultMap) {
+        Object contentObj = ((Map<String, Object>) resultMap).get("content");
+        if (contentObj != null) {
+          String contentStr = contentObj.toString();
+          if (totalChars + contentStr.length() > effectiveBudget) {
+            // Truncate: keep first 500 chars as a summary sketch
+            int remaining = Math.max(500, effectiveBudget - totalChars);
+            String truncated = contentStr.length() > remaining
+                    ? contentStr.substring(0, remaining) + "\n... (truncated for context budget)"
+                    : contentStr;
+            Map<String, Object> newResult = new LinkedHashMap<>((Map<String, Object>) resultMap);
+            newResult.put("content", truncated);
+            Map<String, Object> newEntry = new LinkedHashMap<>(entry);
+            newEntry.put("result", newResult);
+            keptEntry = newEntry;
+            totalChars += truncated.length();
+          } else {
+            totalChars += contentStr.length();
+          }
+        }
+      }
+      kept.put(e.getKey(), keptEntry);
       if (kept.size() >= 12) {
         break;
       }
     }
     return Map.copyOf(kept);
+  }
+
+  /** Keep successful source reads with default chars budget (24K). */
+  public static Map<String, Object> retainSourceReadEntries(Map<String, Object> gathered) {
+    return retainSourceReadEntries(gathered, 0);
   }
 
   @SuppressWarnings("unchecked")
@@ -569,6 +701,37 @@ public final class PhaseGoalHelper {
       return cmd != null ? cmd.toString() : "";
     }
     return "";
+  }
+
+  /**
+   * True when the gathered entry carries an LLM-declared {@code purpose} of {@code "compile"}.
+   * Falls back to {@code "configure"} only for PREPARE steps (cmake configure without --build).
+   */
+  private static boolean isCompilePurpose(Map<String, Object> entry) {
+    Object p = entry.get("purpose");
+    if (p == null || p.toString().isBlank()) {
+      return false;
+    }
+    String purpose = p.toString().toLowerCase(Locale.ROOT);
+    return "compile".equals(purpose) || "configure".equals(purpose);
+  }
+
+  /** True when the gathered entry carries an LLM-declared {@code purpose} of {@code "run"}. */
+  private static boolean isRunPurpose(Map<String, Object> entry) {
+    Object p = entry.get("purpose");
+    if (p == null || p.toString().isBlank()) {
+      return false;
+    }
+    return "run".equalsIgnoreCase(p.toString());
+  }
+
+  /**
+   * Extracts the LLM-declared purpose from a gathered entry, or null if absent.
+   * Used by callers that need the raw purpose string (e.g. ShellCommandGate).
+   */
+  public static String entryPurpose(Map<String, Object> entry) {
+    Object p = entry.get("purpose");
+    return p != null && !p.toString().isBlank() ? p.toString() : null;
   }
 
   public static String stepAlreadySatisfiedDirective(OverAllState state) {

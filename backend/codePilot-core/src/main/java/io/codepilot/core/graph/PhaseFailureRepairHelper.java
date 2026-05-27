@@ -16,6 +16,18 @@ public final class PhaseFailureRepairHelper {
 
   public static final int MAX_PHASE_FAILURE_ATTEMPTS = 10;
 
+  /**
+   * Resolve the effective max failure attempts: state override → hardcoded default.
+   * The state key "maxPhaseFailureAttempts" is set by IntakeAction from GraphEngineProperties.
+   */
+  public static int resolveMaxFailureAttempts(OverAllState state) {
+    Object val = state.value("maxPhaseFailureAttempts").orElse(null);
+    if (val instanceof Number num && num.intValue() > 0) {
+      return num.intValue();
+    }
+    return MAX_PHASE_FAILURE_ATTEMPTS;
+  }
+
   /** Shown to the repair LLM; diagnosis and fix strategy are left to the model. */
   public static final String GENERIC_REPAIR_DIRECTIVE =
       """
@@ -34,7 +46,7 @@ public final class PhaseFailureRepairHelper {
   }
 
   public static boolean shouldAbandonPhase(OverAllState state) {
-    return failureAttempts(state) >= MAX_PHASE_FAILURE_ATTEMPTS;
+    return failureAttempts(state) >= resolveMaxFailureAttempts(state);
   }
 
   public static void incrementFailureAttempts(Map<String, Object> updates, OverAllState state) {

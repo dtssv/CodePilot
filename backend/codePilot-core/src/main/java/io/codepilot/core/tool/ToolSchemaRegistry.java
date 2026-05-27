@@ -127,7 +127,8 @@ public class ToolSchemaRegistry {
             optionalString("cwd"),
             optionalInt("timeoutMs", 60_000),
             optionalEnum("osHint", "windows", "macos", "linux"),
-            optionalObject("env")));
+            optionalObject("env"),
+            optionalEnum("purpose", "compile", "run", "probe", "configure", "other")));
 
     add(
         "plan.show",

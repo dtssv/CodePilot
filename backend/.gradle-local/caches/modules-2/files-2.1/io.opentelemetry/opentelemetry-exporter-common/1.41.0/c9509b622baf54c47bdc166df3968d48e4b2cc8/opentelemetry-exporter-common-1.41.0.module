@@ -1,0 +1,132 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.opentelemetry",
+    "module": "opentelemetry-exporter-common",
+    "version": "1.41.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        },
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-sdk-extension-autoconfigure-spi",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-exporter-common-1.41.0.jar",
+          "url": "opentelemetry-exporter-common-1.41.0.jar",
+          "size": 103688,
+          "sha512": "adcb5dfdbc0674b7268cf4c513429417c084c882d779429f274bc8327736a0a50fa6f8d70884bcf20c5d520e9e036a8489e0b891c6e2c41028709212da04e91a",
+          "sha256": "904e98ec9b92ae6e910c55c370addb8459f23d3b2678f7c9c89484e0f2d51ac2",
+          "sha1": "cf92f4c1b60c2359c12f6f323f6a2a623c333910",
+          "md5": "482710077fc0689fe0f329a3d4c70f28"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        },
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-sdk-extension-autoconfigure-spi",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-exporter-common-1.41.0.jar",
+          "url": "opentelemetry-exporter-common-1.41.0.jar",
+          "size": 103688,
+          "sha512": "adcb5dfdbc0674b7268cf4c513429417c084c882d779429f274bc8327736a0a50fa6f8d70884bcf20c5d520e9e036a8489e0b891c6e2c41028709212da04e91a",
+          "sha256": "904e98ec9b92ae6e910c55c370addb8459f23d3b2678f7c9c89484e0f2d51ac2",
+          "sha1": "cf92f4c1b60c2359c12f6f323f6a2a623c333910",
+          "md5": "482710077fc0689fe0f329a3d4c70f28"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-exporter-common-1.41.0-javadoc.jar",
+          "url": "opentelemetry-exporter-common-1.41.0-javadoc.jar",
+          "size": 371,
+          "sha512": "fe0a04ba98a7cb8d8c1147c0f0b9d3c439d0295bde26bbd7222159912ebed4cb23d6dea36b28ad1a428fe0ad737fea068a36d24808131944028559c79aa463d7",
+          "sha256": "f91dfb9b5d75d2f05f648a041550a16b6d8ddebccdbcfe9141055a7fd6332691",
+          "sha1": "1e9a34687c094941bffc1c4ef4bf869a5ee9149c",
+          "md5": "fde6cb79504b9f04bf6c04d1b2ab9f42"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-exporter-common-1.41.0-sources.jar",
+          "url": "opentelemetry-exporter-common-1.41.0-sources.jar",
+          "size": 64492,
+          "sha512": "3f32d28859c4d22f8e88625850f2ed5bbb42b63b1b27276c251fb343b5360a2bcf1f0e2fb42ade39e558a6e2cdefe536b83461ceba406105017ae2e511c132ad",
+          "sha256": "959346187ade8b68d4122140787f428324ba4a54fe7ebe7fa065be52dc76a530",
+          "sha1": "2425157851e9640d7544c1c32c3165f92061581b",
+          "md5": "150aaa000c40d302723f96ad19275af0"
+        }
+      ]
+    }
+  ]
+}

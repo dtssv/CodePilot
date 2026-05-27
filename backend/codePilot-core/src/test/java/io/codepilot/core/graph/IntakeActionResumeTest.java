@@ -198,8 +198,11 @@ class IntakeActionResumeTest {
 
   @Test
   void restoreFromCheckpoint_allowsFreeformInputOverride() {
-    // When the user types freeform text (no optionId), the `input` field
-    // SHOULD be overwritten with the freeform text.
+    // When the user types freeform text (no optionId) as an ANSWER to an askUser
+    // question, the `input` field should NOT be overwritten — the original request
+    // must be preserved because the freeform text references the askUser context
+    // (e.g. "按方案1推进吧" references "方案1" from the question).
+    // The freeform reply is carried by the `answers` list instead.
     var snapshot =
         new GraphCheckpointStore.CheckpointSnapshot(
             "token-free",
@@ -225,8 +228,17 @@ class IntakeActionResumeTest {
 
     OverAllState state = IntakeAction.restoreFromCheckpoint(snapshot, req, "user-1");
 
-    // freeform text should override the saved input
-    assertEquals("please try a different approach", state.value("input").orElse(""));
+    // ★ FIX: freeform text should NOT override the saved input when answering askUser
+    // because the freeform text references the askUser question context.
+    // The original request must be preserved for LLM context.
+    assertEquals("original request", state.value("input").orElse(""));
+
+    // The freeform reply should be synthesized as an answer
+    @SuppressWarnings("unchecked")
+    List<ConversationRunRequest.Answer> answers =
+        (List<ConversationRunRequest.Answer>) state.value("answers").orElse(List.of());
+    assertEquals(1, answers.size());
+    assertEquals("please try a different approach", answers.get(0).freeform());
   }
 
   @Test
