@@ -220,6 +220,7 @@ public class IntakeAction implements NodeAction {
         // configurable thresholds without needing Spring injection.
         updates.put("maxPhaseFailureAttempts", graphProperties.getMaxPhaseFailureAttempts());
         updates.put("maxGeneratePassesPerPhase", graphProperties.getMaxGeneratePassesPerPhase());
+        updates.put("maxRepairAttemptsPerPhase", graphProperties.getMaxRepairAttemptsPerPhase());
         updates.put("stateArchiveThreshold", graphProperties.getStateArchiveThreshold());
         updates.put("memoryBudget", graphProperties.getMemoryBudget());
 

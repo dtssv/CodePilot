@@ -84,6 +84,14 @@ codepilot:
     planning-shard-summary-max-chars: ${CODEPILOT_GRAPH_PLANNING_SHARD_CHARS:32000}
     state-archive-threshold: ${CODEPILOT_GRAPH_ARCHIVE_THRESHOLD:50}
     gathered-info-chars-budget: ${CODEPILOT_GRAPH_GATHERED_CHARS:24000}
+    # Optional fast/cheap model for memory-classify, context-split, search-evaluate (UUID + GROUP|CUSTOM).
+    auxiliary-model-id: ${CODEPILOT_GRAPH_AUX_MODEL_ID:}
+    auxiliary-model-source: ${CODEPILOT_GRAPH_AUX_MODEL_SOURCE:}
+    gather-cache-ttl-minutes: ${CODEPILOT_GRAPH_GATHER_CACHE_TTL:30}
+    gather-cache-max-entries: ${CODEPILOT_GRAPH_GATHER_CACHE_MAX:512}
+    max-generate-passes-per-phase: ${CODEPILOT_GRAPH_MAX_GENERATE_PASSES:5}
+    max-phase-failure-attempts: ${CODEPILOT_GRAPH_MAX_FAILURE_ATTEMPTS:4}
+    max-repair-attempts-per-phase: ${CODEPILOT_GRAPH_MAX_REPAIR_ATTEMPTS:2}
   conversation:
     queue:
       enabled: ${CODEPILOT_CONVERSATION_QUEUE:auto}

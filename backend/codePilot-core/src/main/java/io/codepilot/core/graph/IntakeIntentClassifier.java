@@ -3,8 +3,6 @@ package io.codepilot.core.graph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.tool.ToolSchemaRegistry;
 import java.util.ArrayList;
@@ -20,17 +18,17 @@ public class IntakeIntentClassifier {
 
   private static final Logger log = LoggerFactory.getLogger(IntakeIntentClassifier.class);
 
-  private final ChatClientFactory chatClientFactory;
+  private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
   private final PromptRegistry promptRegistry;
   private final ToolSchemaRegistry toolSchemaRegistry;
   private final ObjectMapper mapper;
 
   public IntakeIntentClassifier(
-      ChatClientFactory chatClientFactory,
+      GraphAuxiliaryModelResolver auxiliaryModelResolver,
       PromptRegistry promptRegistry,
       ToolSchemaRegistry toolSchemaRegistry,
       ObjectMapper mapper) {
-    this.chatClientFactory = chatClientFactory;
+    this.auxiliaryModelResolver = auxiliaryModelResolver;
     this.promptRegistry = promptRegistry;
     this.toolSchemaRegistry = toolSchemaRegistry;
     this.mapper = mapper;
@@ -41,13 +39,6 @@ public class IntakeIntentClassifier {
       return IntakeIntent.defaults();
     }
     try {
-      String modelId = (String) state.value("modelId").orElse(null);
-      String modelSourceName = (String) state.value("modelSource").orElse(null);
-      String userId = (String) state.value("userId").orElse(null);
-      ModelSource modelSource =
-          modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-      var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-
       String projectMeta = (String) state.value("projectMeta").orElse("");
       String projectMetaSection =
           projectMeta.isBlank() ? "" : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
@@ -65,9 +56,7 @@ public class IntakeIntentClassifier {
               .replace("{{toolCatalog}}", toolSchemaRegistry.renderCatalogBrief())
               .replace("{{mcpTools}}", formatMcpToolsSection(mcpTools));
 
-      GraphExecutionLog.llmRequest(state, "intake-intent", prompt);
-      String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
-      GraphExecutionLog.llmResponse(state, "intake-intent", response, Map.of());
+      String response = auxiliaryModelResolver.completeUserPrompt(state, "intake-intent", prompt);
 
       IntakeIntent intent = parseResponse(response);
       log.info(

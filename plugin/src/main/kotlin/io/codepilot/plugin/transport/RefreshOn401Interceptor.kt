@@ -14,6 +14,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * If refresh also fails (e.g. refresh token expired), clears all stored tokens and
  * notifies the WebUI to show the login page.
+ *
+ * ★ HMAC signature errors (Missing signature headers, Invalid signature, Replay detected)
+ * are NOT caused by expired JWTs — refreshing the token won't help. For these errors,
+ * we clear tokens and force re-login immediately.
  */
 class RefreshOn401Interceptor : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -26,6 +30,21 @@ class RefreshOn401Interceptor : Interceptor {
                 .url.encodedPath
                 .endsWith("/v1/auth/refresh")
         ) {
+            return original
+        }
+
+        // ★ HMAC signature errors are not fixable by token refresh — clear and force re-login.
+        // These errors indicate that deviceSecret is missing or mismatched (e.g. cross-IDE
+        // session sharing where deviceSecret is not available in the current IDE's PasswordSafe).
+        val errorBody = runCatching { original.body?.string()?.take(500) }.getOrNull().orEmpty()
+        if (errorBody.contains("Missing signature headers", ignoreCase = true) ||
+            errorBody.contains("Invalid signature", ignoreCase = true) ||
+            errorBody.contains("Replay detected", ignoreCase = true)
+        ) {
+            com.intellij.openapi.diagnostic.Logger.getInstance("RefreshOn401Interceptor").warn(
+                "[Auth] 401 due to HMAC signature issue (not JWT expiry), clearing tokens and forcing re-login. Error: $errorBody",
+            )
+            clearTokensAndNotifyLogout()
             return original
         }
 

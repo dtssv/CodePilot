@@ -13,6 +13,7 @@ import io.codepilot.core.graph.GraphUiEmitter;
 import io.codepilot.core.graph.SessionExecutionFacts;
 import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.sse.SseEvents;
+import io.codepilot.core.run.GraphEngineProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -40,10 +41,13 @@ public class ApplyPatchAction implements NodeAction {
 
     private final ToolResultBus toolResultBus;
     private final ShadowVerifyHelper shadowHelper;
+    private final GraphEngineProperties graphProperties;
 
-    public ApplyPatchAction(ToolResultBus toolResultBus, ShadowVerifyHelper shadowHelper) {
+    public ApplyPatchAction(ToolResultBus toolResultBus, ShadowVerifyHelper shadowHelper,
+                            GraphEngineProperties graphProperties) {
         this.toolResultBus = toolResultBus;
         this.shadowHelper = shadowHelper;
+        this.graphProperties = graphProperties;
     }
 
     @Override
@@ -328,6 +332,23 @@ public class ApplyPatchAction implements NodeAction {
 
     public String routeAfterApplyPatch(OverAllState state) {
         String result = (String) state.value("patchResult").orElse("failed");
+
+        // ★ Batch generation: after applying a batch, route back to generate
+        // for the next batch instead of going to verify. The last batch
+        // (hasMore=false) will go through normal verify→commit flow.
+        if (Boolean.TRUE.equals(state.value("batchGenerationInProgress").orElse(false))
+                && ("success".equals(result) || "partial".equals(result))) {
+            // Check max passes — if exceeded, stop batch loop and go to verify
+            int passes = (int) state.value("phaseGeneratePasses").orElse(0);
+            int maxPasses = graphProperties.getMaxGeneratePassesPerPhase();
+            if (passes >= maxPasses) {
+                log.warn("ApplyPatch: batch generation hit max passes ({}), routing to verify instead of generate", passes);
+                // Don't clear batchGenerationInProgress here — let verify/commit handle it
+            } else {
+                log.info("ApplyPatch: batch generation in progress, routing back to generate (pass {})", passes);
+                return "generate";
+            }
+        }
 
         if (io.codepilot.core.graph.PhaseMemoryHelper.skipVerify(state)
                 && ("success".equals(result) || "partial".equals(result))) {

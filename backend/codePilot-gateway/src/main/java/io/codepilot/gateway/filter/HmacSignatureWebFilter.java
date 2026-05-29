@@ -28,6 +28,11 @@ import reactor.core.publisher.Mono;
  *   <li>Recomputes the HMAC signature over {@code body + '\n' + ts + '\n' + nonce}.
  * </ol>
  *
+ * <p>Signature verification uses the per-device secret stored in Redis at
+ * {@code codepilot:device-secret:<deviceId>} (set during login). If no per-device secret
+ * is found, falls back to the global {@code codepilot.security.hmac-secret} for backward
+ * compatibility.
+ *
  * <p>Public endpoints (actuator, swagger, version, auth/login) are skipped.
  */
 @Component
@@ -52,9 +57,12 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
 
   private static final int MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MiB
 
+  /** Redis key prefix for per-device secrets: codepilot:device-secret:{deviceId} */
+  private static final String DEVICE_SECRET_PREFIX = "codepilot:device-secret:";
+
   private final SecurityProperties props;
   private final ReactiveStringRedisTemplate redis;
-  private final HmacSigner signer;
+  private final HmacSigner globalSigner;
   private final Clock clock = Clock.systemUTC();
 
   /** Dev token for bypassing HMAC+JWT in development builds. Set via codepilot.security.dev-token. */
@@ -64,7 +72,7 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
       @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}") String devToken) {
     this.props = props;
     this.redis = redis;
-    this.signer = new HmacSigner(props.hmacSecret());
+    this.globalSigner = new HmacSigner(props.hmacSecret());
     this.devToken = devToken.isBlank() ? null : devToken;
   }
 
@@ -116,26 +124,33 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
     String nonceKey = "codepilot:hmac:nonce:" + deviceId + ":" + nonce;
     Duration nonceTtl = props.hmac().nonceTtl();
 
-    return CachedBodyServerHttpRequestDecorator.wrap(req, MAX_BODY_BYTES)
-        .flatMap(
-            wrapped ->
-                redis
-                    .opsForValue()
-                    .setIfAbsent(nonceKey, "1", nonceTtl)
-                    .flatMap(
-                        firstUse -> {
-                          if (Boolean.FALSE.equals(firstUse)) {
-                            return WebErrors.write(
-                                exchange, ErrorCodes.UNAUTHORIZED, "Replay detected", 401);
-                          }
-                          if (!signer.verify(wrapped.bodyAsString(), ts, nonce, sig)) {
-                            return WebErrors.write(
-                                exchange, ErrorCodes.UNAUTHORIZED, "Invalid signature", 401);
-                          }
-                          ServerWebExchange mutated =
-                              exchange.mutate().request(wrapped.request()).build();
-                          return chain.filter(mutated);
-                        }));
+    // ★ Look up per-device secret from Redis; fall back to global hmacSecret if not found.
+    String deviceSecretKey = DEVICE_SECRET_PREFIX + deviceId;
+    return redis.opsForValue().get(deviceSecretKey)
+        .defaultIfEmpty("")
+        .flatMap(deviceSecret -> {
+          HmacSigner signer = deviceSecret.isBlank() ? globalSigner : new HmacSigner(deviceSecret);
+          return CachedBodyServerHttpRequestDecorator.wrap(req, MAX_BODY_BYTES)
+              .flatMap(
+                  wrapped ->
+                      redis
+                          .opsForValue()
+                          .setIfAbsent(nonceKey, "1", nonceTtl)
+                          .flatMap(
+                              firstUse -> {
+                                if (Boolean.FALSE.equals(firstUse)) {
+                                  return WebErrors.write(
+                                      exchange, ErrorCodes.UNAUTHORIZED, "Replay detected", 401);
+                                }
+                                if (!signer.verify(wrapped.bodyAsString(), ts, nonce, sig)) {
+                                  return WebErrors.write(
+                                      exchange, ErrorCodes.UNAUTHORIZED, "Invalid signature", 401);
+                                }
+                                ServerWebExchange mutated =
+                                    exchange.mutate().request(wrapped.request()).build();
+                                return chain.filter(mutated);
+                              }));
+        });
   }
 
   private boolean isPublic(String path) {

@@ -160,6 +160,24 @@ public class AppKeyLoadBalancer {
     onCircuitBreakerFailure(appKeyId);
   }
 
+  /**
+   * Records a rate-limit (429) failure. Opens the circuit-breaker immediately
+   * for rate-limit errors because this appKey's quota is exhausted — no point
+   * in retrying the same key until the rate window resets.
+   */
+  public void recordRateLimit(UUID appKeyId) {
+    // ★ Open circuit-breaker immediately for rate-limit errors.
+    // The appKey's per-minute/per-second quota is exhausted, so further requests
+    // will also be rejected until the window resets. Opening the breaker lets
+    // other appKeys (if configured) take over immediately.
+    String key = breakerKey(appKeyId);
+    redis.opsForHash().put(key, "state", "OPEN");
+    redis.opsForHash().put(key, "failures", String.valueOf(DEFAULT_FAILURE_THRESHOLD));
+    redis.opsForHash().put(key, "openedAt", String.valueOf(System.currentTimeMillis()));
+    redis.expire(key, BREAKER_KEY_TTL);
+    log.warn("Circuit-breaker for appKey {} OPENED immediately due to 429 rate-limit", appKeyId);
+  }
+
   /** Gets the current concurrency for an appKey. */
   public int getLoad(UUID appKeyId) {
     String val = redis.opsForValue().get(concurrencyKey(appKeyId));

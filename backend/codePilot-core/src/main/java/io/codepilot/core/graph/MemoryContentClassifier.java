@@ -125,86 +125,96 @@ public final class MemoryContentClassifier {
 
     /**
      * Classify protection level for content that has no tool provenance
-     * (e.g. conversation history, session digests).
+     * AND no LLM classification available (fallback only).
      *
-     * <p>Uses <b>structural signals</b> instead of keyword matching:
-     * <ul>
-     *   <li>Long, structured content → higher protection</li>
-     *   <li>Short, chatty content → lower protection</li>
-     * </ul>
+     * <p>Engineering layer does NOT guess importance from length/line-count.
+     * Instead, uses the message {@code role} as the sole signal — this is the
+     * most conservative, predictable default. Real classification should be
+     * done by the model layer (LLM); this method is only a safety net.
+     *
+     * @param content the message content
+     * @param role    the message role (user / assistant / system), may be null
      */
-    public static ProtectionLevel classifyProtectionLevel(String content) {
+    public static ProtectionLevel classifyProtectionLevel(String content, String role) {
         if (content == null || content.isBlank()) return ProtectionLevel.VOLATILE;
-        // Structural heuristic: content with multiple lines and substantial length
-        // is more likely to contain meaningful information worth protecting.
-        // This is technology-agnostic — no keyword matching.
-        int lineCount = countLines(content);
-        int length = content.length();
-
-        if (lineCount >= 10 && length >= 500) return ProtectionLevel.IMMORTAL;
-        if (lineCount >= 5  && length >= 200) return ProtectionLevel.PROTECTED;
-        if (length >= 100) return ProtectionLevel.DEGRADABLE;
-        return ProtectionLevel.VOLATILE;
+        // Role-based conservative defaults — no heuristic guessing
+        if ("system".equalsIgnoreCase(role)) return ProtectionLevel.PROTECTED;
+        if ("assistant".equalsIgnoreCase(role)) return ProtectionLevel.DEGRADABLE;
+        // user or unknown
+        return ProtectionLevel.DEGRADABLE;
     }
 
     /**
-     * Classify memory type for content that has no tool provenance.
+     * Classify memory type for content that has no tool provenance
+     * AND no LLM classification available (fallback only).
      *
-     * <p>Uses <b>structural signals</b> instead of keyword matching:
-     * <ul>
-     *   <li>Long multi-line blocks with code-like structure → ARCHITECTURE</li>
-     *   <li>Medium content with clear intent → DECISION</li>
-     *   <li>Everything else → FACT</li>
-     * </ul>
+     * <p>Engineering layer does NOT infer semantic type from content length.
+     * All unclassified content defaults to FACT — the model layer is responsible
+     * for recognizing DECISION, ARCHITECTURE, API_CONTRACT, etc.
+     *
+     * @param content the message content
+     * @param role    the message role (user / assistant / system), may be null
      */
-    public static MemoryType classifyMemoryType(String content) {
+    public static MemoryType classifyMemoryType(String content, String role) {
         if (content == null || content.isBlank()) return MemoryType.FACT;
-        // Structural heuristic: multi-line structured content tends to be
-        // architecture/decision-level, while short messages are facts.
-        int lineCount = countLines(content);
-        int length = content.length();
-
-        if (lineCount >= 8 && length >= 300) return MemoryType.ARCHITECTURE;
-        if (lineCount >= 3 && length >= 100) return MemoryType.DECISION;
+        // Role-based conservative defaults — no heuristic guessing
+        if ("system".equalsIgnoreCase(role)) return MemoryType.DECISION;
+        // Everything else defaults to FACT; model layer should classify properly
         return MemoryType.FACT;
+    }
+
+    /**
+     * @deprecated Use {@link #classifyProtectionLevel(String, String)} instead.
+     *             The single-arg version cannot use role signals and defaults to DEGRADABLE.
+     */
+    @Deprecated
+    public static ProtectionLevel classifyProtectionLevel(String content) {
+        return classifyProtectionLevel(content, null);
+    }
+
+    /**
+     * @deprecated Use {@link #classifyMemoryType(String, String)} instead.
+     *             The single-arg version cannot use role signals and defaults to FACT.
+     */
+    @Deprecated
+    public static MemoryType classifyMemoryType(String content) {
+        return classifyMemoryType(content, null);
     }
 
     /**
      * Extract semantic tags from content using structural signals.
      *
-     * <p>Derives tags from <b>observable structure</b> rather than keywords:
-     * <ul>
-     *   <li>Content with file paths → "source"</li>
-     *   <li>Content with code blocks → "code"</li>
-     *   <li>Content with URLs/endpoints → "network"</li>
-     *   <li>Long content → "detailed"</li>
-     * </ul>
+     * <p>Derives tags from <b>observable structure</b> — minimal, conservative
+     * signals only. The model layer is responsible for producing rich semantic
+     * tags; this method is a fallback when no LLM classification is available.
+     *
+     * @param content the message content
+     * @param role    the message role, may be null
      */
-    public static List<String> extractTags(String content) {
-        if (content == null || content.isBlank()) return List.of();
+    public static List<String> extractTags(String content, String role) {
+        if (content == null || content.isBlank()) return List.of("conversation");
         Set<String> tags = new LinkedHashSet<>();
 
-        // Structural tag extraction — technology-agnostic
-        if (content.contains("/") && (content.contains(".java") || content.contains(".py")
-                || content.contains(".ts") || content.contains(".js") || content.contains(".go")
-                || content.contains(".rs") || content.contains(".kt") || content.contains(".swift")
-                || content.contains(".c") || content.contains(".cpp") || content.contains(".rb"))) {
-            tags.add("source");
-        }
-        if (content.contains("```") || content.contains("import ") || content.contains("package ")) {
-            tags.add("code");
-        }
-        if (content.contains("://") || content.contains("localhost") || content.contains("endpoint")) {
-            tags.add("network");
-        }
-        if (content.contains("{") && content.contains("}") || content.contains("[") && content.contains("]")) {
-            tags.add("structured");
-        }
-        if (content.length() > 500) {
-            tags.add("detailed");
-        }
+        // Role-based baseline tag
+        if (role != null && !role.isBlank()) tags.add(role);
 
+        // Minimal structural signals only — no file-extension enumeration
+        if (content.contains("```")) tags.add("code");
+        if (content.contains("://")) tags.add("network");
+
+        // Presence of file-path patterns (generic: contains '/' and a dot-separated extension)
+        if (content.matches(".*\\b\\w+/[\\w.-]+\\.[\\w]+\\b.*")) tags.add("source");
+
+        tags.add("conversation");
         return new ArrayList<>(tags);
+    }
+
+    /**
+     * @deprecated Use {@link #extractTags(String, String)} instead.
+     */
+    @Deprecated
+    public static List<String> extractTags(String content) {
+        return extractTags(content, null);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -308,15 +318,6 @@ public final class MemoryContentClassifier {
     private static String truncate(String s, int maxLen) {
         if (s.length() <= maxLen) return s;
         return s.substring(0, maxLen) + "...";
-    }
-
-    private static int countLines(String s) {
-        if (s == null || s.isEmpty()) return 0;
-        int count = 1;
-        for (int i = 0; i < s.length(); i++) {
-            if (s.charAt(i) == '\n') count++;
-        }
-        return count;
     }
 
 }

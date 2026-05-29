@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -46,16 +47,21 @@ public class AuthController {
   private static final SecureRandom RANDOM = new SecureRandom();
   private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthController.class);
 
+  private static final Duration DEVICE_SECRET_TTL = Duration.ofDays(30);
+
   private final List<SsoVerifier> verifiers;
   private final JwtService jwt;
   private final SsoProperties ssoProps;
   private final WebClient http;
+  private final ReactiveStringRedisTemplate redis;
 
-  public AuthController(List<SsoVerifier> verifiers, JwtService jwt, SsoProperties ssoProps) {
+  public AuthController(List<SsoVerifier> verifiers, JwtService jwt, SsoProperties ssoProps,
+      ReactiveStringRedisTemplate redis) {
     this.verifiers = verifiers;
     this.jwt = jwt;
     this.ssoProps = ssoProps;
     this.http = WebClient.builder().build();
+    this.redis = redis;
   }
 
   // -------------------- /login & /refresh --------------------
@@ -63,20 +69,26 @@ public class AuthController {
   @PostMapping("/login")
   public Mono<ApiResponse<LoginResponse>> login(@RequestBody @Valid LoginRequest req) {
     return verifyWithFirstAcceptingVerifier(req.ssoToken())
-        .map(
+        .flatMap(
             id -> {
               JwtService.Issued access =
                   jwt.issueAccess(id.subject(), id.tenantId(), id.deviceId(), Set.of("user"));
               JwtService.Issued refresh =
                   jwt.issueRefresh(id.subject(), id.tenantId(), id.deviceId());
               String deviceSecret = newDeviceSecret();
-              return ApiResponse.ok(
-                  new LoginResponse(
-                      access.token(),
-                      access.expiresAt(),
-                      refresh.token(),
-                      refresh.expiresAt(),
-                      deviceSecret));
+              // ★ Persist deviceSecret in Redis so HmacSignatureWebFilter can verify
+              // per-device HMAC signatures. Key: codepilot:device-secret:{deviceId}
+              String redisKey = "codepilot:device-secret:" + id.deviceId();
+              return redis.opsForValue()
+                  .set(redisKey, deviceSecret, DEVICE_SECRET_TTL)
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new LoginResponse(
+                              access.token(),
+                              access.expiresAt(),
+                              refresh.token(),
+                              refresh.expiresAt(),
+                              deviceSecret)));
             });
   }
 

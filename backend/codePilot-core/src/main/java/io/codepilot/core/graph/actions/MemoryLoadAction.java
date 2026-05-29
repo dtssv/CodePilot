@@ -2,16 +2,19 @@ package io.codepilot.core.graph.actions;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.context.ContextOrchestrator;
-import io.codepilot.core.graph.GraphExecutionLog;
-import io.codepilot.core.graph.GraphSseHelper;
+import io.codepilot.core.graph.*;
 import io.codepilot.core.memory.*;
+import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -43,17 +46,28 @@ public class MemoryLoadAction implements NodeAction {
     /** Fallback default when no config is provided (backward compatibility). */
     private static final int FALLBACK_MEMORY_BUDGET = 6000;
     private static final int FALLBACK_MAX_PROJECT_MEMORIES = 20;
+    private static final int MAX_INSTANT_CLASSIFY_CACHE_SESSIONS = 512;
 
     private final ProjectMemoryStore projectMemoryStore;
     private final ContextOrchestrator contextOrchestrator;
     private final io.codepilot.core.run.GraphEngineProperties graphProperties;
+    private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
+    private final PromptRegistry promptRegistry;
+    private final ObjectMapper objectMapper;
+    private final Map<String, InstantClassifyCacheEntry> instantClassifyCache = new ConcurrentHashMap<>();
 
     public MemoryLoadAction(ProjectMemoryStore projectMemoryStore,
                             ContextOrchestrator contextOrchestrator,
-                            io.codepilot.core.run.GraphEngineProperties graphProperties) {
+                            io.codepilot.core.run.GraphEngineProperties graphProperties,
+                            GraphAuxiliaryModelResolver auxiliaryModelResolver,
+                            PromptRegistry promptRegistry,
+                            ObjectMapper objectMapper) {
         this.projectMemoryStore = projectMemoryStore;
         this.contextOrchestrator = contextOrchestrator;
         this.graphProperties = graphProperties;
+        this.auxiliaryModelResolver = auxiliaryModelResolver;
+        this.promptRegistry = promptRegistry;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -179,11 +193,25 @@ public class MemoryLoadAction implements NodeAction {
 
     // ── Layer loaders ──
 
-    /** Load instantaneous memory from conversation history. */
+    /** Load instantaneous memory from conversation history.
+     *  <p>Strategy: LLM-first classification → role-based conservative fallback.
+     *  The engineering layer does NOT guess memory type/protection from content length;
+     *  it delegates that judgment to the model layer and falls back to safe defaults.
+     */
     @SuppressWarnings("unchecked")
     private List<StructuredMemory> loadInstantaneousMemory(OverAllState state) {
         List<Map<String, String>> history =
                 (List<Map<String, String>>) state.value("conversationHistory").orElse(List.of());
+
+        if (history.isEmpty()) return List.of();
+
+        // ── Try LLM-first batch classification ──
+        List<InstantClassification> llmClassifications = null;
+        try {
+            llmClassifications = classifyInstantMemoriesWithLlmIncremental(state, history);
+        } catch (Exception e) {
+            log.warn("MemoryLoadAction: LLM instant classification failed, using role-based fallback: {}", e.getMessage());
+        }
 
         List<StructuredMemory> memories = new ArrayList<>();
         for (int i = 0; i < history.size(); i++) {
@@ -192,11 +220,23 @@ public class MemoryLoadAction implements NodeAction {
             String content = msg.getOrDefault("content", "");
             if (content == null || content.isBlank()) continue;
 
-            // Classify using unified rule-driven classifier
-            ProtectionLevel protection = io.codepilot.core.graph.MemoryContentClassifier
-                    .classifyProtectionLevel(content);
-            MemoryType type = io.codepilot.core.graph.MemoryContentClassifier
-                    .classifyMemoryType(content);
+            ProtectionLevel protection;
+            MemoryType type;
+            List<String> tags;
+
+            if (llmClassifications != null && i < llmClassifications.size()
+                    && llmClassifications.get(i) != null) {
+                // LLM provided classification — use it
+                InstantClassification cls = llmClassifications.get(i);
+                protection = cls.protection;
+                type = cls.type;
+                tags = cls.tags;
+            } else {
+                // Role-based conservative fallback — no heuristic guessing
+                protection = MemoryContentClassifier.classifyProtectionLevel(content, role);
+                type = MemoryContentClassifier.classifyMemoryType(content, role);
+                tags = MemoryContentClassifier.extractTags(content, role);
+            }
 
             String summary = content.length() > 120 ? content.substring(0, 120) + "..." : content;
 
@@ -206,11 +246,186 @@ public class MemoryLoadAction implements NodeAction {
                     type,
                     summary,
                     content,
-                    io.codepilot.core.graph.MemoryContentClassifier.extractTags(content),
+                    tags,
                     ""
             ));
         }
         return memories;
+    }
+
+    // ── LLM-based instant memory classification ──
+
+    /** Classification result from LLM for a single message. */
+    private record InstantClassification(
+            ProtectionLevel protection, MemoryType type, List<String> tags) {}
+    private record InstantClassifyCacheEntry(
+            List<String> historySignatures,
+            List<InstantClassification> classifications) {}
+
+    private List<InstantClassification> classifyInstantMemoriesWithLlmIncremental(
+            OverAllState state, List<Map<String, String>> history) throws Exception {
+        String sessionId = String.valueOf(state.value("sessionId").orElse(""));
+        if (sessionId.isBlank()) {
+            return classifyInstantMemoriesWithLlm(state, history, 0);
+        }
+
+        List<String> signatures = historySignatures(history);
+        InstantClassifyCacheEntry cached = instantClassifyCache.get(sessionId);
+        if (cached == null) {
+            List<InstantClassification> classified = classifyInstantMemoriesWithLlm(state, history, 0);
+            if (classified != null) {
+                putInstantClassifyCache(sessionId, signatures, classified);
+            }
+            return classified;
+        }
+
+        int commonPrefix = commonPrefixLength(cached.historySignatures(), signatures);
+        boolean fullHit = commonPrefix == signatures.size()
+                && cached.classifications().size() == history.size();
+        if (fullHit) {
+            log.debug("MemoryLoadAction: instant classification cache hit for session={}", sessionId);
+            return cached.classifications();
+        }
+
+        List<InstantClassification> merged = new ArrayList<>(Collections.nCopies(history.size(), null));
+        for (int i = 0; i < commonPrefix && i < cached.classifications().size(); i++) {
+            merged.set(i, cached.classifications().get(i));
+        }
+
+        List<InstantClassification> delta = classifyInstantMemoriesWithLlm(state, history, commonPrefix);
+        if (delta != null) {
+            for (int i = commonPrefix; i < delta.size(); i++) {
+                merged.set(i, delta.get(i));
+            }
+        }
+        putInstantClassifyCache(sessionId, signatures, merged);
+        log.info("MemoryLoadAction: instant classification incremental refresh for session={}, commonPrefix={}, total={}",
+                sessionId, commonPrefix, signatures.size());
+        return merged;
+    }
+
+    /**
+     * Call LLM to batch-classify conversation messages.
+     * Returns a list aligned with the input history (same index),
+     * or null entries for messages the LLM did not classify.
+     */
+    private List<InstantClassification> classifyInstantMemoriesWithLlm(
+            OverAllState state, List<Map<String, String>> history, int startIndex) throws Exception {
+
+        String template = promptRegistry.get("graph.memoryClassify-instant");
+        if (template == null || template.isBlank()) {
+            log.debug("MemoryLoadAction: no prompt template 'graph.memoryClassify-instant', skipping LLM classification");
+            return null;
+        }
+        if (startIndex >= history.size()) {
+            return new ArrayList<>(Collections.nCopies(history.size(), null));
+        }
+
+        // Build messages payload for the prompt
+        StringBuilder messagesText = new StringBuilder();
+        for (int i = startIndex; i < history.size(); i++) {
+            Map<String, String> msg = history.get(i);
+            String role = msg.getOrDefault("role", "");
+            String content = msg.getOrDefault("content", "");
+            if (content == null || content.isBlank()) continue;
+            // Truncate long content to keep prompt within budget
+            if (content.length() > 300) {
+                content = content.substring(0, 300) + "...";
+            }
+            messagesText.append("[").append(i).append("] <").append(role).append("> ")
+                    .append(content.replace("\n", "\\n"))
+                    .append("\n");
+        }
+
+        if (messagesText.isEmpty()) return null;
+
+        String prompt = template.replace("{{messages}}", messagesText.toString());
+
+        String response =
+                auxiliaryModelResolver.completeUserPrompt(state, "memory-classify-instant", prompt);
+
+        return parseInstantClassifications(response, history.size());
+    }
+
+    private List<InstantClassification> parseInstantClassifications(
+            String response, int historySize) throws Exception {
+
+        String json = LlmJsonExtract.parseableJson(response);
+        JsonNode root = objectMapper.readTree(json);
+        JsonNode arr = root.get("classifications");
+        if (arr == null || !arr.isArray()) {
+            log.warn("MemoryLoadAction: LLM classification response missing 'classifications' array");
+            return null;
+        }
+
+        // Build indexed result list, initialize with nulls
+        List<InstantClassification> result = new ArrayList<>(
+                Collections.nCopies(historySize, null));
+
+        for (JsonNode node : arr) {
+            int index = node.path("index").asInt(-1);
+            if (index < 0 || index >= historySize) continue;
+
+            ProtectionLevel protection = parseEnum(
+                    node.path("protection").asText("DEGRADABLE"),
+                    ProtectionLevel.class, ProtectionLevel.DEGRADABLE);
+            MemoryType type = parseEnum(
+                    node.path("type").asText("FACT"),
+                    MemoryType.class, MemoryType.FACT);
+            List<String> tags = new ArrayList<>();
+            JsonNode tagsNode = node.get("tags");
+            if (tagsNode != null && tagsNode.isArray()) {
+                for (JsonNode t : tagsNode) {
+                    String tag = t.asText("").trim();
+                    if (!tag.isBlank()) tags.add(tag);
+                }
+            }
+
+            result.set(index, new InstantClassification(protection, type, tags));
+        }
+        return result;
+    }
+
+    private List<String> historySignatures(List<Map<String, String>> history) {
+        List<String> signatures = new ArrayList<>(history.size());
+        for (Map<String, String> message : history) {
+            String role = message.getOrDefault("role", "");
+            String content = message.getOrDefault("content", "");
+            signatures.add(Integer.toHexString(Objects.hash(role, content)));
+        }
+        return signatures;
+    }
+
+    private int commonPrefixLength(List<String> a, List<String> b) {
+        int limit = Math.min(a.size(), b.size());
+        int i = 0;
+        while (i < limit && Objects.equals(a.get(i), b.get(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    private void putInstantClassifyCache(
+            String sessionId,
+            List<String> signatures,
+            List<InstantClassification> classifications) {
+        if (instantClassifyCache.size() > MAX_INSTANT_CLASSIFY_CACHE_SESSIONS) {
+            instantClassifyCache.clear();
+        }
+        instantClassifyCache.put(
+                sessionId,
+                new InstantClassifyCacheEntry(
+                        List.copyOf(signatures),
+                        List.copyOf(classifications)));
+    }
+
+    private static <E extends Enum<E>> E parseEnum(String raw, Class<E> enumType, E fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
+        try {
+            return Enum.valueOf(enumType, raw.trim().toUpperCase().replace('-', '_'));
+        } catch (IllegalArgumentException e) {
+            return fallback;
+        }
     }
 
     /** Load short-term memory from session digest and summaryForNextTurn. */
@@ -289,7 +504,7 @@ public class MemoryLoadAction implements NodeAction {
         if (!phases.isEmpty()) {
             Map<String, Object> phase =
                     phaseCursor.isBlank()
-                            ? phases.get(0)
+                            ? phases.getFirst()
                             : io.codepilot.core.graph.PhaseMemoryHelper.findPhase(phases, phaseCursor);
             queryTags = io.codepilot.core.graph.PhaseMemoryHelper.queryTagsFromPhase(phase);
         }

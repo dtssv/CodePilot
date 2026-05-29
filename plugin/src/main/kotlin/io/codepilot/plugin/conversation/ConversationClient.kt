@@ -370,6 +370,8 @@ class ConversationClient(
 
         fun onAgentRunning(payload: JsonNode) {}
 
+        fun onAgentProgress(payload: JsonNode) {}
+
         fun onRunStarted(payload: JsonNode) {}
 
         fun onRunReclaimed(payload: JsonNode) {}
@@ -431,6 +433,7 @@ class ConversationClient(
                 "agent_reading" -> listener.onAgentReading(node)
                 "agent_writing" -> listener.onAgentWriting(node)
                 "agent_running" -> listener.onAgentRunning(node)
+                "agent_progress" -> listener.onAgentProgress(node)
                 "run_started" -> listener.onRunStarted(node)
                 "run_reclaimed" -> listener.onRunReclaimed(node)
                 else -> {} // ignore comments / unknown events

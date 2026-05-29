@@ -92,6 +92,11 @@ public class GenerateAction implements NodeAction {
             log.info("GenerateAction: executing {} retry tool calls from repair", repairRetryCalls.size());
             updates.put("repairRetryToolCalls", List.of());  // consume — prevent re-execution
 
+            // ★ Reset phaseToolsHadFailure: this is a fresh attempt from repair.
+            // The previous failure flag must not leak into the retry evaluation,
+            // otherwise successful retry tool calls are still judged as failed.
+            updates.put("phaseToolsHadFailure", false);
+
             // Convert retry calls to a JSON structure that GraphDirectToolExecutor can process
             var retryRoot = mapper.valueToTree(Map.of("toolCalls", repairRetryCalls));
             if (GraphDirectToolExecutor.executeFromJson(state, retryRoot, mapper, updates)) {
@@ -118,6 +123,16 @@ public class GenerateAction implements NodeAction {
         int failureRetries = (int) state.value("phaseFailureRetries").orElse(0);
         int generatePasses = (int) state.value("phaseGeneratePasses").orElse(0) + 1;
         updates.put("phaseGeneratePasses", generatePasses);
+        if (GraphLoopBudget.exceedsMaxGeneratePasses(state, generatePasses)) {
+            log.warn(
+                    "GenerateAction: phase {} hit generate pass cap ({}/{}) — skipping LLM, routing to commit",
+                    phaseId,
+                    generatePasses,
+                    GraphLoopBudget.maxGeneratePasses(state));
+            updates.put("generateResult", "commit");
+            GraphExecutionLog.nodeExit(state, "generate", updates);
+            return updates;
+        }
         if (ToolApproachTracker.isExhausted(state)
                 && !Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false))) {
             log.warn("GenerateAction: tool approaches exhausted for phase {} — LLM user message", phaseId);
@@ -257,7 +272,9 @@ public class GenerateAction implements NodeAction {
     private String buildConversationalPrompt(String input, String projectMeta) {
         String template = promptRegistry.get("graph.conversational");
         String projectMetaSection =
-                projectMeta.isBlank() ? "" : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
+                GraphPromptContextBudget.projectMetaSection(
+                        projectMeta,
+                        GraphPromptContextBudget.resolveGenerateProjectMetaBudget(graphProperties));
         return template.replace("{{projectMeta}}", projectMetaSection).replace("{{input}}", input);
     }
 
@@ -276,10 +293,12 @@ public class GenerateAction implements NodeAction {
         boolean planningProseStreamed =
                 Boolean.TRUE.equals(state.value("planningProseStreamed").orElse(false));
         String template = promptRegistry.get("graph.generate");
-        String gatheredContext = gatheredInfo.isEmpty() ? ""
-                : "[GATHERED CONTEXT]\n" + GatheredInfoFormatter.format(gatheredInfo);
-        String projectMetaSection = projectMeta.isBlank() ? ""
-                : "[PROJECT CONTEXT]\n" + projectMeta + "\n";
+        int gatheredBudget = GraphPromptContextBudget.resolveGenerateGatheredBudget(graphProperties);
+        int projectMetaBudget = GraphPromptContextBudget.resolveGenerateProjectMetaBudget(graphProperties);
+        String gatheredContext =
+                GraphPromptContextBudget.gatheredContextSection(gatheredInfo, gatheredBudget);
+        String projectMetaSection =
+                GraphPromptContextBudget.projectMetaSection(projectMeta, projectMetaBudget);
 
         // ★ Build MCP tools section for prompt injection
         String mcpToolsSection = buildMcpToolsSection(mcpTools);
@@ -674,8 +693,21 @@ public class GenerateAction implements NodeAction {
 
         // Check for textOutput — LLM explicitly chooses to respond with text instead of code changes
         // (e.g., when code already exists, or an explanation is more appropriate than patches)
+        // ★ Bug fix: when the LLM returns BOTH patches and textOutput, patches MUST take priority.
+        // Previously textOutput was checked first, causing patches (e.g. 51K chars of Mapper code)
+        // to be silently discarded while only the short textOutput (148 chars) was used. This was
+        // the root cause of pom.xml and other files being shown as "written" in UI but never created.
+        JsonNode patchesNodeEarly = root.get("patches");
+        boolean hasPatchesEarly = patchesNodeEarly != null && !patchesNodeEarly.isNull()
+                && patchesNodeEarly.isArray() && !patchesNodeEarly.isEmpty();
+        JsonNode toolCallsNodeEarly = root.get("toolCalls");
+        boolean hasToolCallsEarly = toolCallsNodeEarly != null && !toolCallsNodeEarly.isNull()
+                && toolCallsNodeEarly.isArray() && !toolCallsNodeEarly.isEmpty();
         JsonNode textOutput = root.get("textOutput");
-        if (textOutput != null && !textOutput.isNull() && !textOutput.asText("").isBlank()) {
+        boolean hasTextOutput = textOutput != null && !textOutput.isNull() && !textOutput.asText("").isBlank();
+        // Skip textOutput when patches/toolCalls are present — the LLM likely added textOutput
+        // as a summary alongside the actual code changes.
+        if (hasTextOutput && !hasPatchesEarly && !hasToolCallsEarly) {
             String textStr = textOutput.asText();
             @SuppressWarnings("unchecked")
             Map<String, Object> gatheredNow =
@@ -875,45 +907,37 @@ public class GenerateAction implements NodeAction {
             // change the file content. Merging them into a single full-file
             // replace avoids both problems.
             List<Patch> mergedPatches = mergeEditsForSameFile(validPatches);
+            // ── Batch generation support ──
+            // When the LLM signals hasMore=true, we apply current patches first via
+            // applyPatch, then route back to generate for the next batch. This gives
+            // users real-time file creation feedback and avoids accumulating huge
+            // patch lists that overwhelm the IDE plugin.
+            // Flow: generate[hasMore=true] → applyPatch → generate[hasMore=true] → … → generate[hasMore=false] → applyPatch → verify → commit
+            boolean hasMore = root.has("hasMore") && root.get("hasMore").asBoolean(false);
             updates.put("pendingPatches", List.copyOf(mergedPatches));
             updates.put("modifiedFiles", List.copyOf(modifiedFiles));
 
-            // ── Batch generation support ──
-            // When the LLM signals hasMore=true (more content to generate in this phase),
-            // accumulate patches in state and route back to generate for the next batch.
-            // This enables super-complex phases (e.g., 10+ API endpoints per table)
-            // to be generated across multiple LLM calls without exceeding output limits.
-            boolean hasMore = root.has("hasMore") && root.get("hasMore").asBoolean(false);
             if (hasMore) {
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> existingPatches =
-                        (List<Map<String, Object>>) state.value("accumulatedPatches").orElse(List.of());
-                List<Map<String, Object>> allPatches = new ArrayList<>(existingPatches);
-                for (Patch p : mergedPatches) {
-                    allPatches.add(mapper.convertValue(p, new TypeReference<Map<String, Object>>() {}));
-                }
-                updates.put("accumulatedPatches", allPatches);
-                updates.put("generateResult", "continueGenerate");
-                log.info("Generate phase={}: hasMore=true, accumulated {} total patches, routing back to generate",
-                        phaseId, allPatches.size());
+                // Current batch is ready for applyPatch; set flag so that applyPatch
+                // routes back to generate instead of verify after success.
+                updates.put("batchGenerationInProgress", true);
+                updates.put("generateResult", "toolCalls"); // routeAfterGenerate → applyPatch
+                log.info("Generate phase={}: hasMore=true, {} files in this batch, routing to applyPatch then back to generate",
+                        phaseId, modifiedFiles.size());
             } else {
-                // Merge any previously accumulated patches with current batch
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> existingPatches =
-                        (List<Map<String, Object>>) state.value("accumulatedPatches").orElse(List.of());
-                if (!existingPatches.isEmpty()) {
-                    List<Patch> allPatches = new ArrayList<>();
-                    for (Map<String, Object> pm : existingPatches) {
-                        Patch p = mapper.convertValue(pm, Patch.class);
-                        if (p != null) allPatches.add(p);
-                    }
-                    allPatches.addAll(mergedPatches);
-                    updates.put("pendingPatches", List.copyOf(mergeEditsForSameFile(allPatches)));
-                    updates.put("accumulatedPatches", List.of()); // Clear accumulator
-                    log.info("Generate phase={}: hasMore=false, merged {} accumulated + {} new patches = {} total",
-                            phaseId, existingPatches.size(), mergedPatches.size(),
-                            allPatches.size());
-                }
+                updates.put("batchGenerationInProgress", false);
+                // Clear accumulator (no longer used, but clean up stale state)
+                updates.put("accumulatedPatches", List.of());
+            }
+
+            // ★ Emit per-file AGENT_WRITING events so the user sees file-level progress.
+            // Each batch triggers its own AGENT_WRITING events right before applyPatch
+            // processes them — this is accurate because applyPatch will write them next.
+            for (Patch p : mergedPatches) {
+                List<Map<String, Object>> writingFiles = GraphPatchUiHelper.buildWritingFiles(List.of(p));
+                String writingText = GraphPatchUiHelper.buildWritingTextFromFiles(writingFiles);
+                GraphSseHelper.emitEvent(state, SseEvents.AGENT_WRITING,
+                    Map.of("text", writingText, "files", writingFiles, "phaseId", phaseId));
             }
 
             if (agentContent != null) {
@@ -1126,15 +1150,17 @@ public class GenerateAction implements NodeAction {
         boolean escalationDone =
                 Boolean.TRUE.equals(state.value("approachEscalationDone").orElse(false));
 
-        // ── Batch generation: continue generating more patches in this phase ──
-        if ("continueGenerate".equals(result)) {
+        // ── Batch generation: check max passes limit ──
+        // When batchGenerationInProgress=true and we've exceeded max passes, stop
+        // the batch loop even if the LLM said hasMore=true. This prevents runaway
+        // generation. The current batch's pendingPatches will still be applied.
+        if (Boolean.TRUE.equals(state.value("batchGenerationInProgress").orElse(false))) {
             int passes = (int) state.value("phaseGeneratePasses").orElse(0);
-            if (passes < resolveMaxGeneratePasses()) {
-                log.info("GenerateAction: routing back to generate for batch continuation (pass {})", passes);
-                return "reenter";
-            } else {
-                log.warn("GenerateAction: batch generation hit max passes, forcing applyPatch with accumulated patches");
-                return "applyPatch";
+            if (passes >= resolveMaxGeneratePasses(state)) {
+                log.warn("GenerateAction: batch generation hit max passes ({}), forcing apply+verify flow", passes);
+                // Fall through to normal routing — pendingPatches will route to applyPatch,
+                // and since batchGenerationInProgress is still true, applyPatch will clear it
+                // and route to verify (not back to generate).
             }
         }
 
@@ -1164,9 +1190,21 @@ public class GenerateAction implements NodeAction {
         // generate→gather→reenter→generate loop.
         // Hard limit: after 3 gathers, refuse to gather again.
         // Soft limit: after gatherExhausted, always refuse.
-        if (PhaseGoalHelper.currentStepGoalSatisfied(state)) {
+        // ★ Bug fix: when generateResult=toolCalls and pendingPatches are non-empty,
+        // the patches MUST be applied via applyPatch before committing. The step-goal-
+        // satisfied check was causing patches (e.g. pom.xml creation) to be skipped —
+        // the UI showed "AGENT_WRITING" but the file was never created because the
+        // commit node does not process pendingPatches. Only route to commit when there
+        // are no pending patches to apply.
+        boolean hasPendingPatches = hasNonEmptyPendingPatches(state);
+        if (PhaseGoalHelper.currentStepGoalSatisfied(state) && !hasPendingPatches) {
             log.info("GenerateAction: step goal satisfied — routing to commit");
             return "commit";
+        }
+        if (hasPendingPatches) {
+            log.info("GenerateAction: pending patches present — routing to applyPatch (stepGoalMet={})",
+                    PhaseGoalHelper.currentStepGoalSatisfied(state));
+            return "applyPatch";
         }
 
         if ("infoRequests".equals(result) && approachExhausted) {
@@ -1214,7 +1252,7 @@ public class GenerateAction implements NodeAction {
                 }
                 return escalationDone ? "summarize" : "reenter";
             }
-            if (generatePasses >= resolveMaxGeneratePasses()) {
+            if (generatePasses >= resolveMaxGeneratePasses(state)) {
                 return routeWhenGeneratePassesCapped(state, generatePasses, "directTools");
             }
             int rounds = (int) state.value("directToolRound").orElse(0);
@@ -1231,7 +1269,7 @@ public class GenerateAction implements NodeAction {
             if ((kind == PhaseGoalHelper.StepKind.ANALYZE
                             || kind == PhaseGoalHelper.StepKind.SYNTHESIZE)
                     && !PhaseGoalHelper.currentStepGoalSatisfied(state)
-                    && generatePasses < resolveMaxGeneratePasses()) {
+                    && generatePasses < resolveMaxGeneratePasses(state)) {
                 log.warn(
                         "GenerateAction: directToolRound cap on {} without deliverable — reenter",
                         kind);
@@ -1254,7 +1292,7 @@ public class GenerateAction implements NodeAction {
                     || kind == PhaseGoalHelper.StepKind.INSPECT
                     || kind == PhaseGoalHelper.StepKind.DISCOVER)
                     && !PhaseGoalHelper.currentStepGoalSatisfied(state)
-                    && generatePasses < 10
+                    && generatePasses < GraphLoopBudget.maxGeneratePasses(state)
                     // After 2+ passes, accept textOutput to avoid infinite reenter loops.
                     // The source code may already be in the user's input context (IDE selection,
                     // pasted snippet) without explicit fs.read/grep in gatheredInfo.
@@ -1265,7 +1303,7 @@ public class GenerateAction implements NodeAction {
                 log.warn("GenerateAction: textOutput on {} but goal not met — reenter (passes={})", kind, generatePasses);
                 return "reenter";
             }
-            if (generatePasses >= resolveMaxGeneratePasses()) {
+            if (generatePasses >= resolveMaxGeneratePasses(state)) {
                 return routeWhenGeneratePassesCapped(state, generatePasses, "textOutput");
             }
         }
@@ -1286,6 +1324,21 @@ public class GenerateAction implements NodeAction {
             case "textOutput" -> "commit";  // B3 fix: skip applyPatch/verify for unstructured text
             default -> "applyPatch";
         };
+    }
+
+    /**
+     * Check whether pendingPatches in state contain at least one non-empty patch
+     * (i.e. patches with edits that need to be applied via applyPatch).
+     */
+    @SuppressWarnings("unchecked")
+    private static boolean hasNonEmptyPendingPatches(OverAllState state) {
+        var patches = (List<?>) state.value("pendingPatches").orElse(List.of());
+        if (patches.isEmpty()) {
+            return false;
+        }
+        // Each patch element is either a Patch object or a Map representation;
+        // non-empty list means there are edits to apply.
+        return true;
     }
 
     private static String routeWhenGeneratePassesCapped(
@@ -1408,10 +1461,18 @@ public class GenerateAction implements NodeAction {
      * Build memory context directive from activeMemories and memoryAnomalies.
      * Uses prompt templates graph.memoryLoad and graph.memoryConflict for
      * structured injection of memory context and anomaly resolution directives.
+     * Enforces a hard character budget to prevent memory injection from inflating
+     * the prompt beyond acceptable limits on super-complex tasks.
      */
     @SuppressWarnings("unchecked")
     private String buildMemoryDirective(OverAllState state) {
         StringBuilder sb = new StringBuilder();
+
+        // ★ Hard character budget for memory directive injection.
+        // Prevents unbounded memory injection from inflating the prompt.
+        // Default 4000 chars (~1000 tokens); configurable via graphProperties.
+        int memoryDirectiveBudget = graphProperties.getMemoryBudget() > 0
+                ? Math.min(graphProperties.getMemoryBudget() * 2, 8000) : 4000;
 
         // ── Active memories (from all four layers, orchestrated by ContextOrchestrator) ──
         List<Map<String, Object>> activeMemories =
@@ -1422,6 +1483,7 @@ public class GenerateAction implements NodeAction {
             sb.append("\n\n").append(promptRegistry.get("graph.memoryLoad")).append("\n");
 
             // Separate by layer for structured data injection
+            // ★ Prioritize SHORT_TERM over LONG_TERM when budget is tight
             List<Map<String, Object>> shortTerm = activeMemories.stream()
                     .filter(m -> "SHORT_TERM".equals(m.get("layer")))
                     .toList();
@@ -1432,13 +1494,21 @@ public class GenerateAction implements NodeAction {
             if (!shortTerm.isEmpty()) {
                 sb.append("\n[SESSION CONTEXT — key facts from this session]\n");
                 for (Map<String, Object> m : shortTerm) {
+                    if (sb.length() >= memoryDirectiveBudget) {
+                        sb.append("... (").append(shortTerm.size()).append(" more memories truncated for budget)\n");
+                        break;
+                    }
                     appendMemoryLine(sb, m);
                 }
             }
 
-            if (!longTerm.isEmpty()) {
+            if (!longTerm.isEmpty() && sb.length() < memoryDirectiveBudget) {
                 sb.append("\n[PROJECT MEMORY — accumulated project knowledge]\n");
                 for (Map<String, Object> m : longTerm) {
+                    if (sb.length() >= memoryDirectiveBudget) {
+                        sb.append("... (").append(longTerm.size()).append(" more memories truncated for budget)\n");
+                        break;
+                    }
                     appendMemoryLine(sb, m);
                 }
             }
@@ -1447,7 +1517,7 @@ public class GenerateAction implements NodeAction {
         // ── Memory anomalies — use graph.memoryConflict template for resolution directives ──
         List<String> anomalies =
                 (List<String>) state.value("memoryAnomalies").orElse(List.of());
-        if (!anomalies.isEmpty()) {
+        if (!anomalies.isEmpty() && sb.length() < memoryDirectiveBudget) {
             String conflictTemplate = promptRegistry.get("graph.memoryConflict");
             String anomalyList = anomalies.stream()
                     .map(a -> "- " + a)
@@ -1514,9 +1584,8 @@ public class GenerateAction implements NodeAction {
     }
 
     /** Resolve max generate passes per phase from config or fallback. */
-    private int resolveMaxGeneratePasses() {
-        int configured = graphProperties.getMaxGeneratePassesPerPhase();
-        return configured > 0 ? configured : 10;
+    private int resolveMaxGeneratePasses(OverAllState state) {
+        return GraphLoopBudget.maxGeneratePasses(state);
     }
 
 }

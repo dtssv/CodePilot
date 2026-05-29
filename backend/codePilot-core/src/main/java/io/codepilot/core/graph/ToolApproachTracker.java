@@ -133,10 +133,10 @@ public final class ToolApproachTracker {
         yield false;
       }
       case "shell.exec" -> {
-        Object exit = m.get("exitCode");
-        int code = exit instanceof Number n ? n.intValue() : -1;
-        yield code != 0 || Boolean.TRUE.equals(m.get("timedOut"));
-      }
+          // Engineering layer does not infer: non-zero exitCode is valid tool output.
+          // Only a timedOut result (command never completed) is unsatisfactory.
+          yield Boolean.TRUE.equals(m.get("timedOut"));
+        }
       default -> false;
     };
   }

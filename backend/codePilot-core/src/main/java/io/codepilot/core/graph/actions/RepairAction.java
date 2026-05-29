@@ -4,8 +4,11 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.dto.Patch;
+import io.codepilot.core.graph.GatheredInfoFormatter;
 import io.codepilot.core.graph.GraphExecutionJournal;
 import io.codepilot.core.graph.GraphFailurePolicy;
+import io.codepilot.core.graph.GraphLoopBudget;
+import io.codepilot.core.graph.GraphPromptContextBudget;
 import io.codepilot.core.graph.PhaseFailureRepairHelper;
 import io.codepilot.core.graph.PhaseOutcomeHelper;
 import io.codepilot.core.graph.GraphLlmHelper;
@@ -42,23 +45,23 @@ import java.util.*;
 public class RepairAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(RepairAction.class);
-    private static final int DEFAULT_MAX_ATTEMPTS = 3;
-    private static final int REPAIR_TOKEN_BUDGET = 2000;
-
     private final ChatClientFactory chatClientFactory;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final GraphSkillSupport graphSkillSupport;
+    private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
     public RepairAction(
             ChatClientFactory chatClientFactory,
             PromptRegistry promptRegistry,
             ObjectMapper mapper,
-            GraphSkillSupport graphSkillSupport) {
+            GraphSkillSupport graphSkillSupport,
+            io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.chatClientFactory = chatClientFactory;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.graphSkillSupport = graphSkillSupport;
+        this.graphProperties = graphProperties;
     }
 
     @Override
@@ -86,10 +89,7 @@ public class RepairAction implements NodeAction {
                         || PhaseOutcomeHelper.hasToolFailures(state))) {
             PhaseFailureRepairHelper.prepareRepairFromFailures(state, updates);
         }
-        var repairPolicy = (Map<String, Object>) state.value("graphRepairPolicy").orElse(null);
-        int maxAttempts = repairPolicy != null && repairPolicy.containsKey("maxAttempts")
-                ? ((Number) repairPolicy.get("maxAttempts")).intValue()
-                : DEFAULT_MAX_ATTEMPTS;
+        int maxAttempts = GraphLoopBudget.maxRepairAttempts(state);
 
         // ── Track attempts — create a new copy to avoid ConcurrentModificationException
         // during state serialization/cloning by the graph framework
@@ -241,6 +241,7 @@ public class RepairAction implements NodeAction {
             List<Map<String, Object>> appliedPatches,
             String phaseId) {
 
+        int promptBudget = GraphPromptContextBudget.resolveRepairPromptBudget(graphProperties);
         StringBuilder sb = new StringBuilder();
         sb.append("[REPAIR TASK]\n");
         sb.append("Phase: ").append(phaseId).append("\n\n");
@@ -308,7 +309,23 @@ public class RepairAction implements NodeAction {
         }
 
         if (!originalCode.isEmpty()) {
-            sb.append("\n[ORIGINAL CODE (before changes)]\n```\n").append(originalCode).append("\n```\n");
+            int codeBudget = Math.max(1500, promptBudget / 3);
+            sb.append("\n[ORIGINAL CODE (before changes)]\n```\n")
+                    .append(GraphPromptContextBudget.truncate(originalCode, codeBudget))
+                    .append("\n```\n");
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> gatheredInfo =
+                (Map<String, Object>) state.value("gatheredInfo").orElse(Map.of());
+        if (!gatheredInfo.isEmpty()) {
+            int gatheredBudget = Math.max(1000, promptBudget / 4);
+            String failures = GatheredInfoFormatter.formatFailures(gatheredInfo);
+            if (!failures.isBlank()) {
+                sb.append("\n")
+                        .append(GraphPromptContextBudget.truncate(failures, gatheredBudget))
+                        .append("\n");
+            }
         }
 
         sb.append("\n[REPAIR RULES]\n");
@@ -328,7 +345,7 @@ public class RepairAction implements NodeAction {
         sb.append("8. If you cannot produce a valid fix, the system will escalate to the user automatically.\n");
         sb.append(GraphExecutionJournal.combinedContextDirective(state));
 
-        return sb.toString();
+        return GraphPromptContextBudget.truncate(sb.toString(), promptBudget * 2);
     }
 
     // ─── Response Parsing ─────────────────────────────────────────────

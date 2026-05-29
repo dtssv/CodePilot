@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -126,44 +127,85 @@ public final class GraphDirectToolExecutor {
       GraphExecutionLog.toolCallEmit(state, toolCallId, name, batchArgs);
       GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, batchArgs);
 
-      try {
-        ToolResultEvent result =
-            GraphToolWaitHelper.await(pending, state, "执行工具: " + name, Duration.ofSeconds(180));
-        String reqId = "direct-" + toolCallId;
-        Map<String, Object> entry = new HashMap<>();
-        entry.put("kind", name);
-        entry.put("id", reqId);
-        // Preserve the LLM-declared purpose for shell.exec (compile / run / probe / configure / other)
-        if ("shell.exec".equals(name)) {
-          Object purpose = args.get("purpose");
-          if (purpose != null && !purpose.toString().isBlank()) {
-            entry.put("purpose", purpose.toString());
-          }
-        }
-        boolean toolOk = toolSucceeded(name, result);
-        entry.put("ok", toolOk);
-        if (toolOk && result != null && result.result() != null) {
-          entry.put("result", result.result());
+      // For shell.exec, retry up to 10 times on timeout (user may be slow to confirm).
+      // Other tools: no retry — a timeout is a genuine failure.
+      int maxAttempts = "shell.exec".equals(name) ? 11 : 1;
+      ToolResultEvent result = null;
+      Exception lastException = null;
+
+      for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        // On retry, register a new future + re-emit TOOL_CALL so the plugin
+        // shows the confirmation dialog again.
+        String currentCallId = attempt == 0 ? toolCallId : toolCallId + "-retry-" + attempt;
+        CompletableFuture<ToolResultEvent> currentFuture;
+        if (attempt == 0) {
+          currentFuture = pending;
         } else {
-          Object errBody = result != null ? result.result() : null;
-          String errMsg =
-              result != null && result.errorMessage() != null
-                  ? result.errorMessage()
-                  : shellErrorFromResult(errBody);
-          entry.put("errorMessage", errMsg);
-          if (errBody != null) {
-            entry.put("result", errBody);
-          }
+          currentFuture = ToolResultBus.registerFuture(sessionId, currentCallId);
+          Map<String, Object> retryArgs = Map.of("id", currentCallId, "name", name, "args", args);
+          GraphExecutionLog.toolCallEmit(state, currentCallId, name, retryArgs);
+          GraphSseHelper.emitEvent(state, SseEvents.TOOL_CALL, retryArgs);
+          log.info("GraphDirectToolExecutor: shell.exec retry attempt {}/{}", attempt, maxAttempts - 1);
         }
-        gathered.put(reqId, entry);
-        executed.add(Map.of("toolCallId", toolCallId, "name", name, "ok", toolOk));
-        log.info("GraphDirectToolExecutor: {} ok={}", name, toolOk);
-      } catch (Exception e) {
-        log.warn("GraphDirectToolExecutor: {} failed: {}", name, e.getMessage());
-        String reqId = "direct-" + toolCallId;
-        gathered.put(reqId, Map.of("kind", name, "id", reqId, "error", e.getMessage()));
-        executed.add(Map.of("toolCallId", toolCallId, "name", name, "ok", false));
+
+        try {
+          result =
+              GraphToolWaitHelper.await(currentFuture, state, "执行工具: " + name, Duration.ofSeconds(180));
+          lastException = null;
+          break; // success
+        } catch (java.util.concurrent.TimeoutException e) {
+          lastException = e;
+          if (attempt < maxAttempts - 1) {
+            log.warn("GraphDirectToolExecutor: {} timeout (attempt {}/{}), retrying…",
+                name, attempt + 1, maxAttempts);
+          } else {
+            log.warn("GraphDirectToolExecutor: {} timeout after {} attempts, giving up",
+                name, maxAttempts);
+          }
+        } catch (Exception e) {
+          lastException = e;
+          break; // non-timeout exception: don't retry
+        }
       }
+
+      if (lastException != null) {
+        log.warn("GraphDirectToolExecutor: {} failed: {}", name, lastException.getMessage());
+        String reqId = "direct-" + toolCallId;
+        gathered.put(reqId, Map.of("kind", name, "id", reqId, "error", lastException.getMessage()));
+        executed.add(Map.of("toolCallId", toolCallId, "name", name, "ok", false));
+        continue;
+      }
+
+      // Process successful result
+      String reqId = "direct-" + toolCallId;
+      Map<String, Object> entry = new HashMap<>();
+      entry.put("kind", name);
+      entry.put("id", reqId);
+      // Preserve the LLM-declared purpose for shell.exec (compile / run / probe / configure / other)
+      if ("shell.exec".equals(name)) {
+        Object purpose = args.get("purpose");
+        if (purpose != null && !purpose.toString().isBlank()) {
+          entry.put("purpose", purpose.toString());
+        }
+      }
+      boolean toolOk = toolSucceeded(name, result);
+      entry.put("ok", toolOk);
+      if (toolOk && result != null && result.result() != null) {
+        entry.put("result", result.result());
+      } else {
+        Object errBody = result != null ? result.result() : null;
+        String errMsg =
+            result != null && result.errorMessage() != null
+                ? result.errorMessage()
+                : shellErrorFromResult(errBody);
+        entry.put("errorMessage", errMsg);
+        if (errBody != null) {
+          entry.put("result", errBody);
+        }
+      }
+      gathered.put(reqId, entry);
+      executed.add(Map.of("toolCallId", toolCallId, "name", name, "ok", toolOk));
+      log.info("GraphDirectToolExecutor: {} ok={}", name, toolOk);
     }
 
     if (executed.isEmpty()) {
@@ -246,6 +288,14 @@ public final class GraphDirectToolExecutor {
     return tc.path("kind").asText("").trim();
   }
 
+  /**
+   * Whether a tool call succeeded from the execution perspective.
+   *
+   * <p>For shell.exec, the engineering layer only executes and does NOT infer — a non-zero
+   * exitCode is valid tool output that the model should interpret (e.g., git returning 128
+   * in a non-git directory is informative, not a failure). We only return false when no
+   * result was received at all.
+   */
   private static boolean toolSucceeded(String toolName, ToolResultEvent result) {
     if (result == null) {
       return false;
@@ -262,12 +312,10 @@ public final class GraphDirectToolExecutor {
     if (!"shell.exec".equals(toolName)) {
       return result.ok();
     }
-    if (!(result.result() instanceof Map<?, ?> m)) {
-      return false;
-    }
-    Object exit = m.get("exitCode");
-    int code = exit instanceof Number n ? n.intValue() : -1;
-    return code == 0 && !Boolean.TRUE.equals(m.get("timedOut"));
+    // shell.exec: engineering layer only executes, does not infer.
+    // As long as we received a result, the tool call succeeded at the
+    // infrastructure level. The model will interpret exitCode/stderr/timedOut.
+    return result.result() instanceof Map<?, ?>;
   }
 
   private static String shellErrorFromResult(Object result) {

@@ -51,9 +51,13 @@ public final class PhasePlanNormalizer {
     }
 
     // Legacy fallback: planner returned a single template phase for a multi-step user plan.
+    // ★ Log a warning because this indicates the LLM ignored the [CRITICAL] prompt directive.
+    // The expanded phases will inherit the single template's intent — they lack per-step
+    // intent/tags/memoryHints, which degrades phase-aware memory loading quality.
     if (phases.size() == 1 && userSteps.size() > 1) {
-      log.info(
-          "Planner returned 1 phase for {} user steps — expanding from step template (fallback only)",
+      log.warn(
+          "Planner returned 1 phase for {} user steps — LLM ignored [CRITICAL] directive. "
+          + "Expanding from step template (fallback). Per-phase tags/intent may be missing.",
           userSteps.size());
       return expandFromSinglePhase(phases.get(0), userSteps);
     }
@@ -172,16 +176,58 @@ public final class PhasePlanNormalizer {
     Object title = step.get("title");
     phase.put("title", title != null && !title.toString().isBlank() ? title : "Step " + (index + 1));
     Object stepIntent = step.get("intent");
+    String resolvedIntent;
     if (stepIntent != null && !stepIntent.toString().isBlank()) {
-      phase.put("intent", stepIntent.toString());
+      resolvedIntent = stepIntent.toString();
     } else {
-      phase.put("intent", template.getOrDefault("intent", "code-change"));
+      resolvedIntent = String.valueOf(template.getOrDefault("intent", "code-change"));
     }
+    phase.put("intent", resolvedIntent);
     phase.put("entry", template.getOrDefault("entry", List.of()));
     phase.put("exit", template.getOrDefault("exit", List.of()));
     phase.put("budget", template.getOrDefault("budget", Map.of("attempts", 3)));
+
+    // ★ When expanding from a single template phase, the LLM didn't provide per-phase
+    // tags/memoryHints/loadShardMode. Infer them from the step's intent and title
+    // so that PhaseAwareMemoryLoader can do meaningful retrieval.
+    if (!template.containsKey("tags") || !(template.get("tags") instanceof List<?> lt) || lt.isEmpty()) {
+      List<String> inferredTags = inferTagsFromStep(resolvedIntent, title != null ? title.toString() : "");
+      phase.put("tags", inferredTags);
+    }
+    if (!template.containsKey("memoryHints") || template.get("memoryHints") == null) {
+      phase.put("memoryHints", List.of());
+    }
+    if (!template.containsKey("loadShardMode")) {
+      phase.put("loadShardMode", "tags");
+    }
+
     attachStep(phase, index, step);
     return phase;
+  }
+
+  /**
+   * Infer tags from step intent and title for phase-aware memory retrieval.
+   * When the LLM returned a single template phase (no per-step tags), this ensures
+   * that expanded phases still have meaningful tags for ContextShardResolver.
+   */
+  private static List<String> inferTagsFromStep(String intent, String title) {
+    List<String> tags = new ArrayList<>();
+    tags.add("step-intent-" + intent);
+    // Extract key nouns from title (words > 3 chars, excluding common verbs)
+    if (title != null && !title.isBlank()) {
+      String[] words = title.split("[\\s,/，、]+");
+      for (String word : words) {
+        // Include meaningful words as tags (both English and Chinese terms)
+        if (word.length() > 2 || word.matches(".*[\\u4e00-\\u9fa5].*")) {
+          tags.add(word.toLowerCase());
+        }
+      }
+    }
+    // Keep tags list bounded
+    if (tags.size() > 8) {
+      tags = tags.subList(0, 8);
+    }
+    return tags;
   }
 
   private static void attachStep(Map<String, Object> phase, int index, Map<String, Object> step) {

@@ -55,6 +55,7 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 {
   "thought": "<brief internal reasoning>",
   "patches": null,
+  "hasMore": false,
   "infoRequests": null,
   "toolCalls": null,
   "askUser": null,
@@ -66,6 +67,7 @@ Optional status: <<<AGENT_THINKING>>>one sentence<<<END>>>
 
 [RULES]
 - You MUST produce ONE of: patches, infoRequests, toolCalls (shell/fs), askUser, or textOutput. All others must be null.
+- ★ BATCH GENERATION: When a step requires creating more files than can fit in a single response, set "hasMore": true. The engine will call generate again for this phase, accumulating patches across multiple rounds. On each round, produce as many complete files as you can, then set hasMore=true if there are still more to create. On the FINAL round, set hasMore=false (or omit it). Do NOT omit files or use placeholders — each round must contain fully complete files; remaining files go in the next round.
 - To produce code changes, set "patches" to an array of patch objects:
   {"patches": [{"summary": "<what this patch does>", "patches": [{"path": "<file path>", "op": "create|write|replace", "newContent": "<full file content for create/write>", "search": "<text to find, only for replace>", "replace": "<replacement text, only for replace>"}]}]}
 - Produce actual, complete, working code. No placeholders, no TODOs, no "...".

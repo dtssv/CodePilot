@@ -63,6 +63,32 @@ public final class GraphExecutionLog {
         preview(response, 500));
   }
 
+  public static void llmComplete(
+          OverAllState state,
+          String action,
+          long durationMs,
+          int promptChars,
+          int responseChars,
+          boolean auxiliaryModel) {
+    LOG.info(
+        "[graph.llm.complete] sessionId={} action={} phase={} durationMs={} promptChars={} responseChars={} auxiliary={}",
+        sessionId(state),
+        action,
+        state.value("phaseCursor").orElse(""),
+        durationMs,
+        promptChars,
+        responseChars,
+        auxiliaryModel);
+  }
+
+  public static void gatherCacheHit(String sessionId, String kind, String requestId) {
+    LOG.info(
+        "[graph.gather.cache.hit] sessionId={} kind={} requestId={}",
+        sessionId,
+        kind,
+        requestId);
+  }
+
   public static void sseEmit(OverAllState state, String eventType, Object data) {
     LOG.debug("[graph.sse.emit] sessionId={} event={} data={}", sessionId(state), eventType, previewData(data));
   }

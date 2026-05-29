@@ -51,6 +51,9 @@ public final class SseEvents {
   /** Agent declares a command execution (e.g., "Verifying compilation and running tests"). */
   public static final String AGENT_RUNNING = "agent_running";
 
+  /** Progress heartbeat emitted during long LLM waits so the user knows the system is still working. */
+  public static final String AGENT_PROGRESS = "agent_progress";
+
   // ── Memory system events (four-layer memory architecture) ──
   /** Memory consistency conflict detected — carries anomaly descriptions for UI display. */
   public static final String MEMORY_CONFLICT = "memory.conflict";

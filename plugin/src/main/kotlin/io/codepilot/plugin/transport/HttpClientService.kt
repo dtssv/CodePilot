@@ -196,6 +196,15 @@ class HttpClientService {
                 .header("X-CodePilot-Ts", ts)
                 .header("X-CodePilot-Nonce", nonce)
                 .header("X-CodePilot-Signature", signature)
+        } else if (devToken.isNullOrBlank()) {
+            // ★ No deviceSecret and no devToken — request will be rejected by backend
+            // with "Missing signature headers". This typically happens when tokens are
+            // shared across IDEs (e.g. via PasswordSafe) but deviceSecret is not available.
+            com.intellij.openapi.diagnostic.Logger.getInstance("HttpClientService").warn(
+                "[HTTP] ${req.method} ${req.url} | No deviceSecret and no devToken — " +
+                    "request will likely be rejected (401 Missing signature headers). " +
+                    "This may indicate a cross-IDE session mismatch; please re-login.",
+            )
         }
 
         val builtReq = builder.build()

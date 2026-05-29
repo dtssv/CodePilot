@@ -5,8 +5,6 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.graph.*;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,18 +38,18 @@ public class ContextSplitAction implements NodeAction {
     private static final Logger log = LoggerFactory.getLogger(ContextSplitAction.class);
 
     private final ContextShardStore shardStore;
-    private final ChatClientFactory chatClientFactory;
+    private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
     public ContextSplitAction(ContextShardStore shardStore,
-                              ChatClientFactory chatClientFactory,
+                              GraphAuxiliaryModelResolver auxiliaryModelResolver,
                               PromptRegistry promptRegistry,
                               ObjectMapper mapper,
                               io.codepilot.core.run.GraphEngineProperties graphProperties) {
         this.shardStore = shardStore;
-        this.chatClientFactory = chatClientFactory;
+        this.auxiliaryModelResolver = auxiliaryModelResolver;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.graphProperties = graphProperties;
@@ -87,44 +85,56 @@ public class ContextSplitAction implements NodeAction {
         String input = (String) state.value("input").orElse("");
         String projectRootHash = (String) state.value("projectRootHash").orElse("");
 
-        // Skip if input is small or no project context
+        // ★ Compute effective context size: input + projectMeta
+        // The actual LLM prompt includes not just input but also projectMeta,
+        // gatheredContext, memoryDirective etc. Checking only input.length() misses
+        // cases where projectMeta is huge (e.g. SQL file embedded in project context).
+        String projectMeta = (String) state.value("projectMeta").orElse("");
+        int effectiveContextChars = input.length() + projectMeta.length();
+
+        // Skip if effective context is small or no project context
         int threshold = splitCharThreshold();
-        if (input.length() < threshold || projectRootHash.isBlank()) {
-            log.info("ContextSplitAction: input length={} (threshold={}), skipping split",
-                    input.length(), threshold);
+        if (effectiveContextChars < threshold || projectRootHash.isBlank()) {
+            log.info("ContextSplitAction: effectiveContext={} chars (input={}, projectMeta={}) threshold={}, skipping split",
+                    effectiveContextChars, input.length(), projectMeta.length(), threshold);
             updates.put("contextSplitResult", "skipped");
             GraphExecutionLog.nodeExit(state, "contextSplit", updates);
             return updates;
         }
 
-        log.info("ContextSplitAction: input length={} exceeds threshold={}, splitting context",
-                input.length(), threshold);
+        log.info("ContextSplitAction: effectiveContext={} chars (input={}, projectMeta={}) exceeds threshold={}, splitting context",
+                effectiveContextChars, input.length(), projectMeta.length(), threshold);
 
         int maxPerCall = maxCharsPerLlmCall();
         List<ContextShardStore.ContextShard> allShards = new ArrayList<>();
         String sourceId = "input-ctx-" + System.currentTimeMillis();
 
-        if (input.length() <= maxPerCall) {
-            allShards.addAll(splitWithLlm(state, input, updates));
+        // ★ Combine input + projectMeta for splitting — both contribute to prompt size.
+        // Structure the combined content so the LLM can understand the two sections
+        // and split them into meaningful shards with appropriate tags.
+        String combinedContent = buildCombinedContentForSplit(input, projectMeta);
+
+        if (combinedContent.length() <= maxPerCall) {
+            allShards.addAll(splitSegment(state, combinedContent, updates, 0));
         } else {
-            int batchCount = (int) Math.ceil((double) input.length() / maxPerCall);
-            log.info("ContextSplitAction: large input ({} chars), splitting into {} batches for LLM",
-                    input.length(), batchCount);
+            int batchCount = (int) Math.ceil((double) combinedContent.length() / maxPerCall);
+            log.info("ContextSplitAction: large context ({} chars), splitting into {} batches for LLM",
+                    combinedContent.length(), batchCount);
 
             int offset = 0;
             int batchIdx = 0;
-            while (offset < input.length()) {
-                int end = Math.min(offset + maxPerCall, input.length());
-                String chunk = input.substring(offset, end);
+            while (offset < combinedContent.length()) {
+                int end = Math.min(offset + maxPerCall, combinedContent.length());
+                String chunk = combinedContent.substring(offset, end);
 
                 log.info("ContextSplitAction: processing batch {}/{}, chars {}-{}",
                         batchIdx + 1, batchCount, offset, end);
 
                 List<ContextShardStore.ContextShard> chunkShards =
-                        splitWithLlm(state, chunk, updates);
+                        splitSegment(state, chunk, updates, batchIdx);
 
                 if (chunkShards.isEmpty()) {
-                    // LLM split failed — use fixed-size fallback chunking
+                    // Rule + LLM split failed — use fixed-size fallback chunking
                     allShards.addAll(fallbackChunkSegment(chunk, batchIdx));
                 } else {
                     // LLM split succeeded — prefix shard IDs with batch index for uniqueness
@@ -150,42 +160,82 @@ public class ContextSplitAction implements NodeAction {
         // ── Save all shards ──
         if (allShards.isEmpty()) {
             log.warn("ContextSplitAction: no shards produced, using full fallback");
-            fallbackChunkAndSave(input, projectRootHash, updates);
+            fallbackChunkAndSave(combinedContent, projectRootHash, updates);
             updates.put("contextSplitResult", "fallback");
         } else {
             Long saved = shardStore.saveAll(projectRootHash, sourceId, allShards).block();
             updates.put("contextSourceId", sourceId);
             updates.put("contextShardCount", allShards.size());
             updates.put("contextSplitResult", "split");
-            log.info("ContextSplitAction: split context into {} shards, saved {} (sourceId={})",
-                    allShards.size(), saved, sourceId);
+
+            // ★ Replace input and projectMeta with concise references when context has been split.
+            // Downstream nodes (PlanningAction, GenerateAction) will use shard summaries
+            // instead of the full input, preventing the 29万chars prompt explosion.
+            // We preserve the first 500 chars of input so the planner understands the
+            // user's intent, plus a note about available shards.
+            String inputAbbrev = input.length() > 500
+                    ? input.substring(0, 500) + "... (full content split into "
+                    + allShards.size() + " context sections)"
+                    : input;
+            updates.put("input", inputAbbrev);
+
+            // ★ Abbreviate projectMeta similarly — the full project context is now in shards.
+            if (projectMeta.length() > 500) {
+                String projectMetaAbbrev = projectMeta.substring(0, 500)
+                        + "... (full project context split into context sections)";
+                updates.put("projectMeta", projectMetaAbbrev);
+            }
+
+            log.info("ContextSplitAction: split context into {} shards, saved {} (sourceId={}). "
+                    + "Input abbreviated from {} to {} chars, projectMeta abbreviated from {} to {} chars",
+                    allShards.size(), saved, sourceId,
+                    input.length(), inputAbbrev.length(),
+                    projectMeta.length(), projectMeta.length() > 500 ? projectMeta.substring(0, 500).length() + 60 : projectMeta.length());
         }
 
         GraphExecutionLog.nodeExit(state, "contextSplit", updates);
         return updates;
     }
 
+    /**
+     * Split a segment: rule-based first (no LLM), then LLM planner, then empty for caller fallback.
+     */
+    private List<ContextShardStore.ContextShard> splitSegment(
+            OverAllState state, String segment, Map<String, Object> updates, int batchIdx) {
+        int chunkSize = fallbackChunkSize();
+        List<ContextShardStore.ContextShard> ruleShards =
+                ContextShardRuleSplitter.split(segment, "input-ctx", batchIdx, chunkSize);
+        if (ContextShardRuleSplitter.isViable(ruleShards, segment)) {
+            log.info(
+                    "ContextSplitAction: rule-based split produced {} shards for segment ({} chars), skipping LLM",
+                    ruleShards.size(),
+                    segment.length());
+            return ruleShards;
+        }
+        List<ContextShardStore.ContextShard> llmShards = splitWithLlm(state, segment, updates);
+        if (!llmShards.isEmpty()) {
+            return llmShards;
+        }
+        if (!ruleShards.isEmpty()) {
+            log.info(
+                    "ContextSplitAction: using {} rule shards as LLM fallback for segment ({} chars)",
+                    ruleShards.size(),
+                    segment.length());
+            return ruleShards;
+        }
+        return List.of();
+    }
+
     /** Attempt to split an input segment using LLM. Returns empty list on failure. */
     private List<ContextShardStore.ContextShard> splitWithLlm(OverAllState state, String segment, Map<String, Object> updates) {
         String splitPrompt = buildSplitPrompt(segment);
-        String llmResponse;
         try {
-            String modelId = (String) state.value("modelId").orElse(null);
-            String modelSourceName = (String) state.value("modelSource").orElse(null);
-            String userId = (String) state.value("userId").orElse(null);
-            ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-            llmResponse = GraphLlmHelper.streamUserPromptToSse(resolved, state, splitPrompt, updates);
-        } catch (Exception e) {
-            log.warn("ContextSplitAction: LLM call failed for segment ({} chars): {}",
-                    segment.length(), e.getMessage());
-            return List.of();
-        }
-
-        try {
+            String llmResponse =
+                    auxiliaryModelResolver.streamUserPromptToSse(
+                            state, "context-split", splitPrompt, updates);
             return parseSplitPlan(llmResponse, segment);
         } catch (Exception e) {
-            log.warn("ContextSplitAction: failed to parse LLM split plan for segment ({} chars): {}",
+            log.warn("ContextSplitAction: LLM split failed for segment ({} chars): {}",
                     segment.length(), e.getMessage());
             return List.of();
         }
@@ -276,6 +326,26 @@ public class ContextSplitAction implements NodeAction {
         if (end < 0) end = original.length();
         else end += endMarker.length();
         return original.substring(start, Math.min(end, original.length()));
+    }
+
+    /**
+     * Combine input and projectMeta into a structured document for LLM splitting.
+     * Both sections are clearly labeled so the LLM can create meaningful shards
+     * with appropriate tags (e.g. "user-request", "project-context", "sql-schema").
+     */
+    private String buildCombinedContentForSplit(String input, String projectMeta) {
+        StringBuilder sb = new StringBuilder();
+        if (!input.isBlank()) {
+            sb.append("=== USER REQUEST ===\n");
+            sb.append(input);
+            sb.append("\n");
+        }
+        if (!projectMeta.isBlank()) {
+            sb.append("\n=== PROJECT CONTEXT ===\n");
+            sb.append(projectMeta);
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 
     /** Fallback: chunk the input into fixed-size pieces with sequential tags. */

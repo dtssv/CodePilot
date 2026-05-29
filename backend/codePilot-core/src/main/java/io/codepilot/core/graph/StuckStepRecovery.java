@@ -25,7 +25,7 @@ public final class StuckStepRecovery {
   /** True when failure-retry budget is exhausted and we should show the stuck-step question. */
   public static boolean shouldEscalateToAskUser(OverAllState state) {
     int failureRetries = (int) state.value("phaseFailureRetries").orElse(0);
-    if (failureRetries < 3) {
+    if (failureRetries < GraphLoopBudget.stuckEscalationThreshold(state)) {
       return false;
     }
     if (!PhaseOutcomeHelper.rawToolsHadFailure(state)) {

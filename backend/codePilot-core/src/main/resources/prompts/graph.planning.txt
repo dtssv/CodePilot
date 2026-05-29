@@ -86,6 +86,11 @@ Do NOT rely on title wording for the engine — set intent explicitly per step.
 - Each phase title should match its step title. The engine runs ONE phase at a time (generate→apply→verify per step).
 - Do NOT collapse all steps into a single phase.
 
+[LARGE-SCALE TASKS — batch planning]
+- When the task requires generating many similar files that cannot fit in one LLM response, do NOT create one phase per file or one phase per batch. Instead, create ONE phase per logical layer or concern, and rely on the engine's batch generation mechanism (hasMore=true in generate) to produce files across multiple generate rounds within that phase.
+- Example: if the user asks to generate code for many data items (tables, APIs, configs, etc.), plan steps by logical layer (e.g. models → data access → business logic → endpoints → configuration), NOT by item batch.
+- The generate node supports hasMore=true to continue producing more files in the same phase. Each phase can run up to 10 generate rounds. Do NOT split items into separate steps/phases like "batch 1", "batch 2" etc.
+
 [PHASE MEMORY & CONTEXT — required for non-trivial tasks]
 - tags: semantic strings used to load only relevant context shards and project memories for THIS phase (e.g. module/entity names). Use distinct tags per phase.
 - memoryHints: optional extra retrieval phrases (not duplicated in tags).

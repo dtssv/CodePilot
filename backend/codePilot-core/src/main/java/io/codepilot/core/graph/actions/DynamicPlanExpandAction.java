@@ -5,13 +5,11 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.graph.ContextShardResolver;
+import io.codepilot.core.graph.GraphAuxiliaryModelResolver;
 import io.codepilot.core.graph.GraphExecutionLog;
-import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.graph.PhaseMemoryHelper;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,18 +40,18 @@ public class DynamicPlanExpandAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicPlanExpandAction.class);
 
-    private final ChatClientFactory chatClientFactory;
+    private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final io.codepilot.core.graph.ContextShardStore shardStore;
     private final io.codepilot.core.graph.PhaseAwareMemoryLoader phaseAwareMemoryLoader;
 
-    public DynamicPlanExpandAction(ChatClientFactory chatClientFactory,
+    public DynamicPlanExpandAction(GraphAuxiliaryModelResolver auxiliaryModelResolver,
                                    PromptRegistry promptRegistry,
                                    ObjectMapper mapper,
                                    io.codepilot.core.graph.ContextShardStore shardStore,
                                    io.codepilot.core.graph.PhaseAwareMemoryLoader phaseAwareMemoryLoader) {
-        this.chatClientFactory = chatClientFactory;
+        this.auxiliaryModelResolver = auxiliaryModelResolver;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.shardStore = shardStore;
@@ -109,13 +107,9 @@ public class DynamicPlanExpandAction implements NodeAction {
 
         String llmResponse;
         try {
-            String modelId = (String) state.value("modelId").orElse(null);
-            String modelSourceName = (String) state.value("modelSource").orElse(null);
-            String userId = (String) state.value("userId").orElse(null);
-            ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-
-            llmResponse = GraphLlmHelper.streamUserPromptToSse(resolved, state, expandPrompt, updates);
+            llmResponse =
+                    auxiliaryModelResolver.streamUserPromptToSse(
+                            state, "dynamic-plan-expand", expandPrompt, updates);
         } catch (Exception e) {
             log.error("DynamicPlanExpandAction: LLM call failed, creating fallback micro-phases", e);
             var fallbackPhases = createFallbackMicroPhases(nextMacroPhase, nextMacroIdx);

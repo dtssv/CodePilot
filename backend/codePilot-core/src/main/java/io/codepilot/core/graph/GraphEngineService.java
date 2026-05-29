@@ -68,6 +68,8 @@ public class GraphEngineService {
     private final GraphCheckpointStore checkpointStore;
     private final StopSignalBus stopBus;
     private final DeployDrainService deployDrainService;
+    private volatile CompiledGraph defaultCompiledGraph;
+    private volatile CompiledGraph deepResearchCompiledGraph;
 
     public GraphEngineService(
             IntakeAction intakeAction,
@@ -145,7 +147,7 @@ public class GraphEngineService {
         try {
             String template = req.policy() != null && req.policy().graphTemplate() != null
                     ? req.policy().graphTemplate() : "default";
-            var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
+            var graph = resolveGraph(template);
             var initialState = intakeAction.buildInitialState(req, userId);
             String sid = req.sessionId();
             GraphExecutionLog.runStart(
@@ -248,7 +250,7 @@ public class GraphEngineService {
                     try {
                         String template = req.policy() != null && req.policy().graphTemplate() != null
                                 ? req.policy().graphTemplate() : "default";
-                        var graph = "deep-research".equals(template) ? buildDeepResearchGraph() : buildGraph();
+                        var graph = resolveGraph(template);
 
                         // Restore state from checkpoint and merge answers
                         var restoredState = IntakeAction.restoreFromCheckpoint(snapshot, req, userId);
@@ -314,6 +316,38 @@ public class GraphEngineService {
                 });
 
         return liveSink.asFlux();
+    }
+
+    private CompiledGraph resolveGraph(String template) throws Exception {
+        if ("deep-research".equals(template)) {
+            CompiledGraph cached = deepResearchCompiledGraph;
+            if (cached != null) {
+                return cached;
+            }
+            synchronized (this) {
+                if (deepResearchCompiledGraph == null) {
+                    long started = System.currentTimeMillis();
+                    deepResearchCompiledGraph = buildDeepResearchGraph();
+                    log.info("GraphEngine compiled deep-research graph in {} ms",
+                            System.currentTimeMillis() - started);
+                }
+                return deepResearchCompiledGraph;
+            }
+        }
+
+        CompiledGraph cached = defaultCompiledGraph;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (this) {
+            if (defaultCompiledGraph == null) {
+                long started = System.currentTimeMillis();
+                defaultCompiledGraph = buildGraph();
+                log.info("GraphEngine compiled default graph in {} ms",
+                        System.currentTimeMillis() - started);
+            }
+            return defaultCompiledGraph;
+        }
     }
 
     private CompiledGraph buildGraph() throws Exception {
@@ -391,10 +425,12 @@ public class GraphEngineService {
                         "reenter", "reenter", "repair", "repair",
                         "summarize", "summarize"));
 
-        // ApplyPatch → may succeed or fail; fast-path can skip verify (C1)
+        // ApplyPatch → may succeed or fail; fast-path can skip verify (C1);
+        // batch generation routes back to generate for next batch
         graph.addConditionalEdges("applyPatch",
                 AsyncEdgeAction.edge_async(applyPatchAction::routeAfterApplyPatch),
-                Map.of("verify", "verify", "repair", "repair", "commit", "commit"));
+                Map.of("verify", "verify", "repair", "repair", "commit", "commit",
+                        "generate", "generate"));
 
         // Verify → success/fail/uncertain
         graph.addConditionalEdges("verify",
@@ -405,7 +441,8 @@ public class GraphEngineService {
         graph.addConditionalEdges("repair",
                 AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
                 Map.of("applyPatch", "applyPatch", "askUser", "askUser",
-                        "commit", "commit", "generate", "generate"));
+                        "commit", "commit", "generate", "generate",
+                        "repair", "repair", "summarize", "summarize"));
 
         // Gather → Reenter
         graph.addEdge("gather", "reenter");
@@ -545,7 +582,8 @@ public class GraphEngineService {
         graph.addConditionalEdges("repair",
                 AsyncEdgeAction.edge_async(repairAction::routeAfterRepair),
                 Map.of("applyPatch", "gather", "askUser", "askUser",
-                        "commit", "commit", "generate", "generate"));
+                        "commit", "commit", "generate", "generate",
+                        "repair", "repair", "summarize", "summarize"));
 
         // Synthesize → summarize → finalize
         graph.addEdge("synthesize", "summarize");

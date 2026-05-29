@@ -38,13 +38,19 @@ public class GraphEngineProperties {
    * Maximum number of generate passes per phase before forcing commit.
    * Default 10; increase for complex phases that need multiple LLM calls.
    */
-  private int maxGeneratePassesPerPhase = 10;
+  private int maxGeneratePassesPerPhase = 5;
 
   /**
    * Maximum number of phase failure repair attempts before abandoning.
-   * Default 10; increase for complex tasks where more retries are acceptable.
+   * Default 4; increase for complex tasks where more retries are acceptable.
    */
-  private int maxPhaseFailureAttempts = 10;
+  private int maxPhaseFailureAttempts = 4;
+
+  /**
+   * Maximum repair-node invocations per phase (verify/repair loop).
+   * Default 2; separate from {@link #maxPhaseFailureAttempts}.
+   */
+  private int maxRepairAttemptsPerPhase = 2;
 
   /**
    * Threshold of completed phases beyond which state archiving is triggered.
@@ -76,6 +82,21 @@ public class GraphEngineProperties {
 
   /** Max chars for shard summary section injected into the planning prompt. */
   private int planningShardSummaryMaxChars = 32000;
+
+  /**
+   * Optional model group/custom model ID for auxiliary tasks (memory classify, context split,
+   * search evaluate). Blank = use the session's primary model.
+   */
+  private String auxiliaryModelId = "";
+
+  /** {@link io.codepilot.core.model.ModelSource} name for {@link #auxiliaryModelId}, or blank. */
+  private String auxiliaryModelSource = "";
+
+  /** TTL for server-side gather result cache entries (minutes). */
+  private int gatherCacheTtlMinutes = 30;
+
+  /** Max entries in the gather result cache per JVM. */
+  private int gatherCacheMaxEntries = 512;
 
   public int getSchedulerThreadCap() {
     return schedulerThreadCap;
@@ -133,6 +154,14 @@ public class GraphEngineProperties {
     this.maxPhaseFailureAttempts = maxPhaseFailureAttempts;
   }
 
+  public int getMaxRepairAttemptsPerPhase() {
+    return maxRepairAttemptsPerPhase;
+  }
+
+  public void setMaxRepairAttemptsPerPhase(int maxRepairAttemptsPerPhase) {
+    this.maxRepairAttemptsPerPhase = maxRepairAttemptsPerPhase;
+  }
+
   public int getStateArchiveThreshold() {
     return stateArchiveThreshold;
   }
@@ -179,5 +208,37 @@ public class GraphEngineProperties {
 
   public void setPlanningShardSummaryMaxChars(int planningShardSummaryMaxChars) {
     this.planningShardSummaryMaxChars = planningShardSummaryMaxChars;
+  }
+
+  public String getAuxiliaryModelId() {
+    return auxiliaryModelId;
+  }
+
+  public void setAuxiliaryModelId(String auxiliaryModelId) {
+    this.auxiliaryModelId = auxiliaryModelId;
+  }
+
+  public String getAuxiliaryModelSource() {
+    return auxiliaryModelSource;
+  }
+
+  public void setAuxiliaryModelSource(String auxiliaryModelSource) {
+    this.auxiliaryModelSource = auxiliaryModelSource;
+  }
+
+  public int getGatherCacheTtlMinutes() {
+    return gatherCacheTtlMinutes;
+  }
+
+  public void setGatherCacheTtlMinutes(int gatherCacheTtlMinutes) {
+    this.gatherCacheTtlMinutes = gatherCacheTtlMinutes;
+  }
+
+  public int getGatherCacheMaxEntries() {
+    return gatherCacheMaxEntries;
+  }
+
+  public void setGatherCacheMaxEntries(int gatherCacheMaxEntries) {
+    this.gatherCacheMaxEntries = gatherCacheMaxEntries;
   }
 }

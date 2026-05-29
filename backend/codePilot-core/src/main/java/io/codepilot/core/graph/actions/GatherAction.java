@@ -87,7 +87,9 @@ public class GatherAction implements NodeAction {
         for (Map<String, Object> serverReq : serverRequests) {
             serverReq.putIfAbsent("sessionId", currentSessionId);
         }
-        var serverResults = dispatcher.executeServerSide(serverRequests);
+        String projectRootHash = (String) state.value("projectRootHash").orElse("");
+        var serverResults =
+                dispatcher.executeServerSide(serverRequests, projectRootHash, currentSessionId);
         for (var result : serverResults) {
             String key = result.get("id") != null ? (String) result.get("id") : UUID.randomUUID().toString();
             gatheredInfo.put(key, result);

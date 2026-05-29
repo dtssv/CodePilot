@@ -213,10 +213,10 @@ public final class GraphStreamProcessor {
     int endAt = GraphMarkerSanitizer.indexOfEndMarker(pending);
     if (endAt < 0) {
       if (MARKER_CONTENT.equals(activeMarker) && !pending.isEmpty()) {
-        if (!agentContentStreamed) {
-          emitPlain(pending.toString());
-          agentContentStreamed = true;
-        }
+        // ★ Stream AGENT_CONTENT continuously (not just the first block)
+        // so the user sees incremental progress during long generate phases
+        emitPlain(pending.toString());
+        agentContentStreamed = true;
         pending.setLength(0);
       } else if (!pending.isEmpty()) {
         markerBody.append(pending);
@@ -249,7 +249,9 @@ public final class GraphStreamProcessor {
     markerBody.setLength(0);
     String phaseId = (String) state.value("phaseCursor").orElse("");
     if (MARKER_CONTENT.equals(activeMarker)) {
-      if (!body.isEmpty() && !agentContentStreamed) {
+      // ★ Stream AGENT_CONTENT continuously (not just the first block)
+      // so the user sees incremental progress during long generate phases
+      if (!body.isEmpty()) {
         emitPlain(body);
         agentContentStreamed = true;
       }

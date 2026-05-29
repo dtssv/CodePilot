@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.memory.ProtectionLevel;
 import io.codepilot.core.memory.StructuredMemory;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.run.GraphEngineProperties;
 import java.util.ArrayList;
@@ -24,17 +22,17 @@ public class GraphMemoryCompactHelper {
 
   private static final Logger log = LoggerFactory.getLogger(GraphMemoryCompactHelper.class);
 
-  private final ChatClientFactory chatClientFactory;
+  private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
   private final PromptRegistry promptRegistry;
   private final ObjectMapper mapper;
   private final GraphEngineProperties graphProperties;
 
   public GraphMemoryCompactHelper(
-      ChatClientFactory chatClientFactory,
+      GraphAuxiliaryModelResolver auxiliaryModelResolver,
       PromptRegistry promptRegistry,
       ObjectMapper mapper,
       GraphEngineProperties graphProperties) {
-    this.chatClientFactory = chatClientFactory;
+    this.auxiliaryModelResolver = auxiliaryModelResolver;
     this.promptRegistry = promptRegistry;
     this.mapper = mapper;
     this.graphProperties = graphProperties;
@@ -106,15 +104,7 @@ public class GraphMemoryCompactHelper {
             .replace("{{memories}}", memText.toString())
             .replace("{{maxChars}}", String.valueOf(maxChars));
     try {
-      String modelId = (String) state.value("modelId").orElse(null);
-      String modelSourceName = (String) state.value("modelSource").orElse(null);
-      String userId = (String) state.value("userId").orElse(null);
-      ModelSource modelSource =
-          modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-      var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-      GraphExecutionLog.llmRequest(state, "memory-compact", prompt);
-      String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
-      GraphExecutionLog.llmResponse(state, "memory-compact", response, Map.of());
+      String response = auxiliaryModelResolver.completeUserPrompt(state, "memory-compact", prompt);
       String json = LlmJsonExtract.parseableJson(response);
       JsonNode root = mapper.readTree(json);
       String summary = root.path("summary").asText("").trim();

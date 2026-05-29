@@ -1,11 +1,57 @@
 package io.codepilot.core.graph;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Formats {@code gatheredInfo} entries for LLM context (generate / reenter). */
 public final class GatheredInfoFormatter {
 
   private GatheredInfoFormatter() {}
+
+  /**
+   * Format gathered info within a character budget. Newer entries (later in the map) are
+   * preferred when the full payload does not fit.
+   */
+  @SuppressWarnings("unchecked")
+  public static String formatWithinBudget(Map<String, Object> gatheredInfo, int maxChars) {
+    if (gatheredInfo == null || gatheredInfo.isEmpty()) {
+      return "";
+    }
+    if (maxChars <= 0) {
+      return format(gatheredInfo);
+    }
+    String full = format(gatheredInfo);
+    if (full.length() <= maxChars) {
+      return full;
+    }
+
+    List<Map.Entry<String, Object>> entries = new ArrayList<>(gatheredInfo.entrySet());
+    Collections.reverse(entries);
+    Map<String, Object> subset = new LinkedHashMap<>();
+    for (var entry : entries) {
+      subset.put(entry.getKey(), entry.getValue());
+      if (format(subset).length() > maxChars) {
+        subset.remove(entry.getKey());
+        break;
+      }
+    }
+
+    if (subset.isEmpty()) {
+      return truncate(full, maxChars);
+    }
+
+    String partial = format(subset);
+    if (subset.size() < gatheredInfo.size()) {
+      partial +=
+          "\n... ("
+              + (gatheredInfo.size() - subset.size())
+              + " older gathered entries omitted for prompt budget)\n";
+    }
+    return partial;
+  }
 
   @SuppressWarnings("unchecked")
   public static String format(Map<String, Object> gatheredInfo) {
@@ -78,10 +124,10 @@ public final class GatheredInfoFormatter {
       return false;
     }
     Object result = map.get("result");
-    if ("shell.exec".equals(String.valueOf(map.get("kind"))) && result instanceof Map<?, ?> shell) {
-      Object exit = shell.get("exitCode");
-      int code = exit instanceof Number n ? n.intValue() : -1;
-      return code == 0 && !Boolean.TRUE.equals(shell.get("timedOut"));
+    if ("shell.exec".equals(String.valueOf(map.get("kind"))) && result instanceof Map<?, ?>) {
+      // Engineering layer does not infer: shell.exec with a result is considered
+      // succeeded at the execution level. The model interprets exitCode/timedOut.
+      return true;
     }
     return result != null;
   }

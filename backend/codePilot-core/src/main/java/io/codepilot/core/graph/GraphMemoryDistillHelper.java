@@ -7,8 +7,6 @@ import io.codepilot.core.memory.MemoryLayer;
 import io.codepilot.core.memory.MemoryType;
 import io.codepilot.core.memory.ProtectionLevel;
 import io.codepilot.core.memory.StructuredMemory;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,13 +26,15 @@ public class GraphMemoryDistillHelper {
   private static final int MAX_LLM_CANDIDATES = 5;
   private static final int MAX_RULE_CANDIDATES = 3;
 
-  private final ChatClientFactory chatClientFactory;
+  private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
   private final PromptRegistry promptRegistry;
   private final ObjectMapper mapper;
 
   public GraphMemoryDistillHelper(
-      ChatClientFactory chatClientFactory, PromptRegistry promptRegistry, ObjectMapper mapper) {
-    this.chatClientFactory = chatClientFactory;
+      GraphAuxiliaryModelResolver auxiliaryModelResolver,
+      PromptRegistry promptRegistry,
+      ObjectMapper mapper) {
+    this.auxiliaryModelResolver = auxiliaryModelResolver;
     this.promptRegistry = promptRegistry;
     this.mapper = mapper;
   }
@@ -74,16 +74,7 @@ public class GraphMemoryDistillHelper {
             .replace("{{input}}", abbreviate(input, 500))
             .replace("{{gathered}}", gatheredText);
 
-    String modelId = (String) state.value("modelId").orElse(null);
-    String modelSourceName = (String) state.value("modelSource").orElse(null);
-    String userId = (String) state.value("userId").orElse(null);
-    ModelSource modelSource =
-        modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-    var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-
-    GraphExecutionLog.llmRequest(state, "memory-distill", prompt);
-    String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
-    GraphExecutionLog.llmResponse(state, "memory-distill", response, Map.of());
+    String response = auxiliaryModelResolver.completeUserPrompt(state, "memory-distill", prompt);
 
     return parseCandidates(response, phaseId);
   }

@@ -1758,6 +1758,10 @@ class CefChatPanel(
                         adapter?.onAgentRunning(payload.path("text").asText(null))
                     }
 
+                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
+                    }
+
                     override fun onRateLimited(
                         code: Int,
                         message: String,
@@ -2418,6 +2422,11 @@ class CefChatPanel(
                         if (isStaleResumeStream()) return
                         dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
                         adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
+
+                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
                     }
 
                     override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -4137,8 +4146,9 @@ class CefChatPanel(
         val hasToken = settings.accessToken() != null
         val hasRefreshToken = settings.refreshToken() != null
         val hasDevToken = settings.state.devToken.isNotBlank()
+        val hasDeviceSecret = settings.deviceSecret() != null
         log.info(
-            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, devToken=${if (hasDevToken) {
+            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, hasDeviceSecret=$hasDeviceSecret, devToken=${if (hasDevToken) {
                 settings.state.devToken.take(
                     8,
                 ) + "..."
@@ -4155,6 +4165,21 @@ class CefChatPanel(
             } else {
                 dispatchToWeb("auth_state", mapOf("authenticated" to false))
             }
+            return
+        }
+
+        // ★ Cross-IDE / session integrity check:
+        // If we have accessToken/refreshToken but no deviceSecret, the login state is incomplete.
+        // This typically happens when another IDE (e.g. CLion) logged in and shared tokens via
+        // PasswordSafe, but the deviceSecret was stored under a different keychain entry or is
+        // otherwise unavailable. Without deviceSecret we cannot sign requests, and devToken
+        // bypass may not work either. Force a clean re-login.
+        if (!hasDeviceSecret && !hasDevToken) {
+            log.warn("[Auth] checkAuth: has tokens but no deviceSecret and no devToken — session incomplete, clearing and showing login")
+            settings.setAccessToken(null)
+            settings.setRefreshToken(null)
+            settings.setDeviceSecret(null)
+            dispatchToWeb("auth_state", mapOf("authenticated" to false))
             return
         }
 

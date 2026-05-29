@@ -90,6 +90,7 @@ export type PluginEventType =
     | 'agent_reading'
     | 'agent_writing'
     | 'agent_running'
+    | 'agent_progress'
     | 'graph_verify'
     | 'graph_phase_done'
     | 'graph_repair_plan'

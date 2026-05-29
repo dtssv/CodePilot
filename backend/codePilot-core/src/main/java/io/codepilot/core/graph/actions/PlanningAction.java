@@ -5,8 +5,8 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.codepilot.core.graph.GraphAuxiliaryModelResolver;
 import io.codepilot.core.graph.GraphExecutionLog;
-import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.GraphStreamProcessor;
 import io.codepilot.core.graph.GraphUiEmitter;
@@ -16,8 +16,6 @@ import io.codepilot.core.graph.UserPlanProgressHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
 import io.codepilot.core.graph.skill.GraphSkillNode;
 import io.codepilot.core.graph.skill.GraphSkillSupport;
-import io.codepilot.core.model.ChatClientFactory;
-import io.codepilot.core.model.ModelSource;
 import io.codepilot.core.prompt.PromptRegistry;
 import io.codepilot.core.sse.SseEvents;
 import org.slf4j.Logger;
@@ -44,7 +42,7 @@ public class PlanningAction implements NodeAction {
 
     private static final Logger log = LoggerFactory.getLogger(PlanningAction.class);
 
-    private final ChatClientFactory chatClientFactory;
+    private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
     private final PromptRegistry promptRegistry;
     private final ObjectMapper mapper;
     private final GraphSkillSupport graphSkillSupport;
@@ -53,14 +51,14 @@ public class PlanningAction implements NodeAction {
     private final io.codepilot.core.run.GraphEngineProperties graphProperties;
 
     public PlanningAction(
-            ChatClientFactory chatClientFactory,
+            GraphAuxiliaryModelResolver auxiliaryModelResolver,
             PromptRegistry promptRegistry,
             ObjectMapper mapper,
             GraphSkillSupport graphSkillSupport,
             io.codepilot.core.graph.ContextShardStore shardStore,
             io.codepilot.core.graph.PhaseAwareMemoryLoader phaseAwareMemoryLoader,
             io.codepilot.core.run.GraphEngineProperties graphProperties) {
-        this.chatClientFactory = chatClientFactory;
+        this.auxiliaryModelResolver = auxiliaryModelResolver;
         this.promptRegistry = promptRegistry;
         this.mapper = mapper;
         this.graphSkillSupport = graphSkillSupport;
@@ -91,14 +89,9 @@ public class PlanningAction implements NodeAction {
         // ── Call LLM (marker-aware streaming) ──
         String llmResponse;
         try {
-            String modelId = (String) state.value("modelId").orElse(null);
-            String modelSourceName = (String) state.value("modelSource").orElse(null);
-            String userId = (String) state.value("userId").orElse(null);
-            ModelSource modelSource = modelSourceName != null ? ModelSource.valueOf(modelSourceName) : null;
-            log.info("PlanningAction resolving model: modelId={}, modelSource={}, userId={}", modelId, modelSourceName, userId);
-            var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-
-            llmResponse = GraphLlmHelper.streamUserPromptToSse(resolved, state, planningPrompt, updates);
+            llmResponse =
+                    auxiliaryModelResolver.streamUserPromptToSse(
+                            state, "planning", planningPrompt, updates);
         } catch (Exception e) {
             log.error("LLM planning call failed", e);
             var fallback = buildFallbackPlan(state, input, updates);

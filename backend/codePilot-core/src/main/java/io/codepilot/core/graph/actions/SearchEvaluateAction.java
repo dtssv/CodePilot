@@ -5,11 +5,10 @@ import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.core.graph.GatheredInfoFormatter;
+import io.codepilot.core.graph.GraphAuxiliaryModelResolver;
 import io.codepilot.core.graph.GraphExecutionLog;
-import io.codepilot.core.graph.GraphLlmHelper;
 import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.graph.LlmJsonExtract;
-import io.codepilot.core.model.ChatClientFactory;
 import io.codepilot.core.sse.SseEvents;
 import org.springframework.stereotype.Component;
 
@@ -32,10 +31,10 @@ import java.util.*;
 public class SearchEvaluateAction implements NodeAction {
 
     private static final int MAX_SEARCH_ROUNDS = 5;
-    private final ChatClientFactory chatClientFactory;
+    private final GraphAuxiliaryModelResolver auxiliaryModelResolver;
 
-    public SearchEvaluateAction(ChatClientFactory chatClientFactory) {
-        this.chatClientFactory = chatClientFactory;
+    public SearchEvaluateAction(GraphAuxiliaryModelResolver auxiliaryModelResolver) {
+        this.auxiliaryModelResolver = auxiliaryModelResolver;
     }
 
     @Override
@@ -106,16 +105,9 @@ public class SearchEvaluateAction implements NodeAction {
                     + "- askUser: the goal is ambiguous or conflicting; request clarification in missing[].\n";
 
             try {
-                String modelId = (String) state.value("modelId").orElse(null);
-                String modelSourceName = (String) state.value("modelSource").orElse(null);
-                String userId = (String) state.value("userId").orElse(null);
-                io.codepilot.core.model.ModelSource modelSource =
-                    modelSourceName != null ? io.codepilot.core.model.ModelSource.valueOf(modelSourceName) : null;
-
-                var resolved = chatClientFactory.resolve(modelId, modelSource, userId);
-                GraphExecutionLog.llmRequest(state, "deep-research.evaluate", prompt);
-                String response = GraphLlmHelper.completeUserPrompt(resolved, state, prompt);
-                GraphExecutionLog.llmResponse(state, "deep-research.evaluate", response, Map.of());
+                String response =
+                        auxiliaryModelResolver.completeUserPrompt(
+                                state, "deep-research.evaluate", prompt);
 
                 String json = LlmJsonExtract.parseableJson(response);
                 ObjectMapper mapper = new ObjectMapper();

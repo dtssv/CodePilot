@@ -105,6 +105,7 @@ public class ChatClientFactory {
      *   <li>Decrements concurrency counter</li>
      *   <li>On success: records token usage for TPM tracking; resets circuit-breaker failures</li>
      *   <li>On failure: increments circuit-breaker failure counter (may open the breaker)</li>
+     *   <li>On 429 rate-limit: opens circuit-breaker immediately (quota exhausted)</li>
      * </ul>
      *
      * @param success    whether the LLM call succeeded
@@ -118,6 +119,18 @@ public class ChatClientFactory {
         } else {
           loadBalancer.recordFailure(appKeyId);
         }
+      }
+    }
+
+    /**
+     * Call after a 429 rate-limit response to open the circuit-breaker immediately.
+     * This signals that the appKey's quota is exhausted and further requests should
+     * be routed to other keys in the group.
+     */
+    public void endRequestRateLimited() {
+      if (appKeyId != null) {
+        loadBalancer.release(appKeyId);
+        loadBalancer.recordRateLimit(appKeyId);
       }
     }
   }
