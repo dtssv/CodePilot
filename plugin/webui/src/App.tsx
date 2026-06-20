@@ -5,6 +5,7 @@ import type { ContextChipData } from './components/ContextChip';
 import { AppHeader } from './components/layout/AppHeader';
 import { ChatInputSection } from './components/layout/ChatInputSection';
 import { ChatMainArea } from './components/layout/ChatMainArea';
+import { MemoryCompactionBanner } from './components/layout/MemoryCompactionBanner';
 import { MessageQueueBanner } from './components/layout/MessageQueueBanner';
 import { LoginPage } from './components/LoginPage';
 import { McpConfirmDialog } from './components/mcp/McpConfirmDialog';
@@ -258,6 +259,7 @@ onSendBlocked: setSendError,
                     {activeTab === 'chat' && (
                         <div className="input-section">
                             <MessageQueueBanner />
+                            <MemoryCompactionBanner />
                             <ChatInputSection
                                 contextTokens={contextTokens}
                                 totalTokens={totalTokens}

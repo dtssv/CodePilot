@@ -1,0 +1,100 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.opentelemetry.semconv",
+    "module": "opentelemetry-semconv",
+    "version": "1.41.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "9.5.0"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-semconv-1.41.0.jar",
+          "url": "opentelemetry-semconv-1.41.0.jar",
+          "size": 19992,
+          "sha512": "2a293aaa5d01e53eba166104a789a086f460c28462395752bbe2ba6ad865761e0f4a82e5f2d7dd8dd73049b1e9fbf9c39688fbbd05ef5a420cc39ac5fcd5ec3a",
+          "sha256": "da62e2b8a413d0469db77ed5eca1b9d4c2e4a24844533038145924a7a238909e",
+          "sha1": "bb726d13dbdf41d18560a82f2266a2f07f6114e2",
+          "md5": "af9e26bc9082d8739158ebce1c6205aa"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-semconv-1.41.0.jar",
+          "url": "opentelemetry-semconv-1.41.0.jar",
+          "size": 19992,
+          "sha512": "2a293aaa5d01e53eba166104a789a086f460c28462395752bbe2ba6ad865761e0f4a82e5f2d7dd8dd73049b1e9fbf9c39688fbbd05ef5a420cc39ac5fcd5ec3a",
+          "sha256": "da62e2b8a413d0469db77ed5eca1b9d4c2e4a24844533038145924a7a238909e",
+          "sha1": "bb726d13dbdf41d18560a82f2266a2f07f6114e2",
+          "md5": "af9e26bc9082d8739158ebce1c6205aa"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-semconv-1.41.0-javadoc.jar",
+          "url": "opentelemetry-semconv-1.41.0-javadoc.jar",
+          "size": 178474,
+          "sha512": "0575fb092d41e75fbf74c9265e68ef184e3ae9e84efde19765ea7320e5a6f9f6f8bcc35b12482832627e7971de70016bb3624c7d6c1b6fbce4fb552d21520dfc",
+          "sha256": "33723c8f0817940313e294595afe96c487e24af8b1921aa8ee9b4fed7291d092",
+          "sha1": "cde0dbd10c618c7482cf96fa2bf69f785ae77db6",
+          "md5": "67e01203c0b78c8d41236fcfeef259e9"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-semconv-1.41.0-sources.jar",
+          "url": "opentelemetry-semconv-1.41.0-sources.jar",
+          "size": 23090,
+          "sha512": "0a5ea3adad0e8cc2647ebde8dd9e255e41cbefadf2f5396df6c7a360902daaea41660101b6e844afdccae33f3bb8857798786162e78d53b0f4cfce57a75663ed",
+          "sha256": "16df2ccb2ba19532c0e5f9f3f0dcf9b6d5887457e73018dbe1649994eb797f55",
+          "sha1": "71df4cfd3a1c314335be57a822d0503f374d548c",
+          "md5": "b3e348bfae1db08338855a067ca24830"
+        }
+      ]
+    }
+  ]
+}

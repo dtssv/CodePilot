@@ -1,0 +1,100 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "com.knuddels",
+    "module": "jtokkit",
+    "version": "1.1.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "files": [
+        {
+          "name": "jtokkit-1.1.0.jar",
+          "url": "jtokkit-1.1.0.jar",
+          "size": 3246331,
+          "sha512": "6bd471e49d2c07b102a3c102684a0144caae8813a3e522ff034375b4c425bc3afb08f56287e48846dd544da8a9d94b53dea8daf68a3006872b2690aaf9eb066d",
+          "sha256": "1501ce0259ab897c6746ccfafa1d208acd404fb17e1ac62e157172f2678b1183",
+          "sha1": "b7370f801db3eb8c7c6a2c2c06231909ac6de0b0",
+          "md5": "39b665048d25ad6a8aa19ba7b2dbd7b7"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "jtokkit-1.1.0.jar",
+          "url": "jtokkit-1.1.0.jar",
+          "size": 3246331,
+          "sha512": "6bd471e49d2c07b102a3c102684a0144caae8813a3e522ff034375b4c425bc3afb08f56287e48846dd544da8a9d94b53dea8daf68a3006872b2690aaf9eb066d",
+          "sha256": "1501ce0259ab897c6746ccfafa1d208acd404fb17e1ac62e157172f2678b1183",
+          "sha1": "b7370f801db3eb8c7c6a2c2c06231909ac6de0b0",
+          "md5": "39b665048d25ad6a8aa19ba7b2dbd7b7"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "jtokkit-1.1.0-sources.jar",
+          "url": "jtokkit-1.1.0-sources.jar",
+          "size": 3229356,
+          "sha512": "b9598055968c63fa4b887d89420be69bc7dcf919627949f4913cd5bf19c89f597d0df95ca0d44332c2b5def989f06fe758675e14d93e929875655dd6bf4fcd76",
+          "sha256": "8348bdd4e1eed650d45a7c2092c261e894c68d90d900313051d944c3c02267df",
+          "sha1": "6db56d331f7b6aad85726dfe229ab2ef9fc4b0ac",
+          "md5": "1c6b2628b5b7e1b1880c24310ea5a260"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "jtokkit-1.1.0-javadoc.jar",
+          "url": "jtokkit-1.1.0-javadoc.jar",
+          "size": 129012,
+          "sha512": "791b9e2c74c6a32184339a28f9c3a4366d512ed98dfc84b347d656aa5e43bbbe1f76046ff180825df05db9f2355ec3df8c9245edb0ae320e1253b076b973ddd3",
+          "sha256": "d31756d7653adcf7a47fe4ef0cdcfbb0c2f0031b0bdeffb8cc3ca91c506eed52",
+          "sha1": "0f93b15e0a91985b8dd7ca3e87409bd3b7aaf2f8",
+          "md5": "2a02cb46bc205ccf9da1bf3ab830f2c4"
+        }
+      ]
+    }
+  ]
+}

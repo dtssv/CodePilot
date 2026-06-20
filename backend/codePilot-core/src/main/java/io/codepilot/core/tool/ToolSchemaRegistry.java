@@ -3,6 +3,7 @@ package io.codepilot.core.tool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.codepilot.core.graph.MemoryContentClassifier;
 import jakarta.annotation.PostConstruct;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -22,9 +23,16 @@ public class ToolSchemaRegistry {
 
   private final ObjectMapper mapper;
   private final Map<String, ObjectNode> tools = new LinkedHashMap<>();
+  /** Memory classification profile per tool name. */
+  private final Map<String, ToolMemoryProfile> memoryProfiles = new LinkedHashMap<>();
 
   public ToolSchemaRegistry(ObjectMapper mapper) {
     this.mapper = mapper;
+  }
+
+  /** Return the memory profile for a tool, or {@link ToolMemoryProfile#NOT_WORTHY} if unknown. */
+  public ToolMemoryProfile getMemoryProfile(String toolName) {
+    return memoryProfiles.getOrDefault(toolName, ToolMemoryProfile.NOT_WORTHY);
   }
 
   @PostConstruct
@@ -38,7 +46,8 @@ public class ToolSchemaRegistry {
             required("path"),
             optionalIntRange("range.startLine"),
             optionalIntRange("range.endLine"),
-            optionalInt("maxBytes", 262_144)));
+            optionalInt("maxBytes", 262_144)),
+        ToolMemoryProfile.ARCHITECTURE);
 
     add(
         "fs.list",
@@ -59,7 +68,8 @@ public class ToolSchemaRegistry {
         "PSI outline (classes / methods / fields) of a single file.",
         "client",
         "low",
-        params(required("path")));
+        params(required("path")),
+        ToolMemoryProfile.ARCHITECTURE);
 
     add(
         "fs.create",
@@ -115,7 +125,8 @@ public class ToolSchemaRegistry {
             optionalString("cwd"),
             optionalInt("timeoutMs", 60_000),
             optionalEnum("osHint", "windows", "macos", "linux"),
-            optionalObject("env")));
+            optionalObject("env"),
+            optionalEnum("purpose", "compile", "run", "probe", "configure", "other")));
 
     add(
         "plan.show",
@@ -130,6 +141,9 @@ public class ToolSchemaRegistry {
         "server",
         "low",
         params(required("query"), optionalInt("topK", 8)));
+
+    // Wire tool memory profiles into the classifier
+    MemoryContentClassifier.init(this::getMemoryProfile);
   }
 
   /**
@@ -195,6 +209,11 @@ public class ToolSchemaRegistry {
   }
 
   private void add(String name, String desc, String executor, String risk, ObjectNode params) {
+    add(name, desc, executor, risk, params, ToolMemoryProfile.NOT_WORTHY);
+  }
+
+  private void add(String name, String desc, String executor, String risk,
+                    ObjectNode params, ToolMemoryProfile profile) {
     ObjectNode node = mapper.createObjectNode();
     node.put("name", name);
     node.put("description", desc);
@@ -202,6 +221,7 @@ public class ToolSchemaRegistry {
     node.put("executor", executor);
     node.put("risk", risk);
     tools.put(name, node);
+    memoryProfiles.put(name, profile);
   }
 
   // -------- tiny Schema builders to keep the registration table readable -------- //

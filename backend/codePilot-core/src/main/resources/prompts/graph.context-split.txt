@@ -1,0 +1,30 @@
+You are planning how to split a large input into retrievable shards for a multi-phase task.
+
+The content is provided below. Analyze it and return a JSON with a "splitPlan" array.
+Each element describes one shard:
+- id: unique string identifier (e.g., "shard_user_table")
+- tags: array of semantic tags for retrieval — YOU decide these based on the content's domain
+  (e.g., for a database-related section: ["user", "table-definition", "entity"];
+   for an API section: ["payment", "api", "controller"];
+   for a configuration section: ["config", "environment"])
+- contentType: type hint (e.g., "table_definition", "api_spec", "module_description", "configuration")
+- summary: a concise 1-2 sentence summary of this shard's content. This summary is used
+  when the full content exceeds the LLM context budget, allowing downstream nodes to inject
+  a compact summary instead of dropping the shard entirely. Be specific: include key names,
+  counts, and relationships.
+- contentStartMarker: a unique substring from the content that marks where this shard's content begins
+- contentEndMarker: a unique substring that marks where this shard's content ends
+- tokenEstimate: rough token count for this shard's content
+
+Rules:
+1. Each shard should be self-contained — someone reading only this shard can understand its meaning
+2. Tags must be specific enough for precise retrieval (avoid generic tags like "document" or "content")
+3. Every major concept/entity/module in the content should have its own shard
+4. Shards should not overlap — each part of the content belongs to exactly one shard
+5. The sum of all tokenEstimate values should approximate the total size
+
+Return ONLY the JSON with "splitPlan" array. No other text.
+
+=== CONTENT START ===
+%s
+=== CONTENT END ===

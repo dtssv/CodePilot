@@ -1,0 +1,172 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "dev.equo.ide",
+    "module": "solstice",
+    "version": "1.7.5",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.1.1"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 11,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "org.slf4j",
+          "module": "slf4j-api",
+          "version": {
+            "requires": "1.7.36"
+          }
+        },
+        {
+          "group": "com.diffplug.durian",
+          "module": "durian-swt.os",
+          "version": {
+            "requires": "4.2.2"
+          }
+        },
+        {
+          "group": "org.eclipse.platform",
+          "module": "org.eclipse.osgi",
+          "version": {
+            "requires": "3.18.300"
+          },
+          "excludes": [
+            {
+              "group": "*",
+              "module": "*"
+            }
+          ]
+        }
+      ],
+      "files": [
+        {
+          "name": "solstice-1.7.5.jar",
+          "url": "solstice-1.7.5.jar",
+          "size": 410586,
+          "sha512": "88f92f7a313d6929aa535cf5ac2ba85887002fa8102897ba670c6e59bb721d4338495d1fa126b6b9400a40a3587c2896b4441eca7e4f9976484f9ab9822368d1",
+          "sha256": "06e14bc43acc331dab6b5ea201fc67364ed123f982c85fa5131f0817ed65ae4f",
+          "sha1": "2e1cb3018d544c836124ae08b6ee10a202d7c42f",
+          "md5": "0645eeea72a55cc89405bcc444f526e9"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 11,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.tukaani",
+          "module": "xz",
+          "version": {
+            "requires": "1.9"
+          }
+        },
+        {
+          "group": "com.squareup.okhttp3",
+          "module": "okhttp",
+          "version": {
+            "requires": "4.12.0"
+          }
+        },
+        {
+          "group": "org.slf4j",
+          "module": "slf4j-api",
+          "version": {
+            "requires": "1.7.36"
+          }
+        },
+        {
+          "group": "com.diffplug.durian",
+          "module": "durian-swt.os",
+          "version": {
+            "requires": "4.2.2"
+          }
+        },
+        {
+          "group": "org.eclipse.platform",
+          "module": "org.eclipse.osgi",
+          "version": {
+            "requires": "3.18.300"
+          },
+          "excludes": [
+            {
+              "group": "*",
+              "module": "*"
+            }
+          ]
+        }
+      ],
+      "files": [
+        {
+          "name": "solstice-1.7.5.jar",
+          "url": "solstice-1.7.5.jar",
+          "size": 410586,
+          "sha512": "88f92f7a313d6929aa535cf5ac2ba85887002fa8102897ba670c6e59bb721d4338495d1fa126b6b9400a40a3587c2896b4441eca7e4f9976484f9ab9822368d1",
+          "sha256": "06e14bc43acc331dab6b5ea201fc67364ed123f982c85fa5131f0817ed65ae4f",
+          "sha1": "2e1cb3018d544c836124ae08b6ee10a202d7c42f",
+          "md5": "0645eeea72a55cc89405bcc444f526e9"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "solstice-1.7.5-javadoc.jar",
+          "url": "solstice-1.7.5-javadoc.jar",
+          "size": 545774,
+          "sha512": "4b60213c76364784f7ba8760cb7b0ca013ec30aa7a4d2ad1edaac1c063e5c22dd0c29bd43e35e2c7b9869468cf03ee9c691b542a27a3f1857054c7231e1f433d",
+          "sha256": "8a53586f7f8ad86e650d387ea3bcd8f8203fbae6de6d1491744dbf0ccdf008c9",
+          "sha1": "7f787682a8180ef4278ea3aaee9e4fb20468b013",
+          "md5": "53db5857d653932a792669bfb5de2300"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "solstice-1.7.5-sources.jar",
+          "url": "solstice-1.7.5-sources.jar",
+          "size": 227149,
+          "sha512": "fb166a09145c4eb9d44b4ddf8545455f06c153cb8142cf906742a209e55795985eff31071d971f561cffd3240cd9151664f9c6a7c043915840696660b96536d2",
+          "sha256": "4a2790a0d89138e29ecb530f0da612771dc52a36c47bc667a18412cf69213d41",
+          "sha1": "3fbd6ae60d261ce8ce2fee741b071bfdb5f45f1a",
+          "md5": "f57bfa90006a98468241c7d7de1440a2"
+        }
+      ]
+    }
+  ]
+}

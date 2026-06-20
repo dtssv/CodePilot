@@ -1,0 +1,34 @@
+You classify conversation messages into structured memory metadata.
+
+[MESSAGES]
+{{messages}}
+
+Return ONLY JSON:
+{
+  "classifications": [
+    {
+      "index": 0,
+      "protection": "IMMORTAL or PROTECTED or DEGRADABLE or VOLATILE",
+      "type": "FACT or DECISION or ARCHITECTURE or API_CONTRACT or BUG_FIX or PREFERENCE",
+      "tags": ["semantic", "tags"]
+    }
+  ]
+}
+
+Rules:
+1. One classification per message, in the same order as input.
+2. Protection level reflects information VALUE, not length:
+   - IMMORTAL: schemas, API contracts, core business rules, architecture constraints the project must not violate.
+   - PROTECTED: user decisions, preferences, conventions, bug-fix records worth keeping across turns.
+   - DEGRADABLE: tool execution details, intermediate reasoning, contextual facts that may age out.
+   - VOLATILE: chitchat, confirmations ("ok", "got it"), greetings, duplicates.
+3. Type reflects semantic role, not length:
+   - ARCHITECTURE: component relationships, tech stack choices, system design decisions.
+   - DECISION: a choice made (e.g., "use Redis for caching", "switch to pnpm").
+   - API_CONTRACT: endpoint definitions, data schemas, interface contracts.
+   - BUG_FIX: a fix or workaround record.
+   - PREFERENCE: user preference or convention (e.g., "prefer pytest over unittest").
+   - FACT: everything else — observations, context, questions.
+4. Tags must be specific (entity names, module names, technology names) — not generic words like "content" or "text".
+5. Short but important messages (decisions, preferences, critical facts) MUST receive higher protection than long but trivial messages (logs, stack traces, verbose output).
+6. System/instruction messages typically warrant at least PROTECTED.

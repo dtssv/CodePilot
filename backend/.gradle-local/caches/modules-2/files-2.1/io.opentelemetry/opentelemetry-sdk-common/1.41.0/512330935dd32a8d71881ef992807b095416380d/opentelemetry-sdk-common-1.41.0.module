@@ -1,0 +1,118 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.opentelemetry",
+    "module": "opentelemetry-sdk-common",
+    "version": "1.41.0",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.9"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-sdk-common-1.41.0.jar",
+          "url": "opentelemetry-sdk-common-1.41.0.jar",
+          "size": 54517,
+          "sha512": "b31eb58759842eeacef63d2874e53008851845d68f26d0cd5ece6439a1119248a5be566c64c2807d4a6a26e17838144e449684c1b13dfd76cd56bc8d3f45bd57",
+          "sha256": "9da8a6e0c0eb33d5dbee588885da7f936ae4734f665af8400499cde8432ab5a0",
+          "sha1": "b820861f85ba83db0ad896c47f723208d7473d5a",
+          "md5": "29a0ff85a94a583808c298f38ad62eb2"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 8,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "io.opentelemetry",
+          "module": "opentelemetry-api",
+          "version": {
+            "requires": "1.41.0"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "opentelemetry-sdk-common-1.41.0.jar",
+          "url": "opentelemetry-sdk-common-1.41.0.jar",
+          "size": 54517,
+          "sha512": "b31eb58759842eeacef63d2874e53008851845d68f26d0cd5ece6439a1119248a5be566c64c2807d4a6a26e17838144e449684c1b13dfd76cd56bc8d3f45bd57",
+          "sha256": "9da8a6e0c0eb33d5dbee588885da7f936ae4734f665af8400499cde8432ab5a0",
+          "sha1": "b820861f85ba83db0ad896c47f723208d7473d5a",
+          "md5": "29a0ff85a94a583808c298f38ad62eb2"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-sdk-common-1.41.0-javadoc.jar",
+          "url": "opentelemetry-sdk-common-1.41.0-javadoc.jar",
+          "size": 131461,
+          "sha512": "7a2af3d05bad3c80777b7491d6cd70771a4861348e26c931d051b65edc8bd1c8e8cb32060903e4d60719cbb959899282220d36e2de7a076018949922e98d388a",
+          "sha256": "1387dc6b304253ea68ff6d48cdc8d2412f55c9ed59cfe945ba2015da18a69b01",
+          "sha1": "3149968c3f6c5520416a582230e5f426c3d99c95",
+          "md5": "7f1cc0a3ad0d87f8358f995965ceb4a4"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "opentelemetry-sdk-common-1.41.0-sources.jar",
+          "url": "opentelemetry-sdk-common-1.41.0-sources.jar",
+          "size": 37592,
+          "sha512": "33791b2a3114631618f8848d9ce9ab2d9897736fd055e0f56ff46189250ae3225be3bcf2c2b59b3a7a34290509330a6ed4513eea7263cbbf1290a24b65fef7e9",
+          "sha256": "b43671444771d41ffa29b3371f7180da7fa29f3e8434018f398a71b0751d1543",
+          "sha1": "58ae42977d89e7fc94f9b5e1423e4acd36eaf1eb",
+          "md5": "354165025506b26998da391495c5919d"
+        }
+      ]
+    }
+  ]
+}

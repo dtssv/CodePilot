@@ -1,0 +1,9 @@
+[MEMORY CONFLICT DETECTED]
+The following inconsistencies were found in your project knowledge:
+{{anomalies}}
+
+You MUST resolve these conflicts before proceeding:
+- For CONFLICT anomalies: Decide which value is correct and state your decision
+- For INCOMPLETE anomalies: Ask the user for missing information via askUser
+- For ORPHAN anomalies: Establish the missing prerequisite
+- For SUPERSEDED_UNMARKED anomalies: Confirm whether the older decision is still valid

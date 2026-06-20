@@ -573,20 +573,32 @@ class PatchApplier(
 
         // Primary: exact match with normalized content
         var result = applyReplace(normalizedOriginal, normalizedSearch, replace, regex, ignoreCase)
-        var usedNormalized = result.text != normalizedOriginal
+        var usedNormalized = result.matches > 0
         log.warn("[replaceFile-DEBUG] $rel — attempt1 (normalized exact): matches=${result.matches}, usedNormalized=$usedNormalized")
 
         // Fallback 1: if exact match failed, try with original (un-normalized) content
         if (!usedNormalized) {
             result = applyReplace(original, search, replace, regex, ignoreCase)
-            usedNormalized = result.text != original
+            usedNormalized = result.matches > 0
             log.warn("[replaceFile-DEBUG] $rel — attempt2 (raw exact): matches=${result.matches}, usedNormalized=$usedNormalized")
+        }
+
+        // Fallback 1.5: if still no match and not regex, try line-trim matching
+        // (normalize each line to trimmed content, match, then restore original indentation)
+        if (!usedNormalized && !regex) {
+            val lineTrimResult = lineTrimReplace(normalizedOriginal, normalizedSearch, replace)
+            if (lineTrimResult.matches > 0) {
+                log.info("replaceFile: exact match failed for $rel, succeeded via line-trim (indent-tolerant) match")
+                result = lineTrimResult
+                usedNormalized = true
+            }
+            log.warn("[replaceFile-DEBUG] $rel — attempt2.5 (line-trim): matches=${lineTrimResult.matches}, usedNormalized=$usedNormalized")
         }
 
         // Fallback 2: if still no match and not regex, try fuzzy match ignoring leading whitespace differences
         if (!usedNormalized && !regex) {
             val fuzzyResult = fuzzyReplaceByLineContent(normalizedOriginal, normalizedSearch, replace)
-            if (fuzzyResult.text != normalizedOriginal) {
+            if (fuzzyResult.matches > 0) {
                 log.info("replaceFile: exact match failed for $rel, succeeded via fuzzy (whitespace-tolerant) match")
                 result = fuzzyResult
                 usedNormalized = true
@@ -598,7 +610,7 @@ class PatchApplier(
         // (search lines appear in order within original, but intermediate lines may be omitted by LLM)
         if (!usedNormalized && !regex) {
             val subseqResult = subsequenceReplace(normalizedOriginal, normalizedSearch, replace)
-            if (subseqResult.text != normalizedOriginal) {
+            if (subseqResult.matches > 0) {
                 log.info("replaceFile: exact+fuzzy match failed for $rel, succeeded via subsequence (omitted-line-tolerant) match")
                 result = subseqResult
                 usedNormalized = true
@@ -657,6 +669,110 @@ class PatchApplier(
         replace('\t', '⇥').replace('\r', '⏎').replace(' ', '·')
 
     /**
+     * ★ Line-trim match: strip leading+trailing whitespace from every line in both
+     * [original] and [searchText], perform exact substring replacement on the trimmed
+     * text, then restore the original indentation for unchanged lines and compute
+     * proper indentation for replaced lines.
+     *
+     * This handles the common LLM error where the search block has correct content
+     * but wrong indentation (e.g. 1 space instead of 4).
+     *
+     * Scenarios supported:
+     * - Search block with wrong indentation depth
+     * - Mixed tab/space indentation differences
+     * - Search block where some lines have correct indent and others don't
+     * - Original file with consistent or mixed indentation styles
+     */
+    private fun lineTrimReplace(
+        original: String,
+        searchText: String,
+        replaceText: String,
+    ): ReplaceResult {
+        val originalLines = original.lines()
+        val searchLines = searchText.lines()
+        if (searchLines.isEmpty()) return ReplaceResult(original, 0)
+
+        val originalTrimmedLines = originalLines.map { it.trim() }
+        val searchTrimmedLines = searchLines.map { it.trim() }
+        val originalTrimmed = originalTrimmedLines.joinToString("\n")
+        val searchTrimmed = searchTrimmedLines.joinToString("\n")
+
+        // Exact match on trimmed content — find ALL occurrences
+        val matchRanges = mutableListOf<IntRange>()
+        var searchFrom = 0
+        while (true) {
+            val idx = originalTrimmed.indexOf(searchTrimmed, searchFrom)
+            if (idx == -1) break
+            matchRanges.add(idx until (idx + searchTrimmed.length))
+            searchFrom = idx + 1
+        }
+        if (matchRanges.isEmpty()) return ReplaceResult(original, 0)
+
+        // For safety, only proceed if there is exactly one match
+        // (multiple matches would create ambiguity about which region to replace)
+        if (matchRanges.size > 1) {
+            log.warn("[lineTrimReplace] found ${matchRanges.size} matches on trimmed content, skipping due to ambiguity")
+            return ReplaceResult(original, 0)
+        }
+        val matchRange = matchRanges.first()
+
+        // Map the trimmed match range back to original line indices
+        // by counting newlines before match start and end
+        val startLine = originalTrimmed.substring(0, matchRange.first).count { it == '\n' }
+        val endLine = startLine + searchTrimmedLines.size - 1
+
+        // Compute indentation mapping: for each line in the matched region,
+        // record the original line's leading whitespace
+        val matchedOriginalIndents = (startLine..endLine).map { idx ->
+            if (idx < originalLines.size) originalLines[idx].takeWhile { it == ' ' || it == '\t' }
+            else ""
+        }
+        val searchIndents = searchLines.map { it.takeWhile { it == ' ' || it == '\t' } }
+
+        // Base indent: the indent of the first matched line in original
+        val baseOriginalIndent = matchedOriginalIndents.firstOrNull() ?: ""
+        val baseSearchIndent = searchIndents.firstOrNull() ?: ""
+
+        // Build replace lines with proper indentation
+        val replaceRawLines = replaceText.lines()
+        val indentedReplace = replaceRawLines.mapIndexed { idx, line ->
+            if (line.isBlank()) line
+            else {
+                val trimmed = line.trim()
+                // Try to find the matching search line to preserve relative indentation
+                val matchedSearchIdx = searchTrimmedLines.indexOfFirst { it == trimmed }
+                val searchLineIndent = if (matchedSearchIdx >= 0 && matchedSearchIdx < searchIndents.size) {
+                    searchIndents[matchedSearchIdx]
+                } else {
+                    // Fallback: use indent of the search line at the same index
+                    if (idx < searchIndents.size) searchIndents[idx]
+                    else baseSearchIndent
+                }
+                // Compute relative indent: how much deeper this line is than the search base
+                val relativeIndent = if (searchLineIndent.length >= baseSearchIndent.length) {
+                    searchLineIndent.substring(baseSearchIndent.length)
+                } else {
+                    ""
+                }
+                baseOriginalIndent + relativeIndent + trimmed
+            }
+        }
+
+        val replacedLines = originalLines.toMutableList()
+        replacedLines.subList(startLine, endLine + 1).clear()
+        replacedLines.addAll(startLine, indentedReplace)
+
+        return ReplaceResult(replacedLines.joinToString("\n"), 1)
+    }
+
+    /** Find the [IntRange] of the first occurrence of [substring] in this string, or null if not found. */
+    private fun String.findRangeOf(substring: String): IntRange? {
+        val idx = indexOf(substring)
+        if (idx == -1) return null
+        return idx until (idx + substring.length)
+    }
+
+    /**
      * ★ Fuzzy match: find a contiguous block of lines whose stripped content matches
      * the stripped lines of [searchText], then replace with [replaceText].
      * This tolerates indentation differences (tabs vs spaces, different indent depths).
@@ -666,17 +782,18 @@ class PatchApplier(
         searchText: String,
         replaceText: String,
     ): ReplaceResult {
-        val searchLines = searchText.lines().map { it.trimEnd() }
-        if (searchLines.isEmpty()) return ReplaceResult(original, 0)
+        // ★ Use trim() instead of trimEnd() — tolerate both leading and trailing whitespace differences
+        val searchLinesTrimmed = searchText.lines().map { it.trim() }
+        if (searchLinesTrimmed.isEmpty()) return ReplaceResult(original, 0)
 
         val originalLines = original.lines()
-        val strippedOriginal = originalLines.map { it.trimEnd() }
+        val originalLinesTrimmed = originalLines.map { it.trim() }
 
-        // Find the first contiguous block in original whose stripped lines match search stripped lines
+        // Find the first contiguous block in original whose trimmed lines match search trimmed lines
         var matchCount = 0
         var matchStart = -1
-        for (i in strippedOriginal.indices) {
-            if (strippedOriginal.subList(i, minOf(i + searchLines.size, strippedOriginal.size)) == searchLines) {
+        for (i in originalLinesTrimmed.indices) {
+            if (originalLinesTrimmed.subList(i, minOf(i + searchLinesTrimmed.size, originalLinesTrimmed.size)) == searchLinesTrimmed) {
                 matchStart = i
                 matchCount++
             }
@@ -684,29 +801,58 @@ class PatchApplier(
 
         if (matchStart == -1) return ReplaceResult(original, 0)
 
-        // Build replacement: preserve the indentation style of the first matched line
+        // Build replacement: compute per-line indentation shift
+        // For each matched line pair, determine how original indent differs from search indent,
+        // then apply the same shift to the corresponding replace line.
+        val searchLinesRaw = searchText.lines()
+        val replaceLinesRaw = replaceText.lines()
+
+        // Base indent from original's first matched line
         val baseIndent = originalLines[matchStart].takeWhile { it == ' ' || it == '\t' }
-        val replacedLines = originalLines.toMutableList()
-        val replaceLines = replaceText.lines()
-        val indentedReplace = replaceLines.mapIndexed { idx, line ->
+        val indentedReplace = replaceLinesRaw.mapIndexed { idx, line ->
             if (line.isBlank()) line
-            else baseIndent + line.trimEnd()
+            else {
+                // Compute relative indent shift: try to match this replace line to a search line
+                // If the replace line corresponds to a search line, use that search line's indent
+                // offset relative to the first search line to preserve relative indentation.
+                val searchBaseIndent = searchLinesRaw.firstOrNull()?.takeWhile { it == ' ' || it == '\t' } ?: ""
+                val replaceLineTrimmed = line.trim()
+                // Find matching search line to preserve relative indentation
+                val matchedSearchIdx = searchLinesTrimmed.indexOfFirst { it == replaceLineTrimmed }
+                val searchLineIndent = if (matchedSearchIdx >= 0 && matchedSearchIdx < searchLinesRaw.size) {
+                    searchLinesRaw[matchedSearchIdx].takeWhile { it == ' ' || it == '\t' }
+                } else {
+                    // Fallback: use the indent of the current search line if idx is within range
+                    if (idx < searchLinesRaw.size) searchLinesRaw[idx].takeWhile { it == ' ' || it == '\t' }
+                    else searchBaseIndent
+                }
+                // Shift: baseIndent + (searchLineIndent - searchBaseIndent) preserves relative depth
+                val relativeIndent = if (searchLineIndent.length >= searchBaseIndent.length) {
+                    searchLineIndent.substring(searchBaseIndent.length)
+                } else {
+                    // search line has less indent than base — just use baseIndent
+                    ""
+                }
+                baseIndent + relativeIndent + replaceLineTrimmed
+            }
         }
-        replacedLines.subList(matchStart, matchStart + searchLines.size).clear()
+        val replacedLines = originalLines.toMutableList()
+        replacedLines.subList(matchStart, matchStart + searchLinesTrimmed.size).clear()
         replacedLines.addAll(matchStart, indentedReplace)
 
         return ReplaceResult(replacedLines.joinToString("\n"), matchCount)
     }
 
     /**
-     * ★ Subsequence match: find the best mapping where each search line (after trimEnd)
+     * ★ Subsequence match: find the best mapping where each search line (after trim)
      * appears in order within original, but intermediate lines may be omitted.
      *
      * This handles the common LLM pattern of generating a "simplified" search block
      * that skips comments, unrelated functions, or reorders #include lines.
+     * Also tolerates leading whitespace (indentation) differences via trim().
      *
      * Algorithm:
-     * 1. For each search line, find ALL candidate matches in original (by trimEnd equality)
+     * 1. For each search line, find ALL candidate matches in original (by trim equality)
      * 2. Find the "tightest" monotonic assignment that minimizes the span width
      * 3. Require a minimum match ratio (≥ 60% of search lines must match)
      * 4. Replace the entire span in original (from first matched line to last matched line)
@@ -717,21 +863,22 @@ class PatchApplier(
         searchText: String,
         replaceText: String,
     ): ReplaceResult {
-        val searchLines = searchText.lines().map { it.trimEnd() }
-        if (searchLines.isEmpty()) return ReplaceResult(original, 0)
+        // ★ Use trim() instead of trimEnd() — tolerate both leading and trailing whitespace differences
+        val searchLinesTrimmed = searchText.lines().map { it.trim() }
+        if (searchLinesTrimmed.isEmpty()) return ReplaceResult(original, 0)
         // Skip if search is too short for meaningful subsequence matching
-        if (searchLines.size < 3) return ReplaceResult(original, 0)
+        if (searchLinesTrimmed.size < 3) return ReplaceResult(original, 0)
 
         val originalLines = original.lines()
-        val trimmedOriginal = originalLines.map { it.trimEnd() }
+        val originalLinesTrimmed = originalLines.map { it.trim() }
 
         // Step 1: Build candidate lists — for each non-blank search line,
-        // find ALL original line indices where trimEnd matches
-        val nonBlankIndices = searchLines.indices.filter { !searchLines[it].isBlank() }
+        // find ALL original line indices where trim matches
+        val nonBlankIndices = searchLinesTrimmed.indices.filter { !searchLinesTrimmed[it].isBlank() }
         val candidates = mutableListOf<List<Int>>()
         for (sIdx in nonBlankIndices) {
-            val sLine = searchLines[sIdx]
-            val matches = trimmedOriginal.indices.filter { trimmedOriginal[it] == sLine }
+            val sLine = searchLinesTrimmed[sIdx]
+            val matches = originalLinesTrimmed.indices.filter { originalLinesTrimmed[it] == sLine }
             if (matches.isEmpty()) {
                 candidates.add(emptyList())
             } else {
@@ -780,18 +927,39 @@ class PatchApplier(
         log.info("[subsequenceReplace] matched $matchedCount/${nonBlankIndices.size} lines (${(matchRatio * 100).toInt()}%), span=[$spanStart..$spanEnd] ($spanWidth lines) in original")
 
         // Safety: if the span is more than 3x the search block size, the match is too loose
-        if (spanWidth > searchLines.size * 3) {
-            log.warn("[subsequenceReplace] span too wide ($spanWidth > ${searchLines.size * 3}), rejecting as unreliable")
+        if (spanWidth > searchLinesTrimmed.size * 3) {
+            log.warn("[subsequenceReplace] span too wide ($spanWidth > ${searchLinesTrimmed.size * 3}), rejecting as unreliable")
             return ReplaceResult(original, 0)
         }
 
         // Step 5: Build replacement — replace the entire span with replaceText
+        // Preserve original indentation style using baseIndent from the span start
+        val searchLinesRaw = searchText.lines()
+        val searchBaseIndent = searchLinesRaw.firstOrNull()?.takeWhile { it == ' ' || it == '\t' } ?: ""
         val baseIndent = originalLines[spanStart].takeWhile { it == ' ' || it == '\t' }
         val replacedLines = originalLines.toMutableList()
-        val replaceLines = replaceText.lines()
-        val indentedReplace = replaceLines.map { line ->
+        val replaceLinesRaw = replaceText.lines()
+        val indentedReplace = replaceLinesRaw.mapIndexed { idx, line ->
             if (line.isBlank()) line
-            else baseIndent + line.trimEnd()
+            else {
+                val replaceLineTrimmed = line.trim()
+                // Find matching search line to preserve relative indentation
+                val matchedSearchIdx = searchLinesTrimmed.indexOfFirst { it == replaceLineTrimmed }
+                val searchLineIndent = if (matchedSearchIdx >= 0 && matchedSearchIdx < searchLinesRaw.size) {
+                    searchLinesRaw[matchedSearchIdx].takeWhile { it == ' ' || it == '\t' }
+                } else {
+                    // Fallback: use the indent of the current search line if idx is within range
+                    if (idx < searchLinesRaw.size) searchLinesRaw[idx].takeWhile { it == ' ' || it == '\t' }
+                    else searchBaseIndent
+                }
+                // Shift: baseIndent + (searchLineIndent - searchBaseIndent) preserves relative depth
+                val relativeIndent = if (searchLineIndent.length >= searchBaseIndent.length) {
+                    searchLineIndent.substring(searchBaseIndent.length)
+                } else {
+                    ""
+                }
+                baseIndent + relativeIndent + replaceLineTrimmed
+            }
         }
         replacedLines.subList(spanStart, spanEnd + 1).clear()
         replacedLines.addAll(spanStart, indentedReplace)

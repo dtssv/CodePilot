@@ -26,6 +26,12 @@ dependencies {
     implementation(libs.otel.exporter.otlp)
 
     implementation(libs.springdoc.openapi)
+
+    // Native DNS resolver for macOS — prevents ERROR at startup:
+    // "Unable to load io.netty.resolver.dns.macos.MacOSDnsServerAddressStreamProvider"
+    // Version is managed by the Spring Boot BOM (netty.version property).
+    val osArch = if (System.getProperty("os.arch") == "aarch64") "osx-aarch_64" else "osx-x86_64"
+    implementation("io.netty:netty-resolver-dns-native-macos::$osArch")
 }
 
 springBoot {

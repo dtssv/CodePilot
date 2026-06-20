@@ -460,6 +460,14 @@ export function installLegacyChatBridge(
                 return { ...msg, agentSteps: [...steps, runningStep], _streaming: true };
             }));
         }),
+        onPluginEvent('agent_progress', (payload) => {
+            if (v2Enabled) return;
+            const data = payload as { text?: string; phaseId?: string; node?: string; reason?: string };
+            // Progress heartbeat — show as a brief status indicator, no agent step card needed
+            setMessages((prev) => upsert(prev, (msg) => {
+                return { ...msg, _progressText: data.text || '正在处理中...', _streaming: true };
+            }));
+        }),
         onPluginEvent('user_plan', (payload) => {
             if (v2Enabled) return;
             const data = payload as { steps?: { id: string; title: string; status?: string }[] };

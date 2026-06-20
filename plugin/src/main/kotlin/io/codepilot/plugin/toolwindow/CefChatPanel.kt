@@ -1698,6 +1698,25 @@ class CefChatPanel(
                         adapter?.onGraphBudgetAlert(data)
                     }
 
+                    // ── Memory system events ──
+                    override fun onMemoryCompacted(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        val data = mapper.treeToValue(payload, Map::class.java)
+                        dispatchToWeb("memory.compacted", data)
+                        // Persist compacted marker into local session digest for recovery
+                        val compacted = data["__COMPACTED__"] as? Boolean == true
+                        if (compacted) {
+                            val summary = data["summary"] as? String
+                            if (summary != null) {
+                                sessionStore.saveDigest(handle, mapOf(
+                                    "compactedSummary" to summary,
+                                    "__COMPACTED__" to true,
+                                    "phaseId" to (data["phaseId"] ?: ""),
+                                    "compressedCount" to (data["compressedCount"] ?: 0),
+                                ))
+                            }
+                        }
+                    }
+
                     // ── User-facing plan events (shown in Plan panel) ──
                     override fun onUserPlan(payload: com.fasterxml.jackson.databind.JsonNode) {
                         if (isStaleStream()) return
@@ -1782,6 +1801,10 @@ class CefChatPanel(
                     override fun onAgentRunning(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
                         adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
+
+                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
                     }
 
                     override fun onRateLimited(
@@ -2305,7 +2328,12 @@ class CefChatPanel(
         }
 
         // Build resume payload using SessionStore (includes graphState, completedToolCalls, etc.)
-        val userInput = answers.joinToString("; ") { a -> a["freeform"]?.toString() ?: a["optionId"]?.toString() ?: "" }
+        // ★ FIX: Only use freeform text as input — never fall back to optionId.
+        // When the user selects a structured option (e.g. optionId="manual"), using the
+        // optionId as `input` causes the LLM to misinterpret it (e.g. "manual" → "user manual"
+        // instead of "I'll handle it manually"). The optionId semantics are carried by the
+        // structured `answers` list; the `input` field should only contain freeform text.
+        val userInput = answers.mapNotNull { a -> a["freeform"]?.toString() }.filter { it.isNotBlank() }.joinToString("; ")
         val resumePayload = sessionStore.buildResumePayload(handle, userInput, handle.meta.modelId ?: "default")
         // Override with the actual answers and continuationToken from this response
         val fullPayload = resumePayload.toMutableMap()
@@ -2446,6 +2474,11 @@ class CefChatPanel(
                         if (isStaleResumeStream()) return
                         dispatchToWeb("agent_running", mapper.treeToValue(payload, Map::class.java))
                         adapter?.onAgentRunning(payload.path("text").asText(null))
+                    }
+
+                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleResumeStream()) return
+                        dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
                     }
 
                     override fun onDone(reason: String, payload: com.fasterxml.jackson.databind.JsonNode) {
@@ -4165,8 +4198,9 @@ class CefChatPanel(
         val hasToken = settings.accessToken() != null
         val hasRefreshToken = settings.refreshToken() != null
         val hasDevToken = settings.state.devToken.isNotBlank()
+        val hasDeviceSecret = settings.deviceSecret() != null
         log.info(
-            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, devToken=${if (hasDevToken) {
+            "[Auth] checkAuth: hasToken=$hasToken, hasRefreshToken=$hasRefreshToken, hasDevToken=$hasDevToken, hasDeviceSecret=$hasDeviceSecret, devToken=${if (hasDevToken) {
                 settings.state.devToken.take(
                     8,
                 ) + "..."
@@ -4183,6 +4217,21 @@ class CefChatPanel(
             } else {
                 dispatchToWeb("auth_state", mapOf("authenticated" to false))
             }
+            return
+        }
+
+        // ★ Cross-IDE / session integrity check:
+        // If we have accessToken/refreshToken but no deviceSecret, the login state is incomplete.
+        // This typically happens when another IDE (e.g. CLion) logged in and shared tokens via
+        // PasswordSafe, but the deviceSecret was stored under a different keychain entry or is
+        // otherwise unavailable. Without deviceSecret we cannot sign requests, and devToken
+        // bypass may not work either. Force a clean re-login.
+        if (!hasDeviceSecret && !hasDevToken) {
+            log.warn("[Auth] checkAuth: has tokens but no deviceSecret and no devToken — session incomplete, clearing and showing login")
+            settings.setAccessToken(null)
+            settings.setRefreshToken(null)
+            settings.setDeviceSecret(null)
+            dispatchToWeb("auth_state", mapOf("authenticated" to false))
             return
         }
 

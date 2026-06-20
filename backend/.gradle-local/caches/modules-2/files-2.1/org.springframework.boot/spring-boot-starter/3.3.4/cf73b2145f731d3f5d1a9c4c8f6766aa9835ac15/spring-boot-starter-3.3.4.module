@@ -1,0 +1,188 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "org.springframework.boot",
+    "module": "spring-boot-starter",
+    "version": "3.3.4",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "7.6.4"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-autoconfigure",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-starter-logging",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "jakarta.annotation",
+          "module": "jakarta.annotation-api",
+          "version": {
+            "requires": "2.1.1"
+          }
+        },
+        {
+          "group": "org.springframework",
+          "module": "spring-core",
+          "version": {
+            "requires": "6.1.13"
+          }
+        },
+        {
+          "group": "org.yaml",
+          "module": "snakeyaml",
+          "version": {
+            "requires": "2.2"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "spring-boot-starter-3.3.4.jar",
+          "url": "spring-boot-starter-3.3.4.jar",
+          "size": 4768,
+          "sha512": "0cae58893825168b16ac3de142d4739346bced6fc02845341d0504df21c4e8bdf554f90580cc2f436c55a7c2f62ff1f90050e418df709b0669b8f509ca74d9a3",
+          "sha256": "fffdc544ad660a1f5cb123e321e0862c6684569d80761e3ba448b798fbc8d9cb",
+          "sha1": "f02312a6816fb439a55d2920b9af8f0f8abf5bac",
+          "md5": "acc511b6eb9aad02bd5b08d0cb8b5579"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-autoconfigure",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "org.springframework.boot",
+          "module": "spring-boot-starter-logging",
+          "version": {
+            "requires": "3.3.4"
+          }
+        },
+        {
+          "group": "jakarta.annotation",
+          "module": "jakarta.annotation-api",
+          "version": {
+            "requires": "2.1.1"
+          }
+        },
+        {
+          "group": "org.springframework",
+          "module": "spring-core",
+          "version": {
+            "requires": "6.1.13"
+          }
+        },
+        {
+          "group": "org.yaml",
+          "module": "snakeyaml",
+          "version": {
+            "requires": "2.2"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "spring-boot-starter-3.3.4.jar",
+          "url": "spring-boot-starter-3.3.4.jar",
+          "size": 4768,
+          "sha512": "0cae58893825168b16ac3de142d4739346bced6fc02845341d0504df21c4e8bdf554f90580cc2f436c55a7c2f62ff1f90050e418df709b0669b8f509ca74d9a3",
+          "sha256": "fffdc544ad660a1f5cb123e321e0862c6684569d80761e3ba448b798fbc8d9cb",
+          "sha1": "f02312a6816fb439a55d2920b9af8f0f8abf5bac",
+          "md5": "acc511b6eb9aad02bd5b08d0cb8b5579"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "spring-boot-starter-3.3.4-javadoc.jar",
+          "url": "spring-boot-starter-3.3.4-javadoc.jar",
+          "size": 4734,
+          "sha512": "90d9d60df7da033d8281cb890c3c1cf9f9e213baea649af24da09ee1a415b866448882c5130e4fa18674ce47f8bbf0f7473ebfdefdb905490f577afaa852b268",
+          "sha256": "a7a253b809b682965f01baaa359c33d11786662499d44ca71ea94d0e3f2caa8a",
+          "sha1": "0e5f4b29a6f3177ee18a413820c798079adee0aa",
+          "md5": "23b80022523c4d1e7ecda20446f1a373"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "spring-boot-starter-3.3.4-sources.jar",
+          "url": "spring-boot-starter-3.3.4-sources.jar",
+          "size": 4733,
+          "sha512": "7b1a69e4ae1b08621ab418715f9d0448fc4a99c0820c0c5f7a364a1f25f9978a8236fe0cd14a30ddd31a4bf47c22265f0fe79031a4cbad6fcb1dca56117495e8",
+          "sha256": "1f0aa96d4193b1cba5c8460cf6b894376d583883cfd8c63df148cb806c6d02b8",
+          "sha1": "9426400d63fd9177d28f2d44afccd1b66116696a",
+          "md5": "75827619292b4d1642dc01e6de26d89d"
+        }
+      ]
+    }
+  ]
+}

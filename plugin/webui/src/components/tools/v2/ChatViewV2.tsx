@@ -9,6 +9,7 @@ import { useChatV2 } from '../../../state/chatStore';
 import type { RiskNotice, StepNode, TurnNode } from '../../../state/events';
 import { useNeedsInputSubmitted } from '../../../state/needsInputStore';
 import { planStatusCssClass, planStatusIcon } from '../../../state/planNormalize';
+import { useMemoryCompaction } from '../../../state/rulesMemory';
 import { useBranches } from '../../../state/sessionUiStore';
 import { normalizeAgentContentText, stripGraphMarkers } from '../../../utils/graphMarkers';
 import { sortStepsChronologically } from '../../../utils/timelineSort';
@@ -74,11 +75,21 @@ function TurnAlerts({ turn }: { turn: TurnNode }) {
     const { t } = useTranslation();
     const notices = turn.riskNotices ?? [];
     const needs = turn.needsInput;
+    const compaction = useMemoryCompaction();
     const isSubmitted = useNeedsInputSubmitted(needs?.continuationToken);
     const showInlineNeedsInput = !!needs;
-    if (notices.length === 0 && !showInlineNeedsInput) return null;
+    if (notices.length === 0 && !showInlineNeedsInput && !compaction) return null;
     return (
         <div className="turn-alerts">
+            {compaction && (
+                <div className="turn-alert turn-alert-compaction" role="status">
+                    <strong>上下文已压缩</strong>
+                    <span>{compaction.compressedCount} 条低优先级记忆已合并为摘要
+                        {compaction.preservedCount > 0 && `（${compaction.preservedCount} 条关键记忆已保留）`}
+                    </span>
+                    <span className="muted">阶段: {compaction.phaseId || '未知'}，压缩上下文将在会话恢复时自动使用</span>
+                </div>
+            )}
             {notices.map((n, i) => (
                 <RiskBanner key={`risk-${i}`} notice={n} />
             ))}

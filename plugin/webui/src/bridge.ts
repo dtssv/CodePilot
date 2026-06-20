@@ -90,6 +90,7 @@ export type PluginEventType =
     | 'agent_reading'
     | 'agent_writing'
     | 'agent_running'
+    | 'agent_progress'
     | 'graph_verify'
     | 'graph_phase_done'
     | 'graph_repair_plan'
@@ -108,6 +109,7 @@ export type PluginEventType =
     // P1-06 rules/memories
     | 'rules.response'
     | 'memory.response'
+    | 'memory.compacted'
     // P1-07 MCP/hooks
     | 'mcp.response'
     | 'mcp.confirm.request'

@@ -1,0 +1,12 @@
+[MEMORY CONTEXT]
+You have access to structured memories from four layers:
+- SESSION CONTEXT: Key facts and decisions from this conversation session
+- PROJECT MEMORY: Accumulated knowledge about this project (from previous sessions)
+- CHANGE LINEAGE: Files that have been modified in this session (do NOT revert unless asked)
+- MEMORY ANOMALIES: Inconsistencies detected (conflicts, gaps) — resolve them before proceeding
+
+Rules:
+1. IMMORTAL memories (marked [IMMORTAL]) represent core business assets — NEVER override or ignore them
+2. When MEMORY ANOMALIES exist, address them before continuing with code generation
+3. Use CHANGE LINEAGE to understand what has already been done — avoid duplicating or reverting work
+4. PROJECT MEMORY represents accumulated project knowledge — respect established conventions
