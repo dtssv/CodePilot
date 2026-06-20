@@ -11,11 +11,14 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
-/** Keeps Redis admission counters aligned with {@code conversation_runs} (crash / reclaim drift). */
+/**
+ * Keeps Redis admission counters aligned with {@code conversation_runs} (crash / reclaim drift).
+ */
 @Component
 public class ConversationRunAdmissionReconciler {
 
-  private static final Logger log = LoggerFactory.getLogger(ConversationRunAdmissionReconciler.class);
+  private static final Logger log =
+      LoggerFactory.getLogger(ConversationRunAdmissionReconciler.class);
 
   private final ConversationRunStore store;
   private final ConversationRunAdmissionService admission;
@@ -32,7 +35,12 @@ public class ConversationRunAdmissionReconciler {
 
   @EventListener(ApplicationReadyEvent.class)
   public void onReady() {
-    reconcileIfNeeded("startup").subscribe();
+    if (store.isDbBacked()) {
+      int cleaned = store.markStaleRunningInterrupted(java.time.Instant.now());
+      if (cleaned > 0) {
+        log.warn("Cleaned up {} stale running runs on startup", cleaned);
+      }
+    }
   }
 
   /** Reconcile when Redis counters are clearly above configured limits (stale increments). */

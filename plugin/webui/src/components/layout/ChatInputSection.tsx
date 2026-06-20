@@ -17,6 +17,8 @@ import { ActiveSkillsBar } from '../skills/ActiveSkillsBar';
 import { AdmissionWaitBanner } from './AdmissionWaitBanner';
 import { MaxModeHint } from './MaxModeHint';
 import { RateLimitBanner } from './RateLimitBanner';
+import { AgentRoleSelector } from '../AgentRoleSelector';
+import type { AgentRole } from '../AgentRoleSelector';
 
 export interface ChatInputSectionProps {
     contextTokens: number;
@@ -41,6 +43,8 @@ export interface ChatInputSectionProps {
     onModeChange: (mode: 'agent' | 'chat') => void;
     onMaxModeChange: (enabled: boolean) => void;
     onAutoApplyChange: (enabled: boolean) => void;
+    agentRole: AgentRole;
+    onAgentRoleChange: (role: AgentRole) => void;
 }
 
 export function ChatInputSection({
@@ -66,6 +70,8 @@ export function ChatInputSection({
     onModeChange,
     onMaxModeChange,
     onAutoApplyChange,
+    agentRole,
+    onAgentRoleChange,
 }: ChatInputSectionProps) {
     const { t } = useTranslation();
 
@@ -118,6 +124,9 @@ export function ChatInputSection({
                     <option value="agent">{t('input.modeAgent')}</option>
                     <option value="chat">{t('input.modeChat')}</option>
                 </select>
+                {mode === 'agent' && (
+                    <AgentRoleSelector value={agentRole} onChange={onAgentRoleChange} />
+                )}
                 <ModelSelector
                     models={models}
                     selectedModelId={selectedModelId}

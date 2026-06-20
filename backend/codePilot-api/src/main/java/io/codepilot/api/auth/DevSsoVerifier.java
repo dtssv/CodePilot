@@ -21,14 +21,16 @@ import reactor.core.publisher.Mono;
  *   <li>a non-trivial {@code codepilot.security.sso.dev.token} is configured.
  * </ul>
  *
- * <p>Plugin login flow:
- * {@code POST /v1/auth/login} with body {@code {"ssoToken":"<dev-token>:<userId>:<tenant>:<device>"}}.
- * The shared secret prevents accidental access while still avoiding any external dependency for
- * unit / integration tests and demos.
+ * <p>Plugin login flow: {@code POST /v1/auth/login} with body {@code
+ * {"ssoToken":"<dev-token>:<userId>:<tenant>:<device>"}}. The shared secret prevents accidental
+ * access while still avoiding any external dependency for unit / integration tests and demos.
  */
 @Service
 @Profile("dev")
-@ConditionalOnProperty(prefix = "codepilot.security.sso.dev", name = "enabled", havingValue = "true")
+@ConditionalOnProperty(
+    prefix = "codepilot.security.sso.dev",
+    name = "enabled",
+    havingValue = "true")
 public class DevSsoVerifier implements SsoVerifier {
 
   private static final Logger log = LoggerFactory.getLogger(DevSsoVerifier.class);
@@ -80,7 +82,8 @@ public class DevSsoVerifier implements SsoVerifier {
     try {
       MessageDigest md = MessageDigest.getInstance("SHA-256");
       byte[] digest = md.digest(bytes);
-      return "sha256:" + Base64.getEncoder().withoutPadding().encodeToString(digest).substring(0, 12);
+      return "sha256:"
+          + Base64.getEncoder().withoutPadding().encodeToString(digest).substring(0, 12);
     } catch (Exception e) {
       return "unknown";
     }

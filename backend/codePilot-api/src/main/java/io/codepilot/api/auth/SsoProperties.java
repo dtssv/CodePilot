@@ -15,7 +15,8 @@ import org.springframework.validation.annotation.Validated;
  *
  * <ol>
  *   <li>{@code oidc} — recommended for production; verifies an OIDC id-token using IdP JWKs.
- *   <li>{@code hmacBridge} — corporate SSO Adapter signs a CodePilot bootstrap token via shared HMAC.
+ *   <li>{@code hmacBridge} — corporate SSO Adapter signs a CodePilot bootstrap token via shared
+ *       HMAC.
  *   <li>{@code dev} — local-only; enabled only when {@code codepilot.security.sso.dev.enabled=true}
  *       AND the active Spring profile is {@code dev}. Never enabled by default.
  * </ol>

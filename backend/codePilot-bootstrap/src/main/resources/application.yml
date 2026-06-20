@@ -19,11 +19,13 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: ${CODEPILOT_DB_URL:jdbc:mysql://localhost:3306/codepilot?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8}
+    url: ${CODEPILOT_DB_URL:jdbc:mysql://localhost:3306/codepilot?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8&allowEmptyPasswords=true}
     username: ${CODEPILOT_DB_USER:root}
-    password: ${CODEPILOT_DB_PASSWORD:}
+    password: ${CODEPILOT_DB_PASSWORD:123456}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
+      test-on-borrow: true
+      connection-test-query: SELECT 1
       pool-name: codePilotHikari
       maximum-pool-size: ${CODEPILOT_DB_POOL_MAX:40}
       minimum-idle: 4
@@ -72,10 +74,6 @@ management:
       probability: 1.0
 
 codepilot:
-  graph:
-    # Graph engine thread pool (per JVM). Scale horizontally; tune thread-cap ≈ expected concurrent agent runs per pod.
-    scheduler-thread-cap: ${CODEPILOT_GRAPH_THREADS:0}
-    scheduler-queue-size: ${CODEPILOT_GRAPH_QUEUE:0}
   conversation:
     queue:
       enabled: ${CODEPILOT_CONVERSATION_QUEUE:auto}

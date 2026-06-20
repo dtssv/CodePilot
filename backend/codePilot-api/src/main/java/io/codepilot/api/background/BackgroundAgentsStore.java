@@ -37,7 +37,8 @@ public class BackgroundAgentsStore {
   public BackgroundAgentsStore(
       NamedParameterJdbcTemplate jdbc,
       @Value("${codepilot.background.persistence:auto}") String persistenceMode,
-      @Value("${codepilot.background.storage-file:${java.io.tmpdir}/codepilot-bg/tasks.json}") String storageFile) {
+      @Value("${codepilot.background.storage-file:${java.io.tmpdir}/codepilot-bg/tasks.json}")
+          String storageFile) {
     this.jdbc = jdbc;
     this.persistenceMode = persistenceMode != null ? persistenceMode.trim().toLowerCase() : "auto";
     this.storageFile = Path.of(storageFile);
@@ -120,7 +121,9 @@ public class BackgroundAgentsStore {
 
   private void importFileIfDbEmpty() {
     try {
-      Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM background_agent_tasks", Map.of(), Integer.class);
+      Integer count =
+          jdbc.queryForObject(
+              "SELECT COUNT(*) FROM background_agent_tasks", Map.of(), Integer.class);
       if (count != null && count > 0) return;
       if (!Files.exists(storageFile)) return;
       Map<String, Map<String, Object>> loaded =
@@ -181,12 +184,13 @@ public class BackgroundAgentsStore {
   }
 
   private Map<String, Object> loadOneFromDb(String id) {
-    return jdbc.query(
-        """
-        SELECT id, task_json FROM background_agent_tasks WHERE id = :id
-        """,
-        Map.of("id", id),
-        (rs, rowNum) -> rowToTask(rs.getString("id"), rs.getString("task_json")))
+    return jdbc
+        .query(
+            """
+            SELECT id, task_json FROM background_agent_tasks WHERE id = :id
+            """,
+            Map.of("id", id),
+            (rs, rowNum) -> rowToTask(rs.getString("id"), rs.getString("task_json")))
         .stream()
         .findFirst()
         .orElse(null);

@@ -12,9 +12,21 @@ import {
     type PlanProgressPayload,
 } from './planNormalize';
 import { stripGraphMarkers } from '../utils/graphMarkers';
+import { normalizeToolArgs, parseToolResultPayload } from '../utils/toolArgs';
+import { classifyToolResult } from '../utils/toolResultClassify';
 
 /** Cast helper that keeps the call sites readable. */
 const P = <T>(payload: unknown): T => payload as T;
+
+function toolStepTitle(tool: string, args: Record<string, unknown>, fallback: string): string {
+    const path = String(args.path ?? '').trim();
+    const command = String(args.command ?? '').trim();
+    if ((tool === 'shell.exec' || tool === 'shell.session') && command) return command;
+    if ((tool.startsWith('fs.') || tool.startsWith('ide.') || tool.startsWith('code.')) && path) {
+        return path;
+    }
+    return fallback;
+}
 
 type ShellPartial = {
     stream?: string;
@@ -44,7 +56,7 @@ function mergeProgressDetail(cur: StepNode, partial: unknown): StepNode {
         stdout,
         stderr,
         kind: p.kind ?? prev.kind ?? (cur.toolCall?.tool?.startsWith('shell.') ? 'shell' : undefined),
-        command: p.command ?? prev.command ?? (cur.toolCall?.args as { command?: string })?.command,
+        command: p.command ?? prev.command ?? String(normalizeToolArgs(cur.toolCall?.args).command ?? ''),
     };
     return { ...cur, progressDetail: merged };
 }
@@ -250,11 +262,8 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             if (!p?.stepId) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
-            const args = p.args as { command?: string } | undefined;
-            const title =
-                (p.tool === 'shell.exec' || p.tool === 'shell.session') && args?.command
-                    ? args.command
-                    : cur.title;
+            const args = normalizeToolArgs(p.args);
+            const title = toolStepTitle(p.tool, args, cur.title);
             return {
                 ...base,
                 steps: {
@@ -262,11 +271,11 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
                     [p.stepId]: {
                         ...cur,
                         title,
-                        toolCall: { tool: p.tool, args: p.args },
+                        toolCall: { tool: p.tool, args },
                         progressDetail: {
                             ...(cur.progressDetail as object),
                             kind: p.tool.startsWith('shell.') ? 'shell' : (cur.progressDetail as { kind?: string })?.kind,
-                            command: args?.command ?? (cur.progressDetail as { command?: string })?.command,
+                            command: args.command ?? (cur.progressDetail as { command?: string })?.command,
                         },
                     },
                 },
@@ -292,18 +301,24 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
             if (!p?.stepId) return base;
             const cur = state.steps[p.stepId];
             if (!cur) return base;
+            const toolName = cur.toolCall?.tool ?? '';
+            const args = normalizeToolArgs(cur.toolCall?.args);
+            const rawResult = parseToolResultPayload(p.result);
             const errFromPayload =
                 p.error
-                ?? (p.result && typeof p.result === 'object' && !Array.isArray(p.result)
-                    ? String((p.result as { errorMessage?: string }).errorMessage ?? '') || null
+                ?? (rawResult && typeof rawResult === 'object' && !Array.isArray(rawResult)
+                    ? String((rawResult as { errorMessage?: string }).errorMessage ?? '') || null
                     : null);
+            const classified = toolName
+                ? classifyToolResult(toolName, args, p.ok, rawResult, null, errFromPayload)
+                : rawResult;
             return {
                 ...base,
                 steps: {
                     ...state.steps,
                     [p.stepId]: {
                         ...cur,
-                        toolResult: { ok: p.ok, result: p.result, error: errFromPayload },
+                        toolResult: { ok: p.ok, result: classified, error: errFromPayload },
                         // tool.result is informational; final status comes from step.end.
                     },
                 },
@@ -370,6 +385,75 @@ export function reduceEnvelope(state: ChatV2State, ev: EventEnvelope): ChatV2Sta
                 turns: state.turns.map((t) =>
                     t.turnId === ev.turnId ? { ...t, needsInput: p ?? t.needsInput } : t,
                 ),
+            };
+        }
+
+        case 'subagent_spawn': {
+            const p = P<{ taskId?: string; agentName?: string; description?: string }>(ev.payload);
+            if (!p?.taskId) return base;
+            return {
+                ...base,
+                turns: state.turns.map((t) => {
+                    if (t.turnId !== ev.turnId) return t;
+                    const subagents = t.subagents ?? [];
+                    if (subagents.some((s) => s.taskId === p.taskId)) return t;
+                    return {
+                        ...t,
+                        subagents: [
+                            ...subagents,
+                            {
+                                taskId: p.taskId!,
+                                agentName: p.agentName ?? 'general',
+                                description: p.description ?? '',
+                                status: 'running',
+                                startedAt: ev.ts,
+                            },
+                        ],
+                    };
+                }),
+            };
+        }
+
+        case 'subagent_progress':
+        case 'subagent_complete':
+        case 'subagent_failed': {
+            const p = P<{ taskId?: string; status?: string; progress?: string; result?: string; error?: string }>(
+                ev.payload,
+            );
+            if (!p?.taskId) return base;
+            return {
+                ...base,
+                turns: state.turns.map((t) => {
+                    if (t.turnId !== ev.turnId) return t;
+                    const subagents = t.subagents ?? [];
+                    const idx = subagents.findIndex((s) => s.taskId === p.taskId);
+                    const existing = idx >= 0
+                        ? subagents[idx]
+                        : {
+                            taskId: p.taskId!,
+                            agentName: 'general',
+                            description: '',
+                            status: 'running' as const,
+                            startedAt: ev.ts,
+                        };
+                    const updated = { ...existing };
+                    if (ev.type === 'subagent_progress') {
+                        updated.status = 'running';
+                        updated.progress = p.progress ?? p.status ?? updated.progress;
+                    } else if (ev.type === 'subagent_complete') {
+                        updated.status = 'success';
+                        updated.result = p.result ?? updated.result;
+                        updated.endedAt = ev.ts;
+                    } else {
+                        updated.status = 'error';
+                        updated.error = p.error ?? updated.error;
+                        updated.endedAt = ev.ts;
+                    }
+                    const next = idx >= 0
+                        ? subagents.map((s, i) => (i === idx ? updated : s))
+                        : [...subagents, updated];
+                    return { ...t, subagents: next };
+                }),
             };
         }
 

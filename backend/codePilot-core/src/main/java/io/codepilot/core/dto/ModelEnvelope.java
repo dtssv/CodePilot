@@ -25,8 +25,5 @@ public record ModelEnvelope(
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record FinalAnswer(
-      String answer,
-      Boolean subtaskDone,
-      List<Patch> patches,
-      String summaryForNextTurn) {}
+      String answer, Boolean subtaskDone, List<Patch> patches, String summaryForNextTurn) {}
 }

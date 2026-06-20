@@ -20,6 +20,7 @@ import { MessageImages } from '../../MessageImages';
 import { NeedsInputCard } from '../../NeedsInputCard';
 import { ShellStepCard, type ShellStepState } from '../../shell/ShellStepCard';
 import { TurnSkillHistory } from '../../skills/TurnSkillHistory';
+import { SubagentTree } from '../../subagents/SubagentTree';
 import { ToolCallCard } from '../../ToolCallCard';
 import { shouldHideToolStep, stepToToolCall } from './stepToToolCall';
 
@@ -154,6 +155,9 @@ function TurnView({ turn, steps }: { turn: TurnNode; steps: Record<string, StepN
                     <div className="turn-steps">
                         {stepList.map((step) => renderStep(step, stepList, true))}
                     </div>
+                    {turn.subagents && turn.subagents.length > 0 && (
+                        <SubagentTree subagents={turn.subagents} />
+                    )}
                     <TurnAlerts turn={turn} />
                     <footer className="turn-footer">
                         <span className={`turn-status status-${turn.status}${admissionWait && turn.status === 'running' ? ' status-waiting' : ''}`}>
@@ -327,11 +331,58 @@ function agentStepFromNode(step: StepNode): AgentStep {
     };
     const rawDetail = step.progressDetail as AgentStep['detail'] | undefined;
     const files = rawDetail?.files;
+    const toolArgs = step.toolCall?.args as Record<string, unknown> | undefined;
+    const toolName = step.toolCall?.tool ?? '';
+
+    // Build files list: prefer progressDetail.files, fall back to toolCall.args
+    let resolvedFiles = files && files.length > 0 ? files : undefined;
+    if (!resolvedFiles && toolArgs) {
+        const pathFromArgs = (toolArgs as { path?: string; filePath?: string }).path
+            ?? (toolArgs as { filePath?: string }).filePath;
+        const opFromArgs = (toolArgs as { op?: string }).op;
+        const patchesFromArgs = (toolArgs as { patches?: { path: string; op?: string }[] }).patches;
+        if (pathFromArgs) {
+            resolvedFiles = [{ path: pathFromArgs, op: opFromArgs ?? (toolName.includes('create') ? 'create' : toolName.includes('delete') ? 'delete' : undefined) }];
+        } else if (patchesFromArgs && Array.isArray(patchesFromArgs)) {
+            resolvedFiles = patchesFromArgs.map((p) => ({ path: p.path, op: p.op }));
+        }
+    }
+
+    // Build command: prefer progressDetail.command, fall back to toolCall.args.command
+    let resolvedCommand = rawDetail?.command;
+    if (!resolvedCommand && toolArgs) {
+        resolvedCommand = (toolArgs as { command?: string }).command;
+    }
+
+    // Build output: prefer progressDetail output, fall back to toolResult
+    let resolvedOutput = rawDetail?.output;
+    if (!resolvedOutput && step.toolResult?.result && typeof step.toolResult.result === 'object') {
+        const result = step.toolResult.result as Record<string, unknown>;
+        resolvedOutput = typeof result.stdout === 'string' ? result.stdout : undefined;
+    }
+
+    // Build detail
+    const detail: AgentStep['detail'] = {};
+    if (resolvedFiles && resolvedFiles.length > 0) detail.files = resolvedFiles;
+    if (resolvedCommand) detail.command = resolvedCommand;
+    if (resolvedOutput) detail.output = resolvedOutput;
+    if (rawDetail?.summary) detail.summary = rawDetail.summary;
+
+    // Build content: use title, but enhance with file names or command for better display
+    let content = stripGraphMarkers(step.title);
+    if (!content || content === toolName) {
+        if (resolvedFiles && resolvedFiles.length > 0) {
+            content = resolvedFiles.map((f) => f.path.split('/').pop() || f.path).join(', ');
+        } else if (resolvedCommand) {
+            content = resolvedCommand;
+        }
+    }
+
     return {
         type: typeMap[step.kind] ?? 'checking',
-        content: stripGraphMarkers(step.title),
+        content,
         status: step.status === 'running' ? 'running' : step.status === 'error' ? 'error' : 'success',
-        detail: files && files.length > 0 ? { files } : rawDetail,
+        detail: Object.keys(detail).length > 0 ? detail : rawDetail,
     };
 }
 

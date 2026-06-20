@@ -39,10 +39,14 @@ public class AuditController {
       @RequestHeader(value = "X-User-Id", required = false) String userId,
       @RequestHeader(value = "X-CodePilot-Device-Id", required = false) String deviceId,
       @RequestBody @Valid AuditEventRequest req) {
-    var extra = req.extra() != null ? new java.util.LinkedHashMap<>(req.extra()) : new java.util.LinkedHashMap<String, Object>();
+    var extra =
+        req.extra() != null
+            ? new java.util.LinkedHashMap<>(req.extra())
+            : new java.util.LinkedHashMap<String, Object>();
     if (req.argsHash() != null) extra.put("argsHash", req.argsHash());
     if (req.durationMs() != null) extra.put("durationMs", req.durationMs());
-    auditRepo.insert(null, null, userId, deviceId, req.type(), "info", null, null, null, null, extra);
+    auditRepo.insert(
+        null, null, userId, deviceId, req.type(), "info", null, null, null, null, extra);
     return ApiResponse.ok(Map.of("accepted", true));
   }
 
@@ -50,10 +54,13 @@ public class AuditController {
   @Operation(summary = "Query current user's audit events")
   @GetMapping("/me")
   public ApiResponse<Object> queryMine(
-      @RequestHeader("X-User-Id") String userId,
-      @RequestParam(defaultValue = "50") int limit) {
-    String sql = "SELECT ts, kind, severity, message, extra_json FROM audit_events WHERE user_id = :uid ORDER BY ts DESC LIMIT :limit";
-    var rows = jdbc.queryForList(sql, new MapSqlParameterSource().addValue("uid", userId).addValue("limit", limit));
+      @RequestHeader("X-User-Id") String userId, @RequestParam(defaultValue = "50") int limit) {
+    String sql =
+        "SELECT ts, kind, severity, message, extra_json FROM audit_events WHERE user_id = :uid"
+            + " ORDER BY ts DESC LIMIT :limit";
+    var rows =
+        jdbc.queryForList(
+            sql, new MapSqlParameterSource().addValue("uid", userId).addValue("limit", limit));
     return ApiResponse.ok(rows);
   }
 

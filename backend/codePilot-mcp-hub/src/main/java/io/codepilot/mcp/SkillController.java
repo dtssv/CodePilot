@@ -28,120 +28,124 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping(value = "/v1/skills", produces = MediaType.APPLICATION_JSON_VALUE)
 public class SkillController {
 
-    private final McpRepository repo;
-    private final SignatureService signatureService;
-    private final SkillClasspathArchiveService archiveService;
+  private final McpRepository repo;
+  private final SignatureService signatureService;
+  private final SkillClasspathArchiveService archiveService;
 
-    public SkillController(
-            McpRepository repo,
-            SignatureService signatureService,
-            SkillClasspathArchiveService archiveService) {
-        this.repo = repo;
-        this.signatureService = signatureService;
-        this.archiveService = archiveService;
-    }
+  public SkillController(
+      McpRepository repo,
+      SignatureService signatureService,
+      SkillClasspathArchiveService archiveService) {
+    this.repo = repo;
+    this.signatureService = signatureService;
+    this.archiveService = archiveService;
+  }
 
-    @GetMapping("/packages")
-    public ApiResponse<McpController.PageResponse> list(
-            @RequestParam(required = false) String type,
-            @RequestParam(required = false) String q,
-            @RequestParam(defaultValue = "1") @Min(1) int page,
-            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
-        int offset = (page - 1) * size;
-        var items = repo.list("skill", q, size, offset);
-        return ApiResponse.ok(new McpController.PageResponse(items.size(), page, size, items));
-    }
+  @GetMapping("/packages")
+  public ApiResponse<McpController.PageResponse> list(
+      @RequestParam(required = false) String type,
+      @RequestParam(required = false) String q,
+      @RequestParam(defaultValue = "1") @Min(1) int page,
+      @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
+    int offset = (page - 1) * size;
+    var items = repo.list("skill", q, size, offset);
+    return ApiResponse.ok(new McpController.PageResponse(items.size(), page, size, items));
+  }
 
-    @GetMapping("/packages/{slug:.+}")
-    public ApiResponse<McpPackage> details(@PathVariable String slug) {
-        return repo.findBySlug(slug)
-                .map(ApiResponse::ok)
-                .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Skill package not found"));
-    }
+  @GetMapping("/packages/{slug:.+}")
+  public ApiResponse<McpPackage> details(@PathVariable String slug) {
+    return repo.findBySlug(slug)
+        .map(ApiResponse::ok)
+        .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Skill package not found"));
+  }
 
-    @GetMapping("/packages/{slug:.+}/versions/{version}/manifest")
-    public ApiResponse<JsonNode> manifest(
-            @PathVariable String slug, @PathVariable String version) {
-        var ver = repo.findVersion(slug, version)
-                .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
-        JsonNode manifest = ver.manifest();
-        if (isSystem(manifest)) {
-            manifest = repo.redactManifestForSystem(manifest);
-        }
-        return ApiResponse.ok(manifest);
-    }
-
-    @GetMapping("/packages/{slug:.+}/versions/{version}/download")
-    public ResponseEntity<ApiResponse<McpController.DownloadInfo>> download(
-            @PathVariable String slug, @PathVariable String version) {
-        var ver = repo.findVersion(slug, version)
-                .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
-
-        String explicitUrl = ver.downloadUrl();
-        if (explicitUrl != null && !explicitUrl.isBlank()) {
-            if (isSystem(ver.manifest())) {
-                throw new CodePilotException(
-                        ErrorCodes.FORBIDDEN,
-                        "This package is marked system-only and has no downloadable artifact configured");
-            }
-            verifySignatureWhenPresent(ver);
-            long signedMs = ver.signedAt() != null ? ver.signedAt().toEpochMilli() : 0L;
-            return ResponseEntity.ok(ApiResponse.ok(
-                    new McpController.DownloadInfo(
-                            explicitUrl, ver.sha256(), ver.signature(), signedMs)));
-        }
-
-        // Bundled classpath skill (ZIP with skill.yaml)
-        if (!archiveService.hasClasspathYaml(slug)) {
-            if (isSystem(ver.manifest())) {
-                throw new CodePilotException(
-                        ErrorCodes.FORBIDDEN,
-                        "Skill is server-managed and no local install artifact is published");
-            }
-            throw new CodePilotException(ErrorCodes.NOT_FOUND, "Skill package has no download artifact");
-        }
-
-        byte[] zip = archiveService.zipBytes(slug);
-        String sha = archiveService.sha256Hex(zip);
-        String relative = "/v1/skills/packages/" + slug + "/versions/" + version + "/archive";
-        long signedMs = ver.signedAt() != null ? ver.signedAt().toEpochMilli() : 0L;
-        return ResponseEntity.ok(ApiResponse.ok(
-                new McpController.DownloadInfo(relative, sha, null, signedMs)));
-    }
-
-    /** Raw ZIP artifact (single {@code skill.yaml}) for IDE installer + SHA verification. */
-    @GetMapping(
-            value = "/packages/{slug:.+}/versions/{version}/archive",
-            produces = "application/zip")
-    public ResponseEntity<byte[]> downloadArchive(@PathVariable String slug, @PathVariable String version) {
+  @GetMapping("/packages/{slug:.+}/versions/{version}/manifest")
+  public ApiResponse<JsonNode> manifest(@PathVariable String slug, @PathVariable String version) {
+    var ver =
         repo.findVersion(slug, version)
-                .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
-        if (!archiveService.hasClasspathYaml(slug)) {
-            throw new CodePilotException(ErrorCodes.NOT_FOUND, "No bundled archive for slug: " + slug);
-        }
-        byte[] zip = archiveService.zipBytes(slug);
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_TYPE, "application/zip")
-                .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(zip.length))
-                .body(zip);
+            .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
+    JsonNode manifest = ver.manifest();
+    if (isSystem(manifest)) {
+      manifest = repo.redactManifestForSystem(manifest);
+    }
+    return ApiResponse.ok(manifest);
+  }
+
+  @GetMapping("/packages/{slug:.+}/versions/{version}/download")
+  public ResponseEntity<ApiResponse<McpController.DownloadInfo>> download(
+      @PathVariable String slug, @PathVariable String version) {
+    var ver =
+        repo.findVersion(slug, version)
+            .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
+
+    String explicitUrl = ver.downloadUrl();
+    if (explicitUrl != null && !explicitUrl.isBlank()) {
+      if (isSystem(ver.manifest())) {
+        throw new CodePilotException(
+            ErrorCodes.FORBIDDEN,
+            "This package is marked system-only and has no downloadable artifact configured");
+      }
+      verifySignatureWhenPresent(ver);
+      long signedMs = ver.signedAt() != null ? ver.signedAt().toEpochMilli() : 0L;
+      return ResponseEntity.ok(
+          ApiResponse.ok(
+              new McpController.DownloadInfo(
+                  explicitUrl, ver.sha256(), ver.signature(), signedMs)));
     }
 
-    private void verifySignatureWhenPresent(McpVersion ver) {
-        if (ver.signature() != null && !ver.signature().isBlank()) {
-            boolean valid = signatureService.verifyOfficialSignature(
-                    ver.sha256(), ver.manifest().toString(), ver.signature());
-            if (!valid) {
-                throw new CodePilotException(
-                        ErrorCodes.FORBIDDEN, "Skill package signature verification failed");
-            }
-        }
+    // Bundled classpath skill (ZIP with skill.yaml)
+    if (!archiveService.hasClasspathYaml(slug)) {
+      if (isSystem(ver.manifest())) {
+        throw new CodePilotException(
+            ErrorCodes.FORBIDDEN,
+            "Skill is server-managed and no local install artifact is published");
+      }
+      throw new CodePilotException(ErrorCodes.NOT_FOUND, "Skill package has no download artifact");
     }
 
-    private boolean isSystem(JsonNode manifest) {
-        if (manifest == null) {
-            return false;
-        }
-        var source = manifest.get("source");
-        return source != null && "system".equalsIgnoreCase(source.asText());
+    byte[] zip = archiveService.zipBytes(slug);
+    String sha = archiveService.sha256Hex(zip);
+    String relative = "/v1/skills/packages/" + slug + "/versions/" + version + "/archive";
+    long signedMs = ver.signedAt() != null ? ver.signedAt().toEpochMilli() : 0L;
+    return ResponseEntity.ok(
+        ApiResponse.ok(new McpController.DownloadInfo(relative, sha, null, signedMs)));
+  }
+
+  /** Raw ZIP artifact (single {@code skill.yaml}) for IDE installer + SHA verification. */
+  @GetMapping(
+      value = "/packages/{slug:.+}/versions/{version}/archive",
+      produces = "application/zip")
+  public ResponseEntity<byte[]> downloadArchive(
+      @PathVariable String slug, @PathVariable String version) {
+    repo.findVersion(slug, version)
+        .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "Version not found"));
+    if (!archiveService.hasClasspathYaml(slug)) {
+      throw new CodePilotException(ErrorCodes.NOT_FOUND, "No bundled archive for slug: " + slug);
     }
+    byte[] zip = archiveService.zipBytes(slug);
+    return ResponseEntity.ok()
+        .header(HttpHeaders.CONTENT_TYPE, "application/zip")
+        .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(zip.length))
+        .body(zip);
+  }
+
+  private void verifySignatureWhenPresent(McpVersion ver) {
+    if (ver.signature() != null && !ver.signature().isBlank()) {
+      boolean valid =
+          signatureService.verifyOfficialSignature(
+              ver.sha256(), ver.manifest().toString(), ver.signature());
+      if (!valid) {
+        throw new CodePilotException(
+            ErrorCodes.FORBIDDEN, "Skill package signature verification failed");
+      }
+    }
+  }
+
+  private boolean isSystem(JsonNode manifest) {
+    if (manifest == null) {
+      return false;
+    }
+    var source = manifest.get("source");
+    return source != null && "system".equalsIgnoreCase(source.asText());
+  }
 }

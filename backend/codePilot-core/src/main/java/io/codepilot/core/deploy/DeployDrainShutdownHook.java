@@ -7,11 +7,15 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 /**
- * On SIGTERM / context shutdown, drain in-flight runs before the JVM exits.
- * High phase value = stops early in the shutdown sequence.
+ * On SIGTERM / context shutdown, drain in-flight runs before the JVM exits. High phase value =
+ * stops early in the shutdown sequence.
  */
 @Component
-@ConditionalOnProperty(prefix = "codepilot.deploy.drain", name = "shutdown-auto-drain", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+    prefix = "codepilot.deploy.drain",
+    name = "shutdown-auto-drain",
+    havingValue = "true",
+    matchIfMissing = true)
 public class DeployDrainShutdownHook implements SmartLifecycle {
 
   private static final Logger log = LoggerFactory.getLogger(DeployDrainShutdownHook.class);
@@ -20,7 +24,8 @@ public class DeployDrainShutdownHook implements SmartLifecycle {
   private final DeployDrainService drainService;
   private volatile boolean running = true;
 
-  public DeployDrainShutdownHook(DeployDrainProperties properties, DeployDrainService drainService) {
+  public DeployDrainShutdownHook(
+      DeployDrainProperties properties, DeployDrainService drainService) {
     this.properties = properties;
     this.drainService = drainService;
   }

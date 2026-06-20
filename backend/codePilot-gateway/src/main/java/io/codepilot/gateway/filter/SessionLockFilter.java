@@ -1,5 +1,6 @@
 package io.codepilot.gateway.filter;
 
+import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
@@ -11,12 +12,10 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-
 /**
  * Ensures only ONE concurrent /conversation/run per sessionId. Uses a Redis SETNX lock with a
- * safety TTL. If the lock is already held, returns 409 Conflict. The lock is released when the
- * SSE stream completes.
+ * safety TTL. If the lock is already held, returns 409 Conflict. The lock is released when the SSE
+ * stream completes.
  */
 @Component
 @Order(45)
@@ -47,22 +46,27 @@ public class SessionLockFilter implements WebFilter {
 
     String lockKey = "cp:lock:agent:" + sessionId;
 
-    return redis.opsForValue().setIfAbsent(lockKey, "1", LOCK_TTL)
-        .flatMap(acquired -> {
-          if (Boolean.FALSE.equals(acquired)) {
-            log.info("Session lock conflict for sessionId={}", sessionId);
-            exchange.getResponse().setStatusCode(HttpStatus.CONFLICT);
-            exchange.getResponse().getHeaders().add("X-Lock-Reason", "session-already-running");
-            return exchange.getResponse().setComplete();
-          }
-          // Proceed; release lock when the stream completes
-          return chain.filter(exchange)
-              .doFinally(signal -> redis.delete(lockKey).subscribe());
-        })
+    return redis
+        .opsForValue()
+        .setIfAbsent(lockKey, "1", LOCK_TTL)
+        .flatMap(
+            acquired -> {
+              if (Boolean.FALSE.equals(acquired)) {
+                log.info("Session lock conflict for sessionId={}", sessionId);
+                exchange.getResponse().setStatusCode(HttpStatus.CONFLICT);
+                exchange.getResponse().getHeaders().add("X-Lock-Reason", "session-already-running");
+                return exchange.getResponse().setComplete();
+              }
+              // Proceed; release lock when the stream completes
+              return chain.filter(exchange).doFinally(signal -> redis.delete(lockKey).subscribe());
+            })
         .onErrorResume(
             Exception.class,
             ex -> {
-              log.warn("Redis unavailable, skipping session lock for sessionId={}: {}", sessionId, ex.getMessage());
+              log.warn(
+                  "Redis unavailable, skipping session lock for sessionId={}: {}",
+                  sessionId,
+                  ex.getMessage());
               return chain.filter(exchange);
             });
   }

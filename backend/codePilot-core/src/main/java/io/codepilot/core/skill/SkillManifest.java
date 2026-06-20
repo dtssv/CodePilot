@@ -21,7 +21,9 @@ public record SkillManifest(
     String systemPrompt,
     Category category) {
 
-  /** Coarse category caps used by [SkillRouter] (lang.primary <= 1, lang.aux <= 2, scenario <= 2). */
+  /**
+   * Coarse category caps used by [SkillRouter] (lang.primary <= 1, lang.aux <= 2, scenario <= 2).
+   */
   public enum Category {
     GENERIC,
     LANG_PRIMARY,

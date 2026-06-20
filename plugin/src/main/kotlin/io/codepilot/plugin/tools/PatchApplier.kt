@@ -1,15 +1,15 @@
 package io.codepilot.plugin.tools
 
 import com.fasterxml.jackson.databind.JsonNode
-import com.intellij.diff.DiffContentFactory
-import com.intellij.diff.DiffManager
-import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.LocalFileSystem
 import io.codepilot.plugin.settings.CodePilotSettings
+import io.codepilot.plugin.ui.InlineDiffRenderer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -316,9 +316,12 @@ class PatchApplier(
             val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
             val patched = applyUnifiedHunks(original, patchContent)
             if (patched == original) return
-            if (!confirmIfNeeded(rel, original, patched, "Apply patch to $rel", risk)) return
-            WriteCommandAction.runWriteCommandAction(project) {
-                vf.setBinaryContent(patched.toByteArray(StandardCharsets.UTF_8))
+            val confirmResult = confirmIfNeededInline(rel, original, patched, "Apply patch to $rel", risk)
+            if (!confirmResult.confirmed) return
+            if (!confirmResult.inlineApplied) {
+                WriteCommandAction.runWriteCommandAction(project) {
+                    vf.setBinaryContent(patched.toByteArray(StandardCharsets.UTF_8))
+                }
             }
         } catch (e: Exception) {
             Messages.showErrorDialog(project, "Failed to apply patch to $rel: ${e.message}", "CodePilot")
@@ -481,9 +484,17 @@ class PatchApplier(
         edit: JsonNode,
         risk: Risk = Risk.MEDIUM,
     ): Boolean {
-        val vf = PathGuard.resolve(project, rel)
         val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
-        val original = String(vf.contentsToByteArray(), StandardCharsets.UTF_8)
+
+        // ★ If the file doesn't exist yet, treat fs.write as create (write-or-create semantics)
+        val existingVf = try {
+            PathGuard.resolve(project, rel)
+        } catch (_: ToolViolation) {
+            // File doesn't exist — create it instead
+            return createFile(rel, edit, risk)
+        }
+
+        val original = String(existingVf.contentsToByteArray(), StandardCharsets.UTF_8)
 
         // ★ Integration: Use ThreeWayMerger if file was modified since Agent last saw it
         val contentToApply = if (edit.has("baseContent")) {
@@ -510,9 +521,12 @@ class PatchApplier(
             newContent
         }
 
-        if (!confirmIfNeeded(rel, original, contentToApply, "Overwrite $rel", risk)) return false
-        WriteCommandAction.runWriteCommandAction(project) {
-            vf.setBinaryContent(contentToApply.toByteArray(StandardCharsets.UTF_8))
+        val confirmResult = confirmIfNeededInline(rel, original, contentToApply, "Overwrite $rel", risk)
+        if (!confirmResult.confirmed) return false
+        if (!confirmResult.inlineApplied) {
+            WriteCommandAction.runWriteCommandAction(project) {
+                existingVf.setBinaryContent(contentToApply.toByteArray(StandardCharsets.UTF_8))
+            }
         }
         recorder.record("current", rel, "write", original, contentToApply)
         return true
@@ -624,9 +638,12 @@ class PatchApplier(
 
         // If we matched against normalized content, convert result back to original line endings
         val finalText = if (original.contains("\r\n")) result.text.replace("\n", "\r\n") else result.text
-        if (!confirmIfNeeded(rel, original, finalText, "Replace in $rel", risk)) return false
-        WriteCommandAction.runWriteCommandAction(project) {
-            vf.setBinaryContent(finalText.toByteArray(StandardCharsets.UTF_8))
+        val confirmResult = confirmIfNeededInline(rel, original, finalText, "Replace in $rel", risk)
+        if (!confirmResult.confirmed) return false
+        if (!confirmResult.inlineApplied) {
+            WriteCommandAction.runWriteCommandAction(project) {
+                vf.setBinaryContent(finalText.toByteArray(StandardCharsets.UTF_8))
+            }
         }
         return true
     }
@@ -915,20 +932,105 @@ class PatchApplier(
         // Risk-based auto-apply: LOW and MEDIUM can be auto-applied when setting is enabled
         if (autoApply && risk != Risk.HIGH) return true
         // HIGH risk always requires explicit confirmation
-        return showDiff(rel, before, after, title)
+        // ★ Try inline diff first (Cursor-style), fall back to DiffManager dialog
+        return tryInlineDiff(rel, before, after, title)
     }
 
-    private fun showDiff(
+    /**
+     * ★ Try to apply the diff inline in the editor (Cursor-style green/red highlighting
+     * with Tab to accept, Esc to reject). Falls back to the DiffManager dialog when
+     * the file is not open in an editor.
+     *
+     * Returns a ConfirmResult that tells the caller whether the inline diff already
+     * wrote the content (so the caller should skip the redundant setBinaryContent call).
+     */
+    data class ConfirmResult(val confirmed: Boolean, val inlineApplied: Boolean = false)
+
+    private fun confirmIfNeededInline(
+        rel: String,
+        before: String,
+        after: String,
+        title: String,
+        risk: Risk = Risk.MEDIUM,
+    ): ConfirmResult {
+        // No change → always skip
+        if (before == after) return ConfirmResult(true, false)
+        // Risk-based auto-apply: LOW and MEDIUM can be auto-applied when setting is enabled
+        if (autoApply && risk != Risk.HIGH) return ConfirmResult(true, false)
+        // ★ Try inline diff first (Cursor-style), fall back to DiffManager dialog
+        return tryInlineDiffResult(rel, before, after, title)
+    }
+
+    /**
+     * ★ Try to apply the diff inline in the editor (Cursor-style green/red highlighting
+     * with Tab to accept, Esc to reject). Falls back to the DiffManager dialog when
+     * the file is not open in an editor.
+     */
+    private fun tryInlineDiff(
         rel: String,
         before: String,
         after: String,
         title: String,
     ): Boolean {
-        val factory = DiffContentFactory.getInstance()
+        return tryInlineDiffResult(rel, before, after, title).confirmed
+    }
+
+    private fun tryInlineDiffResult(
+        rel: String,
+        before: String,
+        after: String,
+        title: String,
+    ): ConfirmResult {
+        val vf = try {
+            PathGuard.resolve(project, rel)
+        } catch (_: Exception) {
+            return ConfirmResult(showDiffDialog(rel, before, after, title), false)
+        }
+
+        val editor = FileEditorManager.getInstance(project).selectedTextEditor
+        if (editor == null) {
+            return ConfirmResult(showDiffDialog(rel, before, after, title), false)
+        }
+
+        val document = FileDocumentManager.getInstance().getDocument(vf)
+        if (document == null || document !== editor.document) {
+            // File not open in the current editor — fall back to dialog
+            return ConfirmResult(showDiffDialog(rel, before, after, title), false)
+        }
+
+        // Apply inline diff: replace the entire document content with the new text,
+        // show green highlighting, and let user Tab/Accept or Esc/Reject.
+        val inlineRenderer = InlineDiffRenderer(project, editor)
+        val startOffset = 0
+        val endOffset = before.length
+
+        ApplicationManager.getApplication().invokeAndWait {
+            inlineRenderer.applyWithDiff(
+                startOffset,
+                endOffset,
+                before,
+                after,
+                onAccept = {},
+                onReject = {},
+            )
+        }
+
+        // The inline renderer already wrote the content to the document;
+        // return inlineApplied=true so callers skip the redundant setBinaryContent call.
+        return ConfirmResult(true, true)
+    }
+
+    private fun showDiffDialog(
+        rel: String,
+        before: String,
+        after: String,
+        title: String,
+    ): Boolean {
+        val factory = com.intellij.diff.DiffContentFactory.getInstance()
         val left = factory.create(before)
         val right = factory.create(after)
-        val request = SimpleDiffRequest(title, left, right, "修改前", "修改后")
-        DiffManager.getInstance().showDiff(project, request)
+        val request = com.intellij.diff.requests.SimpleDiffRequest(title, left, right, "修改前", "修改后")
+        com.intellij.diff.DiffManager.getInstance().showDiff(project, request)
         val confirm =
             Messages.showOkCancelDialog(
                 project,
@@ -1167,9 +1269,18 @@ class PatchApplier(
                 refreshAt(target)
             }
             "write" -> {
-                val vf = PathGuard.resolve(project, rel)
                 val newContent = edit.path("newContent").asText(edit.path("content").asText(""))
-                vf.setBinaryContent(newContent.toByteArray(StandardCharsets.UTF_8))
+                val existingVf = try {
+                    PathGuard.resolve(project, rel)
+                } catch (_: ToolViolation) {
+                    // File doesn't exist yet — create it
+                    val target = PathGuard.resolveOrCreate(project, rel)
+                    Files.createDirectories(target.parent)
+                    Files.writeString(target, newContent)
+                    refreshAt(target)
+                    return
+                }
+                existingVf.setBinaryContent(newContent.toByteArray(StandardCharsets.UTF_8))
             }
             "replace" -> {
                 val vf = PathGuard.resolve(project, rel)

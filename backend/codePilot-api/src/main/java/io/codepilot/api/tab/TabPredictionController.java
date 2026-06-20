@@ -16,8 +16,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
-import org.springframework.ai.openai.OpenAiChatOptions;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -36,7 +36,9 @@ public class TabPredictionController {
   private final FimSyncCompleter fimSyncCompleter;
 
   public TabPredictionController(
-      ChatClientFactory clientFactory, ModelService modelService, FimSyncCompleter fimSyncCompleter) {
+      ChatClientFactory clientFactory,
+      ModelService modelService,
+      FimSyncCompleter fimSyncCompleter) {
     this.clientFactory = clientFactory;
     this.modelService = modelService;
     this.fimSyncCompleter = fimSyncCompleter;
@@ -77,8 +79,8 @@ public class TabPredictionController {
   /**
    * Call FIM/LLM when the caret line has enough typed context, or the file prefix is non-trivial.
    *
-   * <p>Markdown-only guard: skip doc-scale FIM when the user typed short prose on the last line of a
-   * long .md file (e.g. "你好"). Code lines with {@code <<}, {@code ;}, etc. are never skipped.
+   * <p>Markdown-only guard: skip doc-scale FIM when the user typed short prose on the last line of
+   * a long .md file (e.g. "你好"). Code lines with {@code <<}, {@code ;}, etc. are never skipped.
    */
   private boolean shouldTryModel(PredictRequest req) {
     String prefix = req.prefix() != null ? req.prefix() : "";
@@ -143,11 +145,14 @@ public class TabPredictionController {
       }
       return List.of(
           Map.of(
-              "path", req.filePath(),
+              "path",
+              req.filePath(),
               "range",
-                  Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
-              "newText", newText,
-              "confidence", 0.74));
+              Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
+              "newText",
+              newText,
+              "confidence",
+              0.74));
     } catch (Exception e) {
       log.debug("Tab FIM predict skipped: {}", e.getMessage());
       return List.of();
@@ -166,13 +171,7 @@ public class TabPredictionController {
         OpenAiChatOptions options =
             OpenAiChatOptions.builder().temperature(0.05).maxTokens(96).build();
         String completion =
-            resolved
-                .chatClient()
-                .prompt()
-                .user(userPrompt)
-                .options(options)
-                .call()
-                .content();
+            resolved.chatClient().prompt().user(userPrompt).options(options).call().content();
         if (completion == null || completion.isBlank()) return List.of();
         String newText = sanitizeCompletion(completion, req.language(), req);
         if (newText.isBlank()) {
@@ -181,11 +180,14 @@ public class TabPredictionController {
         }
         return List.of(
             Map.of(
-                "path", req.filePath(),
+                "path",
+                req.filePath(),
                 "range",
-                    Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
-                "newText", newText,
-                "confidence", 0.68));
+                Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
+                "newText",
+                newText,
+                "confidence",
+                0.68));
       } finally {
         resolved.endRequest(true, 0);
       }
@@ -217,8 +219,7 @@ public class TabPredictionController {
             ? req.currentLinePrefix()
             : lastLine(req.prefix() != null ? req.prefix() : "");
     String lineSuf = req.currentLineSuffix() != null ? req.currentLineSuffix() : "";
-    String guide =
-        (template != null ? template : "").replace("{{language}}", lang).strip();
+    String guide = (template != null ? template : "").replace("{{language}}", lang).strip();
     if (guide.isBlank()) {
       guide =
           "Output ONLY raw code to insert at the cursor between PREFIX and SUFFIX. "
@@ -287,7 +288,9 @@ public class TabPredictionController {
     if (t.length() >= 4 && linePre.contains(t)) {
       return "";
     }
-    if (t.contains("trappedWater") && pre.contains("trappedWater") && !linePre.contains("trappedWater")) {
+    if (t.contains("trappedWater")
+        && pre.contains("trappedWater")
+        && !linePre.contains("trappedWater")) {
       return "";
     }
     return t;
@@ -335,7 +338,9 @@ public class TabPredictionController {
     if (t.startsWith("这是一个")) return true;
     if (lower.startsWith("the output") || lower.contains("would be:")) return true;
     long han =
-        t.codePoints().filter(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN).count();
+        t.codePoints()
+            .filter(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN)
+            .count();
     if (han >= 6 && !looksLikeCodeInsert(t)) return true;
     if (t.split("\\s+").length > 12 && !t.contains(";") && !t.contains("<<")) return true;
     return false;
@@ -374,18 +379,26 @@ public class TabPredictionController {
       if (indent.length() < 4) indent = "    ";
       return List.of(
           Map.of(
-              "path", req.filePath(),
-              "range", Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
-              "newText", "\n" + indent + "}",
-              "confidence", 0.72));
+              "path",
+              req.filePath(),
+              "range",
+              Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
+              "newText",
+              "\n" + indent + "}",
+              "confidence",
+              0.72));
     }
     if (prefix.trim().endsWith("(") && !suffix.trim().startsWith(")")) {
       return List.of(
           Map.of(
-              "path", req.filePath(),
-              "range", Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
-              "newText", ")",
-              "confidence", 0.55));
+              "path",
+              req.filePath(),
+              "range",
+              Map.of("startLine", req.cursorLine(), "endLine", req.cursorLine()),
+              "newText",
+              ")",
+              "confidence",
+              0.55));
     }
     return List.of();
   }
@@ -394,8 +407,7 @@ public class TabPredictionController {
     if (!tryModel) {
       return "No high-confidence edit inferred.";
     }
-    boolean hasEnabledModel =
-        modelService.listModelGroups().stream().anyMatch(ModelGroup::enabled);
+    boolean hasEnabledModel = modelService.listModelGroups().stream().anyMatch(ModelGroup::enabled);
     if (!hasEnabledModel) {
       return "No enabled model configured for tab prediction.";
     }

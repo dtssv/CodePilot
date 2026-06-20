@@ -1,5 +1,8 @@
 package io.codepilot.gateway.filter;
 
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,16 +15,12 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-
 /**
  * Enforces a daily token quota per user. Token usage (prompt + completion) is tracked in a Redis
  * hash keyed by user ID + date. When the quota is exceeded, returns 429.
  *
- * <p>Token counts are submitted by the ConversationService after each model call via
- * {@link TokenQuotaFilter#recordUsage(String, long)}.
+ * <p>Token counts are submitted by the ConversationService after each model call via {@link
+ * TokenQuotaFilter#recordUsage(String, long)}.
  */
 @Component
 @Order(51)
@@ -54,24 +53,34 @@ public class TokenQuotaFilter implements WebFilter {
 
     String key = quotaKey(userId);
 
-    return redis.opsForHash().get(key, "total")
+    return redis
+        .opsForHash()
+        .get(key, "total")
         .defaultIfEmpty("0")
-        .flatMap(val -> {
-          long used = Long.parseLong(val.toString());
-          if (used >= dailyQuota) {
-            log.info("Token quota exceeded for user={} used={} quota={}", userId, used, dailyQuota);
-            exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
-            exchange.getResponse().getHeaders().add("X-RateLimit-Reason", "daily-token-quota");
-            exchange.getResponse().getHeaders().add("X-RateLimit-Used", String.valueOf(used));
-            exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(dailyQuota));
-            return exchange.getResponse().setComplete();
-          }
-          return chain.filter(exchange);
-        })
+        .flatMap(
+            val -> {
+              long used = Long.parseLong(val.toString());
+              if (used >= dailyQuota) {
+                log.info(
+                    "Token quota exceeded for user={} used={} quota={}", userId, used, dailyQuota);
+                exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
+                exchange.getResponse().getHeaders().add("X-RateLimit-Reason", "daily-token-quota");
+                exchange.getResponse().getHeaders().add("X-RateLimit-Used", String.valueOf(used));
+                exchange
+                    .getResponse()
+                    .getHeaders()
+                    .add("X-RateLimit-Limit", String.valueOf(dailyQuota));
+                return exchange.getResponse().setComplete();
+              }
+              return chain.filter(exchange);
+            })
         .onErrorResume(
             Exception.class,
             ex -> {
-              log.warn("Redis unavailable, skipping token quota check for user={}: {}", userId, ex.getMessage());
+              log.warn(
+                  "Redis unavailable, skipping token quota check for user={}: {}",
+                  userId,
+                  ex.getMessage());
               return chain.filter(exchange);
             });
   }
@@ -81,11 +90,14 @@ public class TokenQuotaFilter implements WebFilter {
    */
   public Mono<Long> recordUsage(String userId, long tokens) {
     String key = quotaKey(userId);
-    return redis.opsForHash().increment(key, "total", tokens)
-        .flatMap(newTotal -> {
-          // Set expiry to end of day + 1 hour (safety margin)
-          return redis.expire(key, Duration.ofHours(25)).thenReturn(newTotal);
-        });
+    return redis
+        .opsForHash()
+        .increment(key, "total", tokens)
+        .flatMap(
+            newTotal -> {
+              // Set expiry to end of day + 1 hour (safety margin)
+              return redis.expire(key, Duration.ofHours(25)).thenReturn(newTotal);
+            });
   }
 
   private String quotaKey(String userId) {

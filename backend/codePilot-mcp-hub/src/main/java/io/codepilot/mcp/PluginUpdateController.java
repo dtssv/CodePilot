@@ -47,13 +47,9 @@ public class PluginUpdateController {
 
   @GetMapping("/changelog/{version}")
   public ApiResponse<PluginUpdate.Changelog> changelog(@PathVariable String version) {
-    // Placeholder: M4 wires the storage; for now return empty-groups so the plugin UI renders gracefully.
-    return ApiResponse.ok(
-        new PluginUpdate.Changelog(
-            null,
-            null,
-            null,
-            null));
+    // Placeholder: M4 wires the storage; for now return empty-groups so the plugin UI renders
+    // gracefully.
+    return ApiResponse.ok(new PluginUpdate.Changelog(null, null, null, null));
   }
 
   public record ReportRequest(

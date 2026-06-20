@@ -33,12 +33,14 @@ import { usePendingMemoryCount } from './state/rulesMemory';
 import { createSendHandlers, createSessionActions, handleRemoveContextChip } from './state/sendBridge';
 import { useBranches, useSessions } from './state/sessionUiStore';
 import type { AppTab } from './types/appTabs';
+import type { AgentRole } from './components/AgentRoleSelector';
 export type { ToolCallInfo } from './state/chatTypes';
 
 export function App() {
     const [authChecked, setAuthChecked] = useState(false);
     const [authenticated, setAuthenticated] = useState(false);
     const [mode, setMode] = useState<'agent' | 'chat'>('agent');
+    const [agentRole, setAgentRole] = useState<AgentRole>('build');
     const [activeTab, setActiveTab] = useState<AppTab>('chat');
     const [models, setModels] = useState<ModelOption[]>([]);
     const [selectedModelId, setSelectedModelId] = useState<string>('');
@@ -164,6 +166,7 @@ export function App() {
             createSendHandlers({
                 v2Enabled,
                 mode,
+                agentRole,
                 messages,
                 selectedModelId,
                 models,
@@ -172,9 +175,9 @@ export function App() {
                 activeTurnIdRef,
                 setMessages,
                 setContextChips,
-                onSendBlocked: setSendError,
-            }),
-        [v2Enabled, mode, messages, selectedModelId, models, maxMode],
+onSendBlocked: setSendError,
+                }),
+        [v2Enabled, mode, messages, selectedModelId, models, maxMode, agentRole],
     );
 
     const sessionActions = useMemo(
@@ -277,6 +280,8 @@ export function App() {
                                 onModelSelect={setSelectedModelId}
                                 onModeChange={setMode}
                                 onMaxModeChange={setMaxMode}
+                                agentRole={agentRole}
+                                onAgentRoleChange={setAgentRole}
                                 onAutoApplyChange={(enabled) => {
                                     setAutoApply(enabled);
                                     sendToPlugin('update_auto_apply', { enabled });

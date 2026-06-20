@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.MultipartBodyBuilder;
@@ -19,7 +20,6 @@ import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
-import org.springframework.core.io.buffer.DataBufferUtils;
 
 /** OpenAI-compatible speech-to-text endpoint used by the IDE voice input bridge. */
 @Tag(name = "speech", description = "Speech recognition")
@@ -48,17 +48,20 @@ public class SpeechController {
   @PostMapping(value = "/recognize", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
   public Mono<Map<String, Object>> recognize(@RequestPart("audio") FilePart audio) {
     if (!StringUtils.hasText(apiKey) || "sk-xxx".equals(apiKey)) {
-      return Mono.error(new ResponseStatusException(
-          HttpStatus.SERVICE_UNAVAILABLE,
-          "Speech recognition is not configured. Set codepilot.speech.api-key or spring.ai.openai.api-key."));
+      return Mono.error(
+          new ResponseStatusException(
+              HttpStatus.SERVICE_UNAVAILABLE,
+              "Speech recognition is not configured. Set codepilot.speech.api-key or"
+                  + " spring.ai.openai.api-key."));
     }
     return DataBufferUtils.join(audio.content())
-        .map(buffer -> {
-          byte[] bytes = new byte[buffer.readableByteCount()];
-          buffer.read(bytes);
-          DataBufferUtils.release(buffer);
-          return bytes;
-        })
+        .map(
+            buffer -> {
+              byte[] bytes = new byte[buffer.readableByteCount()];
+              buffer.read(bytes);
+              DataBufferUtils.release(buffer);
+              return bytes;
+            })
         .flatMap(bytes -> transcribe(audio.filename(), bytes))
         .map(text -> Map.<String, Object>of("text", text));
   }
@@ -76,12 +79,16 @@ public class SpeechController {
         .contentType(MediaType.MULTIPART_FORM_DATA)
         .body(BodyInserters.fromMultipartData(body.build()))
         .retrieve()
-        .onStatus(status -> status.isError(), resp ->
-            resp.bodyToMono(String.class)
-                .defaultIfEmpty("")
-                .flatMap(msg -> Mono.error(new ResponseStatusException(
-                    HttpStatus.BAD_GATEWAY,
-                    "Speech provider failed: " + msg))))
+        .onStatus(
+            status -> status.isError(),
+            resp ->
+                resp.bodyToMono(String.class)
+                    .defaultIfEmpty("")
+                    .flatMap(
+                        msg ->
+                            Mono.error(
+                                new ResponseStatusException(
+                                    HttpStatus.BAD_GATEWAY, "Speech provider failed: " + msg))))
         .bodyToMono(JsonNode.class)
         .map(json -> json.path("text").asText(""));
   }

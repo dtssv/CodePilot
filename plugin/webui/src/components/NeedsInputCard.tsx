@@ -28,14 +28,18 @@ interface Option {
 }
 
 interface NeedsInputPayload {
-    title: string;
-    reason: string;
-    blocking: boolean;
+    title?: string;
+    reason?: string;
+    blocking?: boolean;
     maxAnswers?: number;
-    freeformAllowed: boolean;
-    questions: Question[];
+    freeformAllowed?: boolean;
+    questions?: Question[];
     notesForUser?: string[];
     continuationToken?: string;
+    // Extra fields from ask_permission events
+    callId?: string;
+    toolName?: string;
+    sessionId?: string;
 }
 
 interface NeedsInputCardProps {
@@ -57,10 +61,14 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
     const globallySubmitted = useNeedsInputSubmitted(payload.continuationToken);
     const isSubmitted = submitted || globallySubmitted;
 
-    const hasChoiceQuestions = payload.questions.some(
+    // Defensive: questions may be missing when the payload comes from a permission
+    // request (ask_permission) rather than a structured needs_input event.
+    const questions = payload.questions ?? [];
+
+    const hasChoiceQuestions = questions.some(
         (q) => q.kind !== 'freeform' && (q.options?.length ?? 0) > 0,
     );
-    const hasFreeformOnly = payload.questions.some(
+    const hasFreeformOnly = questions.some(
         (q) => q.kind === 'freeform' || !(q.options?.length),
     );
 
@@ -93,7 +101,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
 
     const buildAnswers = (): Answer[] => {
         const answers: Answer[] = [];
-        for (const q of payload.questions) {
+        for (const q of questions) {
             const selected = selectedOptions[q.id];
             if (selected && selected.length > 0) {
                 if (q.kind === 'multi-choice') {
@@ -125,6 +133,55 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
         return <div className="needs-input-submitted">{t('chat.needsInputSubmitted')}</div>;
     }
 
+    // When questions is empty (e.g. permission request from ask_permission event),
+    // show a simple permission prompt with approve/deny buttons.
+    if (questions.length === 0) {
+        const callId = (payload as Record<string, unknown>).callId as string | undefined;
+        const toolName = (payload as Record<string, unknown>).toolName as string | undefined;
+        return (
+            <div className="needs-input-card">
+                <div className="needs-input-header">
+                    <h4>{payload.title || t('chat.permissionRequired')}</h4>
+                    {payload.reason && <p className="needs-input-reason">{payload.reason}</p>}
+                    {toolName && <p className="needs-input-reason muted">Tool: {toolName}</p>}
+                </div>
+                <div className="needs-input-actions">
+                    <button
+                        type="button"
+                        className="submit-btn"
+                        onClick={() => {
+                            setSubmitted(true);
+                            markNeedsInputSubmitted(payload.continuationToken);
+                            sendToPlugin('tool_result', {
+                                toolCallId: callId,
+                                ok: true,
+                                sessionId: (payload as Record<string, unknown>).sessionId,
+                            });
+                        }}
+                    >
+                        {t('chat.approve')}
+                    </button>
+                    <button
+                        type="button"
+                        className="submit-btn deny-btn"
+                        onClick={() => {
+                            setSubmitted(true);
+                            markNeedsInputSubmitted(payload.continuationToken);
+                            sendToPlugin('tool_result', {
+                                toolCallId: callId,
+                                ok: false,
+                                errorMessage: 'User denied permission',
+                                sessionId: (payload as Record<string, unknown>).sessionId,
+                            });
+                        }}
+                    >
+                        {t('chat.deny')}
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="needs-input-card">
             <div className="needs-input-header">
@@ -132,7 +189,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                 {payload.reason && <p className="needs-input-reason">{payload.reason}</p>}
             </div>
 
-            {payload.questions.map((q) => (
+            {questions.map((q) => (
                 <div key={q.id} className="needs-input-question">
                     <div className="question-header">
                         <span className="question-index">Q{q.index}</span>
@@ -219,7 +276,7 @@ export function NeedsInputCard({ payload, onAnswered }: NeedsInputCardProps) {
                 </div>
             )}
 
-            {payload.questions.some((q) => q.kind === 'multi-choice') && (
+            {questions.some((q) => q.kind === 'multi-choice') && (
                 <div className="needs-input-actions">
                     <button type="button" className="submit-btn" onClick={handleSubmit}>
                         提交回答

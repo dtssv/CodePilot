@@ -1,391 +1,350 @@
 package io.codepilot.plugin.protocol
 
-import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.diagnostic.Logger
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
 
 /**
- * Stateful adapter that converts the existing per-event channel
- * (delta / tool_call / tool_result_ack / agent_thinking / agent_reading /
- * agent_writing / agent_running / user_plan / risk_notice / needs_input / done /
- * error) into structured [EventEnvelope]s emitted on the [EventBus].
+ * Converts events from the conversation backend into bus events for the UI.
  *
- * One instance per active turn. Holds the turn-local state required to allocate
- * step IDs and close the right step at the right time, without modifying the
- * ConversationClient SSE pipeline.
- *
- * Usage from CefChatPanel:
- *   val adapter = LegacyEventAdapter(bus, turnId)
- *   adapter.onTurnStart(userMessage, contextRefs)
- *   // …forward each legacy event…
- *   adapter.onTextDelta(text)
- *   adapter.onToolCall(toolCallId, toolName, args)
- *   adapter.onToolResultAck(toolCallId, ok)
- *   adapter.onDone(reason)
+ * Supports both old graph-engine observer pattern (CefChatPanel) and
+ * new v2 protocol events (via [StreamEvent.Type] from AgentLoop).
  */
 class LegacyEventAdapter(
     private val bus: EventBus,
     val turnId: String,
 ) {
-    private val log = logger<LegacyEventAdapter>()
-
-    /** Current LLM step (auto-created on first text delta). */
+    private val log = Logger.getInstance(LegacyEventAdapter::class.java)
+    private val mapper = ObjectMapper()
     private var llmStepId: String? = null
-
-    /** Tool steps keyed by toolCallId so we can close them on ack. */
-    private val toolSteps = HashMap<String, String>()
-
-    /** Per-tool-call captured info (name + args) so result classification can use args. */
-    data class ToolCallInfo(val name: String, val args: com.fasterxml.jackson.databind.JsonNode?)
-
-    private val toolCallInfos = HashMap<String, ToolCallInfo>()
-
-    /** Last agent_* step id, for "previous-step-success" cascading. */
-    private var lastAgentStepId: String? = null
-
-    /** Kind of the last open agent step (suppress duplicate running heartbeats). */
-    private var lastAgentKind: String? = null
-
-    /** Stable plan step for the turn (user_plan + progress). */
-    private var planStepId: String? = null
-
-    /** Monotonic counter for step IDs within this turn. */
     private var stepCounter = 0
-
-    /** Whether endTurn() has already been emitted (idempotency). */
     private var ended = false
-
-    /** Single writing step per turn — merged file list from all apply phases. */
-    private var writingStepId: String? = null
-
-    private val writingFilesAcc = mutableListOf<Map<String, Any?>>()
+    /** toolCallId → (toolName, parsed args node) for result classification */
+    private val pendingToolMeta = mutableMapOf<String, Pair<String, JsonNode?>>()
 
     private fun nextStepId(prefix: String): String {
         stepCounter += 1
         return "$turnId-$prefix-$stepCounter"
     }
 
-    fun onTurnStart(
-        userMessage: String,
-        contextRefs: List<Map<String, Any?>>,
-        images: List<Map<String, Any?>> = emptyList(),
-        forkMessageIndex: Int? = null,
-    ) {
-        writingStepId = null
-        writingFilesAcc.clear()
-        bus.startTurn(turnId, userMessage, contextRefs, images, forkMessageIndex)
-    }
-
+    // ── Text delta ──
     fun onTextDelta(text: String) {
         if (text.isEmpty()) return
-        val sid =
-            llmStepId ?: run {
-                val s = nextStepId("llm")
-                bus.startStep(turnId, s, StepKinds.LLM, "Reasoning")
-                llmStepId = s
-                s
-            }
+        val sid = llmStepId ?: run {
+            val s = nextStepId("llm")
+            bus.startStep(turnId, s, "llm", "Reasoning")
+            llmStepId = s
+            s
+        }
         bus.textDelta(turnId, sid, text)
     }
 
-    fun onToolCall(toolCallId: String, toolName: String, args: com.fasterxml.jackson.databind.JsonNode?) {
-        // Close the open LLM segment so this tool appears *after* prior output in the timeline.
-        // The next text delta will open a fresh LLM step below the tool card.
+    // ── Tool call lifecycle ──
+    fun onToolCall(toolCallId: String, toolName: String, args: JsonNode?) {
         llmStepId?.let { prev ->
-            bus.endStep(turnId, prev, StepStatuses.SUCCESS)
+            bus.endStep(turnId, prev, "success")
             llmStepId = null
         }
-        // Use backend toolCallId as envelope stepId so shell.ask aligns with the tool card.
         val sid = toolCallId
-        toolSteps[toolCallId] = sid
-        toolCallInfos[toolCallId] = ToolCallInfo(toolName, args)
-        val title =
-            when (toolName) {
-                "shell.exec", "shell.session" ->
-                    args?.path("command")?.asText(null)?.trim()?.takeIf { it.isNotBlank() }
-                        ?: toolName
-                else -> toolName
-            }
-        val detail =
-            if (toolName == "shell.exec" || toolName == "shell.session") {
-                val cmd = args?.path("command")?.asText(null)?.trim().orEmpty()
-                mapOf("kind" to "shell", "command" to cmd, "status" to "running")
-            } else {
-                null
-            }
-        bus.startStep(turnId, sid, StepKinds.TOOL, title, parentStepId = llmStepId, detail = detail)
-        bus.toolCall(turnId, sid, toolName, args, parentStepId = llmStepId)
+        val (argsNode, argsPayload) = coerceArgs(args)
+        pendingToolMeta[toolCallId] = toolName to argsNode
+        val title = toolStepTitle(toolName, argsNode, argsPayload)
+        bus.startStep(turnId, sid, "tool", title)
+        bus.toolCall(turnId, sid, toolName, argsPayload, parentStepId = null)
     }
 
-    /**
-     * Map a legacy tool result ack into a structured v2 `tool.result` envelope.
-     *
-     * The classifier produces a payload with an explicit `kind` so WebUI components
-     * can render rich previews (grep hits, shell terminal, file diff, …) without
-     * brittle string-prefix checks.
-     */
-    fun onToolResultAck(
+    // ── Tool result acknowledgment ──
+    fun onToolResultAck(toolCallId: String, ok: Boolean, result: String?, error: String?) {
+        emitToolResult(toolCallId, ok, result, error, null)
+    }
+
+    // 5-arg overload used in CefChatPanel (ToolDispatcher callback: errorCode=String, errorMessage=String)
+    fun onToolResultAck(toolCallId: String, ok: Boolean, result: Any?, errorMessage: String?, errorCode: String?) {
+        emitToolResult(toolCallId, ok, result, errorMessage, errorCode)
+    }
+
+    // 3-arg overload used in CefChatPanel
+    fun onToolResultAck(toolCallId: String, ok: Boolean, result: Any?) {
+        emitToolResult(toolCallId, ok, result, null, null)
+    }
+
+    private fun emitToolResult(
         toolCallId: String,
         ok: Boolean,
-        result: Any? = null,
-        error: String? = null,
-        errorCode: String? = null,
+        result: Any?,
+        errorMessage: String?,
+        errorCode: String?,
     ) {
-        val sid = toolSteps.remove(toolCallId) ?: run {
-            log.debug("toolResultAck without matching tool.call: $toolCallId")
-            return
-        }
-        val info = toolCallInfos.remove(toolCallId)
-        val classified =
-            info?.let {
-                ToolResultClassifier.classify(it.name, it.args, ok, result, errorCode, error)
-            } ?: mapOf("kind" to "unknown", "raw" to result)
-        bus.toolResult(turnId, sid, ok, classified, error)
-        bus.endStep(
-            turnId, sid,
-            if (ok) StepStatuses.SUCCESS else StepStatuses.ERROR,
-            error,
-        )
+        val sid = toolCallId
+        val (toolName, argsNode) = pendingToolMeta.remove(toolCallId) ?: ("" to null)
+        val classified = classifyForUi(toolName, argsNode, ok, result, errorCode, errorMessage)
+        bus.toolResult(turnId, sid, ok, classified, errorMessage)
+        bus.endStep(turnId, sid, if (ok) "success" else "error", errorMessage)
     }
 
-    /** Map legacy agent_thinking → step.start(kind=thinking) and close prior agent step. */
-    fun onAgentThinking(text: String?) =
-        emitAgentStep(StepKinds.THINKING, text ?: "Thinking…", finalize = false)
-
-    fun onAgentReading(summary: String?) =
-        emitAgentStep("reading", summary ?: "Reading files", finalize = true)
-
-    fun onAgentWriting(text: String?, files: List<Map<String, Any?>>? = null) {
-        if (!files.isNullOrEmpty()) {
-            for (f in files) {
-                val path = f["path"]?.toString()?.trim().orEmpty()
-                if (path.isEmpty()) continue
-                writingFilesAcc.removeAll { it["path"]?.toString() == path }
-                writingFilesAcc.add(f)
+    private fun coerceArgs(args: JsonNode?): Pair<JsonNode?, Map<String, Any?>> {
+        if (args == null || args.isNull || args.isMissingNode) {
+            return null to emptyMap()
+        }
+        if (args.isObject) {
+            @Suppress("UNCHECKED_CAST")
+            return args to (mapper.convertValue(args, Map::class.java) as Map<String, Any?>)
+        }
+        if (args.isTextual) {
+            val text = args.asText().trim()
+            if (text.startsWith("{") || text.startsWith("[")) {
+                return runCatching {
+                    val parsed = mapper.readTree(text)
+                    if (parsed.isObject) {
+                        @Suppress("UNCHECKED_CAST")
+                        parsed to (mapper.convertValue(parsed, Map::class.java) as Map<String, Any?>)
+                    } else {
+                        null to emptyMap()
+                    }
+                }.getOrElse { null to emptyMap() }
             }
         }
-        val summary = text?.takeIf { it.isNotBlank() }
-            ?: if (writingFilesAcc.isEmpty()) "Writing files"
-            else writingFilesAcc.joinToString(", ") { f ->
-                val path = f["path"]?.toString() ?: "?"
-                val op = f["op"]?.toString() ?: "write"
-                val lines = f["lineCount"]
-                val label = if (op == "create") "新建" else if (op == "delete") "删除" else "修改"
-                if (lines != null) "$label: $path +${lines}行" else "$label: $path"
-            }
-        val existing = writingStepId
-        if (existing != null) {
-            bus.stepProgress(
-                turnId,
-                existing,
-                mapOf(
-                    "files" to writingFilesAcc.toList(),
-                    "text" to summary,
-                    "kind" to "writing",
-                ),
-            )
-            return
-        }
-        lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
-        val sid = nextStepId("writing")
-        writingStepId = sid
-        lastAgentStepId = sid
-        lastAgentKind = "writing"
-        bus.startStep(
-            turnId,
-            sid,
-            "writing",
-            summary,
-            parentStepId = llmStepId,
-            detail = if (writingFilesAcc.isEmpty()) null else mapOf("files" to writingFilesAcc.toList()),
-        )
+        return args to emptyMap()
     }
 
-    fun onAgentRunning(text: String?) =
-        emitAgentStep("running", text ?: "Running command", finalize = false)
-
-    private fun emitAgentStep(
-        kind: String,
-        title: String,
-        finalize: Boolean,
-        detail: Map<String, Any?>? = null,
-    ) {
-        if (!finalize && lastAgentStepId != null && lastAgentKind == kind) {
-            return
-        }
-        lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
-        val sid = nextStepId(kind)
-        bus.startStep(turnId, sid, kind, title, parentStepId = llmStepId, detail = detail)
-        if (finalize) {
-            bus.endStep(turnId, sid, StepStatuses.SUCCESS)
-            lastAgentStepId = null
-            lastAgentKind = null
-        } else {
-            lastAgentStepId = sid
-            lastAgentKind = kind
+    private fun toolStepTitle(toolName: String, argsNode: JsonNode?, argsMap: Map<String, Any?>): String {
+        fun path(): String =
+            (argsMap["path"] as? String)?.trim().orEmpty()
+                .ifBlank { argsNode?.path("path")?.asText("")?.trim().orEmpty() }
+        fun command(): String =
+            (argsMap["command"] as? String)?.trim().orEmpty()
+                .ifBlank { argsNode?.path("command")?.asText("")?.trim().orEmpty() }
+        return when {
+            toolName == "shell.exec" || toolName == "shell.session" ->
+                command().ifBlank { toolName }
+            toolName.startsWith("fs.") || toolName.startsWith("ide.") || toolName.startsWith("code.") ->
+                path().ifBlank { toolName }
+            else -> toolName
         }
     }
 
-    /** Graph node transition — show as a running progress step in the chat timeline. */
-    fun onGraphTransition(payload: Any?) {
-        val message =
-            (payload as? Map<*, *>)?.get("message")?.toString()
-                ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("message")?.asText(null)
-        if (message.isNullOrBlank()) return
-        emitAgentStep("running", message, finalize = false)
-    }
-
-    fun onPlanUpdate(payload: Any?) {
-        val sid =
-            planStepId ?: run {
-                val s = nextStepId("plan")
-                bus.startStep(turnId, s, StepKinds.PLAN, "执行计划")
-                planStepId = s
-                s
-            }
-        bus.emit(turnId, sid, EventTypes.PLAN_UPDATE, payload)
-    }
-
-    fun onPlanProgress(payload: Any?) {
-        val sid = planStepId ?: return
-        bus.emit(turnId, sid, EventTypes.PLAN_PROGRESS, payload)
-    }
-
-    fun onGraphVerify(payload: Any?) {
-        val map =
-            when (payload) {
-                is Map<*, *> -> payload
-                is com.fasterxml.jackson.databind.JsonNode -> payload
-                else -> null
-            }
-        val result =
-            when (map) {
-                is Map<*, *> -> map["result"]?.toString()
-                is com.fasterxml.jackson.databind.JsonNode -> map.path("result").asText(null)
-                else -> null
-            } ?: "uncertain"
-        val summary =
-            when (map) {
-                is Map<*, *> -> map["summary"]?.toString()
-                is com.fasterxml.jackson.databind.JsonNode -> map.path("summary").asText(null)
-                else -> null
-            }
-        val title =
-            when (result) {
-                "success" -> "验证通过"
-                "fail" -> "验证未通过"
-                else -> "验证结果待确认"
-            }
-        val failures =
-            when (map) {
-                is Map<*, *> ->
-                    (map["failures"] as? List<*>)?.mapNotNull { it?.toString()?.takeIf { s -> s.isNotBlank() } }
-                        ?: emptyList()
-                is com.fasterxml.jackson.databind.JsonNode -> {
-                    val node = map.path("failures")
-                    if (!node.isArray) emptyList()
-                    else node.mapNotNull { it.asText(null)?.takeIf { s -> s.isNotBlank() } }
+    @Suppress("UNCHECKED_CAST")
+    private fun classifyForUi(
+        toolName: String,
+        argsNode: JsonNode?,
+        ok: Boolean,
+        result: Any?,
+        errorCode: String?,
+        errorMessage: String?,
+    ): Any? {
+        when (result) {
+            is Map<*, *> ->
+                return ToolResultClassifier.classify(
+                    toolName, argsNode, ok, result as Map<String, Any?>, errorCode, errorMessage,
+                )
+            is JsonNode -> {
+                if (result.isObject) {
+                    val m = mapper.convertValue(result, Map::class.java) as Map<String, Any?>
+                    return ToolResultClassifier.classify(toolName, argsNode, ok, m, errorCode, errorMessage)
                 }
-                else -> emptyList()
+                if (result.isTextual) {
+                    return classifyForUi(toolName, argsNode, ok, result.asText(), errorCode, errorMessage)
+                }
             }
-        val detail =
-            when {
-                failures.isNotEmpty() ->
-                    mapOf(
-                        "output" to failures.joinToString("\n"),
-                        "summary" to (summary ?: title),
-                    )
-                summary != null -> mapOf("summary" to summary)
-                else -> null
+            is String -> {
+                val text = result.trim()
+                if (text.startsWith("{")) {
+                    return runCatching {
+                        val m = mapper.readValue(text, Map::class.java) as Map<String, Any?>
+                        ToolResultClassifier.classify(toolName, argsNode, ok, m, errorCode, errorMessage)
+                    }.getOrDefault(result)
+                }
             }
-        val endStatus =
-            when (result) {
-                "fail" -> StepStatuses.ERROR
-                else -> StepStatuses.SUCCESS
-            }
-        lastAgentStepId?.let { prev -> bus.endStep(turnId, prev, StepStatuses.SUCCESS) }
-        val sid = nextStepId("verify")
-        bus.startStep(turnId, sid, StepKinds.VERIFY, title, parentStepId = llmStepId, detail = detail)
-        bus.endStep(turnId, sid, endStatus, if (result == "fail") summary else null)
-        lastAgentStepId = null
-        lastAgentKind = null
+        }
+        return result
     }
 
-    fun onGraphPhaseDone(payload: Any?) {
-        val phase = (payload as? Map<*, *>)?.get("phase")?.toString()
-            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("phase")?.asText("phase")
-            ?: "phase"
-        emitAgentStep(StepKinds.SUBTASK, "阶段完成: $phase", finalize = true)
+    // ── Needs input / Ask permission ──
+    fun onNeedsInput(payload: JsonNode) {
+        bus.emit(turnId, llmStepId ?: turnId, "needs_input", payload)
     }
 
-    fun onGraphRepairPlan(payload: Any?) {
-        val title = (payload as? Map<*, *>)?.get("summary")?.toString()
-            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("summary")?.asText("修复计划")
-            ?: "修复计划"
-        emitAgentStep(StepKinds.REPAIR, title, finalize = false)
+    fun onNeedsInput(data: Any) {
+        bus.emit(turnId, llmStepId ?: turnId, "needs_input", data)
     }
 
-    fun onGraphBudgetAlert(payload: Any?) {
-        val msg = (payload as? Map<*, *>)?.get("message")?.toString()
-            ?: (payload as? com.fasterxml.jackson.databind.JsonNode)?.path("message")?.asText("预算警告")
-            ?: "预算警告"
-        bus.emit(turnId, llmStepId ?: turnId, EventTypes.RISK_NOTICE, mapOf("level" to "warn", "message" to msg))
+    // ── Self check / goal evaluation ──
+    fun onSelfCheck(payload: JsonNode) {
+        val satisfied = payload.path("satisfied").asBoolean(false)
+        val confidence = payload.path("confidence").asDouble()
+        val reason = payload.path("reason").asText("")
+        val message = "confidence=$confidence reason=$reason"
+        if (!satisfied) {
+            bus.emit(turnId, llmStepId ?: turnId, "error", mapOf("message" to message))
+        } else {
+            bus.emit(turnId, llmStepId ?: turnId, "self_check", payload)
+        }
     }
 
-    fun onRiskNotice(payload: Any?) =
-        bus.emit(turnId, llmStepId ?: turnId, EventTypes.RISK_NOTICE, payload)
-
-    fun onNeedsInput(payload: Any?) =
-        bus.emit(turnId, llmStepId ?: turnId, EventTypes.NEEDS_INPUT, payload)
-
-    fun onError(code: Int, message: String) {
-        // Surface as a synthetic step.end on the active LLM/tool step (if any),
-        // then defer turn-end to the caller which knows the terminal reason.
-        val sid = llmStepId ?: turnId
-        bus.emit(
-            turnId, sid, "error",
-            mapOf("code" to code, "message" to message),
-        )
-    }
-
-    /** Call on every legacy `done` event. Only terminal reasons close the turn. */
+    // ── Done ──
     fun onDone(reason: String) {
-        val terminal = TerminalDoneReasons.isTerminal(reason)
-        if (!terminal) return
         if (ended) return
         ended = true
-
-        // Close any still-open steps
-        toolSteps.values.forEach { bus.endStep(turnId, it, StepStatuses.CANCELLED) }
-        toolSteps.clear()
-        lastAgentStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
-        lastAgentStepId = null
-        planStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
-        planStepId = null
-        llmStepId?.let { bus.endStep(turnId, it, StepStatuses.SUCCESS) }
-        llmStepId = null
-
-        val status =
-            when (reason) {
-                "failed" -> TurnStatuses.FAILED
-                "stopped" -> TurnStatuses.STOPPED
-                "max_steps" -> TurnStatuses.MAX_STEPS
-                else -> TurnStatuses.FINAL
-            }
-        bus.endTurn(turnId, status, reason)
+        llmStepId?.let { bus.endStep(turnId, it, "success") }
+        bus.endTurn(turnId, reason)
     }
 
-    /** Call when SSE stream closes without a terminal done event. */
+    // ── Turn lifecycle ──
+    fun onTurnStart(
+        userMessage: String,
+        contextRefs: List<Map<String, Any?>>,
+        images: List<Map<String, Any?>>,
+        forkMessageIndex: Int,
+    ) {
+        bus.startTurn(turnId, userMessage, contextRefs, images, forkMessageIndex)
+    }
+
+    // ── Graph-engine events (deprecated but kept for compile compatibility) ──
+    fun onGraphTransition(data: Any) {
+        bus.emit(turnId, turnId, "graph_transition", data)
+    }
+
+    fun onGraphVerify(data: Any) {
+        bus.emit(turnId, turnId, "graph_verify", data)
+    }
+
+    fun onGraphRepairPlan(data: Any) {
+        bus.emit(turnId, turnId, "graph_repair_plan", data)
+    }
+
+    fun onGraphPhaseDone(data: Any) {
+        bus.emit(turnId, turnId, "graph_phase_done", data)
+    }
+
+    fun onGraphBudgetAlert(data: Any) {
+        bus.emit(turnId, turnId, "graph_budget_alert", data)
+    }
+
+    fun onGraphBudgetAlert(payload: JsonNode) {
+        bus.emit(turnId, turnId, "graph_budget_alert", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Plan callbacks ──
+    fun onPlanUpdate(data: Any) {
+        bus.emit(turnId, turnId, "plan_update", data)
+    }
+
+    fun onPlanProgress(data: Any) {
+        bus.emit(turnId, turnId, "plan_progress", data)
+    }
+
+    // ── Memory update callback ──
+    fun onMemoryUpdate(type: String, content: String) {
+        bus.emit(turnId, turnId, "memory_update", mapOf("type" to type, "content" to content))
+    }
+
+    fun onMemoryUpdate(payload: JsonNode) {
+        bus.emit(turnId, turnId, "memory_update", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Skill invoked callback ──
+    fun onSkillInvoked(skillName: String, description: String) {
+        bus.emit(turnId, turnId, "skill_invoked", mapOf("skillName" to skillName, "description" to description))
+    }
+
+    fun onSkillInvoked(payload: JsonNode) {
+        bus.emit(turnId, turnId, "skill_invoked", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Subagent lifecycle callbacks ──
+    fun onSubagentSpawn(taskId: String, agentName: String, description: String) {
+        bus.emit(turnId, turnId, "subagent_spawn", mapOf("taskId" to taskId, "agentName" to agentName, "description" to description))
+    }
+
+    fun onSubagentSpawn(payload: JsonNode) {
+        bus.emit(turnId, turnId, "subagent_spawn", mapper.convertValue(payload, Map::class.java))
+    }
+
+    fun onSubagentProgress(taskId: String, status: String, progress: String) {
+        bus.emit(turnId, turnId, "subagent_progress", mapOf("taskId" to taskId, "status" to status, "progress" to progress))
+    }
+
+    fun onSubagentProgress(payload: JsonNode) {
+        bus.emit(turnId, turnId, "subagent_progress", mapper.convertValue(payload, Map::class.java))
+    }
+
+    fun onSubagentComplete(taskId: String, result: String) {
+        bus.emit(turnId, turnId, "subagent_complete", mapOf("taskId" to taskId, "result" to result))
+    }
+
+    fun onSubagentComplete(payload: JsonNode) {
+        bus.emit(turnId, turnId, "subagent_complete", mapper.convertValue(payload, Map::class.java))
+    }
+
+    fun onSubagentFailed(taskId: String, error: String) {
+        bus.emit(turnId, turnId, "subagent_failed", mapOf("taskId" to taskId, "error" to error))
+    }
+
+    fun onSubagentFailed(payload: JsonNode) {
+        bus.emit(turnId, turnId, "subagent_failed", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Fork created callback ──
+    fun onForkCreated(newSessionId: String, parentSessionId: String) {
+        bus.emit(turnId, turnId, "fork_created", mapOf("newSessionId" to newSessionId, "parentSessionId" to parentSessionId))
+    }
+
+    fun onForkCreated(payload: JsonNode) {
+        bus.emit(turnId, turnId, "fork_created", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Agent action callbacks ──
+    fun onAgentThinking(summary: String?) {
+        bus.emit(turnId, turnId, "agent_thinking", mapOf("summary" to summary))
+    }
+
+    fun onAgentReading(summary: String?) {
+        bus.emit(turnId, turnId, "agent_reading", mapOf("summary" to summary))
+    }
+
+    fun onAgentWriting(text: String?, files: List<Any?>?) {
+        val data = if (text != null) mapOf("text" to text, "files" to files) else mapOf("files" to (files ?: emptyList<Any?>()))
+        bus.emit(turnId, turnId, "agent_writing", data)
+    }
+
+    fun onAgentWriting(payload: JsonNode) {
+        bus.emit(turnId, turnId, "agent_writing", mapper.convertValue(payload, Map::class.java))
+    }
+
+    fun onAgentRunning(summary: String?) {
+        bus.emit(turnId, turnId, "agent_running", mapOf("summary" to summary))
+    }
+
+    fun onAgentRunning(payload: JsonNode) {
+        bus.emit(turnId, turnId, "agent_running", mapper.convertValue(payload, Map::class.java))
+    }
+
+    // ── Other callbacks ──
+    fun onRiskNotice(data: Any) {
+        bus.emit(turnId, turnId, "risk_notice", data)
+    }
+
+    fun onError(code: Int, message: String) {
+        bus.emit(turnId, turnId, "error", mapOf("code" to code, "message" to message))
+    }
+
+    fun onRunReclaimed(payload: JsonNode) {
+        bus.emit(turnId, turnId, "run_reclaimed", payload)
+    }
+
+    fun onRunReclaimed(data: String?) {
+        bus.emit(turnId, turnId, "run_reclaimed", mapOf("message" to data))
+    }
+
+    fun onSkillsActivated(payload: JsonNode) {
+        bus.emit(turnId, turnId, "skills_activated", payload)
+    }
+
+    // ── Abnormal close ──
     fun onAbnormalClose() {
         if (ended) return
         ended = true
-        toolSteps.values.forEach { bus.endStep(turnId, it, StepStatuses.CANCELLED) }
-        toolSteps.clear()
-        lastAgentStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
-        lastAgentStepId = null
-        planStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
-        planStepId = null
-        llmStepId?.let { bus.endStep(turnId, it, StepStatuses.ERROR, "interrupted") }
-        llmStepId = null
-        bus.endTurn(turnId, TurnStatuses.INTERRUPTED, "stream_closed")
+        llmStepId?.let { bus.endStep(turnId, it, "error", "interrupted") }
+        bus.endTurn(turnId, "interrupted")
     }
-
 }

@@ -101,6 +101,19 @@ export interface SkillActivationRecord {
     ts: number;
 }
 
+/** A subagent spawned by the main agent within a turn (Task_subagent). */
+export interface SubagentNode {
+    taskId: string;
+    agentName: string;
+    description: string;
+    status: 'running' | 'success' | 'error';
+    progress?: string;
+    result?: string;
+    error?: string;
+    startedAt: number;
+    endedAt?: number;
+}
+
 export interface TurnNode {
     turnId: string;
     userMessage: string;
@@ -110,6 +123,8 @@ export interface TurnNode {
     forkMessageIndex?: number;
     riskNotices?: RiskNotice[];
     needsInput?: NeedsInputPayload;
+    /** Subagents spawned during this turn, keyed by taskId order. */
+    subagents?: SubagentNode[];
     /** Chronological Skill activations per graph node within this turn. */
     skillActivations?: SkillActivationRecord[];
     status: TurnStatus;

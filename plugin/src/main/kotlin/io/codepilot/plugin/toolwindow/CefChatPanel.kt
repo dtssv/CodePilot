@@ -1314,9 +1314,21 @@ class CefChatPanel(
             }
             if (effectiveModelId != null && effectiveModelId != "auto") payload["modelId"] = effectiveModelId
             if (effectiveModelSource != null) payload["modelSource"] = effectiveModelSource
+            // Max Mode: best-of-N plan sampling (top-level so it maps to RunRequest.maxMode).
+            if (maxMode) payload["maxMode"] = true
 
             // ★ Inject project meta (language, root files) so LLM knows project context
             payload["projectMeta"] = buildProjectMeta()
+
+            // ★ Inject workspace root and OS hint so the model uses correct paths and commands
+            val projectRoot = project.basePath
+            if (!projectRoot.isNullOrBlank()) {
+                payload["workspaceRoot"] = projectRoot
+            }
+            payload["osHint"] = detectOs()
+
+            // ★ Inject user's preferred language so the model responds in the same language
+            payload["modelLanguage"] = LocaleHelper.normalize(settings.state.preferredLocale)
 
             // ★ Skills (plugin): userSkillRefs = trigger metadata; userSkillBodies = full prompt
             //   text only for IDE coarse-matched skills. Backend GraphNodeSkillMatcher re-runs
@@ -1593,6 +1605,39 @@ class CefChatPanel(
                                 dispatchToWeb("memory_hints", hintData)
                             }
                         }
+                    }
+
+                    // ── Subagent lifecycle (Task_subagent) ──
+                    override fun onSubagentSpawn(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleStream()) return
+                        legacyAdapter?.onSubagentSpawn(payload)
+                    }
+
+                    override fun onSubagentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleStream()) return
+                        legacyAdapter?.onSubagentProgress(payload)
+                    }
+
+                    override fun onSubagentComplete(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleStream()) return
+                        legacyAdapter?.onSubagentComplete(payload)
+                    }
+
+                    override fun onSubagentFailed(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        if (isStaleStream()) return
+                        legacyAdapter?.onSubagentFailed(payload)
+                    }
+
+                    override fun onForkCreated(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        legacyAdapter?.onForkCreated(payload)
+                    }
+
+                    override fun onMemoryUpdate(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        legacyAdapter?.onMemoryUpdate(payload)
+                    }
+
+                    override fun onSkillInvoked(payload: com.fasterxml.jackson.databind.JsonNode) {
+                        legacyAdapter?.onSkillInvoked(payload)
                     }
 
                     // ── Graph engine events (internal, not shown to user) ──
@@ -1986,6 +2031,13 @@ class CefChatPanel(
      * This prevents the LLM from guessing non-existent files like package.json or requirements.txt.
      */
     private fun buildProjectMeta(): String = buildProjectMetaSnippet(project)
+
+    private fun detectOs(): String =
+        when {
+            com.intellij.openapi.util.SystemInfo.isWindows -> "windows"
+            com.intellij.openapi.util.SystemInfo.isMac -> "macos"
+            else -> "linux"
+        }
 
     /**
      * Resume a session that was abnormally terminated.

@@ -46,7 +46,8 @@ public class UsagePersistenceStore {
   public UsagePersistenceStore(
       NamedParameterJdbcTemplate jdbc,
       @Value("${codepilot.usage.persistence:auto}") String persistenceMode,
-      @Value("${codepilot.usage.storage-file:${java.io.tmpdir}/codepilot-usage/records.json}") String storageFile,
+      @Value("${codepilot.usage.storage-file:${java.io.tmpdir}/codepilot-usage/records.json}")
+          String storageFile,
       @Value("${codepilot.usage.max-records:" + DEFAULT_MAX_RECORDS + "}") int maxRecords) {
     this.jdbc = jdbc;
     this.persistenceMode = persistenceMode != null ? persistenceMode.trim().toLowerCase() : "auto";
@@ -69,7 +70,9 @@ public class UsagePersistenceStore {
     } else {
       dbActive = false;
       loadFileSnapshot();
-      log.warn("Usage persistence: file fallback ({}) — usage tables missing or DB unreachable", storageFile);
+      log.warn(
+          "Usage persistence: file fallback ({}) — usage tables missing or DB unreachable",
+          storageFile);
     }
   }
 
@@ -131,7 +134,8 @@ public class UsagePersistenceStore {
 
   private void importFileIfDbEmpty() {
     try {
-      Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM usage_records", Map.of(), Integer.class);
+      Integer count =
+          jdbc.queryForObject("SELECT COUNT(*) FROM usage_records", Map.of(), Integer.class);
       if (count != null && count > 0) return;
       if (!Files.exists(storageFile)) return;
       UsageSnapshot snap = mapper.readValue(Files.readAllBytes(storageFile), UsageSnapshot.class);
@@ -143,7 +147,9 @@ public class UsagePersistenceStore {
       if (snap.dailyQuotaUsd() != null) {
         snap.dailyQuotaUsd().forEach(this::setQuota);
       }
-      log.info("Imported {} usage records from file into database", snap.records() != null ? snap.records().size() : 0);
+      log.info(
+          "Imported {} usage records from file into database",
+          snap.records() != null ? snap.records().size() : 0);
     } catch (Exception e) {
       log.warn("Usage file import skipped: {}", e.getMessage());
     }
@@ -206,8 +212,7 @@ public class UsagePersistenceStore {
       if (count == null || count <= maxRecords) return;
       long toDelete = count - maxRecords;
       jdbc.update(
-          "DELETE FROM usage_records ORDER BY ts_epoch_ms ASC LIMIT :n",
-          Map.of("n", toDelete));
+          "DELETE FROM usage_records ORDER BY ts_epoch_ms ASC LIMIT :n", Map.of("n", toDelete));
     } catch (DataAccessException e) {
       log.debug("Usage trim skipped: {}", e.getMessage());
     }
@@ -228,7 +233,8 @@ public class UsagePersistenceStore {
               Map<String, Object> m = new LinkedHashMap<>();
               m.put("ts", rs.getLong("ts_epoch_ms"));
               m.put("userId", rs.getString("user_id"));
-              if (rs.getString("session_id") != null) m.put("sessionId", rs.getString("session_id"));
+              if (rs.getString("session_id") != null)
+                m.put("sessionId", rs.getString("session_id"));
               if (rs.getString("turn_id") != null) m.put("turnId", rs.getString("turn_id"));
               m.put("modelId", rs.getString("model_id"));
               if (rs.getString("tier") != null) m.put("tier", rs.getString("tier"));
@@ -239,8 +245,7 @@ public class UsagePersistenceStore {
               String extraJson = rs.getString("extra_json");
               if (extraJson != null && !extraJson.isBlank()) {
                 try {
-                  Map<String, Object> extra =
-                      mapper.readValue(extraJson, new TypeReference<>() {});
+                  Map<String, Object> extra = mapper.readValue(extraJson, new TypeReference<>() {});
                   m.putAll(extra);
                 } catch (Exception ignored) {
                   // keep core fields only

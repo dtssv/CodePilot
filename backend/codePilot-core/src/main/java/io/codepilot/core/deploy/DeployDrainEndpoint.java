@@ -1,6 +1,5 @@
 package io.codepilot.core.deploy;
 
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
@@ -16,7 +15,11 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Endpoint(id = "drain")
-@ConditionalOnProperty(prefix = "codepilot.deploy.drain", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+    prefix = "codepilot.deploy.drain",
+    name = "enabled",
+    havingValue = "true",
+    matchIfMissing = true)
 public class DeployDrainEndpoint {
 
   private final DeployDrainService drainService;

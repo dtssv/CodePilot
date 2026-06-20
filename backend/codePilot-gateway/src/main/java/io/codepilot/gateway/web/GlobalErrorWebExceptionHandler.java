@@ -4,18 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.codepilot.common.api.ApiResponse;
 import io.codepilot.common.api.CodePilotException;
 import io.codepilot.common.api.ErrorCodes;
-import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.web.WebProperties;
 import org.springframework.boot.autoconfigure.web.reactive.error.AbstractErrorWebExceptionHandler;
 import org.springframework.boot.web.reactive.error.ErrorAttributes;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
-import org.springframework.core.codec.Encoder;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerCodecConfigurer;
@@ -90,7 +85,9 @@ public class GlobalErrorWebExceptionHandler extends AbstractErrorWebExceptionHan
       case ErrorCodes.FORBIDDEN -> 403;
       case ErrorCodes.NOT_FOUND -> 404;
       case ErrorCodes.RATE_LIMITED -> 429;
-      case ErrorCodes.SECURITY_BLOCKED, ErrorCodes.SYSTEM_PROMPT_LEAK, ErrorCodes.USER_SKILL_INVALID ->
+      case ErrorCodes.SECURITY_BLOCKED,
+              ErrorCodes.SYSTEM_PROMPT_LEAK,
+              ErrorCodes.USER_SKILL_INVALID ->
           451;
       case ErrorCodes.UPSTREAM_MODEL -> 502;
       default -> 500;

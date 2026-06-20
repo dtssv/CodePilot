@@ -2,7 +2,6 @@ package io.codepilot.core.rag;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.codepilot.core.mcp.McpToolExecutor;
 import io.codepilot.core.rag.dto.RagSearchRequest;
 import io.codepilot.core.rag.dto.RagSearchResponse;
@@ -15,8 +14,8 @@ import org.springframework.stereotype.Component;
  * Executes server-side tools (executor="server") within the AgentLoop. Currently supports:
  *
  * <ul>
- *   <li>{@code rag.search} - semantic search over session-scoped pgvector index</li>
- *   <li>{@code mcp.call} - call an MCP server tool via HTTP/SSE transport</li>
+ *   <li>{@code rag.search} - semantic search over session-scoped pgvector index
+ *   <li>{@code mcp.call} - call an MCP server tool via HTTP/SSE transport
  * </ul>
  */
 @Component
@@ -28,15 +27,14 @@ public class ServerToolExecutor {
   private final McpToolExecutor mcpToolExecutor;
   private final ObjectMapper mapper;
 
-  public ServerToolExecutor(RagService ragService, McpToolExecutor mcpToolExecutor, ObjectMapper mapper) {
+  public ServerToolExecutor(
+      RagService ragService, McpToolExecutor mcpToolExecutor, ObjectMapper mapper) {
     this.ragService = ragService;
     this.mcpToolExecutor = mcpToolExecutor;
     this.mapper = mapper;
   }
 
-  /**
-   * Returns true if the given tool name is a server-side tool.
-   */
+  /** Returns true if the given tool name is a server-side tool. */
   public boolean isServerTool(String toolName) {
     return "rag.search".equals(toolName);
   }
@@ -77,6 +75,7 @@ public class ServerToolExecutor {
    * Execute an MCP tool call.
    *
    * <p>Expected args format:
+   *
    * <pre>{@code
    * {
    *   "serverId": "weather",
@@ -86,6 +85,7 @@ public class ServerToolExecutor {
    * }</pre>
    *
    * <p>Or the shorthand form using fullName:
+   *
    * <pre>{@code
    * {
    *   "fullName": "mcp.weather.query",
@@ -118,7 +118,8 @@ public class ServerToolExecutor {
     }
 
     JsonNode arguments = args.has("arguments") ? args.get("arguments") : mapper.createObjectNode();
-    log.info("Executing MCP tool call: server={}, tool={}, session={}", serverId, toolName, sessionId);
+    log.info(
+        "Executing MCP tool call: server={}, tool={}, session={}", serverId, toolName, sessionId);
     return mcpToolExecutor.execute(sessionId, serverId, toolName, arguments);
   }
 }

@@ -37,19 +37,25 @@ public class FimSyncCompleter {
         .orElse(null);
   }
 
-  /** @deprecated use {@link #pickTabPredictModel()} */
+  /**
+   * @deprecated use {@link #pickTabPredictModel()}
+   */
   @Deprecated
   public String pickAnyEnabledModel() {
     return pickTabPredictModel();
   }
 
-  /** @deprecated use {@link #pickTabPredictModel()} */
+  /**
+   * @deprecated use {@link #pickTabPredictModel()}
+   */
   @Deprecated
   public String pickFimCoderModel() {
     return pickTabPredictModel();
   }
 
-  /** @deprecated use {@link #pickTabPredictModel()} */
+  /**
+   * @deprecated use {@link #pickTabPredictModel()}
+   */
   @Deprecated
   public String pickTabInfillModel() {
     return pickTabPredictModel();
@@ -69,13 +75,7 @@ public class FimSyncCompleter {
         OpenAiChatOptions options =
             OpenAiChatOptions.builder().temperature(0.05).maxTokens(tokens).build();
         String completion =
-            resolved
-                .chatClient()
-                .prompt()
-                .user(content)
-                .options(options)
-                .call()
-                .content();
+            resolved.chatClient().prompt().user(content).options(options).call().content();
         return completion != null ? completion.strip() : "";
       } finally {
         resolved.endRequest(true, 0);
@@ -96,19 +96,8 @@ public class FimSyncCompleter {
               + suffix
               + "<｜fim▁end｜>\nINSERTION:";
       case "codestral" ->
-          rules
-              + "\n\nPREFIX:\n"
-              + prefix
-              + "\nSUFFIX:\n"
-              + suffix
-              + "\nMIDDLE (insertion only):";
-      default ->
-          rules
-              + "\n\n<fim_prefix>"
-              + prefix
-              + "<fim_suffix>"
-              + suffix
-              + "<fim_middle>";
+          rules + "\n\nPREFIX:\n" + prefix + "\nSUFFIX:\n" + suffix + "\nMIDDLE (insertion only):";
+      default -> rules + "\n\n<fim_prefix>" + prefix + "<fim_suffix>" + suffix + "<fim_middle>";
     };
   }
 
@@ -126,7 +115,8 @@ public class FimSyncCompleter {
 
   private static String loadTabInfillRules() {
     try {
-      var url = Thread.currentThread().getContextClassLoader().getResource("prompts/tab.infill.txt");
+      var url =
+          Thread.currentThread().getContextClassLoader().getResource("prompts/tab.infill.txt");
       return url != null ? Resources.toString(url, StandardCharsets.UTF_8) : "";
     } catch (Exception e) {
       return "";

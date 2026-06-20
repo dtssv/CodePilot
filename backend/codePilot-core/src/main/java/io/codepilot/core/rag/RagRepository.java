@@ -62,17 +62,21 @@ public class RagRepository {
           AND expires_at > NOW(3)
         """;
     var params = new MapSqlParameterSource().addValue("sessionId", sessionId.toString());
-    List<RagSearchHit> candidates = jdbc.query(sql, params, (rs, rowNum) -> {
-      float[] emb = fromBytes(rs.getBytes("embedding"));
-      double score = cosineSimilarity(queryEmbedding, emb);
-      return new RagSearchHit(
-          rs.getString("path"),
-          rs.getString("lang"),
-          rs.getObject("start_line") == null ? null : rs.getInt("start_line"),
-          rs.getObject("end_line") == null ? null : rs.getInt("end_line"),
-          rs.getString("snippet"),
-          score);
-    });
+    List<RagSearchHit> candidates =
+        jdbc.query(
+            sql,
+            params,
+            (rs, rowNum) -> {
+              float[] emb = fromBytes(rs.getBytes("embedding"));
+              double score = cosineSimilarity(queryEmbedding, emb);
+              return new RagSearchHit(
+                  rs.getString("path"),
+                  rs.getString("lang"),
+                  rs.getObject("start_line") == null ? null : rs.getInt("start_line"),
+                  rs.getObject("end_line") == null ? null : rs.getInt("end_line"),
+                  rs.getString("snippet"),
+                  score);
+            });
     // Sort by score descending and return top-K
     candidates.sort((a, b) -> Double.compare(b.score(), a.score()));
     return candidates.stream().limit(topK).toList();

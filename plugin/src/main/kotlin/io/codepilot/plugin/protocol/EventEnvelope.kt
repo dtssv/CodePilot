@@ -39,7 +39,10 @@ object StepKinds {
  * {@code partial} is legacy (Finalize used it when goalUnmet); treat as terminal for v2 turn.end.
  */
 object TerminalDoneReasons {
-    private val TERMINAL = setOf("final", "failed", "stopped", "max_steps", "partial")
+    private val TERMINAL = setOf(
+        "final", "failed", "stopped", "max_steps", "partial",
+        "task_complete", "goal_not_met", "context_overflow", "user_stopped", "error",
+    )
 
     fun isTerminal(reason: String): Boolean =
         reason in TERMINAL || reason == "deploy_draining"

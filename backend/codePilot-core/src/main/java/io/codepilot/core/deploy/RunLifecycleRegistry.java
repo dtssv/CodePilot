@@ -1,6 +1,5 @@
 package io.codepilot.core.deploy;
 
-import io.codepilot.core.conversation.StopSignalBus;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
@@ -13,12 +12,9 @@ public class RunLifecycleRegistry {
 
   private static final Logger log = LoggerFactory.getLogger(RunLifecycleRegistry.class);
 
-  private final StopSignalBus stopBus;
   private final ConcurrentHashMap<String, String> activeSessions = new ConcurrentHashMap<>();
 
-  public RunLifecycleRegistry(StopSignalBus stopBus) {
-    this.stopBus = stopBus;
-  }
+  public RunLifecycleRegistry() {}
 
   /**
    * Registers a new run for the session. If another run is already active, publishes a cluster-wide
@@ -32,7 +28,6 @@ public class RunLifecycleRegistry {
     String previous = activeSessions.put(sessionId, kind);
     if (previous != null) {
       log.info("RunLifecycleRegistry: superseding active {} for session={}", previous, sessionId);
-      stopBus.stop(sessionId).subscribe();
     }
   }
 

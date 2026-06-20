@@ -27,7 +27,8 @@ public class SystemPromptLeakOutputFilter {
           Pattern.compile("(?i)\\[USER_SKILL_BEGIN"),
           Pattern.compile("(?i)\\[SECURITY\\s*[—-]+\\s*non-negotiable\\]"),
           Pattern.compile("(?i)\\bagent\\.system|\\bbase\\.system|\\bguard\\.system"),
-          Pattern.compile("(?i)\\b(reveal|dump|print|repeat|paraphrase|leak)\\s+(the\\s+)?(system|prompt|rules)\\b"),
+          Pattern.compile(
+              "(?i)\\b(reveal|dump|print|repeat|paraphrase|leak)\\s+(the\\s+)?(system|prompt|rules)\\b"),
           Pattern.compile("(?i)\\bskill\\.lang\\."),
           Pattern.compile("系统提示词|系统提示|内部指令|加载了哪些\\s*skill"));
 
@@ -38,20 +39,19 @@ public class SystemPromptLeakOutputFilter {
   }
 
   public Flux<ServerSentEvent<String>> guard(Flux<ServerSentEvent<String>> source) {
-    return source
-        .switchOnFirst(
-            (signal, src) ->
-                src.concatMap(
-                    sse -> {
-                      if (!SseEvents.DELTA.equals(sse.event())) {
-                        return Flux.just(sse);
-                      }
-                      String text = extractDeltaText(sse.data());
-                      if (text != null && containsLeak(text)) {
-                        return Flux.just(blocked(), done());
-                      }
-                      return Flux.just(sse);
-                    }));
+    return source.switchOnFirst(
+        (signal, src) ->
+            src.concatMap(
+                sse -> {
+                  if (!SseEvents.DELTA.equals(sse.event())) {
+                    return Flux.just(sse);
+                  }
+                  String text = extractDeltaText(sse.data());
+                  if (text != null && containsLeak(text)) {
+                    return Flux.just(blocked(), done());
+                  }
+                  return Flux.just(sse);
+                }));
   }
 
   private static boolean containsLeak(String text) {
@@ -74,7 +74,8 @@ public class SystemPromptLeakOutputFilter {
   private ServerSentEvent<String> blocked() {
     return event(
         SseEvents.ERROR,
-        Map.of("code", ErrorCodes.SYSTEM_PROMPT_LEAK, "message", "Output blocked by safety policy"));
+        Map.of(
+            "code", ErrorCodes.SYSTEM_PROMPT_LEAK, "message", "Output blocked by safety policy"));
   }
 
   private ServerSentEvent<String> done() {

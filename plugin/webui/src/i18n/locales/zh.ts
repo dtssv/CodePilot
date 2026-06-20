@@ -166,6 +166,9 @@ export const zh = {
         waitingForInput: '等待你的回复',
         needsInputUseChatHint: '请在下方输入框中回复以继续',
         needsInputSubmitted: '已回复',
+        permissionRequired: '需要你的确认',
+        approve: '允许',
+        deny: '拒绝',
         admissionRetryProgress: '第 {attempt}/{maxAttempts} 次重试',
         admissionRetryContinue: '继续重试',
         admissionRetryCancel: '取消',
@@ -197,6 +200,11 @@ export const zh = {
             system: '系统',
             user: '用户',
         },
+    },
+    subagent: {
+        title: '子智能体',
+        groupLabel: '已派生的子智能体',
+        result: '结果',
     },
     mcp: {
         pending: 'MCP 待审批：',

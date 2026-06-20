@@ -48,7 +48,7 @@ class ShellExecutor(
                         ShellGrantDecision.DENY ->
                             return denied(command, cwd, osHint, "用户已拒绝执行此命令")
                         ShellGrantDecision.SKIP ->
-                            return denied(command, cwd, osHint, "用户已跳过此命令")
+                            return denied(command, cwd, osHint, "用户已跳过此命令", skipped = true)
                         null -> return denied(command, cwd, osHint, "等待确认超时")
                     }
                 }
@@ -62,7 +62,7 @@ class ShellExecutor(
         return executeStreaming(command, cwd, osHint, timeoutMs, turnId, stepId)
     }
 
-    private fun denied(command: String, cwd: String, osHint: String, reason: String): Map<String, Any?> =
+    private fun denied(command: String, cwd: String, osHint: String, reason: String, skipped: Boolean = false): Map<String, Any?> =
         mapOf(
             "exitCode" to -1,
             "timedOut" to false,
@@ -72,6 +72,7 @@ class ShellExecutor(
             "os" to osHint,
             "cwd" to cwd,
             "command" to command,
+            "userSkipped" to skipped,
         )
 
     private fun askUser(
@@ -183,28 +184,111 @@ class ShellExecutor(
         )
     }
 
-    private fun buildArgv(command: String, os: String): List<String> =
-        when (os) {
-            "windows" -> listOf("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command)
-            else -> listOf("/bin/bash", "-lc", command)
+    private fun buildArgv(command: String, os: String): List<String> {
+        val adaptedCommand = if (os == "windows") adaptForWindows(command) else command
+        return when (os) {
+            "windows" -> listOf("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", adaptedCommand)
+            else -> listOf("/bin/bash", "-lc", adaptedCommand)
         }
+    }
+
+    /**
+     * ★ Adapt common bash-style commands for Windows PowerShell.
+     * LLMs frequently generate bash commands regardless of the target OS.
+     * This translates the most common patterns so they work on PowerShell.
+     */
+    private fun adaptForWindows(command: String): String {
+        var cmd = command.trim()
+        // python3 → python (Windows typically has `python` not `python3`)
+        cmd = cmd.replace(Regex("""\bpython3\b"""), "python")
+        // pip3 → pip
+        cmd = cmd.replace(Regex("""\bpip3\b"""), "pip")
+        // rm -rf dir → Remove-Item -Recurse -Force dir
+        cmd = cmd.replace(Regex("""\brm\s+-rf\s+(\S+)""")) { "Remove-Item -Recurse -Force " + it.groupValues[1] }
+        // rm file → Remove-Item file
+        cmd = cmd.replace(Regex("""\brm\s+(\S+)""")) { "Remove-Item " + it.groupValues[1] }
+        // mkdir -p dir → New-Item -ItemType Directory -Force dir
+        cmd = cmd.replace(Regex("""\bmkdir\s+-p\s+(\S+)""")) { "New-Item -ItemType Directory -Force " + it.groupValues[1] }
+        // cp src dst → Copy-Item src dst
+        cmd = cmd.replace(Regex("""\bcp\s+"""), "Copy-Item ")
+        // mv src dst → Move-Item src dst
+        cmd = cmd.replace(Regex("""\bmv\s+"""), "Move-Item ")
+        // touch file → New-Item -ItemType File file
+        cmd = cmd.replace(Regex("""\btouch\s+(\S+)""")) { "New-Item -ItemType File " + it.groupValues[1] }
+        // which → Get-Command
+        cmd = cmd.replace(Regex("""\bwhich\s+"""), "Get-Command ")
+        // grep → Select-String (basic translation)
+        cmd = cmd.replace(Regex("""\bgrep\s+"""), "Select-String ")
+        // echo $VAR → Write-Output $env:VAR  (PowerShell env variable syntax)
+        cmd = cmd.replace(Regex("""\becho\s+\$(\w+)""")) {
+            "Write-Output " + DOLLAR + "env:" + it.groupValues[1]
+        }
+        // export VAR=val → $env:VAR="val"
+        cmd = cmd.replace(Regex("""\bexport\s+(\w+)=(\S+)""")) {
+            DOLLAR + "env:" + it.groupValues[1] + "=\"" + it.groupValues[2] + "\""
+        }
+        return escapeForPowerShell(cmd)
+    }
+
+    /**
+     * Best-effort fix for common bash-style escapes that LLMs emit on Windows.
+     * Converts `\"` → `` `" `` and `\$` → `` `$ `` outside single-quoted strings.
+     */
+    private fun escapeForPowerShell(command: String): String {
+        val result = StringBuilder()
+        var inSingleQuotes = false
+        var i = 0
+        while (i < command.length) {
+            val c = command[i]
+            if (c == '\'' && !inSingleQuotes) {
+                inSingleQuotes = true
+                result.append(c)
+                i++
+                continue
+            }
+            if (c == '\'' && inSingleQuotes) {
+                inSingleQuotes = false
+                result.append(c)
+                i++
+                continue
+            }
+            if (!inSingleQuotes && c == '\\' && i + 1 < command.length) {
+                when (command[i + 1]) {
+                    '"' -> {
+                        result.append("`\"")
+                        i += 2
+                        continue
+                    }
+                    '$' -> {
+                        result.append("`\$")
+                        i += 2
+                        continue
+                    }
+                }
+            }
+            result.append(c)
+            i++
+        }
+        return result.toString()
+    }
 
     private fun buildCommandLine(
         command: String,
         cwd: String,
         os: String,
     ): GeneralCommandLine {
+        val adaptedCommand = if (os == "windows") adaptForWindows(command) else command
         val line = GeneralCommandLine()
         line.setWorkDirectory(cwd)
         line.charset = Charsets.UTF_8
         when (os) {
             "windows" -> {
                 line.exePath = "powershell.exe"
-                line.addParameters("-NoProfile", "-NonInteractive", "-Command", command)
+                line.addParameters("-NoProfile", "-NonInteractive", "-Command", adaptedCommand)
             }
             else -> {
                 line.exePath = "/bin/bash"
-                line.addParameters("-lc", command)
+                line.addParameters("-lc", adaptedCommand)
             }
         }
         return line
@@ -227,6 +311,9 @@ class ShellExecutor(
     }
 
     companion object {
+        /** Dollar sign literal — avoids Kotlin string template interpretation in PowerShell commands. */
+        private val DOLLAR = "\$"
+
         private val DENY =
             listOf(
                 Pattern.compile("""rm\s+-rf\s+/(\s|$)"""),

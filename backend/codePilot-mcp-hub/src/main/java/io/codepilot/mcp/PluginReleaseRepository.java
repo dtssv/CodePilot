@@ -35,16 +35,16 @@ public class PluginReleaseRepository {
          ORDER BY published_at DESC
          LIMIT 1
         """;
-    var params = new MapSqlParameterSource()
-        .addValue("channel", channel)
-        .addValue("ide", ideBuild);
-    return jdbc.query(
+    var params = new MapSqlParameterSource().addValue("channel", channel).addValue("ide", ideBuild);
+    return jdbc
+        .query(
             sql,
             params,
             (rs, i) -> {
               JsonNode manifestJson = readJson(rs.getString("manifest_json"));
               List<Artifact> artifacts = readArtifacts(manifestJson);
-              JsonNode changelogUrlNode = manifestJson != null ? manifestJson.get("changelogUrl") : null;
+              JsonNode changelogUrlNode =
+                  manifestJson != null ? manifestJson.get("changelogUrl") : null;
               int rollout = rs.getInt("rollout_percent");
               String pinTo = rs.getString("pin_to");
               boolean rolledOut = rolloutHits(deviceId, rollout);

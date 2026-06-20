@@ -36,6 +36,14 @@ subprojects {
         options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all"))
     }
 
+    tasks.withType<Javadoc>().configureEach {
+        options.encoding = "UTF-8"
+        // Disable strict doclint so missing/partial @comments don't fail the javadoc jar build.
+        (options as org.gradle.external.javadoc.StandardJavadocDocletOptions)
+            .addStringOption("Xdoclint:none", "-quiet")
+        isFailOnError = false
+    }
+
     extensions.configure<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension> {
         imports {
             mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)

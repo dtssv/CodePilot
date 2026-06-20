@@ -29,7 +29,10 @@ public class ShareController {
       SharePersistenceStore store,
       @Value("${codepilot.share.public-base-url:http://localhost:8080}") String publicBaseUrl) {
     this.store = store;
-    this.publicBaseUrl = publicBaseUrl.endsWith("/") ? publicBaseUrl.substring(0, publicBaseUrl.length() - 1) : publicBaseUrl;
+    this.publicBaseUrl =
+        publicBaseUrl.endsWith("/")
+            ? publicBaseUrl.substring(0, publicBaseUrl.length() - 1)
+            : publicBaseUrl;
   }
 
   @Operation(summary = "Share persistence backend (db or file)")
@@ -40,18 +43,25 @@ public class ShareController {
 
   @Operation(summary = "Create a shareable conversation snapshot")
   @PostMapping(value = "/create", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public ApiResponse<Map<String, Object>> create(@RequestBody @Valid CreateShareRequest req) throws Exception {
+  public ApiResponse<Map<String, Object>> create(@RequestBody @Valid CreateShareRequest req)
+      throws Exception {
     String redacted = redact(req.content());
     SharePersistenceStore.ShareSnapshot snap =
-        store.create(req.title(), req.format(), redacted, req.expireDays() != null ? req.expireDays() : 7);
+        store.create(
+            req.title(), req.format(), redacted, req.expireDays() != null ? req.expireDays() : 7);
     String path = "/v1/share/" + snap.id();
     return ApiResponse.ok(
         Map.of(
-            "shareId", snap.id(),
-            "url", publicBaseUrl + path,
-            "viewPath", path,
-            "expiresAt", snap.expiresAt().toString(),
-            "backend", store.isDbBacked() ? "db" : "file"));
+            "shareId",
+            snap.id(),
+            "url",
+            publicBaseUrl + path,
+            "viewPath",
+            path,
+            "expiresAt",
+            snap.expiresAt().toString(),
+            "backend",
+            store.isDbBacked() ? "db" : "file"));
   }
 
   @Operation(summary = "Get a shared conversation snapshot")
@@ -85,7 +95,8 @@ public class ShareController {
   @DeleteMapping("/{id}")
   public ApiResponse<Map<String, Object>> revoke(@PathVariable String id) throws Exception {
     boolean deleted = store.revoke(id);
-    return ApiResponse.ok(Map.of("deleted", deleted, "backend", store.isDbBacked() ? "db" : "file"));
+    return ApiResponse.ok(
+        Map.of("deleted", deleted, "backend", store.isDbBacked() ? "db" : "file"));
   }
 
   private static String redact(String content) {

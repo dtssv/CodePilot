@@ -13,12 +13,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Decides which Skills activate for a given turn. Combines:
- *  - user Skills provided in {@code request.userSkills[]} (validated by {@link
- *    UserSkillValidator})
- *  - system Skills loaded by {@link SystemSkillLoader} and matched by {@link TriggerMatcher}
- * Applies explicit allow/deny lists from {@code request.skills.requested/disabled}, per-category
- * caps (lang.primary ≤ 1, lang.aux ≤ 2, scenario ≤ 2, action ≤ 2), and priority ordering.
+ * Decides which Skills activate for a given turn. Combines: - user Skills provided in {@code
+ * request.userSkills[]} (validated by {@link UserSkillValidator}) - system Skills loaded by {@link
+ * SystemSkillLoader} and matched by {@link TriggerMatcher} Applies explicit allow/deny lists from
+ * {@code request.skills.requested/disabled}, per-category caps (lang.primary ≤ 1, lang.aux ≤ 2,
+ * scenario ≤ 2, action ≤ 2), and priority ordering.
  */
 @Service
 public class SkillRouter {
@@ -56,9 +55,7 @@ public class SkillRouter {
 
     // 1) system Skills (AGENT only for this iteration; chat skips them)
     List<ActivatedSkill> sys =
-        req.mode() == ConversationMode.AGENT
-            ? filterSystem(p, requested, disabled)
-            : List.of();
+        req.mode() == ConversationMode.AGENT ? filterSystem(p, requested, disabled) : List.of();
 
     // 2) user Skills
     List<ActivatedSkill> users =

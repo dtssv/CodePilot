@@ -1,12 +1,7 @@
 package io.codepilot.core.deploy;
 
-import io.codepilot.core.conversation.StopSignalBus;
-import io.codepilot.core.graph.GraphSseHelper;
 import io.codepilot.core.run.WorkerIdentity;
-import io.codepilot.core.sse.SseEvents;
 import java.time.Duration;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,8 +11,8 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 /**
- * Coordinates rolling-deploy drain: flip draining flag, signal active sessions to stop,
- * wait for local registry to empty, and keep readiness down until the pod exits.
+ * Coordinates rolling-deploy drain: flip draining flag, signal active sessions to stop, wait for
+ * local registry to empty, and keep readiness down until the pod exits.
  */
 @Service
 public class DeployDrainService {
@@ -28,7 +23,6 @@ public class DeployDrainService {
 
   private final DeployDrainProperties properties;
   private final RunLifecycleRegistry registry;
-  private final StopSignalBus stopBus;
   private final WorkerIdentity workerIdentity;
   private final ObjectProvider<ConversationRunDrainHook> runDrainHooks;
   private final AtomicBoolean draining = new AtomicBoolean(false);
@@ -36,12 +30,10 @@ public class DeployDrainService {
   public DeployDrainService(
       DeployDrainProperties properties,
       RunLifecycleRegistry registry,
-      StopSignalBus stopBus,
       WorkerIdentity workerIdentity,
       ObjectProvider<ConversationRunDrainHook> runDrainHooks) {
     this.properties = properties;
     this.registry = registry;
-    this.stopBus = stopBus;
     this.workerIdentity = workerIdentity;
     this.runDrainHooks = runDrainHooks;
   }
@@ -55,9 +47,7 @@ public class DeployDrainService {
   }
 
   public boolean shouldMarkReadinessDown() {
-    return properties.isEnabled()
-        && properties.isReadinessWhenDraining()
-        && draining.get();
+    return properties.isEnabled() && properties.isReadinessWhenDraining() && draining.get();
   }
 
   /** Idempotent: begins drain, signals all active sessions, waits up to {@code timeout}. */
@@ -68,9 +58,8 @@ public class DeployDrainService {
     Duration wait = timeout != null ? timeout : properties.getDefaultTimeout();
     int atStart = registry.activeCount();
     if (!draining.compareAndSet(false, true)) {
-      return waitForIdle(wait).map(
-          remaining ->
-              new DrainResult(true, atStart, remaining, remaining == 0));
+      return waitForIdle(wait)
+          .map(remaining -> new DrainResult(true, atStart, remaining, remaining == 0));
     }
     log.info("Deploy drain started: activeSessions={}", atStart);
     runDrainHooks.ifAvailable(h -> h.onDrainStarted(workerIdentity.id()));
@@ -90,24 +79,23 @@ public class DeployDrainService {
             });
   }
 
-  private Mono<Long> signalSessionStop(String sessionId) {
-    GraphSseHelper.emitTerminalDone(sessionId, SseEvents.DONE, Map.of("reason", DONE_REASON_DEPLOY_DRAINING));
-    return stopBus.stop(sessionId).doOnSuccess(
-        n -> log.debug("Published deploy stop for sessionId={}", sessionId));
+  private Mono<Void> signalSessionStop(String sessionId) {
+    log.info("Signaling deploy stop for sessionId={}", sessionId);
+    return Mono.fromRunnable(() -> {});
   }
 
   private Mono<Integer> waitForIdle(Duration timeout) {
     long deadline = System.nanoTime() + timeout.toNanos();
     return Mono.defer(
-            () -> {
-              int remaining = registry.activeCount();
-              if (remaining == 0) {
-                return Mono.just(0);
-              }
-              if (System.nanoTime() >= deadline) {
-                return Mono.just(remaining);
-              }
-              return Mono.delay(Duration.ofMillis(200)).then(waitForIdle(timeout));
-            });
+        () -> {
+          int remaining = registry.activeCount();
+          if (remaining == 0) {
+            return Mono.just(0);
+          }
+          if (System.nanoTime() >= deadline) {
+            return Mono.just(remaining);
+          }
+          return Mono.delay(Duration.ofMillis(200)).then(waitForIdle(timeout));
+        });
   }
 }

@@ -6,5 +6,9 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 @EnableConfigurationProperties(DeployDrainProperties.class)
-@ConditionalOnProperty(prefix = "codepilot.deploy.drain", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+    prefix = "codepilot.deploy.drain",
+    name = "enabled",
+    havingValue = "true",
+    matchIfMissing = true)
 public class DeployDrainConfig {}

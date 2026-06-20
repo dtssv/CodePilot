@@ -22,19 +22,27 @@ public class RedactionService {
           // Private key blocks (PEM format)
           new Rule(
               "private-key",
-              Pattern.compile("-----BEGIN\\s+(RSA\\s+)?PRIVATE\\s+KEY-----[\\s\\S]*?-----END\\s+(RSA\\s+)?PRIVATE\\s+KEY-----"),
+              Pattern.compile(
+                  "-----BEGIN\\s+(RSA\\s+)?PRIVATE\\s+KEY-----[\\s\\S]*?-----END\\s+(RSA\\s+)?PRIVATE\\s+KEY-----"),
               "[REDACTED_PRIVATE_KEY]"),
           // OpenAI / generic Bearer
-          new Rule("api-key-bearer", Pattern.compile("(?i)bearer\\s+([A-Za-z0-9._\\-]{20,})"), "Bearer [REDACTED_API_KEY]"),
+          new Rule(
+              "api-key-bearer",
+              Pattern.compile("(?i)bearer\\s+([A-Za-z0-9._\\-]{20,})"),
+              "Bearer [REDACTED_API_KEY]"),
           // sk- / pk- style keys (OpenAI, Stripe etc.)
-          new Rule("sk-style", Pattern.compile("\\b([sp]k-[A-Za-z0-9]{20,})\\b"), "[REDACTED_API_KEY]"),
+          new Rule(
+              "sk-style", Pattern.compile("\\b([sp]k-[A-Za-z0-9]{20,})\\b"), "[REDACTED_API_KEY]"),
           // AWS Access Key Id
           new Rule(
-              "aws-access-key", Pattern.compile("\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"), "[REDACTED_API_KEY]"),
+              "aws-access-key",
+              Pattern.compile("\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"),
+              "[REDACTED_API_KEY]"),
           // Generic API key patterns (key=xxx, apikey=xxx)
           new Rule(
               "api-key-generic",
-              Pattern.compile("(?i)(api[_-]?key|secret[_-]?key)\\s*[=:]\\s*[\"']?([A-Za-z0-9+/=._\\-]{20,})[\"']?"),
+              Pattern.compile(
+                  "(?i)(api[_-]?key|secret[_-]?key)\\s*[=:]\\s*[\"']?([A-Za-z0-9+/=._\\-]{20,})[\"']?"),
               "$1=[REDACTED_API_KEY]"),
           // JWT tokens (3-part base64)
           new Rule(
@@ -50,17 +58,17 @@ public class RedactionService {
           new Rule("phone-cn", Pattern.compile("(?<![0-9])(1[3-9]\\d{9})(?![0-9])"), "***"),
           new Rule(
               "phone-us",
-              Pattern.compile("\\b\\+?\\d{1,2}[ \\-.]?\\(?\\d{3}\\)?[ \\-.]?\\d{3}[ \\-.]?\\d{4}\\b"),
+              Pattern.compile(
+                  "\\b\\+?\\d{1,2}[ \\-.]?\\(?\\d{3}\\)?[ \\-.]?\\d{3}[ \\-.]?\\d{4}\\b"),
               "***"),
           // 18-digit Chinese ID (very loose — only when surrounded by non-digits)
           new Rule(
-              "id-card-cn",
-              Pattern.compile("(?<![0-9])([1-9]\\d{16}[\\dXx])(?![0-9])"),
-              "***"),
+              "id-card-cn", Pattern.compile("(?<![0-9])([1-9]\\d{16}[\\dXx])(?![0-9])"), "***"),
           // Long base64 / hex secrets (>= 32 chars)
           new Rule(
               "secret-blob",
-              Pattern.compile("(?i)(secret|token|password)\\s*[=:]\\s*([\"']?)([A-Za-z0-9+/=._\\-]{20,})\\2"),
+              Pattern.compile(
+                  "(?i)(secret|token|password)\\s*[=:]\\s*([\"']?)([A-Za-z0-9+/=._\\-]{20,})\\2"),
               "$1=***"));
 
   /** Returns the redacted version of {@code text}; never returns {@code null}. */

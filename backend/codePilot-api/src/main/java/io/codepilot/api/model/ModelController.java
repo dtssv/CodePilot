@@ -12,7 +12,6 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -29,9 +28,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * CRUD endpoints for model providers.
+ *
  * <ul>
- *   <li>GET /v1/models — lists system models + user's custom models</li>
- *   <li>POST/PUT/DELETE — only operate on user's own custom models (ownership verified)</li>
+ *   <li>GET /v1/models — lists system models + user's custom models
+ *   <li>POST/PUT/DELETE — only operate on user's own custom models (ownership verified)
  * </ul>
  */
 @Tag(name = "model", description = "Model provider management (system + custom)")
@@ -56,11 +56,17 @@ public class ModelController {
   @Operation(summary = "Create a custom model provider (user-owned)")
   @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<CustomModelProvider> create(
-      @RequestHeader("X-User-Id") String userId,
-      @RequestBody @Valid CreateModelRequest req) {
-    var cmd = new CreateModelCommand(
-        userId, req.name(), req.protocol(),
-        req.baseUrl(), req.apiKey(), req.model(), req.headers(), req.timeoutMs());
+      @RequestHeader("X-User-Id") String userId, @RequestBody @Valid CreateModelRequest req) {
+    var cmd =
+        new CreateModelCommand(
+            userId,
+            req.name(),
+            req.protocol(),
+            req.baseUrl(),
+            req.apiKey(),
+            req.model(),
+            req.headers(),
+            req.timeoutMs());
     CustomModelProvider created = modelService.create(cmd);
     return ApiResponse.ok(created);
   }
@@ -71,9 +77,16 @@ public class ModelController {
       @RequestHeader("X-User-Id") String userId,
       @PathVariable UUID id,
       @RequestBody @Valid UpdateModelRequest req) {
-    var cmd = new UpdateModelCommand(
-        req.name(), req.protocol(), req.baseUrl(), req.apiKey(),
-        req.model(), req.headers(), req.timeoutMs(), req.enabled());
+    var cmd =
+        new UpdateModelCommand(
+            req.name(),
+            req.protocol(),
+            req.baseUrl(),
+            req.apiKey(),
+            req.model(),
+            req.headers(),
+            req.timeoutMs(),
+            req.enabled());
     CustomModelProvider updated = modelService.update(id, userId, cmd);
     return ApiResponse.ok(updated);
   }
@@ -81,8 +94,7 @@ public class ModelController {
   @Operation(summary = "Delete a custom model provider (only own models)")
   @DeleteMapping("/{id}")
   public ApiResponse<Map<String, Boolean>> delete(
-      @RequestHeader("X-User-Id") String userId,
-      @PathVariable UUID id) {
+      @RequestHeader("X-User-Id") String userId, @PathVariable UUID id) {
     modelService.delete(id, userId);
     return ApiResponse.ok(Map.of("deleted", true));
   }
@@ -90,8 +102,14 @@ public class ModelController {
   @Operation(summary = "Test connection to a model provider")
   @PostMapping(value = "/test", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<Map<String, Object>> test(@RequestBody @Valid TestModelRequest req) {
-    var cmd = new TestModelCommand(
-        req.protocol(), req.baseUrl(), req.apiKey(), req.model(), req.headers(), req.timeoutMs());
+    var cmd =
+        new TestModelCommand(
+            req.protocol(),
+            req.baseUrl(),
+            req.apiKey(),
+            req.model(),
+            req.headers(),
+            req.timeoutMs());
     Map<String, Object> result = modelService.testConnection(cmd);
     return ApiResponse.ok(result);
   }
@@ -143,21 +161,35 @@ public class ModelController {
   @Operation(summary = "Create a new model group")
   @PostMapping(value = "/groups", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<ModelGroup> createGroup(@RequestBody @Valid CreateModelGroupRequest req) {
-    ModelGroup created = modelService.createModelGroup(
-        req.name(), req.protocol(), req.baseUrl(), req.model(),
-        req.capabilities(), req.maxTokens(), req.timeoutMs(), req.sortOrder());
+    ModelGroup created =
+        modelService.createModelGroup(
+            req.name(),
+            req.protocol(),
+            req.baseUrl(),
+            req.model(),
+            req.capabilities(),
+            req.maxTokens(),
+            req.timeoutMs(),
+            req.sortOrder());
     return ApiResponse.ok(created);
   }
 
   @Operation(summary = "Update a model group")
   @PutMapping(value = "/groups/{id}", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<ModelGroup> updateGroup(
-      @PathVariable UUID id,
-      @RequestBody @Valid UpdateModelGroupRequest req) {
-    ModelGroup updated = modelService.updateModelGroup(
-        id, req.name(), req.protocol(), req.baseUrl(), req.model(),
-        req.capabilities(), req.maxTokens(), req.timeoutMs(),
-        req.enabled(), req.sortOrder());
+      @PathVariable UUID id, @RequestBody @Valid UpdateModelGroupRequest req) {
+    ModelGroup updated =
+        modelService.updateModelGroup(
+            id,
+            req.name(),
+            req.protocol(),
+            req.baseUrl(),
+            req.model(),
+            req.capabilities(),
+            req.maxTokens(),
+            req.timeoutMs(),
+            req.enabled(),
+            req.sortOrder());
     return ApiResponse.ok(updated);
   }
 
@@ -179,26 +211,37 @@ public class ModelController {
   @Operation(summary = "Add an app key to a model group")
   @PostMapping(value = "/groups/{groupId}/keys", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<ModelAppKey> createAppKey(
-      @PathVariable UUID groupId,
-      @RequestBody @Valid CreateAppKeyRequest req) {
-    ModelAppKey created = modelService.createAppKey(
-        groupId, req.name(), req.baseUrl(), req.apiKey(), req.weight(),
-        req.maxConcurrency() != null ? req.maxConcurrency() : 0,
-        req.rpmLimit() != null ? req.rpmLimit() : 0,
-        req.tpmLimit() != null ? req.tpmLimit() : 0,
-        req.priority() != null ? req.priority() : 0);
+      @PathVariable UUID groupId, @RequestBody @Valid CreateAppKeyRequest req) {
+    ModelAppKey created =
+        modelService.createAppKey(
+            groupId,
+            req.name(),
+            req.baseUrl(),
+            req.apiKey(),
+            req.weight(),
+            req.maxConcurrency() != null ? req.maxConcurrency() : 0,
+            req.rpmLimit() != null ? req.rpmLimit() : 0,
+            req.tpmLimit() != null ? req.tpmLimit() : 0,
+            req.priority() != null ? req.priority() : 0);
     return ApiResponse.ok(created);
   }
 
   @Operation(summary = "Update an app key")
   @PutMapping(value = "/keys/{id}", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ApiResponse<ModelAppKey> updateAppKey(
-      @PathVariable UUID id,
-      @RequestBody @Valid UpdateAppKeyRequest req) {
-    ModelAppKey updated = modelService.updateAppKey(
-        id, req.name(), req.baseUrl(), req.apiKey(), req.weight(),
-        req.maxConcurrency(), req.rpmLimit(), req.tpmLimit(),
-        req.priority(), req.enabled());
+      @PathVariable UUID id, @RequestBody @Valid UpdateAppKeyRequest req) {
+    ModelAppKey updated =
+        modelService.updateAppKey(
+            id,
+            req.name(),
+            req.baseUrl(),
+            req.apiKey(),
+            req.weight(),
+            req.maxConcurrency(),
+            req.rpmLimit(),
+            req.tpmLimit(),
+            req.priority(),
+            req.enabled());
     return ApiResponse.ok(updated);
   }
 

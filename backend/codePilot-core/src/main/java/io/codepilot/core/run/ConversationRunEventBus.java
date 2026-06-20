@@ -2,6 +2,7 @@ package io.codepilot.core.run;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.listener.ChannelTopic;
@@ -22,25 +23,36 @@ public class ConversationRunEventBus {
   private final ReactiveStringRedisTemplate template;
   private final ReactiveRedisMessageListenerContainer container;
   private final ObjectMapper mapper;
+  private final boolean redisAvailable;
 
   public ConversationRunEventBus(
-      ReactiveRedisConnectionFactory connectionFactory,
-      ReactiveRedisMessageListenerContainer container,
+      ObjectProvider<ReactiveRedisConnectionFactory> connectionFactoryProvider,
       ObjectMapper mapper) {
-    var serializer = new StringRedisSerializer();
-    var ctx =
-        RedisSerializationContext.<String, String>newSerializationContext(serializer)
-            .key(serializer)
-            .value(serializer)
-            .build();
-    this.template = new ReactiveStringRedisTemplate(connectionFactory, ctx);
-    this.container = container;
     this.mapper = mapper;
+    ReactiveRedisConnectionFactory connectionFactory = connectionFactoryProvider.getIfAvailable();
+    this.redisAvailable = connectionFactory != null;
+    if (redisAvailable) {
+      var serializer = new StringRedisSerializer();
+      var ctx =
+          RedisSerializationContext.<String, String>newSerializationContext(serializer)
+              .key(serializer)
+              .value(serializer)
+              .build();
+      this.template = new ReactiveStringRedisTemplate(connectionFactory, ctx);
+      this.container = new ReactiveRedisMessageListenerContainer(connectionFactory);
+    } else {
+      this.template = null;
+      this.container = null;
+    }
   }
 
   public Mono<Long> publish(String runId, int seq, ServerSentEvent<String> event) {
+    if (!redisAvailable) {
+      return Mono.just(0L);
+    }
     try {
-      String json = mapper.writeValueAsString(new RunEventMessage(seq, event.event(), event.data()));
+      String json =
+          mapper.writeValueAsString(new RunEventMessage(seq, event.event(), event.data()));
       return template.convertAndSend(channel(runId), json);
     } catch (JsonProcessingException e) {
       return Mono.error(e);
@@ -48,6 +60,9 @@ public class ConversationRunEventBus {
   }
 
   public Flux<RunEventMessage> subscribe(String runId, int afterSeq) {
+    if (!redisAvailable) {
+      return Flux.empty();
+    }
     return container
         .receive(new ChannelTopic(channel(runId)))
         .map(m -> m.getMessage())

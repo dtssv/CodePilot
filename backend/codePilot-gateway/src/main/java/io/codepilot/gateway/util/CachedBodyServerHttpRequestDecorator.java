@@ -24,8 +24,8 @@ public final class CachedBodyServerHttpRequestDecorator extends ServerHttpReques
 
   /**
    * Reads the body fully into memory once (capped at {@code maxBytes}) and returns a cached-body
-   * decorator. The buffered bytes are also returned via the second tuple so callers can hash /
-   * sign without re-reading.
+   * decorator. The buffered bytes are also returned via the second tuple so callers can hash / sign
+   * without re-reading.
    */
   public static Mono<Wrapped> wrap(ServerHttpRequest delegate, int maxBytes) {
     return DataBufferUtils.join(delegate.getBody(), maxBytes)

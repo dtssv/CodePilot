@@ -31,7 +31,8 @@ public class UsageController {
   public ApiResponse<Map<String, Object>> record(@RequestBody Map<String, Object> body) {
     body.putIfAbsent("ts", Instant.now().toEpochMilli());
     store.addRecord(body);
-    return ApiResponse.ok(Map.of("ok", true, "persisted", true, "backend", store.isDbBacked() ? "db" : "file"));
+    return ApiResponse.ok(
+        Map.of("ok", true, "persisted", true, "backend", store.isDbBacked() ? "db" : "file"));
   }
 
   @Operation(summary = "Aggregated usage by day, model, session")
@@ -41,8 +42,10 @@ public class UsageController {
     return ApiResponse.ok(
         Map.of(
             "byDay", aggregate(records, this::dayKey),
-            "byModel", aggregate(records, r -> String.valueOf(r.getOrDefault("modelId", "default"))),
-            "bySession", aggregate(records, r -> String.valueOf(r.getOrDefault("sessionId", "unknown"))),
+            "byModel",
+                aggregate(records, r -> String.valueOf(r.getOrDefault("modelId", "default"))),
+            "bySession",
+                aggregate(records, r -> String.valueOf(r.getOrDefault("sessionId", "unknown"))),
             "quotaWarnings", quotaWarnings(records),
             "recordCount", records.size(),
             "persisted", true,
@@ -59,7 +62,8 @@ public class UsageController {
   }
 
   private Map<String, Map<String, Object>> aggregate(
-      List<Map<String, Object>> records, java.util.function.Function<Map<String, Object>, String> keyFn) {
+      List<Map<String, Object>> records,
+      java.util.function.Function<Map<String, Object>, String> keyFn) {
     Map<String, Map<String, Object>> out = new ConcurrentHashMap<>();
     for (Map<String, Object> r : records) {
       String k = keyFn.apply(r);
@@ -72,8 +76,12 @@ public class UsageController {
                     : new ConcurrentHashMap<>(
                         Map.of("count", 0, "inputTokens", 0, "outputTokens", 0, "costUsd", 0.0));
             b.put("count", ((Number) b.get("count")).intValue() + 1);
-            b.put("inputTokens", ((Number) b.get("inputTokens")).intValue() + intVal(r, "inputTokens"));
-            b.put("outputTokens", ((Number) b.get("outputTokens")).intValue() + intVal(r, "outputTokens"));
+            b.put(
+                "inputTokens",
+                ((Number) b.get("inputTokens")).intValue() + intVal(r, "inputTokens"));
+            b.put(
+                "outputTokens",
+                ((Number) b.get("outputTokens")).intValue() + intVal(r, "outputTokens"));
             b.put("costUsd", ((Number) b.get("costUsd")).doubleValue() + doubleVal(r, "costUsd"));
             return b;
           });
@@ -94,7 +102,15 @@ public class UsageController {
                       .sum();
               return spent >= e.getValue() * 0.9;
             })
-        .map(e -> Map.<String, Object>of("userId", e.getKey(), "dailyLimitUsd", e.getValue(), "warning", "approaching_quota"))
+        .map(
+            e ->
+                Map.<String, Object>of(
+                    "userId",
+                    e.getKey(),
+                    "dailyLimitUsd",
+                    e.getValue(),
+                    "warning",
+                    "approaching_quota"))
         .toList();
   }
 

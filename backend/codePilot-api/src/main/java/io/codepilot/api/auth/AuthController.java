@@ -3,11 +3,12 @@ package io.codepilot.api.auth;
 import io.codepilot.common.api.ApiResponse;
 import io.codepilot.common.api.CodePilotException;
 import io.codepilot.common.api.ErrorCodes;
+import io.codepilot.common.config.SecurityProperties;
+import io.codepilot.gateway.security.DeviceHmacSecretStore;
 import io.codepilot.gateway.security.JwtService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import java.security.SecureRandom;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -29,10 +30,10 @@ import reactor.core.publisher.Mono;
  * Auth API.
  *
  * <ul>
- *   <li>{@code POST /v1/auth/login}     — exchange an SSO bootstrap token for CodePilot JWTs.
- *   <li>{@code POST /v1/auth/refresh}   — refresh access token.
- *   <li>{@code GET  /v1/auth/methods}   — describe enabled SSO methods so the plugin can pick.
- *   <li>{@code POST /v1/auth/device-code}  — initiate RFC 8628 Device Authorization at the IdP.
+ *   <li>{@code POST /v1/auth/login} — exchange an SSO bootstrap token for CodePilot JWTs.
+ *   <li>{@code POST /v1/auth/refresh} — refresh access token.
+ *   <li>{@code GET /v1/auth/methods} — describe enabled SSO methods so the plugin can pick.
+ *   <li>{@code POST /v1/auth/device-code} — initiate RFC 8628 Device Authorization at the IdP.
  *   <li>{@code POST /v1/auth/device-token} — poll for an id-token after the user finishes login.
  * </ul>
  */
@@ -44,17 +45,27 @@ import reactor.core.publisher.Mono;
 public class AuthController {
 
   private static final SecureRandom RANDOM = new SecureRandom();
-  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthController.class);
+  private static final org.slf4j.Logger log =
+      org.slf4j.LoggerFactory.getLogger(AuthController.class);
 
   private final List<SsoVerifier> verifiers;
   private final JwtService jwt;
   private final SsoProperties ssoProps;
+  private final DeviceHmacSecretStore deviceHmacSecretStore;
+  private final SecurityProperties securityProperties;
   private final WebClient http;
 
-  public AuthController(List<SsoVerifier> verifiers, JwtService jwt, SsoProperties ssoProps) {
+  public AuthController(
+      List<SsoVerifier> verifiers,
+      JwtService jwt,
+      SsoProperties ssoProps,
+      DeviceHmacSecretStore deviceHmacSecretStore,
+      SecurityProperties securityProperties) {
     this.verifiers = verifiers;
     this.jwt = jwt;
     this.ssoProps = ssoProps;
+    this.deviceHmacSecretStore = deviceHmacSecretStore;
+    this.securityProperties = securityProperties;
     this.http = WebClient.builder().build();
   }
 
@@ -63,20 +74,25 @@ public class AuthController {
   @PostMapping("/login")
   public Mono<ApiResponse<LoginResponse>> login(@RequestBody @Valid LoginRequest req) {
     return verifyWithFirstAcceptingVerifier(req.ssoToken())
-        .map(
+        .flatMap(
             id -> {
               JwtService.Issued access =
                   jwt.issueAccess(id.subject(), id.tenantId(), id.deviceId(), Set.of("user"));
               JwtService.Issued refresh =
                   jwt.issueRefresh(id.subject(), id.tenantId(), id.deviceId());
               String deviceSecret = newDeviceSecret();
-              return ApiResponse.ok(
-                  new LoginResponse(
-                      access.token(),
-                      access.expiresAt(),
-                      refresh.token(),
-                      refresh.expiresAt(),
-                      deviceSecret));
+              // Store the per-device HMAC secret in Redis so the gateway can verify
+              // subsequent signed requests from this device.
+              return deviceHmacSecretStore
+                  .store(id.deviceId(), deviceSecret, securityProperties.jwt().refreshTtl())
+                  .thenReturn(
+                      ApiResponse.ok(
+                          new LoginResponse(
+                              access.token(),
+                              access.expiresAt(),
+                              refresh.token(),
+                              refresh.expiresAt(),
+                              deviceSecret)));
             });
   }
 
@@ -108,9 +124,7 @@ public class AuthController {
     boolean oidc = ssoProps.oidc() != null;
     boolean hmac = ssoProps.hmacBridge() != null;
     boolean dev =
-        ssoProps.dev() != null
-            && ssoProps.dev().enabled()
-            && ssoProps.dev().token() != null;
+        ssoProps.dev() != null && ssoProps.dev().enabled() && ssoProps.dev().token() != null;
     boolean deviceFlow = oidc && ssoProps.oidc().deviceFlow() != null;
     return Mono.just(ApiResponse.ok(new MethodsResponse(oidc, hmac, dev, deviceFlow)));
   }
@@ -160,8 +174,7 @@ public class AuthController {
             WebClientResponseException.class,
             ex -> {
               // RFC 8628 returns 400 with body {error:"authorization_pending|...|access_denied"}.
-              return new CodePilotException(
-                  ErrorCodes.UNAUTHORIZED, ex.getResponseBodyAsString());
+              return new CodePilotException(ErrorCodes.UNAUTHORIZED, ex.getResponseBodyAsString());
             });
   }
 
@@ -184,7 +197,10 @@ public class AuthController {
                         // We must catch ALL exception types here because verifiers may throw
                         // network-related exceptions (e.g. JWKs endpoint unreachable) that are
                         // not IllegalArgumentException.
-                        log.debug("Verifier {} rejected token: {}", v.getClass().getSimpleName(), ex.getMessage());
+                        log.debug(
+                            "Verifier {} rejected token: {}",
+                            v.getClass().getSimpleName(),
+                            ex.getMessage());
                         return Mono.empty();
                       }));
     }
@@ -194,8 +210,7 @@ public class AuthController {
 
   private SsoProperties.Oidc.DeviceFlow requireDeviceFlow() {
     if (ssoProps.oidc() == null || ssoProps.oidc().deviceFlow() == null) {
-      throw new CodePilotException(
-          ErrorCodes.NOT_FOUND, "Device authorization is not configured");
+      throw new CodePilotException(ErrorCodes.NOT_FOUND, "Device authorization is not configured");
     }
     return ssoProps.oidc().deviceFlow();
   }
@@ -228,7 +243,8 @@ public class AuthController {
 
   public record RefreshResponse(String accessToken, Instant accessExpiresAt) {}
 
-  public record MethodsResponse(boolean oidc, boolean hmacBridge, boolean dev, boolean deviceFlow) {}
+  public record MethodsResponse(
+      boolean oidc, boolean hmacBridge, boolean dev, boolean deviceFlow) {}
 
   /**
    * Reply payload from RFC 8628 device authorization (kept verbatim so the plugin can render it).

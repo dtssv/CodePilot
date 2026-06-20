@@ -21,15 +21,16 @@ import reactor.core.publisher.Mono;
  * Fine-grained rate limiter with per-user + per-operation-type quotas.
  *
  * <p>Quota tiers:
+ *
  * <ul>
- *   <li><b>chat</b> — /v1/conversation/* — 30 req/min (LLM calls are expensive)</li>
- *   <li><b>completion</b> — /v1/actions/inline-completion — 60 req/min (frequent, cheap)</li>
- *   <li><b>agent</b> — /v1/conversation (agent mode) — 10 req/min (long-running, expensive)</li>
- *   <li><b>default</b> — all other endpoints — 60 req/min</li>
+ *   <li><b>chat</b> — /v1/conversation/* — 30 req/min (LLM calls are expensive)
+ *   <li><b>completion</b> — /v1/actions/inline-completion — 60 req/min (frequent, cheap)
+ *   <li><b>agent</b> — /v1/conversation (agent mode) — 10 req/min (long-running, expensive)
+ *   <li><b>default</b> — all other endpoints — 60 req/min
  * </ul>
  *
- * <p>Uses an atomic Redis script for correct concurrent counters.
- * Reads {@link AuthPrincipal} from the reactor context.
+ * <p>Uses an atomic Redis script for correct concurrent counters. Reads {@link AuthPrincipal} from
+ * the reactor context.
  */
 @Component
 public class RateLimitWebFilter implements WebFilter, Ordered {
@@ -79,11 +80,11 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
   private int getLimitForOperation(String opType) {
     int baseLimit = props.rateLimit().userPerMinute();
     return switch (opType) {
-      case "agent" -> Math.min(baseLimit, 50);       // 50 req/min for agent
-      case "chat" -> Math.min(baseLimit, 50);        // 50 req/min for chat
-      case "completion" -> Math.min(baseLimit, 50);  // 50 req/min for completions
-      case "tools" -> Math.min(baseLimit, 50);       // 50 req/min for tools
-      default -> Math.min(baseLimit, 50);            // 50 req/min default
+      case "agent" -> Math.min(baseLimit, 50); // 50 req/min for agent
+      case "chat" -> Math.min(baseLimit, 50); // 50 req/min for chat
+      case "completion" -> Math.min(baseLimit, 50); // 50 req/min for completions
+      case "tools" -> Math.min(baseLimit, 50); // 50 req/min for tools
+      default -> Math.min(baseLimit, 50); // 50 req/min default
     };
   }
 
@@ -112,7 +113,10 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
                     if (count > limit) {
                       exchange.getResponse().getHeaders().add("Retry-After", "60");
                       exchange.getResponse().getHeaders().add("X-RateLimit-Type", opType);
-                      exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(limit));
+                      exchange
+                          .getResponse()
+                          .getHeaders()
+                          .add("X-RateLimit-Limit", String.valueOf(limit));
                       return WebErrors.write(
                           exchange,
                           ErrorCodes.RATE_LIMITED,
@@ -121,15 +125,24 @@ public class RateLimitWebFilter implements WebFilter, Ordered {
                     }
                     // Add rate limit headers for client awareness
                     exchange.getResponse().getHeaders().add("X-RateLimit-Type", opType);
-                    exchange.getResponse().getHeaders().add("X-RateLimit-Limit", String.valueOf(limit));
-                    exchange.getResponse().getHeaders().add("X-RateLimit-Remaining", String.valueOf(limit - count));
+                    exchange
+                        .getResponse()
+                        .getHeaders()
+                        .add("X-RateLimit-Limit", String.valueOf(limit));
+                    exchange
+                        .getResponse()
+                        .getHeaders()
+                        .add("X-RateLimit-Remaining", String.valueOf(limit - count));
                     return chain.filter(exchange);
                   })
               .onErrorResume(
                   Exception.class,
                   ex -> {
-                    log.warn("Redis unavailable, skipping rate limit for user={} opType={}: {}",
-                        principal.userId(), opType, ex.getMessage());
+                    log.warn(
+                        "Redis unavailable, skipping rate limit for user={} opType={}: {}",
+                        principal.userId(),
+                        opType,
+                        ex.getMessage());
                     return chain.filter(exchange);
                   });
         });

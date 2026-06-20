@@ -7,7 +7,7 @@ public record ActivatedSkill(
     String id,
     String version,
     String source, // "system" | "user"
-    String scope,  // "system" | "project" | "global"
+    String scope, // "system" | "project" | "global"
     int priority,
     int tokens,
     List<String> permissionsTools,

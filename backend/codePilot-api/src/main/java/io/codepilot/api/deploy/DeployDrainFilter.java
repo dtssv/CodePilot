@@ -10,8 +10,8 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 /**
- * While the pod is draining (rolling deploy / shutdown), reject new conversation runs
- * so clients fail fast and can retry on another replica.
+ * While the pod is draining (rolling deploy / shutdown), reject new conversation runs so clients
+ * fail fast and can retry on another replica.
  */
 @Component
 @Order(40)

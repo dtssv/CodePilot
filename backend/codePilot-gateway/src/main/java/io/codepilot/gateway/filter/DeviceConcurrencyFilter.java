@@ -1,5 +1,6 @@
 package io.codepilot.gateway.filter;
 
+import java.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,12 +13,10 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-
 /**
- * Limits concurrent SSE streams per device to prevent abuse. Each active /conversation/run
- * request increments a Redis counter keyed by device ID. The counter is decremented when the
- * stream completes or the filter chain exits.
+ * Limits concurrent SSE streams per device to prevent abuse. Each active /conversation/run request
+ * increments a Redis counter keyed by device ID. The counter is decremented when the stream
+ * completes or the filter chain exits.
  */
 @Component
 @Order(50)
@@ -49,32 +48,47 @@ public class DeviceConcurrencyFilter implements WebFilter {
 
     String key = "cp:stream:device:" + deviceId;
 
-    return redis.opsForValue().increment(key)
-        .flatMap(count -> {
-          if (count == 1L) {
-            // Set TTL on first increment (safety net: 10 min max stream lifetime)
-            return redis.expire(key, Duration.ofMinutes(10)).thenReturn(count);
-          }
-          return Mono.just(count);
-        })
-        .flatMap(count -> {
-          if (count > maxConcurrent) {
-            // Over limit → decrement and reject
-            return redis.opsForValue().decrement(key)
-                .then(Mono.defer(() -> {
-                  exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
-                  exchange.getResponse().getHeaders().add("X-RateLimit-Reason", "device-concurrent-streams");
-                  return exchange.getResponse().setComplete();
-                }));
-          }
-          // Proceed and decrement on completion
-          return chain.filter(exchange)
-              .doFinally(signal -> redis.opsForValue().decrement(key).subscribe());
-        })
+    return redis
+        .opsForValue()
+        .increment(key)
+        .flatMap(
+            count -> {
+              if (count == 1L) {
+                // Set TTL on first increment (safety net: 10 min max stream lifetime)
+                return redis.expire(key, Duration.ofMinutes(10)).thenReturn(count);
+              }
+              return Mono.just(count);
+            })
+        .flatMap(
+            count -> {
+              if (count > maxConcurrent) {
+                // Over limit → decrement and reject
+                return redis
+                    .opsForValue()
+                    .decrement(key)
+                    .then(
+                        Mono.defer(
+                            () -> {
+                              exchange.getResponse().setStatusCode(HttpStatus.TOO_MANY_REQUESTS);
+                              exchange
+                                  .getResponse()
+                                  .getHeaders()
+                                  .add("X-RateLimit-Reason", "device-concurrent-streams");
+                              return exchange.getResponse().setComplete();
+                            }));
+              }
+              // Proceed and decrement on completion
+              return chain
+                  .filter(exchange)
+                  .doFinally(signal -> redis.opsForValue().decrement(key).subscribe());
+            })
         .onErrorResume(
             Exception.class,
             ex -> {
-              log.warn("Redis unavailable, skipping device concurrency check for device={}: {}", deviceId, ex.getMessage());
+              log.warn(
+                  "Redis unavailable, skipping device concurrency check for device={}: {}",
+                  deviceId,
+                  ex.getMessage());
               return chain.filter(exchange);
             });
   }

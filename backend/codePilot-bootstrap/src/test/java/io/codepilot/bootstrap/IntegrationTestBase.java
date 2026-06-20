@@ -44,15 +44,10 @@ public abstract class IntegrationTestBase {
     registry.add("spring.ai.openai.chat.options.model", () -> "test-model");
     // Security
     registry.add(
-        "codepilot.security.jwt-secret",
-        () -> "01234567890123456789012345678901"); // 32 bytes
-    registry.add(
-        "codepilot.security.hmac-secret",
-        () -> "01234567890123456789012345678901");
+        "codepilot.security.jwt-secret", () -> "01234567890123456789012345678901"); // 32 bytes
+    registry.add("codepilot.security.hmac-secret", () -> "01234567890123456789012345678901");
     registry.add("codepilot.security.sso.dev.enabled", () -> "true");
-    registry.add(
-        "codepilot.security.sso.dev.token",
-        () -> "test-dev-token-16ch");
+    registry.add("codepilot.security.sso.dev.token", () -> "test-dev-token-16ch");
     // Activate dev profile so DevSsoVerifier is usable.
     registry.add("spring.profiles.active", () -> "dev");
   }

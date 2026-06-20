@@ -197,6 +197,11 @@ export const en = {
             user: 'User',
         },
     },
+    subagent: {
+        title: 'Subagents',
+        groupLabel: 'Spawned subagents',
+        result: 'Result',
+    },
     mcp: {
         pending: 'MCP approval pending:',
         tool: 'MCP tool',

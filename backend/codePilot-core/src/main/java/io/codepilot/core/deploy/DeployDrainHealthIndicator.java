@@ -8,13 +8,18 @@ import reactor.core.publisher.Mono;
 
 /** Removes pod from readiness while draining so the Service stops sending new traffic. */
 @Component("deployDrain")
-@ConditionalOnProperty(prefix = "codepilot.deploy.drain", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+    prefix = "codepilot.deploy.drain",
+    name = "enabled",
+    havingValue = "true",
+    matchIfMissing = true)
 public class DeployDrainHealthIndicator implements ReactiveHealthIndicator {
 
   private final DeployDrainService drainService;
   private final RunLifecycleRegistry registry;
 
-  public DeployDrainHealthIndicator(DeployDrainService drainService, RunLifecycleRegistry registry) {
+  public DeployDrainHealthIndicator(
+      DeployDrainService drainService, RunLifecycleRegistry registry) {
     this.drainService = drainService;
     this.registry = registry;
   }

@@ -6,8 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
- * Single entry point for CodePilot backend. Scans the entire
- * {@code io.codepilot} root so all
+ * Single entry point for CodePilot backend. Scans the entire {@code io.codepilot} root so all
  * modules contribute beans automatically.
  */
 @SpringBootApplication(scanBasePackages = "io.codepilot")
@@ -15,7 +14,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class CodePilotApplication {
 
-    public static void main(String[] args) {
-        SpringApplication.run(CodePilotApplication.class, args);
-    }
+  public static void main(String[] args) {
+    SpringApplication.run(CodePilotApplication.class, args);
+  }
 }

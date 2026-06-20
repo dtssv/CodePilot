@@ -60,7 +60,8 @@ public class BackgroundAgentsController {
     String id = UUID.randomUUID().toString();
     Map<String, Object> task = new ConcurrentHashMap<>();
     task.put("id", id);
-    task.put("title", req.title() != null && !req.title().isBlank() ? req.title() : "Background task");
+    task.put(
+        "title", req.title() != null && !req.title().isBlank() ? req.title() : "Background task");
     task.put("prompt", req.prompt());
     task.put("worktreePath", req.worktreePath() != null ? req.worktreePath() : "");
     task.put("localTaskId", req.localTaskId() != null ? req.localTaskId() : "");
@@ -83,7 +84,8 @@ public class BackgroundAgentsController {
 
   @Operation(summary = "Update task status (plugin sync)")
   @PatchMapping(value = "/{id}", consumes = MediaType.APPLICATION_JSON_VALUE)
-  public ApiResponse<Map<String, Object>> patch(@PathVariable String id, @RequestBody Map<String, Object> body) {
+  public ApiResponse<Map<String, Object>> patch(
+      @PathVariable String id, @RequestBody Map<String, Object> body) {
     Map<String, Object> task = store.get(id);
     if (task == null) {
       return ApiResponse.ok(Map.of("ok", false, "error", "not_found"));
@@ -92,7 +94,8 @@ public class BackgroundAgentsController {
     if (body.containsKey("status")) {
       String next = String.valueOf(body.get("status"));
       if (!canTransition(current, next)) {
-        return ApiResponse.ok(Map.of("ok", false, "error", "invalid_transition", "from", current, "to", next));
+        return ApiResponse.ok(
+            Map.of("ok", false, "error", "invalid_transition", "from", current, "to", next));
       }
       task.put("status", next);
       if (TERMINAL.contains(next)) {
@@ -139,8 +142,5 @@ public class BackgroundAgentsController {
   }
 
   public record CreateTaskRequest(
-      @NotBlank String prompt,
-      String worktreePath,
-      String title,
-      String localTaskId) {}
+      @NotBlank String prompt, String worktreePath, String title, String localTaskId) {}
 }

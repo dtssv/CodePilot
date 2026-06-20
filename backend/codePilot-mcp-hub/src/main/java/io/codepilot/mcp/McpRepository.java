@@ -4,9 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.sql.Timestamp;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -48,12 +46,13 @@ public class McpRepository {
          ORDER BY name ASC
          LIMIT :limit OFFSET :offset
         """;
-    var params = new MapSqlParameterSource()
-        .addValue("type", type)
-        .addValue("q", q)
-        .addValue("pattern", q == null ? null : "%" + q + "%")
-        .addValue("limit", limit)
-        .addValue("offset", offset);
+    var params =
+        new MapSqlParameterSource()
+            .addValue("type", type)
+            .addValue("q", q)
+            .addValue("pattern", q == null ? null : "%" + q + "%")
+            .addValue("limit", limit)
+            .addValue("offset", offset);
     return jdbc.query(sql, params, (rs, i) -> map(rs));
   }
 
@@ -75,7 +74,8 @@ public class McpRepository {
          WHERE p.slug = :slug AND v.version = :version
         """;
     var params = new MapSqlParameterSource().addValue("slug", slug).addValue("version", version);
-    return jdbc.query(
+    return jdbc
+        .query(
             sql,
             params,
             (rs, i) -> {

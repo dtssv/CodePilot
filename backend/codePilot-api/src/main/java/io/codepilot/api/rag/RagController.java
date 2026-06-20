@@ -19,8 +19,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * REST endpoints for the RAG (Retrieval-Augmented Generation) subsystem. All data is
- * session-scoped and automatically expires after 24 hours.
+ * REST endpoints for the RAG (Retrieval-Augmented Generation) subsystem. All data is session-scoped
+ * and automatically expires after 24 hours.
  */
 @Tag(name = "rag", description = "RAG embedding index & search")
 @RestController

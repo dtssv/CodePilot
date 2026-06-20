@@ -6,6 +6,11 @@ export const TERMINAL_DONE_REASONS = new Set([
     'max_steps',
     'partial',
     'deploy_draining',
+    'task_complete',
+    'goal_not_met',
+    'context_overflow',
+    'user_stopped',
+    'error',
 ]);
 
 export function isTerminalDoneReason(reason: string | undefined): boolean {

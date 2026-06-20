@@ -1,7 +1,6 @@
 package io.codepilot.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.codepilot.common.api.ApiResponse;
 import io.codepilot.common.api.CodePilotException;
 import io.codepilot.common.api.ErrorCodes;
@@ -45,12 +44,10 @@ public class McpController {
   }
 
   @GetMapping("/packages/{slug}/versions/{version}/manifest")
-  public ApiResponse<JsonNode> manifest(
-      @PathVariable String slug, @PathVariable String version) {
+  public ApiResponse<JsonNode> manifest(@PathVariable String slug, @PathVariable String version) {
     var ver =
         repo.findVersion(slug, version)
-            .orElseThrow(
-                () -> new CodePilotException(ErrorCodes.NOT_FOUND, "version not found"));
+            .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "version not found"));
     JsonNode manifest = ver.manifest();
     if (isSystem(manifest)) {
       manifest = repo.redactManifestForSystem(manifest);
@@ -63,15 +60,14 @@ public class McpController {
       @PathVariable String slug, @PathVariable String version) {
     var ver =
         repo.findVersion(slug, version)
-            .orElseThrow(
-                () -> new CodePilotException(ErrorCodes.NOT_FOUND, "version not found"));
+            .orElseThrow(() -> new CodePilotException(ErrorCodes.NOT_FOUND, "version not found"));
     if (isSystem(ver.manifest())) {
-      throw new CodePilotException(
-          ErrorCodes.FORBIDDEN, "system packages are not downloadable");
+      throw new CodePilotException(ErrorCodes.FORBIDDEN, "system packages are not downloadable");
     }
     return ResponseEntity.ok(
         ApiResponse.ok(
-            new DownloadInfo(ver.downloadUrl(), ver.sha256(), ver.signature(), ver.signedAt().toEpochMilli())));
+            new DownloadInfo(
+                ver.downloadUrl(), ver.sha256(), ver.signature(), ver.signedAt().toEpochMilli())));
   }
 
   private boolean isSystem(JsonNode manifest) {

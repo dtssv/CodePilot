@@ -152,9 +152,31 @@ function FileBlock({ content, attrs }: { content: string; attrs?: Record<string,
     const op = attrs?.op || 'write';
     const lines = attrs?.lines || '';
     const name = fileName(path);
+    // Extract search/replace attributes if present (from <file path="..." search="..." replace="...">)
+    const search = attrs?.search || '';
+    const replace = attrs?.replace || '';
 
     const opLabel = op === 'create' ? '新建' : op === 'delete' ? '删除' : op === 'replace' ? '修改' : '写入';
     const opIcon = op === 'create' ? '✨' : op === 'delete' ? '🗑️' : '📝';
+
+    // Build diff lines based on op type
+    const diffLines: { type: 'add' | 'remove'; content: string }[] = [];
+    if (op === 'delete') {
+        diffLines.push({ type: 'remove', content: '// 文件已删除' });
+    } else if (op === 'replace' && search) {
+        for (const line of search.split('\n')) {
+            diffLines.push({ type: 'remove', content: line });
+        }
+        const newContent = replace || content;
+        for (const line of newContent.split('\n')) {
+            diffLines.push({ type: 'add', content: line });
+        }
+    } else {
+        // create / write: all green
+        for (const line of content.split('\n')) {
+            diffLines.push({ type: 'add', content: line });
+        }
+    }
 
     return (
         <div className="agent-file-block">
@@ -168,8 +190,19 @@ function FileBlock({ content, attrs }: { content: string; attrs?: Record<string,
                     {expanded ? '▾ 收起' : '▸ 展开查看代码'}
                 </button>
             </div>
-            {expanded && (
-                <pre className="agent-file-code"><code>{content}</code></pre>
+            {expanded && diffLines.length > 0 && (
+                <div className="tool-call-diff">
+                    <table className="tool-call-diff-table">
+                        <tbody>
+                            {diffLines.map((line, i) => (
+                                <tr key={i} className={'tool-call-diff-line tool-call-diff-' + line.type}>
+                                    <td className="tool-call-diff-gutter">{line.type === 'add' ? '+' : '-'}</td>
+                                    <td className="tool-call-diff-content"><pre>{line.content}</pre></td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             )}
         </div>
     );

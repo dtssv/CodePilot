@@ -1,7 +1,6 @@
 package io.codepilot.core.audit;
 
 import io.codepilot.common.api.TraceIdHolder;
-import io.codepilot.core.audit.AuditRepository;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,8 +10,8 @@ import org.springframework.stereotype.Component;
  * Centralized audit event publisher. Called from ConversationService, AuthController,
  * SystemPromptLeakDetector, and ToolDispatcher at their critical paths.
  *
- * <p>This is NOT an AOP aspect to keep things explicit and debuggable; callers invoke
- * methods directly.
+ * <p>This is NOT an AOP aspect to keep things explicit and debuggable; callers invoke methods
+ * directly.
  *
  * <p><strong>Privacy Mode:</strong> When the request carries {@code X-CodePilot-Privacy: strict},
  * audit events are completely skipped (not written to DB or Redis). This ensures zero data
@@ -53,40 +52,63 @@ public class AuditInterceptor {
   }
 
   /** Audit: conversation completed. */
-  public void conversationCompleted(String userId, String deviceId, String sessionId, String reason, int turns) {
-    insert("conversation_completed", userId, deviceId,
+  public void conversationCompleted(
+      String userId, String deviceId, String sessionId, String reason, int turns) {
+    insert(
+        "conversation_completed",
+        userId,
+        deviceId,
         Map.of("sessionId", sessionId, "reason", reason, "turns", turns));
   }
 
   /** Audit: tool executed. */
-  public void toolExecuted(String userId, String deviceId, String toolName, String toolCallId, boolean ok, long durationMs) {
-    insert("tool_executed", userId, deviceId,
+  public void toolExecuted(
+      String userId,
+      String deviceId,
+      String toolName,
+      String toolCallId,
+      boolean ok,
+      long durationMs) {
+    insert(
+        "tool_executed",
+        userId,
+        deviceId,
         Map.of("tool", toolName, "toolCallId", toolCallId, "ok", ok, "durationMs", durationMs));
   }
 
   /** Audit: auth login attempt. */
   public void authLogin(String userId, String deviceId, boolean success, String method) {
-    insert(success ? "auth_login_success" : "auth_login_failed", userId, deviceId,
+    insert(
+        success ? "auth_login_success" : "auth_login_failed",
+        userId,
+        deviceId,
         Map.of("method", method));
   }
 
   /** Audit: system prompt leak detected (pre-filter). */
   public void leakDetectedPre(String userId, String matchedRule) {
-    insert("system_prompt_leak_pre", userId, null,
-        Map.of("matchedRule", matchedRule));
+    insert("system_prompt_leak_pre", userId, null, Map.of("matchedRule", matchedRule));
   }
 
   /** Audit: system prompt leak detected (post-filter). */
   public void leakDetectedPost(String userId, String matchedRule) {
-    insert("system_prompt_leak_post", userId, null,
-        Map.of("matchedRule", matchedRule));
+    insert("system_prompt_leak_post", userId, null, Map.of("matchedRule", matchedRule));
   }
 
   /** Audit: security-blocked request. */
   public void securityBlocked(String userId, String deviceId, String reason) {
     auditRepo.insert(
-        TraceIdHolder.current(), null, userId, deviceId,
-        "security_blocked", "warn", null, reason, null, null, Map.of());
+        TraceIdHolder.current(),
+        null,
+        userId,
+        deviceId,
+        "security_blocked",
+        "warn",
+        null,
+        reason,
+        null,
+        null,
+        Map.of());
   }
 
   /** Audit: command blocked by shell executor. */

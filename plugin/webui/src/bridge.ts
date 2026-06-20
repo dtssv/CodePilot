@@ -114,7 +114,9 @@ export type PluginEventType =
     | 'mcp.install_result'
     | 'hooks.response'
     // P1-08 shell policy
-    | 'shell.policy_response';
+    | 'shell.policy_response'
+    // delta diff — file change summaries
+    | 'delta_diff';
 
 type EventHandler = (payload: unknown) => void;
 const listeners = new Map<string, Set<EventHandler>>();

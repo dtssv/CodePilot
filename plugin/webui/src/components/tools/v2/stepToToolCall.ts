@@ -3,8 +3,7 @@ import type { ToolCallInfo } from '../../ToolCallCard';
 import type { ToolExecutionState } from '../../../state/chatTypes';
 import { classifyToolResult } from '../../../utils/toolResultClassify';
 import { deriveShellExecutionState } from '../../../utils/shellOutput';
-
-const WRITE_TOOLS = ['fs.write', 'fs.create', 'fs.replace', 'fs.applyPatch', 'fs.delete', 'fs.move'];
+import { normalizeToolArgs } from '../../../utils/toolArgs';
 
 function shellResultRecord(step: StepNode): Record<string, unknown> | undefined {
     const raw = step.toolResult?.result;
@@ -26,10 +25,7 @@ function shellResultRecord(step: StepNode): Record<string, unknown> | undefined 
 
 export function stepToToolCall(step: StepNode): ToolCallInfo | null {
     if (!step.toolCall) return null;
-    const args =
-        step.toolCall.args && typeof step.toolCall.args === 'object'
-            ? (step.toolCall.args as Record<string, unknown>)
-            : {};
+    const args = normalizeToolArgs(step.toolCall.args);
     const status = step.status === 'running' ? 'running' : step.status === 'error' ? 'error' : 'success';
     const toolName = step.toolCall.tool;
     const isShell = toolName.startsWith('shell.');
@@ -62,10 +58,6 @@ export function stepToToolCall(step: StepNode): ToolCallInfo | null {
     };
 }
 
-export function shouldHideToolStep(step: StepNode, allSteps: StepNode[]): boolean {
-    const tool = step.toolCall?.tool ?? '';
-    // Always show the real applyPatch tool call (preview writing steps are not disk writes).
-    if (tool.startsWith('fs.applyPatch')) return false;
-    if (!WRITE_TOOLS.some((p) => tool.startsWith(p))) return false;
-    return allSteps.some((s) => s.kind === 'writing');
+export function shouldHideToolStep(_step: StepNode, _allSteps: StepNode[]): boolean {
+    return false;
 }

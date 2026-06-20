@@ -17,6 +17,7 @@ import { validateVisionSend } from './visionValidate';
 export interface SendBridgeDeps {
     v2Enabled: boolean;
     mode: 'agent' | 'chat';
+    agentRole: string;
     messages: ChatMessage[];
     selectedModelId: string;
     models: ModelOption[];
@@ -32,6 +33,7 @@ export function createSendHandlers(deps: SendBridgeDeps) {
     const {
         v2Enabled,
         mode,
+        agentRole,
         messages,
         selectedModelId,
         models,
@@ -106,6 +108,7 @@ export function createSendHandlers(deps: SendBridgeDeps) {
                     : undefined,
             maxMode,
             images: images?.map((img) => ({ name: img.name, mimeType: img.mimeType, base64: img.base64 })),
+            agentRole,
             historyMessages,
             effectiveFreshChat,
             ...(freshChat ? { chatClearEpoch: getChatClearEpoch() } : {}),

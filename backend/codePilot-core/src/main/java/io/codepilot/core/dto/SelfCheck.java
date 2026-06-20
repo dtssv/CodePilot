@@ -30,22 +30,29 @@ public record SelfCheck(
   public record SideEffect(String op, String path, Integer linesChanged) {}
 
   public enum Risk {
-    @JsonProperty("low") LOW,
-    @JsonProperty("medium") MEDIUM,
-    @JsonProperty("high") HIGH
+    @JsonProperty("low")
+    LOW,
+    @JsonProperty("medium")
+    MEDIUM,
+    @JsonProperty("high")
+    HIGH
   }
 
   public enum Action {
-    @JsonProperty("continue") CONTINUE,
-    @JsonProperty("retry") RETRY,
-    @JsonProperty("replan") REPLAN,
-    @JsonProperty("finalize") FINALIZE,
-    @JsonProperty("ask_user") ASK_USER
+    @JsonProperty("continue")
+    CONTINUE,
+    @JsonProperty("retry")
+    RETRY,
+    @JsonProperty("replan")
+    REPLAN,
+    @JsonProperty("finalize")
+    FINALIZE,
+    @JsonProperty("ask_user")
+    ASK_USER
   }
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  public record HintsForContext(
-      List<Pin> pin, List<Pin> unpin, List<Pin> requestRead) {
+  public record HintsForContext(List<Pin> pin, List<Pin> unpin, List<Pin> requestRead) {
 
     public record Pin(String path, String range, String reason) {}
   }

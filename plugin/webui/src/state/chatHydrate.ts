@@ -8,6 +8,7 @@ import type { ToolExecutionState } from './chatTypes';
 import type { ChatV2State, StepNode, TurnNode } from './events';
 import { normalizePlanStatus } from './planNormalize';
 import { classifyToolResult, isReadLikeTool, isWriteLikeTool } from '../utils/toolResultClassify';
+import { normalizeToolArgs } from '../utils/toolArgs';
 
 export interface LegacyHydrateMessage {
     role: string;
@@ -160,7 +161,7 @@ export function buildV2StateFromLegacyMessages(messages: LegacyHydrateMessage[])
 
         const addTool = (tc: NonNullable<LegacyHydrateMessage['toolCalls']>[number]) => {
             const toolName = tc.name || 'unknown';
-            const args = tc.args || {};
+            const args = normalizeToolArgs(tc.args);
             const ok = toolOk(tc);
 
             if (isReadLikeTool(toolName) && !syntheticReadingEmitted && !persistedAgentTypes.has('reading')) {

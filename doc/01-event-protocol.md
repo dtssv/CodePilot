@@ -530,3 +530,45 @@ if (V2) {
 - 端到端:在 `ConsolePanel` 启动事件录制 → 保存为 `.events.json` → 通过
   `replay_from_file` 在 dev 模式注入,验证 UI 完全等价。
 - 故障注入:每 N 个事件随机延迟/丢弃,验证 `replay_since` 收敛。
+
+## 8. 能力事件(最终 envelope 集)
+
+v2 envelope 现已成为**唯一通道**,并在 §3.2 基础上扩展了能力事件。
+后端 `AgentLoop` 通过 `StreamEvent` 发出,经 `ConversationController.mapSseEventName`
+透传为以下 SSE 事件名;插件 `ConversationClient` 解析后由 `LegacyEventAdapter`
+打成 envelope(`turnId` 归属当前轮次),最终进入 `turnReducer`。
+
+| SSE 事件 | envelope `type` | payload | reducer 行为 |
+| --- | --- | --- | --- |
+| `subagent_spawn` | `subagent_spawn` | `{ taskId, agentName, description }` | 在所属 turn 上追加一个 `SubagentNode(status=running)` |
+| `subagent_progress` | `subagent_progress` | `{ taskId, status, progress }` | 更新对应子智能体的 `progress` |
+| `subagent_complete` | `subagent_complete` | `{ taskId, result }` | 置 `status=success` 并记录 `result` |
+| `subagent_failed` | `subagent_failed` | `{ taskId, error }` | 置 `status=error` 并记录 `error` |
+| `fork_created` | `fork_created` | `{ newSessionId, parentSessionId }` | 通知 UI 打开新分支会话 |
+| `memory_update` | `memory_update` | `{ action, details }` | 记忆层变更提示 |
+| `skill_invoked` | `skill_invoked` | `{ skillName, description }` | compose 技能调用提示 |
+| `task_update` | `task_update` | `{ taskId, taskTitle, status }` | 任务树进度 |
+| `goal_evaluation` | `self_check` | `{ satisfied, confidence, reason, remainingWork }` | 独立裁判停机判定 |
+| `checkpoint` / `checkpoint_writer` | — | 内部检查点,UI 不直接渲染 | — |
+| `compacted` | — | 上下文压缩,UI 不直接渲染 | — |
+
+### 8.1 子智能体渲染
+
+- 类型:`plugin/webui/src/state/events.ts` 的 `SubagentNode` + `TurnNode.subagents`。
+- reducer:`plugin/webui/src/state/turnReducer.ts` 的 `subagent_spawn/progress/complete/failed` 分支。
+- 组件:`plugin/webui/src/components/subagents/SubagentTree.tsx`,在 `ChatViewV2`
+  的每个 turn 步骤列表之后渲染。
+
+### 8.2 能力触发端点(WebUI → 后端)
+
+除会话流外,以下 REST 端点surface了计算/进化能力:
+
+- `POST /v1/conversation/dream`(SSE):记忆整合(Dream)。
+- `POST /v1/conversation/distill`(SSE):工作流蒸馏为技能(Distill)。
+- `POST /v1/conversation/workflow`(JSON):运行 LLM 生成的动态工作流脚本(GraalVM 沙箱)。
+- `GET /v1/conversation/skills`(JSON):列出可用技能。
+- `POST /v1/conversation/fork` / `POST /v1/conversation/fork/batch`(SSE):fork 即运行 / 批量 best-of-N fork。
+- `GET /v1/conversation/runs/{id}/status` 与 `GET /v1/conversation/runs/{id}/stream?afterSeq=`:
+  基于 `EnvelopeStore` 的运行状态与断线重放。
+- Max Mode:在 `POST /v1/conversation/run` 的请求体顶层传 `maxMode: true`
+  (可选 `maxModeSamples`),后端在主循环前进行 best-of-N 计划采样并由裁判择优注入。

@@ -12,11 +12,12 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
 /**
- * Cluster-wide load balancer for model app keys within a model group.
- * All runtime state (concurrency, RPM, TPM, circuit-breaker) is stored in Redis
- * so that multiple backend replicas share the same view.
+ * Cluster-wide load balancer for model app keys within a model group. All runtime state
+ * (concurrency, RPM, TPM, circuit-breaker) is stored in Redis so that multiple backend replicas
+ * share the same view.
  *
  * <h3>Redis key layout:</h3>
+ *
  * <pre>
  * codepilot:lb:concurrency:{appKeyId}     → STRING (current concurrent requests, INCR/DECR)
  * codepilot:lb:rpm:{appKeyId}:{minute}    → STRING (request count in this minute, INCR, TTL=120s)
@@ -25,16 +26,19 @@ import org.springframework.stereotype.Component;
  * </pre>
  *
  * <h3>Selection strategy (multi-dimension):</h3>
+ *
  * <ol>
- *   <li><b>Circuit-breaker</b>: skip keys in OPEN state</li>
- *   <li><b>Concurrency limit</b>: skip keys at max concurrency</li>
- *   <li><b>RPM limit</b>: skip keys exceeding requests-per-minute</li>
- *   <li><b>TPM limit</b>: skip keys exceeding tokens-per-minute</li>
- *   <li><b>Weighted least-load + priority</b>: pick lowest load/weight, break ties by priority</li>
+ *   <li><b>Circuit-breaker</b>: skip keys in OPEN state
+ *   <li><b>Concurrency limit</b>: skip keys at max concurrency
+ *   <li><b>RPM limit</b>: skip keys exceeding requests-per-minute
+ *   <li><b>TPM limit</b>: skip keys exceeding tokens-per-minute
+ *   <li><b>Weighted least-load + priority</b>: pick lowest load/weight, break ties by priority
  * </ol>
  *
  * <h3>Circuit-breaker states:</h3>
- * CLOSED → OPEN (after 5 consecutive failures) → HALF-OPEN (after 60s cooldown) → CLOSED (probe success)
+ *
+ * CLOSED → OPEN (after 5 consecutive failures) → HALF-OPEN (after 60s cooldown) → CLOSED (probe
+ * success)
  */
 @Component
 public class AppKeyLoadBalancer {
@@ -62,8 +66,8 @@ public class AppKeyLoadBalancer {
   // ========================================================================
 
   /**
-   * Selects the best available appKey for the given model group.
-   * Returns null if no eligible appKey exists.
+   * Selects the best available appKey for the given model group. Returns null if no eligible appKey
+   * exists.
    */
   public UUID selectAppKey(UUID groupId) {
     List<AppKeyCandidate> candidates = fetchEnabledAppKeys(groupId);
@@ -115,11 +119,17 @@ public class AppKeyLoadBalancer {
     }
 
     if (best != null) {
-      log.info("Selected appKey {} for group {} (load={}, weight={}, priority={}, score={})",
-          best.id, groupId, getLoad(best.id), best.weight, best.priority,
+      log.info(
+          "Selected appKey {} for group {} (load={}, weight={}, priority={}, score={})",
+          best.id,
+          groupId,
+          getLoad(best.id),
+          best.weight,
+          best.priority,
           String.format("%.4f", bestScore));
     } else {
-      log.warn("No eligible appKey for group {} (all filtered by limits or circuit-breaker)", groupId);
+      log.warn(
+          "No eligible appKey for group {} (all filtered by limits or circuit-breaker)", groupId);
     }
     return best != null ? best.id : null;
   }
@@ -139,9 +149,11 @@ public class AppKeyLoadBalancer {
   public void release(UUID appKeyId) {
     String concurrencyKey = concurrencyKey(appKeyId);
     // Lua: DECR but never go below 0
-    DefaultRedisScript<Long> script = new DefaultRedisScript<>(
-        "local v = redis.call('DECR', KEYS[1]); if v < 0 then redis.call('SET', KEYS[1], '0'); return 0; else return v; end",
-        Long.class);
+    DefaultRedisScript<Long> script =
+        new DefaultRedisScript<>(
+            "local v = redis.call('DECR', KEYS[1]); if v < 0 then redis.call('SET', KEYS[1], '0');"
+                + " return 0; else return v; end",
+            Long.class);
     redis.execute(script, List.of(concurrencyKey));
   }
 
@@ -207,8 +219,8 @@ public class AppKeyLoadBalancer {
   // ========================================================================
 
   /**
-   * Checks if a request is allowed under the current circuit-breaker state.
-   * State machine: CLOSED → OPEN → HALF-OPEN → CLOSED
+   * Checks if a request is allowed under the current circuit-breaker state. State machine: CLOSED →
+   * OPEN → HALF-OPEN → CLOSED
    */
   private boolean isRequestAllowed(UUID appKeyId) {
     String key = breakerKey(appKeyId);
@@ -278,7 +290,8 @@ public class AppKeyLoadBalancer {
       redis.opsForHash().put(key, "failures", String.valueOf(failures));
       redis.opsForHash().put(key, "openedAt", String.valueOf(System.currentTimeMillis()));
       redis.expire(key, BREAKER_KEY_TTL);
-      log.warn("Circuit-breaker for appKey {} OPENED after {} consecutive failures", appKeyId, failures);
+      log.warn(
+          "Circuit-breaker for appKey {} OPENED after {} consecutive failures", appKeyId, failures);
     } else {
       // Just increment failure count
       redis.opsForHash().put(key, "state", state);
@@ -292,19 +305,23 @@ public class AppKeyLoadBalancer {
   // ========================================================================
 
   private List<AppKeyCandidate> fetchEnabledAppKeys(UUID groupId) {
-    String sql = """
+    String sql =
+        """
         SELECT id, weight, max_concurrency, rpm_limit, tpm_limit, priority
         FROM model_app_keys
         WHERE group_id = :groupId AND enabled = 1
         """;
-    return jdbc.query(sql, new MapSqlParameterSource("groupId", groupId.toString()),
-        (rs, i) -> new AppKeyCandidate(
-            UUID.fromString(rs.getString("id")),
-            rs.getInt("weight"),
-            rs.getInt("max_concurrency"),
-            rs.getInt("rpm_limit"),
-            rs.getInt("tpm_limit"),
-            rs.getInt("priority")));
+    return jdbc.query(
+        sql,
+        new MapSqlParameterSource("groupId", groupId.toString()),
+        (rs, i) ->
+            new AppKeyCandidate(
+                UUID.fromString(rs.getString("id")),
+                rs.getInt("weight"),
+                rs.getInt("max_concurrency"),
+                rs.getInt("rpm_limit"),
+                rs.getInt("tpm_limit"),
+                rs.getInt("priority")));
   }
 
   private record AppKeyCandidate(

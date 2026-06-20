@@ -16,10 +16,10 @@ import org.springframework.stereotype.Component;
  * <p>Semantics:
  *
  * <ul>
- *   <li>{@code triggers.all[*]}  — every group MUST match (AND of groups).
- *   <li>{@code triggers.any[*]}  — any single group is enough (OR of groups).
- *   <li>Within a group, every populated dimension (language, framework, action, fileGlob,
- *       keywords) MUST overlap with the probe — empty dimensions are ignored.
+ *   <li>{@code triggers.all[*]} — every group MUST match (AND of groups).
+ *   <li>{@code triggers.any[*]} — any single group is enough (OR of groups).
+ *   <li>Within a group, every populated dimension (language, framework, action, fileGlob, keywords)
+ *       MUST overlap with the probe — empty dimensions are ignored.
  * </ul>
  */
 @Component
@@ -39,7 +39,10 @@ public class TriggerMatcher {
     if (t.any() != null && !t.any().isEmpty()) {
       boolean any = false;
       for (TriggerGroup g : t.any()) {
-        if (matchesGroup(g, probe)) { any = true; break; }
+        if (matchesGroup(g, probe)) {
+          any = true;
+          break;
+        }
       }
       if (!any) return false;
     }
@@ -85,8 +88,8 @@ public class TriggerMatcher {
       if (glob == null || glob.isBlank()) continue;
       String syntaxAndPattern = ensurePrefix(glob);
       try {
-        PathMatcher matcher = globCache.computeIfAbsent(
-            syntaxAndPattern, FileSystems.getDefault()::getPathMatcher);
+        PathMatcher matcher =
+            globCache.computeIfAbsent(syntaxAndPattern, FileSystems.getDefault()::getPathMatcher);
         for (String p : paths) {
           try {
             Path path = Path.of(p);

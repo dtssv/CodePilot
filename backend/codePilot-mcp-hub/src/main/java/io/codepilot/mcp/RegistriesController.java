@@ -28,15 +28,17 @@ public class RegistriesController {
 
   @GetMapping("/registries")
   public ApiResponse<RegistriesResponse> list() {
-    Registry official =
-        new Registry("official", "Official", "/v1/mcp/packages", true, null);
+    Registry official = new Registry("official", "Official", "/v1/mcp/packages", true, null);
     List<Registry> thirdParty =
         thirdPartyRegistries.isBlank()
             ? List.of()
             : java.util.Arrays.stream(thirdPartyRegistries.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .map(url -> new Registry("third-party", url, url, false, "/.well-known/codePilot-registry.json"))
+                .map(
+                    url ->
+                        new Registry(
+                            "third-party", url, url, false, "/.well-known/codePilot-registry.json"))
                 .toList();
     return ApiResponse.ok(new RegistriesResponse(official, thirdParty));
   }

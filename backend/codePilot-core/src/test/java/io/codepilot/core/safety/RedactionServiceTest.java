@@ -11,7 +11,8 @@ class RedactionServiceTest {
 
   @Test
   void redacts_apiKeysWithPrefix() {
-    String input = "Use this API key: sk-abc123456789012345678901234567890123456789 in your request.";
+    String input =
+        "Use this API key: sk-abc123456789012345678901234567890123456789 in your request.";
     String redacted = service.redact(input);
     assertThat(redacted).doesNotContain("sk-abc123456789012345678901234567890123456789");
     assertThat(redacted).contains("[REDACTED_API_KEY]");
@@ -19,7 +20,8 @@ class RedactionServiceTest {
 
   @Test
   void redacts_jwtTokens() {
-    String jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+    String jwt =
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
     String input = "Authorization: Bearer " + jwt;
     String redacted = service.redact(input);
     assertThat(redacted).doesNotContain(jwt);

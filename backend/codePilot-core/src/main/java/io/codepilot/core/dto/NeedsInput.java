@@ -28,10 +28,14 @@ public record NeedsInput(
       String placeholder) {
 
     public enum Kind {
-      @JsonProperty("single-choice") SINGLE_CHOICE,
-      @JsonProperty("multi-choice") MULTI_CHOICE,
-      @JsonProperty("yes-no") YES_NO,
-      @JsonProperty("freeform") FREEFORM
+      @JsonProperty("single-choice")
+      SINGLE_CHOICE,
+      @JsonProperty("multi-choice")
+      MULTI_CHOICE,
+      @JsonProperty("yes-no")
+      YES_NO,
+      @JsonProperty("freeform")
+      FREEFORM
     }
   }
 

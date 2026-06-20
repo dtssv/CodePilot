@@ -22,8 +22,8 @@ public final class HmacSigner {
   /**
    * Computes {@code HEX(HmacSHA256(key, body || '\n' || ts || '\n' || nonce))}.
    *
-   * <p>Body may be empty for GET / DELETE requests; the separators keep the signature
-   * non-ambiguous even when one of the inputs is empty.
+   * <p>Body may be empty for GET / DELETE requests; the separators keep the signature non-ambiguous
+   * even when one of the inputs is empty.
    */
   public String sign(String body, String ts, String nonce) {
     try {

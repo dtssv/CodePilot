@@ -1,6 +1,5 @@
 package io.codepilot.core.skill;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import jakarta.annotation.PostConstruct;
 import java.io.IOException;
@@ -9,7 +8,6 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -69,8 +67,7 @@ public class SystemSkillLoader {
   private void validate(SkillManifest s, String file) {
     if (s.id() == null || s.id().isBlank()) fail(file, "id missing");
     if (!"system".equalsIgnoreCase(s.source())) fail(file, "source must be 'system'");
-    if (s.systemPrompt() == null || s.systemPrompt().isBlank())
-      fail(file, "systemPrompt missing");
+    if (s.systemPrompt() == null || s.systemPrompt().isBlank()) fail(file, "systemPrompt missing");
     if (s.category() == null) fail(file, "category missing");
   }
 

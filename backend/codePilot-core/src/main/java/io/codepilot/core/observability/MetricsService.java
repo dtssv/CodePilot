@@ -6,14 +6,15 @@ import io.micrometer.core.instrument.Timer;
 import org.springframework.stereotype.Service;
 
 /**
- * Centralized custom metrics. Exposed via {@code /actuator/prometheus} under the prefix
- * {@code codepilot_*}. These are the "must-have" production observability signals:
+ * Centralized custom metrics. Exposed via {@code /actuator/prometheus} under the prefix {@code
+ * codepilot_*}. These are the "must-have" production observability signals:
+ *
  * <ul>
- *   <li>conversation_run — counts + latency per mode</li>
- *   <li>tool_calls — count by name + ok/fail</li>
- *   <li>system_leak_blocked — pre & post</li>
- *   <li>skill_activated — per skill id</li>
- *   <li>auth — logins, refresh, failures</li>
+ *   <li>conversation_run — counts + latency per mode
+ *   <li>tool_calls — count by name + ok/fail
+ *   <li>system_leak_blocked — pre & post
+ *   <li>skill_activated — per skill id
+ *   <li>auth — logins, refresh, failures
  * </ul>
  */
 @Service
@@ -57,9 +58,13 @@ public class MetricsService {
         .increment();
   }
 
-  public void leakBlockedPre() { leakBlockedPre.increment(); }
+  public void leakBlockedPre() {
+    leakBlockedPre.increment();
+  }
 
-  public void leakBlockedPost() { leakBlockedPost.increment(); }
+  public void leakBlockedPost() {
+    leakBlockedPost.increment();
+  }
 
   public void skillActivated(String id) {
     Counter.builder("codepilot.skill_activated").tag("id", id).register(registry).increment();

@@ -5,9 +5,8 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Read-only projection of the system_model_providers table.
- * System models are configured by administrators and available to all users.
- * API key is never exposed to the client.
+ * Read-only projection of the system_model_providers table. System models are configured by
+ * administrators and available to all users. API key is never exposed to the client.
  */
 public record SystemModelProvider(
     UUID id,

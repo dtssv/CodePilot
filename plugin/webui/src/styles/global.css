@@ -4497,6 +4497,140 @@ button:disabled {
 
 .tool-call-card .tool-call-desc {
     word-break: break-all;
+    cursor: help;
+}
+
+/* Content preview for write/read tool cards */
+.tool-call-content-preview {
+    flex: 1 1 100%;
+    margin: 4px 0 0 24px;
+    padding: 0;
+}
+
+.tool-call-preview-label {
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.tool-call-preview-code {
+    margin: 0;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--bg-secondary, #1e1e1e);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    line-height: 1.45;
+    max-height: 200px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-primary, #e8e8e8);
+}
+
+/* ─── Color-coded diff preview for file write/create/replace/delete ─── */
+.tool-call-diff {
+    margin: 4px 0 0;
+    border-radius: 6px;
+    background: var(--bg-secondary, #1e1e1e);
+    overflow: auto;
+    max-height: 300px;
+}
+
+.tool-call-diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.tool-call-diff-line {
+    margin: 0;
+    padding: 0;
+}
+
+.tool-call-diff-gutter {
+    width: 24px;
+    min-width: 24px;
+    padding: 0 6px;
+    text-align: center;
+    user-select: none;
+    font-weight: 600;
+    vertical-align: top;
+    border-right: 1px solid var(--border-secondary, #333);
+}
+
+.tool-call-diff-content {
+    padding: 0 8px;
+    vertical-align: top;
+}
+
+.tool-call-diff-content pre {
+    margin: 0;
+    padding: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+}
+
+.tool-call-diff-ellipsis {
+    color: var(--text-secondary, #888);
+    font-style: italic;
+    padding: 2px 8px;
+}
+
+/* Green for additions (create, write, replace-new) */
+.tool-call-diff-add {
+    background: rgba(40, 167, 69, 0.15);
+    color: #3fb950;
+}
+.tool-call-diff-add .tool-call-diff-gutter {
+    color: #3fb950;
+    background: rgba(40, 167, 69, 0.1);
+}
+
+/* Red for deletions (delete, replace-old) */
+.tool-call-diff-remove {
+    background: rgba(248, 81, 73, 0.15);
+    color: #f85149;
+}
+.tool-call-diff-remove .tool-call-diff-gutter {
+    color: #f85149;
+    background: rgba(248, 81, 73, 0.1);
+}
+
+/* Expanded multi-patch items */
+.tool-call-patch-item-expandable {
+    margin-bottom: 8px;
+}
+
+.tool-call-patch-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    font-size: 12px;
+}
+
+.tool-call-patch-header .tool-call-patch-icon,
+.tool-call-patch-header .tool-call-patch-verb,
+.tool-call-patch-header .tool-call-patch-path,
+.tool-call-patch-header .tool-call-patch-lines {
+    /* reuse same styles as non-expanded patch items */
+}
+
+.tool-call-patch-item-expandable .tool-call-diff {
+    margin-top: 4px;
+}
+
+.tool-call-full-path {
+    flex: 1 1 100%;
+    margin: 2px 0 0 24px;
+    font-size: 11px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    word-break: break-all;
 }
 
 .chat-view-v2 .step-thinking {
@@ -4977,4 +5111,121 @@ button:disabled {
 
 .mcp-install-result-error {
     color: color-mix(in srgb, #d44 88%, var(--text-primary));
+}
+
+/* ── Subagent tree (Task_subagent) ── */
+.subagent-tree {
+    margin: 8px 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle, #30363d);
+    background: var(--bg-secondary, #161b22);
+    font-size: 12px;
+}
+
+.subagent-tree-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.subagent-tree-icon {
+    opacity: 0.8;
+}
+
+.subagent-tree-count {
+    margin-left: auto;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--bg-tertiary, #21262d);
+    font-size: 11px;
+}
+
+.subagent-tree-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.subagent-card {
+    padding: 6px 8px;
+    border-radius: 5px;
+    border-left: 3px solid var(--border-subtle, #30363d);
+    background: var(--bg-primary, #0d1117);
+}
+
+.subagent-card.subagent-running {
+    border-left-color: #58a6ff;
+}
+
+.subagent-card.subagent-success {
+    border-left-color: #3fb950;
+}
+
+.subagent-card.subagent-error {
+    border-left-color: #f85149;
+}
+
+.subagent-card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.subagent-status-running {
+    color: #58a6ff;
+    animation: subagent-pulse 1.2s ease-in-out infinite;
+}
+
+.subagent-status-success {
+    color: #3fb950;
+}
+
+.subagent-status-error {
+    color: #f85149;
+}
+
+@keyframes subagent-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+}
+
+.subagent-agent-name {
+    font-weight: 600;
+}
+
+.subagent-duration {
+    margin-left: auto;
+}
+
+.subagent-desc {
+    margin-top: 3px;
+    opacity: 0.85;
+}
+
+.subagent-progress {
+    margin-top: 3px;
+    font-style: italic;
+}
+
+.subagent-result {
+    margin-top: 4px;
+}
+
+.subagent-result-body {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 240px;
+    overflow: auto;
+    margin: 4px 0 0;
+    padding: 6px;
+    border-radius: 4px;
+    background: var(--bg-tertiary, #21262d);
+}
+
+.subagent-error {
+    margin-top: 4px;
+    color: #f85149;
 }

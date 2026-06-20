@@ -14,7 +14,6 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.test.StepVerifier;
 
 /**
  * Integration test: verifies the full /v1/conversation/run SSE pipeline end-to-end using WireMock
@@ -27,7 +26,11 @@ class ConversationSseIntegrationTest {
 
   @RegisterExtension
   static WireMockExtension llm =
-      WireMockExtension.newInstance().options(com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig().dynamicPort()).build();
+      WireMockExtension.newInstance()
+          .options(
+              com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig()
+                  .dynamicPort())
+          .build();
 
   @DynamicPropertySource
   static void props(DynamicPropertyRegistry reg) {

@@ -15,8 +15,8 @@ import reactor.core.publisher.Mono;
 import reactor.util.context.Context;
 
 /**
- * Authenticates requests by verifying the {@code Authorization: Bearer <jwt>} header. The
- * resulting {@link AuthPrincipal} is injected into the reactor {@link Context} under {@link
+ * Authenticates requests by verifying the {@code Authorization: Bearer <jwt>} header. The resulting
+ * {@link AuthPrincipal} is injected into the reactor {@link Context} under {@link
  * AuthPrincipal#CTX_KEY}. Public endpoints bypass this filter.
  *
  * <p>Runs <em>after</em> HMAC verification so only signed requests reach this point.
@@ -48,8 +48,10 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
   /** Dev token for bypassing JWT in development builds. Set via codepilot.security.dev-token. */
   private final String devToken;
 
-  public JwtAuthWebFilter(JwtService jwt,
-      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}") String devToken) {
+  public JwtAuthWebFilter(
+      JwtService jwt,
+      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}")
+          String devToken) {
     this.jwt = jwt;
     this.devToken = devToken.isBlank() ? null : devToken;
   }
@@ -71,13 +73,18 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
     if (reqDevToken != null && !reqDevToken.isBlank() && isValidDevToken(reqDevToken)) {
       String deviceId = exchange.getRequest().getHeaders().getFirst("X-CodePilot-Device-Id");
       if (deviceId == null || deviceId.isBlank()) deviceId = "dev-device";
-      AuthPrincipal devPrincipal = new AuthPrincipal(
-          "dev-user", "dev-tenant", deviceId,
-          java.util.Set.of("user", "dev"), Long.MAX_VALUE);
-      ServerWebExchange mutated = exchange.mutate()
-          .request(builder -> builder.header("X-User-Id", devPrincipal.userId())
-              .header("X-Tenant-Id", devPrincipal.tenantId()))
-          .build();
+      AuthPrincipal devPrincipal =
+          new AuthPrincipal(
+              "dev-user", "dev-tenant", deviceId, java.util.Set.of("user", "dev"), Long.MAX_VALUE);
+      ServerWebExchange mutated =
+          exchange
+              .mutate()
+              .request(
+                  builder ->
+                      builder
+                          .header("X-User-Id", devPrincipal.userId())
+                          .header("X-Tenant-Id", devPrincipal.tenantId()))
+              .build();
       return chain.filter(mutated).contextWrite(Context.of(AuthPrincipal.CTX_KEY, devPrincipal));
     }
 
@@ -92,10 +99,15 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
     } catch (IllegalArgumentException ex) {
       return WebErrors.write(exchange, ErrorCodes.UNAUTHORIZED, "Invalid or expired token", 401);
     }
-    ServerWebExchange mutated = exchange.mutate()
-        .request(builder -> builder.header("X-User-Id", principal.userId())
-            .header("X-Tenant-Id", principal.tenantId()))
-        .build();
+    ServerWebExchange mutated =
+        exchange
+            .mutate()
+            .request(
+                builder ->
+                    builder
+                        .header("X-User-Id", principal.userId())
+                        .header("X-Tenant-Id", principal.tenantId()))
+            .build();
     return chain.filter(mutated).contextWrite(Context.of(AuthPrincipal.CTX_KEY, principal));
   }
 
@@ -107,8 +119,8 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
   }
 
   /**
-   * Checks if the provided dev token matches the configured dev token.
-   * Uses constant-time comparison to prevent timing attacks.
+   * Checks if the provided dev token matches the configured dev token. Uses constant-time
+   * comparison to prevent timing attacks.
    */
   private boolean isValidDevToken(String token) {
     if (devToken == null || devToken.isEmpty()) return false;
@@ -117,4 +129,3 @@ public class JwtAuthWebFilter implements WebFilter, Ordered {
         devToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
   }
 }
-

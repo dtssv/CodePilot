@@ -48,13 +48,21 @@ public record ConversationRunRequest(
     // ★ 新增：Graph状态快照（插件端上传，用于断点恢复）
     Map<String, Object> graphState,
     // ★ 新增：项目元信息（语言、根目录文件列表），由插件端注入，供 LLM 了解项目上下文
-    String projectMeta) {
+    String projectMeta,
+    // ★ 新增：项目 workspace 根路径（绝对路径），由插件端注入，供 LLM 生成正确的文件路径
+    String workspaceRoot,
+    // ★ 新增：操作系统类型（windows/macos/linux），由插件端注入，供 LLM 使用正确的路径格式和命令
+    String osHint) {
 
   public enum Intent {
-    @JsonProperty("new") NEW,
-    @JsonProperty("continue") CONTINUE,
-    @JsonProperty("answer") ANSWER,
-    @JsonProperty("cancel") CANCEL
+    @JsonProperty("new")
+    NEW,
+    @JsonProperty("continue")
+    CONTINUE,
+    @JsonProperty("answer")
+    ANSWER,
+    @JsonProperty("cancel")
+    CANCEL
   }
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -65,8 +73,7 @@ public record ConversationRunRequest(
       String goal, List<Plan.Step> steps, Integer totalSteps, List<String> completedStepIds) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  public record Contexts(
-      List<PinnedItem> pinned, List<RecentMessage> recent, List<Ref> refs) {
+  public record Contexts(List<PinnedItem> pinned, List<RecentMessage> recent, List<Ref> refs) {
 
     public record PinnedItem(String kind, String path, String range, String sha1, String reason) {}
 
@@ -81,8 +88,13 @@ public record ConversationRunRequest(
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record UserSkill(
-      String id, String version, String source, String scope, String projectRootHash,
-      String sha256, String yaml) {}
+      String id,
+      String version,
+      String source,
+      String scope,
+      String projectRootHash,
+      String sha256,
+      String yaml) {}
 
   /** User Skill metadata for graph per-node matching (no full yaml on the wire). */
   @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -99,18 +111,7 @@ public record ConversationRunRequest(
 
     public SkillManifest toManifest() {
       return new SkillManifest(
-          id,
-          version,
-          null,
-          source,
-          scope,
-          priority,
-          null,
-          triggers,
-          null,
-          null,
-          null,
-          category);
+          id, version, null, source, scope, priority, null, triggers, null, null, null, category);
     }
   }
 
@@ -142,8 +143,8 @@ public record ConversationRunRequest(
       Integer contextBudgetTokens,
       Integer keepRecentMessages,
       // ── Graph engine fields ──
-      String engine,              // "graph" | "legacy" (default: legacy)
-      String graphTemplate,       // "default" | "refactor" | "migrate" | "bugfix"
+      String engine, // "graph" | "legacy" (default: legacy)
+      String graphTemplate, // "default" | "refactor" | "migrate" | "bugfix"
       GraphVerifyPolicy verify,
       GraphRepairPolicy repair,
       GraphGatherPolicy gather,
@@ -157,14 +158,13 @@ public record ConversationRunRequest(
       Boolean bareMode,
       // ── P2-11 Model routing / Max mode hints. These are advisory and can be
       // honored by providers that support explicit reasoning or output budgets.
-      String thinkingMode,          // "off" | "low" | "medium" | "high"
+      String thinkingMode, // "off" | "low" | "medium" | "high"
       Integer maxOutputTokens,
       Boolean maxMode) {}
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public record GraphVerifyPolicy(
-      Boolean compile, Boolean test, Boolean lint,
-      List<CustomCommand> customCommands) {
+      Boolean compile, Boolean test, Boolean lint, List<CustomCommand> customCommands) {
     public record CustomCommand(String name, String cmd, Integer timeoutMs) {}
   }
 

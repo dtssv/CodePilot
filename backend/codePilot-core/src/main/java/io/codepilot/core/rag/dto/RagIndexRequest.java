@@ -15,9 +15,7 @@ import java.util.UUID;
  * @param chunks the code chunks to embed and store
  */
 public record RagIndexRequest(
-    @NotNull UUID sessionId,
-    @NotNull UUID userId,
-    @NotEmpty @Valid List<ChunkPayload> chunks) {
+    @NotNull UUID sessionId, @NotNull UUID userId, @NotEmpty @Valid List<ChunkPayload> chunks) {
 
   /**
    * A single chunk submitted for indexing.

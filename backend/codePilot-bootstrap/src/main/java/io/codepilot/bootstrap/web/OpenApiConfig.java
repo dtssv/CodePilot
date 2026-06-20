@@ -33,10 +33,7 @@ public class OpenApiConfig {
 
   @Bean
   public GroupedOpenApi pluginGroup() {
-    return GroupedOpenApi.builder()
-        .group("plugin")
-        .pathsToMatch("/v1/plugin/**")
-        .build();
+    return GroupedOpenApi.builder().group("plugin").pathsToMatch("/v1/plugin/**").build();
   }
 
   @Bean

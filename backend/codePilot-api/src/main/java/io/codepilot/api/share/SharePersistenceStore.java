@@ -21,7 +21,8 @@ import org.springframework.stereotype.Component;
 /**
  * Conversation share snapshots.
  *
- * <p>Primary: {@code conversation_shares} (Flyway V9). Fallback: per-id JSON files under storage-dir.
+ * <p>Primary: {@code conversation_shares} (Flyway V9). Fallback: per-id JSON files under
+ * storage-dir.
  */
 @Component
 public class SharePersistenceStore {
@@ -46,7 +47,8 @@ public class SharePersistenceStore {
   public SharePersistenceStore(
       NamedParameterJdbcTemplate jdbc,
       @Value("${codepilot.share.persistence:auto}") String persistenceMode,
-      @Value("${codepilot.share.storage-dir:${java.io.tmpdir}/codepilot-share}") String storageDir) {
+      @Value("${codepilot.share.storage-dir:${java.io.tmpdir}/codepilot-share}")
+          String storageDir) {
     this.jdbc = jdbc;
     this.persistenceMode = persistenceMode != null ? persistenceMode.trim().toLowerCase() : "auto";
     this.storageDir = Path.of(storageDir);
@@ -73,7 +75,8 @@ public class SharePersistenceStore {
     return dbActive;
   }
 
-  public ShareSnapshot create(String title, String format, String content, int expireDays) throws Exception {
+  public ShareSnapshot create(String title, String format, String content, int expireDays)
+      throws Exception {
     String id = java.util.UUID.randomUUID().toString();
     Instant createdAt = Instant.now();
     Instant expiresAt = createdAt.plus(expireDays, ChronoUnit.DAYS);
@@ -106,13 +109,7 @@ public class SharePersistenceStore {
           "content": %s
         }
         """
-            .formatted(
-                id,
-                json(safeTitle),
-                safeFormat,
-                createdAt,
-                expiresAt,
-                json(content));
+            .formatted(id, json(safeTitle), safeFormat, createdAt, expiresAt, json(content));
     Files.writeString(storageDir.resolve(id + ".json"), body);
     return new ShareSnapshot(id, safeTitle, safeFormat, content, createdAt, expiresAt, false);
   }
@@ -128,7 +125,8 @@ public class SharePersistenceStore {
     if (dbActive) {
       int n =
           jdbc.update(
-              "UPDATE conversation_shares SET revoked_at = CURRENT_TIMESTAMP(3) WHERE id = :id AND revoked_at IS NULL",
+              "UPDATE conversation_shares SET revoked_at = CURRENT_TIMESTAMP(3) WHERE id = :id AND"
+                  + " revoked_at IS NULL",
               Map.of("id", id));
       return n > 0;
     }
@@ -148,7 +146,8 @@ public class SharePersistenceStore {
 
   private void importFilesIfDbEmpty() {
     try {
-      Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM conversation_shares", Map.of(), Integer.class);
+      Integer count =
+          jdbc.queryForObject("SELECT COUNT(*) FROM conversation_shares", Map.of(), Integer.class);
       if (count != null && count > 0) return;
       if (!Files.isDirectory(storageDir)) return;
       int imported = 0;
@@ -160,9 +159,9 @@ public class SharePersistenceStore {
           ShareSnapshot s = snap.get();
           jdbc.update(
               """
-              INSERT INTO conversation_shares (id, title, format, content, created_at, expires_at, revoked_at)
-              VALUES (:id, :title, :format, :content, :createdAt, :expiresAt, NULL)
-              """,
+INSERT INTO conversation_shares (id, title, format, content, created_at, expires_at, revoked_at)
+VALUES (:id, :title, :format, :content, :createdAt, :expiresAt, NULL)
+""",
               new MapSqlParameterSource()
                   .addValue("id", s.id())
                   .addValue("title", s.title())
@@ -180,7 +179,8 @@ public class SharePersistenceStore {
   }
 
   private Optional<ShareSnapshot> loadFromDb(String id) {
-    return jdbc.query(
+    return jdbc
+        .query(
             """
             SELECT id, title, format, content, created_at, expires_at, revoked_at
             FROM conversation_shares WHERE id = :id
@@ -206,7 +206,8 @@ public class SharePersistenceStore {
     }
     JsonNode node = mapper.readTree(Files.readString(path));
     Instant createdAt = Instant.parse(node.path("createdAt").asText(Instant.now().toString()));
-    Instant expiresAt = Instant.parse(node.path("expiresAt").asText(createdAt.plus(7, ChronoUnit.DAYS).toString()));
+    Instant expiresAt =
+        Instant.parse(node.path("expiresAt").asText(createdAt.plus(7, ChronoUnit.DAYS).toString()));
     return Optional.of(
         new ShareSnapshot(
             node.path("id").asText(id),
@@ -220,10 +221,7 @@ public class SharePersistenceStore {
 
   private static String json(String s) {
     return "\""
-        + s.replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
+        + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
         + "\"";
   }
 }

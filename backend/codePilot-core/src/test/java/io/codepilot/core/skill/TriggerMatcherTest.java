@@ -64,7 +64,8 @@ class TriggerMatcherTest {
             "system",
             80,
             "append",
-            new Triggers(null, List.of(new TriggerGroup(null, null, List.of("refactor"), null, null))),
+            new Triggers(
+                null, List.of(new TriggerGroup(null, null, List.of("refactor"), null, null))),
             null,
             null,
             "x",
@@ -75,6 +76,7 @@ class TriggerMatcherTest {
 
   private WorkspaceProbe.Probe probe(
       Set<String> langs, Set<String> frameworks, Set<String> files, String action) {
-    return new WorkspaceProbe.Probe(ConversationMode.AGENT, action, langs, frameworks, files, Set.of());
+    return new WorkspaceProbe.Probe(
+        ConversationMode.AGENT, action, langs, frameworks, files, Set.of());
   }
 }

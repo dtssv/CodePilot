@@ -1,6 +1,8 @@
 package io.codepilot.api.auth;
 
 import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.jwk.source.JWKSource;
+import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import com.nimbusds.jose.proc.JWSKeySelector;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
@@ -8,8 +10,6 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
-import com.nimbusds.jose.jwk.source.JWKSource;
-import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.text.ParseException;
@@ -21,9 +21,9 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * OIDC verifier suitable for production. Downloads & caches the IdP JWKs and validates the
- * incoming id-token signature, issuer, audience, and expiry. Bound users / tenants / device ids
- * follow CodePilot conventions:
+ * OIDC verifier suitable for production. Downloads & caches the IdP JWKs and validates the incoming
+ * id-token signature, issuer, audience, and expiry. Bound users / tenants / device ids follow
+ * CodePilot conventions:
  *
  * <ul>
  *   <li>{@code sub} → user subject (mandatory)
@@ -32,8 +32,8 @@ import reactor.core.scheduler.Schedulers;
  *   <li>{@code email} / {@code name} → optional metadata
  * </ul>
  *
- * <p>If your IdP doesn't natively emit {@code tid} / {@code did}, configure a claim mapper on
- * the IdP side (most providers support custom claims).
+ * <p>If your IdP doesn't natively emit {@code tid} / {@code did}, configure a claim mapper on the
+ * IdP side (most providers support custom claims).
  */
 @Service
 @ConditionalOnProperty(prefix = "codepilot.security.sso.oidc", name = "issuer")
@@ -58,22 +58,18 @@ public class OidcSsoVerifier implements SsoVerifier {
       throw new IllegalStateException("Invalid jwks-uri", e);
     }
 
-    JWKSource<SecurityContext> jwkSource =
-        JWKSourceBuilder.create(jwksUrl)
-            .retrying(true)
-            .build();
+    JWKSource<SecurityContext> jwkSource = JWKSourceBuilder.create(jwksUrl).retrying(true).build();
 
     JWSKeySelector<SecurityContext> keySelector =
-        new JWSVerificationKeySelector<>(
-            JWSAlgorithm.RS256,
-            jwkSource);
+        new JWSVerificationKeySelector<>(JWSAlgorithm.RS256, jwkSource);
 
     DefaultJWTProcessor<SecurityContext> proc = new DefaultJWTProcessor<>();
     proc.setJWSKeySelector(keySelector);
     this.processor = proc;
   }
 
-  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OidcSsoVerifier.class);
+  private static final org.slf4j.Logger log =
+      org.slf4j.LoggerFactory.getLogger(OidcSsoVerifier.class);
 
   @Override
   public Mono<VerifiedIdentity> verify(String idToken) {

@@ -12,11 +12,11 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 /**
- * Corporate SSO bridge implementation: a deployment-side adapter signs a "bootstrap token"
- * (HS256, ≤5 min lifetime) with the shared {@code codepilot.security.sso.hmac-bridge.secret}.
+ * Corporate SSO bridge implementation: a deployment-side adapter signs a "bootstrap token" (HS256,
+ * ≤5 min lifetime) with the shared {@code codepilot.security.sso.hmac-bridge.secret}.
  *
- * <p>This is intentionally simple — most production deployments should prefer
- * {@link OidcSsoVerifier}.
+ * <p>This is intentionally simple — most production deployments should prefer {@link
+ * OidcSsoVerifier}.
  */
 @Service
 @ConditionalOnProperty(prefix = "codepilot.security.sso.hmac-bridge", name = "secret")
@@ -40,8 +40,7 @@ public class HmacSsoVerifier implements SsoVerifier {
             throw new IllegalArgumentException("Invalid SSO signature");
           }
           JWTClaimsSet claims = readClaimsOrThrow(jwt);
-          if (claims.getExpirationTime() == null
-              || claims.getExpirationTime().before(new Date())) {
+          if (claims.getExpirationTime() == null || claims.getExpirationTime().before(new Date())) {
             throw new IllegalArgumentException("SSO token expired");
           }
           String subject = require(claims.getSubject(), "sub");

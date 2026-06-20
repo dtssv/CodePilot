@@ -6,7 +6,6 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 @EnableConfigurationProperties({
   ConversationRunProperties.class,
-  GraphEngineProperties.class,
   ConversationRunAdmissionProperties.class
 })
 public class ConversationRunConfig {}

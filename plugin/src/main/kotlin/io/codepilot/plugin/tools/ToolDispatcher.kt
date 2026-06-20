@@ -1,9 +1,12 @@
 package io.codepilot.plugin.tools
 
 import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.SystemInfo
 import com.intellij.openapi.vfs.VfsUtil
 import io.codepilot.plugin.conversation.ConversationClient
 import io.codepilot.plugin.marketplace.LocalMarketplaceStore
@@ -32,6 +35,7 @@ class ToolDispatcher(
     private val workspaceRoot: java.nio.file.Path? = null,
 ) {
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ToolDispatcher::class.java)
+    private val objectMapper = ObjectMapper()
     private val patchApplier = PatchApplier(project)
     private val staging by lazy { io.codepilot.plugin.apply.PatchStaging.getInstance(project) }
 
@@ -57,13 +61,13 @@ class ToolDispatcher(
     // ─── Tool Result Cache ─────────────────────────────────────────────
     // Caches read-only tool results to avoid redundant file reads and searches
     private val toolResultCache = java.util.concurrent.ConcurrentHashMap<String, CachedToolResult>()
-    private val CACHE_TTL_MS = 30_000L // 30 seconds TTL for tool results
+    private val CACHE_TTL_MS = 120_000L // 120 seconds TTL for tool results
 
     data class CachedToolResult(
         val result: Any?,
         val timestamp: Long = System.currentTimeMillis(),
     ) {
-        fun isExpired(): Boolean = System.currentTimeMillis() - timestamp > 30_000L
+        fun isExpired(): Boolean = System.currentTimeMillis() - timestamp > 120_000L
     }
 
     // ─── Parallel Dispatch ─────────────────────────────────────────────
@@ -92,13 +96,57 @@ class ToolDispatcher(
         name.startsWith("code.") -> true
         name.startsWith("ide.diagnostics") || name.startsWith("ide.openFile") -> true
         name.startsWith("ide.shadowValidate") -> true
+        name == "notepad.read" -> true
+        name == "plan.show" -> true
+        name == "plan" -> true   // server-side tool, read-only for the plugin
+        name == "ask_user" -> true  // server-side tool, read-only for the plugin
         else -> false
+    }
+
+    /**
+     * Normalize tool_call args from LLM output.
+     * After context compaction, some models emit args as a plain string (TextNode)
+     * instead of a JSON object (ObjectNode). This method attempts to recover by
+     * parsing the text content as JSON. If that also fails, we report a tool error
+     * so the agent can retry with well-formed args.
+     */
+    private fun normalizeArgs(rawArgs: JsonNode, toolName: String, toolCallId: String): ObjectNode? {
+        if (rawArgs.isObject) {
+            @Suppress("UNCHECKED_CAST")
+            return rawArgs as ObjectNode
+        }
+        // TextNode or other non-object — try to parse text content as JSON
+        val text = rawArgs.asText("")
+        if (text.isBlank()) {
+            return objectMapper.createObjectNode()
+        }
+        return try {
+            val parsed = objectMapper.readTree(text)
+            if (parsed.isObject) {
+                @Suppress("UNCHECKED_CAST")
+                parsed as ObjectNode
+            } else {
+                // Parsed to array / value — cannot use as args
+                log.warn("tool_call args parsed to ${parsed.nodeType}, expected OBJECT for tool=$toolName id=$toolCallId")
+                respond(toolCallId, false, null, "tool_error",
+                    "Invalid args format: expected JSON object, got ${parsed.nodeType}. Please retry with well-formed JSON arguments.", 0L)
+                null
+            }
+        } catch (e: Exception) {
+            log.warn("tool_call args is not valid JSON for tool=$toolName id=$toolCallId, text=${text.take(200)}", e)
+            respond(toolCallId, false, null, "tool_error",
+                "Invalid args format: could not parse arguments as JSON. Please retry with well-formed JSON arguments.", 0L)
+            null
+        }
     }
 
     fun dispatch(toolCall: JsonNode) {
         val name = toolCall.path("name").asText()
         val id = toolCall.path("id").asText()
-        val args = toolCall.path("args")
+        val rawArgs = toolCall.path("args")
+        // ★ Normalize args: LLM may emit args as a TextNode instead of ObjectNode
+        // (especially after context compaction). Parse text content into ObjectNode.
+        val args = normalizeArgs(rawArgs, name, id) ?: return
 
         // Skip gather.execute tool calls — they are handled by GatherDispatcher
         // via the graph_info_request SSE event, not by ToolDispatcher.
@@ -140,7 +188,7 @@ class ToolDispatcher(
                         name == "fs.move" -> dispatchViaPatchApplier(name, args)
                         name == "fs.applyPatch" -> dispatchApplyPatch(args)
                         name == "shell.exec" -> {
-                            val shellArgs = args.deepCopy<com.fasterxml.jackson.databind.node.ObjectNode>().apply {
+                            val shellArgs = args.deepCopy().apply {
                                 put("stepId", id)
                                 currentTurnId?.let { put("turnId", it) }
                                 if (workspaceRoot != null) {
@@ -166,7 +214,17 @@ class ToolDispatcher(
                         // ★ Integration: NotepadService for Agent working memory
                         name == "notepad.write" -> notepadWrite(args)
                         name == "notepad.read" -> notepadRead(args)
+                        name == "commit" -> gitCommit(args)
+                        name == "mcp_call" -> dispatchMcpBridge(args)
                         name.startsWith("mcp.") -> io.codepilot.plugin.mcp.McpCallHelper.dispatchMcp(project, name, args)
+                        // ★ Server-side tools: backend already executed them, just acknowledge for UI
+                        name == "plan" -> serverSideAck(args, name)
+                        name == "ask_user" -> serverSideAck(args, name)
+                        name == "task_create" -> serverSideAck(args, name)
+                        name == "task_update" -> serverSideAck(args, name)
+                        name == "task_list" -> serverSideAck(args, name)
+                        name == "memory" -> serverSideAck(args, name)
+                        name == "skill" -> serverSideAck(args, name)
                         else -> return@executeOnPooledThread refuse(id, "unsupported tool: $name", started)
                     }
 
@@ -179,6 +237,11 @@ class ToolDispatcher(
                 val ok =
                     when (name) {
                         "shell.exec", "shell.session" -> ShellWorkingDirectory.isSuccess(result)
+                        // File write tools: respect the ack field from applySync
+                        "fs.write", "fs.replace", "fs.delete", "fs.move", "fs.create", "fs.applyPatch" -> {
+                            val m = result as? Map<*, *>
+                            m?.get("ack") as? Boolean ?: true
+                        }
                         else -> true
                     }
                 if (name == "shell.exec") {
@@ -193,10 +256,24 @@ class ToolDispatcher(
                         null
                     } else if (name == "shell.exec" || name == "shell.session") {
                         shellErrorMessage(result)
+                    } else if (name.startsWith("fs.")) {
+                        val m = result as? Map<*, *>
+                        m?.get("error")?.toString() ?: "file operation failed"
                     } else {
                         null
                     }
-                respond(id, ok, result, if (ok) null else "tool_failed", errMsg, started)
+                // Detect user skip: when the user explicitly skips a shell command, use a
+                // distinct errorCode so the backend can inject a "do not retry" directive.
+                val userSkipped =
+                    (name == "shell.exec" || name == "shell.session") &&
+                        (result as? Map<*, *>)?.get("userSkipped") == true
+                val errorCode =
+                    when {
+                        ok -> null
+                        userSkipped -> "user_skip"
+                        else -> "tool_failed"
+                    }
+                respond(id, ok, result, errorCode, errMsg, started)
             } catch (v: ToolViolation) {
                 respond(id, false, null, "path_violation", v.message, started)
             } catch (t: Throwable) {
@@ -343,6 +420,54 @@ class ToolDispatcher(
 
     // ---------- MCP routing (original) ----------
 
+    private fun dispatchMcpBridge(args: JsonNode): Map<String, Any?> {
+        val fullName = args.path("full_name").asText()
+        if (fullName.isBlank()) throw ToolViolation("mcp_call: missing full_name")
+        val mcpArgs = args.path("arguments")
+        val parsedArgs = if (mcpArgs.isMissingNode || mcpArgs.isNull) {
+            mapper().createObjectNode()
+        } else if (mcpArgs.isTextual) {
+            try { mapper().readTree(mcpArgs.asText()) } catch (_: Exception) { mapper().createObjectNode() }
+        } else {
+            mcpArgs
+        }
+        return io.codepilot.plugin.mcp.McpCallHelper.dispatchMcp(project, fullName, parsedArgs)
+    }
+
+    private fun mapper() = com.fasterxml.jackson.databind.ObjectMapper()
+
+    private fun gitCommit(args: JsonNode): Map<String, Any?> {
+        val message = args.path("message").asText()
+        if (message.isBlank()) throw ToolViolation("commit: missing message")
+        val addAll = args.path("add_all").asBoolean(true)
+        val root = workspaceRoot?.toString() ?: project.basePath ?: throw ToolViolation("commit: no project root")
+        try {
+            if (addAll) {
+                val addResult = ShellExecutor.execute(project, "git add -A", root)
+                if (addResult.exitCode != 0) {
+                    return mapOf("ok" to false, "error" to "git add failed: ${addResult.stderr}")
+                }
+            }
+            val result = ShellExecutor.execute(project, "git commit -m ${shellEscape(message)}", root)
+            if (result.exitCode != 0) {
+                return mapOf("ok" to false, "error" to result.stderr, "exitCode" to result.exitCode)
+            }
+            return mapOf("ok" to true, "output" to result.stdout.trim())
+        } catch (t: Throwable) {
+            return mapOf("ok" to false, "error" to (t.message ?: t.javaClass.simpleName))
+        }
+    }
+
+    private fun shellEscape(s: String): String {
+        return if (SystemInfo.isWindows) {
+            // PowerShell: escape " and $ with backtick, and double backticks for literal backtick
+            val escaped = s.replace("`", "``").replace("\"", "`\"").replace("$", "`$")
+            "\"$escaped\""
+        } else {
+            "\"${s.replace("\"", "\\\"")}\""
+        }
+    }
+
     // ★ Integration: NotepadService for Agent working memory
     private val notepadService = NotepadService.getInstance(project)
 
@@ -371,8 +496,19 @@ class ToolDispatcher(
     ): Map<String, Any?> {
         val staged = tryStage(name, args)
         if (staged != null) return staged
-        patchApplier.apply(name, args)
-        return mapOf("ack" to true, "appliedVia" to "DiffManager")
+        // ★ Use applySync instead of async apply so the tool result reflects actual write outcome.
+        // The async apply(name, args) returned ack=true before the EDT write completed,
+        // causing the agent to believe a file was written when it may have been rejected
+        // by the user or failed due to path/content issues.
+        val sync = patchApplier.applySync(name, args)
+        return mapOf(
+            "ack" to sync.ok,
+            "appliedVia" to "DiffManager",
+            "written" to sync.written,
+            "path" to sync.path,
+            "lineCount" to sync.lineCount,
+            "error" to sync.error,
+        )
     }
 
     /**
@@ -611,6 +747,15 @@ class ToolDispatcher(
         )
     }
 
+    /**
+     * Server-side tools (plan, ask_user) are executed by the backend.
+     * The plugin only receives the tool_call SSE for UI display purposes.
+     * Return an ack so the ToolResultBus doesn't get a stale "unsupported" error.
+     */
+    private fun serverSideAck(args: JsonNode, toolName: String): Map<String, Any?> {
+        return mapOf("ack" to true, "executedBy" to "server", "tool" to toolName)
+    }
+
     private fun refuse(
         toolCallId: String,
         reason: String,
@@ -643,17 +788,23 @@ class ToolDispatcher(
         val durationMs = (System.nanoTime() - startedNs) / 1_000_000
         // Notify UI callback about tool result for real-time status update
         onToolResult?.invoke(toolCallId, ok, result, errorCode, errorMessage)
-        client.submitToolResult(
-            mutableMapOf<String, Any?>(
-                "sessionId" to sessionId,
-                "toolCallId" to toolCallId,
-                "ok" to ok,
-                "result" to result,
-                "errorCode" to errorCode,
-                "errorMessage" to errorMessage,
-                "durationMs" to durationMs,
-            ),
-        )
+
+        // ★ Server-side tools (executedBy=server) are already handled by the backend.
+        // Only send the tool result to the backend for client-side (plugin-executed) tools.
+        val isServerSide = result is Map<*, *> && result["executedBy"] == "server"
+        if (!isServerSide) {
+            client.submitToolResult(
+                mutableMapOf<String, Any?>(
+                    "sessionId" to sessionId,
+                    "toolCallId" to toolCallId,
+                    "ok" to ok,
+                    "result" to result,
+                    "errorCode" to errorCode,
+                    "errorMessage" to errorMessage,
+                    "durationMs" to durationMs,
+                ),
+            )
+        }
     }
 
     // ---------- read tools ----------
@@ -703,6 +854,11 @@ class ToolDispatcher(
         return lines.subList(from, to).joinToString("\n")
     }
 
+    private val skipDirs = setOf(
+        ".codepilot", ".git", ".svn", ".hg", "node_modules", ".idea", ".vs",
+        "__pycache__", ".gradle", ".mvn", "target", "build", "dist", ".next", ".nuxt"
+    )
+
     private fun listDir(args: JsonNode): Map<String, Any?> {
         val path = args.path("path").asText(".").ifBlank { "." }
         val recursive = args.path("recursive").asBoolean(false)
@@ -717,19 +873,23 @@ class ToolDispatcher(
                 "size" to f.length,
             )
         if (!recursive) {
-            // One level only — same as GatherDispatcher (VfsUtil callback must return true
-            // at the root to descend; the old `recursive || f.parent == vf` never did).
-            val entries = vf.children.take(2_000).map(::entryFor)
+            // One level only — filter out hidden/internal directories
+            val entries = vf.children
+                .filter { it.name !in skipDirs }
+                .take(2_000)
+                .map(::entryFor)
             return mapOf("path" to path, "entries" to entries)
         }
         val entries = mutableListOf<Map<String, Any?>>()
         VfsUtil.processFilesRecursively(vf) { f ->
             if (f != vf) {
+                // Skip hidden/internal directories and their children
+                if (f.isDirectory && f.name in skipDirs) return@processFilesRecursively false
                 entries.add(entryFor(f))
             }
-            true
+            entries.size < 2_000
         }
-        return mapOf("path" to path, "entries" to entries.take(2_000))
+        return mapOf("path" to path, "entries" to entries)
     }
 
     private fun searchProject(args: JsonNode): Map<String, Any?> {
@@ -780,7 +940,7 @@ class ToolDispatcher(
     private fun createFile(args: JsonNode): Map<String, Any?> {
         val rel = args.path("path").asText()
         val content = args.path("content").asText("")
-        val overwrite = args.path("overwrite").asBoolean(false)
+        val overwrite = args.path("overwrite").asBoolean(true)
         val target = pgResolveOrCreate(rel)
         if (Files.exists(target) && !overwrite) {
             throw ToolViolation("already exists: $rel (set overwrite=true to replace)")

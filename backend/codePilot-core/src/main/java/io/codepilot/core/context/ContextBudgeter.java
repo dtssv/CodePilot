@@ -13,16 +13,18 @@ import org.springframework.stereotype.Service;
  * Server-side second-pass context trimming with full layered priority.
  *
  * <h3>Trimming priority (high → low):</h3>
+ *
  * <ol>
- *   <li><b>MUST-KEEP (never trim):</b> goal, cursor subtask branch, confirmed decisions,
- *       pinned items, completedToolCallsTail (last K=5)</li>
- *   <li><b>Degradable:</b> recent messages (FIFO drop), refs (keep path+range only, drop content)</li>
- *   <li><b>Collapsible:</b> multiple recent → local digest (non-model mathematical summary)</li>
- *   <li><b>Model compact:</b> if still over budget → set requestCompact=true for model to emit digest</li>
+ *   <li><b>MUST-KEEP (never trim):</b> goal, cursor subtask branch, confirmed decisions, pinned
+ *       items, completedToolCallsTail (last K=5)
+ *   <li><b>Degradable:</b> recent messages (FIFO drop), refs (keep path+range only, drop content)
+ *   <li><b>Collapsible:</b> multiple recent → local digest (non-model mathematical summary)
+ *   <li><b>Model compact:</b> if still over budget → set requestCompact=true for model to emit
+ *       digest
  * </ol>
  *
  * <p>This component runs <em>before</em> the LLM call; it produces a shaped Result that the
- * PromptOrchestrator uses for system/user message assembly.</p>
+ * PromptOrchestrator uses for system/user message assembly.
  */
 @Service
 public class ContextBudgeter {
@@ -40,8 +42,8 @@ public class ContextBudgeter {
   }
 
   /**
-   * Shape the context to fit within the token budget.
-   * Returns a Result with trimmed data and audit information.
+   * Shape the context to fit within the token budget. Returns a Result with trimmed data and audit
+   * information.
    */
   public Result shape(ConversationRunRequest req, String systemText) {
     int budget = extractBudget(req);
@@ -107,11 +109,24 @@ public class ContextBudgeter {
     audit.put("estimatedTotal", total);
     audit.put("droppedRecent", dropped);
 
-    log.debug("ContextBudgeter: budget={}, total={}, dropped={}, refsDowngraded={}, needCompact={}",
-        budget, total, dropped, refsDowngraded, needCompact);
+    log.debug(
+        "ContextBudgeter: budget={}, total={}, dropped={}, refsDowngraded={}, needCompact={}",
+        budget,
+        total,
+        dropped,
+        refsDowngraded,
+        needCompact);
 
-    return new Result(recent, refs, pinned, toolCallsTail, localDigest,
-        dropped, refsDowngraded, needCompact, audit);
+    return new Result(
+        recent,
+        refs,
+        pinned,
+        toolCallsTail,
+        localDigest,
+        dropped,
+        refsDowngraded,
+        needCompact,
+        audit);
   }
 
   // ─── Extract helpers ──────────────────────────────────────────────
@@ -123,14 +138,16 @@ public class ContextBudgeter {
     return DEFAULT_BUDGET;
   }
 
-  private List<ConversationRunRequest.Contexts.RecentMessage> extractRecent(ConversationRunRequest req) {
+  private List<ConversationRunRequest.Contexts.RecentMessage> extractRecent(
+      ConversationRunRequest req) {
     if (req.contexts() != null && req.contexts().recent() != null) {
       return new ArrayList<>(req.contexts().recent());
     }
     return new ArrayList<>();
   }
 
-  private List<ConversationRunRequest.Contexts.PinnedItem> extractPinned(ConversationRunRequest req) {
+  private List<ConversationRunRequest.Contexts.PinnedItem> extractPinned(
+      ConversationRunRequest req) {
     if (req.contexts() != null && req.contexts().pinned() != null) {
       return new ArrayList<>(req.contexts().pinned());
     }
@@ -144,7 +161,8 @@ public class ContextBudgeter {
     return new ArrayList<>();
   }
 
-  private List<ConversationRunRequest.CompletedToolCall> extractToolCallsTail(ConversationRunRequest req) {
+  private List<ConversationRunRequest.CompletedToolCall> extractToolCallsTail(
+      ConversationRunRequest req) {
     if (req.completedToolCallsTail() != null) {
       var all = req.completedToolCallsTail();
       if (all.size() > TOOL_CALLS_TAIL_K) {
@@ -175,9 +193,10 @@ public class ContextBudgeter {
   }
 
   /** Tokens for items we NEVER trim: input, ledger, plan digest, summaries, pinned, tool calls. */
-  private int countMustKeep(ConversationRunRequest req,
-                            List<ConversationRunRequest.Contexts.PinnedItem> pinned,
-                            List<ConversationRunRequest.CompletedToolCall> toolCallsTail) {
+  private int countMustKeep(
+      ConversationRunRequest req,
+      List<ConversationRunRequest.Contexts.PinnedItem> pinned,
+      List<ConversationRunRequest.CompletedToolCall> toolCallsTail) {
     int n = meter.count(req.input());
 
     if (req.lastAssistantTurnSummary() != null) {
@@ -235,14 +254,12 @@ public class ContextBudgeter {
   }
 
   /**
-   * ★ Integration with LlmContextCompressor:
-   * Try LLM-based compression first for higher quality summaries.
-   * Falls back to heuristic collapse if LLM is unavailable or not cost-effective.
+   * ★ Integration with LlmContextCompressor: Try LLM-based compression first for higher quality
+   * summaries. Falls back to heuristic collapse if LLM is unavailable or not cost-effective.
    *
-   * The LLM compression request is delegated to the plugin-side
-   * LlmContextCompressor via the request's compressionHint field.
-   * On the backend, we check if the request indicates LLM compression
-   * is preferred and compute target tokens accordingly.
+   * <p>The LLM compression request is delegated to the plugin-side LlmContextCompressor via the
+   * request's compressionHint field. On the backend, we check if the request indicates LLM
+   * compression is preferred and compute target tokens accordingly.
    */
   private String collapseWithLlmFallback(
       List<ConversationRunRequest.Contexts.RecentMessage> recent, int targetTokens) {

@@ -17,6 +17,10 @@ dependencies {
     api("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml")
     api("com.google.code.gson:gson")
 
+    // GraalVM polyglot + JS (community) for the Dynamic Workflow sandbox
+    implementation("org.graalvm.polyglot:polyglot:24.1.1")
+    implementation("org.graalvm.polyglot:js-community:24.1.1")
+
     implementation("org.springframework.boot:spring-boot-starter-webflux")
     implementation("org.springframework.boot:spring-boot-starter-data-redis-reactive")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")

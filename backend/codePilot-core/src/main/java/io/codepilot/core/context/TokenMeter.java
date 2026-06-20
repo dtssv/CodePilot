@@ -9,8 +9,8 @@ import org.springframework.stereotype.Component;
 /**
  * Unified token counter shared by the budgeter and the compact-trigger logic.
  *
- * <p>Uses jtokkit with the cl100k_base encoding — a safe default for OpenAI-compatible models and
- * a reasonable proxy for others (the value is always a conservative upper bound in practice).
+ * <p>Uses jtokkit with the cl100k_base encoding — a safe default for OpenAI-compatible models and a
+ * reasonable proxy for others (the value is always a conservative upper bound in practice).
  */
 @Component
 public class TokenMeter {

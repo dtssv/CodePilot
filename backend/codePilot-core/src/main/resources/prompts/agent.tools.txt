@@ -1,5 +1,0 @@
-[AVAILABLE TOOLS — JSON Schema]
-{{toolsJsonSchema}}
-- Choose at most ONE tool per reply.
-- Tools with `executor=client` run inside the IDE plugin; `executor=mcp` go through the backend MCP Hub.
-- Never call a tool not present in this list, and never modify the schema field names.

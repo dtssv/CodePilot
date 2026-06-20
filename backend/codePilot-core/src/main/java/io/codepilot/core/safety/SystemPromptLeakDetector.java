@@ -8,8 +8,8 @@ import org.springframework.stereotype.Service;
 
 /**
  * Detects "leak my system prompt" intents in user input. The detector decodes a few common
- * obfuscation layers (base64, hex, ROT13, zero-width characters) before applying its regex set,
- * so naive evasions are caught.
+ * obfuscation layers (base64, hex, ROT13, zero-width characters) before applying its regex set, so
+ * naive evasions are caught.
  *
  * <p>This service is intentionally small and side-effect free — wire it into web filters or
  * controllers as appropriate.
@@ -29,8 +29,10 @@ public class SystemPromptLeakDetector {
           // English
           Pattern.compile("(?i)\\b(system|developer|hidden|internal)\\s+(prompt|instructions?)"),
           Pattern.compile("(?i)\\bignore\\s+(all\\s+)?previous\\s+instructions?\\b"),
-          Pattern.compile("(?i)\\b(reveal|dump|print|repeat|paraphrase|leak)\\s+(the\\s+)?(system|prompt|rules|skills?)"),
-          Pattern.compile("(?i)\\bjailbreak|developer mode|act as if|disregard.*(rules|guidelines)"),
+          Pattern.compile(
+              "(?i)\\b(reveal|dump|print|repeat|paraphrase|leak)\\s+(the\\s+)?(system|prompt|rules|skills?)"),
+          Pattern.compile(
+              "(?i)\\bjailbreak|developer mode|act as if|disregard.*(rules|guidelines)"),
           Pattern.compile("(?i)\\blist\\s+(active|loaded|enabled)\\s+skills?\\b"),
           // 中文
           Pattern.compile("系统提示词|系统提示语|系统提示|内部指令|内部规则|隐藏指令|展示你的(系统)?提示"),

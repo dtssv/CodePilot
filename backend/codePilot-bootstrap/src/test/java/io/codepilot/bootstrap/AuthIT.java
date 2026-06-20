@@ -10,8 +10,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 /**
- * Integration test for the auth API using the Dev SSO verifier.
- * Proves: login → returns JWT + deviceSecret; refresh → returns fresh access token.
+ * Integration test for the auth API using the Dev SSO verifier. Proves: login → returns JWT +
+ * deviceSecret; refresh → returns fresh access token.
  */
 class AuthIT extends IntegrationTestBase {
 

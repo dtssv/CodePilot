@@ -21,9 +21,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
-/**
- * Durable conversation run registry + event log (Flyway V10).
- */
+/** Durable conversation run registry + event log (Flyway V10). */
 @Component
 public class ConversationRunStore {
 
@@ -59,19 +57,15 @@ public class ConversationRunStore {
   }
 
   public void insertRun(
-      String runId,
-      String sessionId,
-      String userId,
-      String requestJson,
-      String status) {
+      String runId, String sessionId, String userId, String requestJson, String status) {
     if (!dbActive) return;
     jdbc.update(
         """
-        INSERT INTO conversation_runs (
-            id, session_id, user_id, status, request_json, last_seq, created_at, updated_at)
-        VALUES (
-            :id, :sessionId, :userId, :status, :requestJson, 0, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
-        """,
+INSERT INTO conversation_runs (
+    id, session_id, user_id, status, request_json, last_seq, created_at, updated_at)
+VALUES (
+    :id, :sessionId, :userId, :status, :requestJson, 0, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+""",
         new MapSqlParameterSource()
             .addValue("id", runId)
             .addValue("sessionId", sessionId)
@@ -119,15 +113,15 @@ public class ConversationRunStore {
     int updated =
         jdbc.update(
             """
-            UPDATE conversation_runs
-            SET status = 'running', worker_id = :workerId, lease_until = :leaseUntil,
-                updated_at = CURRENT_TIMESTAMP(3)
-            WHERE id = :id
-              AND (
-                status IN ('queued', 'interrupted')
-                OR (status = 'running' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP(3)))
-              )
-            """,
+UPDATE conversation_runs
+SET status = 'running', worker_id = :workerId, lease_until = :leaseUntil,
+    updated_at = CURRENT_TIMESTAMP(3)
+WHERE id = :id
+  AND (
+    status IN ('queued', 'interrupted')
+    OR (status = 'running' AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP(3)))
+  )
+""",
             new MapSqlParameterSource()
                 .addValue("id", runId)
                 .addValue("workerId", workerId)
@@ -159,9 +153,7 @@ public class ConversationRunStore {
             updated_at = CURRENT_TIMESTAMP(3)
         WHERE id = :id AND status IN ('running', 'queued', 'awaiting_input')
         """,
-        new MapSqlParameterSource()
-            .addValue("id", runId)
-            .addValue("token", continuationToken));
+        new MapSqlParameterSource().addValue("id", runId).addValue("token", continuationToken));
   }
 
   public void markInterruptedByWorker(String workerId) {
@@ -238,7 +230,8 @@ public class ConversationRunStore {
             .addValue("eventName", eventName)
             .addValue("payload", payload));
     jdbc.update(
-        "UPDATE conversation_runs SET last_seq = :seq, updated_at = CURRENT_TIMESTAMP(3) WHERE id = :id",
+        "UPDATE conversation_runs SET last_seq = :seq, updated_at = CURRENT_TIMESTAMP(3) WHERE id ="
+            + " :id",
         Map.of("id", runId, "seq", seq));
     return seq;
   }
@@ -254,9 +247,7 @@ public class ConversationRunStore {
         Map.of("runId", runId, "afterSeq", afterSeq),
         (rs, rowNum) ->
             new RunEvent(
-                rs.getInt("seq"),
-                rs.getString("event_name"),
-                rs.getString("payload_json")));
+                rs.getInt("seq"), rs.getString("event_name"), rs.getString("payload_json")));
   }
 
   public List<ServerSentEvent<String>> loadEventsSince(String runId, int afterSeq) {
@@ -280,7 +271,7 @@ public class ConversationRunStore {
             SELECT COUNT(*) FROM conversation_runs
             WHERE status = 'awaiting_input'
                OR (status = 'running'
-                   AND (lease_until IS NULL OR lease_until >= CURRENT_TIMESTAMP(3)))
+                   AND lease_until IS NOT NULL AND lease_until >= CURRENT_TIMESTAMP(3))
             """,
             Map.of(),
             Long.class);
@@ -293,7 +284,7 @@ public class ConversationRunStore {
                      CASE
                        WHEN status = 'awaiting_input' THEN 1
                        WHEN status = 'running'
-                            AND (lease_until IS NULL OR lease_until >= CURRENT_TIMESTAMP(3))
+                            AND lease_until IS NOT NULL AND lease_until >= CURRENT_TIMESTAMP(3)
                        THEN 1
                        ELSE 0
                      END
@@ -305,9 +296,7 @@ public class ConversationRunStore {
             Map.of(),
             (rs, rowNum) ->
                 new UserAdmissionCounts(
-                    rs.getString("user_id"),
-                    rs.getLong("queued"),
-                    rs.getLong("running")));
+                    rs.getString("user_id"), rs.getLong("queued"), rs.getLong("running")));
     return new AdmissionDbSnapshot(globalQueued, globalRunning, perUser);
   }
 
@@ -322,10 +311,10 @@ public class ConversationRunStore {
                 updated_at = CURRENT_TIMESTAMP(3)
             WHERE status = 'running' AND (lease_until IS NULL OR lease_until < :cutoff)
             """,
-            new MapSqlParameterSource()
-                .addValue("cutoff", Timestamp.from(leaseCutoff)));
+            new MapSqlParameterSource().addValue("cutoff", Timestamp.from(leaseCutoff)));
     if (n > 0) {
-      log.info("Marked {} stale-lease running runs as interrupted (leaseCutoff={})", n, leaseCutoff);
+      log.info(
+          "Marked {} stale-lease running runs as interrupted (leaseCutoff={})", n, leaseCutoff);
     }
     return n;
   }
@@ -398,7 +387,8 @@ public class ConversationRunStore {
     }
   }
 
-  public record AdmissionDbSnapshot(long globalQueued, long globalRunning, List<UserAdmissionCounts> perUser) {}
+  public record AdmissionDbSnapshot(
+      long globalQueued, long globalRunning, List<UserAdmissionCounts> perUser) {}
 
   public record UserAdmissionCounts(String userId, long queued, long running) {}
 

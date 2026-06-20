@@ -2,6 +2,7 @@ package io.codepilot.gateway.filter;
 
 import io.codepilot.common.api.ErrorCodes;
 import io.codepilot.common.config.SecurityProperties;
+import io.codepilot.gateway.security.DeviceHmacSecretStore;
 import io.codepilot.gateway.security.HmacSigner;
 import io.codepilot.gateway.util.CachedBodyServerHttpRequestDecorator;
 import io.codepilot.gateway.web.WebErrors;
@@ -25,6 +26,8 @@ import reactor.core.publisher.Mono;
  * <ol>
  *   <li>Checks clock skew via {@code X-CodePilot-Ts};
  *   <li>Rejects replays using a Redis-backed nonce blacklist;
+ *   <li>Resolves the per-device HMAC secret via {@link DeviceHmacSecretStore}, falling back to the
+ *       global {@code codepilot.security.hmac-secret};
  *   <li>Recomputes the HMAC signature over {@code body + '\n' + ts + '\n' + nonce}.
  * </ol>
  *
@@ -54,17 +57,23 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
 
   private final SecurityProperties props;
   private final ReactiveStringRedisTemplate redis;
-  private final HmacSigner signer;
+  private final DeviceHmacSecretStore deviceHmacSecretStore;
   private final Clock clock = Clock.systemUTC();
 
-  /** Dev token for bypassing HMAC+JWT in development builds. Set via codepilot.security.dev-token. */
+  /**
+   * Dev token for bypassing HMAC+JWT in development builds. Set via codepilot.security.dev-token.
+   */
   private final String devToken;
 
-  public HmacSignatureWebFilter(SecurityProperties props, ReactiveStringRedisTemplate redis,
-      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}") String devToken) {
+  public HmacSignatureWebFilter(
+      SecurityProperties props,
+      ReactiveStringRedisTemplate redis,
+      DeviceHmacSecretStore deviceHmacSecretStore,
+      @org.springframework.beans.factory.annotation.Value("${codepilot.security.dev-token:}")
+          String devToken) {
     this.props = props;
     this.redis = redis;
-    this.signer = new HmacSigner(props.hmacSecret());
+    this.deviceHmacSecretStore = deviceHmacSecretStore;
     this.devToken = devToken.isBlank() ? null : devToken;
   }
 
@@ -96,8 +105,7 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
     String sig = headers.getFirst("X-CodePilot-Signature");
 
     if (StringUtils.isAnyBlank(deviceId, ts, nonce, sig)) {
-      return WebErrors.write(
-          exchange, ErrorCodes.UNAUTHORIZED, "Missing signature headers", 401);
+      return WebErrors.write(exchange, ErrorCodes.UNAUTHORIZED, "Missing signature headers", 401);
     }
 
     long tsMillis;
@@ -128,14 +136,46 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
                             return WebErrors.write(
                                 exchange, ErrorCodes.UNAUTHORIZED, "Replay detected", 401);
                           }
-                          if (!signer.verify(wrapped.bodyAsString(), ts, nonce, sig)) {
-                            return WebErrors.write(
-                                exchange, ErrorCodes.UNAUTHORIZED, "Invalid signature", 401);
-                          }
-                          ServerWebExchange mutated =
-                              exchange.mutate().request(wrapped.request()).build();
-                          return chain.filter(mutated);
+                          return verifySignature(wrapped.bodyAsString(), ts, nonce, sig, deviceId)
+                              .flatMap(
+                                  valid -> {
+                                    if (!valid) {
+                                      return WebErrors.write(
+                                          exchange,
+                                          ErrorCodes.UNAUTHORIZED,
+                                          "Invalid signature",
+                                          401);
+                                    }
+                                    ServerWebExchange mutated =
+                                        exchange.mutate().request(wrapped.request()).build();
+                                    return chain.filter(mutated);
+                                  });
                         }));
+  }
+
+  /**
+   * Verifies the HMAC signature, trying the per-device secret first, falling back to the global
+   * {@code codepilot.security.hmac-secret}.
+   */
+  private Mono<Boolean> verifySignature(
+      String body, String ts, String nonce, String sig, String deviceId) {
+    return deviceHmacSecretStore
+        .resolve(deviceId)
+        .flatMap(
+            deviceSecret -> {
+              var deviceSigner = new HmacSigner(deviceSecret);
+              if (deviceSigner.verify(body, ts, nonce, sig)) {
+                return Mono.just(true);
+              }
+              // Device secret didn't match; fall through to global secret
+              return Mono.empty();
+            })
+        .switchIfEmpty(
+            Mono.fromCallable(
+                () -> {
+                  var globalSigner = new HmacSigner(props.hmacSecret());
+                  return globalSigner.verify(body, ts, nonce, sig);
+                }));
   }
 
   private boolean isPublic(String path) {
@@ -148,8 +188,8 @@ public class HmacSignatureWebFilter implements WebFilter, Ordered {
   }
 
   /**
-   * Checks if the provided dev token matches the configured dev token.
-   * Uses constant-time comparison to prevent timing attacks.
+   * Checks if the provided dev token matches the configured dev token. Uses constant-time
+   * comparison to prevent timing attacks.
    */
   private boolean isValidDevToken(String token) {
     if (devToken == null || devToken.isEmpty()) return false;

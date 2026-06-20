@@ -14,12 +14,16 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Wraps the SSE conversation API. The caller provides a [Listener] and receives:
- *   - a delta callback for chat-mode tokens / final.answer text
- *   - one-shot callbacks for plan / plan_delta / task_ledger / tool_call / risk_notice / needs_input / self_check
- *   - lifecycle callbacks for done / error / closed
+ *   - onDelta for streaming text
+ *   - onToolCall / onToolResultAck for tool execution lifecycle
+ *   - onNeedsInput / onPermissionResult for permission handling
+ *   - onSelfCheck for goal evaluation
+ *   - onDone / onError / onClosed for lifecycle
  *
- * The implementation is intentionally thin — it parses the JSON `data` payload and forwards the
- * raw [JsonNode] to the listener, so UI code can decide which fields to render.
+ * The implementation is intentionally thin — it parses the JSON `data` payload and
+ * forwards the raw [JsonNode] to the listener, so UI code can decide which fields to render.
+ *
+ * <p>All events correspond to the new [StreamEvent.Type] emitted by [AgentLoop].
  */
 class ConversationClient(
     private val http: HttpClientService = HttpClientService.getInstance(),
@@ -42,9 +46,6 @@ class ConversationClient(
         return open(request, listener)
     }
 
-    /**
-     * Attach to a durable run (P2b): replay persisted events then live Redis fan-out.
-     */
     fun attachRunStream(
         runId: String,
         afterSeq: Int,
@@ -75,7 +76,6 @@ class ConversationClient(
         }
     }
 
-    /** Cancel the in-flight SSE without notifying the backend (e.g. new chat while disconnected). */
     fun cancelActiveStream() {
         source.getAndSet(null)?.cancel()
     }
@@ -85,7 +85,6 @@ class ConversationClient(
         http.client().newCall(req).enqueue(noOpCallback)
     }
 
-    /** Synchronous tool result submission with error propagation. Returns response body. */
     fun submitToolResultSync(sessionId: String, toolCallId: String, result: Any?, ok: Boolean): String {
         val payload = mapOf(
             "sessionId" to sessionId,
@@ -103,7 +102,6 @@ class ConversationClient(
         return body
     }
 
-    /** Convenience overload for submitting a tool result by individual fields. */
     fun submitToolResult(
         sessionId: String,
         toolCallId: String,
@@ -120,7 +118,6 @@ class ConversationClient(
         )
     }
 
-    /** Submit plan data for display. */
     fun submitPlanData(
         sessionId: String,
         planJson: String,
@@ -138,10 +135,6 @@ class ConversationClient(
         http.client().newCall(req).enqueue(noOpCallback)
     }
 
-    /**
-     * Convenience: run a conversation with a simple callback for each SSE event.
-     * Supports automatic SSE reconnection with intent=continue on disconnect.
-     */
     fun run(
         sessionId: String,
         text: String,
@@ -164,58 +157,29 @@ class ConversationClient(
         retriesLeft: Int,
         onEvent: (eventType: String, data: Any?) -> Unit,
     ) {
-        // Track whether a clean done event was received before onClosed fires.
-        // Without this, the stream closing after a normal done(failed) would
-        // trigger an unnecessary reconnect with intent=continue, causing the
-        // backend to re-execute the graph from scratch.
         var cleanDoneReceived = false
 
         run(
             payload.toMap(),
             object : Listener {
                 override fun onDelta(text: String) = onEvent("delta", mapOf("text" to text))
-
                 override fun onToolCall(payload: JsonNode) = onEvent("tool_call", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onToolResultAck(payload: JsonNode) =
-                    onEvent("tool_result_ack", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onPlan(payload: JsonNode) = onEvent("plan", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onPlanDelta(payload: JsonNode) = onEvent("plan_delta", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onTaskLedger(payload: JsonNode) = onEvent("task_ledger", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onRiskNotice(payload: JsonNode) = onEvent("risk_notice", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onNeedsInput(payload: JsonNode) = onEvent("needs_input", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onDigest(payload: JsonNode) = onEvent("digest", http.mapper.treeToValue(payload, Map::class.java))
-
+                override fun onToolResultAck(payload: JsonNode) = onEvent("tool_result_ack", http.mapper.treeToValue(payload, Map::class.java))
                 override fun onSelfCheck(payload: JsonNode) = onEvent("self_check", http.mapper.treeToValue(payload, Map::class.java))
-
-                override fun onError(
-                    code: Int,
-                    message: String,
-                ) = onEvent("error", mapOf("code" to code, "message" to message))
-
-                override fun onDone(
-                    reason: String,
-                    payload: JsonNode,
-                ) {
+                override fun onNeedsInput(payload: JsonNode) = onEvent("needs_input", http.mapper.treeToValue(payload, Map::class.java))
+                override fun onTaskUpdate(payload: JsonNode) = onEvent("user_plan_progress", http.mapper.treeToValue(payload, Map::class.java))
+                override fun onMemoryUpdate(payload: JsonNode) = onEvent("memory_update", http.mapper.treeToValue(payload, Map::class.java))
+                override fun onSkillInvoked(payload: JsonNode) = onEvent("skill_invoked", http.mapper.treeToValue(payload, Map::class.java))
+                override fun onError(code: Int, message: String) = onEvent("error", mapOf("code" to code, "message" to message))
+                override fun onDone(reason: String, payload: JsonNode) {
                     cleanDoneReceived = true
                     onEvent("done", mapOf("reason" to reason))
                 }
-
                 override fun onClosed() {
-                    // Auto-reconnect: only if the stream was dropped unexpectedly
-                    // (i.e. no clean done event was received). If the server sent
-                    // a proper done(failed/stopped/final), reconnecting would
-                    // cause a full re-execution from scratch.
                     if (cleanDoneReceived) return
                     if (retriesLeft > 0) {
                         val retryPayload = payload.toMutableMap().apply { put("intent", "continue") }
-                        Thread.sleep(1000L * (4 - retriesLeft)) // exponential-ish backoff
+                        Thread.sleep(1000L * (4 - retriesLeft))
                         runWithReconnect(retryPayload, retriesLeft - 1, onEvent)
                     }
                 }
@@ -246,11 +210,9 @@ class ConversationClient(
         if (!sessionId.isNullOrBlank()) {
             builder.header("X-Session-Id", sessionId)
         }
-        // ★ Privacy Mode header: inform backend to skip telemetry/logging
         if (settings.state.privacyMode) {
             builder.header("X-Privacy-Mode", "true")
         }
-        // ★ Anonymous mode header
         if (settings.state.anonymousMode) {
             builder.header("X-Anonymous-Mode", "true")
         }
@@ -268,117 +230,80 @@ class ConversationClient(
 
     private val noOpCallback =
         object : okhttp3.Callback {
-            override fun onFailure(
-                call: okhttp3.Call,
-                e: java.io.IOException,
-            ) {}
-
-            override fun onResponse(
-                call: okhttp3.Call,
-                response: okhttp3.Response,
-            ) = response.close()
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) = response.close()
         }
 
-    /** Listener interface returned to UI. */
     interface Listener {
-        fun onSkillsActivated(payload: JsonNode) {}
-
-        fun onTaskLedger(payload: JsonNode) {}
-
-        fun onPlan(payload: JsonNode) {}
-
-        fun onPlanDelta(payload: JsonNode) {}
-
-        fun onSelfCheck(payload: JsonNode) {}
-
-        fun onRiskNotice(payload: JsonNode) {}
-
-        fun onNeedsInput(payload: JsonNode) {}
-
-        fun onToolCall(payload: JsonNode) {}
-
-        fun onToolResultAck(payload: JsonNode) {}
-
+        /** Streaming text delta from LLM output */
         fun onDelta(text: String) {}
-
-        fun onDigest(payload: JsonNode) {}
-
-        fun onPatch(payload: JsonNode) {}
-
-        fun onUsage(payload: JsonNode) {}
-
-        fun onError(
-            code: Int,
-            message: String,
-        ) {}
-
-        /** HTTP 429 / API 42901 — stream never started; {@link #onClosed()} is not called afterward. */
-        fun onRateLimited(
-            code: Int,
-            message: String,
-            retryAfterSec: Int,
-            opType: String?,
-        ) {
+        /** Tool call was emitted by the agent */
+        fun onToolCall(payload: JsonNode) {}
+        /** Tool result acknowledgment (success/failure) */
+        fun onToolResultAck(payload: JsonNode) {}
+        /** Goal evaluation result */
+        fun onSelfCheck(payload: JsonNode) {}
+        /** Agent needs user input (ask_user tool) */
+        fun onNeedsInput(payload: JsonNode) {}
+        /** Task progress update */
+        fun onTaskUpdate(payload: JsonNode) {}
+        /** Memory update notification */
+        fun onMemoryUpdate(payload: JsonNode) {}
+        /** Skill was invoked by the agent */
+        fun onSkillInvoked(payload: JsonNode) {}
+        /** A subagent was spawned */
+        fun onSubagentSpawn(payload: JsonNode) {}
+        /** A subagent reported progress */
+        fun onSubagentProgress(payload: JsonNode) {}
+        /** A subagent completed successfully */
+        fun onSubagentComplete(payload: JsonNode) {}
+        /** A subagent failed */
+        fun onSubagentFailed(payload: JsonNode) {}
+        /** A fork session was created */
+        fun onForkCreated(payload: JsonNode) {}
+        /** Error from the backend */
+        fun onError(code: Int, message: String) {}
+        /** Terminal event with reason */
+        fun onDone(reason: String, payload: JsonNode) {}
+        /** Stream was abruptly closed */
+        fun onClosed() {}
+        /** HTTP 429 — rate limited */
+        fun onRateLimited(code: Int, message: String, retryAfterSec: Int, opType: String?) {
             onError(code, message)
         }
 
-        fun onDone(
-            reason: String,
-            payload: JsonNode,
-        ) {}
-
-        fun onClosed() {}
-
-        // ── Graph engine events ──
+        // ── Deprecated graph-engine callbacks (no longer emitted by backend,
+        // kept for compile compatibility with CefChatPanel/CodePilotChatPanel) ──
+        fun onPlan(payload: JsonNode) {}
+        fun onPlanDelta(payload: JsonNode) {}
+        fun onTaskLedger(payload: JsonNode) {}
+        fun onRiskNotice(payload: JsonNode) {}
         fun onGraphPlan(payload: JsonNode) {}
-
         fun onGraphTransition(payload: JsonNode) {}
-
         fun onGraphInfoRequest(payload: JsonNode) {}
-
         fun onGraphInfoResult(payload: JsonNode) {}
-
         fun onGraphVerify(payload: JsonNode) {}
-
         fun onGraphRepairPlan(payload: JsonNode) {}
-
         fun onGraphPhaseDone(payload: JsonNode) {}
-
         fun onGraphCheckpoint(payload: JsonNode) {}
-
         fun onGraphBudgetAlert(payload: JsonNode) {}
-
-        // ── Dual-layer plan events ──
+        fun onSkillsActivated(payload: JsonNode) {}
         fun onUserPlan(payload: JsonNode) {}
-
         fun onUserPlanProgress(payload: JsonNode) {}
-
-        // ── Interactive Agent events (semantic layer) ──
         fun onAgentThinking(payload: JsonNode) {}
-
         fun onAgentReading(payload: JsonNode) {}
-
         fun onAgentWriting(payload: JsonNode) {}
-
         fun onAgentRunning(payload: JsonNode) {}
-
         fun onRunStarted(payload: JsonNode) {}
-
         fun onRunReclaimed(payload: JsonNode) {}
+        // ── End deprecated ──
     }
 
     private class EventSourceAdapter(
         private val listener: Listener,
         private val http: HttpClientService,
     ) : EventSourceListener() {
-        override fun onOpen(
-            eventSource: EventSource,
-            response: Response,
-        ) {
-            // Do NOT close the response here — the SSE stream needs to remain open
-            // for OkHttp's EventSource to read events. The response body is consumed
-            // internally by EventSource and closed automatically when the stream ends.
-        }
+        override fun onOpen(eventSource: EventSource, response: Response) {}
 
         override fun onEvent(
             eventSource: EventSource,
@@ -388,42 +313,77 @@ class ConversationClient(
         ) {
             val node: JsonNode = http.mapper.readTree(data.ifEmpty { "{}" })
             when (type) {
-                "skills_activated" -> listener.onSkillsActivated(node)
-                "task_ledger" -> listener.onTaskLedger(node)
-                "plan" -> listener.onPlan(node)
-                "plan_delta" -> listener.onPlanDelta(node)
-                "self_check" -> listener.onSelfCheck(node)
-                "risk_notice" -> listener.onRiskNotice(node)
-                "needs_input" -> listener.onNeedsInput(node)
-                "tool_call" -> listener.onToolCall(node)
-                "tool_result_ack" -> listener.onToolResultAck(node)
-                "digest" -> listener.onDigest(node)
-                "delta" -> listener.onDelta(node.path("text").asText(""))
-                "patch" -> listener.onPatch(node)
-                "usage" -> listener.onUsage(node)
+                // ── Client-facing event names (renamed by ConversationController.mapSseEventName) ──
+                "delta" -> {
+                    // text -> delta: streaming LLM text output
+                    val text = node.path("content").asText("")
+                    if (text.isNotEmpty()) listener.onDelta(text)
+                }
+                "agent_thinking" -> {
+                    // thinking -> agent_thinking: agent reasoning step
+                    val text = node.path("content").asText("")
+                    if (text.isNotEmpty()) listener.onDelta(text)
+                }
+                "tool_call" -> {
+                    // tool_call_start -> tool_call: agent wants to execute a tool
+                    // Normalize field names: backend uses callId/toolName, plugin expects id/name
+                    listener.onToolCall(normalizeToolCallFields(node))
+                }
+                "tool_result_ack" -> {
+                    // tool_call_end / permission_result -> tool_result_ack
+                    listener.onToolResultAck(normalizeToolResultFields(node))
+                }
+                "needs_input" -> {
+                    // ask_permission -> needs_input: agent needs user approval
+                    listener.onNeedsInput(normalizeToolCallFields(node))
+                }
+                "graph_checkpoint" -> {
+                    // checkpoint / checkpoint_writer -> graph_checkpoint
+                }
+                "graph_budget_alert" -> {
+                    // compacted -> graph_budget_alert
+                }
+                "self_check" -> {
+                    // goal_evaluation -> self_check
+                    listener.onSelfCheck(node)
+                }
+                "task_update" -> {
+                    listener.onTaskUpdate(node)
+                }
+                "memory_update" -> {
+                    listener.onMemoryUpdate(node)
+                }
+                "skill_invoked" -> {
+                    listener.onSkillInvoked(node)
+                }
+                "subagent_spawn" -> listener.onSubagentSpawn(node)
+                "subagent_progress" -> listener.onSubagentProgress(node)
+                "subagent_complete" -> listener.onSubagentComplete(node)
+                "subagent_failed" -> listener.onSubagentFailed(node)
+                "fork_created" -> listener.onForkCreated(node)
+                "agent_switch" -> {} // agent mode switch
                 "error" ->
                     listener.onError(node.path("code").asInt(50001), node.path("message").asText(""))
                 "done" -> listener.onDone(node.path("reason").asText("final"), node)
-                // ── Graph engine events ──
-                "graph_plan" -> listener.onGraphPlan(node)
-                "graph_transition" -> listener.onGraphTransition(node)
-                "graph_info_request" -> listener.onGraphInfoRequest(node)
-                "graph_info_result" -> listener.onGraphInfoResult(node)
-                "graph_verify" -> listener.onGraphVerify(node)
-                "graph_repair_plan" -> listener.onGraphRepairPlan(node)
-                "graph_phase_done" -> listener.onGraphPhaseDone(node)
-                "graph_checkpoint" -> listener.onGraphCheckpoint(node)
-                "graph_budget_alert" -> listener.onGraphBudgetAlert(node)
-                "user_plan" -> listener.onUserPlan(node)
-                "user_plan_progress" -> listener.onUserPlanProgress(node)
-                // ── Interactive Agent events ──
-                "agent_thinking" -> listener.onAgentThinking(node)
-                "agent_reading" -> listener.onAgentReading(node)
-                "agent_writing" -> listener.onAgentWriting(node)
-                "agent_running" -> listener.onAgentRunning(node)
-                "run_started" -> listener.onRunStarted(node)
-                "run_reclaimed" -> listener.onRunReclaimed(node)
-                else -> {} // ignore comments / unknown events
+                // ── Also accept internal names for durability (replay from EnvelopeStore
+                //    stores the internal type before rename) ──
+                "text" -> {
+                    val text = node.path("content").asText("")
+                    if (text.isNotEmpty()) listener.onDelta(text)
+                }
+                "thinking" -> {
+                    val text = node.path("content").asText("")
+                    if (text.isNotEmpty()) listener.onDelta(text)
+                }
+                "tool_call_start" -> listener.onToolCall(normalizeToolCallFields(node))
+                "tool_call_end" -> listener.onToolResultAck(normalizeToolResultFields(node))
+                "ask_permission" -> listener.onNeedsInput(normalizeToolCallFields(node))
+                "permission_result" -> listener.onToolResultAck(normalizeToolResultFields(node))
+                "checkpoint" -> {}
+                "checkpoint_writer" -> {}
+                "compacted" -> {}
+                "goal_evaluation" -> listener.onSelfCheck(node)
+                else -> {} // ignore unknown events
             }
         }
 
@@ -453,6 +413,50 @@ class ConversationClient(
                 listener.onError(50002, t?.message ?: "stream failed")
             }
             listener.onClosed()
+        }
+
+        /**
+         * Normalize tool call / permission fields from backend naming to plugin naming.
+         * Backend sends: callId, toolName → Plugin expects: id, name
+         */
+        private fun normalizeToolCallFields(node: JsonNode): JsonNode {
+            val obj = http.mapper.createObjectNode()
+            // Copy all existing fields
+            node.fields().forEach { (key, value) -> obj.set<JsonNode>(key, value) }
+            // Add id/name aliases from callId/toolName if not already present
+            if (!obj.has("id") && obj.has("callId")) {
+                obj.put("id", obj.path("callId").asText())
+            }
+            if (!obj.has("name") && obj.has("toolName")) {
+                obj.put("name", obj.path("toolName").asText())
+            }
+            // Backend may send args as a JSON string; coerce to object for UI / adapter.
+            if (obj.has("args")) {
+                val argsNode = obj.path("args")
+                if (argsNode.isTextual) {
+                    val text = argsNode.asText().trim()
+                    if (text.startsWith("{") || text.startsWith("[")) {
+                        runCatching { obj.set<JsonNode>("args", http.mapper.readTree(text)) }
+                    }
+                }
+            }
+            return obj
+        }
+
+        /**
+         * Normalize tool result fields from backend naming to plugin naming.
+         * Backend sends: callId → Plugin expects: toolCallId or id
+         */
+        private fun normalizeToolResultFields(node: JsonNode): JsonNode {
+            val obj = http.mapper.createObjectNode()
+            node.fields().forEach { (key, value) -> obj.set<JsonNode>(key, value) }
+            if (!obj.has("toolCallId") && obj.has("callId")) {
+                obj.put("toolCallId", obj.path("callId").asText())
+            }
+            if (!obj.has("id") && obj.has("callId")) {
+                obj.put("id", obj.path("callId").asText())
+            }
+            return obj
         }
     }
 }

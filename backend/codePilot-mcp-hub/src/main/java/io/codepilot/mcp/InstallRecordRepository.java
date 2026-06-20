@@ -22,12 +22,14 @@ public class InstallRecordRepository {
         VALUES (:user_id, :slug, :version, :scope, :source)
         ON DUPLICATE KEY UPDATE uninstalled_at = NULL
         """;
-    return jdbc.update(sql, new MapSqlParameterSource()
-        .addValue("user_id", userId)
-        .addValue("slug", packageSlug)
-        .addValue("version", version)
-        .addValue("scope", scope)
-        .addValue("source", source));
+    return jdbc.update(
+        sql,
+        new MapSqlParameterSource()
+            .addValue("user_id", userId)
+            .addValue("slug", packageSlug)
+            .addValue("version", version)
+            .addValue("scope", scope)
+            .addValue("source", source));
   }
 
   public int recordUninstall(
@@ -42,11 +44,13 @@ public class InstallRecordRepository {
            AND scope = :scope
            AND source = :source
         """;
-    return jdbc.update(sql, new MapSqlParameterSource()
-        .addValue("user_id", userId)
-        .addValue("slug", packageSlug)
-        .addValue("version", version)
-        .addValue("scope", scope)
-        .addValue("source", source));
+    return jdbc.update(
+        sql,
+        new MapSqlParameterSource()
+            .addValue("user_id", userId)
+            .addValue("slug", packageSlug)
+            .addValue("version", version)
+            .addValue("scope", scope)
+            .addValue("source", source));
   }
 }

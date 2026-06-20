@@ -84,19 +84,12 @@ public class ConversationRunAdmissionService {
             getCounter(KEY_GLOBAL_RUNNING),
             getCounter(keyUserQueued(uid)),
             getCounter(keyUserRunning(uid)))
-        .map(
-            t ->
-                AdmissionStatus.of(
-                    t.getT1(),
-                    t.getT2(),
-                    t.getT3(),
-                    t.getT4(),
-                    props));
+        .map(t -> AdmissionStatus.of(t.getT1(), t.getT2(), t.getT3(), t.getT4(), props));
   }
 
   /**
-   * Try to reserve a queued slot before {@code conversation_runs} insert. Caller must invoke
-   * {@link #releaseQueued} if insert fails after a successful admit.
+   * Try to reserve a queued slot before {@code conversation_runs} insert. Caller must invoke {@link
+   * #releaseQueued} if insert fails after a successful admit.
    */
   public Mono<AdmissionDecision> tryAdmitEnqueue(String userId) {
     if (!props.isEnabled()) {
@@ -104,11 +97,7 @@ public class ConversationRunAdmissionService {
     }
     String uid = userId != null && !userId.isBlank() ? userId : "anonymous";
     List<String> keys =
-        List.of(
-            KEY_GLOBAL_QUEUED,
-            KEY_GLOBAL_RUNNING,
-            keyUserQueued(uid),
-            keyUserRunning(uid));
+        List.of(KEY_GLOBAL_QUEUED, KEY_GLOBAL_RUNNING, keyUserQueued(uid), keyUserRunning(uid));
     List<String> args =
         List.of(
             String.valueOf(props.getMaxGlobalQueued()),
@@ -167,7 +156,8 @@ public class ConversationRunAdmissionService {
   }
 
   /** Overwrite Redis admission counters from durable DB truth (dev recovery / drift repair). */
-  public Mono<Void> syncCounters(long globalQueued, long globalRunning, Map<String, long[]> perUser) {
+  public Mono<Void> syncCounters(
+      long globalQueued, long globalRunning, Map<String, long[]> perUser) {
     if (!props.isEnabled()) {
       return Mono.empty();
     }
@@ -187,34 +177,40 @@ public class ConversationRunAdmissionService {
   }
 
   /**
-   * Scans Redis for per-user admission counter keys that are NOT in the provided {@code
-   * knownUsers} set, and resets them to zero. This handles stale counters left behind when the
-   * server crashes — the DB may show zero queued/running runs for a user, but Redis still holds
-   * the old counter value.
+   * Scans Redis for per-user admission counter keys that are NOT in the provided {@code knownUsers}
+   * set, and resets them to zero. This handles stale counters left behind when the server crashes —
+   * the DB may show zero queued/running runs for a user, but Redis still holds the old counter
+   * value.
    */
   public Mono<Void> clearStaleUserCounters(java.util.Set<String> knownUsers) {
     if (!props.isEnabled()) {
       return Mono.empty();
     }
     return Mono.when(
-            redis.keys("codepilot:admission:queued:user:*")
+            redis
+                .keys("codepilot:admission:queued:user:*")
                 .flatMap(
                     key -> {
                       String uid = extractUserIdFromKey(key, "codepilot:admission:queued:user:");
                       if (uid != null && !knownUsers.contains(uid)) {
-                        log.info("Clearing stale Redis userQueued counter: key={} (user not in DB)", key);
+                        log.info(
+                            "Clearing stale Redis userQueued counter: key={} (user not in DB)",
+                            key);
                         return setCounter(key, 0);
                       }
                       return Mono.empty();
                     })
                 .collectList()
                 .then(),
-            redis.keys("codepilot:admission:running:user:*")
+            redis
+                .keys("codepilot:admission:running:user:*")
                 .flatMap(
                     key -> {
                       String uid = extractUserIdFromKey(key, "codepilot:admission:running:user:");
                       if (uid != null && !knownUsers.contains(uid)) {
-                        log.info("Clearing stale Redis userRunning counter: key={} (user not in DB)", key);
+                        log.info(
+                            "Clearing stale Redis userRunning counter: key={} (user not in DB)",
+                            key);
                         return setCounter(key, 0);
                       }
                       return Mono.empty();
@@ -237,18 +233,18 @@ public class ConversationRunAdmissionService {
   }
 
   private Mono<Long> getCounter(String key) {
-    return redis.opsForValue().get(key).map(v -> v == null ? 0L : Long.parseLong(v)).defaultIfEmpty(0L);
+    return redis
+        .opsForValue()
+        .get(key)
+        .map(v -> v == null ? 0L : Long.parseLong(v))
+        .defaultIfEmpty(0L);
   }
 
   private Mono<Long> incr(String key) {
     return redis
         .opsForValue()
         .increment(key)
-        .flatMap(
-            n ->
-                redis
-                    .expire(key, Duration.ofHours(2))
-                    .thenReturn(n));
+        .flatMap(n -> redis.expire(key, Duration.ofHours(2)).thenReturn(n));
   }
 
   private Mono<Long> decr(String key) {
@@ -264,7 +260,8 @@ public class ConversationRunAdmissionService {
             });
   }
 
-  public record AdmissionDecision(boolean allowed, int errorCode, String message, int retryAfterSec) {
+  public record AdmissionDecision(
+      boolean allowed, int errorCode, String message, int retryAfterSec) {
     public static AdmissionDecision allowedDecision() {
       return new AdmissionDecision(true, 0, "", 0);
     }
@@ -288,11 +285,7 @@ public class ConversationRunAdmissionService {
     }
 
     static AdmissionStatus of(
-        long gq,
-        long gr,
-        long uq,
-        long ur,
-        ConversationRunAdmissionProperties props) {
+        long gq, long gr, long uq, long ur, ConversationRunAdmissionProperties props) {
       boolean ok =
           gq < props.getMaxGlobalQueued()
               && gr < props.getMaxGlobalRunning()

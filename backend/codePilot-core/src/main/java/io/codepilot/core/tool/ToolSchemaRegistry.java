@@ -13,9 +13,9 @@ import org.springframework.stereotype.Component;
 /**
  * Static catalogue of built-in tool definitions.
  *
- * <p>Each entry follows the shape required by docs/04-Prompt模板.md §9.5: {@code name /
- * description / parameters / executor / risk}. Plugins are expected to advertise the same names so
- * the model can call them.
+ * <p>Each entry follows the shape required by docs/04-Prompt模板.md §9.5: {@code name / description /
+ * parameters / executor / risk}. Plugins are expected to advertise the same names so the model can
+ * call them.
  */
 @Component
 public class ToolSchemaRegistry {
@@ -67,9 +67,7 @@ public class ToolSchemaRegistry {
         "client",
         "medium",
         params(
-            required("path"),
-            optionalString("content", ""),
-            optionalBoolean("overwrite", false)));
+            required("path"), optionalString("content", ""), optionalBoolean("overwrite", false)));
 
     add(
         "fs.write",
@@ -134,7 +132,9 @@ public class ToolSchemaRegistry {
         params(required("query"), optionalInt("topK", 8)));
   }
 
-  /** Returns the JSON Schema (as a string) restricted to {@code allowed} tool names, or full set. */
+  /**
+   * Returns the JSON Schema (as a string) restricted to {@code allowed} tool names, or full set.
+   */
   public String renderSchema(List<String> allowed) {
     ArrayNode arr = mapper.createArrayNode();
     if (allowed == null || allowed.isEmpty()) {
@@ -180,7 +180,9 @@ public class ToolSchemaRegistry {
       ObjectNode node = mapper.createObjectNode();
       node.put("name", name);
       node.put("description", desc);
-      node.set("parameters", mapper.valueToTree(tool.getOrDefault("parameters", Collections.emptyMap())));
+      node.set(
+          "parameters",
+          mapper.valueToTree(tool.getOrDefault("parameters", Collections.emptyMap())));
       node.put("executor", "client");
       node.put("risk", (String) tool.getOrDefault("risk", "medium"));
       tools.put(name, node);
@@ -244,9 +246,7 @@ public class ToolSchemaRegistry {
 
   private ObjectNode optionalBoolean(String name, boolean defVal) {
     return field(
-        name,
-        mapper.createObjectNode().put("type", "boolean").put("default", defVal),
-        false);
+        name, mapper.createObjectNode().put("type", "boolean").put("default", defVal), false);
   }
 
   private ObjectNode optionalInt(String name, Integer defVal) {

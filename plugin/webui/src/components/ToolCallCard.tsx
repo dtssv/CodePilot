@@ -6,6 +6,7 @@ import { useShellAskForStep } from '../state/shellAskStore';
 import type { ToolExecutionState } from '../state/chatTypes';
 import { deriveShellExecutionState } from '../utils/shellOutput';
 import { extractPatchItems, summarizeApplyPatch } from '../utils/graphMarkers';
+import { normalizeToolArgs } from '../utils/toolArgs';
 
 export interface ToolCallInfo {
     id: string;
@@ -71,10 +72,18 @@ const TOOL_VERBS: Record<string, string> = {
     'gather.execute': '收集',
 };
 
-function shortPath(p: string): string {
+const WRITE_TOOLS = new Set([
+    'fs.write', 'fs.create', 'fs.replace', 'fs.delete', 'fs.move', 'fs.applyPatch',
+]);
+
+const READ_TOOLS = new Set([
+    'fs.read', 'fs.list', 'fs.search', 'fs.grep', 'fs.outline',
+]);
+
+/** Shorten a path for compact display — keep last N segments + show full path on hover. */
+function shortPath(p: string, _maxSegments = 2): string {
     if (!p) return '';
-    const parts = p.replace(/\\/g, '/').split('/');
-    return parts.length > 2 ? '.../' + parts.slice(-2).join('/') : p;
+    return p.replace(/\\/g, '/').split('/').pop() || p;
 }
 
 function lineCount(s: string | undefined): number {
@@ -82,7 +91,59 @@ function lineCount(s: string | undefined): number {
     return s.split('\n').length;
 }
 
-function buildToolMeta(name: string, args: Record<string, unknown>): { description: string; detail: string } {
+/** Represents a single diff line for color-coded display. */
+interface DiffLine {
+    type: 'add' | 'remove' | 'context';
+    content: string;
+}
+
+/**
+ * Build diff lines for write/create/replace operations.
+ * - fs.create / fs.write: all lines are green (add)
+ * - fs.replace with search+replace: search lines are red (remove), replace lines are green (add)
+ * - fs.replace with only newContent: all lines are green (add)
+ * - fs.delete: a single red banner line
+ */
+function buildDiffLines(name: string, args: Record<string, unknown>): DiffLine[] {
+    const lines: DiffLine[] = [];
+
+    if (name === 'fs.delete') {
+        lines.push({ type: 'remove', content: '// 文件已删除' });
+        return lines;
+    }
+
+    if (name === 'fs.replace') {
+        const search = (args.search as string) || '';
+        const replace = (args.replace as string) || (args.newContent as string) || (args.content as string) || '';
+
+        if (search) {
+            // Show removed lines (red) then added lines (green)
+            for (const line of search.split('\n')) {
+                lines.push({ type: 'remove', content: line });
+            }
+            for (const line of replace.split('\n')) {
+                lines.push({ type: 'add', content: line });
+            }
+        } else {
+            // No search text, treat as full content write (all green)
+            const content = replace || (args.newContent as string) || (args.content as string) || '';
+            for (const line of content.split('\n')) {
+                lines.push({ type: 'add', content: line });
+            }
+        }
+        return lines;
+    }
+
+    // fs.create / fs.write: all green
+    const content = (args.newContent as string) || (args.content as string) || '';
+    if (!content) return lines;
+    for (const line of content.split('\n')) {
+        lines.push({ type: 'add', content: line });
+    }
+    return lines;
+}
+
+function buildToolMeta(name: string, args: Record<string, unknown>): { description: string; detail: string; fullPath?: string } {
     const path = (args.path as string) || '';
     const content = (args.newContent as string) || (args.content as string) || (args.replace as string) || '';
     const search = (args.search as string) || '';
@@ -94,35 +155,35 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
     switch (name) {
         case 'fs.read': {
             const range = startLine && endLine ? ':' + startLine + '-' + endLine : '';
-            return { description: sp + range, detail: startLine && endLine ? (endLine - startLine + 1) + ' 行' : '' };
+            return { description: sp + range, detail: startLine && endLine ? (endLine - startLine + 1) + ' 行' : '', fullPath: path || undefined };
         }
         case 'fs.list':
-            return { description: sp || '.', detail: '' };
+            return { description: sp || '.', detail: '', fullPath: path || undefined };
         case 'fs.search':
         case 'fs.grep': {
             const q = (args.query as string) || '';
-            return { description: q.length > 40 ? q.substring(0, 40) + '...' : q, detail: sp ? sp : '' };
+            return { description: q.length > 40 ? q.substring(0, 40) + '...' : q, detail: sp ? sp : '', fullPath: path || undefined };
         }
         case 'fs.outline':
-            return { description: sp, detail: '' };
+            return { description: sp, detail: '', fullPath: path || undefined };
         case 'fs.create':
-            return { description: sp, detail: lines > 0 ? lines + ' 行' : '' };
+            return { description: sp, detail: lines > 0 ? lines + ' 行' : '', fullPath: path || undefined };
         case 'fs.write':
-            return { description: sp, detail: lines > 0 ? lines + ' 行' : '' };
+            return { description: sp, detail: lines > 0 ? lines + ' 行' : '', fullPath: path || undefined };
         case 'fs.replace':
-            return { description: sp, detail: lines > 0 ? lines + ' 行' : search ? '文本替换' : '' };
+            return { description: sp, detail: lines > 0 ? lines + ' 行' : search ? '文本替换' : '', fullPath: path || undefined };
         case 'fs.delete':
-            return { description: sp, detail: '' };
+            return { description: sp, detail: '', fullPath: path || undefined };
         case 'fs.move':
-            return { description: sp + ' → ' + shortPath((args.destination as string) || (args.to as string) || ''), detail: '' };
+            return { description: sp + ' → ' + shortPath((args.destination as string) || (args.to as string) || ''), detail: '', fullPath: path || undefined };
         case 'fs.applyPatch':
-            return summarizeApplyPatch(args);
+            return { ...summarizeApplyPatch(args), fullPath: path || undefined };
         case 'ide.openFile': {
             const line = args.line as number | undefined;
-            return { description: sp, detail: line ? ':' + line : '' };
+            return { description: sp, detail: line ? ':' + line : '', fullPath: path || undefined };
         }
         case 'ide.diagnostics':
-            return { description: sp || '项目', detail: '' };
+            return { description: sp || '项目', detail: '', fullPath: path || undefined };
         case 'ide.applyPatch':
             return { description: '应用补丁', detail: '' };
         case 'ide.shadowValidate': {
@@ -136,11 +197,11 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
         case 'shell.session':
             return { description: (args.action as string) || 'exec', detail: '' };
         case 'code.outline':
-            return { description: sp, detail: '' };
+            return { description: sp, detail: '', fullPath: path || undefined };
         case 'code.symbol':
-            return { description: (args.query as string) || '', detail: sp ? sp : '' };
+            return { description: (args.query as string) || '', detail: sp ? sp : '', fullPath: path || undefined };
         case 'code.usages':
-            return { description: (args.symbol as string) || '', detail: sp ? sp : '' };
+            return { description: (args.symbol as string) || '', detail: sp ? sp : '', fullPath: path || undefined };
         case 'plan.show':
         case 'plan.update':
             return { description: '任务计划', detail: '' };
@@ -157,7 +218,6 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
             if (!requests || requests.length === 0) {
                 return { description: '无请求', detail: '' };
             }
-            // First file path as main description, file count as detail
             const firstPath = shortPath(((requests[0]?.args as Record<string, unknown>)?.path as string) || '');
             const fileCount = requests.length;
             return {
@@ -175,6 +235,47 @@ function buildToolMeta(name: string, args: Record<string, unknown>): { descripti
     }
 }
 
+/** Read result content snippet. */
+function readResultSnippet(
+    result: Record<string, unknown> | undefined,
+    maxLines = 8,
+): string | null {
+    if (!result) return null;
+    const raw = (result.content as string) || '';
+    if (!raw) return null;
+    const lines = raw.split('\n');
+    if (lines.length === 0) return null;
+    const preview = lines.slice(0, maxLines).join('\n');
+    const truncated = lines.length > maxLines;
+    return truncated ? preview + '\n...' : preview;
+}
+
+/** Render color-coded diff lines. */
+function DiffPreview({ diffLines, maxLines = 50 }: { diffLines: DiffLine[]; maxLines?: number }) {
+    const visibleLines = diffLines.slice(0, maxLines);
+    const truncated = diffLines.length > maxLines;
+    return (
+        <div className="tool-call-diff">
+            <table className="tool-call-diff-table">
+                <tbody>
+                    {visibleLines.map((line, i) => (
+                        <tr key={i} className={'tool-call-diff-line tool-call-diff-' + line.type}>
+                            <td className="tool-call-diff-gutter">{line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' '}</td>
+                            <td className="tool-call-diff-content"><pre>{line.content}</pre></td>
+                        </tr>
+                    ))}
+                    {truncated && (
+                        <tr className="tool-call-diff-line">
+                            <td className="tool-call-diff-gutter"> </td>
+                            <td className="tool-call-diff-content tool-call-diff-ellipsis">... 还有 {diffLines.length - maxLines} 行</td>
+                        </tr>
+                    )}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
 export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
     const initialStatus = toolCall.status
         ?? (toolCall.result || toolCall.executionState ? 'success' : 'running');
@@ -189,8 +290,7 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
     }, [toolCall.status]);
 
     // Resolve effective tool name for fs.applyPatch based on op field
-    // The args may come as a nested object from the backend SSE stream
-    const rawArgs = toolCall.args || {};
+    const rawArgs = normalizeToolArgs(toolCall.args);
     const op = (rawArgs.op as string) || '';
     const patches = toolCall.name === 'fs.applyPatch' ? extractPatchItems(rawArgs) : [];
     const hasMultiplePatches = patches.length > 1;
@@ -228,8 +328,20 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
     const built = buildToolMeta(effectiveName, rawArgs);
     const description = applyPatchDisplay?.description || built.description;
     const detail = applyPatchDisplay?.detail ?? built.detail;
+    const fullPath = built.fullPath;
 
-    // Build per-patch info for expanded view
+    // Build diff lines for write tools (color-coded preview)
+    const isWriteTool = WRITE_TOOLS.has(effectiveName);
+    const diffLines = isWriteTool ? buildDiffLines(effectiveName, rawArgs) : [];
+    const hasDiffPreview = diffLines.length > 0;
+
+    // Content preview for read results
+    const isReadTool = READ_TOOLS.has(effectiveName);
+    const readSnippet = isReadTool ? readResultSnippet(toolCall.result) : null;
+
+    const hasContentPreview = hasDiffPreview || !!readSnippet;
+
+    // Build per-patch info for expanded view (multi-patch applyPatch)
     const patchItems = patches.map((p, idx) => {
         const patchOp = p.op || '';
         const patchPath = p.path || '';
@@ -237,11 +349,20 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
         const effName = patchOp === 'create' ? 'fs.create' : patchOp === 'delete' ? 'fs.delete' : patchOp === 'replace' ? 'fs.replace' : 'fs.applyPatch';
         const pIcon = toolIcons[effName] || '🩹';
         const pVerb = TOOL_VERBS[effName] || patchOp || '补丁';
-        return { idx, path: shortPath(patchPath), verb: pVerb, icon: pIcon, lines: patchLines, op: patchOp };
+        // Build diff lines for each individual patch
+        const pDiffLines = buildDiffLines(effName, {
+            path: patchPath,
+            search: p.search,
+            replace: p.replace,
+            newContent: p.newContent,
+        });
+        return { idx, path: shortPath(patchPath), fullPath: patchPath, verb: pVerb, icon: pIcon, lines: patchLines, op: patchOp, diffLines: pDiffLines };
     });
 
     const isShell = toolCall.name === 'shell.exec' || toolCall.name === 'shell.session';
-    const shellCmd = isShell ? ((rawArgs.command as string) || description) : '';
+    const shellCmd = isShell
+        ? String(rawArgs.command ?? toolCall.result?.command ?? description ?? '').trim()
+        : '';
     const shellCwd = isShell ? resolveShellCwd(rawArgs, toolCall.result) : '';
     const executionState: ToolExecutionState | undefined =
         toolCall.executionState
@@ -272,7 +393,7 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                 <>
                     <span className="tool-call-icon">{icon}</span>
                     <span className="tool-call-verb" style={{ color: categoryColor }}>{verb}</span>
-                    <span className="tool-call-desc" title={description}>{description}</span>
+                    <span className="tool-call-desc" title={fullPath || description}>{description}</span>
                     {detail && <span className="tool-call-detail muted">{detail}</span>}
                 </>
             ) : null}
@@ -282,6 +403,16 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
                     <span className="tool-call-verb" style={{ color: '#4ec9b0' }}>收集</span>
                     <span className="tool-call-detail">{gatherRequests.length} 个文件</span>
                 </>
+            )}
+            {/* Expand/collapse toggle for tools with content previews */}
+            {hasContentPreview && !hasMultiplePatches && (
+                <button
+                    type="button"
+                    className="agent-file-expand-btn tool-call-expand-btn"
+                    onClick={() => setExpanded(!expanded)}
+                >
+                    {expanded ? '▾ 收起' : '▸ 展开详情'}
+                </button>
             )}
             {hasMultiplePatches && (
                 <button
@@ -307,25 +438,60 @@ export function ToolCallCard({ toolCall }: { toolCall: ToolCallInfo }) {
             {toolCall.name === 'shell.exec' && shellAsk && (
                 <ShellAskBar ask={shellAsk} />
             )}
+            {/* Write tool diff preview (green for additions, red for deletions) */}
+            {expanded && hasDiffPreview && !hasMultiplePatches && (
+                <div className="tool-call-content-preview">
+                    {effectiveName === 'fs.create' && (
+                        <div className="tool-call-preview-label muted">新建文件内容：</div>
+                    )}
+                    {effectiveName === 'fs.write' && (
+                        <div className="tool-call-preview-label muted">写入内容：</div>
+                    )}
+                    {effectiveName === 'fs.replace' && (
+                        <div className="tool-call-preview-label muted">替换内容：</div>
+                    )}
+                    {effectiveName === 'fs.delete' && (
+                        <div className="tool-call-preview-label muted">删除文件：</div>
+                    )}
+                    <DiffPreview diffLines={diffLines} />
+                </div>
+            )}
+            {/* Read tool result content preview */}
+            {expanded && readSnippet && !hasMultiplePatches && (
+                <div className="tool-call-content-preview">
+                    <div className="tool-call-preview-label muted">文件内容：</div>
+                    <pre className="tool-call-preview-code">{readSnippet}</pre>
+                </div>
+            )}
+            {/* Full path display for file tools when expanded */}
+            {expanded && fullPath && fullPath !== description && (
+                <div className="tool-call-full-path muted">完整路径：{fullPath}</div>
+            )}
+            {/* Multi-patch applyPatch: show each patch with its own diff */}
             {expanded && hasMultiplePatches && (
                 <div className="tool-call-patches">
                     {patchItems.map((p) => (
-                        <div key={p.idx} className="tool-call-patch-item">
-                            <span className="tool-call-patch-icon">{p.icon}</span>
-                            <span className="tool-call-patch-verb">{p.verb}</span>
-                            <span className="tool-call-patch-path">{p.path}</span>
-                            {p.lines > 0 && <span className="tool-call-patch-lines">{p.lines} 行</span>}
+                        <div key={p.idx} className="tool-call-patch-item tool-call-patch-item-expandable">
+                            <div className="tool-call-patch-header">
+                                <span className="tool-call-patch-icon">{p.icon}</span>
+                                <span className="tool-call-patch-verb">{p.verb}</span>
+                                <span className="tool-call-patch-path" title={p.fullPath}>{p.path}</span>
+                                {p.lines > 0 && <span className="tool-call-patch-lines">{p.lines} 行</span>}
+                            </div>
+                            {p.diffLines.length > 0 && (
+                                <DiffPreview diffLines={p.diffLines} />
+                            )}
                         </div>
                     ))}
                 </div>
             )}
-            {toolCall.name === 'shell.exec' && toolCall.result && (
+            {(toolCall.name === 'shell.exec' || toolCall.name === 'shell.session') && toolCall.result && (
                 <ShellOutputPreview result={toolCall.result} />
             )}
-            {toolCall.name === 'shell.exec' && terminal && executionState === 'denied' && (
+            {(toolCall.name === 'shell.exec' || toolCall.name === 'shell.session') && terminal && executionState === 'denied' && (
                 <div className="tool-call-shell-state muted">命令未执行（用户拒绝）</div>
             )}
-            {toolCall.name === 'shell.exec' && terminal && executionState === 'skipped' && (
+            {(toolCall.name === 'shell.exec' || toolCall.name === 'shell.session') && terminal && executionState === 'skipped' && (
                 <div className="tool-call-shell-state muted">命令未执行（用户跳过）</div>
             )}
             {isGatherExecute && gatherRequests.length > 0 && (

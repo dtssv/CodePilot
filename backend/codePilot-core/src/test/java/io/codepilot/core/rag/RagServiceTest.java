@@ -5,8 +5,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.codepilot.common.api.CodePilotException;
 import io.codepilot.core.rag.dto.RagIndexRequest;
-import io.codepilot.core.rag.dto.RagSearchRequest;
-import io.codepilot.core.rag.dto.RagSearchResponse;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -16,8 +14,8 @@ import org.springframework.ai.embedding.EmbeddingRequest;
 import org.springframework.ai.embedding.EmbeddingResponse;
 
 /**
- * Unit tests for {@link RagService}. Uses an in-memory mock of EmbeddingModel
- * and RagRepository to verify business logic without external dependencies.
+ * Unit tests for {@link RagService}. Uses an in-memory mock of EmbeddingModel and RagRepository to
+ * verify business logic without external dependencies.
  */
 class RagServiceTest {
 
@@ -31,9 +29,11 @@ class RagServiceTest {
     RagService service = new RagService(embedding, repo);
 
     String largeContent = "x".repeat(33 * 1024); // exceeds 32KB
-    var req = new RagIndexRequest(sessionId, userId, List.of(
-        new RagIndexRequest.ChunkPayload("test.java", "java", 1, 10, largeContent)
-    ));
+    var req =
+        new RagIndexRequest(
+            sessionId,
+            userId,
+            List.of(new RagIndexRequest.ChunkPayload("test.java", "java", 1, 10, largeContent)));
 
     assertThatThrownBy(() -> service.index(req))
         .isInstanceOf(CodePilotException.class)
@@ -46,9 +46,13 @@ class RagServiceTest {
     EmbeddingModel embedding = new FakeEmbeddingModel();
     RagService service = new RagService(embedding, repo);
 
-    var req = new RagIndexRequest(sessionId, userId, List.of(
-        new RagIndexRequest.ChunkPayload("Main.java", "java", 1, 20, "public class Main {}")
-    ));
+    var req =
+        new RagIndexRequest(
+            sessionId,
+            userId,
+            List.of(
+                new RagIndexRequest.ChunkPayload(
+                    "Main.java", "java", 1, 20, "public class Main {}")));
 
     int indexed = service.index(req);
     assertThat(indexed).isEqualTo(1);
@@ -93,9 +97,8 @@ class RagServiceTest {
 
     @Override
     public EmbeddingResponse embedForResponse(List<String> texts) {
-      List<Embedding> embeddings = texts.stream()
-          .map(t -> new Embedding(new float[1536], 0))
-          .toList();
+      List<Embedding> embeddings =
+          texts.stream().map(t -> new Embedding(new float[1536], 0)).toList();
       return new EmbeddingResponse(embeddings);
     }
   }

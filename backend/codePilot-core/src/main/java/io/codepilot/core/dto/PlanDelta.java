@@ -9,8 +9,7 @@ import java.util.List;
 public record PlanDelta(List<Op> ops) {
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  public record Op(
-      Kind op, String stepId, Plan.Step step, Plan.Step.Status status, String reason) {
+  public record Op(Kind op, String stepId, Plan.Step step, Plan.Step.Status status, String reason) {
 
     public enum Kind {
       @JsonProperty("add")

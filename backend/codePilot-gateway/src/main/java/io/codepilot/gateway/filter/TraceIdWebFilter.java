@@ -18,8 +18,8 @@ import reactor.util.context.Context;
  * {@link TraceIdHolder} (servlet/blocking) and the reactor {@link Context} (reactive). The id is
  * also echoed back in the response header for client-side correlation.
  *
- * <p>Order: <strong>first</strong> in the chain so that all subsequent filters can use the trace
- * id when logging/audit.
+ * <p>Order: <strong>first</strong> in the chain so that all subsequent filters can use the trace id
+ * when logging/audit.
  */
 @Component
 public class TraceIdWebFilter implements WebFilter, Ordered {

@@ -30,7 +30,8 @@ public final class WebErrors {
     try {
       payload = MAPPER.writeValueAsBytes(ApiResponse.of(code, userFacingMessage));
     } catch (Exception e) {
-      payload = ("{\"code\":" + code + ",\"message\":\"" + userFacingMessage + "\"}")
+      payload =
+          ("{\"code\":" + code + ",\"message\":\"" + userFacingMessage + "\"}")
               .getBytes(StandardCharsets.UTF_8);
     }
     DataBuffer buffer = response.bufferFactory().wrap(payload);
