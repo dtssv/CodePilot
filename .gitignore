@@ -77,3 +77,10 @@ __pycache__/
 # ---- Local CodePilot data (never commit) ----
 .codePilot/
 .codePilot.broken-*/
+
+# ---- Gradle local caches (never commit; relocated away from default .gradle/) ----
+.gradle-local/
+**/.gradle-local/
+
+# ---- MyBatis generator output ----
+.mybatis/

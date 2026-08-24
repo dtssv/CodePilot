@@ -5,6 +5,11 @@ pluginManagement {
     }
 }
 
+// Auto-download a JDK matching the toolchain (e.g. 21) from Adoptium if none is configured.
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+}
+
 dependencyResolutionManagement {
     @Suppress("UnstableApiUsage")
     repositories {

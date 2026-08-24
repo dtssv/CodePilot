@@ -12,3 +12,5 @@ plugins {
 }
 
 rootProject.name = "codePilot-plugin"
+
+include(":harness-core")
