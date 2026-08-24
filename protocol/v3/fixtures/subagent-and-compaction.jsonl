@@ -1,0 +1,8 @@
+{"type":"run_started","seq":0,"ts":1700000000000,"session_id":"sess-2","goal":"subagent demo"}
+{"type":"user_message_added","seq":1,"ts":1700000000100,"text":"subagent demo"}
+{"type":"assistant_message_added","seq":2,"ts":1700000000200,"text":"Spawning a sub-agent.","tool_calls":[{"call_id":"c1","name":"subagent","arguments_json":"{\"name\":\"grep\",\"goal\":\"find all usages of foo()\"}"}]}
+{"type":"tool_result_added","seq":3,"ts":1700000000300,"call_id":"c1","tool":"subagent","ok":true,"output":"[SUBAGENT grep] found 3 usages","truncated":false}
+{"type":"permission_decision_recorded","seq":4,"ts":1700000000350,"call_id":"c1","tool":"subagent","verdict":"allow","reason":null}
+{"type":"compaction_applied","seq":5,"ts":1700000000400,"summary":"user asked for subagent demo; sub-agent found 3 usages","dropped_messages":2}
+{"type":"assistant_message_added","seq":6,"ts":1700000000500,"text":"Done. 3 usages found.","tool_calls":[]}
+{"type":"run_finished","seq":7,"ts":1700000000600,"status":"completed","total_steps":2,"detail":null}

@@ -16,11 +16,11 @@ CodePilot 让你在 JetBrains IDEA 里拥有类似 Cursor 的 AI 编码体验。
 
 整个项目分三块：
 
-- **插件端**（Kotlin）——跑在 IDEA 里，负责 UI（JCEF）、本地工具执行、代码索引、会话管理等
+- **插件端**（Kotlin）——跑在 IDEA 里，负责 UI（JCEF）、本地工具执行、代码索引、会话管理、以及 **harness-core** 纯 Kotlin agent 编排内核（事件溯源 + 工具循环 + 预算合成）
 - **WebUI**（React 18 + Vite + TypeScript）——嵌入插件的 JCEF 浏览器，渲染聊天界面和各种面板
-- **后端**（Java 21 / Spring Boot 3.3 + Spring WebFlux + Spring AI）——负责 LLM 调用、Graph 编排引擎、Prompt 拼装、用户鉴权、MCP 商城等
+- **后端**（Java 21 / Spring Boot 3.3 + Spring WebFlux + Spring AI）——退化为 **Model Gateway**：负责 LLM 调用、鉴权、配额、路由、MCP 商城；不再持有会话状态或编排逻辑（ADR-1）
 
-设计文档详见 [`docs/`](docs/) 和 [`doc/`](doc/)。
+设计文档详见 [`docs/`](docs/)。
 
 ---
 
@@ -33,10 +33,12 @@ CodePilot 让你在 JetBrains IDEA 里拥有类似 Cursor 的 AI 编码体验。
 - **Chat 模式**：一问一答，适合快速提问
 - **Agent 模式**：AI 自主规划、执行、验证，多轮工具调用，适合复杂任务
 
-后端使用 **StateGraph 编排引擎**（Spring AI Alibaba Graph），节点包括 intake → intentDispatch → planning → preCheck → generate → applyPatch → verify → repair → commit → finalize 等，每一步都通过 SSE 实时推送到前端。
+后端使用 **harness-core** 编排内核（`plugin/harness-core`，纯 Kotlin，无 Spring/IntelliJ 依赖）：`AgentHarness` 是一个 ≤300 行的确定性循环，事件以 NDJSON 追加到会话文件，支持回放/rewind/fork；`BudgetedComposer` 在 token 预算内拼装 system prompt；`Compactor` 在预算超限时把旧消息摘要压缩；`CompletionPolicy` 在 end_turn 后跑 stop-hooks（如 build validator），可强制再来一轮。
+
+> 注：旧的 StateGraph 编排引擎（Spring AI Alibaba Graph）已废弃并计划删除，见 [`docs/backend-strip-plan.md`](docs/backend-strip-plan.md)。
 
 **待完善：**
-- Deep Research 模式（generate → gather → searchEvaluate → synthesize 拓扑已设计，但尚未完全产品化）
+- Deep Research 模式（拓扑已设计，但尚未完全产品化）
 - 会话恢复（发版/SSE 硬断场景下的自动续流，设计中）
 
 ![Chat & Agent对话](./img/chat/chat1.png)
@@ -100,7 +102,7 @@ AI 生成的代码改动不会直接写盘，而是先进入**暂存区**，你�
 
 纯本地的代码索引，不上传你的代码：
 
-- BM25 + 语义余弦 + 符号 + 路径混合评分
+- harness-core `search/` 模块：`Bm25Searcher`（下沉自 LocalSearchEngine，BM25 + TF-IDF 余弦 + 符号 + 路径混合评分）、`RipgrepSearcher`（rg 子进程，有则用 rg，无则回退到 Bm25 grep）、`TfidfEmbedder`（纯 JDK 兜底）/ `PythonEmbedder`（sentence-transformers 子进程，有 Python 时优先）、`OnnxModelCache`（ONNX 模型下载缓存）、`PathFuzzyMatcher`（Levenshtein 路径模糊匹配）
 - 支持 `@` 引用将搜索结果加入对话上下文
 - 自动索引 + pause / resume / rebuild 控制
 - 上下文预算条，实时显示 token 用量
@@ -123,8 +125,8 @@ AI 生成的代码改动不会直接写盘，而是先进入**暂存区**，你�
 支持 Model Context Protocol，连接外部工具和数据源：
 
 - MCP Server 管理面板（start / stop / reload / 配置编辑）
-- Graph 运行时 `mcp.call` 执行外部工具
-- 执行前确认门（McpConfirmGate），防止危险操作
+- harness-core `mcp/` 模块：`McpProcessManager`（stdio + SSE + Streamable HTTP，去 IntelliJ 改 slf4j）、`McpToolRegistry`（动态 `tools/list` 发现）、`McpDynamicTool`（每 tool 一实例）、`McpPermissionGate`（suspend 回调，首次调用需人工批准）
+- 执行前确认门，防止危险操作
 - Hooks 机制：`beforeSubmitPrompt` / `beforeShellExecution`
 
 **待完善：**
@@ -372,21 +374,17 @@ cd plugin
 
 ## 项目状态
 
-当前 P0-P3 阶段已基本完成，主链路稳定可用。详细的成熟度矩阵见 [`doc/STATUS.md`](doc/STATUS.md)，差距分析见 [`doc/gap-analysis-report.md`](doc/gap-analysis-report.md)。
+当前 P0-P3 阶段已基本完成，主链路稳定可用。harness-core 重构（M1-M4 里程碑）正在进行中，详见 [`docs/harness-redesign.md`](docs/harness-redesign.md)。后端裁剪批次详见 [`docs/backend-strip-plan.md`](docs/backend-strip-plan.md)。
 
 ---
 
 ## 文档索引
 
-- [架构设计](docs/01-架构设计.md)
-- [插件端设计](docs/02-插件端设计.md)
-- [后端设计](docs/03-后端设计.md)
-- [Prompt 模板](docs/04-Prompt模板.md)
-- [接口文档](docs/05-接口文档.md)
-- [Graph 编排方案](docs/06-Graph编排方案.md)
+- [harness 重构设计](docs/harness-redesign.md) — 整体架构、ADR、里程碑
+- [harness 设计说明](docs/harness-design.md) — harness-core 模块说明与 skill/mcp/search 接入
+- [Backend 裁剪清单](docs/backend-strip-plan.md) — 后端退化为 Model Gateway 的删除批次
+- [Protocol v3 Events](protocol/v3/events.md) — 会话事件 NDJSON 协议
 - [部署手册](DEPLOY.md)
-- [对标 Cursor 路线图](doc/16-对标Cursor路线图.md)
-- [能力成熟度矩阵](doc/STATUS.md)
 
 ---
 

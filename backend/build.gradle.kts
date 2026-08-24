@@ -120,3 +120,48 @@ subprojects {
         systemProperty("codepilot.no-mocks", "true")
     }
 }
+
+// ---- Protocol v3 events validation ----
+// Lightweight CI guard: validates that every .jsonl fixture under
+// protocol/v3/fixtures conforms to the events schema's field whitelist.
+// Full JSON-Schema validation runs in the codePilot-core test task (which
+// already has json-schema-validator on its test classpath via Jackson).
+val validateEventsJson by tasks.registering {
+    group = "verification"
+    description = "Validate protocol/v3 NDJSON fixtures against events.schema.json field whitelist."
+    val schema = rootProject.file("../protocol/v3/events.schema.json")
+    val fixturesDir = rootProject.file("../protocol/v3/fixtures")
+    inputs.file(schema)
+    if (fixturesDir.exists()) inputs.dir(fixturesDir)
+    doLast {
+        val allowedTypes = listOf(
+            "run_started", "user_message_added", "assistant_message_added",
+            "tool_result_added", "permission_decision_recorded",
+            "compaction_applied", "run_finished",
+        )
+        var errors = 0
+        if (!schema.exists()) throw GradleException("schema not found: ${schema}")
+        if (!fixturesDir.exists()) return@doLast
+        fixturesDir.walkTopDown().filter { it.isFile && it.name.endsWith(".jsonl") }.forEach { f ->
+            f.useLines { lines ->
+                lines.forEachIndexed { i, line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) return@forEachIndexed
+                    val type = Regex("\"type\"\\s*:\\s*\"([a-z_]+)\"").find(trimmed)
+                        ?.groupValues?.get(1)
+                    if (type == null || type !in allowedTypes) {
+                        logger.error("[validateEventsJson] ${f.name}:${i + 1} invalid or unknown type: $type")
+                        errors++
+                    }
+                    if (!trimmed.contains("\"seq\"") || !trimmed.contains("\"ts\"")) {
+                        logger.error("[validateEventsJson] ${f.name}:${i + 1} missing seq/ts")
+                        errors++
+                    }
+                }
+            }
+        }
+        if (errors > 0) throw GradleException("validateEventsJson: $errors error(s)")
+        logger.lifecycle("validateEventsJson: fixtures OK")
+    }
+}
+subprojects { tasks.matching { it.name == "check" }.configureEach { dependsOn(rootProject.tasks.named("validateEventsJson")) } }
