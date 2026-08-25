@@ -1,8 +1,8 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
-    kotlin("jvm") version "2.1.21"
-    id("org.jetbrains.intellij.platform") version "2.1.0"
+    kotlin("jvm") version "2.3.0"
+    id("org.jetbrains.intellij.platform") version "2.18.1"
     id("org.jlleitschuh.gradle.ktlint") version "12.1.1"
 }
 
@@ -34,7 +34,6 @@ dependencies {
     intellijPlatform {
         intellijIdeaCommunity("2024.2.3")
         bundledPlugin("com.intellij.java")
-        instrumentationTools()
         testFramework(TestFrameworkType.Platform)
     }
 
@@ -84,7 +83,7 @@ val webUiDist = webUiDir.resolve("dist")
 val webUiResourceDir = project.file("src/main/resources/webui/dist")
 val npmExecutable = if (System.getProperty("os.name").lowercase().contains("windows")) "npm.cmd" else "npm"
 
-val webUiInstall by tasks.registering(Exec::class) {
+val webUiInstall = tasks.register<Exec>("webUiInstall") {
     group = "webui"
     description = "Install WebUI npm dependencies"
     workingDir = webUiDir
@@ -94,7 +93,7 @@ val webUiInstall by tasks.registering(Exec::class) {
     outputs.dir(webUiDir.resolve("node_modules"))
 }
 
-val webUiBuild by tasks.registering(Exec::class) {
+val webUiBuild = tasks.register<Exec>("webUiBuild") {
     group = "webui"
     description = "Build WebUI (vite)"
     dependsOn(webUiInstall)
@@ -108,7 +107,7 @@ val webUiBuild by tasks.registering(Exec::class) {
     outputs.dir(webUiDist)
 }
 
-val copyWebUi by tasks.registering(Copy::class) {
+val copyWebUi = tasks.register<Copy>("copyWebUi") {
     group = "webui"
     description = "Copy WebUI dist to plugin resources"
     dependsOn(webUiBuild)
@@ -117,7 +116,7 @@ val copyWebUi by tasks.registering(Copy::class) {
 }
 
 // Generate codepilot-dev.properties with devToken (if set) during build
-val generateDevProps by tasks.registering {
+val generateDevProps = tasks.register("generateDevProps") {
     val outDir = layout.buildDirectory.dir("generated-resources")
     outputs.dir(outDir)
     doLast {
@@ -168,7 +167,7 @@ tasks {
 // protocol/v3/fixtures conforms to the events schema's field whitelist.
 // Full JSON-Schema validation runs in the backend module (which already has
 // Jackson + json-schema-validator on its test classpath).
-val validateEventsJson by tasks.registering {
+val validateEventsJson = tasks.register("validateEventsJson") {
     group = "verification"
     description = "Validate protocol/v3 NDJSON fixtures against events.schema.json field whitelist."
     val schema = rootProject.file("protocol/v3/events.schema.json")

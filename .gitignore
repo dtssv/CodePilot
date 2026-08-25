@@ -32,7 +32,7 @@ replay_pid*
 
 # ---- Packages ----
 *.jar
-!gradle/wrapper/gradle-wrapper.jar
+!**/gradle/wrapper/gradle-wrapper.jar
 *.war
 *.nar
 *.ear
