@@ -54,7 +54,7 @@ class McpPermissionGate(
         val key = serverId to toolName
         if (key in approved) return McpVerdict.Allow
         if (key in denied) return McpVerdict.Deny("previously denied")
-        return McpVerdict.Ask(ApprovalRequest(serverId, toolName, spec.callId) { granted ->
+        return McpVerdict.Ask(ApprovalRequest(serverId, toolName, spec.id) { granted ->
             if (granted) approved.add(key) else denied.add(key)
         })
     }

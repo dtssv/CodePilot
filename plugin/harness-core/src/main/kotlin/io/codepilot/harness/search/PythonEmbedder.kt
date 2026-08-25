@@ -2,6 +2,13 @@ package io.codepilot.harness.search
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.exists
@@ -58,7 +65,7 @@ class PythonEmbedder(
         } catch (_: Exception) {
             false
         }
-        _available!!
+        return _available!!
     }
 
     override suspend fun embed(text: String): FloatArray = withContext(Dispatchers.IO) {

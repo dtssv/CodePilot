@@ -19,6 +19,7 @@ class SkillsPromptSection(
     private val requestProvider: () -> SkillRouter.RouteRequest,
 ) : PromptSection {
     override val name = "Skills"
+    override val maxChars = 12_000
 
     override fun compose(snapshot: List<HarnessEvent>): String {
         val req = requestProvider()

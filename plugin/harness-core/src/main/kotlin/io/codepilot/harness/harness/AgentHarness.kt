@@ -104,7 +104,7 @@ class AgentHarness(
             }
 
             val callsAsSpecs = pendingCalls.map { ToolCallSpec(it.callId, it.name, it.argumentsJson) }
-            emit(Persisted(session.append(AssistantMessageAdded(text = textBuilder.toString(), toolCalls = callsAsSpecs))))
+            emit(HarnessUiEvent.Persisted(session.append(AssistantMessageAdded(text = textBuilder.toString(), toolCalls = callsAsSpecs))))
 
             when (stopKind) {
                 StopKind.ERROR -> { finish(RunFinished.ERROR, stepsDone, stopDetail); return@flow }
@@ -130,10 +130,10 @@ class AgentHarness(
     private suspend fun kotlinx.coroutines.flow.FlowCollector<HarnessUiEvent>.ensureStarted(goal: String) {
         val events = session.events()
         if (events.none { it is RunStarted }) {
-            emit(Persisted(session.append(RunStarted(sessionId = "local", goal = goal))))
+            emit(HarnessUiEvent.Persisted(session.append(RunStarted(sessionId = "local", goal = goal))))
         }
         if (events.none { it is UserMessageAdded }) {
-            emit(Persisted(session.append(UserMessageAdded(text = goal))))
+            emit(HarnessUiEvent.Persisted(session.append(UserMessageAdded(text = goal))))
         }
     }
 
@@ -203,7 +203,7 @@ class AgentHarness(
         val truncated = truncateOutput(raw)
         val spec = ToolCallSpec(call.callId, call.name, call.argumentsJson)
         val post = hooks.post(spec, truncated)
-        emit(Persisted(session.append(ToolResultAdded(
+        emit(HarnessUiEvent.Persisted(session.append(ToolResultAdded(
             callId = call.callId, tool = call.name,
             ok = post.ok, output = post.stdout.ifEmpty { post.stderr },
             truncated = post.truncated || post.stdout.length > cfg.maxToolOutputChars,
@@ -229,7 +229,7 @@ class AgentHarness(
     }
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<HarnessUiEvent>.finish(status: String, steps: Int, detail: String? = null) {
-        emit(Persisted(session.append(RunFinished(status = status, totalSteps = steps, detail = detail))))
+        emit(HarnessUiEvent.Persisted(session.append(RunFinished(status = status, totalSteps = steps, detail = detail))))
     }
 
     private fun verdictLabel(v: Verdict): String = when (v) {

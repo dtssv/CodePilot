@@ -14,7 +14,7 @@ import kotlinx.serialization.json.Json
  * A Skill is a reusable block of system-prompt content + tool permissions that
  * activates based on workspace signals (languages, frameworks, file globs,
  * keywords). Skills come from:
- *   - project-local:  .codepilot/skills/*.md
+ *   - project-local:  .codepilot/skills/ (markdown files)
  *   - bundled:        shipped with the plugin
  *   - user-injected:  validated by [UserSkillValidator]
  */

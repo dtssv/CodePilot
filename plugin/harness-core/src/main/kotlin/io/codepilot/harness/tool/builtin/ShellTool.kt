@@ -126,8 +126,8 @@ class ShellTool(
         cmd = cmd.replace(Regex("""\btouch\s+(\S+)""")) { "New-Item -ItemType File " + it.groupValues[1] }
         cmd = cmd.replace(Regex("""\bwhich\s+"""), "Get-Command ")
         cmd = cmd.replace(Regex("""\bgrep\s+"""), "Select-String ")
-        cmd = cmd.replace(Regex("""\becho\s+\$(\w+)""")) { "Write-Output `$env:" + it.groupValues[1] }
-        cmd = cmd.replace(Regex("""\bexport\s+(\w+)=(\S+)""")) { "`$env:" + it.groupValues[1] + "=\"" + it.groupValues[2] + "\"" }
+        cmd = cmd.replace(Regex("""\becho\s+\$(\w+)""")) { "Write-Output `${'\$'}env:" + it.groupValues[1] }
+        cmd = cmd.replace(Regex("""\bexport\s+(\w+)=(\S+)""")) { "`${'\$'}env:" + it.groupValues[1] + "=\"" + it.groupValues[2] + "\"" }
         return cmd
     }
 

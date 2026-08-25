@@ -4,6 +4,7 @@ import io.codepilot.harness.model.ToolSchema
 import io.codepilot.harness.tool.DangerLevel
 import io.codepilot.harness.tool.Tool
 import io.codepilot.harness.tool.ToolOutput
+import io.codepilot.harness.tool.ToolSpec
 import io.codepilot.harness.tool.WorkspaceScope
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject

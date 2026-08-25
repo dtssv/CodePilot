@@ -77,8 +77,8 @@ class ScenarioReadEditTest {
 
         val persisted = events.filterIsInstance<io.codepilot.harness.harness.HarnessUiEvent.Persisted>()
         val kinds = persisted.map { it.event::class.simpleName }
-        assertTrue(UserMessageAdded()::class.simpleName!! in kinds)
-        assertEquals(3, persisted.filterIsInstance<AssistantMessageAdded>().size, "three assistant turns")
+        assertTrue(UserMessageAdded(text = "")::class.simpleName!! in kinds)
+        assertEquals(3, persisted.map { it.event }.filterIsInstance<AssistantMessageAdded>().size, "three assistant turns")
         assertTrue(persisted.any { it.event is ToolResultAdded && (it.event as ToolResultAdded).ok })
         val finished = persisted.last().event as RunFinished
         assertEquals(RunFinished.COMPLETED, finished.status)
@@ -107,7 +107,7 @@ class ScenarioReadEditTest {
 
     @Test
     fun `max steps guard stops runaway loop`() {
-        val loopScript = List(5) { i ->
+        val loopScript = List(12) { i ->
             ScriptedTurn(toolCalls = listOf(AssistantToolCall("c$i", "grep", """{"pattern":"foo"}""")))
         }
         val (harness, _) = harness(loopScript)

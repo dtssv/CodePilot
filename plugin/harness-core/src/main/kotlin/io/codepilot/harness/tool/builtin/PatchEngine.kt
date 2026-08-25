@@ -105,7 +105,17 @@ class PatchEngine {
         val replaced = if (replaceAll) {
             pattern.replace(original) { count++; replace }
         } else {
-            pattern.replace(original, 1) { count++; replace }
+            val m = pattern.find(original)
+            if (m != null) {
+                count = 1
+                buildString {
+                    append(original, 0, m.range.first)
+                    append(replace)
+                    append(original, m.range.last + 1, original.length)
+                }
+            } else {
+                original
+            }
         }
         return ReplaceResult(replaced, count)
     }

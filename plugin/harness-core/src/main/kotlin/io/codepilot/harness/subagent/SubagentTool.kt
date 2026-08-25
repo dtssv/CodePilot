@@ -4,6 +4,7 @@ import io.codepilot.harness.event.AssistantMessageAdded
 import io.codepilot.harness.event.HarnessEvent
 import io.codepilot.harness.harness.AgentHarness
 import io.codepilot.harness.harness.HarnessConfig
+import io.codepilot.harness.harness.HarnessUiEvent
 import io.codepilot.harness.model.ChatMessage
 import io.codepilot.harness.tool.DangerLevel
 import io.codepilot.harness.tool.Tool
@@ -50,7 +51,8 @@ class SubagentTool(
     override suspend fun execute(args: JsonObject): ToolOutput = try {
         val specArg = parseSpec(args)
         val harness = factory(specArg)
-        val events = harness.run(specArg.goal, approval = null).toList()
+        val uiEvents = harness.run(specArg.goal).toList()
+        val events = uiEvents.mapNotNull { (it as? HarnessUiEvent.Persisted)?.event }
         val finalText = collectFinalAssistantText(events) ?: "[subagent ${specArg.name} produced no final text]"
         ToolOutput.success("[SUBAGENT ${specArg.name}] $finalText")
     } catch (e: Exception) {
