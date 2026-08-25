@@ -1699,7 +1699,7 @@ class CefChatPanel(
                     }
 
                     // ── Memory system events ──
-                    override fun onMemoryCompacted(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    fun onMemoryCompacted(payload: com.fasterxml.jackson.databind.JsonNode) {
                         val data = mapper.treeToValue(payload, Map::class.java)
                         dispatchToWeb("memory.compacted", data)
                         // Persist compacted marker into local session digest for recovery
@@ -1803,7 +1803,7 @@ class CefChatPanel(
                         adapter?.onAgentRunning(payload.path("text").asText(null))
                     }
 
-                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
                         dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
                     }
 
@@ -2476,7 +2476,7 @@ class CefChatPanel(
                         adapter?.onAgentRunning(payload.path("text").asText(null))
                     }
 
-                    override fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
+                    fun onAgentProgress(payload: com.fasterxml.jackson.databind.JsonNode) {
                         if (isStaleResumeStream()) return
                         dispatchToWeb("agent_progress", mapper.treeToValue(payload, Map::class.java))
                     }

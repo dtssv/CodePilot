@@ -37,6 +37,13 @@ dependencies {
         testFramework(TestFrameworkType.Platform)
     }
 
+    // New layered architecture: harness-core (pure JVM) + ide-adapter (IDE bridge)
+    // + tools-ide (IDE-backed tool shells). The legacy plugin/src/.../tools/*
+    // implementations are being migrated to tools-ide and will be deleted.
+    implementation(project(":harness-core"))
+    implementation(project(":ide-adapter"))
+    implementation(project(":tools-ide"))
+
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.2")

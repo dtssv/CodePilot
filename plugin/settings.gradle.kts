@@ -14,3 +14,5 @@ plugins {
 rootProject.name = "codePilot-plugin"
 
 include(":harness-core")
+include(":ide-adapter")
+include(":tools-ide")
