@@ -54,7 +54,9 @@ export class OpenAIProvider implements ChatProvider {
       body.tools = opts.tools.map(toOpenAITool);
     }
 
-    const url = `${this.baseURL}/v1/chat/completions`;
+    // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
+    // includes it; many compatible gateways document the bare host).
+    const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/chat/completions`;
     const res = await fetch(url, {
       method: "POST",
       headers: {

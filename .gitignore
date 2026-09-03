@@ -12,3 +12,6 @@ coverage/
 apps/idea/.intellijPlatform/
 apps/idea/.kotlin/
 .pnpm-store/
+.home/
+playground/
+.codepilot/

@@ -73,7 +73,7 @@ export class AnthropicProvider implements ChatProvider {
       );
     }
 
-    const url = `${this.baseURL}/v1/messages`;
+    const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/messages`;
     const headers: Record<string, string> = {
       "content-type": "application/json",
       "x-api-key": this.apiKey,
