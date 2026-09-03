@@ -1,0 +1,9 @@
+.vscode/
+scripts/
+src/
+**/*.tsbuildinfo
+**/*.map
+tsconfig.json
+node_modules/
+*.vsix
+*.tsbuildinfo

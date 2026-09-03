@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<idea-plugin url="https://github.com/codepilot/codepilot"
+             package="com.codepilot.idea">
+
+    <id>com.codepilot.idea</id>
+    <name>CodePilot</name>
+    <version>0.1.0</version>
+    <vendor>CodePilot</vendor>
+
+    <description><![CDATA[
+        CodePilot IDEA plugin — connects to the headless `codepilot serve` process over
+        NDJSON JSON-RPC (stdio). Provides a chat tool window, an editor right-click
+        "Ask CodePilot" action, and a settings page for the `codepilot` binary path,
+        model, and permission mode.
+    ]]></description>
+
+    <change-notes><![CDATA[Initial scaffold.]]></change-notes>
+
+    <!-- IntelliJ Platform 2024.1+ (build 233). -->
+    <idea-version since-build="233" until-build="251.*" />
+
+    <!-- Project-level dependency: only need an Application service and a Project service. -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- ===== Application-level services (lifecycle / settings) ===== -->
+    <applicationService
+        serviceImplementation="com.codepilot.idea.CodepilotService$Application"
+        id="CodepilotApplicationService"/>
+
+    <projectService
+        serviceImplementation="com.codepilot.idea.CodepilotService$ProjectService"
+        id="CodepilotProjectService"/>
+
+    <!-- ===== Tool Window ===== -->
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="CodePilot"
+                    anchor="right"
+                    factoryClass="com.codepilot.idea.ChatToolWindowFactory"
+                    icon="AllIcons.Actions.Execute"
+                    canCloseContents="true"/>
+    </extensions>
+
+    <!-- ===== Editor right-click action: "Ask CodePilot" ===== -->
+    <actions>
+        <action id="codepilot.ask"
+                class="com.codepilot.idea.AskAction"
+                text="Ask CodePilot"
+                description="Send the current selection (with file path) to the CodePilot session."
+                icon="AllIcons.Actions.IntentionBulb">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <!-- Allow triggering from the editor with the standard shortcut when no menu is shown. -->
+            <keyboard-shortcut keymap="$default" first-keystroke="alt C"/>
+    </action>
+
+        <!-- Quick toolbar action to show the tool window if it's been closed. -->
+        <action id="codepilot.showToolWindow"
+                class="com.codepilot.idea.ShowToolWindowAction"
+                text="Open CodePilot Chat"
+                description="Open the CodePilot chat tool window."
+                icon="AllIcons.Actions.Execute">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+
+    <!-- ===== Settings page ===== -->
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationConfigurable id="com.codepilot.idea.settings"
+                                displayName="CodePilot"
+                                instance="com.codepilot.idea.CodepilotSettingsConfigurable"
+                                groupId="tools"/>
+    </extensions>
+
+</idea-plugin>

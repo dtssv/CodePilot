@@ -1,8 +1,0 @@
-{"type":"run_started","seq":0,"ts":1700000000000,"session_id":"sess-1","goal":"fix the greeting"}
-{"type":"user_message_added","seq":1,"ts":1700000000100,"text":"fix the greeting"}
-{"type":"assistant_message_added","seq":2,"ts":1700000000200,"text":"Let me read the file first.","tool_calls":[{"call_id":"c1","name":"read_file","arguments_json":"{\"path\":\"App.kt\"}"}]}
-{"type":"tool_result_added","seq":3,"ts":1700000000300,"call_id":"c1","tool":"read_file","ok":true,"output":"fun main() {\n    println(\"hello\")\n}\n","truncated":false}
-{"type":"assistant_message_added","seq":4,"ts":1700000000400,"text":"Now I will fix the greeting.","tool_calls":[{"call_id":"c2","name":"edit_file","arguments_json":"{\"path\":\"App.kt\",\"old_string\":\"println(\\\"hello\\\")\",\"new_string\":\"println(\\\"hello, CodePilot\\\")\"}"}]}
-{"type":"tool_result_added","seq":5,"ts":1700000000500,"call_id":"c2","tool":"edit_file","ok":true,"output":"edited App.kt (exact, 1 match(es))","truncated":false}
-{"type":"assistant_message_added","seq":6,"ts":1700000000600,"text":"Done. The greeting now mentions CodePilot.","tool_calls":[]}
-{"type":"run_finished","seq":7,"ts":1700000000700,"status":"completed","total_steps":3,"detail":null}

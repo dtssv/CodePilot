@@ -1,0 +1,183 @@
+{
+  "name": "codepilot-vscode",
+  "displayName": "CodePilot",
+  "description": "Token-efficient, long-horizon coding agent — CodePilot VSCode client",
+  "publisher": "codepilot",
+  "version": "2.0.0",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codepilot/codepilot.git",
+    "directory": "apps/vscode"
+  },
+  "type": "module",
+  "main": "./dist/extension.js",
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codepilot.openSidebar",
+        "title": "CodePilot: Open Chat",
+        "category": "CodePilot",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "codepilot.newSession",
+        "title": "CodePilot: New Session",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.cancel",
+        "title": "CodePilot: Cancel Running Prompt",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.askSelection",
+        "title": "CodePilot: Ask about selection",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.explainFile",
+        "title": "CodePilot: Explain this file",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.fixFile",
+        "title": "CodePilot: Fix this file",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.showOutput",
+        "title": "CodePilot: Show Output Channel",
+        "category": "CodePilot"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codepilot",
+          "title": "CodePilot",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codepilot": [
+        {
+          "type": "webview",
+          "id": "codepilot.chatView",
+          "name": "Chat",
+          "contextualTitle": "CodePilot"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodePilot",
+      "properties": {
+        "codepilot.serverPath": {
+          "type": "string",
+          "default": "codepilot",
+          "description": "Path to the `codepilot` CLI executable, or an absolute path. If unset, the extension will look up `codepilot` on $PATH."
+        },
+        "codepilot.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the codepilot CLI's compiled entry (cli.js). When set, the extension launches it via `node <cliPath>` instead of relying on $PATH."
+        },
+        "codepilot.nodePath": {
+          "type": "string",
+          "default": "node",
+          "description": "Path to the node executable used to launch the codepilot CLI."
+        },
+        "codepilot.permissionMode": {
+          "type": "string",
+          "enum": ["ask", "auto-edit", "yolo"],
+          "default": "ask",
+          "description": "Default permission mode passed during the `initialize` handshake."
+        },
+        "codepilot.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional default model id passed to `session/new` (e.g. claude-sonnet-4.5)."
+        },
+        "codepilot.provider": {
+          "type": "string",
+          "enum": ["anthropic", "openai", "copilot", ""],
+          "default": "",
+          "description": "Optional default provider name."
+        },
+        "codepilot.systemPromptExtra": {
+          "type": "string",
+          "default": "",
+          "description": "Extra system prompt text appended to every new session."
+        },
+        "codepilot.autoApprove": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Tool names or bash command regexes that auto-approve."
+        },
+        "codepilot.showDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, edit_file/write_file tool calls open a vscode.diff tab."
+        },
+        "codepilot.protocolVersion": {
+          "type": "number",
+          "default": 1,
+          "description": "Headless protocol version to negotiate."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "codepilot.openSidebar",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "codepilot.askSelection",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "codepilot.cancel",
+        "key": "escape",
+        "when": "codepilot.busy"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codepilot.askSelection",
+          "when": "editorHasSelection",
+          "group": "codepilot"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "package": "vsce package",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,47 @@
+# CodePilot Headless Protocol v1
+
+JSON-RPC 2.0 over stdio（换行分隔 JSON，NDJSON）。客户端 = 前端（TUI 内嵌、VSCode、IDEA），服务端 = `@codepilot/core` 以 `codepilot serve` 启动的进程。
+
+## 生命周期
+
+1. 客户端 spawn `codepilot serve`（或连接已有实例）。
+2. `initialize` 握手：交换协议版本、能力、工作目录、权限模式。
+3. 之后可开多个 session：`session/new`、`session/resume`。
+4. 关闭：`shutdown` + `exit`。
+
+## 客户端 → 服务端 方法
+
+| 方法 | 参数 | 返回 |
+|---|---|---|
+| `initialize` | `{ protocolVersion: 1, cwd, permissionMode: "ask"\|"auto-edit"\|"yolo", clientInfo: {name, version} }` | `{ protocolVersion, capabilities: { tools: string[], providers: string[] } }` |
+| `session/new` | `{ cwd?, model?, systemPromptExtra? }` | `{ sessionId }` |
+| `session/resume` | `{ sessionId }` | `{ sessionId, events: Event[] }`（重放事件） |
+| `session/list` | `{}` | `{ sessions: [{id, title, updatedAt, cwd}] }` |
+| `prompt/send` | `{ sessionId, text, images?: [{mediaType, base64}] }` | `{}`（响应经通知流式推送） |
+| `prompt/cancel` | `{ sessionId }` | `{}` |
+| `permission/respond` | `{ requestId, decision: "allow"\|"deny"\|"always" }` | `{}` |
+| `session/fork` | `{ sessionId, atEventIndex? }` | `{ sessionId }` |
+| `shutdown` | `{}` | `{}` |
+
+## 服务端 → 客户端 通知
+
+| 通知 | 参数 |
+|---|---|
+| `event` | `{ sessionId, event: Event }` — 所有会话事件（含流式 text_delta/tool_use 增量） |
+| `permission/request` | 这是一个**请求**（非通知）：`{ sessionId, requestId, toolName, input, reason }`，客户端用 `permission/respond` 回复 |
+| `session/usage` | `{ sessionId, usage: {input, output, cacheRead, cacheWrite, costUSD} }` |
+
+## 流式
+
+assistant 消息以增量事件流式下发：
+`{type:"message_delta", messageId, delta:{type:"text", text}}` /
+`{type:"message_delta", delta:{type:"tool_input_json", partialJson}}`。
+结束于完整 `message` 事件。客户端只渲染增量、以完整事件为准持久化。
+
+## 错误
+
+标准 JSON-RPC error；agent 内部错误以 `{type:"error", message, recoverable}` 事件下发。
+
+## 版本协商
+
+`initialize` 中 protocolVersion 不一致时服务端返回 `-32602` 错误并附带支持版本列表。

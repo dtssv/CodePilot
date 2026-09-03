@@ -1,0 +1,10 @@
+<ivy-module version="2.0">
+  <info organisation="bundledPlugin" module="org.intellij.intelliLang" revision="241.19416.15+476"/>
+  <configurations>
+    <conf name="default" visibility="public"/>
+  </configurations>
+  <publications>
+    <artifact name="/Users/zyf/workspace/java/CodePilot/.gradle-home/caches/8.14/transforms/6a1543ae67eb67fdb9a20525807c6949/transformed/ideaIC-2024.1.7/plugins/platform-langInjection" type="directory" conf="default"/>
+  </publications>
+  <dependencies/>
+</ivy-module>

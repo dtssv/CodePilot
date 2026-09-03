@@ -1,0 +1,48 @@
+/**
+ * Bottom status bar — shows model, permission mode, session id (first 8 chars),
+ * and cumulative token usage.
+ */
+import React from "react";
+import { Box, Text } from "ink";
+import type { TuiState } from "./state.js";
+
+const MODE_COLOR: Record<TuiState["permissionMode"], string> = {
+  ask: "yellow",
+  "auto-edit": "blue",
+  yolo: "red",
+};
+
+export function StatusBar({ state }: { state: TuiState }): React.ReactElement {
+  const sid = state.sessionId !== undefined ? state.sessionId.slice(0, 8) : "—";
+  const total =
+    state.usage.input +
+    state.usage.output +
+    (state.usage.cacheRead ?? 0) +
+    (state.usage.cacheWrite ?? 0);
+  const cost = state.usage.costUSD !== undefined ? `$${state.usage.costUSD.toFixed(4)}` : "$—";
+  const model = state.model ?? "(model unset)";
+  return (
+    <Box justifyContent="space-between" paddingX={1}>
+      <Box>
+        <Text dimColor>model </Text>
+        <Text>{model}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>mode </Text>
+        <Text color={MODE_COLOR[state.permissionMode]}>{state.permissionMode}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>session </Text>
+        <Text>{sid}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>tokens </Text>
+        <Text>{total.toLocaleString()}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>cost </Text>
+        <Text>{cost}</Text>
+      </Box>
+    </Box>
+  );
+}
