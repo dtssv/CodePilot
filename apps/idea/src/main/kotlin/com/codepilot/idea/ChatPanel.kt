@@ -20,12 +20,14 @@ import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.Box
 import javax.swing.BoxLayout
+import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JOptionPane
 import javax.swing.JPanel
 import javax.swing.JTextPane
+import javax.swing.JToggleButton
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
 import javax.swing.text.BadLocationException
@@ -59,6 +61,10 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
     private val streamingToolInputs = mutableMapOf<String, String>()
     /** Most recent plan steps, keyed by session. */
     private var lastPlan: List<PlanStep> = emptyList()
+    /** Currently active collaboration mode ("chat" | "plan" | "agent"). */
+    private var currentMode: String = CodepilotSettings.getInstance().state.defaultMode
+    /** Tracks whether we've synced the mode once — used to suppress system messages on the initial sync. */
+    private var modeAnnounced: Boolean = false
 
     // ----- UI -----
     private val messagePane = JTextPane().apply {
@@ -106,6 +112,52 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
         foreground = JBColor.GRAY
     }
 
+    // Mode toggle (Ask / Plan / Agent).
+    private val modeGroup = ButtonGroup()
+    private val askToggle = JToggleButton("Ask").apply {
+        toolTipText = "Chat — read-only Q&A. No file edits or commands."
+        isFocusable = false
+        actionCommand = "chat"
+    }
+    private val planToggle = JToggleButton("Plan").apply {
+        toolTipText = "Plan — read-only exploration, write a plan before acting."
+        isFocusable = false
+        actionCommand = "plan"
+    }
+    private val agentToggle = JToggleButton("Agent").apply {
+        toolTipText = "Agent — full autonomy: edits files and runs commands (default)."
+        isFocusable = false
+        actionCommand = "agent"
+    }
+    private val modeBar = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.X_AXIS)
+        border = BorderFactory.createEmptyBorder(2, 8, 4, 8)
+        add(JLabel("Mode:"))
+        add(Box.createHorizontalStrut(6))
+        // Register in group so only one is selected at a time.
+        listOf(askToggle, planToggle, agentToggle).forEach { btn ->
+            modeGroup.add(btn)
+            btn.addActionListener { onModeButtonClicked(btn.actionCommand) }
+        }
+        add(askToggle)
+        add(Box.createHorizontalStrut(4))
+        add(planToggle)
+        add(Box.createHorizontalStrut(4))
+        add(agentToggle)
+        add(Box.createHorizontalGlue())
+    }
+
+    /** Reflect [mode] in the toggle bar without re-triggering the listener. */
+    private fun syncModeToggles(mode: String) {
+        val target = when (mode) {
+            "chat" -> askToggle
+            "plan" -> planToggle
+            "agent" -> agentToggle
+            else -> agentToggle
+        }
+        for (b in listOf(askToggle, planToggle, agentToggle)) b.isSelected = (b === target)
+    }
+
     val component: JComponent = buildComponent()
 
     private fun buildComponent(): JComponent {
@@ -114,6 +166,14 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
             add(newSessionButton)
             add(Box.createHorizontalGlue())
         }
+
+        val north = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            add(toolbar)
+            add(modeBar)
+        }
+        // Seed the selected toggle from the local default until the server confirms.
+        syncModeToggles(currentMode)
 
         val bottomBar = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.X_AXIS)
@@ -129,7 +189,7 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
         }
 
         return JPanel(BorderLayout()).apply {
-            add(toolbar, BorderLayout.NORTH)
+            add(north, BorderLayout.NORTH)
             add(scroll, BorderLayout.CENTER)
             add(south, BorderLayout.SOUTH)
             add(statusLabel, BorderLayout.PAGE_END)
@@ -323,14 +383,54 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
                 sessionId = newId
                 streamingMessages.clear()
                 streamingToolInputs.clear()
+                // Reset the mode latch: the new session will report its own mode.
+                val settings = CodepilotSettings.getInstance().state
+                currentMode = CodepilotSettings.normalizeMode(settings.defaultMode)
+                modeAnnounced = false
                 SwingUtilities.invokeLater {
                     messagePane.text = ""
+                    syncModeToggles(currentMode)
                     statusLabel.text = "New session: ${newId?.take(8) ?: "(failed)"}"
                 }
             } catch (t: Throwable) {
                 appendSystem("Failed to open new session: ${t.message}")
             }
         }
+    }
+
+    /**
+     * User clicked Ask/Plan/Agent. Optimistically update the toggle and ask the server to
+     * switch the session's collaboration mode. The server will confirm with a `mode` event;
+     * if it disagrees (stale state / unknown session), the next event resyncs the UI.
+     */
+    private fun onModeButtonClicked(mode: String) {
+        val previous = currentMode
+        if (mode == previous) return
+        currentMode = mode
+        syncModeToggles(mode)
+        val sid = sessionId
+        if (sid == null) {
+            // No session yet — just persist locally so the next session/new uses it.
+            appendSystem("Mode set to ${prettyMode(mode)} (will apply to next session).")
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            val ok = client?.setMode(sid, mode) ?: false
+            if (!ok) {
+                SwingUtilities.invokeLater {
+                    currentMode = previous
+                    syncModeToggles(previous)
+                    appendSystem("Server refused mode switch to ${prettyMode(mode)}.")
+                }
+            }
+        }
+    }
+
+    private fun prettyMode(mode: String): String = when (mode) {
+        "chat" -> "Ask"
+        "plan" -> "Plan"
+        "agent" -> "Agent"
+        else -> mode
     }
 
     // ----- Message rendering -----
@@ -499,6 +599,20 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
             "status" -> {
                 val status = event.get("status")?.asString ?: ""
                 SwingUtilities.invokeLater { statusLabel.text = "Status: $status" }
+            }
+            "mode" -> {
+                val newMode = event.get("mode")?.asString ?: return
+                val previous = currentMode
+                currentMode = newMode
+                SwingUtilities.invokeLater { syncModeToggles(newMode) }
+                if (modeAnnounced) {
+                    // Suppress the very first sync (it just echoes our initial toggle state).
+                    if (newMode != previous) {
+                        appendSystem("Mode → ${prettyMode(newMode)}.")
+                    }
+                } else {
+                    modeAnnounced = true
+                }
             }
             "error" -> appendError(event.get("message")?.asString ?: "unknown error")
         }

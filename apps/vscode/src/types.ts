@@ -6,6 +6,10 @@
 export type PermissionMode = "ask" | "auto-edit" | "yolo";
 export type PermissionDecision = "allow" | "deny" | "always";
 
+/** Collaboration mode (Cursor-style Ask/Plan/Agent). */
+export type AgentMode = "chat" | "plan" | "agent";
+export const AGENT_MODES: AgentMode[] = ["chat", "plan", "agent"];
+
 export interface TextBlock {
   type: "text";
   text: string;
@@ -72,7 +76,8 @@ export type Event =
   | { type: "usage"; usage: UsageInfo }
   | { type: "compaction"; summary: string }
   | { type: "status"; status: "idle" | "running" | "waiting_permission" | "compacting" }
-  | { type: "error"; message: string; recoverable: boolean };
+  | { type: "error"; message: string; recoverable: boolean }
+  | { type: "mode"; mode: AgentMode };
 
 /** Server -> client `event` notification payload. */
 export interface ServerEvent {
@@ -99,6 +104,8 @@ export interface SessionUsageNotification {
 export interface ServerCapabilities {
   tools: string[];
   providers: string[];
+  /** Supported collaboration modes (subset of {@link AgentMode}). */
+  modes?: AgentMode[];
 }
 
 export interface InitializeResult {
@@ -148,6 +155,13 @@ export interface SessionNewParams {
   cwd?: string;
   model?: string;
   systemPromptExtra?: string;
+  /** Initial collaboration mode. Defaults to `agent`. */
+  agentMode?: AgentMode;
+}
+
+export interface SessionSetModeParams {
+  sessionId: string;
+  mode: AgentMode;
 }
 
 export interface PromptSendParams {

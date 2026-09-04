@@ -4,7 +4,7 @@
 //  - drives the status bar (connection + cumulative token usage).
 
 import * as vscode from "vscode";
-import type { PermissionMode } from "./types.js";
+import type { AgentMode, PermissionMode } from "./types.js";
 
 export interface CodepilotSettings {
   serverPath: string;
@@ -17,6 +17,8 @@ export interface CodepilotSettings {
   autoApprove: string[];
   showDiff: boolean;
   protocolVersion: number;
+  /** Default {@link AgentMode} applied to every new session. */
+  agentMode: AgentMode;
 }
 
 const KEYS = {
@@ -30,10 +32,12 @@ const KEYS = {
   autoApprove: "codepilot.autoApprove",
   showDiff: "codepilot.showDiff",
   protocolVersion: "codepilot.protocolVersion",
+  agentMode: "codepilot.agentMode",
 } as const;
 
 function readConfig(cfg: vscode.WorkspaceConfiguration): CodepilotSettings {
   const provider = cfg.get<string>(KEYS.provider, "") as CodepilotSettings["provider"];
+  const agentMode = cfg.get<AgentMode>(KEYS.agentMode, "agent");
   return {
     serverPath: cfg.get<string>(KEYS.serverPath, "codepilot"),
     cliPath: cfg.get<string>(KEYS.cliPath, ""),
@@ -45,6 +49,7 @@ function readConfig(cfg: vscode.WorkspaceConfiguration): CodepilotSettings {
     autoApprove: cfg.get<string[]>(KEYS.autoApprove, []),
     showDiff: cfg.get<boolean>(KEYS.showDiff, true),
     protocolVersion: cfg.get<number>(KEYS.protocolVersion, 1),
+    agentMode,
   };
 }
 
@@ -81,7 +86,8 @@ export class SettingsStore implements DisposableLike {
 }
 
 /**
- * Status bar entry. Shows connection status + cumulative tokens.
+ * Status bar entry. Shows connection status + cumulative tokens + current
+ * collaboration mode.
  *
  * Clicks fire the registered command ("codepilot.openSidebar" by default).
  */
@@ -89,6 +95,7 @@ export class StatusBar implements vscode.Disposable {
   private item: vscode.StatusBarItem;
   private cumulative = { input: 0, output: 0, cost: 0 };
   private state: "connecting" | "ready" | "error" | "busy" = "connecting";
+  private mode: AgentMode | null = null;
 
   constructor(command: string) {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -103,6 +110,11 @@ export class StatusBar implements vscode.Disposable {
     this.render();
     // Toggle the `codepilot.busy` context so keybindings (esc to cancel) work.
     void vscode.commands.executeCommand("setContext", "codepilot.busy", state === "busy");
+  }
+
+  setMode(mode: AgentMode | null): void {
+    this.mode = mode;
+    this.render();
   }
 
   addUsage(u: { input?: number; output?: number; costUSD?: number }): void {
@@ -134,17 +146,30 @@ export class StatusBar implements vscode.Disposable {
         : this.state === "error"
         ? "CodePilot (error)"
         : "CodePilot (connecting)";
+    const mode = this.mode ? `  ·  ${modeLabel(this.mode)}` : "";
     const usage =
       this.cumulative.input + this.cumulative.output > 0
         ? `  ·  ${formatNumber(this.cumulative.input + this.cumulative.output)} tok`
         : "";
     const cost =
       this.cumulative.cost > 0 ? `  ·  $${this.cumulative.cost.toFixed(3)}` : "";
-    this.item.text = `${icon} ${label}${usage}${cost}`;
+    this.item.text = `${icon} ${label}${mode}${usage}${cost}`;
   }
 
   dispose(): void {
     this.item.dispose();
+  }
+}
+
+/** Human-friendly label for a collaboration mode (also used by webview). */
+export function modeLabel(mode: AgentMode): string {
+  switch (mode) {
+    case "chat":
+      return "Ask";
+    case "plan":
+      return "Plan";
+    case "agent":
+      return "Agent";
   }
 }
 

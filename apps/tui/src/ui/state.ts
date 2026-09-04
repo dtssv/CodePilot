@@ -11,6 +11,7 @@
  *  - The same logic is testable in isolation.
  */
 import type {
+  AgentMode,
   ContentBlock,
   Event,
   PlanStep,
@@ -62,6 +63,8 @@ export interface TuiState {
   cwd: string;
   model: string | undefined;
   permissionMode: "ask" | "auto-edit" | "yolo";
+  /** Cursor-style collaboration mode (which tools the model can call). */
+  agentMode: AgentMode;
   status: UiStatus;
   /** Rendered in order. May be a message, tool row, plan row, or system note. */
   rows: Row[];
@@ -92,7 +95,7 @@ export type Row =
   | { kind: "system"; text: string; at: number };
 
 export type TuiAction =
-  | { type: "init"; sessionId: string | undefined; cwd: string; model: string | undefined; permissionMode: TuiState["permissionMode"] }
+  | { type: "init"; sessionId: string | undefined; cwd: string; model: string | undefined; permissionMode: TuiState["permissionMode"]; agentMode: AgentMode }
   | { type: "event"; event: Event }
   | { type: "set-input"; value: string }
   | { type: "permission-pending"; req: PendingPermission }
@@ -103,6 +106,7 @@ export type TuiAction =
   | { type: "set-plan"; plan: PlanStep[] }
   | { type: "set-model"; model: string | undefined }
   | { type: "set-mode"; mode: TuiState["permissionMode"] }
+  | { type: "set-agent-mode"; mode: AgentMode }
   | { type: "set-sessions"; sessions: TuiState["sessions"] }
   | { type: "clear" }
   | { type: "exit" };
@@ -114,12 +118,14 @@ export function initialState(opts: {
   cwd: string;
   model: string | undefined;
   permissionMode: TuiState["permissionMode"];
+  agentMode: AgentMode;
 }): TuiState {
   return {
     sessionId: opts.sessionId,
     cwd: opts.cwd,
     model: opts.model,
     permissionMode: opts.permissionMode,
+    agentMode: opts.agentMode,
     status: "idle",
     rows: [],
     plan: undefined,
@@ -201,6 +207,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
         cwd: action.cwd,
         model: action.model,
         permissionMode: action.permissionMode,
+        agentMode: action.agentMode,
       };
     case "set-input":
       return { ...state, input: action.value };
@@ -223,6 +230,8 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
       return { ...state, model: action.model };
     case "set-mode":
       return { ...state, permissionMode: action.mode };
+    case "set-agent-mode":
+      return { ...state, agentMode: action.mode };
     case "set-sessions":
       return { ...state, sessions: action.sessions };
     case "permission-pending":
@@ -434,6 +443,15 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
               ...state.rows,
               { kind: "error", message: ev.message, recoverable: ev.recoverable, at: Date.now() },
             ],
+          };
+        case "mode":
+          // Core pushed a mode change (e.g. via Session.setAgentMode, including
+          // changes triggered by remote/CLI clients). Mirror it locally so the
+          // StatusBar and any downstream UI stay in sync.
+          return {
+            ...state,
+            agentMode: ev.mode,
+            notice: `Collaboration mode: ${ev.mode}`,
           };
       }
     }

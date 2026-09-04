@@ -39,6 +39,11 @@
         "category": "CodePilot"
       },
       {
+        "command": "codepilot.switchMode",
+        "title": "CodePilot: Switch Mode",
+        "category": "CodePilot"
+      },
+      {
         "command": "codepilot.askSelection",
         "title": "CodePilot: Ask about selection",
         "category": "CodePilot"
@@ -133,6 +138,12 @@
           "type": "number",
           "default": 1,
           "description": "Headless protocol version to negotiate."
+        },
+        "codepilot.agentMode": {
+          "type": "string",
+          "enum": ["chat", "plan", "agent"],
+          "default": "agent",
+          "description": "Default collaboration mode for new sessions (Ask / Plan / Agent). The webview and `CodePilot: Switch Mode` can override this at runtime; `session/setMode` (Cursor-style) is supported on an open session."
         }
       }
     },

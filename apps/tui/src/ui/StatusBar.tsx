@@ -1,15 +1,27 @@
 /**
- * Bottom status bar — shows model, permission mode, session id (first 8 chars),
- * and cumulative token usage.
+ * Bottom status bar — shows model, permission mode, collaboration mode,
+ * session id (first 8 chars), and cumulative token usage.
+ *
+ * Two distinct mode fields are surfaced because they answer different
+ * questions:
+ *   - permission mode — how the user is prompted for tool calls
+ *   - agent mode      — which tools the model can call (Cursor-style)
  */
 import React from "react";
 import { Box, Text } from "ink";
+import type { AgentMode } from "@codepilot/core";
 import type { TuiState } from "./state.js";
 
-const MODE_COLOR: Record<TuiState["permissionMode"], string> = {
+const PERM_COLOR: Record<TuiState["permissionMode"], string> = {
   ask: "yellow",
   "auto-edit": "blue",
   yolo: "red",
+};
+
+const AGENT_COLOR: Record<AgentMode, string> = {
+  chat: "cyan",
+  plan: "magenta",
+  agent: "green",
 };
 
 export function StatusBar({ state }: { state: TuiState }): React.ReactElement {
@@ -28,8 +40,12 @@ export function StatusBar({ state }: { state: TuiState }): React.ReactElement {
         <Text>{model}</Text>
       </Box>
       <Box>
-        <Text dimColor>mode </Text>
-        <Text color={MODE_COLOR[state.permissionMode]}>{state.permissionMode}</Text>
+        <Text dimColor>perm </Text>
+        <Text color={PERM_COLOR[state.permissionMode]}>{state.permissionMode}</Text>
+      </Box>
+      <Box>
+        <Text dimColor>agent </Text>
+        <Text color={AGENT_COLOR[state.agentMode]}>[{state.agentMode}]</Text>
       </Box>
       <Box>
         <Text dimColor>session </Text>

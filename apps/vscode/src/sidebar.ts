@@ -7,7 +7,7 @@
 
 import * as vscode from "vscode";
 import { renderWebviewHtml } from "./webview-html.js";
-import type { ContentBlock, Event, UsageInfo } from "./types.js";
+import type { AgentMode, ContentBlock, Event, UsageInfo } from "./types.js";
 
 export interface SidebarOptions {
   /** Called when the user submits a prompt. */
@@ -19,6 +19,9 @@ export interface SidebarOptions {
   /** Called when the user requests to explain/fix a file (from a context menu
    *  inside the webview). We send back the file URI to the extension host. */
   onPickContext(action: "open" | "explain" | "fix"): void;
+  /** Called when the user picks a different collaboration mode (Ask / Plan / Agent)
+   *  from the segmented control in the webview. */
+  onSetMode(mode: AgentMode): void;
 }
 
 /* ---------- public view model ---------- */
@@ -49,6 +52,8 @@ export interface ViewState {
   usage: UsageInfo;
   connection: "disconnected" | "connecting" | "ready" | "error" | "idle";
   detail?: string;
+  /** Current collaboration mode, or `null` if no session is open yet. */
+  mode: AgentMode | null;
 }
 
 /* ---------- webview provider ---------- */
@@ -60,6 +65,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     messages: [],
     usage: { input: 0, output: 0 },
     connection: "disconnected",
+    mode: null,
   };
 
   constructor(
@@ -87,6 +93,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       usage: { input: 0, output: 0 },
       connection: this.state.connection,
       detail: this.state.detail,
+      mode: null,
     };
     this.postState();
   }
@@ -100,6 +107,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   setBusy(busy: boolean): void {
     this.state.busy = busy;
     this.postState();
+  }
+
+  /** Override the displayed mode (e.g. when starting a new session with a
+   *  non-default {@link AgentMode}, or until the first `mode` event arrives). */
+  setMode(mode: AgentMode | null): void {
+    this.state.mode = mode;
+    this.postState();
+  }
+
+  /** Return the mode currently shown in the webview. */
+  currentMode(): AgentMode | null {
+    return this.state.mode;
   }
 
   addUsage(u: UsageInfo): void {
@@ -248,6 +267,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // surfaced via setBusy; no UI change here
         return;
       }
+      case "mode": {
+        this.state.mode = ev.mode;
+        // no need to push a system message — the segmented control is the UI
+        break;
+      }
     }
     this.postState();
   }
@@ -284,6 +308,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       case "toggleTool":
         // purely local — handled inside the webview already
         return;
+      case "setMode": {
+        const next = m.mode;
+        if (next === "chat" || next === "plan" || next === "agent") {
+          this.opts.onSetMode(next);
+        }
+        return;
+      }
       default:
         return;
     }

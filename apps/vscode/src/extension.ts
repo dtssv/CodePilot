@@ -11,9 +11,9 @@
 
 import * as vscode from "vscode";
 import { CodePilotClient } from "./client.js";
-import { SettingsStore, StatusBar } from "./config.js";
+import { SettingsStore, StatusBar, modeLabel } from "./config.js";
 import { SidebarProvider, type ChatMessage } from "./sidebar.js";
-import type { Event, PermissionRequestParams } from "./types.js";
+import { AGENT_MODES, type AgentMode, type Event, type PermissionRequestParams } from "./types.js";
 
 const OUTPUT = vscode.window.createOutputChannel("CodePilot");
 
@@ -22,6 +22,12 @@ let settings: SettingsStore | null = null;
 let statusBar: StatusBar | null = null;
 let sidebar: SidebarProvider | null = null;
 let activeSessionId: string | null = null;
+/** The mode the next/active session should be in. Mirrors what the user picked
+  * in the webview or via the Switch Mode command, and is what we'll pass to
+  * the next `session/new` call. */
+let currentMode: AgentMode | null = null;
+/** Cached "before" value for rollback if `session/setMode` errors. */
+let pendingModeRollback: AgentMode | null = null;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   settings = new SettingsStore();
@@ -33,7 +39,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onCancel: () => cancelActivePrompt(),
     onNewSession: () => startNewSession(),
     onPickContext: (a) => handleContextAction(a),
+    onSetMode: (mode) => void applyModeChange(mode),
   });
+  // Reflect initial mode (from settings) immediately in the sidebar / status bar
+  // so the segmented control is non-empty before the first session starts.
+  const initialMode = (settings.snapshot().agentMode ?? "agent") as AgentMode;
+  currentMode = initialMode;
+  sidebar.setMode(initialMode);
+  statusBar.setMode(initialMode);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("codepilot.chatView", sidebar, {
       webviewOptions: { retainContextWhenHidden: true },
@@ -80,6 +93,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const cancel = vscode.commands.registerCommand("codepilot.cancel", async () => {
     await cancelActivePrompt();
+  });
+
+  const switchMode = vscode.commands.registerCommand("codepilot.switchMode", async () => {
+    const labels: Record<AgentMode, string> = {
+      chat: "Ask — read-only Q&A",
+      plan: "Plan — read-only exploration + planning",
+      agent: "Agent — full autonomous execution",
+    };
+    const items: vscode.QuickPickItem[] = AGENT_MODES.map((m) => ({
+      label: modeLabel(m),
+      description: labels[m],
+      picked: currentMode === m,
+    }));
+    const pick = await vscode.window.showQuickPick(items, {
+      title: "CodePilot: Switch Mode",
+      placeHolder: "Select collaboration mode",
+    });
+    if (!pick) return;
+    const next = pick.label === "Ask" ? "chat" : pick.label === "Plan" ? "plan" : "agent";
+    await applyModeChange(next);
   });
 
   const askSelection = vscode.commands.registerCommand("codepilot.askSelection", async () => {
@@ -134,6 +167,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     openSidebar,
     newSession,
     cancel,
+    switchMode,
     askSelection,
     explainFile,
     fixFile,
@@ -174,13 +208,19 @@ async function startNewSession(): Promise<void> {
     return;
   }
   try {
-    activeSessionId = await c.newSession({});
+    activeSessionId = await c.newSession({ agentMode: currentMode ?? undefined });
     sidebar.reset();
     sidebar.resetUsage();
     statusBar?.resetUsage();
     sidebar.setBusy(false);
     sidebar.setConnection("ready");
-    sidebar.appendSystem(`New session started: ${activeSessionId.slice(0, 8)}`);
+    if (currentMode) {
+      sidebar.setMode(currentMode);
+      statusBar?.setMode(currentMode);
+    }
+    sidebar.appendSystem(
+      `New session started: ${activeSessionId.slice(0, 8)}${currentMode ? ` · ${modeLabel(currentMode)}` : ""}`,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sidebar.appendSystem(`Failed to create session: ${msg}`);
@@ -197,10 +237,14 @@ async function sendPrompt(text: string, context?: ChatMessage["context"]): Promi
   }
   if (!activeSessionId) {
     try {
-      activeSessionId = await c.newSession({});
+      activeSessionId = await c.newSession({ agentMode: currentMode ?? undefined });
       sidebar.reset();
       sidebar.resetUsage();
       statusBar?.resetUsage();
+      if (currentMode) {
+        sidebar.setMode(currentMode);
+        statusBar?.setMode(currentMode);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       sidebar.appendSystem(`Failed to create session: ${msg}`);
@@ -229,6 +273,40 @@ async function cancelActivePrompt(): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     sidebar?.appendSystem(`Cancel failed: ${msg}`);
+  }
+}
+
+/**
+ * Apply a user-requested collaboration-mode change. If a session is open we
+ * tell the server via `session/setMode`; the server then emits a `mode` event
+ * that confirms the switch. If no session is open yet we just remember the
+ * choice so the next `session/new` picks it up via `agentMode`.
+ */
+async function applyModeChange(mode: AgentMode): Promise<void> {
+  if (currentMode === mode) return;
+  const previous = currentMode;
+  currentMode = mode;
+  sidebar?.setMode(mode);
+  statusBar?.setMode(mode);
+  if (!client || !activeSessionId) {
+    sidebar?.appendSystem(`Mode → ${modeLabel(mode)} (will apply to next session).`);
+    return;
+  }
+  pendingModeRollback = previous;
+  try {
+    await client.setMode(activeSessionId, mode);
+    // The server's `mode` event will update the UI authoritatively. If the
+    // request errors, the event won't arrive and we revert below.
+    sidebar?.appendSystem(`Mode → ${modeLabel(mode)}`);
+    pendingModeRollback = null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sidebar?.appendSystem(`Failed to switch mode: ${msg}`);
+    const fallback = pendingModeRollback ?? previous ?? "agent";
+    pendingModeRollback = null;
+    currentMode = fallback;
+    sidebar?.setMode(fallback);
+    statusBar?.setMode(fallback);
   }
 }
 
@@ -307,6 +385,13 @@ function onSessionEvent(ev: Event): void {
     } else if (ev.status === "compacting") {
       sidebar.appendSystem("Compacting context…");
     }
+    return;
+  }
+  if (ev.type === "mode") {
+    // Authoritative confirmation from the server.
+    currentMode = ev.mode;
+    sidebar.setMode(ev.mode);
+    statusBar?.setMode(ev.mode);
     return;
   }
   // For tool_call/edit events on supported tools, try to surface a diff.

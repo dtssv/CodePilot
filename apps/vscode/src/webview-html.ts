@@ -142,6 +142,41 @@ footer.cp-footer {
   background: var(--cp-bg);
   display: flex; flex-direction: column; gap: 6px;
 }
+.modes {
+  display: flex; align-items: center; gap: 0;
+  font-size: 11px;
+  user-select: none;
+}
+.modes .label {
+  color: var(--cp-muted);
+  margin-right: 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.modes .seg {
+  display: inline-flex;
+  border: 1px solid var(--cp-border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.modes .seg button {
+  background: transparent;
+  color: var(--cp-fg);
+  border: none;
+  padding: 2px 9px;
+  font-size: 11px;
+  cursor: pointer;
+  border-right: 1px solid var(--cp-border);
+}
+.modes .seg button:last-child { border-right: none; }
+.modes .seg button:hover { background: var(--cp-accent-hover); color: var(--cp-accent-fg); }
+.modes .seg button.active {
+  background: var(--cp-accent);
+  color: var(--cp-accent-fg);
+  font-weight: 600;
+}
+.modes .seg button:disabled { opacity: 0.5; cursor: not-allowed; }
 footer textarea {
   width: 100%;
   resize: none;
@@ -193,6 +228,14 @@ footer .usage {
   </div>
 </main>
 <footer class="cp-footer">
+  <div class="modes" id="modes">
+    <span class="label">Mode</span>
+    <div class="seg" role="group" aria-label="Collaboration mode">
+      <button data-mode="chat" title="Read-only Q&A">Ask</button>
+      <button data-mode="plan" title="Read-only exploration + planning">Plan</button>
+      <button data-mode="agent" title="Full autonomous execution">Agent</button>
+    </div>
+  </div>
   <textarea id="input" placeholder="Ask CodePilot…   (Shift+Enter for newline)" rows="3"></textarea>
   <div class="row">
     <button id="btn-send">Send</button>
@@ -203,7 +246,7 @@ footer .usage {
 <script>
 (function () {
   var vscode = acquireVsCodeApi();
-  var state = { busy: false, messages: [], usage: {}, connection: 'connecting' };
+  var state = { busy: false, messages: [], usage: {}, connection: 'connecting', mode: null };
 
   var $dot = document.getElementById('dot');
   var $conn = document.getElementById('conn-label');
@@ -214,6 +257,8 @@ footer .usage {
   var $new = document.getElementById('btn-new');
   var $usage = document.getElementById('usage');
   var $empty = document.getElementById('empty');
+  var $modes = document.getElementById('modes');
+  var $modeButtons = $modes.querySelectorAll('button[data-mode]');
 
   function post(msg) { vscode.postMessage(msg); }
 
@@ -291,6 +336,13 @@ footer .usage {
 
     $send.disabled = state.busy || !$input.value.trim();
     $cancel.disabled = !state.busy;
+
+    for (var mi = 0; mi < $modeButtons.length; mi++) {
+      var btn = $modeButtons[mi];
+      var active = state.mode && btn.getAttribute('data-mode') === state.mode;
+      btn.classList.toggle('active', !!active);
+      btn.disabled = !state.mode;
+    }
 
     var totalTok = (state.usage.input || 0) + (state.usage.output || 0);
     $usage.textContent = totalTok ? formatNum(totalTok) + ' tok' + (state.usage.costUSD ? ' · $' + state.usage.costUSD.toFixed(3) : '') : '0 tok';
@@ -400,6 +452,18 @@ footer .usage {
   $send.addEventListener('click', submit);
   $cancel.addEventListener('click', function () { post({ type: 'cancel' }); });
   $new.addEventListener('click', function () { post({ type: 'new' }); });
+  for (var mi2 = 0; mi2 < $modeButtons.length; mi2++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var m = btn.getAttribute('data-mode');
+        if (!m || m === state.mode) return;
+        // optimistic UI flip; the server's 'mode' event will confirm.
+        state.mode = m;
+        render();
+        post({ type: 'setMode', mode: m });
+      });
+    })($modeButtons[mi2]);
+  }
   function submit() {
     var text = $input.value;
     if (!text.trim() || state.busy) return;

@@ -7,10 +7,14 @@
   "packageManager": "pnpm@9.15.0",
   "engines": { "node": ">=20" },
   "scripts": {
-    "build": "pnpm -r --workspace-concurrency=4 build",
-    "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
-    "dev:tui": "pnpm --filter @codepilot/tui dev",
+    "build": "corepack pnpm -r --workspace-concurrency=4 build",
+    "typecheck": "corepack pnpm -r typecheck",
+    "test": "corepack pnpm -r test",
+    "dev:tui": "corepack pnpm --filter @codepilot/tui dev",
+    "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
+    "package:idea": "cd apps/idea && ./gradlew buildPlugin",
+    "package:npm": "corepack pnpm --filter @codepilot/core --filter @codepilot/protocol --filter @codepilot/tui pack",
+    "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
     "lint": "tsc -b --noEmit false 2>/dev/null || true"
   },
   "devDependencies": {

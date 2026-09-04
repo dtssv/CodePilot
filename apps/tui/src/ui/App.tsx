@@ -13,6 +13,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type {
+  AgentMode,
   Event,
   PermissionDecision,
   PermissionMode,
@@ -35,11 +36,12 @@ export interface AppProps {
   cwd: string;
   model: string | undefined;
   permissionMode: PermissionMode;
+  initialAgentMode: AgentMode;
   initialPrompt?: string | undefined;
 }
 
 export function App(props: AppProps): React.ReactElement {
-  const { session, controller, permissionBridge, cwd, model, permissionMode, initialPrompt } = props;
+  const { session, controller, permissionBridge, cwd, model, permissionMode, initialAgentMode, initialPrompt } = props;
 
   const [state, dispatch] = React.useReducer(reducer, undefined, () =>
     initialState({
@@ -47,6 +49,7 @@ export function App(props: AppProps): React.ReactElement {
       cwd,
       model,
       permissionMode,
+      agentMode: initialAgentMode,
     }),
   );
 
@@ -116,6 +119,25 @@ export function App(props: AppProps): React.ReactElement {
             dispatch({ type: "set-mode", mode: result.mode });
             dispatch({ type: "set-notice", text: `Permission mode: ${result.mode}` });
             return;
+          case "set-agent-mode": {
+            // Optimistically reflect the new mode locally so the StatusBar
+            // updates immediately. The session will also emit a `mode` event
+            // for any other subscribers; the reducer will reconcile.
+            dispatch({ type: "set-agent-mode", mode: result.mode });
+            dispatch({
+              type: "set-notice",
+              text: `Collaboration mode → ${result.mode} (only ${result.mode === "chat" ? "safe read tools" : result.mode === "plan" ? "read tools + plan_update" : "all tools"} are exposed to the model)`,
+            });
+            try {
+              await session.setAgentMode(result.mode);
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: `Failed to switch collaboration mode: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+            return;
+          }
           case "show-plan": {
             const plan = state.plan;
             dispatch({

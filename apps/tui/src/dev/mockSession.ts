@@ -21,6 +21,7 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  AgentMode,
   Event,
   PermissionDecision,
   Session,
@@ -32,6 +33,8 @@ export interface MockSessionOptions {
   cwd: string;
   yolo: boolean;
   bridge: PermissionBridge;
+  /** Optional initial Cursor-style collaboration mode (default "agent"). */
+  initialAgentMode?: AgentMode;
 }
 
 export interface MockSessionHandle {
@@ -51,6 +54,8 @@ interface SessionShape {
   cancel(): void;
   subscribe(listener: (e: Event) => void): () => void;
   getEvents(): Event[];
+  setAgentMode(mode: AgentMode): Promise<void>;
+  getAgentMode(): AgentMode;
   fork(atEventIndex?: number): Promise<SessionShape>;
   dispose(): Promise<void>;
 }
@@ -62,9 +67,11 @@ class MockSessionImpl implements SessionShape {
   private events: Event[] = [];
   private cancelled = false;
   private busy = false;
+  private mode: AgentMode;
 
-  constructor(cwd: string, private readonly yolo: boolean, private readonly bridge: PermissionBridge) {
+  constructor(cwd: string, private readonly yolo: boolean, private readonly bridge: PermissionBridge, initialAgentMode: AgentMode = "agent") {
     this.cwd = cwd;
+    this.mode = initialAgentMode;
     // Seed with an initial status:idle so the UI knows we're alive.
     this.emit({ type: "status", status: "idle" });
   }
@@ -182,11 +189,25 @@ class MockSessionImpl implements SessionShape {
   }
 
   async fork(_atEventIndex?: number): Promise<SessionShape> {
-    return new MockSessionImpl(this.cwd, this.yolo, this.bridge) as SessionShape;
+    return new MockSessionImpl(this.cwd, this.yolo, this.bridge, this.mode) as SessionShape;
   }
 
   async dispose(): Promise<void> {
     this.listeners.clear();
+  }
+
+  async setAgentMode(mode: AgentMode): Promise<void> {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    // Mirror the real Session behaviour: persist + emit a `mode` event so the
+    // UI's reducer keeps state in sync with the canonical source of truth.
+    const ev: Event = { type: "mode", mode };
+    this.events.push(ev);
+    for (const l of this.listeners) l(ev);
+  }
+
+  getAgentMode(): AgentMode {
+    return this.mode;
   }
 
   private cannedReply(prompt: string): string[] {
@@ -206,7 +227,7 @@ function sleep(ms: number): Promise<void> {
 export function createMockSession(opts: MockSessionOptions): MockSessionHandle {
   // The mock conforms structurally to SessionShape; cast at the boundary so
   // the TUI can pass it as a Session to the rest of the UI.
-  const mock = new MockSessionImpl(opts.cwd, opts.yolo, opts.bridge);
+  const mock = new MockSessionImpl(opts.cwd, opts.yolo, opts.bridge, opts.initialAgentMode);
   return {
     session: mock as unknown as Session,
     defaultModel: "mock-model",

@@ -77,8 +77,13 @@ class CodepilotService private constructor() {
             val settings = CodepilotSettings.getInstance().state
             // Use basePath directly; works in 2024.1.
             val projectCwd: String? = project.basePath
+            val mode = CodepilotSettings.normalizeMode(settings.defaultMode)
             return try {
-                client()?.newSession(cwd = projectCwd, model = settings.model.ifBlank { null })
+                client()?.newSession(
+                    cwd = projectCwd,
+                    model = settings.model.ifBlank { null },
+                    agentMode = mode,
+                )
             } catch (t: Throwable) {
                 log.warn("newSession failed: ${t.message}", t)
                 null

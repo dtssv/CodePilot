@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
+import com.intellij.openapi.diagnostic.logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,6 +49,7 @@ class CodepilotClient(
     private val envOverrides: Map<String, String> = emptyMap(),
 ) {
     private val gson = Gson()
+    private val log = logger<CodepilotClient>()
     private val idGen = AtomicLong(1L)
     private val pending = ConcurrentHashMap<Long, CompletableDeferredJson>()
     /** sessionId → active prompt generation (used so we can correlate incoming events). */
@@ -167,17 +169,42 @@ class CodepilotClient(
             protocolVersion = result.get("protocolVersion")?.asInt ?: 1,
             tools = capabilities?.getAsJsonArray("tools")?.map { it.asString } ?: emptyList(),
             providers = capabilities?.getAsJsonArray("providers")?.map { it.asString } ?: emptyList(),
+            modes = capabilities?.getAsJsonArray("modes")?.map { it.asString } ?: listOf("chat", "plan", "agent"),
         )
     }
 
-    fun newSession(cwd: String? = null, model: String? = null, systemPromptExtra: String? = null): String {
+    fun newSession(
+        cwd: String? = null,
+        model: String? = null,
+        systemPromptExtra: String? = null,
+        agentMode: String? = null,
+    ): String {
         val args = JsonObject().apply {
             cwd?.let { addProperty("cwd", it) }
             model?.let { addProperty("model", it) }
             systemPromptExtra?.let { addProperty("systemPromptExtra", it) }
+            agentMode?.let { addProperty("agentMode", it) }
         }
         val r = sendRequest("session/new", args) ?: error("session/new timed out")
         return r.get("sessionId").asString
+    }
+
+    /**
+     * Switch the collaboration mode for an already-open session (Cursor-style Ask/Plan/Agent).
+     * Server immediately emits a `{type:"mode", mode}` event to acknowledge.
+     * Returns true on success; false if the server rejected with SessionNotFound / InvalidParams.
+     */
+    fun setMode(sessionId: String, mode: String): Boolean {
+        val args = JsonObject().apply {
+            addProperty("sessionId", sessionId)
+            addProperty("mode", mode)
+        }
+        return try {
+            sendRequest("session/setMode", args, timeoutMs = 5_000) != null
+        } catch (t: Throwable) {
+            log.warn("setMode($mode) failed: ${t.message}", t)
+            false
+        }
     }
 
     fun resumeSession(sessionId: String): ResumeResult {
@@ -362,6 +389,7 @@ data class InitializeResult(
     val protocolVersion: Int,
     val tools: List<String>,
     val providers: List<String>,
+    val modes: List<String>,
 )
 
 data class ResumeResult(val sessionId: String, val events: List<JsonObject>)

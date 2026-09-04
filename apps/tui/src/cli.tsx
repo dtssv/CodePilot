@@ -15,6 +15,9 @@ import { App as AppUI } from "./ui/App.js";
 import { createPermissionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
 
+const AGENT_MODES = ["chat", "plan", "agent"] as const;
+type AgentMode = (typeof AGENT_MODES)[number];
+
 type ParsedArgs = {
   cwd: string;
   model?: string;
@@ -24,6 +27,8 @@ type ParsedArgs = {
   mock: boolean;
   prompt?: string;
   showHelp: boolean;
+  /** Cursor-style collaboration mode. */
+  mode?: AgentMode;
 };
 
 const HELP = `codepilot-tui — interactive terminal UI for CodePilot
@@ -32,13 +37,17 @@ Usage:
   codepilot-tui [options] [prompt...]
 
 Options:
-  --cwd <dir>        Project directory (default: $PWD)
-  --model <name>     Override model (e.g. claude-sonnet-4-5)
-  --provider <p>     One of anthropic|openai|copilot
-  --yolo             Start in yolo permission mode (auto-approve all)
-  --resume <id>      Resume an existing session
-  --mock             Use an in-memory mock session (no core needed; for UI dev)
-  -h, --help         Show this help
+  --cwd <dir>                Project directory (default: $PWD)
+  --model <name>             Override model (e.g. claude-sonnet-4-5)
+  --provider <p>             One of anthropic|openai|copilot
+  --yolo                     Start in yolo permission mode (auto-approve all)
+  --mode <chat|plan|agent>   Start in a Cursor-style collaboration mode
+                               chat  — read-only Q&A (no edits, no shell)
+                               plan  — read-only + plan_update; produces a plan
+                               agent — full autonomy (default)
+  --resume <id>              Resume an existing session
+  --mock                     Use an in-memory mock session (no core needed; for UI dev)
+  -h, --help                 Show this help
 
 If positional arguments are provided, they are joined and submitted as the
 first prompt once the UI is ready.
@@ -99,6 +108,19 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         if (v) out.resume = v;
         break;
       }
+      case a === "--mode":
+      case a.startsWith("--mode="): {
+        const v = takeValue();
+        if (v && (AGENT_MODES as readonly string[]).includes(v)) {
+          out.mode = v as AgentMode;
+        } else if (v !== undefined) {
+          process.stderr.write(
+            `codepilot-tui: --mode must be one of ${AGENT_MODES.join(", ")} (got: ${v})\n`,
+          );
+          process.exit(2);
+        }
+        break;
+      }
       case a === "--yolo": {
         out.yolo = true;
         break;
@@ -154,6 +176,7 @@ async function main(): Promise<void> {
   let permissionMode: import("@codepilot/core").PermissionMode = args.yolo
     ? "yolo"
     : "ask";
+  let agentMode: import("@codepilot/core").AgentMode = args.mode ?? "agent";
   let model: string | undefined = args.model;
   const bridge = createPermissionBridge();
 
@@ -167,6 +190,7 @@ async function main(): Promise<void> {
       cwd: args.cwd,
       yolo: args.yolo,
       bridge,
+      initialAgentMode: agentMode,
     });
     session = mock.session;
     permissionMode = args.yolo ? "yolo" : "ask";
@@ -178,8 +202,10 @@ async function main(): Promise<void> {
       permissionMode: args.yolo ? "yolo" : (cfg.permissionMode ?? "ask"),
       provider: args.provider ?? cfg.provider,
       model: args.model ?? cfg.model,
+      agentMode: args.mode ?? cfg.agentMode,
     };
     permissionMode = config.permissionMode ?? "ask";
+    agentMode = config.agentMode ?? "agent";
     model = config.model;
 
     session = await core.createSession({
@@ -187,8 +213,11 @@ async function main(): Promise<void> {
       config,
       sessionId: args.resume,
       model: args.model,
+      agentMode,
       onPermissionRequest: (req) => bridge.waitDecision(req),
     });
+    // Reflect the actual current mode (e.g. resumed sessions may differ).
+    agentMode = session.getAgentMode();
   }
 
   // We need a way for the UI to (a) trigger runGoal and (b) list sessions,
@@ -218,6 +247,7 @@ async function main(): Promise<void> {
       cwd: args.cwd,
       model,
       permissionMode,
+      initialAgentMode: agentMode,
       initialPrompt: args.prompt,
     }),
   );

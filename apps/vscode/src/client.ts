@@ -10,6 +10,7 @@ import { EventEmitter } from "node:events";
 import * as vscode from "vscode";
 import type { CodepilotSettings } from "./config.js";
 import type {
+  AgentMode,
   Event,
   InitializeParams,
   InitializeResult,
@@ -25,6 +26,7 @@ import type {
   ServerEvent,
   SessionNewParams,
   SessionResumeParams,
+  SessionSetModeParams,
   SessionUsageNotification,
 } from "./types.js";
 
@@ -159,10 +161,12 @@ export class CodePilotClient extends EventEmitter {
     const cwd = params.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const model = params.model ?? (this.settings.model || undefined);
     const sysExtra = params.systemPromptExtra ?? (this.settings.systemPromptExtra || undefined);
+    const agentMode = params.agentMode ?? (this.settings.agentMode || undefined);
     const { sessionId } = await this.request<{ sessionId: string }>("session/new", {
       cwd,
       model,
       systemPromptExtra: sysExtra,
+      agentMode,
     });
     this.knownSessions.add(sessionId);
     return sessionId;
@@ -189,6 +193,18 @@ export class CodePilotClient extends EventEmitter {
       requestId,
       decision,
     } satisfies PermissionRespondParams);
+  }
+
+  /**
+   * Switch a session's collaboration mode at runtime. The server replies with
+   * an empty object and immediately emits a `{type:"mode", mode}` event so we
+   * can keep the UI in sync.
+   */
+  async setMode(sessionId: string, mode: AgentMode): Promise<void> {
+    await this.request("session/setMode", {
+      sessionId,
+      mode,
+    } satisfies SessionSetModeParams);
   }
 
   capabilities(): InitializeResult["capabilities"] | null {
