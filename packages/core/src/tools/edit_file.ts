@@ -201,7 +201,16 @@ function applyBlockReplacements(
 export const editFileTool: ToolDef<typeof schema> = {
   name: "edit_file",
   description:
-    "Apply a search/replace edit to a file. Tries exact match first, then trimmed-line match, then single-line unique match. Pass `regex: true` to use a regular expression.",
+    "Apply a search/replace edit to a single file. ALWAYS prefer this over `write_file` for " +
+    "changes — search/replace produces a small diff that is easy to review and impossible to " +
+    "accidentally clobber unrelated lines. The tool tries four match strategies in order: " +
+    "(1) exact string match, (2) trimmed-line match (ignores leading/trailing whitespace per " +
+    "line), (3) single-line unique match, (4) regex when `regex: true`. " +
+    "If the search text occurs more than once and `global_replace` is not set, the call fails " +
+    "with an 'ambiguous' error — either widen the search to include surrounding context, or " +
+    "set `global_replace: true`. Read the file (or use `grep`) first to confirm the search " +
+    "text actually exists. Use `write_file` only when creating a new file or doing a near-full " +
+    "rewrite.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

@@ -39,7 +39,17 @@ export interface SubagentRunner {
 export const taskTool: ToolDef<typeof schema> & { runner?: SubagentRunner } = {
   name: "task",
   description:
-    "Run a sub-agent in an isolated context to perform a focused task; return the conclusion to the main agent.",
+    "Dispatch a focused task to a sub-agent in an isolated context. The sub-agent does not " +
+    "see your history and you do not see its intermediate steps — only its final conclusion " +
+    "comes back. Use it for parallelisable exploration that would otherwise clutter your own " +
+    "context: codebase searches, 'what does this module do', 'find every callsite of X', " +
+    "'summarise this file'. Do NOT use it for a single `read_file` or one-line `grep` — that " +
+    "is cheaper to do directly. Do NOT use it to delegate serial work you could do yourself. " +
+    "Pass `tools` to widen the sub-agent's tool set beyond the read-only default; the sub-agent " +
+    "still cannot spawn further sub-agents. Write the `objective` so a fresh agent can act on " +
+    "it without further context (state the goal, the files of interest, and what to return). " +
+    "The sub-agent's conclusion must follow the structured `### Findings / ### Key " +
+    "references / ### Recommendations` format described in its system prompt.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

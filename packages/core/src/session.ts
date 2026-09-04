@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { runAgent, type AgentDeps } from "./agent.js";
 import type {
+  AgentMode,
   CodepilotConfig,
   Event,
   ImageAttachment,
@@ -39,6 +40,7 @@ import {
   memoryWriteTool,
   readArtifactTool,
   taskTool,
+  filterToolsByModeFromRegistry,
 } from "./tools/index.js";
 
 export const SESSIONS_DIR = join(homedir(), ".codepilot", "sessions");
@@ -67,6 +69,8 @@ export class Session {
   private mcp: McpManager | null = null;
   private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string } | null = null;
   private disposed = false;
+  /** Current Cursor-style collaboration mode (default "agent"). */
+  private mode: AgentMode = "agent";
 
   constructor(
     id: string,
@@ -78,6 +82,7 @@ export class Session {
     this.model = opts.model ?? this.config.model ?? "claude-sonnet-4-5";
     this.systemPromptExtra = opts.systemPromptExtra;
     this.onPermissionRequest = opts.onPermissionRequest;
+    this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
     this.toolRegistry = new ToolRegistry();
     this.artifacts = new ArtifactStore(join(opts.cwd, ".codepilot", "artifacts"));
     this.permissions = new PermissionEngine({
@@ -108,6 +113,7 @@ export class Session {
         cwd: this.cwd,
         systemPrompt: this.systemPromptCache ?? undefined,
         signal: this.cancelController.signal,
+        agentMode: this.mode,
         onEvent: async (e) => {
           this.events.push(e);
           await this.persistEvent(e);
@@ -125,6 +131,29 @@ export class Session {
     } finally {
       this.cancelController = null;
     }
+  }
+
+  /**
+   * Runtime collaboration-mode switch. Takes effect on the next `prompt()`
+   * (and on tool dispatch — see `runOneTool`'s mode gate in agent.ts). The
+   * system prompt is rebuilt so the new mode's guidance reaches the model
+   * on the next turn. Emits a `mode` event so subscribers (and protocol
+   * clients) can react immediately.
+   */
+  async setAgentMode(mode: AgentMode): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    if (this.mode === mode) return;
+    this.mode = mode;
+    await this.rebuildSystemPrompt();
+    const ev: Event = { type: "mode", mode };
+    this.events.push(ev);
+    await this.persistEvent(ev);
+    this.notify(ev);
+  }
+
+  /** Returns the current collaboration mode (default "agent"). */
+  getAgentMode(): AgentMode {
+    return this.mode;
   }
 
   cancel(): void {
@@ -157,6 +186,7 @@ export class Session {
       config: this.config,
       model: this.model,
       systemPromptExtra: this.systemPromptExtra,
+      agentMode: this.mode,
       onPermissionRequest: this.onPermissionRequest,
     });
     await forked.init();
@@ -280,7 +310,10 @@ export class Session {
   private async rebuildSystemPrompt(): Promise<void> {
     const memory = summariseMemory(await readMemory(this.cwd));
     const plan = extractPlan(this.events);
-    const toolNames = this.toolRegistry.names();
+    // The system prompt advertises the *mode-filtered* tool list, so the
+    // model doesn't expect tools that aren't actually available.
+    const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
+    const toolNames = visibleTools.map((t) => t.name);
     this.systemPromptCache = await buildSystemPrompt({
       cwd: this.cwd,
       memory,
@@ -289,6 +322,7 @@ export class Session {
       extra: this.systemPromptExtra,
       model: this.model,
       provider: this.config.provider ?? "anthropic",
+      mode: this.mode,
     });
   }
 

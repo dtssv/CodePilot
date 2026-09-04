@@ -88,6 +88,8 @@ function serializeEventForEstimate(e: Event): string {
       return e.status;
     case "error":
       return e.message;
+    case "mode":
+      return `mode:${e.mode}`;
   }
 }
 
@@ -151,6 +153,43 @@ function findCutoff(events: Event[], keep: number): number {
 }
 
 /**
+ * The structured prompt the small model receives to summarise dropped
+ * history. Exported so tests can assert the contract; callers that want
+ * to customise the prompt can pass a string override (not currently
+ * exposed via the public API but kept here for future use).
+ */
+export const SUMMARY_SYSTEM_PROMPT = `You are a context compactor for a long-running coding session. The conversation below has been dropped from the active context window because the session is running out of tokens. Your job is to write a summary that will let the next instance of the agent (which has not seen the dropped turns) resume the work as if nothing had happened.
+
+Write the summary in plain text, no markdown code fences, no preamble. Use exactly these seven sections in this order, with a blank line between them. Keep the whole summary under ~1200 tokens; prefer dense prose over lists.
+
+1. TASK OVERVIEW
+   The user's request, success criteria, and any clarifications they gave. One or two sentences.
+
+2. CURRENT STATE
+   What is done, what is in flight, and what is not started. Reference plan step ids when present.
+
+3. KEY FILES AND SYMBOLS
+   Concrete paths and line numbers the next agent will need: files read, files edited, exported symbols touched, config knobs flipped. Format: \`path/to/file.ts:42 — why it matters\`.
+
+4. DECISIONS MADE
+   Choices the team (or the previous agent) took, with the one-sentence rationale. Anything that, if forgotten, would cause the next agent to re-debate it.
+
+5. ERRORS AND FIXES
+   Bugs hit, their root cause, and how they were resolved. Include the verbatim command or error message when it is diagnostic (e.g. a specific stack-trace frame). Skip transient network blips.
+
+6. OPEN THREADS
+   Things left unfinished, known unknowns, and any questions waiting on the user.
+
+7. NEXT CONCRETE ACTION
+   The single most useful thing the next agent should do first. One sentence.
+
+Rules:
+- Preserve verbatim: exact command lines, file paths, error messages, env var values, branch names, commit hashes, and any literal string the user gave (connection strings, ports, seeds, tokens). Never paraphrase these.
+- Drop: conversational filler, duplicate tool outputs, intermediate reasoning that did not lead to a decision.
+- When in doubt about whether something is verbatim-form, treat it as verbatim and quote it.
+- Do not address the user. Do not say "I". Do not add a closing line. The seven sections are the entire output.`;
+
+/**
  * Run the full layered compaction. If no summariser is provided only the
  * local fold pass is applied. The result is a new event list with a
  * synthetic compaction event prepended (if anything was dropped).
@@ -196,16 +235,12 @@ async function callSummariser(
   events: Event[],
   model: string | undefined
 ): Promise<string> {
-  const systemPrompt =
-    "You are a context compactor. Produce a concise, structured summary of the dropped " +
-    "events. Preserve: decisions, file paths touched, errors, plan changes, open questions. " +
-    "Drop: redundant tool outputs, conversational filler. Output plain text only.";
   const userContent = events.map(serializeEventForEstimate).join("\n---\n");
   const collected: string[] = [];
   const stream = provider.stream({
     model: model ?? provider.smallModel,
     messages: [{ role: "user", content: [{ type: "text", text: userContent }] }],
-    systemPrompt,
+    systemPrompt: SUMMARY_SYSTEM_PROMPT,
   });
   for await (const ev of stream) {
     if (ev.kind === "text_delta") collected.push(ev.text);

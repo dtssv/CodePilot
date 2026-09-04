@@ -75,7 +75,21 @@ export type Event =
       type: "status";
       status: "idle" | "running" | "waiting_permission" | "compacting";
     }
-  | { type: "error"; message: string; recoverable: boolean };
+  | { type: "error"; message: string; recoverable: boolean }
+  | { type: "mode"; mode: AgentMode };
+
+/**
+ * Cursor-style collaboration mode. Controls which tools the model is allowed
+ * to call and how the system prompt is shaped.
+ *
+ * - `chat`: read-only Q&A. Only safe read tools are exposed. No file edits,
+ *   no shell. Model is asked to answer questions / give suggestions without
+ *   modifying the codebase.
+ * - `plan`: read-only + `plan_update`. The model explores the code and
+ *   produces a structured plan but does not execute any mutations.
+ * - `agent`: full autonomy — the default. All tools are available.
+ */
+export type AgentMode = "chat" | "plan" | "agent";
 
 export type PermissionMode = "ask" | "auto-edit" | "yolo";
 
@@ -111,6 +125,8 @@ export interface CodepilotConfig {
   mcpServers?: Record<string, McpServerConfig>;
   /** Tool names or bash command regexes that auto-approve. */
   autoApprove?: string[];
+  /** Default collaboration mode for new sessions (default: "agent"). */
+  agentMode?: AgentMode;
 }
 
 export interface ImageAttachment {
@@ -125,6 +141,8 @@ export interface SessionOptions {
   sessionId?: string;
   systemPromptExtra?: string;
   model?: string;
+  /** Initial collaboration mode (default: "agent"). Override at runtime via Session.setAgentMode. */
+  agentMode?: AgentMode;
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
 }
 

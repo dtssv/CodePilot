@@ -16,6 +16,7 @@
  */
 
 import type {
+  AgentMode,
   CodepilotConfig,
   Event,
   PermissionDecision,
@@ -52,13 +53,20 @@ export interface InitializeParams {
 
 export interface InitializeResult {
   protocolVersion: number;
-  capabilities: { tools: string[]; providers: string[] };
+  capabilities: {
+    tools: string[];
+    providers: string[];
+    /** Supported collaboration modes (per docs/PROTOCOL.md). */
+    modes: AgentMode[];
+  };
 }
 
 export interface SessionNewParams {
   cwd?: string;
   model?: string;
   systemPromptExtra?: string;
+  /** Initial collaboration mode (default "agent"). */
+  agentMode?: AgentMode;
 }
 
 export interface SessionResumeParams {
@@ -94,6 +102,15 @@ export interface SessionForkParams {
   atEventIndex?: number;
 }
 
+/**
+ * Wire params for `session/setMode`: change a session's collaboration
+ * mode at runtime (see docs/PROTOCOL.md).
+ */
+export interface SessionSetModeParams {
+  sessionId: string;
+  mode: AgentMode;
+}
+
 /** Wire params for the reverse request we send to the client. */
 export interface PermissionRequestParams {
   sessionId: string;
@@ -104,6 +121,8 @@ export interface PermissionRequestParams {
 }
 
 export const PROTOCOL_VERSION = 1;
+/** All collaboration modes advertised by the server. */
+export const SUPPORTED_MODES: AgentMode[] = ["chat", "plan", "agent"];
 
 /**
  * Wire up RPC handlers on an existing `Peer`. Exposed for tests; production
@@ -128,6 +147,10 @@ export function registerServer(
   );
   peer.onRequest<SessionNewParams, { sessionId: string }>("session/new", (p) =>
     handleSessionNew(ctx, p),
+  );
+  peer.onRequest<SessionSetModeParams, Record<string, never>>(
+    "session/setMode",
+    (p) => handleSessionSetMode(ctx, p),
   );
   peer.onRequest<SessionResumeParams, SessionResumeResult>(
     "session/resume",
@@ -207,6 +230,7 @@ function defaultCapabilities(): InitializeResult["capabilities"] {
       "web_fetch",
     ],
     providers: ["anthropic", "openai", "copilot"],
+    modes: [...SUPPORTED_MODES],
   };
 }
 
@@ -283,15 +307,57 @@ async function handleSessionNew(
   assertInitialized(ctx);
   const cwd = params?.cwd ?? ctx.defaultCwd;
   const config = await loadConfigSafe(cwd);
-  const effectiveConfig = mergePermissionMode(config, ctx.defaultPermissionMode);
+  const effectiveConfig = mergeAgentMode(
+    mergePermissionMode(config, ctx.defaultPermissionMode),
+    params?.agentMode,
+  );
   const session = await createSession({
     cwd,
     config: effectiveConfig,
     model: params?.model ?? config?.model,
     systemPromptExtra: params?.systemPromptExtra,
+    agentMode: params?.agentMode ?? effectiveConfig.agentMode,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
   });
   return registerSession(ctx, session);
+}
+
+/**
+ * `session/setMode`: switch a session's collaboration mode at runtime.
+ * The session emits a `mode` event on its event stream so subscribers
+ * observe the change without polling.
+ */
+async function handleSessionSetMode(
+  ctx: ServerContext,
+  params: SessionSetModeParams,
+): Promise<Record<string, never>> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) {
+    throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  }
+  if (!isSupportedMode(params.mode)) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `unsupported mode: ${String(params.mode)}`,
+      { supported: SUPPORTED_MODES },
+    );
+  }
+  const session = ctx.sessions.get(params.sessionId);
+  if (!session) {
+    throw new RpcError(
+      ErrorCode.SessionNotFound,
+      `session not found: ${params.sessionId}`,
+    );
+  }
+  await session.setAgentMode(params.mode);
+  return {};
+}
+
+function isSupportedMode(value: unknown): value is AgentMode {
+  return (
+    typeof value === "string" &&
+    (SUPPORTED_MODES as string[]).includes(value)
+  );
 }
 
 async function handleSessionResume(
@@ -321,6 +387,15 @@ function mergePermissionMode(
   mode: PermissionMode,
 ): CodepilotConfig {
   return { ...(config ?? {}), permissionMode: mode };
+}
+
+/** Merge a per-call `agentMode` override into the effective config. */
+function mergeAgentMode(
+  config: CodepilotConfig,
+  mode: AgentMode | undefined,
+): CodepilotConfig {
+  if (!mode) return config;
+  return { ...config, agentMode: mode };
 }
 
 function registerSession(

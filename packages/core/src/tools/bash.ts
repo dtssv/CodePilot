@@ -22,7 +22,16 @@ const schema = z.object({
 export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
-    "Execute a shell command. Output is truncated; large outputs spill to an artifact.",
+    "Execute a shell command in the project working directory via `/bin/sh -c`. " +
+    "Use for anything you would type at a terminal: running tests, build commands, " +
+    "git queries, package-manager invocations, ad-hoc inspection (`ls`, `wc -l`, `head`). " +
+    "Do NOT use for reading files — prefer `read_file` / `grep` / `glob` (no shell, no escaping). " +
+    "Do NOT use for edits — prefer `edit_file` (search/replace). " +
+    "Output above 8 KB is spilled to an artifact; the tool result returns the head and a `ref`. " +
+    "Commands have a default 60s timeout (configurable up to 10 min) and a 5MB output cap. " +
+    "Dangerous commands (`rm -rf /`, `git push --force`, `git reset --hard`, drop-table, " +
+    "raw disk writes, etc.) require explicit user authorisation — when in doubt, do not run " +
+    "them; describe what you would run instead. The command runs with the user's full environment.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

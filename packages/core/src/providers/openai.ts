@@ -3,6 +3,7 @@
 // speaks the /v1/chat/completions streaming protocol.
 
 import { parseSse } from "./sse.js";
+import { fetchWithRetry } from "./retry.js";
 import type {
   ChatProvider,
   ProviderMessage,
@@ -57,13 +58,15 @@ export class OpenAIProvider implements ChatProvider {
     // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
     // includes it; many compatible gateways document the bare host).
     const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/chat/completions`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: opts.signal,
+    }, {
       signal: opts.signal,
     });
     if (!res.ok || !res.body) {

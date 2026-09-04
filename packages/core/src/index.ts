@@ -12,6 +12,7 @@ export type {
   MessageDelta,
   TextDelta,
   ToolInputJsonDelta,
+  AgentMode,
   PermissionMode,
   PermissionRequest,
   PermissionDecision,
@@ -67,6 +68,9 @@ export {
   readArtifactTool,
   taskTool,
   ArtifactStore,
+  filterToolsByMode,
+  filterToolsByModeFromRegistry,
+  filterToolNames,
 } from "./tools/index.js";
 export type {
   ToolDef,

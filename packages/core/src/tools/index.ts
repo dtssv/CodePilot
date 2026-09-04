@@ -20,3 +20,8 @@ export { readArtifactTool } from "./read_artifact.js";
 export { taskTool } from "./task.js";
 export type { SubagentRunner } from "./task.js";
 export { ArtifactStore } from "./artifacts.js";
+export {
+  filterToolsByMode,
+  filterToolsByModeFromRegistry,
+  filterToolNames,
+} from "./modes.js";

@@ -15,6 +15,7 @@ import { zodToJsonSchema } from "./tools/types.js";
 import type { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
 import type {
+  AgentMode,
   CodepilotConfig,
   ContentBlock,
   Event,
@@ -23,6 +24,7 @@ import type {
   PermissionRequest,
   ToolUseBlock,
 } from "./types.js";
+import { filterToolsByMode } from "./tools/modes.js";
 
 export interface AgentDeps {
   provider: ChatProvider;
@@ -43,6 +45,11 @@ export interface AgentDeps {
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
   /** Maximum number of assistant turns per prompt. */
   maxTurns?: number;
+  /**
+   * Cursor-style collaboration mode. Filters the tool table sent to the
+   * provider. Defaults to "agent" (no filtering).
+   */
+  agentMode?: AgentMode;
 }
 
 export interface AgentRunInput {
@@ -66,6 +73,7 @@ export async function runAgent(
   deps: AgentDeps
 ): Promise<AgentRunResult> {
   const maxTurns = deps.maxTurns ?? 50;
+  const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const emit = async (e: Event): Promise<void> => {
     produced.push(e);
@@ -93,7 +101,7 @@ export async function runAgent(
     await emit({ type: "status", status: "running" });
 
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages);
-    const providerTools = buildProviderToolDefs(deps.tools);
+    const providerTools = buildProviderToolDefs(deps.tools, agentMode);
 
     const messageId = `msg_${randomUUID()}`;
     const assistantText: string[] = [];
@@ -186,7 +194,7 @@ export async function runAgent(
 
     // Run tools in parallel.
     const toolResults = await Promise.all(
-      toolCalls.map((tc) => runOneTool(tc, deps, emit))
+      toolCalls.map((tc) => runOneTool(tc, deps, emit, agentMode))
     );
     for (let i = 0; i < toolCalls.length; i++) {
       const tc = toolCalls[i]!;
@@ -257,15 +265,28 @@ async function* streamOnce(
   const sys = deps.systemPrompt;
   const staticPrefix = sys?.staticPrefix;
   const dynamicSuffix = sys?.dynamicSuffix;
-  // We only pass the static prefix as the system prompt; the dynamic suffix
-  // is appended to the LAST user message as a final note. This keeps the
-  // cache-friendly prefix stable across turns while still giving the model
-  // fresh runtime context.
+  // Static prefix goes to the system prompt (cache-friendly). The dynamic
+  // suffix (env, git, memory, plan) is appended to the final user message as
+  // a <runtime_context> note so it stays fresh per turn without busting the
+  // cached prefix. Messages here are provider-bound copies, safe to derive.
+  let effectiveMessages = messages;
+  if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
+    effectiveMessages = [...messages];
+    const note = `<runtime_context>\n${dynamicSuffix}\n</runtime_context>`;
+    const last = effectiveMessages[effectiveMessages.length - 1];
+    if (last && last.role === "user") {
+      effectiveMessages[effectiveMessages.length - 1] = {
+        ...last,
+        content: [...last.content, { type: "text", text: "\n\n" + note }],
+      };
+    } else {
+      effectiveMessages.push({ role: "user", content: [{ type: "text", text: note }] });
+    }
+  }
   void messageId;
-  void dynamicSuffix;
   yield* provider.stream({
     model: deps.config.model ?? provider.defaultModel,
-    messages,
+    messages: effectiveMessages,
     tools,
     systemPrompt: staticPrefix,
     signal: deps.signal,
@@ -273,8 +294,9 @@ async function* streamOnce(
   });
 }
 
-function buildProviderToolDefs(tools: ToolRegistry): ProviderToolDef[] {
-  return tools.all().map((t) => ({
+function buildProviderToolDefs(tools: ToolRegistry, mode: AgentMode): ProviderToolDef[] {
+  const visible = filterToolsByMode(tools.all(), mode);
+  return visible.map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: zodToJsonSchema(t.inputSchema),
@@ -385,7 +407,8 @@ function compactTranscriptToProviderMessages(
 async function runOneTool(
   tc: ToolUseBlock,
   deps: AgentDeps,
-  emit: (e: Event) => Promise<void>
+  emit: (e: Event) => Promise<void>,
+  mode: AgentMode = "agent"
 ): Promise<{
   content: string;
   isError: boolean;
@@ -396,6 +419,18 @@ async function runOneTool(
   if (!tool) {
     return {
       content: `unknown tool: ${tc.name}`,
+      isError: true,
+    };
+  }
+
+  // Mode gating: refuse tools that the current collaboration mode forbids.
+  // This is a defence-in-depth check — the provider also shouldn't see them
+  // — but if a previous turn's mode was changed, an in-flight call could
+  // otherwise reach a forbidden tool.
+  const visible = filterToolsByMode([tool], mode);
+  if (visible.length === 0) {
+    return {
+      content: `tool ${tc.name} is not allowed in ${mode} mode`,
       isError: true,
     };
   }

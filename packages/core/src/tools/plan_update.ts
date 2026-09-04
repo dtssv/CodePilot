@@ -19,7 +19,16 @@ const schema = z.object({
 export const planUpdateTool: ToolDef<typeof schema> = {
   name: "plan_update",
   description:
-    "Replace the current plan with the given steps. Use this to keep an up-to-date todo list visible to the user and protected from compaction.",
+    "Replace the current plan with a fresh list of steps. Use this to keep a structured " +
+    "todo list visible to the user AND protected from context compaction (plan events " +
+    "are always retained verbatim). For any task with >= 3 steps, call this at the start " +
+    "to declare the plan, then call it again whenever a step's status changes (mark " +
+    "`completed`, set the next one `in_progress`, or surface a `blocked` step). " +
+    "Each step has: `id` (stable short string, reuse across updates), `title` (one line, " +
+    "what the deliverable is), and `status` in {pending, in_progress, completed, blocked}. " +
+    "Aim for 3-8 active steps; collapse clusters of completed steps rather than letting the " +
+    "list grow unbounded. If you mark a step `blocked`, say so in its title so the user sees " +
+    "the blocker without opening a tool result.",
   inputSchema: schema,
   permission: "read",
   async execute(input) {

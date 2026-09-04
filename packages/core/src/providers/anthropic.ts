@@ -2,6 +2,7 @@
 // No SDK dependency — uses fetch directly.
 
 import { parseSse } from "./sse.js";
+import { fetchWithRetry } from "./retry.js";
 import type {
   ChatProvider,
   ProviderMessage,
@@ -83,12 +84,12 @@ export class AnthropicProvider implements ChatProvider {
       headers["anthropic-beta"] = BETA_PROMPT_CACHING;
     }
 
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
       signal: opts.signal,
-    });
+    }, { signal: opts.signal });
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
       yield {
