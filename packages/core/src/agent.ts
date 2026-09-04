@@ -25,6 +25,9 @@ import type {
   ToolUseBlock,
 } from "./types.js";
 import { filterToolsByMode } from "./tools/modes.js";
+import { estimateTokens, lookupContextWindow } from "./tokens.js";
+import { foldToolResults } from "./compaction.js";
+import type { ResolvedSandbox } from "./sandbox.js";
 
 export interface AgentDeps {
   provider: ChatProvider;
@@ -41,10 +44,26 @@ export interface AgentDeps {
   onEvent?: (e: Event) => void | Promise<void>;
   /** Called with each usage update. */
   onUsage?: (usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; costUSD?: number }) => void;
+  /**
+   * Called after every assistant turn with the running session-level token
+   * estimate. The estimate is produced by the segmented estimator in
+   * `./tokens.js` and is meant to drive decisions like "should we
+   * checkpoint now?" rather than match a specific provider's BPE table.
+   * Optional — when omitted the agent runs unchanged.
+   */
+  onTokenEstimate?: (estimate: { tokens: number; turns: number; window: number }) => void;
   /** Permission request handler. */
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
   /** Maximum number of assistant turns per prompt. */
   maxTurns?: number;
+  /** Active sandbox policy handed to every tool via ToolContext. */
+  sandbox?: ResolvedSandbox;
+  /**
+   * Steering hook: called at the start of every agent turn. Returned texts
+   * are injected into the transcript as additional user messages, letting a
+   * host queue mid-run guidance without cancelling the run.
+   */
+  drainSteering?: () => string[];
   /**
    * Cursor-style collaboration mode. Filters the tool table sent to the
    * provider. Defaults to "agent" (no filtering).
@@ -72,7 +91,7 @@ export async function runAgent(
   input: AgentRunInput,
   deps: AgentDeps
 ): Promise<AgentRunResult> {
-  const maxTurns = deps.maxTurns ?? 50;
+  const maxTurns = deps.maxTurns ?? deps.config.maxTurns ?? 50;
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const emit = async (e: Event): Promise<void> => {
@@ -98,6 +117,22 @@ export async function runAgent(
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (deps.signal?.aborted) break;
+
+    // Drain queued steering messages into the transcript before building
+    // the provider request, so mid-run guidance reaches the model on the
+    // very next turn.
+    if (deps.drainSteering) {
+      const steered = deps.drainSteering();
+      for (const text of steered) {
+        await emit({
+          type: "message",
+          id: `msg_${randomUUID()}`,
+          role: "user",
+          content: [{ type: "text", text }],
+        });
+      }
+    }
+
     await emit({ type: "status", status: "running" });
 
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages);
@@ -179,7 +214,24 @@ export async function runAgent(
 
     if (sawError) {
       await emit({ type: "error", message: sawError, recoverable: true });
+      // The stream failed mid-turn: any tool calls we did receive may have
+      // been parsed from truncated input. Do NOT execute them — end the run
+      // and let the caller (or the next user message) retry cleanly.
+      if (toolCalls.length > 0) {
+        await emit({ type: "status", status: "idle" });
+        return {
+          events: produced,
+          hadToolCalls: sawToolCalls,
+          finalText: assistantText.join(""),
+        };
+      }
     }
+
+    // Fire the token-estimate hook so the session layer can decide
+    // whether to compact or write a checkpoint. We do this in addition
+    // to the per-prompt postlude so very long single-prompt runs (many
+    // tool calls within one user message) can still react.
+    emitTokenEstimateIfNeeded(deps, input, produced, turn);
 
     // Stop if the model didn't request any tools.
     if (toolCalls.length === 0) {
@@ -255,6 +307,45 @@ export async function runAgent(
   };
 }
 
+/** Compute a running session-level token estimate and notify the host. */
+function emitTokenEstimateIfNeeded(
+  deps: AgentDeps,
+  input: AgentRunInput,
+  produced: Event[],
+  turn: number
+): void {
+  if (!deps.onTokenEstimate) return;
+  const all = [...input.history, ...produced];
+  let tokens = 0;
+  let turns = 0;
+  for (const e of all) {
+    if (e.type === "message") {
+      if (e.role === "user") turns++;
+      for (const b of e.content) {
+        if (b.type === "text") tokens += estimateTokens(b.text);
+        else tokens += estimateTokens(JSON.stringify(b));
+      }
+    } else if (e.type === "compaction") {
+      tokens += estimateTokens(e.summary);
+    } else if (e.type === "tool_call") {
+      tokens += estimateTokens(JSON.stringify(e.input ?? {}));
+    } else if (e.type === "tool_result") {
+      tokens += estimateTokens(e.content);
+    } else if (e.type === "plan") {
+      tokens += estimateTokens(JSON.stringify(e.steps));
+    }
+  }
+  const window = deps.config.contextWindow ??
+    lookupContextWindow(deps.config.model).contextWindow;
+  try {
+    deps.onTokenEstimate({ tokens, turns, window });
+  } catch {
+    /* never let a listener throw */
+  }
+  // Touch `turn` to keep the parameter used when we add per-turn thresholds.
+  void turn;
+}
+
 async function* streamOnce(
   provider: ChatProvider,
   deps: AgentDeps,
@@ -313,8 +404,13 @@ function buildProviderMessages(
   // so far in the current run (we already appended the user message, so
   // we omit `userText` here). The agent loop is responsible for sending
   // the user message once at the start of the run.
-  const transcript = [...history, ...newEvents];
-  return compactTranscriptToProviderMessages(transcript, userText, images);
+  //
+  // Micro-compaction (opencode-style prune): before sending, fold old
+  // tool_result events (everything before the last 8 messages) into short
+  // stubs that keep the artifactRef. This operates on a COPY of the event
+  // list — the persisted JSONL transcript is untouched.
+  const folded = foldToolResults([...history, ...newEvents], { keepRecentMessages: 8 });
+  return compactTranscriptToProviderMessages(folded.events, userText, images);
 }
 
 function compactTranscriptToProviderMessages(
@@ -454,7 +550,10 @@ async function runOneTool(
         void err;
       }
       if (decision === "always") {
-        deps.permissions.setMode("yolo");
+        // Narrow the grant to a rule covering this invocation (e.g.
+        // "bash(npm test *)") instead of flipping the whole session to yolo.
+        const rule = PermissionEngine.suggestRule(tool, tc.input);
+        deps.permissions.addSessionRule(rule, "allow");
         decision = "allow";
       }
       await emit({ type: "status", status: "running" });
@@ -470,20 +569,32 @@ async function runOneTool(
     };
   }
 
-  // Validate input via Zod (best-effort: on failure, surface the issue).
+  // Validate input via Zod. A validation failure is returned as a tool
+  // error so the model can self-correct (this is the behaviour all mature
+  // agents rely on); silently passing malformed input through is how
+  // corrupt edits happen.
   let parsed: unknown = tc.input;
   const safe = tool.inputSchema.safeParse(tc.input);
   if (!safe.success) {
-    parsed = tc.input;
-  } else {
-    parsed = safe.data;
+    const issues = safe.error.issues
+      .slice(0, 5)
+      .map((i) => `  - ${i.path.join(".") || "<root>"}: ${i.message}`)
+      .join("\n");
+    return {
+      content:
+        `invalid arguments for tool ${tc.name}:\n${issues}\n` +
+        `Fix the arguments and call the tool again.`,
+      isError: true,
+    };
   }
+  parsed = safe.data;
 
   const ctx: ToolContext = {
     cwd: deps.cwd,
     signal: deps.signal,
     artifact: async (blob, hint) => deps.artifacts.write(blob, hint),
     readArtifact: async (ref) => deps.artifacts.read(ref),
+    sandbox: deps.sandbox,
   };
 
   try {

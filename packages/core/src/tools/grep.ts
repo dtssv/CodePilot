@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { ToolDef } from "./types.js";
+import { isIgnoredDirName, guardPath } from "./_shared.js";
 
 const schema = z.object({
   pattern: z.string().describe("Regular expression (JavaScript syntax)."),
@@ -35,10 +36,19 @@ interface GrepHit {
 export const grepTool: ToolDef<typeof schema> = {
   name: "grep",
   description:
-    "Search file contents with a regex. Returns file:line:snippet for each match.",
+    "Search file contents with a regular expression (JavaScript syntax). Returns " +
+    "`file:line: snippet` for each match with `context` lines of surrounding code " +
+    "(default 1). Restrict the file set with `include` (a glob like \"*.ts\"). " +
+    "Files >2MB and heavy directories (node_modules, .git, dist, …) are skipped.\n\n" +
+    "When to use: locating symbols, call sites, config keys — any content-based " +
+    "discovery. Prefer it over `read_file` when you do not yet know which file " +
+    "matters. When NOT to use: when you already know the file (use `read_file`), " +
+    "or for file-name search (use `glob`).",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
+    const guard = await guardPath(ctx, input.cwd ?? ".", "read");
+    if (guard) return guard;
     const base = resolve(ctx.cwd, input.cwd ?? ".");
     const max = input.maxResults ?? 200;
     const ctxLines = input.context ?? 1;
@@ -78,7 +88,7 @@ async function walk(
     if (out.length >= cap) return;
     const abs = join(dir, ent.name);
     if (ent.isDirectory()) {
-      if (ent.name === "node_modules" || ent.name === ".git" || ent.name === "dist") continue;
+      if (isIgnoredDirName(ent.name)) continue;
       await walk(root, abs, re, include, ctxLines, out, cap, depth + 1);
     } else if (ent.isFile()) {
       const rel = abs.startsWith(root + sep) ? abs.slice(root.length + 1) : abs;

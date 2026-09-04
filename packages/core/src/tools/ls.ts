@@ -4,6 +4,7 @@ import { z } from "zod";
 import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ToolDef } from "./types.js";
+import { guardPath } from "./_shared.js";
 
 const schema = z.object({
   path: z
@@ -22,10 +23,16 @@ const schema = z.object({
 
 export const lsTool: ToolDef<typeof schema> = {
   name: "ls",
-  description: "List a single directory (non-recursive).",
+  description:
+    "List a single directory, one level deep, directories first (`d name/`, " +
+    "`- file`). Dotfiles are hidden unless `showHidden: true`. Cheap and fast — " +
+    "use it to orient in an unfamiliar directory before reaching for `glob`. " +
+    "Not recursive; use `glob` with a `**` pattern for tree-wide listing.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
+    const guard = await guardPath(ctx, input.path ?? ".", "read");
+    if (guard) return guard;
     const dir = resolve(ctx.cwd, input.path ?? ".");
     const max = input.maxEntries ?? 500;
     const showHidden = input.showHidden ?? false;

@@ -1,0 +1,182 @@
+// Background job registry for the bash tool.
+//
+// A background job is a detached child process whose stdout/stderr stream
+// into `.codepilot/jobs/<jobId>.log`, with metadata in `<jobId>.json`.
+// The registry is module-level and keyed by cwd, so the `bash`,
+// `bash_output` and `bash_kill` tools share it within a session.
+//
+// Job state survives the command that started it, but NOT a process
+// restart of CodePilot itself: on disk, jobs whose metadata says
+// "running" at load time are reported as "unknown" (the pid may be dead
+// or reused). This mirrors claude-code's BashOutput/KillShell model.
+
+import { createWriteStream, existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+
+export interface JobMeta {
+  id: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  startedAt: string;
+  status: "running" | "exited" | "killed" | "failed" | "unknown";
+  exitCode?: number | null;
+  finishedAt?: string;
+  sandboxed: boolean;
+  sandboxBackend: string;
+}
+
+export interface BackgroundJob {
+  meta: JobMeta;
+  proc?: ChildProcess;
+  logPath: string;
+  metaPath: string;
+}
+
+interface Registry {
+  jobs: Map<string, BackgroundJob>;
+}
+
+const registries = new Map<string, Registry>();
+
+function registryFor(cwd: string): Registry {
+  let r = registries.get(cwd);
+  if (!r) {
+    r = { jobs: new Map() };
+    registries.set(cwd, r);
+  }
+  return r;
+}
+
+export function jobsDir(cwd: string): string {
+  return join(cwd, ".codepilot", "jobs");
+}
+
+export interface SpawnJobSpec {
+  command: string;
+  cwd: string;
+  /** Shell executable and args prefix (from the sandbox wrapper). */
+  shell: string;
+  shellArgs: string[];
+  sandboxed: boolean;
+  sandboxBackend: string;
+}
+
+/** Spawn a detached background job. Returns the job record immediately. */
+export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<BackgroundJob> {
+  const id = `job_${randomUUID().slice(0, 8)}`;
+  await mkdir(jobsDir(spec.cwd), { recursive: true });
+  const logPath = join(jobsDir(spec.cwd), `${id}.log`);
+  const metaPath = join(jobsDir(spec.cwd), `${id}.json`);
+
+  const log = createWriteStream(logPath, { flags: "a" });
+  const proc = spawn(spec.shell, [...spec.shellArgs, spec.command], {
+    cwd: spec.cwd,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  proc.stdout?.on("data", (b: Buffer) => log.write(b));
+  proc.stderr?.on("data", (b: Buffer) => log.write(b));
+
+  const meta: JobMeta = {
+    id,
+    command: spec.command,
+    cwd: spec.cwd,
+    pid: proc.pid ?? undefined,
+    startedAt: new Date().toISOString(),
+    status: "running",
+    sandboxed: spec.sandboxed,
+    sandboxBackend: spec.sandboxBackend,
+  };
+  const job: BackgroundJob = { meta, proc, logPath, metaPath };
+  registryFor(spec.cwd).jobs.set(id, job);
+  await persistMeta(job);
+
+  proc.on("close", (code) => {
+    meta.status = meta.status === "killed" ? "killed" : "exited";
+    meta.exitCode = code;
+    meta.finishedAt = new Date().toISOString();
+    log.end();
+    void persistMeta(job);
+  });
+  proc.on("error", () => {
+    meta.status = "failed";
+    meta.finishedAt = new Date().toISOString();
+    log.end();
+    void persistMeta(job);
+  });
+  return job;
+}
+
+/** Look up a live job; if absent in memory, try loading metadata from disk. */
+export async function getJob(cwd: string, id: string): Promise<BackgroundJob | null> {
+  const live = registryFor(cwd).jobs.get(id);
+  if (live) return live;
+  const metaPath = join(jobsDir(cwd), `${id}.json`);
+  if (!existsSync(metaPath)) return null;
+  try {
+    const meta = JSON.parse(await readFile(metaPath, "utf-8")) as JobMeta;
+    // The process that owned it is gone (CodePilot restarted) — we can no
+    // longer know its true state.
+    if (meta.status === "running") meta.status = "unknown";
+    return {
+      meta,
+      logPath: join(jobsDir(cwd), `${id}.log`),
+      metaPath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** List all jobs known to this session (live registry only). */
+export function listJobs(cwd: string): JobMeta[] {
+  return [...registryFor(cwd).jobs.values()].map((j) => j.meta);
+}
+
+/** Kill a job (SIGTERM). Returns false when the process is not alive. */
+export async function killJob(cwd: string, id: string): Promise<boolean> {
+  const job = registryFor(cwd).jobs.get(id);
+  if (!job?.proc || job.meta.status !== "running") return false;
+  job.meta.status = "killed";
+  try {
+    job.proc.kill("SIGTERM");
+  } catch {
+    /* already dead */
+  }
+  await persistMeta(job);
+  return true;
+}
+
+/** Read the tail of a job's log. */
+export async function readJobLog(
+  cwd: string,
+  id: string,
+  tailLines = 100
+): Promise<string> {
+  const logPath = join(jobsDir(cwd), `${id}.log`);
+  try {
+    const text = await readFile(logPath, "utf-8");
+    const lines = text.split(/\r?\n/);
+    const tail = lines.slice(-tailLines);
+    const prefix =
+      lines.length > tailLines
+        ? `[...${lines.length - tailLines} earlier lines omitted]\n`
+        : "";
+    return prefix + tail.join("\n");
+  } catch {
+    return "(no output yet)";
+  }
+}
+
+async function persistMeta(job: BackgroundJob): Promise<void> {
+  try {
+    await mkdir(jobsDir(job.meta.cwd), { recursive: true });
+    await writeFile(job.metaPath, JSON.stringify(job.meta, null, 2), "utf-8");
+  } catch {
+    /* best-effort */
+  }
+}

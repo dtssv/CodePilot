@@ -93,6 +93,55 @@ export type AgentMode = "chat" | "plan" | "agent";
 
 export type PermissionMode = "ask" | "auto-edit" | "yolo";
 
+/**
+ * Sandbox policy for shell commands and file tools.
+ *
+ * - `off`             — no sandboxing (legacy behaviour; not recommended).
+ * - `workspace-write` — commands may read the host but may only write inside
+ *                       the session cwd, the system temp dir, and
+ *                       `~/.codepilot`. File tools enforce the same boundary.
+ * - `read-only`       — no writes at all.
+ *
+ * Enforcement is two-layer:
+ *   1. Process layer: bash commands are wrapped in `sandbox-exec` (macOS
+ *      Seatbelt) or `bwrap` (Linux) when available.
+ *   2. Tool layer: read_file / write_file / edit_file / ls / glob / grep
+ *      paths are validated against the policy before any I/O happens.
+ *
+ * `network: false` blocks outbound network for sandboxed commands where the
+ * platform sandbox supports it.
+ *
+ * `fallback` decides what happens when no OS sandbox binary is available and
+ * mode is not "off": "deny" refuses to run bash (fail closed, the default),
+ * "allow-unsandboxed" runs the command anyway with a loud warning.
+ */
+export interface SandboxConfig {
+  mode?: "off" | "workspace-write" | "read-only";
+  network?: boolean;
+  /** Extra absolute paths that are writable in workspace-write mode. */
+  writablePaths?: string[];
+  fallback?: "deny" | "allow-unsandboxed";
+}
+
+/**
+ * claude-code style permission rules. Each rule is a string:
+ *
+ *   "read_file"                 — the whole tool
+ *   "mcp__github__*"            — wildcard over tool names
+ *   "bash(npm test *)"          — prefix/glob match on the tool's primary
+ *                                 argument (bash→command, read_file/write_file/
+ *                                 edit_file→path, web_fetch→url)
+ *   "bash(/^git (status|diff)/)" — regex match on the primary argument
+ *
+ * Evaluation order: deny > ask > allow > mode default. `deny` applies in
+ * every mode, including yolo — it is the last-line safety net.
+ */
+export interface PermissionRules {
+  allow?: string[];
+  ask?: string[];
+  deny?: string[];
+}
+
 export interface PermissionRequest {
   requestId: string;
   toolName: string;
@@ -123,8 +172,15 @@ export interface CodepilotConfig {
   /** Token threshold to trigger compaction. */
   contextWindow?: number;
   mcpServers?: Record<string, McpServerConfig>;
-  /** Tool names or bash command regexes that auto-approve. */
+  /** Tool names or bash command regexes that auto-approve.
+   *  @deprecated prefer `permissions.allow` (same rule syntax). */
   autoApprove?: string[];
+  /** claude-code style allow/ask/deny rule lists. See {@link PermissionRules}. */
+  permissions?: PermissionRules;
+  /** OS-level sandbox policy. Default: workspace-write, fail-closed. */
+  sandbox?: SandboxConfig;
+  /** Maximum assistant turns per prompt (default 50). */
+  maxTurns?: number;
   /** Default collaboration mode for new sessions (default: "agent"). */
   agentMode?: AgentMode;
 }

@@ -3,6 +3,7 @@
 
 import type { z } from "zod";
 import type { ContentBlock } from "../types.js";
+import type { ResolvedSandbox } from "../sandbox.js";
 
 export type PermissionLevel = "read" | "write" | "execute" | "network";
 
@@ -13,6 +14,12 @@ export interface ToolContext {
   artifact(blob: string | Uint8Array, hint?: string): Promise<string>;
   /** Resolve an artifact reference back to its contents. */
   readArtifact(ref: string): Promise<string>;
+  /**
+   * Active sandbox policy. File tools MUST call `assertPathAllowedAsync`
+   * before any I/O; bash wraps commands via `wrapCommand`. Optional so
+   * test harnesses can construct minimal contexts (absent = mode "off").
+   */
+  sandbox?: ResolvedSandbox;
 }
 
 export interface ToolResult {
@@ -54,13 +61,23 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   if (!def) return { type: "object", additionalProperties: true };
   const description = (schema as unknown as { description?: string }).description;
   switch (def.typeName) {
+    case "ZodEffects": {
+      // .refine()/.transform() wrappers — unwrap to the inner schema.
+      return def.schema ? zodToJsonSchema(def.schema as z.ZodTypeAny) : {};
+    }
+    case "ZodDefault": {
+      // .default(v) — unwrap; the property is optional from the caller's view.
+      return def.innerType ? zodToJsonSchema(def.innerType) : {};
+    }
     case "ZodObject": {
       const shape = def.shape?.() ?? {};
       const properties: Record<string, unknown> = {};
       const required: string[] = [];
       for (const [k, v] of Object.entries(shape)) {
         const child = zodToJsonSchema(v);
-        if ((v as unknown as { isOptional?: () => boolean }).isOptional?.()) {
+        const defK = (v as unknown as { _def?: { typeName?: string } })._def;
+        const defaulted = defK?.typeName === "ZodDefault";
+        if (defaulted || (v as unknown as { isOptional?: () => boolean }).isOptional?.()) {
           // leave off `required`
         } else {
           required.push(k);

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { ToolDef } from "./types.js";
+import { isIgnoredDirName, guardPath } from "./_shared.js";
 
 const schema = z.object({
   pattern: z.string().describe("Glob pattern (e.g. \"src/**/*.ts\")."),
@@ -20,10 +21,19 @@ const schema = z.object({
 
 export const globTool: ToolDef<typeof schema> = {
   name: "glob",
-  description: "List files matching a glob pattern.",
+  description:
+    "Find files by glob pattern (e.g. \"src/**/*.ts\", \"*test*\"). Returns " +
+    "matching paths relative to the base directory, one per line, capped at " +
+    "`maxResults` (default 1000). Heavy directories (node_modules, .git, dist, " +
+    "build outputs, caches) are skipped automatically.\n\n" +
+    "When to use: locating files by name/extension before reading or editing. " +
+    "When NOT to use: searching file *contents* (use `grep`) or listing one " +
+    "directory's immediate entries (use `ls`).",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
+    const guard = await guardPath(ctx, input.cwd ?? ".", "read");
+    if (guard) return guard;
     const base = resolve(ctx.cwd, input.cwd ?? ".");
     const max = input.maxResults ?? 1000;
     const matches: string[] = [];
@@ -89,7 +99,7 @@ async function walk(
     const abs = join(dir, ent.name);
     const rel = abs.startsWith(root + sep) ? abs.slice(root.length + 1) : abs;
     if (ent.isDirectory()) {
-      if (rel === "node_modules" || rel === ".git" || rel === "dist") continue;
+      if (isIgnoredDirName(ent.name)) continue;
       await walk(root, abs, pattern, out, cap);
       // Also match the directory itself.
       if (matcher.test(rel) || matcher.test(rel + "/")) {

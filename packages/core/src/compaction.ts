@@ -14,13 +14,16 @@ import type {
   UsageInfo,
 } from "./types.js";
 import type { ChatProvider } from "./providers/types.js";
+import { estimateTokens as defaultTokenEstimator } from "./tokens.js";
 
 export interface CompactionOptions {
   /** Trigger compaction when total estimated tokens >= this. */
   contextWindow: number;
   /** Number of recent messages to keep verbatim. Default 8. */
   keepRecentMessages?: number;
-  /** Token estimator override. */
+  /** Token estimator override. Defaults to the segmented estimator in
+   *  `./tokens.js` (CJK-aware, code-punctuation-aware, no third-party
+   *  dependency). */
   estimateTokens?: (text: string) => number;
   /** When provided, called to summarise (small model path). */
   summariser?: ChatProvider;
@@ -38,7 +41,7 @@ export function shouldCompact(
   events: Event[],
   opts: CompactionOptions
 ): CompactionDecision {
-  const est = opts.estimateTokens ?? defaultEstimator;
+  const est = opts.estimateTokens ?? defaultTokenEstimator;
   const tokens = estimateEventTokens(events, est);
   return {
     estimatedTokens: tokens,
@@ -48,11 +51,6 @@ export function shouldCompact(
         ? `tokens ${tokens} >= window ${opts.contextWindow}`
         : `tokens ${tokens} < window ${opts.contextWindow}`,
   };
-}
-
-function defaultEstimator(s: string): number {
-  // ~4 chars per token — OpenAI's rough rule of thumb.
-  return Math.ceil(s.length / 4);
 }
 
 export function estimateEventTokens(
@@ -210,7 +208,7 @@ export async function compact(
   // Pass 2: model-driven summary if still over budget.
   if (
     opts.summariser &&
-    estimateEventTokens(working, opts.estimateTokens ?? defaultEstimator) >=
+    estimateEventTokens(working, opts.estimateTokens ?? defaultTokenEstimator) >=
       opts.contextWindow
   ) {
     const cutoff = findCutoff(working, opts.keepRecentMessages ?? 8);

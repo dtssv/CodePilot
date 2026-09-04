@@ -6,6 +6,10 @@ export type {
 } from "./types.js";
 export { ToolRegistry, zodToJsonSchema } from "./types.js";
 export { bashTool } from "./bash.js";
+export { bashOutputTool } from "./bash_output.js";
+export { bashKillTool } from "./bash_kill.js";
+export { webFetchTool, htmlToText } from "./web_fetch.js";
+export { webSearchTool, parseDuckDuckGoHtml } from "./web_search.js";
 export { readFileTool } from "./read_file.js";
 export { writeFileTool } from "./write_file.js";
 export { editFileTool, applyEdit } from "./edit_file.js";
@@ -20,6 +24,8 @@ export { readArtifactTool } from "./read_artifact.js";
 export { taskTool } from "./task.js";
 export type { SubagentRunner } from "./task.js";
 export { ArtifactStore } from "./artifacts.js";
+export { skillTool, createSkillTool, StaticSkillStore } from "./skill.js";
+export type { SkillStore, SkillToolHandle } from "./skill.js";
 export {
   filterToolsByMode,
   filterToolsByModeFromRegistry,

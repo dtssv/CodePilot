@@ -1,9 +1,23 @@
 // Long-horizon goal mode: drive the agent until it reports done, blocked, or
 // hits maxRounds. The session owns plan + memory state; the goal loop just
 // keeps prompting with a structured per-round nudge.
+//
+// Enhancements (2025-Q1):
+//   - Per-round checkpoint append: after each round we append a small
+//     `### Round N — <status>` block to the session's checkpoint file
+//     (under .codepilot/checkpoints/<sessionId>.md) so the next session
+//     can see not just the final state but the trajectory that got us
+//     there. The structured `blocked_reason` is included verbatim when
+//     the round terminates with `<goal_status>blocked</goal_status>`.
+//   - onCheckpoint callback: callers (CLI, protocol server) can observe
+//     every checkpoint write without reading the file. The callback
+//     fires once per round with the round index, status, optional
+//     reason, and the checkpoint path. It is part of `GoalRunOptionsEx`
+//     to preserve the existing `GoalRunOptions` shape.
 
 import { createSession } from "./session.js";
 import type { GoalRunOptions, GoalRunResult, Event } from "./types.js";
+import { appendCheckpointRound, checkpointPath } from "./checkpoints.js";
 
 /**
  * The two goal-completion markers the loop scans the final assistant text
@@ -15,6 +29,24 @@ export const COMPLETION_MARKERS = [
 ] as const;
 
 const DEFAULT_MAX_ROUNDS = 50;
+
+/** Structured data passed to `onCheckpoint` after each round. */
+export interface GoalCheckpointInfo {
+  round: number;
+  status: "running" | "completed" | "blocked" | "round_limit";
+  reason?: string;
+  blockedReason?: string;
+  path: string;
+}
+
+/**
+ * Extension surface for `runGoal`. GoalRunOptions (in types.ts) is fixed;
+ * this shape extends it with the new optional `onCheckpoint` callback
+ * without forcing a types.ts change. Callers can pass either shape.
+ */
+export interface GoalRunOptionsEx extends GoalRunOptions {
+  onCheckpoint?: (info: GoalCheckpointInfo) => void | Promise<void>;
+}
 
 /**
  * The body of the per-round nudge the goal loop injects into the session.
@@ -44,16 +76,50 @@ Additional rules:
 
 The loop will continue until you emit one of the status markers or it hits the round cap.`;
 
-export async function runGoal(opts: GoalRunOptions): Promise<GoalRunResult> {
+export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
   const session = await createSession(opts);
   let round = 0;
   let status: "completed" | "blocked" | "round_limit" = "round_limit";
   let reason: string | undefined;
+  let blockedReason: string | undefined;
+  const sessionId = session.id;
+  const cwd = session.cwd;
+  const checkpoint = checkpointPath(cwd, sessionId);
+
+  // Helper: fire the per-round checkpoint (file + optional callback).
+  const fireCheckpoint = async (
+    roundIndex: number,
+    s: "running" | "completed" | "blocked" | "round_limit",
+    r?: string,
+    br?: string
+  ): Promise<void> => {
+    try {
+      await appendCheckpointRound(cwd, sessionId, roundIndex, s, r, br);
+    } catch (err) {
+      process.stderr.write(
+        `[goal] checkpoint append failed: ${(err as Error).message}\n`
+      );
+    }
+    if (opts.onCheckpoint) {
+      try {
+        await opts.onCheckpoint({
+          round: roundIndex,
+          status: s,
+          reason: r,
+          blockedReason: br,
+          path: checkpoint,
+        });
+      } catch {
+        /* listener errors are not fatal */
+      }
+    }
+  };
 
   try {
     for (round = 1; round <= maxRounds; round++) {
       opts.onRound?.(round, "running");
+      await fireCheckpoint(round, "running");
       const userText = renderRoundPrompt(round, opts.objective);
       await session.prompt(userText);
 
@@ -64,11 +130,14 @@ export async function runGoal(opts: GoalRunOptions): Promise<GoalRunResult> {
       if (found === "completed") {
         status = "completed";
         reason = extractCompletedReason(lastAssistant) ?? "model reported completed";
+        await fireCheckpoint(round, "completed", reason);
         break;
       }
       if (found === "blocked") {
         status = "blocked";
-        reason = extractBlockedReason(lastAssistant) ?? "model reported blocked";
+        blockedReason = extractBlockedReason(lastAssistant);
+        reason = blockedReason ?? "model reported blocked";
+        await fireCheckpoint(round, "blocked", reason, blockedReason);
         break;
       }
     }
@@ -78,8 +147,13 @@ export async function runGoal(opts: GoalRunOptions): Promise<GoalRunResult> {
 
   if (status === "round_limit") {
     reason = `reached maxRounds=${maxRounds} without a status marker`;
+    await fireCheckpoint(round, "round_limit", reason);
   }
-  return { status, reason };
+  const result: GoalRunResult = { status, reason };
+  if (blockedReason) {
+    (result as GoalRunResult & { blockedReason?: string }).blockedReason = blockedReason;
+  }
+  return result;
 }
 
 /** Build the user-text for a given round. Round 1 frames the work; later rounds re-anchor it. */

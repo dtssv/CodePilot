@@ -25,6 +25,8 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   "ls",
   "read_artifact",
   "web_fetch",
+  "web_search",
+  "bash_output",
 ]);
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */
@@ -38,6 +40,7 @@ const PLAN_ONLY_TOOLS: ReadonlySet<string> = new Set([
 /** Tools that are NEVER allowed in restricted modes. */
 const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "bash",
+  "bash_kill",
   "write_file",
   "edit_file",
   "task",

@@ -1,18 +1,22 @@
-// edit_file: search/replace edits with multiple fallback strategies.
-// Strategies (in order):
+// edit_file: search/replace edits with multiple fallback strategies and an
+// optional multi-edit (transactional) mode.
+// Match strategies (in order):
 //   1. Exact string match.
 //   2. Trimmed whitespace-tolerant match (ignore leading/trailing whitespace per line).
-//   3. Line-block match (allow trailing/leading context lines to differ).
-//   4. Unique-line match when search is a single line that appears exactly once.
-//   5. Regex literal search using `re` (optional explicit flag).
+//   3. Unique-line match when search is a single line that appears exactly once.
+//   4. Regex literal search using `re` (optional explicit flag).
+//
+// Multi-edit mode (`edits: [...]`) applies several edits in order and is
+// transactional: if any edit fails, the file is left untouched and the
+// error names the failing edit index and strategy.
 
 import { z } from "zod";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
+import { guardPath } from "./_shared.js";
 
-const schema = z.object({
-  path: z.string().describe("File path to edit."),
+const singleEdit = z.object({
   search: z.string().describe("Exact text to find."),
   replace: z.string().describe("Replacement text."),
   global_replace: z
@@ -24,6 +28,32 @@ const schema = z.object({
     .optional()
     .describe("Interpret `search` as a regular expression (default false)."),
 });
+
+const schema = z
+  .object({
+    path: z.string().describe("File path to edit."),
+    search: z.string().optional().describe("Exact text to find (single-edit mode)."),
+    replace: z.string().optional().describe("Replacement text (single-edit mode)."),
+    global_replace: z
+      .boolean()
+      .optional()
+      .describe("Replace every occurrence (default false)."),
+    regex: z
+      .boolean()
+      .optional()
+      .describe("Interpret `search` as a regular expression (default false)."),
+    edits: z
+      .array(singleEdit)
+      .optional()
+      .describe(
+        "Multi-edit mode: an ordered list of search/replace pairs applied " +
+          "atomically. Mutually exclusive with the top-level search/replace."
+      ),
+  })
+  .refine(
+    (v) => (v.edits && v.edits.length > 0) !== (v.search !== undefined),
+    { message: "provide either `edits` or top-level `search`/`replace`, not both" }
+  );
 
 export interface EditOutcome {
   ok: boolean;
@@ -198,22 +228,36 @@ function applyBlockReplacements(
   return lines.join("\n");
 }
 
+/** Line-count delta between two texts, for the result summary. */
+function lineDelta(before: string, after: string): { added: number; removed: number } {
+  const a = before.length === 0 ? 0 : before.split(/\r?\n/).length;
+  const b = after.length === 0 ? 0 : after.split(/\r?\n/).length;
+  return b >= a ? { added: b - a, removed: 0 } : { added: 0, removed: a - b };
+}
+
 export const editFileTool: ToolDef<typeof schema> = {
   name: "edit_file",
   description:
-    "Apply a search/replace edit to a single file. ALWAYS prefer this over `write_file` for " +
-    "changes — search/replace produces a small diff that is easy to review and impossible to " +
-    "accidentally clobber unrelated lines. The tool tries four match strategies in order: " +
-    "(1) exact string match, (2) trimmed-line match (ignores leading/trailing whitespace per " +
-    "line), (3) single-line unique match, (4) regex when `regex: true`. " +
-    "If the search text occurs more than once and `global_replace` is not set, the call fails " +
-    "with an 'ambiguous' error — either widen the search to include surrounding context, or " +
-    "set `global_replace: true`. Read the file (or use `grep`) first to confirm the search " +
-    "text actually exists. Use `write_file` only when creating a new file or doing a near-full " +
-    "rewrite.",
+    "Apply search/replace edits to a single file. ALWAYS prefer this over `write_file` " +
+    "for changes — search/replace produces a small, reviewable diff and cannot clobber " +
+    "unrelated lines.\n\n" +
+    "Two modes: (a) single edit via top-level `search`/`replace`; (b) multi-edit via " +
+    "`edits: [{search, replace, ...}]` — several edits applied in order, atomically " +
+    "(if any edit fails, nothing is written; the error names the failing index). " +
+    "Prefer multi-edit when changing several spots in one file: it saves round-trips.\n\n" +
+    "Match strategies, tried in order: (1) exact string, (2) trimmed-line (ignores " +
+    "leading/trailing whitespace per line), (3) unique single-line, (4) regex when " +
+    "`regex: true`. If the search text occurs more than once without " +
+    "`global_replace`, the call fails with 'ambiguous' — widen the search with " +
+    "surrounding context lines (copy them verbatim from `read_file` output, WITHOUT " +
+    "the line-number prefix) or set `global_replace: true`.\n\n" +
+    "You MUST have read the file (read_file) earlier in this session before editing " +
+    "it. Use `write_file` only for new files or near-complete rewrites.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
+    const guard = await guardPath(ctx, input.path, "write");
+    if (guard) return guard;
     const p = resolve(ctx.cwd, input.path);
     let original: string;
     try {
@@ -224,23 +268,45 @@ export const editFileTool: ToolDef<typeof schema> = {
         isError: true,
       };
     }
-    const outcome = applyEdit(original, {
-      search: input.search,
-      replace: input.replace,
-      global_replace: input.global_replace,
-      regex: input.regex,
-    });
-    if (!outcome.ok) {
-      return {
-        content: `edit_file failed (${outcome.strategy}): ${outcome.message}`,
-        isError: true,
-      };
+
+    const edits =
+      input.edits && input.edits.length > 0
+        ? input.edits
+        : [{ search: input.search!, replace: input.replace ?? "", global_replace: input.global_replace, regex: input.regex }];
+
+    // Apply in order against a working copy; transactional — any failure
+    // aborts without touching disk.
+    let working = original;
+    const applied: string[] = [];
+    for (let i = 0; i < edits.length; i++) {
+      const e = edits[i]!;
+      const outcome = applyEdit(working, {
+        search: e.search,
+        replace: e.replace,
+        global_replace: e.global_replace,
+        regex: e.regex,
+      });
+      if (!outcome.ok) {
+        const prefix = edits.length > 1 ? `edit #${i + 1} ` : "";
+        return {
+          content:
+            `edit_file failed (${prefix}${outcome.strategy}): ${outcome.message}. ` +
+            `No changes were written.`,
+          isError: true,
+        };
+      }
+      working = outcome.message;
+      applied.push(
+        `#${i + 1} ${outcome.strategy} (${outcome.occurrences} occurrence${outcome.occurrences === 1 ? "" : "s"})`
+      );
     }
-    await writeFile(p, outcome.message, "utf-8");
+
+    await writeFile(p, working, "utf-8");
+    const delta = lineDelta(original, working);
+    const deltaStr =
+      delta.added > 0 ? `+${delta.added} lines` : delta.removed > 0 ? `-${delta.removed} lines` : "same line count";
     return {
-      content: `applied ${outcome.strategy} edit (${outcome.occurrences} occurrence${
-        outcome.occurrences === 1 ? "" : "s"
-      }) to ${p}`,
+      content: `applied ${applied.length} edit(s) to ${p} (${deltaStr})\n${applied.join("\n")}`,
     };
   },
 };

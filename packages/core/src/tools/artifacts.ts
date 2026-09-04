@@ -39,9 +39,28 @@ export class ArtifactStore {
     return `art_${hash}`;
   }
 
+  /**
+   * Convenience: serialise a JSON value, write it, and return both the
+   * artifact reference and the byte count. Used by the checkpoint writer
+   * to stash large per-round debug payloads without growing the
+   * transcript. The JSON is pretty-printed so the artifact file is
+   * diff-friendly when humans inspect it later.
+   */
+  async writeJson(value: unknown, hint?: string): Promise<{ ref: string; bytes: number }> {
+    const text = JSON.stringify(value, null, 2);
+    const ref = await this.write(text, hint);
+    return { ref, bytes: Buffer.byteLength(text, "utf-8") };
+  }
+
   async read(ref: string): Promise<string> {
     const buf = await readFile(this.pathFor(ref));
     return buf.toString("utf-8");
+  }
+
+  /** Read and JSON-parse an artifact. Throws if parsing fails. */
+  async readJson<T = unknown>(ref: string): Promise<T> {
+    const text = await this.read(ref);
+    return JSON.parse(text) as T;
   }
 
   /** Resolve a path that may be inside the workspace. */
