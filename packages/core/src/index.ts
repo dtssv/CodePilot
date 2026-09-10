@@ -121,7 +121,7 @@ export type {
 } from "./sandbox.js";
 
 // ---- Hooks ----
-export { HookEngine } from "./hooks.js";
+export { HookEngine, hashCommand } from "./hooks.js";
 export type { HookEvent, HookEntry, PreHookResult, PostHookResult } from "./hooks.js";
 
 // ---- Redaction ----
@@ -186,6 +186,7 @@ export {
   useProvider,
   resolveModelAlias,
   getUserConfigPath,
+  getManagedConfigPath,
   getRepoConfigPath,
   REPO_CONFIG_PATH,
   DEFAULT_CONFIG,
@@ -379,3 +380,60 @@ export type {
 // ---- Subagent isolation modes (re-exported from the task tool) ----
 export { ISOLATION_MODES } from "./tools/task.js";
 export type { Isolation } from "./tools/task.js";
+export { parseCsv } from "./tools/task.js";
+
+// ---- Runtime management & introspection (/mcp /hooks /agents /skills /context) ----
+export {
+  describeMcp,
+  formatMcp,
+  describeHooks,
+  formatHooks,
+  describeAgents,
+  formatAgents,
+  describeSkills,
+  formatSkills,
+  formatContext,
+} from "./management.js";
+export type {
+  McpSummary,
+  HooksSummary,
+  AgentsSummary,
+  SkillsSummary,
+  ContextSummary,
+} from "./management.js";
+
+// ---- MCP tool-name normalization (64-char limit + hash collision prevention) ----
+export { normalizeMcpToolName, buildMcpToolNameMap, MCP_TOOL_NAME_MAX_LENGTH } from "./mcp.js";
+
+// ---- Consistency assertion (model-visible equals logged, debug/test only) ----
+export { consistencyAssertEnabled, assertConsistency, ConsistencyError } from "./consistency.js";
+
+// ---- Keyless transcript replay (test mode, no API key needed) ----
+export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";
+
+// ---- Custom status-line script (claude-code-style) ----
+export { runStatusLine, buildPayload } from "./statusLine.js";
+export type { StatusLinePayload, StatusLineConfig, StatusLineResult } from "./statusLine.js";
+
+// ---- OpenTelemetry-compatible telemetry (OTLP/HTTP-JSON export) ----
+export { Tracer, loadTelemetryConfig, getTracer, setTracer } from "./telemetry.js";
+export type { Span, TelemetryConfig as OtelTelemetryConfig } from "./telemetry.js";
+
+// ---- Plugins (bundled, distributable extensions + marketplace) ----
+export {
+  discoverPlugins,
+  pluginResourcePaths,
+  mergePluginConfig,
+  installPlugin,
+  uninstallPlugin,
+  fetchMarketplaceIndex,
+  searchMarketplace,
+} from "./plugins.js";
+export type {
+  PluginManifest,
+  Plugin,
+  MarketplaceEntry,
+  DiscoverPluginsOptions,
+  InstallOptions,
+} from "./plugins.js";
+

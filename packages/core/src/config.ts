@@ -222,7 +222,7 @@ export type ResolvedCodepilotConfig = CodepilotConfig & {
 /** One layer of the merge, kept around for `loadConfigWithSources`. */
 export interface ConfigLayer {
   /** Stable id of the layer for debugging. */
-  name: "defaults" | "user" | "repo" | "mcp-json" | "env" | "caller";
+  name: "defaults" | "managed" | "user" | "repo" | "mcp-json" | "env" | "caller";
   /** Path / env key, when the layer was sourced from a file or env var. */
   source?: string;
   /** The raw value (after interpolation, before merge with the next layer). */
@@ -273,6 +273,34 @@ export const REPO_CONFIG_PATH = ".codepilot/config.json";
 
 export function getRepoConfigPath(cwd: string): string {
   return join(cwd, REPO_CONFIG_PATH);
+}
+
+/**
+ * Enterprise/MDM managed config path (claude-code/codex parity).
+ *
+ * On macOS:   /Library/Application Support/CodePilot/managed.json
+ * On Linux:   /etc/codepilot/managed.json
+ * On Windows: C:\ProgramData\CodePilot\managed.json
+ *
+ * The managed layer sits between `defaults` and `user` — it lets IT
+ * administrators enforce policies (e.g. restrict providers, set sandbox
+ * mode, deny specific tools) that users cannot override in their personal
+ * config. The env and caller layers still take precedence, so CI/CD and
+ * programmatic callers can override managed settings when needed.
+ *
+ * Override the path with the `CODEPILOT_MANAGED_CONFIG` env var for testing.
+ */
+export function getManagedConfigPath(): string {
+  const override = process.env.CODEPILOT_MANAGED_CONFIG;
+  if (override) return override;
+  switch (process.platform) {
+    case "darwin":
+      return "/Library/Application Support/CodePilot/managed.json";
+    case "win32":
+      return join(process.env.PROGRAMDATA ?? "C:\\ProgramData", "CodePilot", "managed.json");
+    default:
+      return "/etc/codepilot/managed.json";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +513,16 @@ export async function loadConfigWithSources(
 
   // 1) defaults — always present, lowest priority.
   sources.push({ name: "defaults", value: { ...DEFAULT_CONFIG } });
+
+  // 1b) enterprise/MDM managed config — sits between defaults and user.
+  // IT administrators use this to enforce policies users cannot override.
+  const managedPath = getManagedConfigPath();
+  if (readFiles && existsSync(managedPath)) {
+    const parsed = await readAndParse(managedPath);
+    if (parsed !== undefined) {
+      sources.push({ name: "managed", source: managedPath, value: parsed });
+    }
+  }
 
   // 2) user-level file
   if (readFiles && existsSync(userPath)) {

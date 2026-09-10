@@ -33,6 +33,7 @@ import type { ResolvedSandbox } from "./sandbox.js";
 import type { HookEngine } from "./hooks.js";
 import { redactSecrets } from "./redact.js";
 import { DoomLoopDetector } from "./doomLoop.js";
+import { consistencyAssertEnabled, assertConsistency } from "./consistency.js";
 
 export interface AgentDeps {
   provider: ChatProvider;
@@ -160,6 +161,14 @@ export async function runAgent(
 
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages);
     const providerTools = buildProviderToolDefs(deps.tools, agentMode);
+
+    // Debug/test consistency assertion (deepseek-harness parity): verify the
+    // non-folded tail of the provider messages matches the persisted event
+    // log. Only active when CODEPILOT_ASSERT_CONSISTENCY=1. Catches bugs
+    // where what the model sees diverges from what was logged.
+    if (consistencyAssertEnabled()) {
+      assertConsistency(providerMessages, [...input.history, ...produced], 8);
+    }
 
     const messageId = `msg_${randomUUID()}`;
     const assistantText: string[] = [];

@@ -43,10 +43,12 @@ import { discoverCustomAgents, renderCustomAgentsBlock, type CustomAgent } from 
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
 import { writePlanFile, setPlanFileStatus, type PlanFile } from "./plans.js";
 import { PersistentShell } from "./persistentShell.js";
-import { McpManager, resolveMcpReferences } from "./mcp.js";import {
+import { McpManager, resolveMcpReferences, normalizeMcpToolName } from "./mcp.js";import { getTracer } from "./telemetry.js";import {
   bashTool,
   bashOutputTool,
   bashKillTool,
+  writeStdinTool,
+  notebookEditTool,
   webFetchTool,
   webSearchTool,
   readFileTool,
@@ -122,6 +124,8 @@ export class Session {
   private readonly onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
   private readonly onMcpOpenAuthUrl?: SessionOptions["onMcpOpenAuthUrl"];
   private readonly diagnosticsProvider?: SessionOptions["diagnosticsProvider"];
+  /** Provider override (from Agent SDK / replay mode). When set, skips buildProvider(). */
+  private readonly providerOverride?: import("./providers/types.js").ChatProvider;
   /** Files the agent has written/edited this session, for snapshot rewind. */
   private touchedFiles: Set<string> = new Set();
   /** Unsubscribe functions for background-job completion listeners. */
@@ -192,6 +196,7 @@ export class Session {
     this.onMcpServerRequest = opts.onMcpServerRequest;
     this.onMcpOpenAuthUrl = opts.onMcpOpenAuthUrl;
     this.diagnosticsProvider = opts.diagnosticsProvider;
+    this.providerOverride = opts.provider;
     this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
     this.hostSurface = opts.hostSurface ?? "cli";
     this.toolRegistry = new ToolRegistry();
@@ -203,6 +208,8 @@ export class Session {
     });
     this.sandbox = resolveSandbox(this.config.sandbox, this.cwd);
     this.hooks = new HookEngine(this.config.hooks, this.cwd);
+    // Wire hook trust (hash-based review for command hooks, codex-style).
+    this.hooks.setTrustFile(join(this.cwd, ".codepilot", "hook_trust.json"));
     // Fail-closed notification: when sandbox mode is active but no OS backend
     // is available AND the fallback is "deny", we surface a prominent warning
     // so the user knows bash commands will be refused. deepseek-harness goes
@@ -223,6 +230,8 @@ export class Session {
     this.registerBuiltins();
     await this.loadFromDisk();
     await this.startMcp();
+    // Load trusted hook hashes (for command-hook trust enforcement).
+    await this.hooks.loadTrustedHashes();
     // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/.
     this.customAgents = await discoverCustomAgents(this.cwd);
     await this.rebuildSystemPrompt();
@@ -269,6 +278,12 @@ export class Session {
   async prompt(text: string, images?: ImageAttachment[]): Promise<void> {
     if (this.disposed) throw new Error("session disposed");
     this.cancelController = new AbortController();
+
+    // Telemetry: wrap each prompt in a span (no-op when OTEL is not configured).
+    const tracer = getTracer();
+    const promptSpan = tracer.enabled
+      ? tracer.startSpan("codepilot.prompt", { attributes: { "codepilot.session_id": this.id, "codepilot.prompt_length": text.length } })
+      : undefined;
 
     // Run UserPromptSubmit hooks. A blocking hook stops the prompt; a
     // rewriting hook replaces the text (first hook wins).
@@ -319,7 +334,7 @@ export class Session {
       // and are popped in the finally block below.
       const effectiveModel = this.turnOverrideModel ?? this.model;
       const deps: AgentDeps = {
-        provider: buildProvider(this.config),
+        provider: this.providerOverride ?? buildProvider(this.config),
         tools: this.toolRegistry,
         artifacts: this.artifacts,
         permissions: this.permissions,
@@ -394,6 +409,8 @@ export class Session {
       // Clear turn-scoped overrides so the session model + permission
       // grants resume on the user's next message (claude-code semantics).
       this.clearTurnOverrides();
+      // End the telemetry span (no-op when disabled).
+      if (promptSpan) tracer.end(promptSpan);
     }
   }
 
@@ -712,6 +729,26 @@ export class Session {
     };
   }
 
+  /** The MCP manager (null when no servers are configured). For `/mcp`. */
+  getMcpManager(): import("./mcp.js").McpManager | null {
+    return this.mcp;
+  }
+
+  /** The hook engine. For `/hooks`. */
+  getHookEngine(): import("./hooks.js").HookEngine {
+    return this.hooks;
+  }
+
+  /** Working directory (for agent/skill discovery). */
+  getCwd(): string {
+    return this.cwd;
+  }
+
+  /** Status-line script configuration (for the TUI custom status bar). */
+  getStatusLineConfig(): import("./types.js").StatusLineConfig | undefined {
+    return this.config.statusLine;
+  }
+
   subscribe(listener: (e: Event) => void): () => void {
     // Replay history first.
     for (const e of this.events) {
@@ -823,6 +860,8 @@ export class Session {
     this.toolRegistry.register(bashTool);
     this.toolRegistry.register(bashOutputTool);
     this.toolRegistry.register(bashKillTool);
+    this.toolRegistry.register(writeStdinTool);
+    this.toolRegistry.register(notebookEditTool);
     this.toolRegistry.register(webFetchTool);
     this.toolRegistry.register(webSearchTool);
     this.toolRegistry.register(readFileTool);
@@ -898,9 +937,13 @@ export class Session {
     try {
       await this.mcp.startAll();
       for (const t of this.mcp.listAllTools()) {
+        // Normalize the tool name to fit provider limits (64 chars) and
+        // prevent collisions between long names. The original (server, name)
+        // pair is captured in the closure so invocation is unaffected.
+        const registeredName = normalizeMcpToolName(t.server, t.name);
         // Register a thin wrapper tool.
         this.toolRegistry.register({
-          name: `mcp__${t.server}__${t.name}`,
+          name: registeredName,
           description: `[mcp:${t.server}] ${t.description}`,
           inputSchema: jsonSchemaToZod(t.inputSchema),
           permission: "network",

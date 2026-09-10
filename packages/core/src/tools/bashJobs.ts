@@ -91,7 +91,9 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
   const proc = spawn(spec.shell, [...spec.shellArgs, spec.command], {
     cwd: spec.cwd,
     env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    // Use "pipe" for stdin so write_stdin can send input to interactive
+    // long-running processes (REPLs, servers, CLIs that read stdin).
+    stdio: ["pipe", "pipe", "pipe"],
   });
   proc.stdout?.on("data", (b: Buffer) => log.write(b));
   proc.stderr?.on("data", (b: Buffer) => log.write(b));
@@ -178,6 +180,31 @@ export async function killJob(cwd: string, id: string): Promise<boolean> {
   }
   await persistMeta(job);
   return true;
+}
+
+/**
+ * Write data to a background job's stdin. Used by the `write_stdin` tool to
+ * send input to interactive long-running processes (REPLs, servers, CLIs
+ * that read stdin). Returns false when the job is not running or has no
+ * writable stdin (e.g. restored from disk after a restart).
+ *
+ * When `appendNewline` is true (default), a `\n` is appended — most CLI
+ * tools expect line-terminated input. Set it to false for raw binary input.
+ */
+export async function writeJobStdin(
+  cwd: string,
+  id: string,
+  data: string,
+  opts: { appendNewline?: boolean } = {}
+): Promise<boolean> {
+  const job = registryFor(cwd).jobs.get(id);
+  if (!job?.proc || job.meta.status !== "running") return false;
+  const stdin = job.proc.stdin;
+  if (!stdin || stdin.destroyed) return false;
+  const payload = opts.appendNewline === false ? data : data + "\n";
+  return new Promise<boolean>((resolve) => {
+    stdin.write(payload, (err) => resolve(err === undefined));
+  });
 }
 
 /** Read the tail of a job's log. */

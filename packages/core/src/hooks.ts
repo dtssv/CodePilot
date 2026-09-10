@@ -118,6 +118,12 @@ export interface SimpleHookResult {
 
 const HOOK_TIMEOUT_MS = 10_000;
 
+/** Compute the SHA-256 hash of a command string (for hook trust). */
+export function hashCommand(command: string): string {
+  const { createHash } = require("node:crypto") as typeof import("node:crypto");
+  return createHash("sha256").update(command).digest("hex");
+}
+
 /**
  * The default matcher field for each event type. Events not listed here
  * match against "*" (i.e. every hook for that event fires).
@@ -149,6 +155,74 @@ export class HookEngine {
       Notification: config?.Notification ?? [],
       Stop: config?.Stop ?? [],
     };
+  }
+
+  // ---- Hook trust (hash-based review, codex-style) ----
+  //
+  // Arbitrary `command` hooks can execute any shell code. The trust
+  // mechanism requires the user to approve each unique command string
+  // (identified by its SHA-256 hash) before it runs. Approved hashes are
+  // persisted to `.codepilot/hook_trust.json`. Unapproved hooks are
+  // skipped with a warning (fail-safe: don't execute untrusted code).
+  //
+  // `http`/`mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate
+  // to already-vetted infrastructure, not arbitrary shell code).
+
+  private trustedHashes: Set<string> | null = null;
+  private trustFile: string | null = null;
+
+  /** Set the trust file path (typically `<cwd>/.codepilot/hook_trust.json`).
+   *  When set, command hooks are gated on hash approval. Call
+   *  `loadTrustedHashes()` after setting this. */
+  setTrustFile(path: string): void {
+    this.trustFile = path;
+    this.trustedHashes = null;
+  }
+
+  /** Load approved hook hashes from the trust file. */
+  async loadTrustedHashes(): Promise<void> {
+    if (!this.trustFile) { this.trustedHashes = new Set(); return; }
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const text = await readFile(this.trustFile, "utf-8");
+      const data = JSON.parse(text) as { approved?: string[] };
+      this.trustedHashes = new Set(data.approved ?? []);
+    } catch {
+      this.trustedHashes = new Set();
+    }
+  }
+
+  /** Check if a command hook is trusted (hash approved). Returns true when
+   *  trust is not configured (backwards-compatible default). */
+  isTrusted(hook: HookEntry): boolean {
+    // Non-command hooks are always trusted.
+    if (!hook.command) return true;
+    if (!this.trustedHashes) return true; // trust not configured
+    return this.trustedHashes.has(hashCommand(hook.command));
+  }
+
+  /** Approve a command hook's hash and persist to the trust file. */
+  async approveHook(command: string): Promise<void> {
+    if (!this.trustFile) return;
+    if (!this.trustedHashes) this.trustedHashes = new Set();
+    this.trustedHashes.add(hashCommand(command));
+    try {
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      await mkdir(dirname(this.trustFile), { recursive: true });
+      await writeFile(
+        this.trustFile,
+        JSON.stringify({ approved: [...this.trustedHashes] }, null, 2),
+        "utf-8"
+      );
+    } catch {
+      /* best-effort persistence */
+    }
+  }
+
+  /** Get the set of approved command hashes (for UI display). */
+  getTrustedHashes(): Set<string> {
+    return this.trustedHashes ?? new Set();
   }
 
   hasHooks(event: HookEvent): boolean {
@@ -389,13 +463,34 @@ export class HookEngine {
     if (hook.http) {
       return this.runHttpHook(hook, payload);
     }
+    // MCP tool handler: invoke an MCP server tool.
+    if (hook.mcpTool) {
+      return this.runMcpToolHook(hook, payload);
+    }
+    // Prompt handler: send the payload to the small model.
+    if (hook.prompt) {
+      return this.runPromptHook(hook, payload);
+    }
+    // Agent handler: spawn a sub-agent.
+    if (hook.agent) {
+      return this.runAgentHook(hook, payload);
+    }
     // Command handler (default).
     const command = hook.command;
     if (!command) {
       return Promise.resolve({
         code: 1,
         stdout: "",
-        stderr: "hook has neither `command` nor `http`",
+        stderr: "hook has no handler (command, http, mcp_tool, prompt, or agent)",
+        timedOut: false,
+      });
+    }
+    // Trust check: skip unapproved command hooks with a warning.
+    if (!this.isTrusted(hook)) {
+      return Promise.resolve({
+        code: 0,
+        stdout: "",
+        stderr: `hook command not trusted (hash ${hashCommand(command).slice(0, 8)} not approved). Approve via /hooks or .codepilot/hook_trust.json.`,
         timedOut: false,
       });
     }
@@ -504,6 +599,73 @@ export class HookEngine {
       }
       return { code: 1, stdout: "", stderr: msg, timedOut: false };
     }
+  }
+
+  /** MCP tool handler: invoke `<server>:<tool>` with the payload as args.
+   *  The tool's text result is interpreted as the decision JSON. */
+  private async runMcpToolHook(
+    hook: HookEntry,
+    payload: Record<string, unknown>
+  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+    if (!this.mcpResolver) {
+      return { code: 1, stdout: "", stderr: "mcp_tool hook: no MCP resolver configured", timedOut: false };
+    }
+    try {
+      const result = await this.mcpResolver(hook.mcpTool!, payload);
+      return { code: 0, stdout: result, stderr: "", timedOut: false };
+    } catch (err) {
+      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
+    }
+  }
+
+  /** Prompt handler: send the payload to the small model and interpret
+   *  the response text as the decision JSON. */
+  private async runPromptHook(
+    hook: HookEntry,
+    payload: Record<string, unknown>
+  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+    if (!this.promptResolver) {
+      return { code: 1, stdout: "", stderr: "prompt hook: no prompt resolver configured", timedOut: false };
+    }
+    try {
+      const result = await this.promptResolver(hook.prompt!, payload);
+      return { code: 0, stdout: result, stderr: "", timedOut: false };
+    } catch (err) {
+      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
+    }
+  }
+
+  /** Agent handler: spawn a sub-agent with the payload as objective. */
+  private async runAgentHook(
+    hook: HookEntry,
+    payload: Record<string, unknown>
+  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+    if (!this.agentResolver) {
+      return { code: 1, stdout: "", stderr: "agent hook: no agent resolver configured", timedOut: false };
+    }
+    try {
+      const result = await this.agentResolver(hook.agent!, payload);
+      return { code: 0, stdout: result, stderr: "", timedOut: false };
+    } catch (err) {
+      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
+    }
+  }
+
+  /** Optional resolvers for non-command/http handler types. Wired by the
+   *  session when MCP, provider, or sub-agent infrastructure is available. */
+  mcpResolver?: (tool: string, payload: Record<string, unknown>) => Promise<string>;
+  promptResolver?: (prompt: string, payload: Record<string, unknown>) => Promise<string>;
+  agentResolver?: (objective: string, payload: Record<string, unknown>) => Promise<string>;
+
+  /** Wire resolvers for the new handler types. */
+  setResolvers(opts: {
+    mcp?: (tool: string, payload: Record<string, unknown>) => Promise<string>;
+    prompt?: (prompt: string, payload: Record<string, unknown>) => Promise<string>;
+    agent?: (objective: string, payload: Record<string, unknown>) => Promise<string>;
+  }): void {
+    if (opts.mcp) this.mcpResolver = opts.mcp;
+    if (opts.prompt) this.promptResolver = opts.prompt;
+    if (opts.agent) this.agentResolver = opts.agent;
   }
 }
 

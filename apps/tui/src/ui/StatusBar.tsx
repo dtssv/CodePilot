@@ -6,10 +6,15 @@
  * questions:
  *   - permission mode — how the user is prompted for tool calls
  *   - agent mode      — which tools the model can call (Cursor-style)
+ *
+ * When `config.statusLine` is configured (claude-code-style), a custom
+ * command is spawned on each update and its stdout replaces the default
+ * status bar content. ANSI color codes are preserved.
  */
 import React from "react";
 import { Box, Text } from "ink";
-import type { AgentMode } from "@codepilot/core";
+import type { AgentMode, StatusLineConfig } from "@codepilot/core";
+import { runStatusLine, buildPayload } from "@codepilot/core";
 import type { TuiState } from "./state.js";
 
 const PERM_COLOR: Record<TuiState["permissionMode"], string> = {
@@ -24,7 +29,56 @@ const AGENT_COLOR: Record<AgentMode, string> = {
   agent: "green",
 };
 
-export function StatusBar({ state }: { state: TuiState }): React.ReactElement {
+export function StatusBar({
+  state,
+  statusLineConfig,
+  cwd,
+  version,
+}: {
+  state: TuiState;
+  statusLineConfig?: StatusLineConfig;
+  cwd: string;
+  version: string;
+}): React.ReactElement {
+  const [customText, setCustomText] = React.useState<string | null>(null);
+
+  // Run the custom status-line script on state changes (debounced).
+  React.useEffect(() => {
+    if (!statusLineConfig) return;
+    const totalInput = state.usage.input + (state.usage.cacheRead ?? 0);
+    const totalOutput = state.usage.output;
+    const windowSize = 200_000; // default; could be derived from model
+    const total = totalInput + totalOutput;
+    const usedPct = total > 0 && windowSize > 0 ? (total / windowSize) * 100 : null;
+    const payload = buildPayload({
+      sessionId: state.sessionId ?? "—",
+      renderWidth: process.stdout.columns ?? 120,
+      cwd,
+      model: state.model ?? "(unset)",
+      totalInputTokens: totalInput,
+      totalOutputTokens: totalOutput,
+      contextWindowSize: windowSize,
+      usedPercentage: usedPct,
+      version,
+    });
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      runStatusLine(statusLineConfig, payload, { cwd }).then((r) => {
+        if (!cancelled && r.ok) setCustomText(r.text);
+      });
+    }, statusLineConfig.updateIntervalMs ?? 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [state.model, state.sessionId, state.usage, statusLineConfig, cwd, version]);
+
+  // Custom status line: render the script's stdout (preserving ANSI).
+  if (statusLineConfig && customText !== null) {
+    return (
+      <Box paddingX={(statusLineConfig.padding ?? 0) + 1}>
+        <Text>{customText}</Text>
+      </Box>
+    );
+  }
+
   const sid = state.sessionId !== undefined ? state.sessionId.slice(0, 8) : "—";
   const total =
     state.usage.input +

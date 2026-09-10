@@ -221,8 +221,8 @@ export interface HookEntryConfig {
    *  also blocks; PostToolUse may emit `{"feedback":"..."}`; PreToolUse may
    *  emit `{"updatedInput":{...}}` to rewrite the tool input.
    *
-   *  Mutually exclusive with `http`. At least one of `command` or `http`
-   *  must be provided. */
+   *  Mutually exclusive with `http`, `mcp_tool`, `prompt`, and `agent`.
+   *  At least one handler type must be provided. */
   command?: string;
   /** HTTP endpoint to POST the hook payload to (claude-code-style `http`
    *  handler). The response body is interpreted as JSON for decisions
@@ -236,6 +236,30 @@ export interface HookEntryConfig {
   httpHeaders?: Record<string, string>;
   /** Optional: timeout in ms for `http` requests (default 10s). */
   timeout?: number;
+  /** MCP tool handler: invoke an MCP server tool by name
+   *  (`<server>:<tool>`). The hook payload is passed as the tool's
+   *  arguments. The tool's text result is interpreted as JSON for
+   *  decisions (same schema as `command` stdout).
+   *
+   *  Mutually exclusive with `command` and `http`. Requires an MCP
+   *  resolver to be wired into the HookEngine. */
+  mcpTool?: string;
+  /** Prompt handler: send the hook payload (as JSON) to the small model
+   *  as a user message and interpret the model's text response as JSON
+   *  for decisions. Use for natural-language hook logic that's hard to
+   *  express in a shell script (e.g. "is this command safe to run?").
+   *
+   *  Mutually exclusive with `command` and `http`. Requires a prompt
+   *  resolver to be wired into the HookEngine. */
+  prompt?: string;
+  /** Agent handler: spawn a sub-agent with the hook payload as its
+   *  objective. The sub-agent's conclusion text is interpreted as JSON
+   *  for decisions. Heavier than `prompt` but can use tools (e.g.
+   *  read_file to inspect the repo before deciding).
+   *
+   *  Mutually exclusive with `command` and `http`. Requires an agent
+   *  resolver to be wired into the HookEngine. */
+  agent?: string;
 }
 
 /** Lifecycle hooks configuration. See hooks.ts. */
@@ -311,6 +335,23 @@ export interface CodepilotConfig {
    *  teaching posture), this is a direct verbosity hint some providers
    *  honour. Default undefined (provider default). */
   modelVerbosity?: "low" | "medium" | "high";
+  /** Custom status-line script (claude-code-style). When set, the TUI spawns
+   *  this command on each status update, feeds it a JSON payload on stdin
+   *  describing the session, and renders its stdout as the status line. */
+  statusLine?: StatusLineConfig;
+}
+
+export interface StatusLineConfig {
+  /** Must be `"command"`. */
+  type: "command";
+  /** Path to an executable or inline command. `~` is expanded. */
+  command: string;
+  /** Horizontal inset (in characters) for the status line container. Default 0. */
+  padding?: number;
+  /** Minimum interval between invocations in ms. Clamped to >= 300. Default 300. */
+  updateIntervalMs?: number;
+  /** Maximum time the command may run before being killed. Default 2000. */
+  timeoutMs?: number;
 }
 
 export interface WebFetchConfig {
@@ -366,6 +407,9 @@ export interface SessionOptions {
   /** Host-supplied LSP diagnostics provider. When set, the `diagnostics`
    *  tool reads from it; otherwise the tool reports unavailability. */
   diagnosticsProvider?: import("./tools/diagnostics.js").DiagnosticsProvider;
+  /** Override the chat provider. When set, skips `buildProvider()` entirely.
+   *  Used by the Agent SDK for replay mode and custom provider injection. */
+  provider?: import("./providers/types.js").ChatProvider;
 }
 
 export interface GoalRunOptions extends SessionOptions {

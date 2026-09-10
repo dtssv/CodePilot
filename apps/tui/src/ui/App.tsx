@@ -20,6 +20,16 @@ import {
   type Session,
   type SlashCommand,
   discoverSlashCommands,
+  describeMcp,
+  formatMcp,
+  describeHooks,
+  formatHooks,
+  describeAgents,
+  formatAgents,
+  describeSkills,
+  formatSkills,
+  formatContext,
+  discoverPlugins,
 } from "@codepilot/core";
 
 import { RowView } from "./EventView.js";
@@ -326,6 +336,69 @@ export function App(props: AppProps): React.ReactElement {
             dispatch({ type: "clear" });
             dispatch({ type: "set-notice", text: "Cleared." });
             return;
+          case "show-mcp": {
+            try {
+              const summary = describeMcp(session.getMcpManager());
+              dispatch({ type: "set-notice", text: formatMcp(summary) });
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query MCP: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "show-hooks": {
+            try {
+              const summary = describeHooks(session.getHookEngine());
+              dispatch({ type: "set-notice", text: formatHooks(summary) });
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query hooks: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "show-agents": {
+            try {
+              const summary = await describeAgents(session.getCwd());
+              dispatch({ type: "set-notice", text: formatAgents(summary) });
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query agents: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "show-skills": {
+            try {
+              const summary = await describeSkills(session.getCwd());
+              dispatch({ type: "set-notice", text: formatSkills(summary) });
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query skills: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "show-context": {
+            try {
+              const report = session.contextReport();
+              dispatch({ type: "set-notice", text: formatContext(report) });
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query context: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "show-plugins": {
+            try {
+              const plugins = await discoverPlugins(session.getCwd());
+              if (plugins.size === 0) {
+                dispatch({ type: "set-notice", text: "No plugins installed. Install with: codepilot plugin install <git-url>. Plugins live in ~/.codepilot/plugins/." });
+              } else {
+                const lines: string[] = [`Plugins (${plugins.size}):`];
+                for (const p of plugins.values()) {
+                  lines.push(`  ${p.manifest.name} v${p.manifest.version} [${p.source}]`);
+                  lines.push(`    ${p.manifest.description}`);
+                }
+                dispatch({ type: "set-notice", text: lines.join("\n") });
+              }
+            } catch (err: unknown) {
+              dispatch({ type: "set-notice", text: `Failed to query plugins: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
           case "exit":
             setExitPending(true);
             return;
@@ -450,7 +523,12 @@ export function App(props: AppProps): React.ReactElement {
       )}
 
       {/* Status bar */}
-      <StatusBar state={state} />
+      <StatusBar
+        state={state}
+        statusLineConfig={session.getStatusLineConfig()}
+        cwd={cwd}
+        version="2.0.0"
+      />
 
       {/* Bottom spinner line when busy */}
       {state.busy ? (

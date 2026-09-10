@@ -88,10 +88,37 @@ const schema = z
       .enum(["none", "worktree"])
       .optional()
       .describe("Filesystem isolation for single-task mode (default \"none\")."),
+    csv: z
+      .string()
+      .optional()
+      .describe(
+        "CSV batch mode: a CSV string (with a header row) where each data row " +
+          "becomes a separate sub-agent objective. Combine with `csv_template` " +
+          "to control how each row is turned into an objective. The tasks run " +
+          "IN PARALLEL (subject to max_threads). Use for repetitive batch work " +
+          "across many items (e.g. one row per file, one row per PR). Mutually " +
+          "exclusive with `objective` and `tasks`."
+      ),
+    csv_template: z
+      .string()
+      .optional()
+      .describe(
+        "A template string for CSV batch mode. Column values are interpolated " +
+          "by header name, e.g. \"Review the file {path} for security issues " +
+          "and report findings.\" When omitted, the entire CSV row (joined by " +
+          "spaces) is used as the objective."
+      ),
   })
-  .refine((v) => Boolean(v.objective) !== Boolean(v.tasks && v.tasks.length > 0), {
-    message: "provide either `objective` (single task) or `tasks` (fan-out), not both",
-  });
+  .refine(
+    (v) => {
+      const modes = [Boolean(v.objective), Boolean(v.tasks && v.tasks.length > 0), Boolean(v.csv)];
+      return modes.filter(Boolean).length === 1;
+    },
+    {
+      message:
+        "provide exactly one of `objective` (single task), `tasks` (fan-out), or `csv` (batch), not multiple",
+    }
+  );
 
 export interface SubagentRunSpec {
   objective: string;
@@ -125,11 +152,51 @@ export interface SubagentRunner {
   run(spec: SubagentRunSpec): Promise<{ conclusion: string; steps: number }>;
 }
 
+/**
+ * Minimal CSV parser: handles quoted fields (with embedded commas, quotes
+ * escaped as `""`), and CRLF/LF line endings. Returns an array of rows,
+ * each row an array of field strings. The first row is the header. Does
+ * not handle multi-line quoted fields (rows must be single-line) — this is
+ * sufficient for `csv` batch mode where each row is a short objective spec.
+ */
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ",") {
+        row.push(field); field = "";
+      } else if (ch === "\n" || ch === "\r") {
+        if (ch === "\r" && text[i + 1] === "\n") i++;
+        row.push(field); field = "";
+        if (row.length > 1 || row[0] !== "") rows.push(row);
+        row = [];
+      } else {
+        field += ch;
+      }
+    }
+  }
+  // Last field/row.
+  if (field !== "" || row.length > 0) { row.push(field); if (row.length > 1 || row[0] !== "") rows.push(row); }
+  return rows;
+}
+
 /** A counting semaphore to cap concurrent sub-agent executions. Shared
  *  across all `task` tool invocations in a session so that nested fan-outs
  *  can't exceed the global limit. */
-export class Semaphore {
-  private permits: number;
+export class Semaphore {  private permits: number;
   private readonly waiters: Array<() => void> = [];
   constructor(permits: number) {
     this.permits = permits;
@@ -190,7 +257,11 @@ export const taskTool: ToolDef<typeof schema> & {
     "checkout + branch, never touching your working tree). Essential for " +
     "parallel fan-outs that each edit files, or for throwaway experiments. " +
     "Requires a git repo; falls back to the parent cwd if git is unavailable. " +
-    "The conclusion includes a diff stat of the worktree's changes.",
+    "The conclusion includes a diff stat of the worktree's changes.\n\n" +
+    "CSV batch mode: provide `csv` (a CSV string with a header row) and optional " +
+    "`csv_template` to spawn one sub-agent per data row. Column values are " +
+    "interpolated into the template by header name (e.g. \"Review {file} for " +
+    "security issues\"). Use for repetitive batch work across many items.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -217,32 +288,61 @@ export const taskTool: ToolDef<typeof schema> & {
       this._sem = new Semaphore(this.maxThreads ?? 4);
     }
     const sem = this._sem;
-    const specs: SubagentRunSpec[] =
-      input.tasks && input.tasks.length > 0
-        ? input.tasks.map((t) => ({
-            objective: t.objective,
+    const specs: SubagentRunSpec[] = (() => {
+      // Fan-out mode: explicit tasks array.
+      if (input.tasks && input.tasks.length > 0) {
+        return input.tasks.map((t) => ({
+          objective: t.objective,
+          cwd: ctx.cwd,
+          agentType: t.agent_type,
+          tools: t.tools,
+          model: t.model,
+          maxSteps: t.maxSteps,
+          depth: currentDepth + 1,
+          outputSchema: t.output_schema,
+          isolation: t.isolation,
+        }));
+      }
+      // CSV batch mode: each data row becomes a sub-agent objective.
+      if (input.csv) {
+        const rows = parseCsv(input.csv);
+        if (rows.length === 0) return [];
+        const headers = rows[0]!;
+        const template = input.csv_template;
+        return rows.slice(1).map((row) => {
+          const colMap = new Map<string, string>();
+          headers.forEach((h, i) => colMap.set(h, row[i] ?? ""));
+          const objective = template
+            ? template.replace(/\{(\w+)\}/g, (_, key) => colMap.get(String(key)) ?? "")
+            : row.join(" ");
+          return {
+            objective,
             cwd: ctx.cwd,
-            agentType: t.agent_type,
-            tools: t.tools,
-            model: t.model,
-            maxSteps: t.maxSteps,
+            agentType: input.agent_type,
+            tools: input.tools,
+            model: input.model,
+            maxSteps: input.maxSteps,
             depth: currentDepth + 1,
-            outputSchema: t.output_schema,
-            isolation: t.isolation,
-          }))
-        : [
-            {
-              objective: input.objective!,
-              cwd: ctx.cwd,
-              agentType: input.agent_type,
-              tools: input.tools,
-              model: input.model,
-              maxSteps: input.maxSteps,
-              depth: currentDepth + 1,
-              outputSchema: input.output_schema,
-              isolation: input.isolation,
-            },
-          ];
+            outputSchema: input.output_schema,
+            isolation: input.isolation,
+          };
+        });
+      }
+      // Single-task mode.
+      return [
+        {
+          objective: input.objective!,
+          cwd: ctx.cwd,
+          agentType: input.agent_type,
+          tools: input.tools,
+          model: input.model,
+          maxSteps: input.maxSteps,
+          depth: currentDepth + 1,
+          outputSchema: input.output_schema,
+          isolation: input.isolation,
+        },
+      ];
+    })();
     const results = await Promise.all(
       specs.map(async (spec, i) => {
         try {
@@ -253,6 +353,9 @@ export const taskTool: ToolDef<typeof schema> & {
         }
       })
     );
+    if (results.length === 0) {
+      return { content: "No tasks to run (CSV had no data rows or tasks array was empty).", isError: true };
+    }
     if (results.length === 1) {
       const r = results[0]!;
       return r.ok

@@ -37,6 +37,18 @@ export type CommandResult =
   | { kind: "show-plan" }
   | { kind: "compact" }
   | { kind: "goal"; objective: string }
+  /** Show MCP server status (from /mcp). */
+  | { kind: "show-mcp" }
+  /** Show configured hooks (from /hooks). */
+  | { kind: "show-hooks" }
+  /** Show custom agents (from /agents). */
+  | { kind: "show-agents" }
+  /** Show skills (from /skills). */
+  | { kind: "show-skills" }
+  /** Show context usage (from /context). */
+  | { kind: "show-context" }
+  /** Show installed plugins (from /plugins). */
+  | { kind: "show-plugins" }
   /** A custom slash command (from .codepilot/commands/*.md). The rendered
    *  prompt is sent to the session; optional model + allowedTools overrides
    *  apply to this turn only (claude-code semantics). */
@@ -78,6 +90,12 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "sessions", description: "List saved sessions" },
   { name: "goal", description: "Long-running goal mode", args: "<objective>" },
   { name: "clear", description: "Clear the visible event log" },
+  { name: "mcp", description: "Show MCP server status & tools" },
+  { name: "hooks", description: "Show configured hooks" },
+  { name: "agents", description: "Show custom sub-agents" },
+  { name: "skills", description: "Show available skills" },
+  { name: "context", description: "Show context window usage" },
+  { name: "plugins", description: "Show installed plugins" },
   { name: "exit", description: "Exit CodePilot" },
 ];
 
@@ -102,6 +120,15 @@ export const HELP_TEXT = `Available commands:
   /sessions                          List saved sessions
   /goal <objective>                  Long-running goal mode
   /clear                             Clear the visible event log
+
+  -- runtime introspection --
+  /mcp                               Show MCP server status & tools
+  /hooks                             Show configured hooks
+  /agents                            Show custom sub-agents (.codepilot/agents/)
+  /skills                            Show available skills
+  /context                           Show context window usage
+  /plugins                           Show installed plugins
+
   /exit                              Exit CodePilot
 
   -- custom commands (from .codepilot/commands/*.md & ~/.codepilot/commands/*.md) --
@@ -166,6 +193,18 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       if (rest === "") return { kind: "system", text: "Usage: /goal <objective>" };
       return { kind: "goal", objective: rest };
     }
+    case "mcp":
+      return { kind: "show-mcp" };
+    case "hooks":
+      return { kind: "show-hooks" };
+    case "agents":
+      return { kind: "show-agents" };
+    case "skills":
+      return { kind: "show-skills" };
+    case "context":
+      return { kind: "show-context" };
+    case "plugins":
+      return { kind: "show-plugins" };
     case "clear":
       return { kind: "clear" };
     case "exit":
@@ -195,6 +234,12 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "sessions",
   "goal",
   "clear",
+  "mcp",
+  "hooks",
+  "agents",
+  "skills",
+  "context",
+  "plugins",
   "exit",
   "quit",
 ]);
