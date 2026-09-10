@@ -270,15 +270,77 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) {
                 val toolName = msg.params.get("toolName").asString
                 val reason = msg.params.get("reason")?.asString ?: ""
                 val input = msg.params.get("input")?.toString() ?: ""
-                val decision = askUserPermission(toolName, reason, input)
                 scope.launch(Dispatchers.IO) {
+                    // Ack the reverse call first so the server-side promise
+                    // resolves, then deliver the decision via permission/respond.
+                    client?.ackServerRequest(msg.id)
+                    val decision = askUserPermission(toolName, reason, input)
                     client?.respondPermission(requestId, decision)
+                }
+            }
+            "question/request" -> {
+                val requestId = msg.params.get("requestId").asString
+                scope.launch(Dispatchers.IO) {
+                    client?.ackServerRequest(msg.id)
+                    val answers = askUserQuestions(msg.params.getAsJsonArray("questions"))
+                    client?.respondQuestion(requestId, answers)
                 }
             }
             else -> {
                 appendSystem("Unhandled server request: ${msg.method}")
             }
         }
+    }
+
+    /**
+     * Structured questions (ask_user_question / plan_done). Asked sequentially:
+     * a question with options becomes a combo-box dialog (multi-select via a
+     * checkbox list), one without options becomes a free-text input. Cancel/X
+     * yields an empty answer — fail-closed (plan_done reads a missing "Approve"
+     * as "not approved"). Returns the answers map keyed by question id.
+     */
+    private fun askUserQuestions(questions: com.google.gson.JsonArray?): JsonObject {
+        val answers = JsonObject()
+        if (questions == null) return answers
+        for (el in questions) {
+            val q = el.asJsonObject
+            val id = q.get("id")?.asString ?: continue
+            val header = q.get("header")?.asString
+            val question = q.get("question")?.asString ?: ""
+            val options = q.getAsJsonArray("options")
+            val multiSelect = q.get("multiSelect")?.asBoolean ?: false
+            val title = if (header != null) "CodePilot: $header" else "CodePilot"
+            appendSystem("❓ $question")
+            if (options != null && options.size() > 0) {
+                val labels = options.map { it.asJsonObject.get("label").asString }.toTypedArray()
+                if (multiSelect) {
+                    // Multi-select: checkbox list inside a confirm dialog.
+                    val boxes = labels.map { javax.swing.JCheckBox(it) }
+                    val panel = javax.swing.JPanel(java.awt.GridLayout(0, 1))
+                    panel.add(javax.swing.JLabel(question))
+                    boxes.forEach { panel.add(it) }
+                    val ok = JOptionPane.showConfirmDialog(
+                        component, panel, title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE,
+                    )
+                    if (ok == JOptionPane.OK_OPTION) {
+                        val arr = com.google.gson.JsonArray()
+                        boxes.forEachIndexed { i, b -> if (b.isSelected) arr.add(labels[i]) }
+                        answers.add(id, arr)
+                    }
+                } else {
+                    val pick = JOptionPane.showInputDialog(
+                        component, question, title, JOptionPane.QUESTION_MESSAGE,
+                        null, labels, labels[0],
+                    )
+                    if (pick != null) answers.addProperty(id, pick.toString())
+                }
+            } else {
+                // Free-text fallback when the question has no options.
+                val text = JOptionPane.showInputDialog(component, question, title, JOptionPane.QUESTION_MESSAGE)
+                if (text != null) answers.addProperty(id, text)
+            }
+        }
+        return answers
     }
 
     private fun handleNotification(msg: IncomingMessage.Notification) {

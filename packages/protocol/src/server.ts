@@ -22,6 +22,8 @@ import type {
   PermissionDecision,
   PermissionMode,
   PermissionRequest as CorePermissionRequest,
+  QuestionAnswers,
+  QuestionRequest as CoreQuestionRequest,
   Session,
   SessionSummary,
   UsageInfo,
@@ -97,6 +99,12 @@ export interface PermissionRespondParams {
   decision: PermissionDecision;
 }
 
+export interface QuestionRespondParams {
+  requestId: string;
+  /** Answers keyed by question id: option label(s) or free text. */
+  answers: QuestionAnswers;
+}
+
 export interface SessionForkParams {
   sessionId: string;
   atEventIndex?: number;
@@ -120,6 +128,13 @@ export interface PermissionRequestParams {
   reason: string;
 }
 
+/** Wire params for the reverse `question/request` (ask_user_question / plan_done). */
+export interface QuestionRequestParams {
+  sessionId: string;
+  requestId: string;
+  questions: CoreQuestionRequest["questions"];
+}
+
 export const PROTOCOL_VERSION = 1;
 /** All collaboration modes advertised by the server. */
 export const SUPPORTED_MODES: AgentMode[] = ["chat", "plan", "agent"];
@@ -136,6 +151,7 @@ export function registerServer(
     peer,
     sessions: new Map(),
     pendingPermissions: new Map(),
+    pendingQuestions: new Map(),
     defaultCwd: opts.defaultCwd ?? process.cwd(),
     defaultPermissionMode: opts.defaultPermissionMode ?? "ask",
     capabilities: opts.capabilities ?? defaultCapabilities(),
@@ -171,6 +187,10 @@ export function registerServer(
     "permission/respond",
     (p) => handlePermissionRespond(ctx, p),
   );
+  peer.onRequest<QuestionRespondParams, Record<string, never>>(
+    "question/respond",
+    (p) => handleQuestionRespond(ctx, p),
+  );
   peer.onRequest<SessionForkParams, { sessionId: string }>(
     "session/fork",
     (p) => handleSessionFork(ctx, p),
@@ -201,6 +221,8 @@ interface ServerContext {
   sessions: Map<string, Session>;
   /** Wire-level permission requests awaiting a client response. */
   pendingPermissions: Map<string, (decision: PermissionDecision) => void>;
+  /** Wire-level question requests awaiting a client response. */
+  pendingQuestions: Map<string, (answers: QuestionAnswers) => void>;
   defaultCwd: string;
   defaultPermissionMode: PermissionMode;
   capabilities: InitializeResult["capabilities"];
@@ -318,6 +340,7 @@ async function handleSessionNew(
     systemPromptExtra: params?.systemPromptExtra,
     agentMode: params?.agentMode ?? effectiveConfig.agentMode,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
+    onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
   });
   return registerSession(ctx, session);
 }
@@ -376,6 +399,7 @@ async function handleSessionResume(
     config: effectiveConfig,
     sessionId: params.sessionId,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
+    onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
   });
   registerSession(ctx, session);
   return { sessionId: session.id, events: session.getEvents() };
@@ -472,6 +496,22 @@ async function handlePermissionRespond(
   return {};
 }
 
+async function handleQuestionRespond(
+  ctx: ServerContext,
+  params: QuestionRespondParams,
+): Promise<Record<string, never>> {
+  const resolve = ctx.pendingQuestions.get(params.requestId);
+  if (!resolve) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `no pending question request: ${params.requestId}`,
+    );
+  }
+  ctx.pendingQuestions.delete(params.requestId);
+  resolve(params.answers ?? {});
+  return {};
+}
+
 async function handleSessionFork(
   ctx: ServerContext,
   params: SessionForkParams,
@@ -505,6 +545,10 @@ async function handleShutdown(
   // Reject outstanding permission requests.
   for (const [, resolve] of ctx.pendingPermissions) resolve("deny");
   ctx.pendingPermissions.clear();
+  // Fail-closed for outstanding questions: empty answers (plan_done treats a
+  // missing "Approve" answer as not approved, ask_user reports "(no answer)").
+  for (const [, resolve] of ctx.pendingQuestions) resolve({});
+  ctx.pendingQuestions.clear();
   // Tear the peer down after the response is sent.
   setImmediate(() => {
     void ctx.peer.close();
@@ -557,6 +601,36 @@ function defaultDecision(mode: PermissionMode): PermissionDecision {
     default:
       return "deny";
   }
+}
+
+/**
+ * Issue a server-initiated `question/request` to the client and resolve with
+ * the client's `question/respond` answers. Uses the same `<sessionId>#<id>`
+ * wire-id convention as permission requests. On transport failure we resolve
+ * with empty answers (fail-closed: plan_done reads that as "not approved").
+ */
+async function requestQuestionFromClient(
+  ctx: ServerContext,
+  session: Session,
+  req: CoreQuestionRequest,
+): Promise<QuestionAnswers> {
+  const wireId = `${session.id}#${req.requestId}`;
+  return new Promise<QuestionAnswers>((resolve) => {
+    ctx.pendingQuestions.set(wireId, resolve);
+    void ctx.peer
+      .request<QuestionRequestParams, Record<string, never>>(
+        "question/request",
+        {
+          sessionId: session.id,
+          requestId: wireId,
+          questions: req.questions,
+        },
+      )
+      .catch(() => {
+        ctx.pendingQuestions.delete(wireId);
+        resolve({});
+      });
+  });
 }
 
 /**

@@ -27,12 +27,14 @@ import type {
   Session,
   SessionSummary,
 } from "@codepilot/core";
-import type { PermissionBridge } from "../ui/controller.js";
+import type { PermissionBridge, QuestionBridge } from "../ui/controller.js";
 
 export interface MockSessionOptions {
   cwd: string;
   yolo: boolean;
   bridge: PermissionBridge;
+  /** Optional question bridge; enables the "ask" demo path. */
+  questionBridge?: QuestionBridge;
   /** Optional initial Cursor-style collaboration mode (default "agent"). */
   initialAgentMode?: AgentMode;
 }
@@ -69,7 +71,7 @@ class MockSessionImpl implements SessionShape {
   private busy = false;
   private mode: AgentMode;
 
-  constructor(cwd: string, private readonly yolo: boolean, private readonly bridge: PermissionBridge, initialAgentMode: AgentMode = "agent") {
+  constructor(cwd: string, private readonly yolo: boolean, private readonly bridge: PermissionBridge, initialAgentMode: AgentMode = "agent", private readonly questionBridge?: QuestionBridge) {
     this.cwd = cwd;
     this.mode = initialAgentMode;
     // Seed with an initial status:idle so the UI knows we're alive.
@@ -166,6 +168,42 @@ class MockSessionImpl implements SessionShape {
       }
     }
 
+    // 4b. Optionally demonstrate a structured question round-trip when the
+    // prompt mentions "ask" and a question bridge is available.
+    if (!this.cancelled && this.questionBridge !== undefined && text.toLowerCase().includes("ask")) {
+      const answers = await this.questionBridge.waitAnswers({
+        requestId: randomUUID(),
+        questions: [
+          {
+            id: "confirm",
+            header: "Confirm",
+            question: "Proceed with the mocked plan?",
+            options: [
+              { label: "Yes (Recommended)", description: "Continue the demo." },
+              { label: "No", description: "Stop here." },
+            ],
+          },
+          {
+            id: "note",
+            header: "Note",
+            question: "Anything else to add? (free text)",
+          },
+        ],
+      });
+      this.emit({
+        type: "message",
+        id: randomUUID(),
+        role: "assistant",
+        model: "mock-model",
+        content: [
+          {
+            type: "text",
+            text: `(mock) answers: ${JSON.stringify(answers)}`,
+          },
+        ],
+      });
+    }
+
     // 5. Usage event.
     this.emit({
       type: "usage",
@@ -189,7 +227,7 @@ class MockSessionImpl implements SessionShape {
   }
 
   async fork(_atEventIndex?: number): Promise<SessionShape> {
-    return new MockSessionImpl(this.cwd, this.yolo, this.bridge, this.mode) as SessionShape;
+    return new MockSessionImpl(this.cwd, this.yolo, this.bridge, this.mode, this.questionBridge) as SessionShape;
   }
 
   async dispose(): Promise<void> {
@@ -227,7 +265,7 @@ function sleep(ms: number): Promise<void> {
 export function createMockSession(opts: MockSessionOptions): MockSessionHandle {
   // The mock conforms structurally to SessionShape; cast at the boundary so
   // the TUI can pass it as a Session to the rest of the UI.
-  const mock = new MockSessionImpl(opts.cwd, opts.yolo, opts.bridge, opts.initialAgentMode);
+  const mock = new MockSessionImpl(opts.cwd, opts.yolo, opts.bridge, opts.initialAgentMode, opts.questionBridge);
   return {
     session: mock as unknown as Session,
     defaultModel: "mock-model",

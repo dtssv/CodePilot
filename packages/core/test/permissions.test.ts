@@ -60,11 +60,11 @@ describe("PermissionEngine", () => {
     const t2 = makeTool("test_run", "execute");
     expect(e.preflight(t1, {})).toEqual({
       decision: "allow",
-      reason: "matched autoApprove rule",
+      reason: "matched allow rule \"lint\"",
     });
     expect(e.preflight(t2, {})).toEqual({
       decision: "allow",
-      reason: "matched autoApprove rule",
+      reason: "matched allow rule \"test_*\"",
     });
   });
 
@@ -73,7 +73,7 @@ describe("PermissionEngine", () => {
     const t = makeTool("bash", "execute");
     expect(e.preflight(t, { command: "git status" })).toEqual({
       decision: "allow",
-      reason: "matched autoApprove rule",
+      reason: "matched allow rule \"/^git (status|log)$/\"",
     });
     expect(e.preflight(t, { command: "git push" })).toBe("ask");
   });

@@ -23,6 +23,9 @@ import type {
   PermissionRespondParams,
   PromptCancelParams,
   PromptSendParams,
+  QuestionAnswers,
+  QuestionRequestParams,
+  QuestionRespondParams,
   ServerEvent,
   SessionNewParams,
   SessionResumeParams,
@@ -38,6 +41,8 @@ export interface ClientEvents {
   event: (sessionId: string, ev: Event) => void;
   usage: (n: SessionUsageNotification) => void;
   permissionRequest: (params: PermissionRequestParams) => void;
+  /** Structured question (ask_user_question / plan_done) from the server. */
+  questionRequest: (params: QuestionRequestParams) => void;
   /** Low-level protocol notification we don't model explicitly. */
   rawNotification: (method: string, params: unknown) => void;
   /** Server-initiated JSON-RPC request we don't have a handler for. */
@@ -196,6 +201,18 @@ export class CodePilotClient extends EventEmitter {
   }
 
   /**
+   * Answer a `question/request`. Fail-closed note: if the webview/host never
+   * responds, the server-side prompt hangs; callers should always resolve with
+   * at least an empty answers map on dismissal.
+   */
+  async respondQuestion(requestId: string, answers: QuestionAnswers): Promise<void> {
+    await this.request("question/respond", {
+      requestId,
+      answers,
+    } satisfies QuestionRespondParams);
+  }
+
+  /**
    * Switch a session's collaboration mode at runtime. The server replies with
    * an empty object and immediately emits a `{type:"mode", mode}` event so we
    * can keep the UI in sync.
@@ -318,9 +335,19 @@ export class CodePilotClient extends EventEmitter {
         this.writeMessage({ jsonrpc: "2.0", id, result: result ?? null });
       }
     };
+    // Per PROTOCOL.md the client must BOTH ack the reverse call itself (empty
+    // result — otherwise the server-side request promise leaks) AND send the
+    // real answer later via `permission/respond` / `question/respond`.
     if (req.method === "permission/request") {
+      respond({});
       const params = req.params as PermissionRequestParams;
       this.emit("permissionRequest", params);
+      return;
+    }
+    if (req.method === "question/request") {
+      respond({});
+      const params = req.params as QuestionRequestParams;
+      this.emit("questionRequest", params);
       return;
     }
     this.emit("rawRequest", req.method, req.params, respond);

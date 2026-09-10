@@ -14,6 +14,15 @@ export type {
   ToolInputJsonDelta,
   AgentMode,
   PermissionMode,
+  PermissionRules,
+  SandboxConfig,
+  HooksConfig,
+  HookEntryConfig,
+  ProviderFallbackConfig,
+  WebFetchConfig,
+  QuestionSpec,
+  QuestionRequest,
+  QuestionAnswers,
   PermissionRequest,
   PermissionDecision,
   CodepilotConfig,
@@ -56,6 +65,12 @@ export {
   ToolRegistry,
   zodToJsonSchema,
   bashTool,
+  bashOutputTool,
+  bashKillTool,
+  webFetchTool,
+  webSearchTool,
+  askUserQuestionTool,
+  planDoneTool,
   readFileTool,
   writeFileTool,
   editFileTool,
@@ -83,16 +98,47 @@ export type {
 } from "./tools/index.js";
 
 // ---- Permissions ----
-export { PermissionEngine, matchRule } from "./permissions.js";
+export { PermissionEngine, matchRule, persistRule } from "./permissions.js";
 export type { PermissionCheckResult } from "./permissions.js";
+
+// ---- Sandbox ----
+export {
+  resolveSandbox,
+  wrapCommand,
+  buildSeatbeltProfile,
+  detectSandboxBackend,
+  assertPathAllowed,
+  assertPathAllowedAsync,
+  checkDangerousCommand,
+  winPathToWsl,
+  SENSITIVE_READ_PATHS,
+} from "./sandbox.js";
+export type {
+  ResolvedSandbox,
+  WrappedCommand,
+  SandboxBackend,
+  PathCheckResult,
+} from "./sandbox.js";
+
+// ---- Hooks ----
+export { HookEngine } from "./hooks.js";
+export type { HookEvent, HookEntry, PreHookResult, PostHookResult } from "./hooks.js";
+
+// ---- Redaction ----
+export { redactSecrets, containsSecretShape } from "./redact.js";
+
+// ---- Provider fallback ----
+export { FallbackProvider, isFailoverError } from "./providers/fallback.js";
 
 // ---- Memory ----
 export {
   readMemory,
+  readLayeredProjectMemory,
   FileMemorySink,
   summariseMemory,
   memoryFileExists,
   PROJECT_MEMORY_NAME,
+  AGENTS_MEMORY_NAME,
   USER_MEMORY_PATH,
 } from "./memory.js";
 export type { MemoryContents } from "./memory.js";
@@ -201,11 +247,36 @@ export type { Skill, SkillSource, DiscoverOptions } from "./skills.js";
 export { skillTool, createSkillTool, StaticSkillStore, setDefaultSkillStore } from "./tools/skill.js";
 export type { SkillStore, SkillToolHandle } from "./tools/skill.js";
 
+// ---- Slash commands (custom /name commands from .codepilot/commands/*.md) ----
+export {
+  parseSlashCommandMd,
+  discoverSlashCommands,
+  findSlashCommand,
+  commandHelpLine,
+  renderCommandPrompt,
+  interpolateTemplate,
+  isValidCommandName,
+  resolveSlashCommand,
+  resolveCommandsDir,
+  commandsDirFor,
+  userCommandsDir,
+  commandFilePath,
+  commandDir,
+} from "./slashCommands.js";
+export type {
+  SlashCommand,
+  SlashCommandSource,
+  SlashCommandFrontmatter,
+  DiscoverSlashCommandsOptions,
+  DiscoverSlashCommandsResult,
+  ResolveResult,
+} from "./slashCommands.js";
+
 // ---- MCP (extended — adds SSE, resources, prompts, fail-soft) ----
 // Note: McpStdioClient, McpManager, mcpToolName, parseMcpToolName,
 // McpToolDescriptor, McpInvokeRequest, McpInvokeResult are already
 // exported above in the legacy "MCP" block.
-export { McpSseClient, isMcpSseConfig, mcpResourceToolName } from "./mcp.js";
+export { McpSseClient, isMcpSseConfig, mcpResourceToolName, MCP_REF_REGEX, parseMcpReference, resolveMcpReferences } from "./mcp.js";
 export type {
   McpResourceDescriptor,
   McpResourceReadResult,
@@ -215,6 +286,9 @@ export type {
   McpServerConfigEntry,
   McpClient,
   McpStartError,
+  McpServerRequestHandler,
+  McpElicitationResult,
+  McpSamplingResult,
 } from "./mcp.js";
 
 // ---- Tokens (estimator + per-model context windows) ----
@@ -225,8 +299,9 @@ export {
   estimateEventsTokens,
   lookupContextWindow,
   resolveCompactionThreshold,
+  estimateCostUSD,
 } from "./tokens.js";
-export type { TokenEstimator, ModelContextWindow } from "./tokens.js";
+export type { TokenEstimator, ModelContextWindow, ModelCost } from "./tokens.js";
 
 // ---- Checkpoints (cross-session memory files) ----
 export {
@@ -251,6 +326,14 @@ export type {
   CheckpointHook,
   WriteCheckpointResult,
 } from "./checkpoints.js";
+
+// ---- Snapshots (checkpoint rewind) ----
+export {
+  createSnapshot,
+  rewindToSnapshot,
+  listSnapshots,
+  deleteSnapshot,
+} from "./snapshots.js";
 
 // ---- Memory (structured sections) ----
 export {
@@ -277,3 +360,22 @@ export type {
 // ---- Goal (checkpoint callback + structured blocked reason) ----
 export { goalPromptBody, COMPLETION_MARKERS } from "./goal.js";
 export type { GoalRunOptionsEx, GoalCheckpointInfo } from "./goal.js";
+
+// ---- Worktree isolation for sub-agents (claude-code 2026-05 style) ----
+export {
+  createWorktree,
+  removeWorktree,
+  resolveRepoRoot,
+  worktreeDiffStat,
+  isGitAvailable,
+} from "./worktree.js";
+export type {
+  WorktreeHandle,
+  WorktreeCreateOptions,
+  WorktreeCreateResult,
+  WorktreeRemoveResult,
+} from "./worktree.js";
+
+// ---- Subagent isolation modes (re-exported from the task tool) ----
+export { ISOLATION_MODES } from "./tools/task.js";
+export type { Isolation } from "./tools/task.js";

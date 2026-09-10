@@ -2,7 +2,7 @@
 // async execute function. The agent loop invokes them with parsed input.
 
 import type { z } from "zod";
-import type { ContentBlock } from "../types.js";
+import type { ContentBlock, QuestionRequest, QuestionAnswers } from "../types.js";
 import type { ResolvedSandbox } from "../sandbox.js";
 
 export type PermissionLevel = "read" | "write" | "execute" | "network";
@@ -20,6 +20,34 @@ export interface ToolContext {
    * test harnesses can construct minimal contexts (absent = mode "off").
    */
   sandbox?: ResolvedSandbox;
+  /**
+   * Structured user-question channel (ask_user_question / plan_done).
+   * Absent in headless sessions — tools must degrade gracefully.
+   */
+  askUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
+  /**
+   * Persistent shell for foreground `bash` calls. When present, the bash
+   * tool routes foreground commands through it so `cd`, `export`, and
+   * background jobs persist across calls. Absent in test harnesses —
+   * the bash tool falls back to a fresh `sh -c` child.
+   */
+  persistentShell?: { run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("../persistentShell.js").PersistentShellResult> };
+  /**
+   * LSP / language-server diagnostics provider (host-supplied). When
+   * present, the `diagnostics` tool reads from it; otherwise the tool
+   * reports that diagnostics are unavailable and suggests `bash`.
+   */
+  diagnosticsProvider?: import("./diagnostics.js").DiagnosticsProvider;
+  /**
+   * The session's resolved config (read-only). Tools that need
+   * config-driven behaviour (e.g. web_fetch's per-domain allowlist) read
+   * from here. Optional so minimal test contexts still type-check.
+   */
+  config?: import("../types.js").CodepilotConfig;
+  /** Current sub-agent nesting depth (0 at top level). The `task` tool
+   *  refuses to spawn beyond the configured max depth to prevent
+   *  unbounded recursion. */
+  subagentDepth?: number;
 }
 
 export interface ToolResult {
@@ -30,6 +58,11 @@ export interface ToolResult {
   artifactRef?: string;
   /** Optional structured blocks for richer UI use; not required. */
   blocks?: ContentBlock[];
+  /** Optional images returned by image-capable tools (e.g. read_image).
+   *  The agent loop emits them alongside the tool_result as image content
+   *  blocks so a multimodal model can see them. Non-multimodal models
+   *  simply never receive them (provider strips unsupported blocks). */
+  images?: { mediaType: string; base64: string }[];
 }
 
 export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {

@@ -39,6 +39,10 @@ import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
 import { URL } from "node:url";
 import type { McpServerConfig } from "./types.js";
+import {
+  OAuthTransportHelper,
+  type RawHttpResponse,
+} from "./mcpOAuthTransport.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -117,6 +121,9 @@ export interface McpClient {
   listPrompts(): McpPromptDescriptor[];
   /** Render a prompt by name with the given arguments. */
   getPrompt(name: string, args?: Record<string, string>): Promise<unknown>;
+  /** Install a handler for server-initiated requests (elicitation,
+   *  sampling). When unset, such requests are rejected. */
+  setServerRequestHandler(h: McpServerRequestHandler | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,15 +145,35 @@ export interface McpSseServerConfig {
 }
 
 /** Discriminated union of all supported server-config shapes. We treat a
- *  config object with a `type: "sse"` as SSE, anything else as stdio. This
- *  keeps existing configs (which have no `type` field) backward compatible. */
-export type McpServerConfigEntry = McpStdioServerConfig | McpSseServerConfig;
+ *  config object with a `type: "sse"` as SSE, `type: "http"` as Streamable
+ *  HTTP, anything else as stdio. This keeps existing configs (which have no
+ *  `type` field) backward compatible. */
+export type McpServerConfigEntry =
+  | McpStdioServerConfig
+  | McpSseServerConfig
+  | McpHttpServerConfig;
+
+/** Streamable HTTP MCP server (MCP 2025-03-26): a single endpoint that
+ *  answers POSTs with either JSON or an SSE stream, tracks sessions via the
+ *  `mcp-session-id` header, and accepts DELETE to end the session. */
+export interface McpHttpServerConfig {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
 
 /** Type guard. */
 export function isMcpSseConfig(
   cfg: McpServerConfigEntry
 ): cfg is McpSseServerConfig {
   return Boolean(cfg) && (cfg as McpSseServerConfig).type === "sse";
+}
+
+/** Type guard. */
+export function isMcpHttpConfig(
+  cfg: McpServerConfigEntry
+): cfg is McpHttpServerConfig {
+  return Boolean(cfg) && (cfg as McpHttpServerConfig).type === "http";
 }
 
 // ---------------------------------------------------------------------------
@@ -162,15 +189,48 @@ interface JsonRpcRequest {
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
-  id: number | string;
+  id?: number | string;
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
+  // Server-initiated requests (elicitation/sampling) carry method+params.
+  method?: string;
+  params?: unknown;
 }
 
 type Pending = {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
 };
+
+/**
+ * Handler for server-initiated (reverse) requests such as
+ * `elicitation/create` and `sampling/createMessage`. Returning a value
+ * resolves the request; throwing rejects it with a JSON-RPC error.
+ */
+export type McpServerRequestHandler = (
+  serverName: string,
+  method: string,
+  params: unknown
+) => Promise<unknown>;
+
+/** Result shape for an `elicitation/create` response. */
+export interface McpElicitationResult {
+  /** The user's action: "accept" to return the data, "decline" to refuse
+   *  without data, "cancel" to abort the request entirely. */
+  action: "accept" | "decline" | "cancel";
+  /** The elicited data, when `action === "accept"`. */
+  data?: Record<string, unknown>;
+}
+
+/** Result shape for a `sampling/createMessage` response. */
+export interface McpSamplingResult {
+  role: "assistant";
+  content: { type: "text"; text: string } | { type: "image"; data: string; mimeType?: string };
+  /** Provider-specific model identifier that produced the message. */
+  model?: string;
+  /** Optional stop reason. */
+  stopReason?: "end_turn" | "stop_sequence" | "max_tokens" | string;
+}
 
 /** Mixin shared by both transports: assigns ids, tracks pending requests,
  *  dispatches responses. The transport is responsible for delivering raw
@@ -186,6 +246,15 @@ abstract class BaseJsonRpcClient implements McpClient {
   protected prompts: McpPromptDescriptor[] = [];
   protected supportsResources = false;
   protected supportsPrompts = false;
+  /** Optional reverse-request handler (elicitation/sampling). */
+  protected serverRequestHandler: McpServerRequestHandler | null = null;
+
+  /** Install a handler for server-initiated requests. Pass `null` to
+   *  disable. When unset, such requests are rejected with code -32601
+   *  (method not found). */
+  setServerRequestHandler(h: McpServerRequestHandler | null): void {
+    this.serverRequestHandler = h;
+  }
 
   abstract start(): Promise<void>;
   abstract stop(): Promise<void>;
@@ -266,8 +335,13 @@ abstract class BaseJsonRpcClient implements McpClient {
   /** Dispatch a single parsed JSON-RPC envelope. Subclasses call this from
    *  their transport's read path. */
   protected onMessage(msg: JsonRpcResponse): void {
+    // Server-initiated request (elicitation/sampling): has method + id.
+    if (msg.method !== undefined && msg.id !== undefined && msg.id !== null) {
+      void this.handleServerRequest(msg.id, msg.method, msg.params);
+      return;
+    }
+    // Notification (no id) — we don't subscribe to anything in this client.
     if (msg.id === undefined || msg.id === null) {
-      // Notification — we don't subscribe to anything in this client.
       return;
     }
     const p = this.pending.get(msg.id);
@@ -277,6 +351,39 @@ abstract class BaseJsonRpcClient implements McpClient {
       p.reject(new Error(`MCP error ${msg.error.code}: ${msg.error.message}`));
     } else {
       p.resolve(msg.result);
+    }
+  }
+
+  /** Handle a server-initiated request (elicitation/create or
+   *  sampling/createMessage). The response is sent back as a JSON-RPC
+   *  result/error on the same transport. */
+  protected async handleServerRequest(
+    id: number | string,
+    method: string,
+    params: unknown
+  ): Promise<void> {
+    // `sendFrame` is typed for requests, but both transports serialize the
+    // envelope verbatim — so we cast a JSON-RPC response to the request type
+    // to reuse the same write path.
+    const respond = (result: unknown, error?: { code: number; message: string }) => {
+      const resp = error
+        ? ({ jsonrpc: "2.0", id, error } as unknown as JsonRpcRequest)
+        : ({ jsonrpc: "2.0", id, result } as unknown as JsonRpcRequest);
+      try {
+        this.sendFrame(resp);
+      } catch {
+        /* best-effort */
+      }
+    };
+    if (!this.serverRequestHandler) {
+      respond(null, { code: -32601, message: "method not found" });
+      return;
+    }
+    try {
+      const result = await this.serverRequestHandler(this.serverName, method, params);
+      respond(result);
+    } catch (e) {
+      respond(null, { code: -32603, message: (e as Error).message ?? "internal error" });
     }
   }
 
@@ -290,7 +397,10 @@ abstract class BaseJsonRpcClient implements McpClient {
   protected async handshakeAndDiscover(): Promise<void> {
     const init = (await this.request("initialize", {
       protocolVersion: "2024-11-05",
-      capabilities: {},
+      capabilities: {
+        elicitation: {},
+        sampling: {},
+      },
       clientInfo: { name: "codepilot", version: "2.0.0" },
     })) as {
       serverInfo?: { name: string; version?: string };
@@ -382,7 +492,13 @@ export class McpStdioClient extends BaseJsonRpcClient {
 
   async start(): Promise<void> {
     if (this.proc) return;
-    const proc = spawn(this.config.command, this.config.args ?? [], {
+    if (!this.config.command) {
+      throw new Error(
+        `MCP stdio server ${this.serverName}: command is required (use type "http" or "sse" with a url for remote servers)`
+      );
+    }
+    const command = this.config.command;
+    const proc = spawn(command, this.config.args ?? [], {
       env: { ...process.env, ...(this.config.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -505,10 +621,13 @@ export class McpSseClient extends BaseJsonRpcClient {
   private readonly headers: Record<string, string>;
   /** Parsed base URL (control plane). */
   private readonly baseUrl: URL;
+  /** OAuth helper, if the host enabled it. */
+  private readonly oauth: OAuthTransportHelper | null;
 
   constructor(
     public readonly serverName: string,
-    private readonly config: McpSseServerConfig
+    private readonly config: McpSseServerConfig,
+    ctx?: McpTransportContext,
   ) {
     super();
     if (!config.url) {
@@ -516,6 +635,19 @@ export class McpSseClient extends BaseJsonRpcClient {
     }
     this.baseUrl = new URL(config.url);
     this.headers = { ...(config.headers ?? {}) };
+    this.oauth =
+      ctx && ctx.openAuthUrl
+        ? new OAuthTransportHelper(
+            serverName,
+            ctx.cwd,
+            {
+              oauthClientId: (config as McpServerConfig).oauthClientId,
+              oauthClientSecret: (config as McpServerConfig).oauthClientSecret,
+              oauthScopes: (config as McpServerConfig).oauthScopes,
+            },
+            ctx.openAuthUrl,
+          )
+        : null;
   }
 
   async start(): Promise<void> {
@@ -564,29 +696,72 @@ export class McpSseClient extends BaseJsonRpcClient {
   private postJson(
     msg: JsonRpcRequest
   ): Promise<{ status: number; body: string; contentType: string }> {
+    return (async () => {
+      const res = await this.doPost(msg);
+      // 401 with WWW-Authenticate → OAuth flow + one retry.
+      if (res.status === 401 && this.oauth) {
+        const newToken = await this.oauth.handle401({
+          status: res.status,
+          headers: { "www-authenticate": res.wwwAuthenticate ?? undefined },
+          body: res.body,
+        });
+        if (newToken) {
+          return this.doPost(msg);
+        }
+      }
+      return res;
+    })().catch((err) => {
+      const p = this.pending.get(msg.id);
+      if (p) {
+        this.pending.delete(msg.id);
+        p.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+      throw err;
+    });
+  }
+
+  /** A single POST attempt. Dispatches the response body to `onMessage`
+   *  (whether JSON or SSE-framed) and resolves with status/body/contentType
+   *  + the WWW-Authenticate header (for the 401 path). */
+  private async doPost(
+    msg: JsonRpcRequest,
+  ): Promise<{ status: number; body: string; contentType: string; wwwAuthenticate?: string }> {
     const target = this.endpoint ? new URL(this.endpoint, this.baseUrl) : this.baseUrl;
+    const isHttps = target.protocol === "https:";
+    const body = JSON.stringify(msg);
+    const baseHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      "Content-Length": String(Buffer.byteLength(body)),
+      ...this.strippedAuthHeaders(this.headers),
+    };
+    if (this.oauth) {
+      await this.oauth.attachAuth(baseHeaders);
+    }
+    const opts: RequestOptions | HttpsRequestOptions = {
+      method: "POST",
+      hostname: target.hostname,
+      port: target.port || (isHttps ? 443 : 80),
+      path: target.pathname + target.search,
+      headers: baseHeaders,
+    };
+    const reqFn = isHttps ? httpsRequest : httpRequest;
     return new Promise((resolve, reject) => {
-      const isHttps = target.protocol === "https:";
-      const body = JSON.stringify(msg);
-      const opts: RequestOptions | HttpsRequestOptions = {
-        method: "POST",
-        hostname: target.hostname,
-        port: target.port || (isHttps ? 443 : 80),
-        path: target.pathname + target.search,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "Content-Length": Buffer.byteLength(body),
-          ...this.strippedAuthHeaders(this.headers),
-        },
-      };
-      const reqFn = isHttps ? httpsRequest : httpRequest;
       const req = reqFn(opts, (res) => {
         const contentType = String(res.headers["content-type"] ?? "");
+        const wwwAuth = Array.isArray(res.headers["www-authenticate"])
+          ? res.headers["www-authenticate"].join(", ")
+          : (res.headers["www-authenticate"] as string | undefined);
         const chunks: Buffer[] = [];
         res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () => {
           const out = Buffer.concat(chunks).toString("utf-8");
+          if ((res.statusCode ?? 0) >= 400) {
+            // Don't dispatch the body on error; the caller (postJson) decides
+            // whether to retry via OAuth or reject the pending entry.
+            resolve({ status: res.statusCode ?? 0, body: out, contentType, wwwAuthenticate: wwwAuth });
+            return;
+          }
           if (contentType.includes("text/event-stream")) {
             // The response IS an SSE stream. We parse it inline and look
             // for the JSON-RPC response frame.
@@ -597,7 +772,6 @@ export class McpSseClient extends BaseJsonRpcClient {
             // The POST has been "answered" once the stream ends; the
             // pending entry is already gone because onMessage dispatched
             // it.
-            resolve({ status: res.statusCode ?? 0, body: out, contentType });
           } else {
             // JSON body — try to parse as the JSON-RPC response directly.
             try {
@@ -615,8 +789,8 @@ export class McpSseClient extends BaseJsonRpcClient {
                 );
               }
             }
-            resolve({ status: res.statusCode ?? 0, body: out, contentType });
           }
+          resolve({ status: res.statusCode ?? 0, body: out, contentType, wwwAuthenticate: wwwAuth });
         });
         res.on("error", (err) => {
           const p = this.pending.get(msg.id);
@@ -861,16 +1035,248 @@ async function* parseSseStream(
 }
 
 // ---------------------------------------------------------------------------
+// Streamable HTTP transport (MCP 2025-03-26)
+// ---------------------------------------------------------------------------
+
+/**
+ * Streamable HTTP transport: one endpoint, POST-per-message. Responses may
+ * be `application/json` (single envelope) or `text/event-stream` (a short
+ * SSE stream whose frames carry the response and any server-initiated
+ * messages). Session state rides the `mcp-session-id` header: the server
+ * assigns it on `initialize`, we echo it on every later request, and we
+ * DELETE it on `stop()`. Notifications receive `202 Accepted` with an empty
+ * body.
+ */
+export class McpHttpClient extends BaseJsonRpcClient {
+  private sessionId: string | null = null;
+  private stopped = false;
+  private readonly baseUrl: URL;
+  private readonly headers: Record<string, string>;
+  private readonly oauth: OAuthTransportHelper | null;
+
+  constructor(
+    public readonly serverName: string,
+    private readonly config: McpHttpServerConfig,
+    ctx?: McpTransportContext,
+  ) {
+    super();
+    if (!config.url) throw new Error(`MCP HTTP server ${serverName}: url is required`);
+    this.baseUrl = new URL(config.url);
+    this.headers = { ...(config.headers ?? {}) };
+    // OAuth is enabled if the host provided an openAuthUrl hook.
+    this.oauth =
+      ctx && ctx.openAuthUrl
+        ? new OAuthTransportHelper(
+            serverName,
+            ctx.cwd,
+            {
+              oauthClientId: (config as McpServerConfig).oauthClientId,
+              oauthClientSecret: (config as McpServerConfig).oauthClientSecret,
+              oauthScopes: (config as McpServerConfig).oauthScopes,
+            },
+            ctx.openAuthUrl,
+          )
+        : null;
+  }
+
+  async start(): Promise<void> {
+    if (this.stopped) throw new Error(`MCP ${this.serverName} already stopped`);
+    await this.handshakeAndDiscover();
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.failAllPending(new Error(`MCP ${this.serverName} stopped`));
+    if (this.sessionId) {
+      // Best-effort session termination.
+      await this.rawRequest("DELETE").catch(() => undefined);
+      this.sessionId = null;
+    }
+  }
+
+  protected sendFrame(msg: JsonRpcRequest): void {
+    if (this.stopped) throw new Error(`MCP ${this.serverName} is stopped`);
+    this.postJson(msg).catch((err) => {
+      const p = this.pending.get(msg.id);
+      if (p) {
+        this.pending.delete(msg.id);
+        p.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  private async rawRequest(method: "DELETE"): Promise<void> {
+    const isHttps = this.baseUrl.protocol === "https:";
+    const reqFn = isHttps ? httpsRequest : httpRequest;
+    const headers = await this.outboundHeaders();
+    await new Promise<void>((resolve, reject) => {
+      const req = reqFn(
+        {
+          method,
+          hostname: this.baseUrl.hostname,
+          port: this.baseUrl.port || (isHttps ? 443 : 80),
+          path: this.baseUrl.pathname + this.baseUrl.search,
+          headers,
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve());
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  private async outboundHeaders(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {
+      "MCP-Protocol-Version": "2025-03-26",
+      ...this.headers,
+    };
+    if (this.sessionId) out["mcp-session-id"] = this.sessionId;
+    if (this.oauth) {
+      await this.oauth.attachAuth(out);
+    }
+    return out;
+  }
+
+  private postJson(msg: JsonRpcRequest): Promise<void> {
+    const isNotification = msg.method.startsWith("notifications/");
+    const body = JSON.stringify(msg);
+    return (async () => {
+      // First attempt (with a cached token, if any).
+      const res = await this.doPost(msg, body, isNotification);
+      if (res === null) return; // notification sent
+      // 401 → OAuth flow + one retry.
+      if (res.status === 401 && this.oauth) {
+        const newToken = await this.oauth.handle401(res);
+        if (newToken) {
+          const retry = await this.doPost(msg, body, isNotification);
+          if (retry === null) return;
+          // If the retry also fails, fall through to the normal error path
+          // using the retry's response.
+          void retry;
+        }
+      }
+      // The response was already dispatched to onMessage inside doPost on
+      // success; on failure the pending entry was rejected there. Nothing
+      // more to do here.
+    })().catch((err) => {
+      const p = this.pending.get(msg.id);
+      if (p) {
+        this.pending.delete(msg.id);
+        p.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** Perform a single POST. Returns the raw response on HTTP-level failure
+   *  (>=400), or null for notifications / successful dispatch (the response
+   *  body has already been fed to onMessage in the success case). */
+  private async doPost(
+    msg: JsonRpcRequest,
+    body: string,
+    isNotification: boolean,
+  ): Promise<RawHttpResponse | null> {
+    const headers = await this.outboundHeaders();
+    const isHttps = this.baseUrl.protocol === "https:";
+    const reqFn = isHttps ? httpsRequest : httpRequest;
+    const res: RawHttpResponse = await new Promise((resolve, reject) => {
+      const req = reqFn(
+        {
+          method: "POST",
+          hostname: this.baseUrl.hostname,
+          port: this.baseUrl.port || (isHttps ? 443 : 80),
+          path: this.baseUrl.pathname + this.baseUrl.search,
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "Content-Length": Buffer.byteLength(body),
+            ...headers,
+          },
+        },
+        (r) => {
+          const sid = r.headers["mcp-session-id"];
+          if (typeof sid === "string" && sid) this.sessionId = sid;
+          const chunks: Buffer[] = [];
+          r.on("data", (c: Buffer) => chunks.push(c));
+          r.on("end", () => {
+            resolve({
+              status: r.statusCode ?? 0,
+              headers: r.headers as Record<string, string | string[] | undefined>,
+              body: Buffer.concat(chunks).toString("utf-8"),
+            });
+          });
+          r.on("error", reject);
+        },
+      );
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
+
+    // Session id assignment/rotation (already done above; kept for clarity).
+    const contentType = String(res.headers["content-type"] ?? "");
+    const text = res.body;
+    if (res.status >= 400) {
+      // Surface 401 to the caller (OAuth retry path); reject other errors.
+      if (res.status === 401 && this.oauth) {
+        return res;
+      }
+      const p = this.pending.get(msg.id);
+      const err = new Error(
+        `MCP ${this.serverName} HTTP ${res.status}: ${text.slice(0, 300)}`,
+      );
+      if (p) {
+        this.pending.delete(msg.id);
+        p.reject(err);
+      }
+      return res;
+    }
+    if (isNotification || res.status === 202) {
+      return null;
+    }
+    if (contentType.includes("text/event-stream")) {
+      for (const frame of parseSseResponse(text)) this.onMessage(frame);
+    } else if (text.trim()) {
+      try {
+        this.onMessage(JSON.parse(text) as JsonRpcResponse);
+      } catch {
+        const p = this.pending.get(msg.id);
+        if (p) {
+          this.pending.delete(msg.id);
+          p.reject(new Error(`MCP ${this.serverName}: non-JSON response`));
+        }
+      }
+    }
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
+
+/** Context passed to every transport, used for OAuth on remote servers. */
+export interface McpTransportContext {
+  /** The working directory, for token persistence. */
+  cwd: string;
+  /** Host hook to open the OAuth authorization URL. If null, OAuth is
+   *  disabled and remote servers requiring auth surface 401s as errors. */
+  openAuthUrl: ((server: string, url: string) => void | Promise<void>) | null;
+}
 
 /** Build a client for a single server config, picking the right transport. */
 function buildClient(
   name: string,
-  cfg: McpServerConfigEntry
+  cfg: McpServerConfigEntry,
+  ctx?: McpTransportContext,
 ): McpClient {
   if (isMcpSseConfig(cfg)) {
-    return new McpSseClient(name, cfg);
+    return new McpSseClient(name, cfg, ctx);
+  }
+  if (isMcpHttpConfig(cfg)) {
+    return new McpHttpClient(name, cfg, ctx);
   }
   return new McpStdioClient(name, cfg);
 }
@@ -895,12 +1301,16 @@ export class McpManager {
    *                 (all entries treated as stdio) or the richer
    *                 `Record<string, McpServerConfigEntry>` map. Existing
    *                 session.ts call sites keep working.
+   * @param ctx      Transport context (cwd + OAuth host hook). Optional; when
+   *                 omitted, remote servers requiring OAuth will fail with a
+   *                 401 instead of launching a browser flow.
    */
   constructor(
     private readonly configs: Record<
       string,
       McpServerConfig | McpServerConfigEntry
-    > = {}
+    > = {},
+    private readonly ctx?: McpTransportContext,
   ) {}
 
   /** Start every configured server concurrently. Failures are collected,
@@ -909,8 +1319,9 @@ export class McpManager {
     await Promise.all(
       Object.entries(this.configs).map(async ([name, cfg]) => {
         try {
-          const c = buildClient(name, cfg as McpServerConfigEntry);
+          const c = buildClient(name, cfg as McpServerConfigEntry, this.ctx);
           await c.start();
+          this.wireHandler(c);
           this.clients.set(name, c);
         } catch (err) {
           const message = (err as Error).message ?? String(err);
@@ -999,6 +1410,32 @@ export class McpManager {
     await Promise.all([...this.clients.values()].map((c) => c.stop()));
     this.clients.clear();
   }
+
+  /** Install a reverse-request handler on every currently-running client.
+   *  Clients started later (via `startAll`) will also be wired up at start
+   *  time. Pass `null` to disable. */
+  setServerRequestHandler(h: McpServerRequestHandler | null): void {
+    this._serverRequestHandler = h;
+    for (const c of this.clients.values()) {
+      try {
+        c.setServerRequestHandler(h);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  private _serverRequestHandler: McpServerRequestHandler | null = null;
+
+  /** Internal: ensure newly-built clients inherit the manager-level handler. */
+  private wireHandler(c: McpClient): void {
+    if (this._serverRequestHandler) {
+      try {
+        c.setServerRequestHandler(this._serverRequestHandler);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,4 +1470,60 @@ export function parseMcpToolName(
     };
   }
   return { server: parts[0]!, tool: parts.slice(1).join("__"), kind: "tool" };
+}
+
+// ---------------------------------------------------------------------------
+// `@mcp:` reference resolution
+// ---------------------------------------------------------------------------
+
+/** Regex matching `@mcp:<server>/<uri>` tokens in user prompts. The server
+ *  name is `[A-Za-z0-9_-]+`; the URI is everything up to the next whitespace
+ *  or end of string. Example: `@mcp:github/repos/foo/bar` →
+ *  `{ server: "github", uri: "repos/foo/bar" }`. */
+export const MCP_REF_REGEX = /@mcp:([A-Za-z0-9_.-]+)\/(\S+)/g;
+
+/** Parse an `@mcp:<server>/<uri>` token. Returns null if the string does not
+ *  look like an MCP resource reference. */
+export function parseMcpReference(
+  token: string
+): { server: string; uri: string } | null {
+  const m = /^@mcp:([A-Za-z0-9_.-]+)\/(\S+)$/.exec(token);
+  if (!m) return null;
+  return { server: m[1]!, uri: m[2]! };
+}
+
+/** Scan a text for `@mcp:<server>/<uri>` references and resolve each via the
+ *  manager, returning a concatenation of their textual contents suitable for
+ *  injection as user context. Unknown servers or failed reads are skipped
+ *  with an inline note. The `uris` are unquoted (the `@mcp:` prefix is
+ *  stripped before lookup). */
+export async function resolveMcpReferences(
+  text: string,
+  manager: McpManager
+): Promise<{ text: string; resolved: number }> {
+  const refs: { server: string; uri: string; raw: string }[] = [];
+  for (const m of text.matchAll(MCP_REF_REGEX)) {
+    refs.push({ server: m[1]!, uri: m[2]!, raw: m[0] });
+  }
+  if (refs.length === 0) return { text, resolved: 0 };
+  let resolved = 0;
+  const blocks: string[] = [];
+  for (const r of refs) {
+    const client = manager.getClient(r.server);
+    if (!client) {
+      blocks.push(`[mcp:${r.server}] (unknown server) ${r.uri}`);
+      continue;
+    }
+    try {
+      const res = await client.readResource(r.uri);
+      const body = (res.contents ?? [])
+        .map((c) => c.text ?? (c.blob ? `(base64 blob, ${c.blob.length} chars)` : "(empty)"))
+        .join("\n");
+      blocks.push(`[mcp:${r.server} ${r.uri}]\n${body}`);
+      resolved++;
+    } catch (e) {
+      blocks.push(`[mcp:${r.server} ${r.uri}] (error: ${(e as Error).message})`);
+    }
+  }
+  return { text: blocks.join("\n\n"), resolved };
 }

@@ -180,6 +180,55 @@ export function resolveCompactionThreshold(
   return lookupContextWindow(model).compactionThreshold;
 }
 
+// ---------------------------------------------------------------------------
+// Cost estimation (USD per 1M tokens, public list prices as of 2025)
+// ---------------------------------------------------------------------------
+
+export interface ModelCost {
+  input: number;
+  output: number;
+  /** Cache-read price when the provider reports it (Anthropic); defaults to input * 0.1. */
+  cacheRead?: number;
+}
+
+const MODEL_COSTS: Array<{ match: (id: string) => boolean; cost: ModelCost }> = [
+  { match: (id) => id.includes("claude-opus-4"), cost: { input: 15, output: 75, cacheRead: 1.5 } },
+  { match: (id) => id.includes("claude-sonnet-4") || id.includes("claude-3-5-sonnet"), cost: { input: 3, output: 15, cacheRead: 0.3 } },
+  { match: (id) => id.includes("claude-haiku"), cost: { input: 0.8, output: 4, cacheRead: 0.08 } },
+  { match: (id) => id.includes("claude"), cost: { input: 3, output: 15 } },
+  { match: (id) => id.includes("gpt-5-mini"), cost: { input: 0.25, output: 2 } },
+  { match: (id) => id.includes("gpt-5"), cost: { input: 1.25, output: 10 } },
+  { match: (id) => id.includes("gpt-4.1-mini"), cost: { input: 0.4, output: 1.6 } },
+  { match: (id) => id.includes("gpt-4.1") || id.includes("gpt-4-1"), cost: { input: 2, output: 8 } },
+  { match: (id) => id.includes("gpt-4o-mini"), cost: { input: 0.15, output: 0.6 } },
+  { match: (id) => id.includes("gpt-4o"), cost: { input: 2.5, output: 10 } },
+  { match: (id) => id.includes("deepseek"), cost: { input: 0.27, output: 1.1 } },
+  { match: (id) => id.includes("qwen"), cost: { input: 0.3, output: 1.2 } },
+];
+
+/**
+ * Estimate the USD cost of one usage record. Returns undefined when the
+ * model is unknown — callers should treat undefined as "not priced", not
+ * zero. Cache-write is priced at 1.25x input (Anthropic semantics);
+ * cache-read uses the table's cacheRead or input * 0.1.
+ */
+export function estimateCostUSD(
+  model: string | undefined,
+  usage: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
+): number | undefined {
+  const id = (model ?? "").toLowerCase().trim();
+  const entry = MODEL_COSTS.find((e) => e.match(id));
+  if (!entry) return undefined;
+  const { input, output, cacheRead } = entry.cost;
+  const m = 1_000_000;
+  return (
+    ((usage.input ?? 0) / m) * input +
+    ((usage.output ?? 0) / m) * output +
+    ((usage.cacheRead ?? 0) / m) * (cacheRead ?? input * 0.1) +
+    ((usage.cacheWrite ?? 0) / m) * (input * 1.25)
+  );
+}
+
 interface ModelEntry {
   /** Substring matcher — any model id containing this string matches. */
   match: (id: string) => boolean;

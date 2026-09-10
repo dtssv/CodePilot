@@ -258,7 +258,37 @@ class CodepilotClient(
             addProperty("requestId", requestId)
             addProperty("decision", decision)
         }
-        sendNotification("permission/respond", args)
+        // Must be a request (not notification): the server registers
+        // `permission/respond` via onRequest and resolves the pending
+        // permission promise from its handler.
+        sendRequest("permission/respond", args)
+    }
+
+    /**
+     * Answer a `question/request` (ask_user_question / plan_done).
+     * `answers` maps question id → option label / labels / free text.
+     */
+    fun respondQuestion(requestId: String, answers: JsonObject) {
+        val args = JsonObject().apply {
+            addProperty("requestId", requestId)
+            add("answers", answers)
+        }
+        sendRequest("question/respond", args)
+    }
+
+    /**
+     * Ack a server-initiated reverse request (`permission/request`,
+     * `question/request`). Per PROTOCOL.md the client must reply to the
+     * request frame itself (empty result) AND send the actual decision via
+     * `*/respond`; skipping the ack leaks the server-side request promise.
+     */
+    fun ackServerRequest(id: Long) {
+        val frame = JsonObject().apply {
+            addProperty("jsonrpc", "2.0")
+            addProperty("id", id)
+            add("result", JsonObject())
+        }
+        writeChannel.trySend(gson.toJson(frame))
     }
 
     fun forkSession(sessionId: String, atEventIndex: Int? = null): String {

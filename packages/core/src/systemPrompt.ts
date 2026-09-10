@@ -25,16 +25,39 @@ import {
   type EnvironmentSnapshot,
 } from "./env.js";
 
+/**
+ * Output style (claude-code Explanatory/Learning equivalent). Controls how
+ * verbose the assistant is and whether it teaches as it goes.
+ *   - `concise`  (default): direct, technical, minimal — the existing style.
+ *   - `explanatory`: lead with the "why", explain non-obvious decisions,
+ *                   surface trade-offs. Still no fluff, but teach.
+ *   - `learning`: like explanatory but also call out the concepts a junior
+ *                 engineer would need to understand the change.
+ */
+export type OutputStyle = "concise" | "explanatory" | "learning";
+
 export interface SystemPromptContext {
   cwd: string;
+  /** Session id (for citation in artifacts / logs). */
+  sessionId?: string;
+  /** Host surface the prompt is being built for: "cli" | "tui" | "vscode" | "idea".
+   *  Lets the prompt tailor advice (e.g. "open the diff" only in an IDE). */
+  hostSurface?: "cli" | "tui" | "vscode" | "idea";
   memory: MemoryContents;
   plan?: PlanStep[];
   toolNames: string[];
+  /** Optional one-line summaries per tool (from ToolDef descriptions). */
+  toolSummaries?: Record<string, string>;
+  /** Optional longer per-tool reference text (when_to_use / gotchas / examples).
+   *  Injected into the static prefix's Tool Reference section. */
+  toolReference?: Record<string, string>;
   extra?: string;
   model?: string;
   provider?: string;
   /** Cursor-style collaboration mode (default: "agent"). */
   mode?: AgentMode;
+  /** Output style (default: "concise"). */
+  outputStyle?: OutputStyle;
   /**
    * Override the environment provider. Defaults to a real implementation
    * that shells out to `git`. Tests should always supply a deterministic
@@ -86,7 +109,17 @@ You are **CodePilot**, a careful, token-efficient software engineering agent run
 - You are the **CodePilot** agent. Reference material and naming live in \`packages/core\` and \`docs/\`; user-facing surfaces (TUI/VSCode/IDEA) are thin protocol clients.
 - You run in a sandboxed shell. The dynamic suffix at the end of this prompt gives you the live \`cwd\`, OS, Node version, git state, project memory, and the current plan.
 - The user may switch collaboration modes at runtime (\`chat\` / \`plan\` / \`agent\`). The active mode is also restated in the dynamic suffix. Stay within the mode's constraints — a tool that is not exposed is not available.
-- All events you produce are streamed to the host UI and persisted to \`~/.codepilot/sessions/<id>.jsonl\`. Tool calls and tool results are the source of truth for what happened.`);
+- All events you produce are streamed to the host UI and persisted to \`~/.codepilot/sessions/<id>.jsonl\`. Tool calls and tool results are the source of truth for what happened.
+
+### Runtime platform
+
+The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`shell\`, \`workspace_root\`, \`host_surface\`, \`session_id\`) is the source of truth for the platform you're running on. Treat it as authoritative:
+- \`platform\` (\`darwin\` | \`linux\` | \`win32\`) governs which shell commands and path separators are valid. On \`darwin\`/\`linux\` use POSIX commands (\`ls\`, \`grep\`, \`find\`, \`/\` paths); on \`win32\` prefer PowerShell or \`cmd\` equivalents and \`\\\\\` paths unless the project clearly uses a POSIX shell (e.g. Git Bash, WSL).
+- \`arch\` (\`arm64\` | \`x64\`) matters for native binaries and prebuilt deps — don't assume \`x64\`.
+- \`shell\` is the user's default shell; \`bash\` commands that work in \`/bin/sh\` may not work in \`fish\` or \`nushell\`. When you need portability, use \`sh -c '...'\`.
+- \`workspace_root\` is the project boundary (git toplevel, or the cwd when not in a repo). Treat paths outside it as external — don't edit them unless the user asked.
+- \`host_surface\` (\`cli\` | \`tui\` | \`vscode\` | \`idea\`) tells you what UI the user sees. Only suggest "open in editor" / "click the diff" actions when \`host_surface\` is an IDE; in \`cli\`/\`tui\` give terminal-friendly instructions.
+- \`session_id\` is the current session; cite it when the user asks about logs or artifacts.`);
 
   parts.push(`## 2. Tool-Use Policy
 
@@ -138,12 +171,19 @@ You are **CodePilot**, a careful, token-efficient software engineering agent run
   parts.push(`## 7. Memory
 
 - CodePilot has a two-tier memory:
-  - **Project memory** at \`<cwd>/CODEPILOT.md\` — facts about *this* project: architecture, conventions, build commands, gotchas. Read on entry, updated when you discover something durable.
+  - **Project memory** — \`CODEPILOT.md\` (and \`AGENTS.md\` by convention) loaded **hierarchically**: every directory from the cwd up to your home directory contributes its file, nearer directories first. Facts about *this* project: architecture, conventions, build commands, gotchas. Read on entry; updated when you discover something durable (write to the cwd-level file with \`memory_write\`).
   - **User memory** at \`~/.codepilot/MEMORY.md\` — facts about the user: their preferred languages, their coding style, hardware quirks.
 - **Write durable knowledge to memory with \`memory_write\`.** Anything you had to discover by reading the code or by trial and error — and that a future session would benefit from — is a candidate. Examples: "tests run with \`pnpm test\`, not \`npm test\`", "the auth module is the single source of truth for the user table".
 - **Do not write volatile knowledge.** Today's task, today's plan, today's bug do not belong in memory. If it does not survive the session ending, do not persist it.
 - **Prefer project memory over user memory.** A fact that only matters in this repo is project-scoped. A fact that applies across repos (the user prefers tabs) is user-scoped.
-- The dynamic suffix injects a short summary of both files. You can \`read_file\` them in full when you need to.`);
+- The dynamic suffix injects a short summary of both tiers. You can \`read_file\` the underlying files in full when you need to; each layer is annotated with its source path.`);
+
+  parts.push(`## 7b. External Context (MCP)
+
+- Tools prefixed \`mcp__<server>__\` are provided by external MCP servers. Their \`description\` carries the server name in brackets, e.g. \`[mcp:github]\`. Treat them exactly like built-in tools: read the description, honour the input schema, prefer them over manual \`web_fetch\` when they expose a structured API.
+- **\`@mcp:<server>/<uri>\` in the user prompt** is an MCP resource reference. The referenced resource contents are already inlined above the prompt — you do **not** need to call any tool to fetch them. Cite the inlined content directly.
+- MCP servers may also expose **prompts** (parameterised templates). These are not tools; if a user references one, use the \`read_artifact\`-style path your host provides, or ask.
+- **Reverse requests:** a server may ask *you* (via \`elicitation\` or \`sampling\`) mid-tool-call. The host handles the interaction; you will see the resolved result in the tool output. Do not try to satisfy these yourself.`);
 
   parts.push(`## 8. Token Efficiency
 
@@ -186,15 +226,45 @@ This prompt and the conversation you are reading cost real money. Treat tokens l
 
 The user can switch the agent between three modes. The active mode is also listed in the dynamic suffix; the rule below is what governs your behaviour in this turn.
 
-${modeGuidance(mode)}`);
+${modeGuidance(mode)}
+
+${outputStyleGuidance(ctx.outputStyle ?? "concise")}`);
 
   parts.push(`## 12. Tool Reference (current session)
 
-The list below is the complete set of tools available to you in this turn (post-mode-filtering). Tool names match the \`name\` field of their JSON schema; arguments are validated server-side.
+The list below is the complete set of tools available to you in this turn (post-mode-filtering). Tool names match the \`name\` field of their JSON schema; arguments are validated server-side — an invalid call comes back as a tool error you can correct and retry.
 
 ${ctx.toolNames.length > 0
-  ? ctx.toolNames.map((n) => `- \`${n}\``).join("\n")
-  : "(no tools exposed in this mode — fall back to reasoning only)"}`);
+  ? ctx.toolNames
+      .map((n) => {
+        const summary = ctx.toolSummaries?.[n];
+        const ref = ctx.toolReference?.[n];
+        if (ref && ref.trim().length > 0) {
+          return `- \`${n}\`${summary ? ` — ${summary}` : ""}\n${ref
+            .trim()
+            .split("\n")
+            .map((l) => `  ${l}`)
+            .join("\n")}`;
+        }
+        return `- \`${n}\`${summary ? ` — ${summary}` : ""}`;
+      })
+      .join("\n")
+  : "(no tools exposed in this mode — fall back to reasoning only)"}
+
+### Task-completion criteria
+
+A task is done when ALL of the following hold:
+1. The deliverable exists on disk (not described — written).
+2. It is verified: the relevant test/build/lint command was run and passed. State the exact command and its exit status in your final message.
+3. The plan (if any) shows every step \`completed\` or explicitly \`blocked\` with a reason.
+Never declare completion to please the user; if verification is impossible (no network, missing toolchain), say so explicitly and mark the gap.
+
+### Interaction examples (abbreviated)
+
+- Bad: \`bash("cat src/foo.ts")\` → Good: \`read_file("src/foo.ts")\` (no shell, line-numbered output).
+- Bad: rewrite a 900-line file with \`write_file\` to change one function → Good: one \`edit_file\` with the function's exact text as \`search\`.
+- Bad: three sequential turns reading three independent files → Good: one turn with three parallel \`read_file\` calls.
+- Bad: "find where X is defined" answered by reading ten files → Good: one \`grep\` for the symbol, or one \`task\` sub-agent for an open-ended search.`);
 
   if (ctx.extra && ctx.extra.trim().length > 0) {
     parts.push(`## 13. Project-Specific Notes
@@ -214,7 +284,7 @@ function modeGuidance(mode: AgentMode): string {
     case "chat":
       return [
         "**Mode: \`chat\` (read-only Q&A).**",
-        "- You may only call read-only tools: \`read_file\`, \`glob\`, \`grep\`, \`ls\`, \`read_artifact\`, \`web_fetch\`. \`bash\`, \`write_file\`, \`edit_file\`, \`task\`, \`plan_update\`, and \`memory_write\` are intentionally absent.",
+        "- You may only call read-only tools: \`read_file\`, \`glob\`, \`grep\`, \`ls\`, \`read_artifact\`, \`web_fetch\`, \`web_search\`, \`bash_output\`. \`bash\`, \`write_file\`, \`edit_file\`, \`task\`, \`plan_update\`, and \`memory_write\` are intentionally absent.",
         "- Do not modify the codebase or run state-changing commands. Do not pretend to; if the user asks you to make a change, describe the diff you would write instead.",
         "- Answer in prose, with fenced code blocks for snippets. Prefer short, focused answers over exhaustive ones; ask one clarifying question if the request is genuinely ambiguous.",
         "- This is the right mode for \"what does this function do?\", \"how do I configure X?\", \"review this design\".",
@@ -222,9 +292,9 @@ function modeGuidance(mode: AgentMode): string {
     case "plan":
       return [
         "**Mode: \`plan\` (read-only exploration + planning).**",
-        "- Read-only tools are available, plus \`plan_update\` (build the structured plan) and \`memory_write\` (capture findings that will help future sessions). \`bash\`, \`write_file\`, \`edit_file\`, and \`task\` are NOT available — you cannot make changes, only plan them.",
+        "- Read-only tools are available, plus \`plan_update\` (build the structured plan), \`memory_write\` (capture findings that will help future sessions), and \`plan_done\` (submit the plan for approval). \`bash\`, \`write_file\`, \`edit_file\`, and \`task\` are NOT available — you cannot make changes, only plan them.",
         "- Spend the time you saved by not editing on actually understanding the code. Read the modules you would touch, locate the right call sites, surface the gotchas. A plan that hides unknowns is worse than one that lists them.",
-        "- When you have enough information, output a final assistant message that summarises the plan in natural language. The structured plan in \`plan_update\` is the source of truth; the prose summary exists for the user.",
+        "- When the plan is complete, call \`plan_done\` with a one-paragraph summary. The user approves or asks for revisions; on approval the session switches to agent mode automatically.",
         "- Do not execute shell commands even for \"safe\" reads. If you need to know whether a file exists, use \`ls\` or \`glob\`; if you need to read content, use \`read_file\`.",
       ].join("\n");
     case "agent":
@@ -235,6 +305,35 @@ function modeGuidance(mode: AgentMode): string {
         "- **Principle of least surprise.** Prefer the smallest change that solves the problem. Prefer many small, verifiable edits over one large speculative one. Ask before any operation the user might consider destructive (see §10 Safety).",
         "- The default permission mode is \`ask\`: write/execute/network tools will trigger a permission prompt that the host UI mediates. The user may have switched to \`auto-edit\` (writes allowed, executes asked) or \`yolo\` (everything allowed) — when in doubt, behave conservatively.",
         "- Sub-agents (\`task\`) inherit the \`agent\` mode by default, but their tool set is restricted (read-only by default; you can pass \`tools=[...]\` to widen). Use them for parallel exploration, not for serial work you could do yourself.",
+      ].join("\n");
+  }
+}
+
+function outputStyleGuidance(style: OutputStyle): string {
+  switch (style) {
+    case "explanatory":
+      return [
+        "## 11b. Output Style: \`explanatory\`",
+        "- Lead with the **why** before the **what**. State the decision, then the trade-off it makes.",
+        "- Surface non-obvious choices and the alternatives you rejected. One sentence each, not a paragraph.",
+        "- When you make a judgment call (naming, layering, error handling), say what principle you applied.",
+        "- Still no fluff: no restating the question, no \"great question\", no recap. The teaching is in the trade-offs, not the prose.",
+      ].join("\n");
+    case "learning":
+      return [
+        "## 11b. Output Style: \`learning\`",
+        "- Teach as you go. When you touch a concept a junior engineer might not know (a design pattern, a framework convention, a language feature), name it and give a one-line explanation.",
+        "- Lead with the **why** and the **concept**, then the **what**.",
+        "- Surface trade-offs and the alternatives you rejected, and explain *when* each alternative would have been the right call.",
+        "- Cite the file/line that demonstrates the concept so the reader can go look.",
+        "- Do not over-explain basics the user clearly already knows (matched to their language and the project's existing style).",
+      ].join("\n");
+    case "concise":
+    default:
+      return [
+        "## 11b. Output Style: \`concise\` (default)",
+        "- Direct, technical, minimal. State the conclusion, then the evidence. Do not teach unless asked.",
+        "- If a one-word answer suffices, give a one-word answer.",
       ].join("\n");
   }
 }
@@ -252,17 +351,25 @@ async function buildDynamicSuffix(ctx: SystemPromptContext): Promise<string> {
 provider: ${ctx.provider ?? "auto"}
 model: ${ctx.model ?? "(default)"}
 mode: ${ctx.mode ?? "agent"}
+output_style: ${ctx.outputStyle ?? "concise"}
+session_id: ${ctx.sessionId ?? "(unknown)"}
+host_surface: ${ctx.hostSurface ?? "cli"}
+platform: ${env.platform}
+arch: ${env.arch}
 os: ${env.os}
 hostname: ${env.hostname}
 user: ${env.user}
 shell: ${env.shell}
 node: ${env.node}
 cwd: ${env.cwd}
+workspace_root: ${env.workspaceRoot ?? env.cwd}
 now: ${env.now}
 timezone: ${env.timezone}
 </environment>`);
 
   out.push(renderGitBlock(env.git));
+
+  out.push(renderDirectoryTreeBlock(env.directoryTree));
 
   out.push(renderMemoryBlock(ctx.memory));
 
@@ -306,6 +413,17 @@ not a git working tree
   return `<git>
 ${lines.join("\n")}
 </git>`;
+}
+
+function renderDirectoryTreeBlock(tree: string | undefined): string {
+  if (!tree || tree.trim().length === 0) {
+    return `<project_tree>
+(unavailable)
+</project_tree>`;
+  }
+  return `<project_tree>
+${tree}
+</project_tree>`;
 }
 
 function renderMemoryBlock(memory: MemoryContents): string {

@@ -16,6 +16,7 @@ class FakeSession {
   cancelled = false;
   promptCalls: Array<{ text: string; images?: unknown }> = [];
   permissionHandler?: (req: unknown) => Promise<unknown>;
+  askUserHandler?: (req: unknown) => Promise<unknown>;
   disposeCount = 0;
 
   static counter = 0;
@@ -40,6 +41,28 @@ class FakeSession {
   }
   async prompt(text: string, images?: unknown): Promise<void> {
     this.promptCalls.push({ text, images });
+    if (text === "ask" && this.askUserHandler) {
+      // Exercise the question reverse-request path.
+      const req = {
+        requestId: "q-1",
+        questions: [
+          {
+            id: "confirm",
+            header: "Confirm",
+            question: "Proceed?",
+            options: [{ label: "Yes" }, { label: "No" }],
+          },
+        ],
+      };
+      const answers = (await this.askUserHandler(req)) as Record<string, string>;
+      this.emit({
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [{ type: "text", text: `answers=${JSON.stringify(answers)}` }],
+      });
+      return;
+    }
     if (this.permissionHandler) {
       const req = {
         requestId: "coreReq-1",
@@ -103,6 +126,7 @@ vi.mock("@codepilot/core", () => ({
       sessionsById.set(s.id, s);
     }
     if (opts.onPermissionRequest) s.permissionHandler = opts.onPermissionRequest;
+    if (opts.onAskUser) s.askUserHandler = opts.onAskUser;
     return s;
   }),
   listSessions: vi.fn(async () =>
@@ -316,6 +340,67 @@ describe("server / protocol handlers", () => {
       await client.request("permission/respond", {
         requestId: "pr_unknown",
         decision: "allow",
+      });
+      throw new Error("should have rejected");
+    } catch (err) {
+      expect(err).toBeInstanceOf(RpcError);
+      expect((err as RpcError).code).toBe(-32602);
+    }
+  });
+
+  it("question/request round-trips answers via question/respond", async () => {
+    registerServer(server, { defaultCwd: "/work", defaultPermissionMode: "ask" });
+
+    let sawQuestion = false;
+    client.onRequest<{ requestId: string; questions: Array<{ id: string }> }, Record<string, never>>(
+      "question/request",
+      async ({ requestId, questions }) => {
+        sawQuestion = true;
+        expect(questions[0]?.id).toBe("confirm");
+        void client.request("question/respond", {
+          requestId,
+          answers: { confirm: "Yes" },
+        });
+        return {};
+      },
+    );
+
+    const events: Array<{ event?: { type: string; content?: Array<{ text?: string }> } }> = [];
+    client.onNotification("event", (params) => {
+      events.push(params as never);
+    });
+
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>(
+      "session/new",
+      {},
+    );
+    await client.request("prompt/send", { sessionId, text: "ask" });
+    await settled();
+    expect(sawQuestion).toBe(true);
+    const final = events
+      .map((e) => e.event)
+      .find((e) => e?.type === "message" && e.content?.[0]?.text?.includes("answers="));
+    expect(final?.content?.[0]?.text).toContain('"confirm":"Yes"');
+  });
+
+  it("question/respond without a pending request returns -32602", async () => {
+    registerServer(server);
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    try {
+      await client.request("question/respond", {
+        requestId: "q_unknown",
+        answers: {},
       });
       throw new Error("should have rejected");
     } catch (err) {

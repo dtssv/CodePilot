@@ -100,6 +100,32 @@ export interface SessionUsageNotification {
   usage: UsageInfo;
 }
 
+/* ---------- Structured questions (ask_user_question / plan_done) ---------- */
+
+/** A single structured question (mirrors core `QuestionSpec`). */
+export interface QuestionSpec {
+  id: string;
+  header?: string;
+  question: string;
+  options?: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+}
+
+/** Answers keyed by question id: option label(s) or free text. */
+export type QuestionAnswers = Record<string, string | string[]>;
+
+/** Server -> client `question/request` request payload. */
+export interface QuestionRequestParams {
+  sessionId: string;
+  requestId: string;
+  questions: QuestionSpec[];
+}
+
+export interface QuestionRespondParams {
+  requestId: string;
+  answers: QuestionAnswers;
+}
+
 /** Capabilities returned by `initialize`. */
 export interface ServerCapabilities {
   tools: string[];

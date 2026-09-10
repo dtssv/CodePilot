@@ -27,11 +27,14 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   "web_fetch",
   "web_search",
   "bash_output",
+  "ask_user_question",
 ]);
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */
 const PLAN_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "plan_update",
+  // plan_done is the plan-mode exit ramp (ExitPlanMode equivalent).
+  "plan_done",
   // memory_write is `write`-tier but harmless; allowed in plan to capture
   // findings while exploring. Excluded from chat on purpose.
   "memory_write",

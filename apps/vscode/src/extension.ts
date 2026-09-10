@@ -13,7 +13,7 @@ import * as vscode from "vscode";
 import { CodePilotClient } from "./client.js";
 import { SettingsStore, StatusBar, modeLabel } from "./config.js";
 import { SidebarProvider, type ChatMessage } from "./sidebar.js";
-import { AGENT_MODES, type AgentMode, type Event, type PermissionRequestParams } from "./types.js";
+import { AGENT_MODES, type AgentMode, type Event, type PermissionRequestParams, type QuestionAnswers, type QuestionRequestParams, type QuestionSpec } from "./types.js";
 
 const OUTPUT = vscode.window.createOutputChannel("CodePilot");
 
@@ -368,6 +368,13 @@ function attachClientHandlers(c: CodePilotClient): void {
       sidebar?.appendSystem(`Permission error: ${m}`);
     });
   });
+
+  c.on("questionRequest", (params) => {
+    onQuestionRequest(c, params).catch((err) => {
+      const m = err instanceof Error ? err.message : String(err);
+      sidebar?.appendSystem(`Question error: ${m}`);
+    });
+  });
 }
 
 function onSessionEvent(ev: Event): void {
@@ -425,8 +432,69 @@ function onPermissionRequest(c: CodePilotClient, params: PermissionRequestParams
   });
 }
 
-function summarizeTool(toolName: string, input: unknown): string {
-  if (!input || typeof input !== "object") return "";
+/**
+ * Answer a structured `question/request` (ask_user_question / plan_done).
+ *
+ * Questions are asked sequentially via QuickPick (with options) or InputBox
+ * (free text). Dismissing a prompt (Esc) yields an empty answer for that
+ * question — fail-closed: plan_done reads a missing "Approve" answer as
+ * "not approved". We always send `question/respond` so the server-side
+ * promise resolves even if the user walks away.
+ */
+async function onQuestionRequest(c: CodePilotClient, params: QuestionRequestParams): Promise<void> {
+  const answers: QuestionAnswers = {};
+  // Surface the request in the chat so the user has context even if they
+  // dismiss the native prompt.
+  const first = params.questions[0];
+  sidebar?.appendSystem(
+    `❓ ${params.questions.length} question(s) from the agent${first ? `: ${first.question}` : ""}`,
+  );
+  try {
+    for (const q of params.questions) {
+      answers[q.id] = await askOneQuestion(q);
+    }
+  } finally {
+    try {
+      await c.respondQuestion(params.requestId, answers);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      sidebar?.appendSystem(`Failed to send question response: ${m}`);
+    }
+  }
+}
+
+/** Ask a single {@link QuestionSpec}; returns the label(s) or free text. */
+async function askOneQuestion(q: QuestionSpec): Promise<string | string[]> {
+  const title = q.header ? `CodePilot: ${q.header}` : "CodePilot";
+  if (q.options && q.options.length > 0) {
+    const items: vscode.QuickPickItem[] = q.options.map((o) => ({
+      label: o.label,
+      description: o.description,
+    }));
+    if (q.multiSelect) {
+      const picks = await vscode.window.showQuickPick(items, {
+        title,
+        placeHolder: q.question,
+        canPickMany: true,
+      });
+      // Esc (undefined) → empty selection; explicit OK with none → [].
+      return picks ? picks.map((p) => p.label) : [];
+    }
+    const pick = await vscode.window.showQuickPick(items, {
+      title,
+      placeHolder: q.question,
+    });
+    return pick ? pick.label : "";
+  }
+  // Free-text fallback when no options were provided.
+  const text = await vscode.window.showInputBox({
+    title,
+    prompt: q.question,
+  });
+  return text ?? "";
+}
+
+function summarizeTool(toolName: string, input: unknown): string {  if (!input || typeof input !== "object") return "";
   const obj = input as Record<string, unknown>;
   if (toolName === "bash" && typeof obj.command === "string") return `$ ${obj.command}`;
   if ((toolName === "read_file" || toolName === "write_file" || toolName === "edit_file") && typeof obj.path === "string") {

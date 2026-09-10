@@ -152,7 +152,16 @@ describe("validateConfig", () => {
   it("rejects malformed mcpServers", () => {
     expect(() =>
       validateConfig({ mcpServers: { bad: { args: ["x"] } } })
-    ).toThrow(/mcpServers\.bad\.command/);
+    ).toThrow(/mcpServers\.bad.*command/);
+  });
+
+  it("accepts an HTTP MCP transport", () => {
+    const cfg = validateConfig({
+      mcpServers: {
+        "http-srv": { type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer x" } },
+      },
+    });
+    expect(cfg.mcpServers?.["http-srv"].url).toBe("https://mcp.example.com/mcp");
   });
 });
 

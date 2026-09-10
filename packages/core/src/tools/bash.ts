@@ -11,8 +11,13 @@ import type { ToolDef } from "./types.js";
 import { wrapCommand, resolveSandbox } from "../sandbox.js";
 import { spawnBackgroundJob } from "./bashJobs.js";
 
-const MAX_OUTPUT_CHARS = 30_000;
+/** Below this size, output is returned verbatim. Above, it spills to an
+ *  artifact and the inline view keeps the head + tail with a gap marker. */
 const ARTIFACT_THRESHOLD = 8_000;
+/** How many chars of head/tail to keep when truncating inline. Tuned so a
+ *  typical compile error block (head) + a stack tail fit comfortably. */
+const HEAD_CHARS = 6_000;
+const TAIL_CHARS = 6_000;
 
 const schema = z.object({
   command: z.string().describe("Shell command to execute (run via /bin/sh -c)."),
@@ -78,33 +83,70 @@ export const bashTool: ToolDef<typeof schema> = {
       };
     }
 
-    const result = await runCommand(wrapped.command, {
-      cwd,
-      timeout,
-      signal: ctx.signal,
-      shell: wrapped.shell ?? defaultShell(),
-      shellArgs: wrapped.shellArgs ?? defaultShellArgs(),
-    });
-    let content = result.stdout;
-    if (result.stderr.length > 0) {
-      content += (content.length > 0 ? "\n" : "") + result.stderr;
+    // Foreground: prefer the persistent shell (cwd/env persist across calls).
+    // Fall back to a fresh `sh -c` child when no persistent shell is wired
+    // (e.g. test harnesses) or when a custom cwd is requested (the
+    // persistent shell's cwd is fixed at session start).
+    let stdout: string;
+    let stderr: string;
+    let code: number | null;
+    let signal: NodeJS.Signals | null;
+    let timedOut: boolean;
+    if (ctx.persistentShell && !input.cwd) {
+      // The persistent shell runs the *unwrapped* command — the shell
+      // itself was started inside the sandbox wrapper. Re-wrapping here
+      // would double-sandbox. We pass the user's command verbatim.
+      // (When sandbox mode is "off", wrapped.command === input.command.)
+      const psResult = await ctx.persistentShell.run(input.command, {
+        timeout,
+        signal: ctx.signal,
+      });
+      stdout = psResult.stdout;
+      stderr = psResult.stderr;
+      code = psResult.exitCode;
+      signal = psResult.signal;
+      timedOut = psResult.timedOut;
+    } else {
+      const r = await runCommand(wrapped.command, {
+        cwd,
+        timeout,
+        signal: ctx.signal,
+        shell: wrapped.shell ?? defaultShell(),
+        shellArgs: wrapped.shellArgs ?? defaultShellArgs(),
+      });
+      stdout = r.stdout;
+      stderr = r.stderr;
+      code = r.code;
+      signal = r.signal;
+      timedOut = false;
+    }
+    let content = stdout;
+    if (stderr.length > 0) {
+      content += (content.length > 0 ? "\n" : "") + stderr;
     }
     if (wrapped.warning) {
       content = wrapped.warning + "\n" + content;
     }
-    if (result.code !== 0) {
-      content = `[exit ${result.code}]\n${content}`;
+    if (code !== 0) {
+      content = `[exit ${code ?? (timedOut ? "timeout" : "?")}]\n${content}`;
     }
     let artifactRef: string | undefined;
     if (content.length > ARTIFACT_THRESHOLD) {
+      // Spill the full output to an artifact, then render a head+tail view
+      // inline with a gap marker. This preserves the start (where the
+      // command's first lines / the first error usually live) AND the end
+      // (where exit status, final summary, and stack traces land), which a
+      // head-only truncation loses. opencode/codex use the same shape.
       artifactRef = await ctx.artifact(content, `bash:${input.command.slice(0, 80)}`);
+      const omitted = content.length - HEAD_CHARS - TAIL_CHARS;
       content =
-        content.slice(0, MAX_OUTPUT_CHARS) +
-        `\n\n[truncated; full output saved to artifact ${artifactRef}]`;
+        content.slice(0, HEAD_CHARS) +
+        `\n\n[... ${omitted.toLocaleString()} chars omitted; full output in artifact ${artifactRef} — use read_artifact with startLine/endLine for any slice ...]\n\n` +
+        content.slice(content.length - TAIL_CHARS);
     }
     return {
       content,
-      isError: result.code !== 0 && result.signal !== "SIGTERM",
+      isError: code !== 0 && signal !== "SIGTERM",
       artifactRef,
     };
   },

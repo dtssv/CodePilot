@@ -85,15 +85,22 @@ export const webSearchTool: ToolDef<typeof schema> = {
 /** Parse the DuckDuckGo HTML results page. Kept exported for tests. */
 export function parseDuckDuckGoHtml(html: string): SearchHit[] {
   const hits: SearchHit[] = [];
-  // Results are <a class="result__a" href="...">title</a> followed by
-  // <a class="result__snippet" ...>snippet</a>.
-  const blockRe =
-    /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/g;
-  let m: RegExpExecArray | null;
-  while ((m = blockRe.exec(html)) !== null) {
+  // Results are <a class="result__a" href="...">title</a>, with a
+  // <a class="result__snippet">…</a> somewhere before the next result__a.
+  const linkRe =
+    /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/;
+  const matches = [...html.matchAll(linkRe)];
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i]!;
     const rawUrl = m[1] ?? "";
     const title = htmlToText(m[2] ?? "");
-    const snippet = htmlToText(m[3] ?? "");
+    // Search for the snippet between this link and the next one.
+    const regionStart = (m.index ?? 0) + m[0].length;
+    const regionEnd = i + 1 < matches.length ? matches[i + 1]!.index! : html.length;
+    const region = html.slice(regionStart, regionEnd);
+    const sm = region.match(snippetRe);
+    const snippet = sm ? htmlToText(sm[1] ?? "") : "";
     // DDG wraps outbound links: //duckduckgo.com/l/?uddg=<encoded>
     const uddg = rawUrl.match(/uddg=([^&]+)/);
     const url = uddg ? decodeURIComponent(uddg[1]!) : rawUrl;

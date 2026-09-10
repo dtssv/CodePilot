@@ -15,7 +15,8 @@
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
     "package:npm": "corepack pnpm --filter @codepilot/core --filter @codepilot/protocol --filter @codepilot/tui pack",
     "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
-    "lint": "tsc -b --noEmit false 2>/dev/null || true"
+    "lint": "corepack pnpm -r typecheck",
+    "lint:fix": "echo 'no auto-fix configured; typecheck is the lint gate'"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

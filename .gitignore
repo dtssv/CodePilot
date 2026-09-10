@@ -15,3 +15,28 @@ apps/idea/.kotlin/
 .home/
 playground/
 .codepilot/
+
+# Per-app / per-package build artifacts (not covered by the globs above)
+apps/*/node_modules/
+apps/*/dist/
+apps/idea/.intellijPlatform/
+apps/idea/.gradle/
+apps/idea/.kotlin/
+apps/idea/build/
+packages/*/node_modules/
+packages/*/dist/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+playground/.pytest_cache/
+
+# OS / editor cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store

@@ -100,13 +100,25 @@ export const UsageConfigSchema = z
   .strict()
   .optional();
 
-export const McpServerConfigSchema = z
-  .object({
-    command: z.string().min(1),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })
-  .strict();
+export const McpServerConfigSchema = z.union([
+  // stdio transport (default; `type` may be omitted for back-compat)
+  z
+    .object({
+      type: z.enum(["stdio", ""]).optional(),
+      command: z.string().min(1),
+      args: z.array(z.string()).optional(),
+      env: z.record(z.string(), z.string()).optional(),
+    })
+    .strict(),
+  // Streamable HTTP (2025-03-26) and SSE transports
+  z
+    .object({
+      type: z.enum(["http", "sse"]),
+      url: z.string().min(1),
+      headers: z.record(z.string(), z.string()).optional(),
+    })
+    .strict(),
+]);
 
 /** claude-code style permission rule lists. */
 export const PermissionRulesSchema = z
@@ -117,6 +129,23 @@ export const PermissionRulesSchema = z
   })
   .strict();
 
+/** Lifecycle hook entry (see hooks.ts). */
+export const HookEntrySchema = z
+  .object({
+    matcher: z.string().min(1),
+    command: z.string().min(1),
+  })
+  .strict();
+
+export const HooksConfigSchema = z
+  .object({
+    PreToolUse: z.array(HookEntrySchema).optional(),
+    PostToolUse: z.array(HookEntrySchema).optional(),
+    Notification: z.array(HookEntrySchema).optional(),
+    Stop: z.array(HookEntrySchema).optional(),
+  })
+  .strict();
+
 /** OS-level sandbox policy (see sandbox.ts). */
 export const SandboxConfigSchema = z
   .object({
@@ -124,6 +153,15 @@ export const SandboxConfigSchema = z
     network: z.boolean().optional(),
     writablePaths: z.array(z.string().min(1)).optional(),
     fallback: z.enum(["deny", "allow-unsandboxed"]).optional(),
+  })
+  .strict();
+
+/** web_fetch per-domain allowlist + cache TTL (see types.ts WebFetchConfig). */
+export const WebFetchConfigSchema = z
+  .object({
+    allowedDomains: z.array(z.string().min(1)).optional(),
+    blockedDomains: z.array(z.string().min(1)).optional(),
+    cacheTtlMinutes: z.number().int().min(0).optional(),
   })
   .strict();
 
@@ -143,11 +181,15 @@ export const CodepilotConfigSchema = z
     agentMode: z.enum(["chat", "plan", "agent"]).optional(),
     maxTokens: z.number().int().positive().optional(),
     contextWindow: z.number().int().positive().optional(),
+    compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
+    autoCompact: z.boolean().optional(),
     mcpServers: z.record(z.string().min(1), McpServerConfigSchema).optional(),
     autoApprove: z.array(z.string().min(1)).optional(),
     permissions: PermissionRulesSchema.optional(),
     sandbox: SandboxConfigSchema.optional(),
     maxTurns: z.number().int().positive().max(500).optional(),
+    hooks: HooksConfigSchema.optional(),
+    fallbacks: z.array(ProviderPresetSchema).optional(),
     // v2 additions -----------------------------------------------------
     models: ModelsConfigSchema.optional(),
     providers: ProvidersConfigSchema,
@@ -155,6 +197,7 @@ export const CodepilotConfigSchema = z
     logging: LoggingConfigSchema,
     telemetry: TelemetryConfigSchema,
     usage: UsageConfigSchema,
+    webFetch: WebFetchConfigSchema.optional(),
   })
   .strict();
 
@@ -179,7 +222,7 @@ export type ResolvedCodepilotConfig = CodepilotConfig & {
 /** One layer of the merge, kept around for `loadConfigWithSources`. */
 export interface ConfigLayer {
   /** Stable id of the layer for debugging. */
-  name: "defaults" | "user" | "repo" | "env" | "caller";
+  name: "defaults" | "user" | "repo" | "mcp-json" | "env" | "caller";
   /** Path / env key, when the layer was sourced from a file or env var. */
   source?: string;
   /** The raw value (after interpolation, before merge with the next layer). */
@@ -287,9 +330,29 @@ export function validateConfig(raw: unknown): ResolvedCodepilotConfig {
     // zod returns plain objects; ensure the runtime shape matches.
     return result.data as ResolvedCodepilotConfig;
   }
-  const lines = result.error.issues.map((i) => {
-    const path = i.path.length === 0 ? "<root>" : i.path.join(".");
-    return `  - ${path}: ${i.message}`;
+  // Flatten union errors to their most specific cause so the user sees a
+  // field path (e.g. mcpServers.bad.command: Required) rather than a bare
+  // "Invalid input".
+  type IssueShape = { path?: (string | number)[]; message: string };
+  const flattenIssues = (
+    issues: Array<{ code: string; path?: (string | number)[]; message: string; unionErrors?: Array<{ issues?: IssueShape[] }> }>
+  ): IssueShape[] => {
+    const out: IssueShape[] = [];
+    for (const issue of issues) {
+      const firstBranch = issue.unionErrors ? issue.unionErrors[0] : undefined;
+      const firstIssue = firstBranch && firstBranch.issues && firstBranch.issues.length > 0 ? firstBranch.issues[0] : undefined;
+      out.push(firstIssue ?? { path: issue.path, message: issue.message });
+    }
+    return out;
+  };
+  const lines = flattenIssues(result.error.issues).map((i) => {
+    const path = i.path && i.path.length > 0 ? i.path.join(".") : "<root>";
+    let message = i.message;
+    if (i.message === "Invalid input") {
+      message =
+        'expected a stdio transport (command) or a remote transport (type "http"|"sse" + url)';
+    }
+    return `  - ${path}: ${message}`;
   });
   throw new Error(`Invalid CodePilot config:\n${lines.join("\n")}`);
 }
@@ -336,6 +399,20 @@ function mergeOne(
     } else if (key === "mcpServers" && baseVal && overrideVal &&
                typeof baseVal === "object" && typeof overrideVal === "object") {
       out[key] = { ...(baseVal as Record<string, unknown>), ...(overrideVal as Record<string, unknown>) };
+    } else if (key === "permissions" && baseVal && overrideVal &&
+               typeof baseVal === "object" && typeof overrideVal === "object") {
+      // Permission rules layer additively across user/project/local:
+      // deny unions (absolute), allow/ask also union so a project can
+      // extend the user's allow-list without redeclaring it.
+      const bp = baseVal as Record<string, unknown>;
+      const op = overrideVal as Record<string, unknown>;
+      const merged: Record<string, unknown> = {};
+      for (const eff of ["allow", "ask", "deny"]) {
+        const a = Array.isArray(bp[eff]) ? (bp[eff] as string[]) : [];
+        const b = Array.isArray(op[eff]) ? (op[eff] as string[]) : [];
+        merged[eff] = [...a, ...b];
+      }
+      out[key] = merged;
     } else {
       out[key] = overrideVal;
     }
@@ -422,6 +499,19 @@ export async function loadConfigWithSources(
     const parsed = await readAndParse(repoPath);
     if (parsed !== undefined) {
       sources.push({ name: "repo", source: repoPath, value: parsed });
+    }
+  }
+
+  // 3b) project-level .mcp.json (claude-code-compatible). This file lives
+  // at the repo root (NOT under .codepilot/) and contains ONLY an
+  // `mcpServers` map. It lets projects ship MCP server definitions
+  // alongside the code without polluting the user config. Merged at
+  // the same priority as the repo-level config (project-scoped).
+  const mcpJsonPath = join(cwd, ".mcp.json");
+  if (readFiles && existsSync(mcpJsonPath)) {
+    const parsed = await readAndParse(mcpJsonPath);
+    if (parsed !== undefined && parsed.mcpServers && typeof parsed.mcpServers === "object") {
+      sources.push({ name: "mcp-json", source: mcpJsonPath, value: parsed });
     }
   }
 

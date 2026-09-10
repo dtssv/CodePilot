@@ -46,6 +46,9 @@ export interface StreamChatOptions {
   cacheControl?: boolean;
   signal?: AbortSignal;
   maxTokens?: number;
+  /** Model reasoning effort (codex-style). Providers that support it
+   *  (OpenAI o-series, DeepSeek) pass this through; others ignore it. */
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 export type StreamEvent =

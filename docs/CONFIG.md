@@ -279,3 +279,156 @@ superset) and validated by the zod schema; merging / loading functions
 that produce a fully-resolved config return that type. Code paths that
 still operate on plain `CodepilotConfig` (e.g. the existing
 `Session` constructor) continue to work.
+
+## v3 additions: permissions rules, sandbox, maxTurns
+
+```jsonc
+// .codepilot/config.json
+{
+  "maxTurns": 50,
+  "permissions": {
+    "allow": ["read_file", "bash(npm test *)", "bash(/^git (status|diff)/)", "mcp__github__*"],
+    "ask":   ["bash(git push *)"],
+    "deny":  ["bash(rm -rf *)", "edit_file(*.env)"]
+  },
+  "sandbox": {
+    "mode": "workspace-write",       // off | workspace-write | read-only
+    "network": true,
+    "writablePaths": ["/data/scratch"],
+    "fallback": "deny"               // deny | allow-unsandboxed
+  }
+}
+```
+
+### Permission rules
+
+Rule syntax (claude-code compatible):
+
+| Rule form | Matches |
+|---|---|
+| `"read_file"` | every call of the tool |
+| `"mcp__github__*"` | wildcard over tool names |
+| `"bash(npm test *)"` | glob/prefix on the tool's primary argument (bash→command, file tools→path, web_fetch→url, web_search→query); a trailing ` *` also matches the bare prefix |
+| `"bash(/^git (status\|diff)/)"` | regex on the primary argument |
+| `"/^git status/"` | legacy bare-regex form, applies to bash commands (back-compat with `autoApprove`) |
+
+Evaluation order: **deny → ask → allow → mode default**. Deny rules apply
+in every mode including `yolo`. The legacy `autoApprove` array is merged
+into `permissions.allow`. Choosing "always" at a permission prompt now adds
+a narrowed session rule (e.g. `bash(npm test *)`) instead of flipping the
+whole session to `yolo`; hosts can persist it with `persistRule(cwd, rule)`.
+
+Bash commands matching a dangerous-pattern scan (`rm -rf /`, force-push,
+`git reset --hard`, fork bombs, `curl|sh`, DROP TABLE, …) always require
+interactive confirmation unless an allow rule explicitly covers them.
+
+### Sandbox
+
+The sandbox is enforced at two layers:
+
+1. **Process layer** — `bash` commands are wrapped by the strongest
+   available OS primitive: `sandbox-exec` (macOS Seatbelt), `bwrap`
+   (Linux), or WSL+bwrap (Windows, when a WSL distro with bubblewrap is
+   installed). Writes are confined to the workspace, the system temp dir,
+   `~/.codepilot`, and `sandbox.writablePaths`; `network: false` cuts
+   outbound access (`deny network*` / `--unshare-net`). Sensitive reads
+   (`~/.ssh`, credential files, `/etc/shadow`) are denied outright.
+2. **Tool layer** — `read_file`/`write_file`/`edit_file`/`ls`/`glob`/`grep`
+   validate every path before I/O, including a realpath check so symlinks
+   cannot escape the writable roots. This layer is pure Node and behaves
+   identically on macOS, Linux and Windows.
+
+When no OS sandbox binary exists and mode ≠ `off`, `fallback` decides:
+`deny` (default, fail closed — bash refuses to run) or
+`allow-unsandboxed` (run with a loud warning in the output). On Windows
+without WSL+bwrap the process layer is unavailable; the tool-layer guard
+still applies and bash fails closed under the default fallback.
+
+## v4 additions: hooks, provider fallback, interactive questions, background jobs
+
+```jsonc
+// .codepilot/config.json
+{
+  "fallbacks": [
+    { "provider": "openai",    "model": "gpt-5",             "apiKey": "${OPENAI_API_KEY}" },
+    { "provider": "anthropic", "model": "claude-sonnet-4-5" }
+  ],
+  "hooks": {
+    "PreToolUse":   [{ "matcher": "^write_file", "command": "sh hooks/check-path.sh" }],
+    "PostToolUse":  [{ "matcher": "*",           "command": "sh hooks/lint-after.sh" }],
+    "Notification": [{ "matcher": "*",           "command": "sh hooks/notify.sh" }],
+    "Stop":         [{ "matcher": "*",           "command": "sh hooks/on-stop.sh" }],
+  },
+  "mcpServers": {
+    "remote":  { "type": "http", "url": "https://mcp.example.com/mcp",
+                 "headers": { "Authorization": "Bearer ${MCP_TOKEN}" } }
+  }
+}
+```
+
+### Lifecycle hooks
+
+Each hook entry is `{ matcher, command }`. `matcher` is a regex tested
+against the tool name (`"*"` matches all). The hook's shell command receives
+a JSON payload on **stdin** containing the tool name, input, result and cwd.
+
+| Event | Payload | Semantics |
+|---|---|---|
+| `PreToolUse` | tool, input, cwd | **exit 2 = block the call**; stderr becomes the model-visible reason. Any other code = proceed. |
+| `PostToolUse` | tool, input, result, isError | stdout is appended to the tool result the model sees (use this to inject lint/test feedback). |
+| `Notification` | free-form | fire-and-forget side effects (toasts, file watchers). |
+| `Stop` | free-form | runs when a prompt finishes. |
+
+### Provider fallback
+
+`fallbacks` is an ordered list of backup providers. The primary provider is
+the top-level `provider`/`model`. If the primary's stream fails **before any
+content was produced** with a transient error (429 / rate limit / quota /
+overloaded / 401 / 403 / 5xx / connection reset / DNS failure), the request
+is replayed against the next provider. Once a provider has streamed real
+content we never switch — mid-stream failover would corrupt tool-call
+framing. Non-transient errors (bad schema, invalid request) do not cascade.
+Failover events are logged to stderr and to `session.getUsage()`.
+
+### Interactive questions (`ask_user_question`) and `plan_done`
+
+The model can ask the user structured questions — a multi-question prompt
+with an id, optional `header`, and optional choices. Hosts wire the callback
+via `SessionOptions.onAskUser(req: QuestionRequest) => Promise<QuestionAnswers>`.
+Without a handler the tool returns an explicit error so the model degrades
+gracefully instead of guessing.
+
+`plan_done` is the ExitPlanMode equivalent: it asks the user to approve the
+plan and, on approval, emits a `mode_request` event that the session turns
+into a real mode switch to `agent`. The TUI mirrors both `mode` and
+`mode_request` events.
+
+### Background bash jobs
+
+`bash` accepts `run_in_background: true` and returns a job id. `bash_output`
+polls for the tail of a job's output; `bash_kill` sends SIGTERM. Jobs write
+to `~/.codepilot/jobs/*.log` so they survive restarts of the TUI.
+
+### MCP Streamable HTTP transport
+
+`mcpServers` entries may declare `"type": "http"` (Streamable HTTP, MCP
+2025-03-26) or `"type": "sse"` (the older SSE transport). Both are POST-per-
+message; `http` tracks the `mcp-session-id` header and DELETEs the session on
+shutdown. stdio remains the default when `type` is omitted.
+
+### Secret redaction
+
+Every tool result is passed through `redactSecrets()` before it is echoed to
+the model or persisted. The pattern set covers PEM private keys, AWS access
+keys, GitHub / OpenAI / Anthropic tokens, Slack tokens, bearer headers,
+passwords inside connection strings, and `KEY=…` / `"key": "…"` env and JSON
+shapes. Redaction is idempotent and false-positive-tolerant by design: a
+redacted non-secret is a nuisance, a leaked real secret is an incident.
+
+### Usage and cost
+
+`session.getUsage()` returns aggregate `{ input, output, cacheRead,
+cacheWrite, costUSD }`. Cost is estimated from `estimateCostUSD(model,
+usage)` in `tokens.ts`, which ships a public-price table for the Claude,
+GPT, DeepSeek and Qwen families and returns `undefined` for unknown models
+(callers must treat that as "not priced", not zero).

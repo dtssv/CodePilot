@@ -28,6 +28,7 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   CodepilotConfig,
   PermissionMode,
@@ -83,6 +84,19 @@ export class PermissionEngine {
   /** Record an "always"-style decision as a narrowed rule for this session. */
   addSessionRule(rule: string, effect: RuleEffect = "allow"): void {
     this.sessionRules[effect].push(rule);
+  }
+
+  /** Remove the last `count` session rules of the given effect (LIFO).
+   *  Used by the Session's turn-scoped override cleanup: slash-command
+   *  `allowed-tools` grants are pushed onto the allow list for one turn
+   *  and popped here so the next prompt resumes the normal permission
+   *  posture. If `count` exceeds the number of session rules of that
+   *  effect, all of them are removed (no error). */
+  removeLastSessionRules(effect: RuleEffect, count: number): void {
+    if (count <= 0) return;
+    const arr = this.sessionRules[effect];
+    const toRemove = Math.min(count, arr.length);
+    arr.splice(arr.length - toRemove, toRemove);
   }
 
   /**
@@ -198,6 +212,20 @@ export function matchRule(
   input: unknown,
   primary?: string
 ): boolean {
+  // Legacy bare-regex form: "/^git (status|log)/" — matches bash commands
+  // with the historical implicit word-boundary anchoring.
+  if (rule.startsWith("/") && rule.endsWith("/") && rule.length > 1) {
+    if (toolName !== "bash") return false;
+    const arg = primary ?? extractPrimaryArg(toolName, input);
+    if (arg === undefined) return false;
+    let body = rule.slice(1, -1);
+    if (!body.startsWith("^")) body = "^(?:.*\\s)?" + body;
+    try {
+      return new RegExp(body).test(arg);
+    } catch {
+      return false;
+    }
+  }
   const scoped = rule.match(/^([A-Za-z0-9_*-]+)\((.*)\)$/s);
   if (scoped) {
     const [, toolPart, argPattern] = scoped;
@@ -212,6 +240,9 @@ export function matchRule(
         return false;
       }
     }
+    // A trailing " *" (prefix rule) also matches the bare prefix itself:
+    // "bash(npm test *)" covers both "npm test" and "npm test -- --watch".
+    if (pat.endsWith(" *") && arg === pat.slice(0, -2)) return true;
     return globMatch(pat, arg);
   }
   return matchToolName(rule, toolName);
@@ -246,16 +277,28 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * Persist a rule into `<cwd>/.codepilot/config.json` under
- * `permissions.<effect>`. Merges with existing file content; creates the
- * file when missing. Best-effort: throws on malformed existing JSON.
+ * Persist a rule into a config file under `permissions.<effect>`. Merges
+ * with existing file content; creates the file when missing. Best-effort:
+ * throws on malformed existing JSON.
+ *
+ * @param cwd      repo root
+ * @param rule     the rule string
+ * @param effect   allow / ask / deny
+ * @param scope    "repo" (default, `<cwd>/.codepilot/config.json`) or
+ *                 "user" (`~/.codepilot/config.json`). Project rules should
+ *                 be committed; user rules follow the developer across
+ *                 projects.
  */
 export async function persistRule(
   cwd: string,
   rule: string,
-  effect: RuleEffect = "allow"
+  effect: RuleEffect = "allow",
+  scope: "repo" | "user" = "repo"
 ): Promise<string> {
-  const path = join(cwd, ".codepilot", "config.json");
+  const path =
+    scope === "user"
+      ? join(homedir(), ".codepilot", "config.json")
+      : join(cwd, ".codepilot", "config.json");
   let json: Record<string, unknown> = {};
   try {
     json = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
@@ -269,7 +312,7 @@ export async function persistRule(
   if (!list.includes(rule)) list.push(rule);
   perms[effect] = list;
   json.permissions = perms;
-  await mkdir(join(cwd, ".codepilot"), { recursive: true });
+  await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, JSON.stringify(json, null, 2) + "\n", "utf-8");
   return path;
 }

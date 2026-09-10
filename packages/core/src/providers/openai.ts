@@ -54,6 +54,12 @@ export class OpenAIProvider implements ChatProvider {
     if (opts.tools && opts.tools.length > 0) {
       body.tools = opts.tools.map(toOpenAITool);
     }
+    // Reasoning effort (o-series / codex-style). Only sent when configured;
+    // non-supporting models ignore unknown fields gracefully in most
+    // OpenAI-compatible gateways, but we gate on it to avoid surprises.
+    if (opts.reasoningEffort) {
+      body.reasoning_effort = opts.reasoningEffort;
+    }
 
     // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
     // includes it; many compatible gateways document the bare host).

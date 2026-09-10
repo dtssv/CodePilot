@@ -15,6 +15,7 @@ import type {
   ContentBlock,
   Event,
   PlanStep,
+  QuestionRequest,
   TextBlock,
   ToolResultBlock,
   ToolUseBlock,
@@ -48,7 +49,7 @@ export interface ToolRow {
 }
 
 /** UI status derived from core status events + our own knowledge. */
-export type UiStatus = "idle" | "thinking" | "executing" | "compacting" | "waiting_permission";
+export type UiStatus = "idle" | "thinking" | "executing" | "compacting" | "waiting_permission" | "waiting_question";
 
 /** A pending permission request the user must resolve. */
 export interface PendingPermission {
@@ -76,6 +77,8 @@ export interface TuiState {
   input: string;
   /** Pending permission request, if any. */
   permission: PendingPermission | undefined;
+  /** Pending structured question request (ask_user_question / plan_done). */
+  question: QuestionRequest | undefined;
   /** True while a prompt is in flight (between prompt() and the next status:idle). */
   busy: boolean;
   /** Last system message, used for ephemeral notices. */
@@ -100,6 +103,8 @@ export type TuiAction =
   | { type: "set-input"; value: string }
   | { type: "permission-pending"; req: PendingPermission }
   | { type: "permission-resolve" }
+  | { type: "question-pending"; req: QuestionRequest }
+  | { type: "question-resolve" }
   | { type: "set-status"; status: UiStatus }
   | { type: "set-busy"; busy: boolean }
   | { type: "set-notice"; text: string | undefined }
@@ -132,6 +137,7 @@ export function initialState(opts: {
     usage: { ...emptyUsage },
     input: "",
     permission: undefined,
+    question: undefined,
     busy: false,
     notice: undefined,
     sessions: [],
@@ -238,6 +244,10 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
       return { ...state, permission: action.req, status: "waiting_permission" };
     case "permission-resolve":
       return { ...state, permission: undefined };
+    case "question-pending":
+      return { ...state, question: action.req, status: "waiting_question" };
+    case "question-resolve":
+      return { ...state, question: undefined };
     case "clear":
       return { ...initialState(state), input: state.input };
     case "exit":
@@ -452,6 +462,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             agentMode: ev.mode,
             notice: `Collaboration mode: ${ev.mode}`,
+          };
+        case "mode_request":
+          // plan_done was approved by the user; the session has already
+          // switched modes, so mirror it here.
+          return {
+            ...state,
+            agentMode: ev.mode,
+            notice: `Plan approved — switching to ${ev.mode} mode`,
           };
       }
     }

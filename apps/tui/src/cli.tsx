@@ -12,7 +12,7 @@ import { render } from "ink";
 import React from "react";
 
 import { App as AppUI } from "./ui/App.js";
-import { createPermissionBridge } from "./ui/controller.js";
+import { createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
 
 const AGENT_MODES = ["chat", "plan", "agent"] as const;
@@ -179,6 +179,7 @@ async function main(): Promise<void> {
   let agentMode: import("@codepilot/core").AgentMode = args.mode ?? "agent";
   let model: string | undefined = args.model;
   const bridge = createPermissionBridge();
+  const questionBridge = createQuestionBridge();
 
   if (!args.mock) {
     core = await tryLoadCore();
@@ -190,6 +191,7 @@ async function main(): Promise<void> {
       cwd: args.cwd,
       yolo: args.yolo,
       bridge,
+      questionBridge,
       initialAgentMode: agentMode,
     });
     session = mock.session;
@@ -215,6 +217,28 @@ async function main(): Promise<void> {
       model: args.model,
       agentMode,
       onPermissionRequest: (req) => bridge.waitDecision(req),
+      onAskUser: (req) => questionBridge.waitAnswers(req),
+      onMcpOpenAuthUrl: (server, url) => {
+        // Surface the authorization URL: print to stderr (so it's visible
+        // even while the TUI owns stdout) and attempt to open it in the
+        // browser. The core handles the local redirect listener + token
+        // exchange; we just need to get the user to visit the URL.
+        process.stderr.write(
+          `\n[mcp:${server}] Authorization required.\nOpen this URL in your browser to authorize:\n${url}\n\n`,
+        );
+        // Best-effort browser open (non-blocking, ignored on failure).
+        import("node:child_process")
+          .then(({ exec }) => {
+            const cmd =
+              process.platform === "darwin"
+                ? `open "${url}"`
+                : process.platform === "win32"
+                  ? `start "" "${url}"`
+                  : `xdg-open "${url}"`;
+            exec(cmd, () => undefined);
+          })
+          .catch(() => undefined);
+      },
     });
     // Reflect the actual current mode (e.g. resumed sessions may differ).
     agentMode = session.getAgentMode();
@@ -244,6 +268,7 @@ async function main(): Promise<void> {
       session,
       controller,
       permissionBridge: bridge,
+      questionBridge,
       cwd: args.cwd,
       model,
       permissionMode,

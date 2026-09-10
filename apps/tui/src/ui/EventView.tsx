@@ -6,6 +6,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { Markdown } from "./Markdown.js";
+import { DiffText } from "./DiffText.js";
 import { Spinner } from "./Spinner.js";
 import type { Row, ToolRow } from "./state.js";
 
@@ -43,7 +44,7 @@ function ToolBlock({ tool }: { tool: ToolRow }): React.ReactElement {
               </Text>
             ) : null}
           </Box>
-          <Text color={isError ? "red" : undefined}>{shown}</Text>
+          <DiffText dimColor={false} color={isError ? "red" : undefined}>{shown}</DiffText>
         </Box>
       ) : null}
       {tool.artifactRef !== undefined ? (

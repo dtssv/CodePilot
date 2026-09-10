@@ -101,15 +101,46 @@ CodePilot 已具备：分层 system prompt（静态前缀/动态后缀）、事�
 - 新增少量 **few-shot 行为示例**（一个 edit 流程、一个测试失败迭代），控制静态前缀 ≤ ~6k tokens。
 - 工具清单从"裸名字列表"升级为带一句话用途的列表（从 ToolDef.description 首句提取）。
 
-## 6. 已评估、暂不实施（记录理由）
+## 6. 已实施 vs 后续路线
 
-- **内核级沙箱**（codex seatbelt/landlock）：跨平台复杂度高；以权限规则 + 文档约束替代，后续可用 `sandbox` 配置包装 bash 命令。
-- **MCP Streamable HTTP transport**：现有 stdio+SSE 覆盖主流；HTTP transport 列入路线。
-- **task 并行 fan-out / 结构化 schema 输出**：当前单任务模型够用；调用方在 prompt 层并行发多个 task tool call 已天然并行（agent loop 并行执行工具）。
-- **checkpoint 结构化 rewind（git worktree 快照）**：opencode 用 git snapshot 做 revert；引入 git 依赖重，列入路线。
+**本轮已实施**（详见各模块代码注释与 docs/CONFIG.md）：
+- 工具系统：read_file 行号/二进制检测/行长截断，edit_file 事务性多 edit，bash 后台任务（bash_output/bash_kill），web_fetch/web_search，glob/grep 默认忽略重目录，全部工具描述强化为"何时用/不用/禁忌"格式。
+- 沙箱（双层，三平台）：进程层 macOS Seatbelt / Linux bwrap / Windows WSL+bwrap，fail-closed 默认；工具层路径守卫（含 realpath 符号链接逃逸检测）跨平台生效；危险命令静态扫描在任何模式下强制询问。
+- 权限：claude-code 语法 allow/ask/deny 规则（deny 绝对优先），"always" 收窄为会话级规则，persistRule 可持久化到 repo config。
+- Agent loop：Zod 校验失败回错、provider 错误不执行残缺工具调用、maxTurns 可配、turn 级微压缩（fold 旧 tool_result）、steering 运行中注入。
+- 记忆：CODEPILOT.md/AGENTS.md 沿目录树向上层级加载。
+- System prompt：任务完成判定、行为 few-shot、工具清单带摘要、修复 web_fetch 幻觉引用。
+
+**后续路线**（已评估，未实施）：
+- MCP Streamable HTTP transport（现有 stdio+SSE 覆盖主流）。
+- checkpoint 结构化 rewind（git worktree 快照，opencode 风格 revert）。
+- task 子代理类型系统与结构化 schema 输出。
+- Windows 原生进程沙箱（Job Objects 需原生模块；当前 WSL 后端 + fail-closed 兜底）。
 
 ## 7. 测试与验证计划
 
 - 单测：permissions 规则矩阵、edit_file 多 edit 事务性、read_file 行号/二进制、bash 后台生命周期、web_fetch HTML 剥离（本地 http server）、记忆层级加载、微压缩 fold、Zod 错误回传。
 - 回归：`pnpm -r build` + `pnpm test`（core/protocol）全绿。
 - 文档：README/docs 同步新增工具与配置说明。
+
+## v4 批次（已实施）
+
+- `hooks.ts`：`HookEngine` 支持 PreToolUse / PostToolUse / Notification / Stop；exit 2 阻断工具调用，PostToolUse stdout 作为反馈追加到工具结果。
+- `tools/ask_user.ts`：`ask_user_question`（多问题、可选项、multiSelect）+ `plan_done`（计划审批 → `mode_request` 事件 → 自动切到 agent 模式）。宿主通过 `SessionOptions.onAskUser` 接入。
+- `tools/task.ts`：并行 fan-out（`tasks: [{objective, agent_type, tools, model, maxSteps}]`），`explore`（只读）/`worker`（可写）两种子代理类型。
+- `mcp.ts`：`McpHttpClient`（Streamable HTTP / MCP 2025-03-26）—— 单端点 POST、`mcp-session-id` 会话头、JSON 或 SSE 响应、DELETE 结束会话；配置 `{"type":"http","url":...}`。
+- `redact.ts`：工具结果统一脱敏（PEM 私钥、AWS/GitHub/OpenAI/Anthropic/Slack token、bearer、连接串密码、env/JSON 密值），agent loop 在回显与持久化前调用。
+- `providers/fallback.ts`：`FallbackProvider` 有序 failover 链，仅在未产出内容且错误为瞬态时切换；`config.fallbacks`。
+- `tokens.ts`：`estimateCostUSD` 公开价目表 + `session.getUsage()` 累计 token 与估算成本。
+- `Event` 新增 `mode_request` 变体，TUI reducer 已同步。
+
+### 待做（下一批次建议顺序）
+
+~~1. TUI 问题 UI~~ **已完成**：`QuestionBridge`（参照 PermissionBridge）+ `QuestionPrompt` 组件（编号选项/键位选择/自由文本），`cli.tsx` 接 `onAskUser`。
+~~2. IDEA 插件~~ **已更新接口**：`question/request` 对话框（选项单选/多选 checkbox/自由文本），修正 `permission/respond` 为 request 语义并补 reverse-request ack（协议要求双重回复）；未本地重编译（Kotlin/Gradle）。
+~~3. 工具清单~~ **已补**：README「内置工具」一节。
+~~4. 协议层 question RPC~~ **已完成**：`question/request`（server→client 反向请求）+ `question/respond`，`pendingQuestions` 注册表，shutdown 时 fail-closed 空 answers；VSCode 客户端接 `questionRequest` 事件 + QuickPick/InputBox 顺序询问。
+
+**新增后续路线**：
+- IDEA 插件 Gradle 重编译验证（本环境无 Gradle）。
+- TUI/VSCode 端 `task` 工具并行子任务的可视化（当前以 tool_result 文本呈现）。

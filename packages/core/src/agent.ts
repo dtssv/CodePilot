@@ -22,12 +22,17 @@ import type {
   ImageAttachment,
   PermissionDecision,
   PermissionRequest,
+  QuestionAnswers,
+  QuestionRequest,
   ToolUseBlock,
 } from "./types.js";
 import { filterToolsByMode } from "./tools/modes.js";
 import { estimateTokens, lookupContextWindow } from "./tokens.js";
 import { foldToolResults } from "./compaction.js";
 import type { ResolvedSandbox } from "./sandbox.js";
+import type { HookEngine } from "./hooks.js";
+import { redactSecrets } from "./redact.js";
+import { DoomLoopDetector } from "./doomLoop.js";
 
 export interface AgentDeps {
   provider: ChatProvider;
@@ -58,6 +63,23 @@ export interface AgentDeps {
   maxTurns?: number;
   /** Active sandbox policy handed to every tool via ToolContext. */
   sandbox?: ResolvedSandbox;
+  /** Lifecycle hook engine (PreToolUse / PostToolUse). Optional. */
+  hooks?: HookEngine;
+  /** Structured user-question channel for ask_user_question / plan_done. */
+  onAskUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
+  /**
+   * Persistent shell for foreground `bash` calls. When present, the bash
+   * tool routes foreground commands through it so `cd`, `export`, and
+   * background jobs persist across calls. Optional — absent in tests.
+   */
+  persistentShell?: {
+    run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("./persistentShell.js").PersistentShellResult>;
+  };
+  /** LSP diagnostics provider for the `diagnostics` tool. Host-supplied. */
+  diagnosticsProvider?: import("./tools/diagnostics.js").DiagnosticsProvider;
+  /** Current sub-agent nesting depth (0 at top level). Drives the `task`
+   *  tool's recursion guard. */
+  subagentDepth?: number;
   /**
    * Steering hook: called at the start of every agent turn. Returned texts
    * are injected into the transcript as additional user messages, letting a
@@ -94,6 +116,7 @@ export async function runAgent(
   const maxTurns = deps.maxTurns ?? deps.config.maxTurns ?? 50;
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
+  const doomLoop = new DoomLoopDetector();
   const emit = async (e: Event): Promise<void> => {
     produced.push(e);
     if (deps.onEvent) await deps.onEvent(e);
@@ -246,15 +269,18 @@ export async function runAgent(
 
     // Run tools in parallel.
     const toolResults = await Promise.all(
-      toolCalls.map((tc) => runOneTool(tc, deps, emit, agentMode))
+      toolCalls.map((tc) => runOneTool(tc, deps, emit, agentMode, doomLoop))
     );
     for (let i = 0; i < toolCalls.length; i++) {
       const tc = toolCalls[i]!;
       const r = toolResults[i]!;
+      // Secret redaction: credentials must never reach the transcript or
+      // the model context (see redact.ts). Artifacts keep full fidelity.
+      const safeContent = redactSecrets(r.content);
       const tr: ContentBlock = {
         type: "tool_result",
         toolCallId: tc.id,
-        content: r.content,
+        content: safeContent,
         isError: r.isError,
         artifactRef: r.artifactRef,
       };
@@ -263,9 +289,10 @@ export async function runAgent(
         type: "tool_result",
         toolCallId: tc.id,
         name: tc.name,
-        content: r.content,
+        content: safeContent,
         isError: r.isError,
         artifactRef: r.artifactRef,
+        images: r.images,
       });
       // Append the tool_result block to the most recent assistant message.
       const last = produced[produced.length - 2]; // assistant message
@@ -276,18 +303,30 @@ export async function runAgent(
     }
 
     // Plan updates are picked up here: if any tool returned a plan block
-    // (currently only plan_update), surface it as a `plan` event.
+    // (currently only plan_update), surface it as a `plan` event. The
+    // exit_plan_mode signal from plan_done becomes a `mode_request` event
+    // that the session turns into a mode switch.
     for (let i = 0; i < toolCalls.length; i++) {
       const r = toolResults[i]!;
       if (r.blocks) {
         for (const b of r.blocks) {
           if (b.type === "text") {
             try {
-              const parsed = JSON.parse(b.text) as { type: string; steps?: unknown };
+              const parsed = JSON.parse(b.text) as {
+                type: string;
+                steps?: unknown;
+                approved?: boolean;
+              };
               if (parsed.type === "plan" && Array.isArray(parsed.steps)) {
                 await emit({
                   type: "plan",
                   steps: parsed.steps as never,
+                });
+              } else if (parsed.type === "exit_plan_mode" && parsed.approved === true) {
+                await emit({
+                  type: "mode_request",
+                  mode: "agent",
+                  reason: "plan approved via plan_done",
                 });
               }
             } catch {
@@ -382,6 +421,7 @@ async function* streamOnce(
     systemPrompt: staticPrefix,
     signal: deps.signal,
     maxTokens: deps.config.maxTokens,
+    reasoningEffort: deps.config.reasoningEffort,
   });
 }
 
@@ -466,17 +506,21 @@ function compactTranscriptToProviderMessages(
       // tool_use; we synthesise a user-role turn carrying them, since most
       // providers expect tool_result as a user-side message.
       flush();
-      out.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            toolCallId: e.toolCallId,
-            content: e.content,
-            isError: e.isError,
-          },
-        ],
-      });
+      const blocks: ProviderMessageContent[] = [
+        {
+          type: "tool_result",
+          toolCallId: e.toolCallId,
+          content: e.content,
+          isError: e.isError,
+        },
+      ];
+      // Image-capable tools (read_image) attach images to the tool_result.
+      // We emit them as sibling image blocks in the same user turn so a
+      // multimodal model sees the picture alongside the tool's text result.
+      for (const img of e.images ?? []) {
+        blocks.push({ type: "image", mediaType: img.mediaType, base64: img.base64 });
+      }
+      out.push({ role: "user", content: blocks });
       continue;
     }
     if (e.type === "compaction") {
@@ -504,12 +548,14 @@ async function runOneTool(
   tc: ToolUseBlock,
   deps: AgentDeps,
   emit: (e: Event) => Promise<void>,
-  mode: AgentMode = "agent"
+  mode: AgentMode = "agent",
+  doomLoop?: DoomLoopDetector,
 ): Promise<{
   content: string;
   isError: boolean;
   artifactRef?: string;
   blocks?: ContentBlock[];
+  images?: { mediaType: string; base64: string }[];
 }> {
   const tool = deps.tools.get(tc.name);
   if (!tool) {
@@ -531,8 +577,20 @@ async function runOneTool(
     };
   }
 
+  // Doom-loop detection: refuse after repeated identical calls.
+  let effectiveInput: unknown = tc.input;
+  if (doomLoop) {
+    const dl = doomLoop.check(tc.name, tc.input);
+    if (dl.refuse) {
+      return {
+        content: dl.message,
+        isError: true,
+      };
+    }
+  }
+
   // Permission check.
-  const check = deps.permissions.preflight(tool, tc.input);
+  const check = deps.permissions.preflight(tool, effectiveInput);
   let decision: PermissionDecision = "allow";
   if (check === "ask") {
     if (!deps.onPermissionRequest) {
@@ -542,7 +600,7 @@ async function runOneTool(
     } else {
       await emit({ type: "status", status: "waiting_permission" });
       const reqId = `perm_${randomUUID()}`;
-      const req = deps.permissions.buildRequest(reqId, tool, tc.input);
+      const req = deps.permissions.buildRequest(reqId, tool, effectiveInput);
       try {
         decision = await deps.onPermissionRequest(req);
       } catch (err) {
@@ -552,7 +610,7 @@ async function runOneTool(
       if (decision === "always") {
         // Narrow the grant to a rule covering this invocation (e.g.
         // "bash(npm test *)") instead of flipping the whole session to yolo.
-        const rule = PermissionEngine.suggestRule(tool, tc.input);
+        const rule = PermissionEngine.suggestRule(tool, effectiveInput);
         deps.permissions.addSessionRule(rule, "allow");
         decision = "allow";
       }
@@ -569,12 +627,30 @@ async function runOneTool(
     };
   }
 
+  // PreToolUse hooks: user-configured blockers (exit 2 = block) + input
+  // rewriting (JSON `{"updatedInput": {...}}` replaces the tool input).
+  if (deps.hooks?.hasHooks("PreToolUse")) {
+    const pre = await deps.hooks.runPreToolUse(tc.name, effectiveInput);
+    if (pre.action === "block") {
+      return {
+        content: `blocked by PreToolUse hook: ${pre.reason}`,
+        isError: true,
+      };
+    }
+    // Input rewriting: a hook may return updatedInput to modify the
+    // arguments before execution (codex-style). The replacement must be a
+    // valid object; we re-validate below.
+    if (pre.updatedInput !== undefined) {
+      effectiveInput = pre.updatedInput;
+    }
+  }
+
   // Validate input via Zod. A validation failure is returned as a tool
   // error so the model can self-correct (this is the behaviour all mature
   // agents rely on); silently passing malformed input through is how
   // corrupt edits happen.
-  let parsed: unknown = tc.input;
-  const safe = tool.inputSchema.safeParse(tc.input);
+  let parsed: unknown = effectiveInput;
+  const safe = tool.inputSchema.safeParse(effectiveInput);
   if (!safe.success) {
     const issues = safe.error.issues
       .slice(0, 5)
@@ -595,12 +671,35 @@ async function runOneTool(
     artifact: async (blob, hint) => deps.artifacts.write(blob, hint),
     readArtifact: async (ref) => deps.artifacts.read(ref),
     sandbox: deps.sandbox,
+    askUser: deps.onAskUser,
+    persistentShell: deps.persistentShell,
+    diagnosticsProvider: deps.diagnosticsProvider,
+    config: deps.config,
+    subagentDepth: deps.subagentDepth ?? 0,
   };
 
   try {
     const result = await tool.execute(parsed as never, ctx);
+    let content = result.content;
+    // Doom-loop warning appended to the result so the model sees it.
+    if (doomLoop) {
+      const dl = doomLoop.check(tc.name, tc.input);
+      if (dl.warn) {
+        content = `[${dl.message}]\n\n${content}`;
+      }
+    }
+    // PostToolUse hooks: stdout is appended as feedback for the model.
+    if (deps.hooks?.hasHooks("PostToolUse")) {
+      const post = await deps.hooks.runPostToolUse(
+        tc.name,
+        effectiveInput,
+        content,
+        result.isError === true
+      );
+      if (post.feedback) content += `\n\n[hook feedback]\n${post.feedback}`;
+    }
     return {
-      content: result.content,
+      content,
       isError: result.isError === true,
       artifactRef: result.artifactRef,
       blocks: result.blocks,

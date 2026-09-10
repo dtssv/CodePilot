@@ -12,27 +12,36 @@
  */
 import React from "react";
 import { Box, Text } from "ink";
-import type {
-  AgentMode,
-  Event,
-  PermissionDecision,
-  PermissionMode,
-  Session,
+import {
+  type AgentMode,
+  type Event,
+  type PermissionDecision,
+  type PermissionMode,
+  type Session,
+  type SlashCommand,
+  discoverSlashCommands,
 } from "@codepilot/core";
 
 import { RowView } from "./EventView.js";
 import { InputBox } from "./InputBox.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
+import { QuestionPrompt } from "./QuestionPrompt.js";
 import { StatusBar } from "./StatusBar.js";
 import { Spinner } from "./Spinner.js";
 import { initialState, reducer, type TuiState } from "./state.js";
-import { isCommand, runCommand } from "./commands.js";
-import type { PermissionBridge, SessionController } from "./controller.js";
+import {
+  isCommand,
+  runCommandWithCustom,
+  buildCommandList,
+  BUILTIN_COMMAND_NAMES,
+} from "./commands.js";
+import type { PermissionBridge, QuestionBridge, SessionController } from "./controller.js";
 
 export interface AppProps {
   session: Session;
   controller: SessionController;
   permissionBridge: PermissionBridge;
+  questionBridge: QuestionBridge;
   cwd: string;
   model: string | undefined;
   permissionMode: PermissionMode;
@@ -41,7 +50,7 @@ export interface AppProps {
 }
 
 export function App(props: AppProps): React.ReactElement {
-  const { session, controller, permissionBridge, cwd, model, permissionMode, initialAgentMode, initialPrompt } = props;
+  const { session, controller, permissionBridge, questionBridge, cwd, model, permissionMode, initialAgentMode, initialPrompt } = props;
 
   const [state, dispatch] = React.useReducer(reducer, undefined, () =>
     initialState({
@@ -51,6 +60,49 @@ export function App(props: AppProps): React.ReactElement {
       permissionMode,
       agentMode: initialAgentMode,
     }),
+  );
+
+  // Custom slash commands discovered from .codepilot/commands/*.md and
+  // ~/.codepilot/commands/*.md. Discovered once on mount (and re-discovered
+  // when cwd changes). Built-in command names are reserved so custom files
+  // can't shadow them.
+  const [customCommands, setCustomCommands] = React.useState<SlashCommand[]>([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { commands, warnings } = await discoverSlashCommands(cwd, {
+          reservedNames: BUILTIN_COMMAND_NAMES,
+        });
+        if (cancelled) return;
+        setCustomCommands(commands);
+        if (warnings.length > 0) {
+          dispatch({
+            type: "set-notice",
+            text: `Custom command warnings:\n${warnings.slice(0, 5).join("\n")}`,
+          });
+        }
+      } catch (err) {
+        // Discovery is best-effort; don't block the UI on failure.
+        if (!cancelled) {
+          setCustomCommands([]);
+          dispatch({
+            type: "set-notice",
+            text: `Custom command discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd]);
+
+  // The merged autocomplete list (built-ins + custom). Memoised so InputBox
+  // doesn't re-render on every keystroke.
+  const commandList = React.useMemo(
+    () => buildCommandList(customCommands),
+    [customCommands],
   );
 
   // 1. Subscribe to session events.
@@ -85,6 +137,27 @@ export function App(props: AppProps): React.ReactElement {
     });
   }, [permissionBridge]);
 
+  // 2b. Question bridge: when core calls onAskUser, it pushes a request into
+  //     the bridge and awaits answers. The UI renders QuestionPrompt and
+  //     resolves the waiter once every question has an answer.
+  React.useEffect(() => {
+    return questionBridge.onPending((req) => {
+      dispatch({ type: "question-pending", req });
+    });
+  }, [questionBridge]);
+
+  const onQuestionDone = React.useCallback(
+    (answers: import("@codepilot/core").QuestionAnswers) => {
+      const pending = state.question;
+      if (pending !== undefined) {
+        questionBridge.resolve(pending.requestId, answers);
+      }
+      dispatch({ type: "question-resolve" });
+      dispatch({ type: "set-status", status: state.busy ? "thinking" : "idle" });
+    },
+    [state.question, state.busy, questionBridge],
+  );
+
   const onPermissionDecide = React.useCallback(
     (decision: PermissionDecision) => {
       const pending = state.permission;
@@ -101,19 +174,66 @@ export function App(props: AppProps): React.ReactElement {
   const doSubmit = React.useCallback(
     async (text: string) => {
       if (isCommand(text)) {
-        const result = runCommand(text, { controller, cwd });
+        const result = runCommandWithCustom(text, { controller, cwd }, customCommands);
         switch (result.kind) {
           case "noop":
             return;
           case "system":
             dispatch({ type: "set-notice", text: result.text });
             return;
+          case "unknown-command":
+            dispatch({ type: "set-notice", text: `Unknown command: /${result.name}. Try /help.` });
+            return;
           case "submit-prompt":
             text = result.text;
             break;
+          case "custom-command": {
+            // A custom slash command: send the rendered prompt to the
+            // session. Apply optional model + allowed-tools overrides for
+            // this turn only (claude-code semantics — the session clears
+            // them in prompt()'s finally block).
+            try {
+              if (result.model || result.allowedTools) {
+                session.setTurnOverrides({
+                  model: result.model,
+                  allowedTools: result.allowedTools,
+                });
+              }
+              dispatch({ type: "set-busy", busy: true });
+              dispatch({ type: "set-status", status: "thinking" });
+              const overrideNote =
+                result.model && result.allowedTools
+                  ? ` (model: ${result.model}, tools: ${result.allowedTools.join(", ")})`
+                  : result.model
+                    ? ` (model: ${result.model})`
+                    : result.allowedTools
+                      ? ` (tools: ${result.allowedTools.join(", ")})`
+                      : "";
+              dispatch({
+                type: "set-notice",
+                text: `/${result.commandName}${overrideNote}`,
+              });
+              await session.prompt(result.prompt);
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: `Custom command failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            } finally {
+              dispatch({ type: "set-busy", busy: false });
+              dispatch({ type: "set-status", status: "idle" });
+            }
+            return;
+          }
           case "set-model":
             dispatch({ type: "set-model", model: result.model });
             dispatch({ type: "set-notice", text: `Model set to ${result.model}` });
+            // Persist the model change on the session too.
+            try {
+              await session.setModel(result.model);
+            } catch {
+              /* best-effort */
+            }
             return;
           case "set-mode":
             dispatch({ type: "set-mode", mode: result.mode });
@@ -226,7 +346,7 @@ export function App(props: AppProps): React.ReactElement {
         dispatch({ type: "set-status", status: "idle" });
       }
     },
-    [session, controller, cwd, state.plan],
+    [session, controller, cwd, state.plan, customCommands],
   );
 
   // 4. Initial prompt.
@@ -241,7 +361,7 @@ export function App(props: AppProps): React.ReactElement {
 
   // 5. Cancel handler (Ctrl+C).
   const doCancel = React.useCallback(() => {
-    if (state.busy || state.status === "waiting_permission") {
+    if (state.busy || state.status === "waiting_permission" || state.status === "waiting_question") {
       try {
         session.cancel();
         dispatch({ type: "set-notice", text: "(cancelling…)" });
@@ -271,6 +391,7 @@ export function App(props: AppProps): React.ReactElement {
   }, [exitPending, session]);
 
   const pendingPerm = state.permission;
+  const pendingQuestion = state.question;
 
   return (
     <Box flexDirection="column" width="100%" height="100%">
@@ -292,7 +413,7 @@ export function App(props: AppProps): React.ReactElement {
         </Box>
       ) : null}
 
-      {/* Permission prompt or input */}
+      {/* Permission prompt, question prompt, or input */}
       {pendingPerm !== undefined ? (
         <Box paddingX={1} marginY={1}>
           <PermissionPrompt
@@ -301,6 +422,10 @@ export function App(props: AppProps): React.ReactElement {
             reason={pendingPerm.reason}
             onDecide={onPermissionDecide}
           />
+        </Box>
+      ) : pendingQuestion !== undefined ? (
+        <Box paddingX={1} marginY={1}>
+          <QuestionPrompt request={pendingQuestion} onDone={onQuestionDone} />
         </Box>
       ) : (
         <Box paddingX={1} marginY={1}>
@@ -313,10 +438,12 @@ export function App(props: AppProps): React.ReactElement {
             }}
             onCancel={doCancel}
             disabled={state.busy}
+            cwd={cwd}
+            commands={commandList}
             placeholder={
               state.busy
                 ? "Working… Ctrl+C to cancel."
-                : "Type a message. Enter to send, Shift+Enter for newline. / for commands."
+                : "Type a message. Enter to send, Shift+Enter for newline. / for commands, @ for files."
             }
           />
         </Box>
@@ -334,6 +461,8 @@ export function App(props: AppProps): React.ReactElement {
                 ? "compacting…"
                 : state.status === "waiting_permission"
                 ? "waiting for permission…"
+                : state.status === "waiting_question"
+                ? "waiting for your answer…"
                 : state.status === "executing"
                 ? "executing…"
                 : "thinking…"

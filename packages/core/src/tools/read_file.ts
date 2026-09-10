@@ -72,6 +72,9 @@ export const readFileTool: ToolDef<typeof schema> = {
     }
     const text = buf.toString("utf-8");
     const lines = text.split(/\r?\n/);
+    // A single trailing newline is a line terminator, not an empty last
+    // line — drop it so line numbers match `cat -n` exactly.
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
     const start = input.startLine ?? 0;
     const max = input.maxLines ?? 2000;
     const slice = lines.slice(start, start + max);

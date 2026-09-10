@@ -21,6 +21,7 @@ JSON-RPC 2.0 over stdio（换行分隔 JSON，NDJSON）。客户端 = 前端（T
 | `prompt/send` | `{ sessionId, text, images?: [{mediaType, base64}] }` | `{}`（响应经通知流式推送） |
 | `prompt/cancel` | `{ sessionId }` | `{}` |
 | `permission/respond` | `{ requestId, decision: "allow"\|"deny"\|"always" }` | `{}` |
+| `question/respond` | `{ requestId, answers: { [questionId]: string \| string[] } }` | `{}` |
 | `session/fork` | `{ sessionId, atEventIndex? }` | `{ sessionId }` |
 | `shutdown` | `{}` | `{}` |
 
@@ -49,6 +50,7 @@ JSON-RPC 2.0 over stdio（换行分隔 JSON，NDJSON）。客户端 = 前端（T
 |---|---|
 | `event` | `{ sessionId, event: Event }` — 所有会话事件（含流式 text_delta/tool_use 增量） |
 | `permission/request` | 这是一个**请求**（非通知）：`{ sessionId, requestId, toolName, input, reason }`，客户端用 `permission/respond` 回复 |
+| `question/request` | 这是一个**请求**（非通知）：`{ sessionId, requestId, questions: [{ id, header?, question, options?: [{label, description?}], multiSelect? }] }`，客户端用 `question/respond` 回复（answers 以 question id 为键，值为选项 label、label 数组或自由文本）。由 `ask_user_question` / `plan_done` 工具触发；客户端不可达或服务端 shutdown 时按空 answers 失败关闭（plan_done 视为未批准） |
 | `session/usage` | `{ sessionId, usage: {input, output, cacheRead, cacheWrite, costUSD} }` |
 
 ## 流式

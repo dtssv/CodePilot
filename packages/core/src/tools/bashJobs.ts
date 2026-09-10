@@ -38,6 +38,8 @@ export interface BackgroundJob {
 
 interface Registry {
   jobs: Map<string, BackgroundJob>;
+  /** Listeners fired when a job transitions to a terminal state. */
+  completionListeners: Set<(meta: JobMeta) => void>;
 }
 
 const registries = new Map<string, Registry>();
@@ -45,10 +47,23 @@ const registries = new Map<string, Registry>();
 function registryFor(cwd: string): Registry {
   let r = registries.get(cwd);
   if (!r) {
-    r = { jobs: new Map() };
+    r = { jobs: new Map(), completionListeners: new Set() };
     registries.set(cwd, r);
   }
   return r;
+}
+
+/** Register a listener fired when any job in this cwd finishes (exits, is
+ *  killed, or errors). Returns an unsubscribe function. The session uses
+ *  this to push a steering message into the agent loop so the model learns
+ *  the job is done without having to poll. */
+export function onJobCompletion(
+  cwd: string,
+  listener: (meta: JobMeta) => void
+): () => void {
+  const r = registryFor(cwd);
+  r.completionListeners.add(listener);
+  return () => r.completionListeners.delete(listener);
 }
 
 export function jobsDir(cwd: string): string {
@@ -101,14 +116,28 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
     meta.finishedAt = new Date().toISOString();
     log.end();
     void persistMeta(job);
+    fireCompletion(spec.cwd, meta);
   });
   proc.on("error", () => {
     meta.status = "failed";
     meta.finishedAt = new Date().toISOString();
     log.end();
     void persistMeta(job);
+    fireCompletion(spec.cwd, meta);
   });
   return job;
+}
+
+function fireCompletion(cwd: string, meta: JobMeta): void {
+  const r = registries.get(cwd);
+  if (!r) return;
+  for (const l of r.completionListeners) {
+    try {
+      l(meta);
+    } catch {
+      /* listener errors must not crash the close handler */
+    }
+  }
 }
 
 /** Look up a live job; if absent in memory, try loading metadata from disk. */

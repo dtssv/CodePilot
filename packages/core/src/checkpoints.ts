@@ -143,6 +143,8 @@ function serializeEvent(e: Event): string {
       return e.message;
     case "mode":
       return `mode:${e.mode}`;
+    case "mode_request":
+      return `mode_request:${e.mode}`;
   }
 }
 
