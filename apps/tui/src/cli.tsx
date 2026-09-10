@@ -14,6 +14,7 @@ import React from "react";
 import { App as AppUI } from "./ui/App.js";
 import { createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
+import { runHeadless, parseOutputFormat } from "./headless.js";
 
 const AGENT_MODES = ["chat", "plan", "agent"] as const;
 type AgentMode = (typeof AGENT_MODES)[number];
@@ -29,6 +30,11 @@ type ParsedArgs = {
   showHelp: boolean;
   /** Cursor-style collaboration mode. */
   mode?: AgentMode;
+  /** Headless / print mode (claude-code `-p`). When true, skip the Ink UI
+   *  and run a single prompt to completion, writing to stdout. */
+  print: boolean;
+  /** Output format for print mode (text | json | stream-json). */
+  outputFormat?: string;
 };
 
 const HELP = `codepilot-tui — interactive terminal UI for CodePilot
@@ -47,11 +53,49 @@ Options:
                                agent — full autonomy (default)
   --resume <id>              Resume an existing session
   --mock                     Use an in-memory mock session (no core needed; for UI dev)
+
+  Headless / print mode (claude-code -p equivalent — for scripts & CI):
+  -p, --print                Run a single prompt to completion and exit.
+                             No interactive UI. Requires a prompt (positional
+                             args or piped via stdin). Implies --yolo unless a
+                             permission mode is set, since there's no UI to
+                             approve tool calls interactively.
+  --output-format <fmt>      Print-mode output: text | json | stream-json
+                               text        — final assistant text only (default)
+                               json        — single result JSON object
+                               stream-json — NDJSON, one event per line (realtime)
+
   -h, --help                 Show this help
 
 If positional arguments are provided, they are joined and submitted as the
-first prompt once the UI is ready.
+first prompt once the UI is ready (or as the sole prompt in --print mode).
 `;
+
+/**
+ * Read all of stdin as a string. Resolves to "" when stdin is a TTY (no
+ * piped input). Used by --print mode to accept prompts piped via stdin:
+ *   echo "review this" | codepilot-tui -p --output-format json
+ */
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    // When stdin is a TTY (no pipe), resolve immediately with "" so the
+    // caller can fall back to a positional prompt or error out.
+    if (process.stdin.isTTY) {
+      resolve("");
+      return;
+    }
+    let data = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", () => resolve(""));
+    // Safety: if nothing ever ends the stream, resolve after 10s so we
+    // don't hang forever in CI environments that don't close stdin.
+    setTimeout(() => resolve(data), 10_000).unref?.();
+  });
+}
 
 /**
  * Minimal hand-rolled argv parser (avoids an extra runtime dep).
@@ -63,6 +107,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     yolo: false,
     mock: false,
     showHelp: false,
+    print: false,
   };
   const positional: string[] = [];
   let i = 0;
@@ -123,6 +168,18 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       case a === "--yolo": {
         out.yolo = true;
+        break;
+      }
+      case a === "-p" || a === "--print" || a.startsWith("--print="): {
+        const v = takeValue();
+        // --print is a boolean flag; --print=false explicitly disables.
+        out.print = v === undefined ? true : v !== "false" && v !== "0";
+        break;
+      }
+      case a === "--output-format":
+      case a.startsWith("--output-format="): {
+        const v = takeValue();
+        if (v) out.outputFormat = v;
         break;
       }
       case a === "--mock": {
@@ -242,6 +299,73 @@ async function main(): Promise<void> {
     });
     // Reflect the actual current mode (e.g. resumed sessions may differ).
     agentMode = session.getAgentMode();
+  }
+
+  // ---- Headless / print mode ----
+  // When --print is set, skip the Ink UI entirely: read the prompt (from
+  // args or stdin), run it to completion, write output to stdout, exit.
+  // There's no interactive permission UI in this mode, so we require a
+  // non-interactive permission mode (yolo) — otherwise tool calls that
+  // need approval are denied (the bridge has no resolver attached).
+  if (args.print) {
+    let prompt = args.prompt;
+    if (prompt === undefined || prompt.trim() === "") {
+      // Read the prompt from stdin if nothing was passed positionally.
+      // Supports both piped input (`echo "x" | codepilot-tui -p`) and
+      // interactive typing (rare in print mode, but supported).
+      const stdinText = await readStdin();
+      prompt = stdinText.trim();
+    }
+    if (prompt.length === 0) {
+      process.stderr.write(
+        "codepilot-tui: --print requires a prompt (pass positional args or pipe via stdin)\n",
+      );
+      try { await session.dispose(); } catch { /* ignore */ }
+      process.exit(2);
+    }
+
+    let format: "text" | "json" | "stream-json";
+    try {
+      format = parseOutputFormat(args.outputFormat);
+    } catch (err) {
+      process.stderr.write(`codepilot-tui: ${(err as Error).message}\n`);
+      try { await session.dispose(); } catch { /* ignore */ }
+      process.exit(2);
+    }
+
+    // In print mode there's no UI to resolve permission requests or ask
+    // questions. We don't attach handlers, so the session falls back to
+    // its permissionMode: yolo auto-approves everything; ask/auto-edit
+    // deny any tool call that would normally prompt. The user gets a
+    // clear result object either way.
+    try {
+      await runHeadless({ session, prompt, format });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (format === "text") {
+        process.stderr.write(`codepilot-tui: ${msg}\n`);
+      } else {
+        // Emit a result object with subtype "error" so JSON consumers
+        // always get a parseable final line.
+        process.stdout.write(
+          JSON.stringify({
+            type: "result",
+            subtype: "error",
+            result: msg,
+            session_id: session.id,
+            usage: session.getUsage(),
+            duration_ms: 0,
+            num_turns: 0,
+            had_tool_calls: false,
+            errors: [msg],
+          }) + "\n",
+        );
+      }
+      try { await session.dispose(); } catch { /* ignore */ }
+      process.exit(1);
+    }
+    try { await session.dispose(); } catch { /* ignore */ }
+    process.exit(0);
   }
 
   // We need a way for the UI to (a) trigger runGoal and (b) list sessions,
