@@ -23,7 +23,10 @@ export type Event =
   | { type: "compaction"; summary: string }
   | { type: "status"; status: "idle" | "running" | "waiting_permission" | "compacting" }
   | { type: "error"; message: string; recoverable: boolean }
-  | { type: "mode"; mode: AgentMode };
+  | { type: "mode"; mode: AgentMode }
+  // Agent team 内部通信（见 docs/TEAMS.md）。持久化并推给 UI，但对模型不可见。
+  | { type: "team_message"; from: string; to: string; content: string; timestamp: number;
+      kind?: "assignment" | "conclusion" | "conflict" | "summary" | "status" };
 
 export interface UsageInfo { input: number; output: number; cacheRead?: number; cacheWrite?: number; costUSD?: number }
 

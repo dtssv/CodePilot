@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./ws": {
+      "types": "./dist/ws.d.ts",
+      "import": "./dist/ws.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "import": "./dist/rpc.js"
     }
   },
   "bin": {
@@ -21,13 +29,17 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@codepilot/core": "workspace:*"
+    "@codepilot/core": "workspace:*",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^2.1.8",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
   }

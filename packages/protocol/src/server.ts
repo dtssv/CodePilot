@@ -15,6 +15,12 @@
  *  4. `shutdown` returns and we close the peer.
  */
 
+import { readdir, readFile, stat, writeFile, rename } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
+import { join, relative, resolve } from "node:path";
 import type {
   AgentMode,
   CodepilotConfig,
@@ -83,6 +89,21 @@ export interface SessionResumeResult {
 export interface SessionListResult {
   sessions: SessionSummary[];
 }
+
+export interface WorkspaceListParams { path?: string; }
+export interface WorkspaceEntry { name: string; path: string; kind: "file" | "directory"; size?: number; }
+export interface WorkspaceListResult { path: string; entries: WorkspaceEntry[]; }
+export interface WorkspaceReadParams { path: string; }
+export interface WorkspaceReadResult { path: string; content: string; size: number; hash: string; truncated: boolean; }
+export interface WorkspaceSearchParams { query: string; path?: string; maxResults?: number; }
+export interface WorkspaceSearchResult { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean; }
+export interface WorkspaceWriteParams { path: string; content: string; expectedSize?: number; expectedHash?: string; }
+export interface WorkspaceWriteResult { path: string; size: number; hash: string; }
+export interface WorkspaceGitStatusResult { branch: string; files: Array<{ path: string; index: string; worktree: string; status: string }>; }
+export interface WorkspaceGitDiffParams { path?: string; staged?: boolean; }
+export interface WorkspaceGitDiffResult { path?: string; diff: string; truncated: boolean; }
+export interface WorkspaceStatParams { path: string; }
+export interface WorkspaceStatResult { path: string; exists: boolean; size: number; hash: string; modifiedAt?: number; }
 
 export interface PromptSendParams {
   sessionId: string;
@@ -175,6 +196,21 @@ export function registerServer(
   peer.onRequest<{}, SessionListResult>("session/list", () =>
     handleSessionList(ctx),
   );
+  peer.onRequest<WorkspaceListParams, WorkspaceListResult>("workspace/list", (p) =>
+    handleWorkspaceList(ctx, p),
+  );
+  peer.onRequest<WorkspaceReadParams, WorkspaceReadResult>("workspace/read", (p) =>
+    handleWorkspaceRead(ctx, p),
+  );
+  peer.onRequest<WorkspaceSearchParams, WorkspaceSearchResult>("workspace/search", (p) =>
+    handleWorkspaceSearch(ctx, p),
+  );
+  peer.onRequest<WorkspaceWriteParams, WorkspaceWriteResult>("workspace/write", (p) =>
+    handleWorkspaceWrite(ctx, p),
+  );
+  peer.onRequest<{}, WorkspaceGitStatusResult>("workspace/git-status", () => handleWorkspaceGitStatus(ctx));
+  peer.onRequest<WorkspaceGitDiffParams, WorkspaceGitDiffResult>("workspace/git-diff", (p) => handleWorkspaceGitDiff(ctx, p));
+  peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<PromptSendParams, Record<string, never>>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
@@ -202,6 +238,7 @@ export function registerServer(
   return {
     peer,
     close: () => peer.close(),
+    dispose: () => teardown(ctx),
   };
 }
 
@@ -214,6 +251,15 @@ export interface ServerOptions {
 export interface ServerHandle {
   peer: Peer;
   close(): Promise<void>;
+  /**
+   * Release everything this connection owns: unsubscribe from session events,
+   * dispose the sessions, and fail-closed on any outstanding permission /
+   * question requests. `shutdown` does this for a well-behaved client; a
+   * transport that can drop without warning (a closed browser tab over
+   * WebSocket) must call it from its close handler, or the sessions keep
+   * running with nobody listening.
+   */
+  dispose(): Promise<void>;
 }
 
 interface ServerContext {
@@ -439,6 +485,124 @@ async function handleSessionList(
   return { sessions };
 }
 
+const WORKSPACE_MAX_BYTES = 512 * 1024;
+function workspacePath(ctx: ServerContext, input: string | undefined): { abs: string; rel: string } {
+  const rel = input ?? ".";
+  const root = resolve(ctx.defaultCwd);
+  const abs = resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + "/")) throw new RpcError(ErrorCode.InvalidRequest, "workspace path escapes cwd");
+  return { abs, rel: relative(root, abs) || "." };
+}
+
+async function handleWorkspaceList(ctx: ServerContext, params: WorkspaceListParams): Promise<WorkspaceListResult> {
+  assertInitialized(ctx);
+  const target = workspacePath(ctx, params.path);
+  const entries: WorkspaceEntry[] = [];
+  for (const name of await readdir(target.abs)) {
+    const abs = join(target.abs, name);
+    const info = await stat(abs);
+    entries.push({ name, path: join(target.rel, name), kind: info.isDirectory() ? "directory" : "file", size: info.isFile() ? info.size : undefined });
+  }
+  entries.sort((a, b) => Number(b.kind === "directory") - Number(a.kind === "directory") || a.name.localeCompare(b.name));
+  return { path: target.rel, entries };
+}
+
+async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadParams): Promise<WorkspaceReadResult> {
+  assertInitialized(ctx);
+  const target = workspacePath(ctx, params.path);
+  const data = await readFile(target.abs);
+  const truncated = data.byteLength > WORKSPACE_MAX_BYTES;
+  const content = data.subarray(0, WORKSPACE_MAX_BYTES).toString("utf8");
+  return { path: target.rel, content, size: data.byteLength, hash: createHash("sha256").update(data).digest("hex"), truncated };
+}
+
+async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearchParams): Promise<WorkspaceSearchResult> {
+  assertInitialized(ctx);
+  const root = workspacePath(ctx, params.path).abs;
+  const query = params.query.trim();
+  if (!query) return { matches: [], truncated: false };
+  const max = Math.min(Math.max(params.maxResults ?? 100, 1), 1000);
+  const matches: Array<{ path: string; line: number; text: string }> = [];
+  let stopped = false;
+  async function walk(dir: string): Promise<void> {
+    if (stopped) return;
+    for (const name of await readdir(dir)) {
+      if (name === ".git" || name === "node_modules" || name === ".codepilot") continue;
+      const abs = join(dir, name);
+      const info = await stat(abs);
+      if (info.isDirectory()) await walk(abs);
+      else if (info.isFile() && info.size <= WORKSPACE_MAX_BYTES) {
+        try {
+          const text = await readFile(abs, "utf8");
+          const lines = text.split(/\r?\n/);
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i]!.toLowerCase().includes(query.toLowerCase())) {
+              matches.push({ path: relative(resolve(ctx.defaultCwd), abs), line: i + 1, text: lines[i]! });
+              if (matches.length >= max) { stopped = true; break; }
+            }
+          }
+        } catch { /* binary/unreadable files are skipped */ }
+      }
+      if (stopped) return;
+    }
+  }
+  await walk(root);
+  return { matches, truncated: stopped };
+}
+
+async function handleWorkspaceGitStatus(ctx: ServerContext): Promise<WorkspaceGitStatusResult> {
+  assertInitialized(ctx);
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", ctx.defaultCwd, "status", "--short", "--branch", "--porcelain=v1"]);
+    const lines = stdout.split(/\r?\n/).filter(Boolean);
+    const branch = lines.find(l => l.startsWith("## "))?.slice(3) ?? "(detached/unknown)";
+    const files = lines.filter(l => !l.startsWith("## ")).map(l => ({ index: l[0] ?? " ", worktree: l[1] ?? " ", status: l.slice(0, 2), path: l.slice(3) }));
+    return { branch, files };
+  } catch (err) {
+    throw new RpcError(ErrorCode.InvalidRequest, `git status unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function handleWorkspaceStat(ctx: ServerContext, params: WorkspaceStatParams): Promise<WorkspaceStatResult> {
+  assertInitialized(ctx);
+  const target = workspacePath(ctx, params.path);
+  try {
+    const info = await stat(target.abs);
+    if (!info.isFile()) return { path: target.rel, exists: false, size: 0, hash: "" };
+    const data = await readFile(target.abs);
+    return { path: target.rel, exists: true, size: info.size, hash: createHash("sha256").update(data).digest("hex"), modifiedAt: info.mtimeMs };
+  } catch { return { path: target.rel, exists: false, size: 0, hash: "" }; }
+}
+
+async function handleWorkspaceGitDiff(ctx: ServerContext, params: WorkspaceGitDiffParams): Promise<WorkspaceGitDiffResult> {
+  assertInitialized(ctx);
+  const args = ["-C", ctx.defaultCwd, "diff", "--no-ext-diff", "--no-color", "--no-renames"];
+  if (params.staged) args.push("--cached");
+  if (params.path) args.push("--", workspacePath(ctx, params.path).rel);
+  try {
+    const { stdout } = await execFileAsync("git", args, { maxBuffer: 1024 * 1024 });
+    const bytes = Buffer.from(stdout, "utf8");
+    const truncated = bytes.byteLength > WORKSPACE_MAX_BYTES;
+    return { path: params.path, diff: bytes.subarray(0, WORKSPACE_MAX_BYTES).toString("utf8"), truncated };
+  } catch (err) { throw new RpcError(ErrorCode.InvalidRequest, `git diff unavailable: ${err instanceof Error ? err.message : String(err)}`); }
+}
+
+async function handleWorkspaceWrite(ctx: ServerContext, params: WorkspaceWriteParams): Promise<WorkspaceWriteResult> {
+  assertInitialized(ctx);
+  const target = workspacePath(ctx, params.path);
+  if (Buffer.byteLength(params.content, "utf8") > WORKSPACE_MAX_BYTES) throw new RpcError(ErrorCode.InvalidRequest, "workspace file exceeds 512 KiB");
+  const current = await readFile(target.abs).catch(() => Buffer.alloc(0));
+  const currentHash = createHash("sha256").update(current).digest("hex");
+  if (params.expectedSize !== undefined && current.byteLength !== params.expectedSize) throw new RpcError(ErrorCode.InvalidRequest, "file changed since it was loaded");
+  if (params.expectedHash !== undefined && currentHash !== params.expectedHash) throw new RpcError(ErrorCode.InvalidRequest, "file changed since it was loaded");
+  const next = Buffer.from(params.content, "utf8");
+  const hash = createHash("sha256").update(next).digest("hex");
+  const temp = `${target.abs}.codepilot-${process.pid}-${Date.now()}.tmp`;
+  await writeFile(temp, next, { mode: 0o600 });
+  await rename(temp, target.abs);
+  return { path: target.rel, size: next.byteLength, hash };
+}
+
 async function handlePromptSend(
   ctx: ServerContext,
   params: PromptSendParams,
@@ -528,9 +692,8 @@ async function handleSessionFork(
   return registerSession(ctx, forked);
 }
 
-async function handleShutdown(
-  ctx: ServerContext,
-): Promise<Record<string, never>> {
+/** Drop every session and pending reverse-request this connection owns. */
+async function teardown(ctx: ServerContext): Promise<void> {
   const sessions = Array.from(ctx.sessions.values());
   ctx.sessions.clear();
   for (const s of sessions) {
@@ -549,6 +712,12 @@ async function handleShutdown(
   // missing "Approve" answer as not approved, ask_user reports "(no answer)").
   for (const [, resolve] of ctx.pendingQuestions) resolve({});
   ctx.pendingQuestions.clear();
+}
+
+async function handleShutdown(
+  ctx: ServerContext,
+): Promise<Record<string, never>> {
+  await teardown(ctx);
   // Tear the peer down after the response is sent.
   setImmediate(() => {
     void ctx.peer.close();

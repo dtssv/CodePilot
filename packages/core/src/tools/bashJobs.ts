@@ -182,11 +182,24 @@ export async function killJob(cwd: string, id: string): Promise<boolean> {
   return true;
 }
 
+/** Why a stdin write did not happen. Distinct cases, because the caller's
+ *  advice differs: an exited job is never worth retrying, a closed stdin
+ *  means the process stopped reading, and a failed write may be transient. */
+export type WriteJobStdinResult =
+  | { ok: true }
+  | { ok: false; reason: "no-such-job" }
+  | { ok: false; reason: "not-running"; status: JobMeta["status"] }
+  | { ok: false; reason: "no-stdin" }
+  | { ok: false; reason: "write-failed"; message: string };
+
 /**
  * Write data to a background job's stdin. Used by the `write_stdin` tool to
  * send input to interactive long-running processes (REPLs, servers, CLIs
- * that read stdin). Returns false when the job is not running or has no
- * writable stdin (e.g. restored from disk after a restart).
+ * that read stdin).
+ *
+ * The status is re-checked here rather than trusted from the caller: a job
+ * can exit between the caller's check and this write, and the result tells
+ * the caller which of those actually happened.
  *
  * When `appendNewline` is true (default), a `\n` is appended — most CLI
  * tools expect line-terminated input. Set it to false for raw binary input.
@@ -196,14 +209,38 @@ export async function writeJobStdin(
   id: string,
   data: string,
   opts: { appendNewline?: boolean } = {}
-): Promise<boolean> {
+): Promise<WriteJobStdinResult> {
   const job = registryFor(cwd).jobs.get(id);
-  if (!job?.proc || job.meta.status !== "running") return false;
+  if (!job?.proc) return { ok: false, reason: "no-such-job" };
+  if (job.meta.status !== "running") {
+    return { ok: false, reason: "not-running", status: job.meta.status };
+  }
   const stdin = job.proc.stdin;
-  if (!stdin || stdin.destroyed) return false;
+  if (!stdin || stdin.destroyed) return { ok: false, reason: "no-stdin" };
   const payload = opts.appendNewline === false ? data : data + "\n";
-  return new Promise<boolean>((resolve) => {
-    stdin.write(payload, (err) => resolve(err === undefined));
+  // A dead child makes the pipe raise EPIPE asynchronously: the error
+  // listener must be attached up front (and kept until the job ends) so it
+  // never surfaces as an uncaught "error" event on the stream.
+  if (!stdin.listenerCount("error")) {
+    stdin.on("error", () => {
+      /* write failures are reported via the write callback below */
+    });
+  }
+  return new Promise<WriteJobStdinResult>((resolve) => {
+    // Node's stream write callback receives `null` (not undefined) on success.
+    stdin.write(payload, (err) => {
+      if (err == null) {
+        resolve({ ok: true });
+        return;
+      }
+      // The write lost a race with the process exiting: report the job's
+      // state, which is what the caller can act on.
+      if (job.meta.status !== "running") {
+        resolve({ ok: false, reason: "not-running", status: job.meta.status });
+        return;
+      }
+      resolve({ ok: false, reason: "write-failed", message: err.message });
+    });
   });
 }
 

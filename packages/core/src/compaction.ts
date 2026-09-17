@@ -90,6 +90,11 @@ function serializeEventForEstimate(e: Event): string {
       return `mode:${e.mode}`;
     case "mode_request":
       return `mode_request:${e.mode}`;
+    case "team_message":
+      // Team chatter is persisted for auditing but never sent to the
+      // provider, so it costs zero context. Counting it here would compact
+      // early for tokens the model never sees.
+      return "";
   }
 }
 

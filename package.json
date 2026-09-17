@@ -5,23 +5,29 @@
   "description": "CodePilot — token-efficient, long-horizon coding agent: core engine, TUI, VSCode & IDEA plugins",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "corepack pnpm -r --workspace-concurrency=4 build",
     "typecheck": "corepack pnpm -r typecheck",
     "test": "corepack pnpm -r test",
+    "test:coverage": "corepack pnpm -r test:coverage",
     "dev:tui": "corepack pnpm --filter @codepilot/tui dev",
     "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
     "package:npm": "corepack pnpm --filter @codepilot/core --filter @codepilot/protocol --filter @codepilot/tui pack",
     "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
-    "lint": "corepack pnpm -r typecheck",
-    "lint:fix": "echo 'no auto-fix configured; typecheck is the lint gate'"
+    "lint": "biome lint packages/ apps/",
+    "lint:ci": "biome lint --max-diagnostics=0 --diagnostic-level=error packages/ apps/",
+    "lint:fix": "biome lint --write packages/ apps/",
+    "format": "biome format --write packages/ apps/"
   },
   "devDependencies": {
-    "typescript": "^5.6.3",
+    "@biomejs/biome": "^2.5.12",
+    "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
-    "vitest": "^2.1.8",
-    "@types/node": "^22.10.0"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
   }
 }

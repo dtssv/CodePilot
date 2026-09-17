@@ -1,7 +1,7 @@
 plugins {
     // IntelliJ Platform Gradle Plugin 2.x — see https://plugins.jetbrains.com/plugin/26102-intellij-platform-gradle-plugin
     id("org.jetbrains.intellij.platform") version "2.1.0"
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.1.0"
 }
 
 // ----- Project identity -----
@@ -49,6 +49,14 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8:1.8.1")
     // `Dispatchers.Swing` (used by ChatPanel) lives in this module.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.1")
+
+    // ----- Test dependencies -----
+    // JUnit 5 (Jupiter) — test engine + assertions.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.3")
+    // MockK — mocking framework for Kotlin (used for spying the client's NDJSON sink).
+    testImplementation("io.mockk:mockk-jvm:1.13.12")
+    // Coroutines test utilities (runTest, TestDispatcher) — available for future async tests.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }
 
 intellijPlatform {
@@ -71,7 +79,11 @@ intellijPlatform {
     sandboxContainer.set(project.layout.buildDirectory.dir("idea-sandbox"))
 }
 
-// Tests are not yet provided; keep the configuration minimal but allow `./gradlew check`.
+// Pure unit tests (no IDE fixture) — protocol logic, serialization, settings roundtrip.
+// Anything requiring a Project/Editor must use the IDE fixture framework and live elsewhere.
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    testLogging {
+        events("passed", "failed", "skipped")
+    }
 }

@@ -46,6 +46,7 @@ codepilot serve
 packages/core       agent 核心引擎
 packages/protocol   headless JSON-RPC 协议 + codepilot CLI
 apps/tui            终端界面
+apps/web            浏览器界面（React SPA，走 WebSocket）
 apps/vscode         VSCode 扩展
 apps/idea           IntelliJ IDEA 插件（Kotlin）
 docs/               ARCHITECTURE.md / PROTOCOL.md / API.md
@@ -108,5 +109,6 @@ corepack pnpm package:all      # 全部
 
 - [架构设计](docs/ARCHITECTURE.md)
 - [Headless 协议](docs/PROTOCOL.md)
+- [Web UI（浏览器客户端）](docs/WEB.md)
 - [Core API 契约](docs/API.md)
 - [提示词一览（所有 prompt 的位置与修改指引）](docs/PROMPTS.md)

@@ -195,5 +195,42 @@ export function RowView({ row }: { row: Row }): React.ReactElement | null {
           <Text dimColor>· {row.text}</Text>
         </Box>
       );
+    case "team":
+      return <TeamBlock row={row} />;
   }
+}
+
+/** One line of team traffic: who sent it, to whom, and what.
+ *  Assignments and conflicts are worth reading in full; a worker's
+ *  conclusion is long and already summarised by the team report, so it is
+ *  clipped to a couple of lines here. */
+function TeamBlock({ row }: { row: Extract<Row, { kind: "team" }> }): React.ReactElement {
+  const palette: Record<string, string> = {
+    assignment: "cyan",
+    conclusion: "green",
+    conflict: "yellow",
+    summary: "magenta",
+    status: "gray",
+  };
+  const color = palette[row.msgKind ?? "status"] ?? "gray";
+  const label = row.msgKind ?? "msg";
+  const full = row.msgKind === "assignment" || row.msgKind === "conflict";
+  const body = full ? row.text : clipLines(row.text, 2, 160);
+  return (
+    <Box marginY={1} flexDirection="column">
+      <Text color={color}>
+        ⇄ [{label}] {row.from} → {row.to}
+      </Text>
+      <Box marginLeft={2}>
+        <Text dimColor>{body}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function clipLines(text: string, maxLines: number, maxChars: number): string {
+  const lines = text.split("\n");
+  const kept = lines.slice(0, maxLines).join("\n");
+  const clipped = kept.length > maxChars ? `${kept.slice(0, maxChars)}…` : kept;
+  return lines.length > maxLines ? `${clipped}\n  … (${lines.length - maxLines} more lines)` : clipped;
 }

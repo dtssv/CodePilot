@@ -1,0 +1,9 @@
+{
+  "name": "refactor",
+  "displayName": "Refactor",
+  "description": "Safe automated refactoring — extract functions, rename symbols, simplify conditionals, modernize syntax",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/refactor",
+  "enabled": true
+}

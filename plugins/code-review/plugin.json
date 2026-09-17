@@ -1,0 +1,9 @@
+{
+  "name": "code-review",
+  "displayName": "Code Review",
+  "description": "Automated code review with configurable rules and severity levels",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/code-review",
+  "enabled": true
+}

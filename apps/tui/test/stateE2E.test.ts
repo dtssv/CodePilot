@@ -299,6 +299,50 @@ describe("TUI state machine — end-to-end session lifecycle", () => {
     ).toBe(true);
   });
 
+  it("renders team_message events as team rows without disturbing the turn", () => {
+    let state: TuiState = initialState({
+      sessionId: "s-team",
+      cwd: "/tmp",
+      model: "m",
+      permissionMode: "ask",
+      agentMode: "agent",
+    });
+    const send = (event: Event): void => {
+      state = reducer(state, { type: "event", event });
+    };
+    send({ type: "status", status: "running" });
+    send({
+      type: "team_message",
+      from: "lead",
+      to: "worker-1",
+      content: "update the callers",
+      timestamp: 1700,
+      kind: "assignment",
+    });
+    send({
+      type: "team_message",
+      from: "team",
+      to: "all",
+      content: "src/api.ts: worker-1, worker-2",
+      timestamp: 1800,
+      kind: "conflict",
+    });
+
+    const team = state.rows.filter(
+      (r): r is Extract<Row, { kind: "team" }> => r.kind === "team",
+    );
+    expect(team).toHaveLength(2);
+    expect(team[0]).toMatchObject({
+      from: "lead",
+      to: "worker-1",
+      msgKind: "assignment",
+      at: 1700,
+    });
+    expect(team[1]?.msgKind).toBe("conflict");
+    // Team traffic is auxiliary: it must not change the turn's status.
+    expect(state.status).toBe("thinking");
+  });
+
   it("tracks an error event as a recoverable row", () => {
     let state: TuiState = initialState({
       sessionId: "s6",

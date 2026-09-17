@@ -1,0 +1,9 @@
+{
+  "name": "security-audit",
+  "displayName": "Security Audit",
+  "description": "Security audit — dependency scanning, secret detection, injection prevention, auth/authz review",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/security-audit",
+  "enabled": true
+}

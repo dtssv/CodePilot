@@ -235,7 +235,10 @@ export class CodePilotClient extends EventEmitter {
   /* ---------------- transport ---------------- */
 
   private request<R = unknown>(method: string, params?: unknown): Promise<R> {
-    if (!this.proc || this.state !== "ready") {
+    // The `initialize` handshake happens while we are still `connecting` —
+    // only that method is allowed before `ready`. All other calls require a
+    // fully connected client.
+    if (!this.proc || (this.state !== "ready" && method !== "initialize")) {
       return Promise.reject(new Error(`client not ready (state=${this.state})`));
     }
     const id = this.nextId++;

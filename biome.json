@@ -1,0 +1,97 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"includes": [
+			"**/*.ts",
+			"**/*.tsx",
+			"**/*.js",
+			"**/*.jsx",
+			"**/*.json",
+			"**/*.jsonc",
+			"!!**/node_modules/**",
+			"!!**/dist/**",
+			"!!**/build/**",
+			"!!**/.codepilot/**",
+			"!!**/apps/idea/build/**",
+			"!!**/apps/vscode/dist/**",
+			"!!**/apps/vscode/vsix/**",
+			"!!**/packages/*/dist/**",
+			"!!**/.gradle/**",
+			"!!**/coverage/**",
+			"!!**/pr.diff",
+			"!!**/*.vsix"
+		]
+	},
+	"formatter": {
+		"enabled": false
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"style": {
+				"noNonNullAssertion": "off",
+				"useImportType": "off",
+				"useNamingConvention": "off",
+				"useSingleVarDeclarator": "off",
+				"noInferrableTypes": "off",
+				"useShorthandFunctionType": "off"
+			},
+			"suspicious": {
+				"noExplicitAny": "off",
+				"noConsole": "off",
+				"noImplicitAnyLet": "warn",
+				"noRedeclare": "warn",
+				"noCompareNegZero": "warn",
+				"noSelfCompare": "warn",
+				"noFallthroughSwitchClause": "warn",
+				"noAssignInExpressions": "off",
+				"useIterableCallbackReturn": "warn",
+				"noArrayIndexKey": "warn",
+				"noUnsafeDeclarationMerging": "warn"
+			},
+			"correctness": {
+				"noUnusedVariables": "warn",
+				"noUnusedImports": "warn",
+				"noUnreachable": "warn",
+				"noUnsafeOptionalChaining": "warn",
+				"useExhaustiveDependencies": "warn",
+				"noSwitchDeclarations": "off"
+			},
+			"complexity": {
+				"noUselessFragments": "warn",
+				"noBannedTypes": "off",
+				"noUselessTypeConstraint": "off",
+				"useArrowFunction": "off",
+				"useOptionalChain": "off"
+			},
+			"a11y": {
+				"preset": "none"
+			},
+			"performance": {
+				"noAccumulatingSpread": "warn"
+			}
+		}
+	},
+	"javascript": {
+		"globals": ["NodeJS"]
+	},
+	"overrides": [
+		{
+			"includes": ["**/*.test.ts", "**/*.test.tsx", "test/**"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUnusedVariables": "off",
+						"noUnusedImports": "off"
+					}
+				}
+			}
+		}
+	]
+}

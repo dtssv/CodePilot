@@ -1,0 +1,193 @@
+name: Release
+
+# Triggered by pushing a tag matching `v*.*.*` (e.g. v2.0.1, v3.0.0).
+# Builds and publishes:
+#   - @codepilot/core, @codepilot/protocol, @codepilot/tui → npm (public)
+#   - codepilot-vscode → GitHub Release as .vsix
+#   - CodePilot IDEA plugin → GitHub Release as .zip
+# A GitHub Release is created automatically (softprops/action-gh-release)
+# and all artifacts are attached to it.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build everything from a single job so the artifacts share a cache.
+  # ---------------------------------------------------------------------
+  build:
+    name: Build all artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup JDK 17 (for IDEA plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all TS packages
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # --- npm packages (tarballs) ---
+      - name: Pack npm packages
+        run: pnpm package:npm
+
+      - name: Collect npm tarballs
+        run: |
+          mkdir -p artifacts/npm
+          find packages -name "*.tgz" -exec cp {} artifacts/npm/ \;
+          ls -la artifacts/npm/
+
+      # --- VSCode extension (.vsix) ---
+      - name: Package VSCode extension
+        run: pnpm package:vscode
+
+      - name: Collect .vsix
+        run: |
+          mkdir -p artifacts/vscode
+          find apps/vscode -name "*.vsix" -exec cp {} artifacts/vscode/ \;
+          ls -la artifacts/vscode/
+
+      # --- IDEA plugin (.zip) ---
+      - name: Build IDEA plugin
+        working-directory: apps/idea
+        run: ./gradlew buildPlugin --no-daemon
+
+      - name: Collect IDEA .zip
+        run: |
+          mkdir -p artifacts/idea
+          find apps/idea/build/distributions -name "*.zip" -exec cp {} artifacts/idea/ \;
+          ls -la artifacts/idea/
+
+      # --- Upload all as workflow artifacts for downstream jobs ---
+      - name: Upload npm tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarballs
+          path: artifacts/npm/*.tgz
+
+      - name: Upload VSCode vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-vsix
+          path: artifacts/vscode/*.vsix
+
+      - name: Upload IDEA plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: idea-plugin
+          path: artifacts/idea/*.zip
+
+  # ---------------------------------------------------------------------
+  # Publish to npm. Separate job so a publish failure doesn't block the
+  # GitHub Release. Each package is published with `--access public` and
+  # `--no-git-checks` (the tag checkout is detached, not on a branch).
+  # ---------------------------------------------------------------------
+  publish-npm:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download npm tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: ./tarballs
+
+      - name: Publish each tarball
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for tgz in tarballs/*.tgz; do
+            echo "Publishing $tgz …"
+            npm publish "$tgz" --access public
+          done
+
+  # ---------------------------------------------------------------------
+  # Create the GitHub Release and attach the IDE artifacts. The npm
+  # tarballs are also attached for archival (the canonical source is npm).
+  # ---------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-assets
+
+      - name: Flatten artifact layout
+        run: |
+          mkdir -p assets
+          find release-assets -type f \( -name "*.vsix" -o -name "*.zip" -o -name "*.tgz" \) \
+            -exec cp {} assets/ \;
+          ls -la assets/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: CodePilot ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: |
+            assets/*.vsix
+            assets/*.zip
+            assets/*.tgz

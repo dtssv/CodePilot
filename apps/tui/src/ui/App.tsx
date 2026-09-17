@@ -592,6 +592,8 @@ function rowKey(r: import("./state.js").Row, i: number): string {
       return `e-${r.at}-${i}`;
     case "system":
       return `s-${r.at}-${i}`;
+    case "team":
+      return `tm-${r.at}-${i}`;
     default: {
       // Exhaustiveness check.
       const _exhaustive: never = r;

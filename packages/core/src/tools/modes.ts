@@ -47,6 +47,8 @@ const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "write_file",
   "edit_file",
   "task",
+  // Spawns an external agent subprocess — same risk profile as `task`.
+  "harness_bridge",
 ]);
 
 /** Tools that are blocked specifically in `chat` mode (state-modifying read-tier tools). */

@@ -81,7 +81,31 @@ export type Event =
     }
   | { type: "error"; message: string; recoverable: boolean }
   | { type: "mode"; mode: AgentMode }
-  | { type: "mode_request"; mode: AgentMode; reason?: string };
+  | { type: "mode_request"; mode: AgentMode; reason?: string }
+  | TeamMessageEvent;
+
+/**
+ * Communication between members of an agent team (ROADMAP-NEXT §4.2):
+ * leader assignments, worker conclusions, conflict notices.
+ *
+ * These events are persisted and streamed to the UI so a team run can be
+ * audited afterwards, but they are deliberately invisible to the model —
+ * `compactTranscriptToProviderMessages` ignores them, so a team's internal
+ * chatter never inflates the parent's context. The parent agent learns the
+ * outcome from the `task` tool result, as with any other sub-agent.
+ */
+export interface TeamMessageEvent {
+  type: "team_message";
+  /** Member name, or "team" for orchestrator notices. */
+  from: string;
+  /** Target member name, or "all" for a broadcast. */
+  to: string;
+  content: string;
+  /** Epoch milliseconds. */
+  timestamp: number;
+  /** What kind of message this is, for UI grouping. */
+  kind?: "assignment" | "conclusion" | "conflict" | "summary" | "status";
+}
 
 /**
  * Cursor-style collaboration mode. Controls which tools the model is allowed
@@ -339,6 +363,17 @@ export interface CodepilotConfig {
    *  this command on each status update, feeds it a JSON payload on stdin
    *  describing the session, and renders its stdout as the status line. */
   statusLine?: StatusLineConfig;
+  /** Name of a registered `AgentRuntime` (ROADMAP-NEXT §4.1) to drive this
+   *  session's agent loop instead of the built-in default loop. Undefined
+   *  (or "default") means the standard `runAgent()` loop. Unknown names
+   *  throw at prompt time rather than silently degrading. Plugins register
+   *  custom runtimes via `runtimeRegistry.register()` in their init hook. */
+  runtime?: string;
+  /** Per-runtime options, keyed by runtime name (e.g.
+   *  `{ mcts: { candidates: 4 } }`). Each runtime reads and validates its
+   *  own entry; unknown keys are ignored rather than rejected, so a plugin
+   *  runtime can define options the core knows nothing about. */
+  runtimeOptions?: Record<string, unknown>;
 }
 
 export interface StatusLineConfig {
@@ -410,6 +445,15 @@ export interface SessionOptions {
   /** Override the chat provider. When set, skips `buildProvider()` entirely.
    *  Used by the Agent SDK for replay mode and custom provider injection. */
   provider?: import("./providers/types.js").ChatProvider;
+  /** Name of a registered `AgentRuntime` to use for this session's prompt
+   *  loop (ROADMAP-NEXT §4.1). Overrides `config.runtime`. Undefined/"default"
+   *  keeps the standard `runAgent()` loop. */
+  runtime?: string;
+  /** Whether `createSession` should discover plugins and register the agent
+   *  runtimes they declare (ROADMAP-NEXT §4.1 Phase 2). Default true. Set
+   *  false to keep the process registry untouched — plugin runtime modules
+   *  execute host code, so hosts that never opt into plugins can skip it. */
+  pluginRuntimes?: boolean;
 }
 
 export interface GoalRunOptions extends SessionOptions {

@@ -9,6 +9,7 @@ export type {
   PlanStep,
   UsageInfo,
   Event,
+  TeamMessageEvent,
   MessageDelta,
   TextDelta,
   ToolInputJsonDelta,
@@ -170,8 +171,73 @@ export type { McpToolDescriptor, McpInvokeRequest, McpInvokeResult } from "./mcp
 export { runAgent } from "./agent.js";
 export type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
 
+// ---- Agent runtime (pluggable loop) — ROADMAP-NEXT §4.1 ----
+export {
+  runtimeRegistry,
+  RuntimeRegistry,
+  DefaultRuntime,
+  createRuntimeToolkit,
+  DEFAULT_RUNTIME_NAME,
+} from "./runtime.js";
+export type {
+  AgentRuntime,
+  AgentRuntimeState,
+  RuntimeFactory,
+  RuntimeFactoryDeps,
+  RuntimeResolveOptions,
+  RuntimeToolkit,
+} from "./runtime.js";
+// Example runtimes; importing registers "audit" + "mcts" (inert until used).
+export {
+  registerBuiltinRuntimes,
+  AuditRuntime,
+  auditRuntimeFactory,
+  missingAuditSections,
+  AUDIT_RUNTIME_NAME,
+  MctsRuntime,
+  mctsRuntimeFactory,
+  parseScores,
+  selectCandidate,
+  MCTS_RUNTIME_NAME,
+} from "./runtimes/index.js";
+export type {
+  AuditRuntimeOptions,
+  MctsCandidate,
+  MctsRuntimeOptions,
+} from "./runtimes/index.js";
+
+// ---- Agent teams (multi-agent collaboration) — ROADMAP-NEXT §4.2 ----
+export {
+  runTeam,
+  validateTeam,
+  nameMembers,
+  detectConflicts,
+  writtenPath,
+  concatSummary,
+  parseAssignments,
+  parseVote,
+  renderTeamResult,
+  TEAM_ROLES,
+  MERGE_STRATEGIES,
+} from "./teams.js";
+export type {
+  TeamRole,
+  MergeStrategy,
+  TeamSpec,
+  TeamMemberSpec,
+  TeamMemberResult,
+  TeamConflict,
+  TeamRunResult,
+  TeamRunDeps,
+  TeamVote,
+} from "./teams.js";
+
 // ---- Session ----
-export { Session, createSession, listSessions, SESSIONS_DIR } from "./session.js";
+// The session module was split into session.ts (the Session class) +
+// session-utils.ts (standalone helpers). Both are re-exported here so the
+// public API is unchanged.
+export { Session } from "./session.js";
+export { createSession, listSessions, SESSIONS_DIR } from "./session-utils.js";
 
 // ---- Goal ----
 export { runGoal } from "./goal.js";
@@ -185,6 +251,8 @@ export {
   interpolateEnv,
   useProvider,
   resolveModelAlias,
+  resolveProfile,
+  applyConfigPatch,
   getUserConfigPath,
   getManagedConfigPath,
   getRepoConfigPath,
@@ -211,6 +279,24 @@ export type {
   ConfigLayer,
   LoadConfigResult,
 } from "./config.js";
+
+// ---- Bundles (config + resources export/import) ----
+export {
+  BUNDLE_VERSION,
+  exportBundle,
+  exportBundleToFile,
+  serializeBundle,
+  parseBundle,
+  validateBundle,
+  importBundle,
+  importBundleFromFile,
+} from "./bundle.js";
+export type {
+  CodepilotBundle,
+  ExportBundleOptions,
+  ImportBundleOptions,
+  ImportBundleResult,
+} from "./bundle.js";
 
 // ---- Logger ----
 export {
@@ -352,11 +438,22 @@ export {
   searchSessions,
   exportSession,
   deleteSession,
-} from "./session.js";
+} from "./session-utils.js";
 export type {
   RichSessionSummary,
   SessionExportFormat,
-} from "./session.js";
+} from "./session-utils.js";
+
+// ---- Session internals (split modules — MCP wiring + prompt telemetry) ----
+export {
+  startMcp,
+  resolveSessionMcpReferences,
+  jsonSchemaToZod,
+  compileJsonSchema,
+} from "./session-mcp.js";
+export type { SessionMcpHost } from "./session-mcp.js";
+export { startPromptSpan, endPromptSpan } from "./session-telemetry.js";
+export type { PromptSpan } from "./session-telemetry.js";
 
 // ---- Goal (checkpoint callback + structured blocked reason) ----
 export { goalPromptBody, COMPLETION_MARKERS } from "./goal.js";
@@ -428,6 +525,10 @@ export {
   uninstallPlugin,
   fetchMarketplaceIndex,
   searchMarketplace,
+  derivePluginName,
+  loadPluginRuntimes,
+  initPluginRuntimes,
+  pluginDefaultRuntime,
 } from "./plugins.js";
 export type {
   PluginManifest,
@@ -435,5 +536,8 @@ export type {
   MarketplaceEntry,
   DiscoverPluginsOptions,
   InstallOptions,
+  PluginRuntimeLoadResult,
+  PluginRuntimeInit,
+  InitPluginRuntimesOptions,
 } from "./plugins.js";
 

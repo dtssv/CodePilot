@@ -103,4 +103,18 @@ GOTCHA: artifacts are session-scoped and may be evicted under memory pressure �
 
   skill: `When to use: loading a named skill's full instructions into context. The system prompt only advertises skill names + one-line descriptions; call this to get the body when the user's task matches a skill's \`when\` hint.
 When NOT to use: speculative loading. Only pull a skill when you actually intend to follow it.`,
+
+  code_mode: `When to use: multi-step operations that benefit from control flow (loops, conditionals, string manipulation) — e.g. read several files, transform content, write results in one call instead of many round-trips.
+When NOT to use: a single tool call (use the dedicated tool directly — one \`read_file\` in \`code_mode\` is strictly more overhead).
+Sandbox API (all async, all routed through the normal permission/sandbox pipeline): \`readFile(path)\`, \`writeFile(path, content)\`, \`editFile(path, oldStr, newStr)\`, \`bash(command, timeout_ms?)\`, \`grep(pattern, path?)\`, \`glob(pattern)\`, \`ls(path?)\`. API errors throw — wrap in try/catch if partial failure is acceptable.
+Output: \`console.log\`/\`console.error\` lines plus the value of the last expression (JSON-stringified if not a string). Timeout: default 30s, max 120s via \`timeout_ms\`.
+Gotchas: code runs in a \`node:vm\` context with string/wasm code generation disabled — no \`eval\`, no \`require\`, no Node builtins beyond the injected API. Top-level \`await\` works (code is wrapped in an async IIFE).
+Example: \`code_mode({ code: "const files = await glob('src/**/*.ts');\\nlet total = 0;\\nfor (const f of files) { total += (await readFile(f)).length; }\\nconsole.log(files.length, 'files');\\nreturn total;" })\``,
+
+  harness_bridge: `When to use: delegating a self-contained objective to an EXTERNAL agent runtime — a second opinion from claude-code, a codex-specific capability, or an in-house harness via \`harness: "custom"\`.
+When NOT to use: work you can do yourself with the built-in tools, in-process sub-agents (\`task\` is cheaper), or anything needing interactive back-and-forth (the subprocess gets NO stdin — it cannot ask questions).
+Harnesses: \`"claude-code"\` runs \`claude -p --output-format json\` and returns the envelope's \`result\` field (requires \`claude\` in PATH); \`"codex"\` runs \`codex exec\` (requires \`codex\` in PATH); \`"custom"\` runs \`custom_command custom_args... <prompt>\` and returns stdout.
+Limits: default timeout 2 min (max 10 min via \`timeout_ms\`), output truncated at 100KB. The subprocess inherits the session's OS sandbox (writes confined to the workspace), exactly like \`bash\`.
+Gotchas: the \`prompt\` must be fully self-contained — the harness sees nothing of this session. A missing CLI surfaces as exit 127 / "command not found" in stderr. Non-zero exit → \`[exit N]\` prefix and an error result.
+Example: \`harness_bridge({ harness: "claude-code", prompt: "Review src/auth.ts for security issues and list findings." })\``,
 };

@@ -1,0 +1,13 @@
+{
+  "name": "runtime-example",
+  "displayName": "Runtime Example (context primer)",
+  "description": "Reference plugin for custom agent runtimes — primes each prompt with a listing of the working directory, then delegates to the built-in loop",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/runtime-example",
+  "enabled": true,
+  "runtime": {
+    "module": "./runtime.mjs",
+    "name": "primer"
+  }
+}

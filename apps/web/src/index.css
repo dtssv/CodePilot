@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/* Dark-first: this is a developer tool that sits next to an editor. */
+@theme {
+  --color-surface: oklch(0.18 0.01 260);
+  --color-surface-raised: oklch(0.23 0.012 260);
+  --color-surface-sunken: oklch(0.14 0.01 260);
+  --color-edge: oklch(0.32 0.015 260);
+  --color-ink: oklch(0.93 0.005 260);
+  --color-ink-dim: oklch(0.68 0.01 260);
+  --color-accent: oklch(0.72 0.14 230);
+  --color-add: oklch(0.72 0.15 150);
+  --color-remove: oklch(0.7 0.17 25);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}

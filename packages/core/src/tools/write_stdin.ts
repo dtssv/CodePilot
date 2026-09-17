@@ -7,7 +7,32 @@
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import { getJob, writeJobStdin } from "./bashJobs.js";
+import { getJob, writeJobStdin, type WriteJobStdinResult } from "./bashJobs.js";
+
+/** Turn a failed write into advice the model can act on. */
+function writeFailure(
+  jobId: string,
+  result: Extract<WriteJobStdinResult, { ok: false }>
+): string {
+  switch (result.reason) {
+    case "no-such-job":
+      return `unknown job: ${jobId}`;
+    case "not-running":
+      // Includes the case where the job exited while this write was in
+      // flight, which is why the tool re-reports the status here.
+      return (
+        `job ${jobId} is not running (status: ${result.status}) — ` +
+        `use bash_output to read what it produced before exiting`
+      );
+    case "no-stdin":
+      return (
+        `job ${jobId} has no writable stdin (it was restored after a restart, ` +
+        `or the process closed stdin)`
+      );
+    case "write-failed":
+      return `failed to write to stdin of job ${jobId}: ${result.message}`;
+  }
+}
 
 const schema = z.object({
   job_id: z.string().describe("Job id returned by bash (e.g. \"job_1a2b3c4d\")."),
@@ -53,14 +78,11 @@ export const writeStdinTool: ToolDef<typeof schema> = {
         isError: true,
       };
     }
-    const ok = await writeJobStdin(ctx.cwd, input.job_id, input.input, {
+    const write = await writeJobStdin(ctx.cwd, input.job_id, input.input, {
       appendNewline: !input.raw,
     });
-    if (!ok) {
-      return {
-        content: `failed to write to stdin of job ${input.job_id} (the process may have closed its stdin)`,
-        isError: true,
-      };
+    if (!write.ok) {
+      return { content: writeFailure(input.job_id, write), isError: true };
     }
     const sent = input.raw ? input.input : input.input + "\\n";
     const preview = sent.length > 100 ? sent.slice(0, 100) + "…" : sent;

@@ -48,6 +48,17 @@ export interface ToolContext {
    *  refuses to spawn beyond the configured max depth to prevent
    *  unbounded recursion. */
   subagentDepth?: number;
+  /**
+   * Side channel for auxiliary session events (currently `team_message`
+   * from the `task` tool's team mode). Events go straight to the host —
+   * persisted and streamed to the UI — WITHOUT entering the provider
+   * transcript, so a tool can narrate long-running internal work without
+   * spending the model's context on it. The model still learns everything
+   * it needs from the tool result.
+   *
+   * Absent in minimal contexts; tools must treat it as optional.
+   */
+  emitEvent?: (e: import("../types.js").Event) => void | Promise<void>;
 }
 
 export interface ToolResult {

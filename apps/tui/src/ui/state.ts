@@ -16,6 +16,7 @@ import type {
   Event,
   PlanStep,
   QuestionRequest,
+  TeamMessageEvent,
   TextBlock,
   ToolResultBlock,
   ToolUseBlock,
@@ -95,7 +96,15 @@ export type Row =
   | { kind: "compaction"; summary: string; at: number }
   | { kind: "usage"; usage: UsageInfo; at: number }
   | { kind: "error"; message: string; recoverable: boolean; at: number }
-  | { kind: "system"; text: string; at: number };
+  | { kind: "system"; text: string; at: number }
+  | {
+      kind: "team";
+      from: string;
+      to: string;
+      text: string;
+      msgKind: TeamMessageEvent["kind"];
+      at: number;
+    };
 
 export type TuiAction =
   | { type: "init"; sessionId: string | undefined; cwd: string; model: string | undefined; permissionMode: TuiState["permissionMode"]; agentMode: AgentMode }
@@ -432,6 +441,21 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             rows: [
               ...state.rows,
               { kind: "compaction", summary: ev.summary, at: Date.now() },
+            ],
+          };
+        case "team_message":
+          return {
+            ...state,
+            rows: [
+              ...state.rows,
+              {
+                kind: "team",
+                from: ev.from,
+                to: ev.to,
+                text: ev.content,
+                msgKind: ev.kind,
+                at: ev.timestamp,
+              },
             ],
           };
         case "status":

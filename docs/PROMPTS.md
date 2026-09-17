@@ -133,6 +133,21 @@ await buildSystemPrompt({ ..., environmentProvider: fakeEnv });
 
 `SUBAGENT_OBJECTIVE_FOOTER` 在 user message 末尾再次提醒结论格式，避免模型在前面的推理里跑题。
 
+### 3.1 Agent Teams — `packages/core/src/teams.ts`
+
+team 模式（`task` 的 `team` 字段，详见 [TEAMS.md](./TEAMS.md)）的成员本身就是子代理，
+用的还是 `SUBAGENT_ROLE_BLOCK`；teams.ts 额外有三段**编排提示**，都是以 objective
+的形式喂给某个成员的：
+
+| 提示 | 函数 | 契约要点 |
+|------|------|---------|
+| 拆解 | `decomposePrompt` | 给 leader 的 roster 里每个成员标 `NEEDS-ASSIGNMENT` 或"已领活"；硬约束是"成员并行、互不通信、不给两人派重叠的文件"。输出走 `assignmentSchema` 的结构化 JSON（`{assignments:[{member, objective}]}`），由 `parseAssignments` 解析——改 schema 必须同步改解析 |
+| 合并 | `summaryPrompt` | 把成员结论包成 `<member name role ok steps>` 块 + 文件冲突清单，要求报告覆盖：完成了什么、各人改了什么、矛盾与遗留、还剩什么。明确禁止 leader 重做成员的活 |
+| 投票 | `votePrompt` | 候选包成 `<candidate>` 块，要求按"独立得出同一结论的人数 + 证据质量"判定，**不许按篇幅或语气自信度**判定。输出走 `VOTE_SCHEMA`，由 `parseVote` 解析 |
+
+三段提示的解析失败都不是硬错误：拆解失败退回团队目标、合并/投票失败退回
+`concat`，并在结果的 `notes` 里说明。改提示时优先保住这个降级路径。
+
 ## 4. 上下文压缩 — `packages/core/src/compaction.ts`
 
 `callSummariser` 用 `SUMMARY_SYSTEM_PROMPT`（已 export）让 small model 压缩被丢弃的历史。摘要必须按以下七节顺序写：
@@ -155,7 +170,7 @@ await buildSystemPrompt({ ..., environmentProvider: fakeEnv });
 |------|--------|
 | `bash` | 用 `/bin/sh -c`、8KB artifact spill、5MB cap、禁用危险命令（rm -rf /、force-push 等）需显式授权 |
 | `edit_file` | search/replace 优先于 `write_file`、四种匹配策略、ambiguous 错误处理 |
-| `task` | 委派场景、何时不用、结论格式 |
+| `task` | 委派场景、何时不用、结论格式、team 与 fan-out 的区别及额外成本 |
 | `plan_update` | 状态机语义、压缩时保留、3-8 步建议 |
 | `plan_update` / `memory_write` / `read_artifact` / `read_file` / `glob` / `grep` / `ls` | 简洁但写清触发场景与不回退的边界 |
 
@@ -168,5 +183,6 @@ await buildSystemPrompt({ ..., environmentProvider: fakeEnv });
 | 长程目标判定 | `goal.ts`（`goalPromptBody` / `COMPLETION_MARKERS`） |
 | 摘要结构 | `compaction.ts`（`SUMMARY_SYSTEM_PROMPT`） |
 | 子代理角色边界 | `subagent.ts`（`SUBAGENT_ROLE_BLOCK`） |
+| team 拆解/合并/投票 | `teams.ts`（`decomposePrompt` / `summaryPrompt` / `votePrompt`，改 JSON 契约时同步 `parseAssignments` / `parseVote`） |
 | 工具行为/约束 | `src/tools/<name>.ts` 的 `description` |
 | 前端额外 prompt | `session/new` 的 `systemPromptExtra` 或项目根 `CODEPILOT.md` |

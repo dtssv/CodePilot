@@ -425,6 +425,27 @@ passwords inside connection strings, and `KEY=…` / `"key": "…"` env and JSON
 shapes. Redaction is idempotent and false-positive-tolerant by design: a
 redacted non-secret is a nuisance, a leaked real secret is an incident.
 
+### Agent runtime
+
+`runtime` names a registered `AgentRuntime` to drive the prompt loop instead
+of the built-in one; `runtimeOptions` is a per-runtime options bag keyed by
+runtime name. Unlike the rest of the schema, option values are not validated
+here — a plugin runtime defines its own option shape and validates it itself,
+and strict-mode would otherwise reject any option the core has never heard of.
+
+```jsonc
+{
+  "runtime": "mcts",
+  "runtimeOptions": {
+    "mcts": { "candidates": 3, "exploreMode": "plan" }
+  }
+}
+```
+
+An unknown runtime name throws at prompt time rather than silently falling
+back to the default loop. Plugins can register runtimes (and even claim the
+default) — see [RUNTIME.md](./RUNTIME.md).
+
 ### Usage and cost
 
 `session.getUsage()` returns aggregate `{ input, output, cacheRead,

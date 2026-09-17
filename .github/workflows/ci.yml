@@ -12,12 +12,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: typecheck + build + test (node ${{ matrix.node }})
+  # ---------------------------------------------------------------------
+  # Lint — Biome static analysis on all TS/TSX/JS/JSON source.
+  # Runs once (not in the matrix) because it is fast and OS-independent.
+  # ---------------------------------------------------------------------
+  lint:
+    name: lint (biome)
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (errors only — CI gate)
+        # --diagnostic-level=error makes warnings non-fatal; only emitted
+        # errors fail the step. This lets us introduce lint incrementally
+        # without a big-bang cleanup commit.
+        run: pnpm exec biome lint --diagnostic-level=error packages/ apps/
+
+  # ---------------------------------------------------------------------
+  # Build + typecheck + test across the OS × Node matrix.
+  # ---------------------------------------------------------------------
+  build-and-test:
+    name: typecheck + build + test (node ${{ matrix.node }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ["20", "22"]
     steps:
       - name: Checkout
@@ -45,3 +80,92 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # ---------------------------------------------------------------------
+  # Coverage — v8 coverage for the core package (and others, if they have
+  # tests). Reports are uploaded as artifacts and, on the core package,
+  # thresholds are enforced (core ≥80%).
+  # ---------------------------------------------------------------------
+  coverage:
+    name: test coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Run tests with coverage
+        # core enforces ≥80% (lines/functions/statements) + ≥70% branches
+        # via vitest thresholds in packages/core/vitest.config.ts.
+        # Other packages enforce ≥60% / ≥50%.
+        run: pnpm test:coverage
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            packages/*/coverage/
+            apps/*/coverage/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # IDEA plugin — Gradle compile + Kotlin unit tests on Linux with JDK 17.
+  # Uses the setup-gradle action for caching. This is the CI integration
+  # promised in ROADMAP §1.3.
+  # ---------------------------------------------------------------------
+  idea-build:
+    name: IDEA plugin (Gradle build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # Only cache the wrapper + deps; build outputs are per-run.
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Compile Kotlin
+        working-directory: apps/idea
+        run: ./gradlew compileKotlin --no-daemon
+
+      - name: Run unit tests
+        working-directory: apps/idea
+        run: ./gradlew test --no-daemon
+
+      - name: Build plugin (verify packaging)
+        working-directory: apps/idea
+        run: ./gradlew buildPlugin --no-daemon
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codepilot-idea-plugin
+          path: apps/idea/build/distributions/*.zip
+          if-no-files-found: warn
+          retention-days: 14

@@ -169,8 +169,13 @@ export const WebFetchConfigSchema = z
  * Top-level config schema. Every field is optional because configs layer
  * from defaults up; strict-mode means unknown keys produce a readable
  * validation error instead of being silently dropped.
+ *
+ * `profiles` / `activeProfile` implement the named-profile composition
+ * system: `profiles` is a map of named partial configs, and when
+ * `activeProfile` names one of them it is merged on top of the base
+ * config (see {@link resolveProfile}).
  */
-export const CodepilotConfigSchema = z
+export const CodepilotConfigSchema: z.ZodType<unknown> = z
   .object({
     provider: z.enum(["anthropic", "openai", "copilot"]).optional(),
     model: z.string().min(1).optional(),
@@ -198,6 +203,24 @@ export const CodepilotConfigSchema = z
     telemetry: TelemetryConfigSchema,
     usage: UsageConfigSchema,
     webFetch: WebFetchConfigSchema.optional(),
+    // Agent runtime (ROADMAP-NEXT §4.1) --------------------------------
+    // Name of a registered AgentRuntime driving the prompt loop, plus a
+    // free-form options bag keyed by runtime name. The values are opaque
+    // here on purpose: a plugin runtime defines its own option shape and
+    // validates it itself, and strict-mode would otherwise reject any
+    // option the core has never heard of.
+    runtime: z.string().min(1).optional(),
+    runtimeOptions: z.record(z.string().min(1), z.unknown()).optional(),
+    // Profile composition ----------------------------------------------
+    // Named partial configs. Activated via `activeProfile` (config key,
+    // CODEPILOT_PROFILE env var, or the `--profile <name>` CLI flag).
+    profiles: z
+      .record(
+        z.string().min(1),
+        z.lazy((): z.ZodType<unknown> => CodepilotConfigSchema)
+      )
+      .optional(),
+    activeProfile: z.string().min(1).optional(),
   })
   .strict();
 
@@ -217,12 +240,25 @@ export type ResolvedCodepilotConfig = CodepilotConfig & {
   logging?: LoggingConfig;
   telemetry?: TelemetryConfig;
   usage?: UsageConfig;
+  /** Named partial configs, activated via `activeProfile`. */
+  profiles?: Record<string, ResolvedCodepilotConfig>;
+  /** The profile to merge on top of the base config. */
+  activeProfile?: string;
 };
 
 /** One layer of the merge, kept around for `loadConfigWithSources`. */
 export interface ConfigLayer {
   /** Stable id of the layer for debugging. */
-  name: "defaults" | "managed" | "user" | "repo" | "mcp-json" | "env" | "caller";
+  name:
+    | "defaults"
+    | "managed"
+    | "user"
+    | "repo"
+    | "mcp-json"
+    | "env"
+    | "caller"
+    | "profile"
+    | "patch";
   /** Path / env key, when the layer was sourced from a file or env var. */
   source?: string;
   /** The raw value (after interpolation, before merge with the next layer). */
@@ -449,6 +485,105 @@ function mergeOne(
 }
 
 // ---------------------------------------------------------------------------
+// Profile composition + JSON merge-patch
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the active profile on top of the base config.
+ *
+ * Looks up `config.profiles[name]` (where `name` defaults to
+ * `config.activeProfile`) and merges it over the base with the same
+ * type-aware merge semantics as {@link mergeConfig}. The profile's own
+ * `profiles` / `activeProfile` keys are intentionally dropped — profiles
+ * are flat (a profile cannot activate another profile), which keeps the
+ * composition order easy to reason about:
+ *
+ *   defaults < managed < user < repo < env < caller < profile < patch
+ *
+ * Returns the input unchanged when no profile is active. Throws a
+ * descriptive error listing the known profile names when the requested
+ * profile doesn't exist.
+ */
+export function resolveProfile(
+  config: ResolvedCodepilotConfig,
+  name?: string
+): ResolvedCodepilotConfig {
+  const profileName = name ?? config.activeProfile;
+  if (!profileName) return config;
+  const profiles = config.profiles;
+  const profile = profiles?.[profileName];
+  if (!profile) {
+    const known = profiles ? Object.keys(profiles) : [];
+    throw new Error(
+      `Unknown config profile "${profileName}". ` +
+        (known.length > 0
+          ? `Known profiles: ${known.join(", ")}.`
+          : `No "profiles" are defined in the config.`)
+    );
+  }
+  // Strip meta keys from both sides before merging: the profile name has
+  // been resolved, and profiles must not recursively activate profiles.
+  const { profiles: _baseProfiles, ...baseRest } = config;
+  const { profiles: _p, activeProfile: _a, ...profileRest } =
+    profile as ResolvedCodepilotConfig;
+  const merged = mergeOne(
+    baseRest as Record<string, unknown>,
+    profileRest as Record<string, unknown>
+  );
+  return {
+    ...(merged as ResolvedCodepilotConfig),
+    profiles,
+    activeProfile: profileName,
+  };
+}
+
+/**
+ * Apply a JSON merge-patch (RFC 7386-ish) on top of a config.
+ *
+ * Semantics:
+ *  - objects merge recursively, key by key;
+ *  - scalars and arrays replace wholesale (patch arrays do NOT concatenate
+ *    with the base — a patch is an exact override, unlike layered config
+ *    files);
+ *  - `null` deletes the key from the base.
+ *
+ * Both inputs are treated as immutable; a fresh object is returned.
+ */
+export function applyConfigPatch(
+  config: ResolvedCodepilotConfig,
+  patch: Record<string, unknown>
+): ResolvedCodepilotConfig {
+  return patchObject(
+    config as Record<string, unknown>,
+    patch
+  ) as ResolvedCodepilotConfig;
+}
+
+function patchObject(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, patchVal] of Object.entries(patch)) {
+    if (patchVal === null) {
+      delete out[key];
+      continue;
+    }
+    const baseVal = out[key];
+    if (isPlainObject(baseVal) && isPlainObject(patchVal)) {
+      out[key] = patchObject(baseVal, patchVal);
+    } else {
+      out[key] = patchVal;
+    }
+  }
+  return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// ---------------------------------------------------------------------------
 // Environment variable layer
 // ---------------------------------------------------------------------------
 
@@ -468,6 +603,10 @@ export function readEnvOverrides(): Partial<CodepilotConfig> {
   const perm = process.env.CODEPILOT_PERMISSION_MODE;
   if (perm && (perm === "ask" || perm === "auto-edit" || perm === "yolo")) {
     out.permissionMode = perm;
+  }
+  const profile = process.env.CODEPILOT_PROFILE;
+  if (profile && profile.length > 0) {
+    (out as ResolvedCodepilotConfig).activeProfile = profile;
   }
   // CODEPILOT_LOG_LEVEL is read by the logger, not stored on CodepilotConfig.
   return out;
@@ -494,19 +633,38 @@ export async function loadConfig(cwd: string): Promise<CodepilotConfig> {
  * contribution (for the `codepilot config` debug command).
  *
  * @param cwd            current working directory
- * @param explicit       optional caller-supplied overrides (highest priority)
+ * @param explicit       optional caller-supplied overrides (highest priority
+ *                       among the file/env layers; the profile and patch
+ *                       composition steps still run on top of it)
  * @param options.readFiles  when false, skip disk reads — useful in tests
  *                          and in environments where filesystem access is
  *                          unavailable.
+ * @param options.profile    profile name to activate (equivalent to the
+ *                          `--profile <name>` CLI flag). Wins over
+ *                          `activeProfile` from any layer.
+ * @param options.patch      JSON merge-patch applied on top of the fully
+ *                          merged + profile-resolved config (equivalent to
+ *                          the `--config-patch '<json>'` CLI flag).
+ * @param options.homeDir    override the home directory used to locate the
+ *                          user-level config (defaults to os.homedir()).
+ *                          Primarily for tests and bundle export/import.
  */
 export async function loadConfigWithSources(
   cwd: string,
   explicit?: Partial<CodepilotConfig>,
-  options: { readFiles?: boolean } = {}
+  options: {
+    readFiles?: boolean;
+    profile?: string;
+    patch?: Record<string, unknown>;
+    homeDir?: string;
+  } = {}
 ): Promise<LoadConfigResult> {
   const readFiles = options.readFiles !== false;
+  const userConfigPath = options.homeDir
+    ? join(options.homeDir, ".codepilot", "config.json")
+    : getUserConfigPath();
 
-  const userPath = getUserConfigPath();
+  const userPath = userConfigPath;
   const repoPath = getRepoConfigPath(cwd);
 
   const sources: ConfigLayer[] = [];
@@ -570,8 +728,30 @@ export async function loadConfigWithSources(
     merged = mergeOne(merged, layer.value as Record<string, unknown>);
   }
 
+  // 6) profile composition — an explicit `options.profile` (the --profile
+  //    CLI flag) wins over `activeProfile` coming from any layer.
+  let resolved = merged as ResolvedCodepilotConfig;
+  if (options.profile) {
+    resolved.activeProfile = options.profile;
+  }
+  if (resolved.activeProfile) {
+    resolved = resolveProfile(resolved);
+    sources.push({
+      name: "profile",
+      source: `profile:${resolved.activeProfile}`,
+      value: resolved,
+    });
+  }
+
+  // 7) JSON merge-patch (the --config-patch CLI flag) — the absolute last
+  //    word, applied after profile composition.
+  if (options.patch && Object.keys(options.patch).length > 0) {
+    resolved = applyConfigPatch(resolved, options.patch);
+    sources.push({ name: "patch", source: "<inline>", value: resolved });
+  }
+
   // Interpolate env references inside the merged value.
-  const interpolated = interpolateEnv(merged);
+  const interpolated = interpolateEnv(resolved);
 
   // Validate (this is the "schema validation" boundary).
   const validated = validateConfig(interpolated);

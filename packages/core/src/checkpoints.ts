@@ -145,6 +145,9 @@ function serializeEvent(e: Event): string {
       return `mode:${e.mode}`;
     case "mode_request":
       return `mode_request:${e.mode}`;
+    case "team_message":
+      // Never reaches the provider (see compaction.ts) — zero context cost.
+      return "";
   }
 }
 

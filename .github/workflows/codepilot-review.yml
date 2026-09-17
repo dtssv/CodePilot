@@ -1,0 +1,100 @@
+name: CodePilot Review
+
+# Sample workflow demonstrating the CodePilot composite action
+# (.github/actions/codepilot) for automated PR review. It runs the agent
+# headlessly over the PR diff and posts the findings back as a comment.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# One review run per PR — new pushes cancel the in-flight review.
+concurrency:
+  group: codepilot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: CodePilot PR review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (base)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Checkout (head)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          clean: false
+
+      - name: Generate diff
+        id: diff
+        run: |
+          git diff \
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            > pr.diff
+          echo "lines=$(wc -l < pr.diff)" >> "$GITHUB_OUTPUT"
+
+      - name: Run CodePilot review
+        id: codepilot
+        uses: ./.github/actions/codepilot
+        env:
+          # Provider credentials for the agent loop.
+          CODEPILOT_API_KEY: ${{ secrets.CODEPILOT_API_KEY || secrets.ANTHROPIC_API_KEY }}
+        with:
+          output-format: json
+          yolo: true
+          max-turns: "30"
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }}
+            ("${{ github.event.pull_request.title }}") in ${{ github.repository }}.
+
+            The full diff is in ./pr.diff — read it with the file tools, and
+            inspect the surrounding source files for context where needed.
+
+            Review the changes for:
+            - Correctness bugs and logic errors
+            - Security issues (injection, unsafe input handling, secrets)
+            - Broken error handling / unhandled edge cases
+            - Style inconsistencies with the surrounding codebase
+
+            Be concise and specific: reference file paths and line numbers.
+            If the change looks good, say so briefly. Do NOT modify any files.
+
+      - name: Comment review on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const raw = process.env.CODEPILOT_RESULT;
+            let body = '';
+            let meta = '';
+            try {
+              const result = JSON.parse(raw);
+              body = result.result || '(empty review)';
+              const cost = result.cost_usd != null ? `$${result.cost_usd}` : 'n/a';
+              meta = `\n\n---\n<sub>session: \`${result.session_id}\` · turns: ${result.num_turns} · cost: ${cost}</sub>`;
+            } catch {
+              body = raw || '(no output)';
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `## CodePilot Review 🤖\n\n${body}${meta}`,
+            });
+        env:
+          CODEPILOT_RESULT: ${{ steps.codepilot.outputs.result }}
+
+      - name: Upload PR diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codepilot-review-diff
+          path: pr.diff
+          retention-days: 7

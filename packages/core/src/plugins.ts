@@ -26,9 +26,11 @@
 import { readdir, readFile, stat, rm, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, isAbsolute, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { runtimeRegistry, type RuntimeFactory, type RuntimeRegistry } from "./runtime.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -58,6 +60,24 @@ export interface PluginManifest {
   mcpServers?: Record<string, unknown>;
   /** Whether the plugin is enabled (default true). */
   enabled?: boolean;
+  /**
+   * Custom agent runtime (ROADMAP-NEXT §4.1 Phase 2). Points to a JS module
+   * inside the plugin directory that exports a `RuntimeFactory` — either as
+   * the default export or as a named `factory` / `runtimeFactory` export:
+   *
+   *   // runtime.mjs
+   *   export default { name: "my-runtime", create: (deps) => new MyRuntime(deps) };
+   *
+   * - String form: relative module path; the factory's own `name` is used.
+   * - Object form: `module` (path), optional `name` (overrides the factory
+   *   name), optional `default: true` to claim the session runtime, so a
+   *   session uses it without any config (see {@link initPluginRuntimes},
+   *   which `createSession` calls). Only one plugin may claim the default.
+   *
+   * The module runs in the host process with full Node access — only install
+   * plugins from trusted sources. Load via {@link loadPluginRuntimes}.
+   */
+  runtime?: string | { module: string; name?: string; default?: boolean };
 }
 
 /** A discovered plugin with its manifest and filesystem path. */
@@ -218,7 +238,155 @@ export function mergePluginConfig(
     }
   }
   if (mcpChanged) merged.mcpServers = mcpServers;
+  // Runtime: a plugin may declare itself the session runtime (`default: true`).
+  const pluginDefault = pluginDefaultRuntime(plugins, merged.runtime as string | undefined);
+  if (pluginDefault !== undefined) merged.runtime = pluginDefault;
   return merged;
+}
+
+/**
+ * The runtime name a plugin declared as the session default (manifest
+ * `runtime.default === true`), or undefined when no plugin claims one.
+ *
+ * `existing` is an already-chosen runtime name (from config or an explicit
+ * session option). Because two conflicting defaults — or a default that
+ * contradicts explicit config — can only be resolved by the user, this
+ * throws instead of picking a winner silently. Returns undefined when
+ * `existing` is set and no plugin declares a default, so callers can keep
+ * their own value.
+ *
+ * `registered` maps plugin name → the name the runtime was actually
+ * registered under (as returned by {@link loadPluginRuntimes}). Pass it
+ * whenever the modules have been loaded: a manifest that omits
+ * `runtime.name` takes its name from the factory, which is only knowable
+ * after the import. Without it, the plugin's own name is the best guess.
+ */
+export function pluginDefaultRuntime(
+  plugins: Map<string, Plugin>,
+  existing?: string,
+  registered?: Map<string, string>
+): string | undefined {
+  let chosen: string | undefined;
+  for (const p of plugins.values()) {
+    const rt = p.manifest.runtime;
+    if (!rt || typeof rt === "string" || rt.default !== true) continue;
+    const name = registered?.get(p.manifest.name) ?? rt.name ?? p.manifest.name;
+    const conflict = chosen ?? existing;
+    if (conflict !== undefined) {
+      throw new Error(
+        `multiple plugins declare a default runtime: "${conflict}" (config) vs ` +
+        `"${name}" (plugin ${p.manifest.name}). Set config.runtime explicitly to disambiguate.`
+      );
+    }
+    chosen = name;
+  }
+  return chosen;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-provided agent runtimes (ROADMAP-NEXT §4.1 Phase 2)
+// ---------------------------------------------------------------------------
+
+export interface PluginRuntimeLoadResult {
+  /** Factory names successfully registered, keyed by plugin name. */
+  registered: Map<string, string>;
+  /** Per-plugin load failures (plugin name → error message). */
+  errors: Map<string, string>;
+}
+
+/**
+ * Dynamically import every discovered plugin's `runtime` module and register
+ * its `RuntimeFactory` with the given registry (default: the process-wide
+ * {@link runtimeRegistry}).
+ *
+ * The module may export the factory as the default export, or as a named
+ * `factory` / `runtimeFactory` export. The factory's `name` may be overridden
+ * by the manifest's `runtime.name`. Loading is per-plugin isolated: one bad
+ * module does not prevent other plugins from loading; failures are collected
+ * in the returned `errors` map so hosts can surface them (e.g. `/plugins`).
+ *
+ * Call this AFTER `discoverPlugins` and BEFORE creating a session whose
+ * config references a plugin runtime.
+ */
+export async function loadPluginRuntimes(
+  plugins: Map<string, Plugin>,
+  registry: RuntimeRegistry = runtimeRegistry
+): Promise<PluginRuntimeLoadResult> {
+  const registered = new Map<string, string>();
+  const errors = new Map<string, string>();
+
+  for (const p of plugins.values()) {
+    const rt = p.manifest.runtime;
+    if (!rt) continue;
+    const relModule = typeof rt === "string" ? rt : rt.module;
+    const nameOverride = typeof rt === "object" ? rt.name : undefined;
+    try {
+      const modulePath = join(p.path, relModule);
+      if (!existsSync(modulePath)) {
+        throw new Error(`runtime module not found: ${modulePath}`);
+      }
+      const mod = (await import(pathToFileURL(modulePath).href)) as Record<string, unknown>;
+      const factory = (mod.default ?? mod.factory ?? mod.runtimeFactory) as RuntimeFactory | undefined;
+      if (!factory || typeof factory !== "object") {
+        throw new Error(
+          `plugin runtime module must export a RuntimeFactory (default, "factory", or "runtimeFactory" export)`
+        );
+      }
+      const factoryName = nameOverride ?? factory.name;
+      if (!factoryName || typeof factoryName !== "string") {
+        throw new Error("runtime factory has no name (set manifest runtime.name or factory.name)");
+      }
+      if (typeof factory.create !== "function") {
+        throw new Error("runtime factory has no create(deps) function");
+      }
+      registry.register({ name: factoryName, create: factory.create.bind(factory) });
+      registered.set(p.manifest.name, factoryName);
+    } catch (err) {
+      errors.set(p.manifest.name, (err as Error).message);
+    }
+  }
+  return { registered, errors };
+}
+
+export interface PluginRuntimeInit extends PluginRuntimeLoadResult {
+  /** Plugins discovered during this init (reusable for resource paths). */
+  plugins: Map<string, Plugin>;
+  /** Runtime name a plugin declared as the session default, if any. */
+  defaultRuntime?: string;
+}
+
+export interface InitPluginRuntimesOptions extends DiscoverPluginsOptions {
+  /** Registry to register into (default: the process-wide registry). */
+  registry?: RuntimeRegistry;
+  /** Runtime name already chosen by config/session options. Used to detect
+   *  conflicts with a plugin that declares itself the default. */
+  existingRuntime?: string;
+}
+
+/**
+ * Discover plugins for `cwd` and register every runtime they declare, then
+ * report which runtime (if any) should become the session default.
+ *
+ * This is the one call a host needs to make plugin runtimes usable;
+ * `createSession` does it automatically. Registration is idempotent, so
+ * calling it once per session is fine.
+ */
+export async function initPluginRuntimes(
+  cwd: string,
+  opts: InitPluginRuntimesOptions = {}
+): Promise<PluginRuntimeInit> {
+  const plugins = await discoverPlugins(cwd, opts);
+  const loaded = await loadPluginRuntimes(plugins, opts.registry);
+  // A plugin whose module failed to load must not be named as the default —
+  // that would turn a load warning into a hard failure at prompt time.
+  const loadable = new Map(
+    [...plugins].filter(([name]) => !loaded.errors.has(name))
+  );
+  return {
+    ...loaded,
+    plugins,
+    defaultRuntime: pluginDefaultRuntime(loadable, opts.existingRuntime, loaded.registered),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +460,7 @@ export async function uninstallPlugin(name: string): Promise<boolean> {
 }
 
 /** Derive a plugin name from a source URL or path. */
-function derivePluginName(source: string): string {
+export function derivePluginName(source: string): string {
   // For git URLs: use the repo name (last path segment, minus .git).
   // For local paths: use the directory name.
   const clean = source.replace(/\.git$/, "").replace(/\/$/, "");

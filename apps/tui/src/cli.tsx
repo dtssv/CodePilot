@@ -19,7 +19,7 @@ import { runHeadless, parseOutputFormat } from "./headless.js";
 const AGENT_MODES = ["chat", "plan", "agent"] as const;
 type AgentMode = (typeof AGENT_MODES)[number];
 
-type ParsedArgs = {
+export type ParsedArgs = {
   cwd: string;
   model?: string;
   provider?: "anthropic" | "openai" | "copilot";
@@ -35,6 +35,18 @@ type ParsedArgs = {
   print: boolean;
   /** Output format for print mode (text | json | stream-json). */
   outputFormat?: string;
+  /** Restrict which tools the agent can use (comma-separated tool names). */
+  allowedTools?: string[];
+  /** Maximum number of agent turns. */
+  maxTurns?: number;
+  /** Activate a named config profile (merged on top of the base config). */
+  profile?: string;
+  /** Raw JSON merge-patch string (--config-patch '{"model":"gpt-4o"}'). */
+  configPatch?: string;
+  /** Subcommand ("bundle") when argv[0] is a known subcommand word. */
+  subcommand?: string;
+  /** Remaining positional args after the subcommand word. */
+  subcommandArgs: string[];
 };
 
 const HELP = `codepilot-tui — interactive terminal UI for CodePilot
@@ -54,6 +66,25 @@ Options:
   --resume <id>              Resume an existing session
   --mock                     Use an in-memory mock session (no core needed; for UI dev)
 
+  Config composition:
+  --profile <name>           Activate a named profile from the config's
+                             "profiles" map. The profile is merged on top of
+                             the base config (equivalent to setting
+                             "activeProfile" or CODEPILOT_PROFILE).
+  --config-patch '<json>'    Apply a JSON merge-patch on top of the final
+                             resolved config. Objects merge recursively,
+                             scalars/arrays replace, null deletes a key.
+                             Example:
+                               --config-patch '{"model":"gpt-4o","permissionMode":"yolo"}'
+
+Subcommands:
+  bundle export [path]       Export the resolved config + custom commands,
+                             agents and skills to a single JSON bundle file
+                             (default path: ./codepilot-bundle.json).
+  bundle import <path>       Import a bundle: writes the config to
+                             ~/.codepilot/config.json and the resources to
+                             ~/.codepilot/{commands,agents,skills}/.
+
   Headless / print mode (claude-code -p equivalent — for scripts & CI):
   -p, --print                Run a single prompt to completion and exit.
                              No interactive UI. Requires a prompt (positional
@@ -61,9 +92,12 @@ Options:
                              permission mode is set, since there's no UI to
                              approve tool calls interactively.
   --output-format <fmt>      Print-mode output: text | json | stream-json
-                               text        — final assistant text only (default)
-                               json        — single result JSON object
-                               stream-json — NDJSON, one event per line (realtime)
+                                text        — final assistant text only (default)
+                                json        — single result JSON object
+                                stream-json — NDJSON, one event per line (realtime)
+  --allowed-tools <t1,t2>    Restrict which tools the agent can use
+                              (comma-separated, e.g. bash,read_file,write_file)
+  --max-turns <N>            Maximum number of agent turns (default: 50)
 
   -h, --help                 Show this help
 
@@ -97,18 +131,50 @@ function readStdin(): Promise<string> {
   });
 }
 
+/** Words that, when they appear as the first argv token, select a subcommand. */
+const SUBCOMMANDS = ["bundle"] as const;
+
 /**
  * Minimal hand-rolled argv parser (avoids an extra runtime dep).
  * Supports `--flag value`, `--flag=value`, boolean `--flag`, and bare positionals.
  */
-function parseArgs(argv: readonly string[]): ParsedArgs {
+export function parseArgs(argv: readonly string[]): ParsedArgs {
   const out: ParsedArgs = {
     cwd: process.cwd(),
     yolo: false,
     mock: false,
     showHelp: false,
     print: false,
+    subcommandArgs: [],
   };
+  // Subcommand detection: `codepilot bundle export ./x.json`. The subcommand
+  // word and everything after it are captured separately and NOT parsed as
+  // flags (a bundle path may legitimately start with "-" in exotic cases).
+  if (
+    argv.length > 0 &&
+    !argv[0]!.startsWith("-") &&
+    (SUBCOMMANDS as readonly string[]).includes(argv[0]!)
+  ) {
+    out.subcommand = argv[0];
+    // Split subcommand args into positionals (kept verbatim) and recognised
+    // global flags (--profile, --config-patch) that may appear after them.
+    const positional: string[] = [];
+    const rest = argv.slice(1);
+    for (let j = 0; j < rest.length; j++) {
+      const a = rest[j]!;
+      if (a === "--profile" || a.startsWith("--profile=")) {
+        const v = a.includes("=") ? a.slice(a.indexOf("=") + 1) : rest[++j];
+        if (v) out.profile = v;
+      } else if (a === "--config-patch" || a.startsWith("--config-patch=")) {
+        const v = a.includes("=") ? a.slice(a.indexOf("=") + 1) : rest[++j];
+        if (v) out.configPatch = v;
+      } else {
+        positional.push(a);
+      }
+    }
+    out.subcommandArgs = positional;
+    return out;
+  }
   const positional: string[] = [];
   let i = 0;
   while (i < argv.length) {
@@ -182,6 +248,48 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
         if (v) out.outputFormat = v;
         break;
       }
+      case a === "--allowed-tools":
+      case a.startsWith("--allowed-tools="): {
+        const v = takeValue();
+        if (v) {
+          out.allowedTools = v.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+        }
+        break;
+      }
+      case a === "--max-turns":
+      case a.startsWith("--max-turns="): {
+        const v = takeValue();
+        if (v) {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n) && n > 0) {
+            out.maxTurns = n;
+          } else {
+            process.stderr.write(
+              `codepilot-tui: --max-turns must be a positive integer (got: ${v})\n`,
+            );
+            process.exit(2);
+          }
+        }
+        break;
+      }
+      case a === "--profile":
+      case a.startsWith("--profile="): {
+        const v = takeValue();
+        if (v) out.profile = v;
+        break;
+      }
+      case a === "--config-patch":
+      case a.startsWith("--config-patch="): {
+        const v = takeValue();
+        if (v === undefined) {
+          process.stderr.write(
+            "codepilot-tui: --config-patch requires a JSON argument (e.g. --config-patch '{\"model\":\"gpt-4o\"}')\n",
+          );
+          process.exit(2);
+        }
+        out.configPatch = v;
+        break;
+      }
       case a === "--mock": {
         out.mock = true;
         break;
@@ -197,6 +305,100 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   if (positional.length > 0) out.prompt = positional.join(" ");
   return out;
+}
+
+/**
+ * Parse the `--config-patch '<json>'` value into an object. Throws a
+ * user-friendly error when the JSON is malformed or not an object.
+ */
+export function parseConfigPatch(raw: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `--config-patch is not valid JSON: ${(err as Error).message}`
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      "--config-patch must be a JSON object (e.g. '{\"model\":\"gpt-4o\"}')"
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * `codepilot bundle export [path]` / `codepilot bundle import <path>`.
+ * Returns the process exit code (0 on success).
+ */
+export async function runBundle(
+  subcommandArgs: readonly string[],
+  globals: ParsedArgs
+): Promise<number> {
+  const core = await tryLoadCore();
+  if (core === null) {
+    process.stderr.write(
+      "codepilot-tui: bundle requires @codepilot/core (build packages/core first)\n"
+    );
+    return 1;
+  }
+  const [action, ...rest] = subcommandArgs;
+  switch (action) {
+    case "export": {
+      const target = resolve(rest[0] ?? "codepilot-bundle.json");
+      try {
+        const patch = globals.configPatch
+          ? parseConfigPatch(globals.configPatch)
+          : undefined;
+        const bundle = await core.exportBundleToFile(target, {
+          cwd: globals.cwd,
+          profile: globals.profile,
+          patch,
+        });
+        const counts =
+          `${Object.keys(bundle.commands).length} commands, ` +
+          `${Object.keys(bundle.agents).length} agents, ` +
+          `${Object.keys(bundle.skills).length} skills`;
+        process.stdout.write(`Exported bundle to ${target} (${counts})\n`);
+        return 0;
+      } catch (err) {
+        process.stderr.write(
+          `codepilot-tui: bundle export failed: ${(err as Error).message}\n`
+        );
+        return 1;
+      }
+    }
+    case "import": {
+      const source = rest[0];
+      if (!source) {
+        process.stderr.write(
+          "codepilot-tui: bundle import requires a path (codepilot bundle import <path>)\n"
+        );
+        return 2;
+      }
+      try {
+        const result = await core.importBundleFromFile(resolve(source));
+        process.stdout.write(
+          `Imported bundle: config -> ${result.configPath}, ` +
+            `${result.commands} commands, ${result.agents} agents, ` +
+            `${result.skills} skills\n`
+        );
+        return 0;
+      } catch (err) {
+        process.stderr.write(
+          `codepilot-tui: bundle import failed: ${(err as Error).message}\n`
+        );
+        return 1;
+      }
+    }
+    default:
+      process.stderr.write(
+        `codepilot-tui: unknown bundle action "${action ?? ""}" ` +
+          "(expected: export [path] | import <path>)\n"
+      );
+      return 2;
+  }
 }
 
 /**
@@ -219,6 +421,11 @@ async function main(): Promise<void> {
   if (args.showHelp) {
     process.stdout.write(HELP);
     return;
+  }
+
+  // Subcommands short-circuit before any session/UI setup.
+  if (args.subcommand === "bundle") {
+    process.exit(await runBundle(args.subcommandArgs, args));
   }
 
   if (!existsSync(args.cwd)) {
@@ -255,13 +462,31 @@ async function main(): Promise<void> {
     permissionMode = args.yolo ? "yolo" : "ask";
     model = model ?? mock.defaultModel;
   } else {
-    const cfg = await core.loadConfig(args.cwd);
+    // Resolve the layered config, then apply the --profile composition and
+    // the --config-patch JSON merge-patch on top of it.
+    let patch: Record<string, unknown> | undefined;
+    if (args.configPatch !== undefined) {
+      try {
+        patch = parseConfigPatch(args.configPatch);
+      } catch (err) {
+        process.stderr.write(`codepilot-tui: ${(err as Error).message}\n`);
+        process.exit(2);
+      }
+    }
+    const cfg = await core.loadConfigWithSources(args.cwd, undefined, {
+      profile: args.profile,
+      patch,
+    }).then((r) => r.config).catch((err: unknown) => {
+      process.stderr.write(`codepilot-tui: ${(err as Error).message}\n`);
+      process.exit(2);
+    });
     const config: import("@codepilot/core").CodepilotConfig = {
       ...cfg,
       permissionMode: args.yolo ? "yolo" : (cfg.permissionMode ?? "ask"),
       provider: args.provider ?? cfg.provider,
       model: args.model ?? cfg.model,
       agentMode: args.mode ?? cfg.agentMode,
+      maxTurns: args.maxTurns ?? cfg.maxTurns,
     };
     permissionMode = config.permissionMode ?? "ask";
     agentMode = config.agentMode ?? "agent";
@@ -339,7 +564,13 @@ async function main(): Promise<void> {
     // deny any tool call that would normally prompt. The user gets a
     // clear result object either way.
     try {
-      await runHeadless({ session, prompt, format });
+      await runHeadless({
+        session,
+        prompt,
+        format,
+        maxTurns: args.maxTurns,
+        allowedTools: args.allowedTools,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (format === "text") {

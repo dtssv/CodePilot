@@ -106,8 +106,13 @@ class CodepilotClient(
                     if (line.isBlank()) continue
                     val msg = parseLine(line)
                     if (msg != null) {
-                        if (msg is IncomingMessage.Response) {
-                            pending.remove(msg.id)?.complete(msg)
+                        when (msg) {
+                            is IncomingMessage.Response -> pending.remove(msg.id)?.complete(msg)
+                            // JSON-RPC error responses also resolve the pending request — the
+                            // deferred rethrows as IllegalStateException so callers see the
+                            // server's code/message instead of hanging until timeout.
+                            is IncomingMessage.Error -> pending.remove(msg.id)?.failWith(msg)
+                            else -> Unit
                         }
                         // Always deliver to the global channel (UI hooks live here).
                         eventChannel.trySend(msg)
@@ -280,7 +285,8 @@ class CodepilotClient(
      * Ack a server-initiated reverse request (`permission/request`,
      * `question/request`). Per PROTOCOL.md the client must reply to the
      * request frame itself (empty result) AND send the actual decision via
-     * `*/respond`; skipping the ack leaks the server-side request promise.
+     * the `* /respond` method; skipping the ack leaks the server-side
+     * request promise.
      */
     fun ackServerRequest(id: Long) {
         val frame = JsonObject().apply {
@@ -396,6 +402,12 @@ private class CompletableDeferredJson {
         error = IncomingMessage.Error(-1, JsonObject().apply {
             addProperty("code", -32603); addProperty("message", t.message ?: "internal")
         })
+        done = true; lock.notifyAll()
+    }
+
+    /** Fail with the server's own JSON-RPC error frame (preserves code + message). */
+    fun failWith(err: IncomingMessage.Error) = synchronized(lock) {
+        error = err
         done = true; lock.notifyAll()
     }
 

@@ -1,0 +1,187 @@
+name: CodePilot
+description: >-
+  Run CodePilot (codepilot-tui) in headless mode against a repository.
+  Wraps `codepilot-tui -p --output-format json` and exposes the result,
+  session id, and USD cost as step outputs. Builds from source when used
+  inside the CodePilot repo, otherwise installs @codepilot/tui from npm.
+author: codepilot
+branding:
+  icon: zap
+  color: blue
+
+inputs:
+  prompt:
+    description: >-
+      The prompt to run. If empty, the prompt is read from stdin (useful for
+      long, multi-line prompts piped from a file or heredoc).
+    required: false
+    default: ""
+  cwd:
+    description: Working directory CodePilot runs against.
+    required: false
+    default: ${{ github.workspace }}
+  model:
+    description: Model override passed to `--model` (e.g. claude-sonnet-4-5).
+    required: false
+    default: ""
+  output-format:
+    description: Headless output format — text, json, or stream-json.
+    required: false
+    default: json
+  max-turns:
+    description: >-
+      Maximum number of agentic turns. Maps to the `maxTurns` key of a
+      repo-level `.codepilot/config.json` written by this action (the CLI
+      has no --max-turns flag). Empty keeps the built-in default (50).
+    required: false
+    default: ""
+  yolo:
+    description: >-
+      Auto-approve every tool call (passes --yolo). Headless mode implies
+      yolo unless a permission mode is configured; set to "false" only if
+      you manage permissions via config.
+    required: false
+    default: "true"
+
+outputs:
+  result:
+    description: The full JSON result object emitted by `--output-format json`.
+    value: ${{ steps.run.outputs.result }}
+  session-id:
+    description: Session id of the run (usable with `codepilot-tui --resume`).
+    value: ${{ steps.run.outputs.session-id }}
+  cost-usd:
+    description: Approximate USD cost of the run (empty when not computable).
+    value: ${{ steps.run.outputs.cost-usd }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install pnpm
+      # Needed for the in-repo source build. pnpm/action-setup is
+      # idempotent and cheap, so we always set it up for simplicity.
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Resolve codepilot-tui
+      id: resolve
+      shell: bash
+      env:
+        ACTION_DIR: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        REPO_ROOT="$(cd "$ACTION_DIR/../../.." && pwd)"
+
+        if [ -f "$REPO_ROOT/pnpm-workspace.yaml" ] && [ -d "$REPO_ROOT/apps/tui" ]; then
+          # Running inside the CodePilot monorepo — build from source.
+          echo "mode=source" >> "$GITHUB_OUTPUT"
+          echo "repo-root=$REPO_ROOT" >> "$GITHUB_OUTPUT"
+          echo "bin=$REPO_ROOT/apps/tui/dist/cli.js" >> "$GITHUB_OUTPUT"
+          echo "Resolved codepilot-tui: building from source at $REPO_ROOT"
+        else
+          # External usage — install the published package.
+          echo "mode=npm" >> "$GITHUB_OUTPUT"
+          echo "bin=$(command -v codepilot-tui || true)" >> "$GITHUB_OUTPUT"
+          echo "Resolved codepilot-tui: will install @codepilot/tui from npm"
+        fi
+
+    - name: Build CodePilot from source
+      if: steps.resolve.outputs.mode == 'source'
+      shell: bash
+      working-directory: ${{ steps.resolve.outputs.repo-root }}
+      run: |
+        pnpm install --frozen-lockfile
+        pnpm build
+
+    - name: Install @codepilot/tui from npm
+      if: steps.resolve.outputs.mode == 'npm'
+      id: resolve-npm
+      shell: bash
+      run: |
+        npm install -g @codepilot/tui
+        echo "bin=$(command -v codepilot-tui)" >> "$GITHUB_OUTPUT"
+
+    - name: Apply max-turns config
+      if: inputs.max-turns != ''
+      shell: bash
+      working-directory: ${{ inputs.cwd }}
+      run: |
+        set -euo pipefail
+        mkdir -p .codepilot
+        if [ -f .codepilot/config.json ]; then
+          tmp="$(mktemp)"
+          jq --argjson n "${{ inputs.max-turns }}" '.maxTurns = $n' .codepilot/config.json > "$tmp"
+          mv "$tmp" .codepilot/config.json
+        else
+          jq -n --argjson n "${{ inputs.max-turns }}" '{ maxTurns: $n }' > .codepilot/config.json
+        fi
+        echo "Wrote .codepilot/config.json with maxTurns=${{ inputs.max-turns }}"
+
+    - name: Run CodePilot
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.cwd }}
+      env:
+        BIN: ${{ steps.resolve.outputs.mode == 'source' && steps.resolve.outputs.bin || steps.resolve-npm.outputs.bin }}
+        PROMPT: ${{ inputs.prompt }}
+        MODEL: ${{ inputs.model }}
+        OUTPUT_FORMAT: ${{ inputs.output-format }}
+        YOLO: ${{ inputs.yolo }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        args=(--print --output-format "$OUTPUT_FORMAT" --cwd "${{ inputs.cwd }}")
+        if [ -n "$MODEL" ]; then
+          args+=(--model "$MODEL")
+        fi
+        if [ "$YOLO" = "true" ]; then
+          args+=(--yolo)
+        fi
+
+        output_file="$(mktemp)"
+        if [ -n "$PROMPT" ]; then
+          # </dev/null: don't let the CLI block reading a piped prompt from
+          # the step's stdin when an inline prompt was provided.
+          node "$BIN" "${args[@]}" "$PROMPT" < /dev/null | tee "$output_file"
+        else
+          # No inline prompt — forward stdin (piped prompt) to the CLI.
+          node "$BIN" "${args[@]}" | tee "$output_file"
+        fi
+
+        if [ "$OUTPUT_FORMAT" = "json" ]; then
+          # The json format emits exactly one JSON object on the last line.
+          result_json="$(grep -v '^$' "$output_file" | tail -n 1)"
+          session_id="$(printf '%s' "$result_json" | jq -r '.session_id // empty')"
+          cost_usd="$(printf '%s' "$result_json" | jq -r '.cost_usd // empty')"
+          subtype="$(printf '%s' "$result_json" | jq -r '.subtype // empty')"
+
+          {
+            echo 'result<<CODEPILOT_EOF'
+            printf '%s\n' "$result_json"
+            echo 'CODEPILOT_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "session-id=$session_id" >> "$GITHUB_OUTPUT"
+          echo "cost-usd=$cost_usd" >> "$GITHUB_OUTPUT"
+
+          echo "CodePilot finished: subtype=$subtype session=$session_id cost=\$${cost_usd:-n/a}"
+          if [ "$subtype" = "error" ]; then
+            echo "::error::CodePilot run failed — see the result output for details"
+            exit 1
+          fi
+        else
+          # text / stream-json: expose the raw output; structured outputs
+          # are only available with --output-format json.
+          {
+            echo 'result<<CODEPILOT_EOF'
+            cat "$output_file"
+            echo 'CODEPILOT_EOF'
+          } >> "$GITHUB_OUTPUT"
+        fi

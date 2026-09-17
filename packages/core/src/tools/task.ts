@@ -57,6 +57,38 @@ const taskSpec = z.object({
     ),
 });
 
+/** One member of a team (ROADMAP-NEXT §4.2). */
+const teamMemberSpec = z.object({
+  role: z
+    .enum(["leader", "worker", "specialist"])
+    .describe(
+      "\"leader\" splits the goal into assignments and writes the final report " +
+        "(read-only, at most one per team); \"worker\" does the work; " +
+        "\"specialist\" is a worker with a narrow remit (security, performance…)."
+    ),
+  objective: z
+    .string()
+    .optional()
+    .describe(
+      "What this member does. Omit for workers when the team has a leader — the " +
+        "leader then writes the assignment from the team `objective`."
+    ),
+  name: z
+    .string()
+    .optional()
+    .describe("Display name used in the team log (default \"<role>-<n>\")."),
+  agent_type: z
+    .string()
+    .optional()
+    .describe(
+      "Sub-agent type, or a custom agent name. Defaults to \"explore\" for a " +
+        "leader and \"worker\" for everyone else."
+    ),
+  tools: z.array(z.string()).optional().describe("Restrict this member's tools."),
+  model: z.string().optional().describe("Override this member's model."),
+  maxSteps: z.number().int().positive().max(50).optional(),
+});
+
 const schema = z
   .object({
     objective: z
@@ -108,15 +140,52 @@ const schema = z
           "and report findings.\" When omitted, the entire CSV row (joined by " +
           "spaces) is used as the objective."
       ),
+    team: z
+      .array(teamMemberSpec)
+      .optional()
+      .describe(
+        "Team mode: several agents working on ONE goal (given in `objective`), " +
+          "with roles. Unlike `tasks` (independent objectives), a team can have a " +
+          "`leader` that splits the goal into assignments, members can share one " +
+          "git worktree, edits to the same file by two members are detected and " +
+          "reported, and the results are merged per `merge_strategy`. Use for work " +
+          "that is one job but splits cleanly by area (frontend/backend/security)."
+      ),
+    merge_strategy: z
+      .enum(["leader_summary", "voting", "concat"])
+      .optional()
+      .describe(
+        "How team results become one answer. \"leader_summary\" (default when the " +
+          "team has a leader): the leader writes the report. \"voting\": members " +
+          "solved the SAME problem independently and a judge picks the best-supported " +
+          "answer. \"concat\" (default without a leader): every conclusion verbatim, " +
+          "no extra model call."
+      ),
+    shared_worktree: z
+      .boolean()
+      .optional()
+      .describe(
+        "Run every team member in ONE linked git worktree instead of your working " +
+          "tree. Use when the team edits files: their changes land on an isolated " +
+          "branch you can review and merge. Requires a git repo; falls back to the " +
+          "parent cwd with a note."
+      ),
   })
   .refine(
     (v) => {
-      const modes = [Boolean(v.objective), Boolean(v.tasks && v.tasks.length > 0), Boolean(v.csv)];
+      const modes = [
+        // `objective` doubles as the team goal, so it is not its own mode
+        // when `team` is present.
+        Boolean(v.objective) && !(v.team && v.team.length > 0),
+        Boolean(v.tasks && v.tasks.length > 0),
+        Boolean(v.csv),
+        Boolean(v.team && v.team.length > 0),
+      ];
       return modes.filter(Boolean).length === 1;
     },
     {
       message:
-        "provide exactly one of `objective` (single task), `tasks` (fan-out), or `csv` (batch), not multiple",
+        "provide exactly one of `objective` (single task), `tasks` (fan-out), `csv` (batch), or `team` (team mode, with `objective` as the shared goal)",
     }
   );
 
@@ -261,7 +330,16 @@ export const taskTool: ToolDef<typeof schema> & {
     "CSV batch mode: provide `csv` (a CSV string with a header row) and optional " +
     "`csv_template` to spawn one sub-agent per data row. Column values are " +
     "interpolated into the template by header name (e.g. \"Review {file} for " +
-    "security issues\"). Use for repetitive batch work across many items.",
+    "security issues\"). Use for repetitive batch work across many items.\n\n" +
+    "Team mode: `objective` (the ONE shared goal) + `team: [{role, …}]`. Use when " +
+    "the work is a single job that splits by area and the pieces need to be " +
+    "reconciled — not for independent errands (that is `tasks`). A `leader` " +
+    "investigates and writes each worker's assignment, so you may omit worker " +
+    "objectives; members run in parallel and cannot talk to each other. Files " +
+    "written by two members are detected and reported as conflicts. " +
+    "`merge_strategy` controls the final answer; `shared_worktree: true` keeps all " +
+    "edits on an isolated branch. Costs one extra sub-agent run for decomposition " +
+    "and one for the merge — prefer `tasks` when you do not need either.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -288,6 +366,35 @@ export const taskTool: ToolDef<typeof schema> & {
       this._sem = new Semaphore(this.maxThreads ?? 4);
     }
     const sem = this._sem;
+
+    // Team mode: one goal, several roles, merged result. See ../teams.ts.
+    if (input.team && input.team.length > 0) {
+      const { runTeam, renderTeamResult } = await import("../teams.js");
+      try {
+        const result = await runTeam(
+          {
+            objective: input.objective,
+            members: input.team,
+            merge_strategy: input.merge_strategy,
+            shared_worktree: input.shared_worktree,
+          },
+          {
+            runner: this.runner,
+            cwd: ctx.cwd,
+            emitEvent: ctx.emitEvent,
+            semaphore: sem,
+            depth: currentDepth + 1,
+            signal: ctx.signal,
+          }
+        );
+        return {
+          content: renderTeamResult(result),
+          isError: result.members.every((m) => !m.ok),
+        };
+      } catch (err) {
+        return { content: `team run failed: ${(err as Error).message}`, isError: true };
+      }
+    }
     const specs: SubagentRunSpec[] = (() => {
       // Fan-out mode: explicit tasks array.
       if (input.tasks && input.tasks.length > 0) {

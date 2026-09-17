@@ -1,6 +1,13 @@
 // Hook system (claude-code style, extended): user-configured shell commands
 // that run at agent lifecycle points and can observe or block tool execution.
 //
+// Module layout (see ROADMAP §3.3):
+//   hooks.ts          — this file: types + HookEngine (event registration + run*)
+//   hooks-handlers.ts — the five handler types (command/http/mcp_tool/prompt/
+//                       agent) + decision interpretation (interpretDecision,
+//                       extractJson, matchDiscriminator)
+//   hooks-trust.ts    — hash-based command trust store (HookTrustStore)
+//
 // Supported events (claude-code-aligned, with matchers):
 //   - SessionStart       matcher: source (startup | resume | clear | compact | fork)
 //   - UserPromptSubmit   matcher: none (fires for every user prompt)
@@ -12,18 +19,6 @@
 //   - Notification       matcher: "*" (legacy, fire-and-forget)
 //   - Stop               matcher: "*" (legacy, fire-and-forget)
 //
-// Hook input (JSON on stdin):
-//   - Always: { event, cwd, session_id?, timestamp }
-//   - PreToolUse  : { ..., tool, input }
-//   - PostToolUse : { ..., tool, input, result, isError }
-//   - UserPromptSubmit: { ..., prompt }
-//   - PreCompact  : { ..., trigger, custom_instructions? }
-//   - PostCompact : { ..., trigger, compact_summary }
-//   - SubagentStop: { ..., agent_type, conclusion }
-//   - SessionStart: { ..., source }
-//   - Notification: { ..., message }
-//   - Stop        : { ..., reason }
-//
 // Exit codes / JSON decision (claude-code compatible):
 //   - exit 0 = OK (allow / proceed)
 //   - exit 2 = BLOCK (PreToolUse blocks the tool call; PreCompact blocks
@@ -32,30 +27,37 @@
 //   - other non-zero = warning (surfaced in the tool result / event log,
 //     never fatal).
 //   - STDOUT JSON: hooks may emit a JSON object on stdout for richer
-//     control. Recognised shapes:
-//       { "decision": "block", "reason": "..." }   — block (any event
-//          that supports blocking; takes precedence over exit code 0)
-//       { "decision": "allow" }                    — explicit allow
-//       PostToolUse: { "feedback": "..." }         — append to tool result
-//       UserPromptSubmit: { "prompt": "..." }      — replace the prompt
-//          (only the first hook's replacement wins; subsequent hooks see
-//          the rewritten text)
-//       PreToolUse: { "updatedInput": {...} }      — rewrite the tool input
-//          (codex-style; the replacement is re-validated against the tool's
-//          schema before execution)
-//
-// Hooks are spawned through the host shell directly (NOT the sandbox) —
-// they are user-authored configuration, the same trust level as the
-// config file itself.
-//
-// Backward compatibility: the original 4-event config shape
-// (PreToolUse/PostToolUse/Notification/Stop) is fully supported. New
-// events are opt-in. The `matcher` field keeps its regex semantics for
-// tool-name events; for source/trigger/agent_type events it is matched
-// against that event's discriminator field.
+//     control. See `hooks-handlers.ts` `interpretDecision` for the schema.
 
-import { spawn } from "node:child_process";
 import type { HooksConfig, HookEntryConfig } from "./types.js";
+import { HookTrustStore, hashCommand } from "./hooks-trust.js";
+import {
+  dispatchHook,
+  interpretDecision,
+  matchDiscriminator,
+  type HookResolvers,
+  type HookRawResult,
+} from "./hooks-handlers.js";
+
+// Re-export the trust + handler helpers so existing `from "./hooks.js"`
+// imports keep resolving.
+export { hashCommand, HookTrustStore } from "./hooks-trust.js";
+export {
+  interpretDecision,
+  extractJson,
+  matchDiscriminator,
+  dispatchHook,
+  runCommandHook,
+  runHttpHook,
+  runMcpToolHook,
+  runPromptHook,
+  runAgentHook,
+} from "./hooks-handlers.js";
+export type {
+  HookDecision,
+  HookRawResult,
+  HookResolvers,
+} from "./hooks-handlers.js";
 
 export type HookEvent =
   | "PreToolUse"
@@ -116,14 +118,6 @@ export interface SimpleHookResult {
   warnings: string[];
 }
 
-const HOOK_TIMEOUT_MS = 10_000;
-
-/** Compute the SHA-256 hash of a command string (for hook trust). */
-export function hashCommand(command: string): string {
-  const { createHash } = require("node:crypto") as typeof import("node:crypto");
-  return createHash("sha256").update(command).digest("hex");
-}
-
 /**
  * The default matcher field for each event type. Events not listed here
  * match against "*" (i.e. every hook for that event fires).
@@ -139,10 +133,14 @@ const DEFAULT_MATCH_FIELD: Partial<Record<HookEvent, string>> = {
 
 export class HookEngine {
   private readonly hooks: Record<HookEvent, HookEntry[]>;
+  private trust: HookTrustStore;
+  /** Optional resolvers for non-command/http handler types. Wired by the
+   *  session when MCP, provider, or sub-agent infrastructure is available. */
+  private resolvers: HookResolvers = {};
 
   constructor(
     config: HooksConfig | undefined,
-    private readonly cwd: string
+    private readonly cwd: string,
   ) {
     this.hooks = {
       SessionStart: config?.SessionStart ?? [],
@@ -155,6 +153,7 @@ export class HookEngine {
       Notification: config?.Notification ?? [],
       Stop: config?.Stop ?? [],
     };
+    this.trust = new HookTrustStore();
   }
 
   // ---- Hook trust (hash-based review, codex-style) ----
@@ -168,61 +167,32 @@ export class HookEngine {
   // `http`/`mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate
   // to already-vetted infrastructure, not arbitrary shell code).
 
-  private trustedHashes: Set<string> | null = null;
-  private trustFile: string | null = null;
-
   /** Set the trust file path (typically `<cwd>/.codepilot/hook_trust.json`).
    *  When set, command hooks are gated on hash approval. Call
    *  `loadTrustedHashes()` after setting this. */
   setTrustFile(path: string): void {
-    this.trustFile = path;
-    this.trustedHashes = null;
+    this.trust = new HookTrustStore(path);
   }
 
   /** Load approved hook hashes from the trust file. */
   async loadTrustedHashes(): Promise<void> {
-    if (!this.trustFile) { this.trustedHashes = new Set(); return; }
-    try {
-      const { readFile } = await import("node:fs/promises");
-      const text = await readFile(this.trustFile, "utf-8");
-      const data = JSON.parse(text) as { approved?: string[] };
-      this.trustedHashes = new Set(data.approved ?? []);
-    } catch {
-      this.trustedHashes = new Set();
-    }
+    await this.trust.load();
   }
 
   /** Check if a command hook is trusted (hash approved). Returns true when
    *  trust is not configured (backwards-compatible default). */
   isTrusted(hook: HookEntry): boolean {
-    // Non-command hooks are always trusted.
-    if (!hook.command) return true;
-    if (!this.trustedHashes) return true; // trust not configured
-    return this.trustedHashes.has(hashCommand(hook.command));
+    return this.trust.isTrusted(hook);
   }
 
   /** Approve a command hook's hash and persist to the trust file. */
   async approveHook(command: string): Promise<void> {
-    if (!this.trustFile) return;
-    if (!this.trustedHashes) this.trustedHashes = new Set();
-    this.trustedHashes.add(hashCommand(command));
-    try {
-      const { writeFile, mkdir } = await import("node:fs/promises");
-      const { dirname } = await import("node:path");
-      await mkdir(dirname(this.trustFile), { recursive: true });
-      await writeFile(
-        this.trustFile,
-        JSON.stringify({ approved: [...this.trustedHashes] }, null, 2),
-        "utf-8"
-      );
-    } catch {
-      /* best-effort persistence */
-    }
+    await this.trust.approve(command);
   }
 
   /** Get the set of approved command hashes (for UI display). */
   getTrustedHashes(): Set<string> {
-    return this.trustedHashes ?? new Set();
+    return this.trust.getApproved();
   }
 
   hasHooks(event: HookEvent): boolean {
@@ -236,7 +206,10 @@ export class HookEngine {
 
   /** Run PreToolUse hooks. First blocking hook wins. A hook may also
    *  rewrite the tool input via JSON `{"updatedInput": {...}}`. */
-  async runPreToolUse(toolName: string, input: unknown): Promise<PreHookResult> {
+  async runPreToolUse(
+    toolName: string,
+    input: unknown,
+  ): Promise<PreHookResult> {
     const warnings: string[] = [];
     let current = input;
     let updated: unknown | undefined;
@@ -251,7 +224,8 @@ export class HookEngine {
       if (decision.action === "block") {
         return {
           action: "block",
-          reason: decision.reason ?? `blocked by PreToolUse hook (${h.command})`,
+          reason:
+            decision.reason ?? `blocked by PreToolUse hook (${h.command})`,
           warnings,
         };
       }
@@ -260,9 +234,12 @@ export class HookEngine {
         current = updated;
       }
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`PreToolUse hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `PreToolUse hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
-      if (r.timedOut) warnings.push(`PreToolUse hook "${h.command}" timed out`);
+      if (r.timedOut)
+        warnings.push(`PreToolUse hook "${h.command}" timed out`);
     }
     return { action: "allow", updatedInput: updated, warnings };
   }
@@ -272,7 +249,7 @@ export class HookEngine {
     toolName: string,
     input: unknown,
     result: string,
-    isError: boolean
+    isError: boolean,
   ): Promise<PostHookResult> {
     const warnings: string[] = [];
     const feedback: string[] = [];
@@ -289,9 +266,12 @@ export class HookEngine {
       if (decision.feedback) feedback.push(decision.feedback);
       else if (r.stdout.trim()) feedback.push(r.stdout.trim());
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`PostToolUse hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `PostToolUse hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
-      if (r.timedOut) warnings.push(`PostToolUse hook "${h.command}" timed out`);
+      if (r.timedOut)
+        warnings.push(`PostToolUse hook "${h.command}" timed out`);
     }
     return { feedback: feedback.join("\n") || undefined, warnings };
   }
@@ -315,7 +295,9 @@ export class HookEngine {
       if (decision.action === "block") {
         return {
           action: "block",
-          reason: decision.reason ?? `blocked by UserPromptSubmit hook (${h.command})`,
+          reason:
+            decision.reason ??
+            `blocked by UserPromptSubmit hook (${h.command})`,
           warnings,
         };
       }
@@ -324,9 +306,12 @@ export class HookEngine {
         current = rewritten;
       }
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`UserPromptSubmit hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `UserPromptSubmit hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
-      if (r.timedOut) warnings.push(`UserPromptSubmit hook "${h.command}" timed out`);
+      if (r.timedOut)
+        warnings.push(`UserPromptSubmit hook "${h.command}" timed out`);
     }
     return { action: "allow", rewrittenPrompt: rewritten, warnings };
   }
@@ -334,7 +319,7 @@ export class HookEngine {
   /** Run PreCompact hooks. A blocking hook stops compaction. */
   async runPreCompact(
     trigger: "manual" | "auto",
-    customInstructions?: string
+    customInstructions?: string,
   ): Promise<PreHookResult> {
     const warnings: string[] = [];
     for (const h of this.matching("PreCompact", trigger, { trigger })) {
@@ -348,12 +333,15 @@ export class HookEngine {
       if (decision.action === "block") {
         return {
           action: "block",
-          reason: decision.reason ?? `blocked by PreCompact hook (${h.command})`,
+          reason:
+            decision.reason ?? `blocked by PreCompact hook (${h.command})`,
           warnings,
         };
       }
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`PreCompact hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `PreCompact hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
       if (r.timedOut) warnings.push(`PreCompact hook "${h.command}" timed out`);
     }
@@ -363,7 +351,7 @@ export class HookEngine {
   /** Run PostCompact hooks. Cannot block; fire-and-forget feedback. */
   async runPostCompact(
     trigger: "manual" | "auto",
-    compactSummary: string
+    compactSummary: string,
   ): Promise<SimpleHookResult> {
     const warnings: string[] = [];
     for (const h of this.matching("PostCompact", trigger, { trigger })) {
@@ -374,7 +362,9 @@ export class HookEngine {
         cwd: this.cwd,
       });
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`PostCompact hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `PostCompact hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
       if (r.timedOut) warnings.push(`PostCompact hook "${h.command}" timed out`);
     }
@@ -382,7 +372,9 @@ export class HookEngine {
   }
 
   /** Run SessionStart hooks (matcher: source). Fire-and-forget. */
-  async runSessionStart(source: "startup" | "resume" | "clear" | "compact" | "fork"): Promise<SimpleHookResult> {
+  async runSessionStart(
+    source: "startup" | "resume" | "clear" | "compact" | "fork",
+  ): Promise<SimpleHookResult> {
     const warnings: string[] = [];
     for (const h of this.matching("SessionStart", source, { source })) {
       const r = await this.runHook(h, {
@@ -391,7 +383,9 @@ export class HookEngine {
         cwd: this.cwd,
       });
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`SessionStart hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `SessionStart hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
       if (r.timedOut) warnings.push(`SessionStart hook "${h.command}" timed out`);
     }
@@ -401,10 +395,12 @@ export class HookEngine {
   /** Run SubagentStop hooks (matcher: agent_type). Fire-and-forget. */
   async runSubagentStop(
     agentType: string,
-    conclusion: string
+    conclusion: string,
   ): Promise<SimpleHookResult> {
     const warnings: string[] = [];
-    for (const h of this.matching("SubagentStop", agentType, { agent_type: agentType })) {
+    for (const h of this.matching("SubagentStop", agentType, {
+      agent_type: agentType,
+    })) {
       const r = await this.runHook(h, {
         event: "SubagentStop",
         agent_type: agentType,
@@ -412,7 +408,9 @@ export class HookEngine {
         cwd: this.cwd,
       });
       if (r.code !== 0 && r.code !== null) {
-        warnings.push(`SubagentStop hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`);
+        warnings.push(
+          `SubagentStop hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
       }
       if (r.timedOut) warnings.push(`SubagentStop hook "${h.command}" timed out`);
     }
@@ -420,10 +418,18 @@ export class HookEngine {
   }
 
   /** Fire-and-forget notification/stop hooks (legacy). */
-  async runSimple(event: "Notification" | "Stop", payload: Record<string, unknown>): Promise<void> {
+  async runSimple(
+    event: "Notification" | "Stop",
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     for (const h of this.matching(event, "*", payload)) {
       await this.runHook(h, { event, cwd: this.cwd, ...payload });
     }
+  }
+
+  /** Wire resolvers for the new handler types. */
+  setResolvers(opts: HookResolvers): void {
+    this.resolvers = { ...this.resolvers, ...opts };
   }
 
   // -------------------------------------------------------------------
@@ -433,7 +439,7 @@ export class HookEngine {
   private matching(
     event: HookEvent,
     discriminator: string,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
   ): HookEntry[] {
     return this.hooks[event].filter((h) => {
       // SessionStart / PreCompact / PostCompact / SubagentStop: matcher
@@ -454,302 +460,17 @@ export class HookEngine {
     });
   }
 
-  private runHook(
+  private async runHook(
     hook: HookEntry,
-    payload: Record<string, unknown>
-  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-    // HTTP handler: POST the payload to the configured URL and interpret
-    // the response body as the decision JSON (same schema as command stdout).
-    if (hook.http) {
-      return this.runHttpHook(hook, payload);
-    }
-    // MCP tool handler: invoke an MCP server tool.
-    if (hook.mcpTool) {
-      return this.runMcpToolHook(hook, payload);
-    }
-    // Prompt handler: send the payload to the small model.
-    if (hook.prompt) {
-      return this.runPromptHook(hook, payload);
-    }
-    // Agent handler: spawn a sub-agent.
-    if (hook.agent) {
-      return this.runAgentHook(hook, payload);
-    }
-    // Command handler (default).
-    const command = hook.command;
-    if (!command) {
-      return Promise.resolve({
-        code: 1,
-        stdout: "",
-        stderr: "hook has no handler (command, http, mcp_tool, prompt, or agent)",
-        timedOut: false,
-      });
-    }
-    // Trust check: skip unapproved command hooks with a warning.
-    if (!this.isTrusted(hook)) {
-      return Promise.resolve({
-        code: 0,
-        stdout: "",
-        stderr: `hook command not trusted (hash ${hashCommand(command).slice(0, 8)} not approved). Approve via /hooks or .codepilot/hook_trust.json.`,
-        timedOut: false,
-      });
-    }
-    return new Promise((resolve) => {
-      const shell = process.platform === "win32"
-        ? (process.env.COMSPEC ?? "cmd.exe")
-        : "/bin/sh";
-      const args = process.platform === "win32" ? ["/d", "/s", "/c"] : ["-c"];
-      let child;
-      try {
-        child = spawn(shell, [...args, command], {
-          cwd: this.cwd,
-          env: process.env,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch (err) {
-        resolve({ code: 1, stdout: "", stderr: (err as Error).message, timedOut: false });
-        return;
-      }
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      }, hook.timeout ?? HOOK_TIMEOUT_MS);
-      const out: Buffer[] = [];
-      const err: Buffer[] = [];
-      child.stdout.on("data", (b: Buffer) => out.push(b));
-      child.stderr.on("data", (b: Buffer) => err.push(b));
-      child.on("error", (e) => {
-        clearTimeout(timer);
-        resolve({ code: 1, stdout: "", stderr: e.message, timedOut });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({
-          code,
-          stdout: Buffer.concat(out).toString("utf-8").slice(0, 10_000),
-          stderr: Buffer.concat(err).toString("utf-8").slice(0, 10_000),
-          timedOut,
-        });
-      });
-      child.stdin.write(JSON.stringify(payload));
-      child.stdin.end();
-    });
+    payload: Record<string, unknown>,
+  ): Promise<HookRawResult> {
+    return dispatchHook(
+      hook,
+      payload,
+      this.cwd,
+      this.resolvers,
+      (h) => this.trust.isTrusted(h),
+      (cmd) => hashCommand(cmd).slice(0, 8),
+    );
   }
-
-  /** POST the hook payload to an HTTP endpoint and interpret the response. */
-  private async runHttpHook(
-    hook: HookEntry,
-    payload: Record<string, unknown>
-  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-    const url = hook.http!;
-    const body = JSON.stringify(payload);
-    try {
-      const { request } = await import("node:https");
-      const { request: httpRequest } = await import("node:http");
-      const u = new URL(url);
-      const isHttps = u.protocol === "https:";
-      const reqFn = isHttps ? request : httpRequest;
-      const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), hook.timeout ?? HOOK_TIMEOUT_MS);
-      const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const req = reqFn(
-          {
-            method: "POST",
-            hostname: u.hostname,
-            port: u.port || (isHttps ? 443 : 80),
-            path: u.pathname + u.search,
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-              "Content-Length": String(Buffer.byteLength(body)),
-              ...(hook.httpHeaders ?? {}),
-            },
-            signal: ac.signal,
-          },
-          (r) => {
-            const chunks: Buffer[] = [];
-            r.on("data", (c: Buffer) => chunks.push(c));
-            r.on("end", () => {
-              resolve({
-                status: r.statusCode ?? 0,
-                body: Buffer.concat(chunks).toString("utf-8"),
-              });
-            });
-          },
-        );
-        req.on("error", reject);
-        req.write(body);
-        req.end();
-      });
-      clearTimeout(timer);
-      // 4xx → treat as block (exit 2); 5xx → warning (exit 1); 2xx → OK.
-      if (res.status >= 400 && res.status < 500) {
-        return { code: 2, stdout: res.body, stderr: res.body, timedOut: false };
-      }
-      if (res.status >= 500) {
-        return { code: 1, stdout: "", stderr: `hook http ${res.status}: ${res.body.slice(0, 200)}`, timedOut: false };
-      }
-      return { code: 0, stdout: res.body, stderr: "", timedOut: false };
-    } catch (err) {
-      const msg = (err as Error).message ?? String(err);
-      // AbortError → timed out
-      if (msg.includes("aborted") || msg.includes("AbortError")) {
-        return { code: 1, stdout: "", stderr: "hook http timed out", timedOut: true };
-      }
-      return { code: 1, stdout: "", stderr: msg, timedOut: false };
-    }
-  }
-
-  /** MCP tool handler: invoke `<server>:<tool>` with the payload as args.
-   *  The tool's text result is interpreted as the decision JSON. */
-  private async runMcpToolHook(
-    hook: HookEntry,
-    payload: Record<string, unknown>
-  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-    if (!this.mcpResolver) {
-      return { code: 1, stdout: "", stderr: "mcp_tool hook: no MCP resolver configured", timedOut: false };
-    }
-    try {
-      const result = await this.mcpResolver(hook.mcpTool!, payload);
-      return { code: 0, stdout: result, stderr: "", timedOut: false };
-    } catch (err) {
-      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
-    }
-  }
-
-  /** Prompt handler: send the payload to the small model and interpret
-   *  the response text as the decision JSON. */
-  private async runPromptHook(
-    hook: HookEntry,
-    payload: Record<string, unknown>
-  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-    if (!this.promptResolver) {
-      return { code: 1, stdout: "", stderr: "prompt hook: no prompt resolver configured", timedOut: false };
-    }
-    try {
-      const result = await this.promptResolver(hook.prompt!, payload);
-      return { code: 0, stdout: result, stderr: "", timedOut: false };
-    } catch (err) {
-      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
-    }
-  }
-
-  /** Agent handler: spawn a sub-agent with the payload as objective. */
-  private async runAgentHook(
-    hook: HookEntry,
-    payload: Record<string, unknown>
-  ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
-    if (!this.agentResolver) {
-      return { code: 1, stdout: "", stderr: "agent hook: no agent resolver configured", timedOut: false };
-    }
-    try {
-      const result = await this.agentResolver(hook.agent!, payload);
-      return { code: 0, stdout: result, stderr: "", timedOut: false };
-    } catch (err) {
-      return { code: 1, stdout: "", stderr: (err as Error).message, timedOut: false };
-    }
-  }
-
-  /** Optional resolvers for non-command/http handler types. Wired by the
-   *  session when MCP, provider, or sub-agent infrastructure is available. */
-  mcpResolver?: (tool: string, payload: Record<string, unknown>) => Promise<string>;
-  promptResolver?: (prompt: string, payload: Record<string, unknown>) => Promise<string>;
-  agentResolver?: (objective: string, payload: Record<string, unknown>) => Promise<string>;
-
-  /** Wire resolvers for the new handler types. */
-  setResolvers(opts: {
-    mcp?: (tool: string, payload: Record<string, unknown>) => Promise<string>;
-    prompt?: (prompt: string, payload: Record<string, unknown>) => Promise<string>;
-    agent?: (objective: string, payload: Record<string, unknown>) => Promise<string>;
-  }): void {
-    if (opts.mcp) this.mcpResolver = opts.mcp;
-    if (opts.prompt) this.promptResolver = opts.prompt;
-    if (opts.agent) this.agentResolver = opts.agent;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Decision interpretation
-// ---------------------------------------------------------------------------
-
-interface HookDecision {
-  action: "allow" | "block";
-  reason?: string;
-  feedback?: string;
-  rewrittenPrompt?: string;
-  /** PreToolUse: replacement input object. */
-  updatedInput?: unknown;
-}
-
-/**
- * Parse a hook's stdout (and exit code) into a structured decision.
- * Exit 2 always wins as "block". Otherwise we look for a JSON object on
- * stdout; if present, its fields override the exit-code interpretation.
- */
-function interpretDecision(r: {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-}): HookDecision {
-  if (r.code === 2) {
-    return { action: "block", reason: r.stderr.trim() || undefined };
-  }
-  // Try to parse stdout as JSON. Be tolerant: ignore leading/trailing
-  // whitespace and non-JSON lines (common when a hook prints a log line
-  // before the JSON).
-  const json = extractJson(r.stdout);
-  if (json) {
-    const action = json.decision === "block" ? "block" : "allow";
-    const reason = typeof json.reason === "string" ? json.reason : undefined;
-    const feedback = typeof json.feedback === "string" ? json.feedback : undefined;
-    const rewrittenPrompt = typeof json.prompt === "string" ? json.prompt : undefined;
-    const updatedInput = "updatedInput" in json ? json.updatedInput : undefined;
-    return { action, reason, feedback, rewrittenPrompt, updatedInput };
-  }
-  return { action: "allow" };
-}
-
-/** Extract the first JSON object from a string. Returns null if none. */
-function extractJson(s: string): Record<string, unknown> | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  // Find the matching closing brace (naive — hooks are short).
-  let depth = 0;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const candidate = s.slice(start, i + 1);
-        try {
-          return JSON.parse(candidate) as Record<string, unknown>;
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Match a discriminator value against a matcher. For SessionStart etc.,
- * the matcher may be "*" (all), a bare value ("startup"), or a regex
- * ("/^compact/"). This mirrors claude-code's matcher semantics.
- */
-function matchDiscriminator(matcher: string, value: string): boolean {
-  if (matcher === "*" || matcher === "") return true;
-  // Regex form: /pattern/
-  if (matcher.startsWith("/") && matcher.endsWith("/") && matcher.length > 1) {
-    try {
-      return new RegExp(matcher.slice(1, -1)).test(value);
-    } catch {
-      return false;
-    }
-  }
-  // Bare value: exact match (case-insensitive, since these are enums).
-  return matcher.toLowerCase() === value.toLowerCase();
 }

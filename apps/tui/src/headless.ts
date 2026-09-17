@@ -28,6 +28,10 @@ export interface HeadlessOptions {
   session: Session;
   prompt: string;
   format: OutputFormat;
+  /** Maximum number of agent turns (maps to config.maxTurns). */
+  maxTurns?: number;
+  /** Restrict which tools the agent can use. */
+  allowedTools?: string[];
   /** Optional stdin reader for prompts piped in (unused for now, reserved
    *  for --input-format stream-json). */
 }
@@ -60,8 +64,18 @@ export interface HeadlessResult {
  * for disposing the session afterwards.
  */
 export async function runHeadless(opts: HeadlessOptions): Promise<void> {
-  const { session, prompt, format } = opts;
+  const { session, prompt, format, maxTurns, allowedTools } = opts;
   const startedAt = Date.now();
+
+  // Apply tool restriction before prompting: filter the session's tool
+  // registry so the model only sees the allowed tools.
+  if (allowedTools && allowedTools.length > 0) {
+    session.filterToolRegistry(allowedTools);
+  }
+
+  // maxTurns is expected to have been set via config at session creation
+  // time (see cli.tsx). It flows through CodepilotConfig.maxTurns →
+  // agent.ts line 117: deps.maxTurns ?? deps.config.maxTurns ?? 50.
 
   // Collect events for the final json result + extract final text.
   const events: Event[] = [];

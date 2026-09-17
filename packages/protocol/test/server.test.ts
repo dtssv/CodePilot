@@ -4,6 +4,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 
 // --- Mock @codepilot/core per docs/API.md ---------------------------------
 type Listener = (e: unknown) => void;
@@ -425,6 +429,48 @@ describe("server / protocol handlers", () => {
     );
     expect(res.sessions.length).toBeGreaterThanOrEqual(1);
     expect(listSessions).toHaveBeenCalled();
+  });
+
+  it("workspace list/read/search are cwd-confined", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-workspace-"));
+    mkdirSync(join(root, "src")); writeFileSync(join(root, "src", "a.ts"), "const needle = 1;\n", "utf8");
+    registerServer(server, { defaultCwd: root });
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+    const listed = await client.request("workspace/list", { path: "src" }) as { entries: Array<{ name: string }> };
+    expect(listed.entries.map(e => e.name)).toContain("a.ts");
+    const read = await client.request("workspace/read", { path: "src/a.ts" }) as { content: string };
+    expect(read.content).toContain("needle");
+    const found = await client.request("workspace/search", { query: "needle" }) as { matches: Array<{ path: string; line: number }> };
+    expect(found.matches[0]).toMatchObject({ path: "src/a.ts", line: 1 });
+    const written = await client.request("workspace/write", { path: "src/a.ts", content: "const needle = 2;\n", expectedSize: 18 }) as { size: number };
+    expect(written.size).toBeGreaterThan(0);
+    const updated = await client.request("workspace/read", { path: "src/a.ts" }) as { content: string; hash: string };
+    expect(updated.content).toContain("needle = 2");
+    await expect(client.request("workspace/write", { path: "src/a.ts", content: "stale", expectedSize: 999 })).rejects.toBeInstanceOf(RpcError);
+    await expect(client.request("workspace/write", { path: "src/a.ts", content: "stale", expectedHash: "bad" })).rejects.toBeInstanceOf(RpcError);
+    const stat = await client.request("workspace/stat", { path: "src/a.ts" }) as { exists: boolean; hash: string; size: number };
+    expect(stat).toMatchObject({ exists: true, size: updated.content.length });
+    expect(stat.hash).toHaveLength(64);
+    await expect(client.request("workspace/write", { path: "../outside", content: "x" })).rejects.toBeInstanceOf(RpcError);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("workspace/git-diff returns unstaged and staged patches", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-git-"));
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+    writeFileSync(join(root, "a.txt"), "before\n", "utf8");
+    execFileSync("git", ["add", "a.txt"], { cwd: root }); execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
+    writeFileSync(join(root, "a.txt"), "after\n", "utf8");
+    registerServer(server, { defaultCwd: root });
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+    const unstaged = await client.request("workspace/git-diff", { path: "a.txt" }) as { diff: string; truncated: boolean };
+    expect(unstaged).toMatchObject({ truncated: false }); expect(unstaged.diff).toContain("-before");
+    execFileSync("git", ["add", "a.txt"], { cwd: root });
+    const staged = await client.request("workspace/git-diff", { path: "a.txt", staged: true }) as { diff: string };
+    expect(staged.diff).toContain("+after");
+    rmSync(root, { recursive: true, force: true });
   });
 
   it("session/resume replays events", async () => {

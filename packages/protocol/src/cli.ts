@@ -19,6 +19,8 @@ import {
   type PermissionMode,
   type Session,
 } from "@codepilot/core";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { startServer } from "./server.js";
 
 interface ParsedArgs {
@@ -56,12 +58,23 @@ function helpText(): string {
   return `codepilot — headless coding agent
 
 Usage:
-  codepilot serve
+  codepilot serve                        — JSON-RPC over stdio
+  codepilot serve --web [--port N] [--host H] [--token T]
+                        [--allow-origin O1,O2] [--no-auth] [--web-root [DIR]]
+                                         — same protocol over WebSocket; with
+                                           --web-root also hosts the built web
+                                           SPA (auto-detects apps/web/dist)
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
                        [--yolo] [--permission-mode ask|auto-edit|yolo]
                        [--json] [--quiet]
   codepilot goal "<objective>" [--max-rounds N]
   codepilot --help
+
+serve --web notes:
+  Binds 127.0.0.1 and requires a token (auto-generated, printed on start).
+  Browser clients must also come from an allowed Origin — localhost on the
+  same port is allowed by default; add others with --allow-origin.
+  This port fronts an agent that can run shell commands: do not expose it.
 
 Environment:
   ANTHROPIC_API_KEY / OPENAI_API_KEY / GITHUB_TOKEN — provider keys.
@@ -79,7 +92,7 @@ async function main(): Promise<number> {
 
   switch (cmd) {
     case "serve":
-      return cmdServe();
+      return cmdServe(flags);
     case "run":
       return cmdRun(positional.slice(1), flags);
     case "goal":
@@ -90,10 +103,104 @@ async function main(): Promise<number> {
   }
 }
 
-async function cmdServe(): Promise<number> {
-  const handle = await startServer();
-  // Wait until stdin closes.
-  await handle.peer.loopDone;
+async function cmdServe(
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  if (flags["web"] !== true) {
+    const handle = await startServer();
+    // Wait until stdin closes.
+    await handle.peer.loopDone;
+    return 0;
+  }
+  return cmdServeWeb(flags);
+}
+
+/**
+ * `codepilot serve --web`: the same protocol over WebSocket, for browser
+ * clients. Prints the URL (token included) to stdout and then runs until
+ * interrupted.
+ */
+async function cmdServeWeb(
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const { startWebSocketServer } = await import("./ws.js");
+  const portFlag = flags["port"];
+  const port = typeof portFlag === "string" ? Number(portFlag) : undefined;
+  if (portFlag !== undefined && !Number.isInteger(port)) {
+    process.stderr.write(`invalid --port: ${String(portFlag)}\n`);
+    return 2;
+  }
+  const host = typeof flags["host"] === "string" ? flags["host"] : undefined;
+  const token = typeof flags["token"] === "string" ? flags["token"] : undefined;
+  const noAuth = flags["no-auth"] === true;
+  const allowOrigin = flags["allow-origin"];
+  // --web-root serves the built SPA (apps/web/dist) over plain HTTP on the
+  // same port. "true" (bare --web-root) auto-detects apps/web/dist relative
+  // to this package (installed layout: <pkg>/apps/web/dist next to
+  // <pkg>/packages/protocol).
+  const webRootFlag = flags["web-root"];
+  let webRoot: string | undefined;
+  if (webRootFlag === true) {
+    const here = new URL(".", import.meta.url).pathname;
+    const candidate = resolve(here, "..", "..", "..", "apps", "web", "dist");
+    if (!existsSync(join(candidate, "index.html"))) {
+      process.stderr.write(
+        `--web-root auto-detect failed: no index.html at ${candidate}\n` +
+          `Build the web UI first (pnpm --filter @codepilot/web build) or pass --web-root <dir>.\n`,
+      );
+      return 2;
+    }
+    webRoot = candidate;
+  } else if (typeof webRootFlag === "string") {
+    if (!existsSync(join(webRootFlag, "index.html"))) {
+      process.stderr.write(`--web-root: no index.html at ${webRootFlag}\n`);
+      return 2;
+    }
+    webRoot = webRootFlag;
+  }
+
+  // Binding beyond loopback exposes an agent that can run shell commands, so
+  // it has to be paired with a token. Refuse rather than warn.
+  if (noAuth && host !== undefined && host !== "127.0.0.1" && host !== "localhost") {
+    process.stderr.write(
+      `refusing --no-auth with --host ${host}: that would let anyone who can ` +
+        `reach this port run commands as you. Drop --no-auth, or bind loopback.\n`,
+    );
+    return 2;
+  }
+
+  const handle = await startWebSocketServer({
+    port,
+    host,
+    token,
+    auth: noAuth ? "none" : "token",
+    staticRoot: webRoot,
+    allowedOrigins:
+      typeof allowOrigin === "string" ? allowOrigin.split(",").map((s) => s.trim()) : undefined,
+    onConnection: ({ count }) => {
+      process.stderr.write(`[serve] clients: ${count}\n`);
+    },
+  });
+
+  process.stdout.write(`${handle.url}\n`);
+  process.stderr.write(
+    `[serve] CodePilot protocol on ws://${handle.host}:${handle.port}\n` +
+      (webRoot
+        ? `[serve] web UI: http://${handle.host}:${handle.port}/` +
+          (handle.token ? ` (paste token on first connect)\n` : `\n`)
+        : "") +
+      (handle.token
+        ? `[serve] token: ${handle.token}\n`
+        : `[serve] AUTH DISABLED — anything that can reach this port can run commands\n`),
+  );
+
+  await new Promise<void>((resolve) => {
+    const stop = (): void => {
+      void handle.close().then(resolve, () => resolve());
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
   return 0;
 }
 
@@ -184,6 +291,11 @@ function renderEventText(e: Event, stream: NodeJS.WriteStream, skipMessageText =
       return;
     case "error":
       stream.write(`\n[error${e.recoverable ? " recoverable" : ""}] ${e.message}\n`);
+      return;
+    case "team_message":
+      stream.write(
+        `[team:${e.kind ?? "msg"}] ${e.from} → ${e.to}: ${truncate(e.content, 300)}\n`,
+      );
       return;
   }
 }
