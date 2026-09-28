@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": 1789605716747,
+  "timestamp": 1790560898851,
   "projectRoot": "/Users/zyf/workspace/java/CodePilot",
   "entries": [
     {
@@ -9,44 +9,14 @@
       "size": 5574
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/SchedulingConfig.class",
-      "mtime": 1789366873986.828,
-      "size": 3290
-    },
-    {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/OpenApiConfig.class",
-      "mtime": 1789370028019.8335,
-      "size": 2205
-    },
-    {
       "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/config/DashScopeHttpClientConfig.class",
       "mtime": 1789434787285.549,
       "size": 5867
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/codereview/CodeReviewToolCallingConfig.class",
-      "mtime": 1789459861756.9688,
-      "size": 1071
-    },
-    {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/RedisConfig.class",
-      "mtime": 1789460697825.071,
-      "size": 2056
-    },
-    {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/codereview/CodeReviewAgentConfig.class",
-      "mtime": 1789460700312.1853,
-      "size": 6155
-    },
-    {
       "path": "../AIProject/mall-front/trunk/target/classes/cn/com/casmart/mall/front/domain/properties/WebConfig.class",
       "mtime": 1789519623287.0642,
       "size": 14806
-    },
-    {
-      "path": "../AIProject/ai-chat-service/target/classes/com/casmart/sourcing/config/AsyncConfig.class",
-      "mtime": 1789528039865.9578,
-      "size": 1389
     },
     {
       "path": "../AIProject/ai-chat-service/target/classes/com/casmart/sourcing/config/PurchaseKbProperties$TenantConfig.class",
@@ -74,33 +44,89 @@
       "size": 1502
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/config/SpringAiConfig.class",
-      "mtime": 1789551843085.5806,
-      "size": 1036
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/codereview/CodeReviewToolCallingConfig.class",
+      "mtime": 1789722857012.6836,
+      "size": 1071
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/WechatWorkProperties$CorpConfig.class",
-      "mtime": 1789551869550.8352,
-      "size": 4279
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/OpenApiConfig.class",
+      "mtime": 1789884065869.1663,
+      "size": 2205
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/persistence/mybatis/MybatisPlusConfig.class",
-      "mtime": 1789551872591.608,
-      "size": 2821
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/SchedulingConfig.class",
+      "mtime": 1789988143311.8813,
+      "size": 3322
     },
     {
-      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/trace/TraceAsyncConfig.class",
-      "mtime": 1789553462072.5073,
-      "size": 1299
+      "path": "../AIProject/casmart-V3_purchase_kb-dev3.1.1233333/target/classes/cn/com/casmart/purchasekb/PurchaseKbApplication.class",
+      "mtime": 1790061132329.3538,
+      "size": 1036,
+      "mapperScan": {
+        "basePackages": [
+          "cn.com.casmart.purchasekb.infrastructure.persistence.mapper"
+        ],
+        "sourceFile": "/Users/zyf/workspace/java/AIProject/casmart-V3_purchase_kb-dev3.1.1233333/target/classes/cn/com/casmart/purchasekb/PurchaseKbApplication.class"
+      }
+    },
+    {
+      "path": "../AIProject/casmart-V3_purchase_kb-dev3.1.1233333/target/classes/cn/com/casmart/purchasekb/infrastructure/config/PurchaseKbProperties$TenantConfig.class",
+      "mtime": 1790061139724.7385,
+      "size": 2865
+    },
+    {
+      "path": "../AIProject/casmart-V3_purchase_kb-dev3.1.1233333/target/classes/cn/com/casmart/purchasekb/infrastructure/config/WebMvcConfig.class",
+      "mtime": 1790061139733.9993,
+      "size": 2259
+    },
+    {
+      "path": "../AIProject/casmart-V3_ai-chat-service-dev1.0/target/classes/com/casmart/sourcing/config/WebConfig.class",
+      "mtime": 1790061140357.2195,
+      "size": 3130
     },
     {
       "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/WebMvcConfig.class",
-      "mtime": 1789605710029.2317,
+      "mtime": 1790141384894.659,
       "size": 5457
     },
     {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/persistence/mybatis/MybatisPlusConfig.class",
+      "mtime": 1790213071178.79,
+      "size": 3215
+    },
+    {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/trace/TraceAsyncConfig.class",
+      "mtime": 1790242945483.5154,
+      "size": 1299
+    },
+    {
+      "path": "../AIProject/ai-chat-service/target/classes/com/casmart/sourcing/config/AsyncConfig.class",
+      "mtime": 1790559396696.6387,
+      "size": 1389
+    },
+    {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/RedisConfig.class",
+      "mtime": 1790560874896.2253,
+      "size": 2056
+    },
+    {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/codereview/CodeReviewAgentConfig.class",
+      "mtime": 1790560877279.2058,
+      "size": 6155
+    },
+    {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/config/WechatWorkProperties$CorpConfig.class",
+      "mtime": 1790560877635.4236,
+      "size": 4279
+    },
+    {
+      "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/infrastructure/ai/config/SpringAiConfig.class",
+      "mtime": 1790560880468.6455,
+      "size": 1036
+    },
+    {
       "path": "../AIProject/traceflow-backend/target/classes/cn/com/casmart/traceflow/TraceflowApplication.class",
-      "mtime": 1789605716009.471,
+      "mtime": 1790560896470.9382,
       "size": 1545
     }
   ]

@@ -16,6 +16,7 @@
  */
 
 import { readdir, readFile, stat, writeFile, rename } from "node:fs/promises";
+import { watch, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -104,6 +105,15 @@ export interface WorkspaceGitDiffParams { path?: string; staged?: boolean; }
 export interface WorkspaceGitDiffResult { path?: string; diff: string; truncated: boolean; }
 export interface WorkspaceStatParams { path: string; }
 export interface WorkspaceStatResult { path: string; exists: boolean; size: number; hash: string; modifiedAt?: number; }
+export interface WorkspaceWatchParams { path?: string; }
+export interface WorkspaceWatchResult { watching: boolean; path: string; }
+export interface WorkspaceChangedParams {
+  path: string;
+  /** Debounced change kinds since the last notification. */
+  kinds: Array<"rename" | "change">;
+  /** Set when the underlying watcher failed; clients should fall back to polling. */
+  error?: string;
+}
 
 export interface PromptSendParams {
   sessionId: string;
@@ -211,6 +221,7 @@ export function registerServer(
   peer.onRequest<{}, WorkspaceGitStatusResult>("workspace/git-status", () => handleWorkspaceGitStatus(ctx));
   peer.onRequest<WorkspaceGitDiffParams, WorkspaceGitDiffResult>("workspace/git-diff", (p) => handleWorkspaceGitDiff(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
+  peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
   peer.onRequest<PromptSendParams, Record<string, never>>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
@@ -273,6 +284,8 @@ interface ServerContext {
   defaultPermissionMode: PermissionMode;
   capabilities: InitializeResult["capabilities"];
   initialized: boolean;
+  /** At most one workspace watcher per connection (re-watch replaces). */
+  watcher?: { watcher: FSWatcher; debounce?: ReturnType<typeof setTimeout>; kinds: Set<"rename" | "change">; path: string };
 }
 
 /** Per-session bookkeeping kept off the session itself (held weakly). */
@@ -518,7 +531,10 @@ async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadPara
 
 async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearchParams): Promise<WorkspaceSearchResult> {
   assertInitialized(ctx);
-  const root = workspacePath(ctx, params.path).abs;
+  const target = workspacePath(ctx, params.path);
+  const root = target.abs;
+  const rootInfo = await stat(root).catch(() => null);
+  if (!rootInfo?.isDirectory()) throw new RpcError(ErrorCode.InvalidRequest, `workspace search path is not a directory: ${target.rel}`);
   const query = params.query.trim();
   if (!query) return { matches: [], truncated: false };
   const max = Math.min(Math.max(params.maxResults ?? 100, 1), 1000);
@@ -526,10 +542,13 @@ async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearch
   let stopped = false;
   async function walk(dir: string): Promise<void> {
     if (stopped) return;
-    for (const name of await readdir(dir)) {
+    let names: string[];
+    try { names = await readdir(dir); } catch { return; }
+    for (const name of names) {
       if (name === ".git" || name === "node_modules" || name === ".codepilot") continue;
       const abs = join(dir, name);
-      const info = await stat(abs);
+      let info;
+      try { info = await stat(abs); } catch { continue; }
       if (info.isDirectory()) await walk(abs);
       else if (info.isFile() && info.size <= WORKSPACE_MAX_BYTES) {
         try {
@@ -585,6 +604,57 @@ async function handleWorkspaceGitDiff(ctx: ServerContext, params: WorkspaceGitDi
     const truncated = bytes.byteLength > WORKSPACE_MAX_BYTES;
     return { path: params.path, diff: bytes.subarray(0, WORKSPACE_MAX_BYTES).toString("utf8"), truncated };
   } catch (err) { throw new RpcError(ErrorCode.InvalidRequest, `git diff unavailable: ${err instanceof Error ? err.message : String(err)}`); }
+}
+
+const WATCH_DEBOUNCE_MS = 150;
+function stopWatcher(ctx: ServerContext): void {
+  const w = ctx.watcher;
+  if (!w) return;
+  ctx.watcher = undefined;
+  if (w.debounce) clearTimeout(w.debounce);
+  try { w.watcher.close(); } catch { /* already closed */ }
+}
+
+async function handleWorkspaceWatch(ctx: ServerContext, params: WorkspaceWatchParams): Promise<WorkspaceWatchResult> {
+  assertInitialized(ctx);
+  stopWatcher(ctx);
+  const target = workspacePath(ctx, params.path);
+  const info = await stat(target.abs).catch(() => null);
+  if (!info?.isDirectory()) throw new RpcError(ErrorCode.InvalidRequest, `workspace watch path is not a directory: ${target.rel}`);
+  const root = resolve(ctx.defaultCwd);
+  let watcher: FSWatcher;
+  try {
+    watcher = watch(target.abs, { recursive: true }, (kind, filename) => {
+      if (!filename) return;
+      const rel = relative(root, resolve(target.abs, filename));
+      if (!rel || rel.startsWith("..")) return;
+      const top = rel.split("/")[0];
+      if (top === ".git" || top === "node_modules" || top === ".codepilot") return;
+      const entry = ctx.watcher;
+      if (!entry) return;
+      entry.kinds.add(kind === "rename" ? "rename" : "change");
+      if (entry.debounce) clearTimeout(entry.debounce);
+      entry.debounce = setTimeout(() => {
+        entry.debounce = undefined;
+        const kinds = Array.from(entry.kinds);
+        entry.kinds.clear();
+        void ctx.peer.notify<WorkspaceChangedParams>("workspace/changed", { path: entry.path, kinds }).catch(() => {});
+      }, WATCH_DEBOUNCE_MS);
+    });
+  } catch (err) {
+    throw new RpcError(ErrorCode.InvalidRequest, `workspace watch unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const entry = { watcher, kinds: new Set<"rename" | "change">(), path: target.rel };
+  ctx.watcher = entry;
+  watcher.on("error", (err) => {
+    // A broken watcher must not silently stop notifying: tell the client to
+    // fall back to polling, then drop the watcher.
+    if (ctx.watcher === entry) stopWatcher(ctx);
+    void ctx.peer.notify<WorkspaceChangedParams>("workspace/changed", {
+      path: target.rel, kinds: [], error: err instanceof Error ? err.message : String(err),
+    }).catch(() => {});
+  });
+  return { watching: true, path: target.rel };
 }
 
 async function handleWorkspaceWrite(ctx: ServerContext, params: WorkspaceWriteParams): Promise<WorkspaceWriteResult> {
@@ -694,6 +764,7 @@ async function handleSessionFork(
 
 /** Drop every session and pending reverse-request this connection owns. */
 async function teardown(ctx: ServerContext): Promise<void> {
+  stopWatcher(ctx);
   const sessions = Array.from(ctx.sessions.values());
   ctx.sessions.clear();
   for (const s of sessions) {

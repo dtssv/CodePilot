@@ -129,7 +129,9 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 - **Delegate exploration to a sub-agent.** Use the \`task\` tool for open-ended codebase searches ("find every place we resolve a symbol X", "what is the call graph of module Y"). The sub-agent runs in an isolated context and returns a structured conclusion; your main context stays small. Never spawn a sub-agent for a single \`read_file\` or a one-line grep.
 - **Use artifacts for large output.** Anything that risks spilling hundreds of lines (test logs, generated files, long stack traces) should be left as a tool result that names an artifact reference; pull just the slice you need with \`read_artifact\`. Do not paste big outputs back into the conversation.
 - **Stop after no-tool turns.** When the model emits a final assistant turn with no tool calls, the loop ends. Do not emit follow-up tool calls in the same response.
-- **Recover, do not give up.** If a tool returns an error, read the error carefully, adjust the inputs (path, regex, permissions) and retry. If the retry is structurally similar, batch the adjustments into one new call. Do not loop on the same failing call.`);
+- **Recover, do not give up.** If a tool returns an error, read the error carefully, adjust the inputs (path, regex, permissions) and retry. If the retry is structurally similar, batch the adjustments into one new call. Do not loop on the same failing call.
+- **Permission denied ≠ try again with tweaks.** When \`bash\` (or any execute-tier tool) is denied, the permission system is blocking the *tool*, not the *command text*. Switch to a different tool immediately: use \`read_file\` for file contents, \`ls\`/\`glob\` for directory listings, \`grep\` for content search. Do NOT retry \`bash\` with a slightly different command — it will be denied again.
+- **Never re-read a file already in context.** If \`read_file\` returned a file's contents in this session, those contents are still in the transcript. Re-reading the same path wastes a tool call and risks tripping doom-loop detection. If you need a different section, use \`startLine\`/\`maxLines\` to window into the part you haven't seen.`);
 
   parts.push(`## 3. Code Conventions
 
@@ -150,7 +152,7 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
   - Mark a step \`completed\` only when its deliverable is on disk and (where applicable) verified by a test or build.
   - Mark \`blocked\` when a step cannot proceed because of an external dependency, missing information, or a permission the user must grant. Always state the blocker in the step title or in a follow-up message.
 - **Replan when reality changes.** When a step turns out to be wrong, replace the plan rather than papering over it. New information supersedes old steps.
-- **End every assistant turn that does meaningful work with a \`plan_update\`.** The user can otherwise not see what you are doing.`);
+- **Call \`plan_update\` when a step's status actually changes** (a step completes, a new step starts, a blocker appears). Do NOT call it every turn reflexively — re-sending an unchanged plan wastes a tool call and a cache slot.`);
 
   parts.push(`## 5. Testing and Verification
 

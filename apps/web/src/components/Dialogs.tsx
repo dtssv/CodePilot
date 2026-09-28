@@ -52,7 +52,7 @@ export function PermissionDialog({
           type="button"
           onClick={() => onDecide("always")}
           className="rounded-md border border-[var(--color-edge)] px-3 py-1.5 text-sm hover:bg-[var(--color-surface-sunken)]"
-          title="Remember this decision for matching calls in this session"
+          title="Remember this command pattern for this session — other commands still ask"
         >
           Always allow
         </button>

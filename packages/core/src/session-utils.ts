@@ -121,6 +121,10 @@ export function buildSingleProvider(config: CodepilotConfig): ChatProvider {
       return new OpenAIProvider({
         apiKey: config.apiKey,
         baseURL: config.baseURL,
+        maxRetries: config.maxRetries,
+        baseDelayMs: config.baseRetryDelayMs,
+        maxDelayMs: config.maxRetryDelayMs,
+        abortOnDelayMs: config.retryAbortOnDelayMs,
       });
     case "copilot":
       return new CopilotProvider({});
@@ -137,6 +141,10 @@ export function buildSmallProvider(config: CodepilotConfig) {
       return new OpenAIProvider({
         apiKey: config.apiKey,
         baseURL: config.baseURL,
+        maxRetries: config.maxRetries,
+        baseDelayMs: config.baseRetryDelayMs,
+        maxDelayMs: config.maxRetryDelayMs,
+        abortOnDelayMs: config.retryAbortOnDelayMs,
       });
     case "copilot":
       return new CopilotProvider({});

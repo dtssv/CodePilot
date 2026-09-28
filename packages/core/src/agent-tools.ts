@@ -155,6 +155,26 @@ export async function runOneTool(
         isError: true,
       };
     }
+    // Idempotent-call de-duplication: if this exact (tool, input) already
+    // succeeded earlier in the run, replay the cached result instead of
+    // re-executing. This collapses the "rate-limit makes the model re-explore
+    // the same directories" loop: the model still gets the data it asked for,
+    // but we don't burn another tool round-trip or stack a duplicate
+    // tool_result into the context. A short prefix tells the model this is a
+    // replay so it doesn't keep asking for the same thing.
+    const cached = doomLoop.cachedResult(tc.name, tc.input);
+    if (cached) {
+      endToolSpan();
+      return {
+        content:
+          `[dedup: replaying the result of an identical ${tc.name} call from ` +
+          `earlier in this run — nothing has changed since. Use this result; ` +
+          `do not call ${tc.name} again with the same arguments.]\n\n` +
+          cached.content,
+        isError: false,
+        artifactRef: cached.artifactRef,
+      };
+    }
   }
 
   // Permission check.
@@ -183,8 +203,12 @@ export async function runOneTool(
         void err;
       }
       if (decision === "always") {
-        // Narrow the grant to a rule covering this invocation (e.g.
-        // "bash(npm test *)") instead of flipping the whole session to yolo.
+        // Narrow the grant to a rule covering THIS invocation (e.g.
+        // "bash(npm test *)") rather than flipping the whole session to
+        // allow every call to this tool. The rule is session-scoped: it
+        // lives in memory on the PermissionEngine and is never persisted,
+        // so it dies with this Session. deny rules still override — they
+        // are checked first in preflight and are absolute, even under yolo.
         const rule = PermissionEngine.suggestRule(tool, effectiveInput);
         deps.permissions.addSessionRule(rule, "allow");
         decision = "allow";
@@ -268,11 +292,16 @@ export async function runOneTool(
   try {
     const result = await tool.execute(parsed as never, ctx);
     let content = result.content;
-    // Doom-loop warning appended to the result so the model sees it.
+    // Doom-loop warning (post-execution). NOTE: we do NOT call
+    // doomLoop.check() again here — the pre-execution check already
+    // recorded this call. A second check would double-count every
+    // invocation, making the REFUSE_THRESHOLD (5) effectively fire at
+    // the 3rd real call (6 counts). Instead we ask for the CURRENT
+    // count without incrementing, purely to decide whether to warn.
     if (doomLoop) {
-      const dl = doomLoop.check(tc.name, tc.input);
-      if (dl.warn) {
-        content = `[${dl.message}]\n\n${content}`;
+      const count = doomLoop.peekCount(tc.name, tc.input);
+      if (count >= DoomLoopDetector.WARN_THRESHOLD) {
+        content = `[doom_loop warning: you've called ${tc.name} with this exact input ${count} times. If previous calls didn't help, STOP and try a different approach.]\n\n${content}`;
       }
     }
     // PostToolUse hooks: stdout is appended as feedback for the model.
@@ -288,6 +317,14 @@ export async function runOneTool(
     if (result.isError === true)
       endToolSpan(new Error(`tool ${tc.name} returned an error`));
     else endToolSpan();
+    // Cache successful idempotent reads so a later identical call can replay.
+    if (doomLoop && result.isError !== true) {
+      doomLoop.recordResult(tc.name, tc.input, {
+        content,
+        artifactRef: result.artifactRef,
+        isError: false,
+      });
+    }
     return {
       content,
       isError: result.isError === true,

@@ -13,6 +13,8 @@ export type UiStatus = "idle" | "thinking" | "waiting_permission" | "waiting_que
 
 export interface AppState {
   connection: "disconnected" | "connecting" | "connected";
+  /** Attempt counter while automatic reconnect is underway. */
+  reconnectAttempt?: number;
   /** Set while disconnected or after a failure. */
   connectionError?: string;
   sessionId?: string;
@@ -34,6 +36,8 @@ export type Action =
   | { type: "connecting" }
   | { type: "connected"; cwd: string; modes: AgentMode[] }
   | { type: "disconnected"; error?: string }
+  | { type: "reconnecting"; attempt: number }
+  | { type: "reconnected" }
   | { type: "session-opened"; sessionId: string; agentMode: AgentMode; history?: Event[] }
   | { type: "event"; event: Event }
   | { type: "sending" }
@@ -61,12 +65,13 @@ export function initialState(cwd = ""): AppState {
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "connecting":
-      return { ...state, connection: "connecting", connectionError: undefined };
+      return { ...state, connection: "connecting", connectionError: undefined, reconnectAttempt: undefined };
     case "connected":
       return {
         ...state,
         connection: "connected",
         connectionError: undefined,
+        reconnectAttempt: undefined,
         cwd: action.cwd,
       };
     case "disconnected":
@@ -80,6 +85,10 @@ export function reducer(state: AppState, action: Action): AppState {
         permission: undefined,
         question: undefined,
       };
+    case "reconnecting":
+      return { ...state, connection: "connecting", reconnectAttempt: action.attempt };
+    case "reconnected":
+      return { ...state, connection: "connected", reconnectAttempt: undefined, connectionError: undefined };
     case "session-opened": {
       const base: AppState = {
         ...state,

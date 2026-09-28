@@ -15,6 +15,8 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<Array<{ path: string; line: number; text: string }>>([]);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const searchRevision = useRef(0);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [git, setGit] = useState<{ branch: string; files: Array<{ path: string; status: string }> } | null>(null);
@@ -28,6 +30,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
     return () => diffController.invalidate();
   }, [diffController, cwd, connected]);
   const [externalChanged, setExternalChanged] = useState(false);
+  const [watchError, setWatchError] = useState<string | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const terminalLines = rows.filter((r): r is Extract<Row, { kind: "tool" }> => r.kind === "tool" && r.tool.name === "bash").flatMap(r => [r.tool.result ?? "", r.tool.status === "running" ? "… running" : ""] ).filter(Boolean);
   const openFile = async (file: string) => {
@@ -51,7 +54,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
       setError(null); setEntries(result.entries); setPath(next); setSelected(null); setDirty(false);
     } catch (err) { if (revision === readRevision.current) setError(String(err)); }
   };
-  useEffect(() => () => { readRevision.current++; }, [cwd, connected]);
+  useEffect(() => () => { readRevision.current++; searchRevision.current++; setMatches([]); setSearchTruncated(false); }, [cwd, connected]);
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -59,6 +62,26 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
   useEffect(() => { if (connected) void load(); }, [connected, cwd]);
+  // Server-pushed disk changes: refresh the visible listing and re-check the
+  // open file immediately (the 3s poll below remains as a fallback when the
+  // watcher itself errors — `error` in the notification).
+  useEffect(() => {
+    client.setWorkspaceChangedHandler((params) => {
+      if (params.error) { setWatchError(params.error); return; }
+      setWatchError(null);
+      void client.listWorkspace(path).then(r => setEntries(r.entries)).catch(() => {});
+      if (selected) {
+        void client.workspaceStat(selected.path).then(s => {
+          setExternalChanged(changedExternally(selected, s));
+        }).catch(() => {});
+      }
+    });
+    return () => client.setWorkspaceChangedHandler(null);
+  }, [client, path, selected?.path, selected?.originalHash, selected]);
+  useEffect(() => {
+    if (!connected) return;
+    void client.watchWorkspace(".").catch(() => setWatchError("watch unavailable — polling"));
+  }, [client, connected, cwd]);
   useEffect(() => { setDirty(false); setExternalChanged(false); }, [selected?.path]);
   useEffect(() => {
     if (!selected || !connected || saving) return;
@@ -77,9 +100,10 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
   return <aside className="flex w-72 shrink-0 flex-col border-l border-[var(--color-edge)] bg-[var(--color-surface-sunken)] text-xs">
     <div className="flex items-center justify-between border-b border-[var(--color-edge)] px-3 py-2 font-medium"><span>Workspace</span><button type="button" onClick={() => setTerminalOpen(v => !v)} className="rounded border px-1.5 py-0.5">Terminal</button><button type="button" onClick={() => void load()} className="rounded border px-1.5 py-0.5">Refresh</button></div>
     <div className="border-b border-[var(--color-edge)] px-3 py-1 font-mono text-[10px]">{path}</div><button type="button" onClick={() => void client.gitStatus().then(setGit).catch(err => setError(String(err)))} className="border-b border-[var(--color-edge)] px-3 py-1 text-left text-[10px] hover:bg-[var(--color-surface-raised)]">Git: {git?.branch ?? "load status"}</button>{git && <div className="max-h-24 overflow-auto border-b border-[var(--color-edge)]">{git.files.length ? git.files.map(f => <button type="button" key={f.path} onClick={() => { void diffController.load(f.path, diffStaged); }} className="block w-full truncate px-3 py-1 text-left font-mono text-[10px] hover:bg-[var(--color-surface-raised)]">{f.status} {f.path}</button>) : <div className="px-3 py-1 text-[10px]">Clean</div>}</div>}
-    <form className="flex gap-1 border-b border-[var(--color-edge)] p-2" onSubmit={e => { e.preventDefault(); void client.searchWorkspace(query).then(r => setMatches(r.matches)).catch(err => setError(String(err))); }}><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search workspace" className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1" /><button type="submit" className="rounded border px-2">Go</button></form>
+    <form className="flex gap-1 border-b border-[var(--color-edge)] p-2" onSubmit={e => { e.preventDefault(); const revision = ++searchRevision.current; void client.searchWorkspace(query, path).then(r => { if (revision === searchRevision.current) { setMatches(r.matches); setSearchTruncated(r.truncated); setError(null); } }).catch(err => { if (revision === searchRevision.current) setError(String(err)); }); }}><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search workspace" className="min-w-0 flex-1 rounded border bg-transparent px-2 py-1" /><button type="submit" className="rounded border px-2">Go</button></form>
     {error && <div className="p-2 text-[var(--color-remove)]">{error}</div>}
-    {matches.length > 0 && <div className="max-h-36 overflow-auto border-b border-[var(--color-edge)]">{matches.map((m, i) => <button key={`${m.path}:${m.line}:${i}`} type="button" onClick={() => void openFile(m.path)} className="block w-full truncate px-2 py-1 text-left hover:bg-[var(--color-surface-raised)]"><span className="font-mono">{m.path}:{m.line}</span> {m.text}</button>)}</div>}
+    {watchError && <div role="status" className="px-2 py-1 text-[10px]">Live file watch unavailable ({watchError}); falling back to polling.</div>}
+    {searchTruncated && <div role="status" className="px-2 py-1 text-[10px]">Search results truncated by server.</div>}{matches.length > 0 && <div className="max-h-36 overflow-auto border-b border-[var(--color-edge)]">{matches.map((m, i) => <button key={`${m.path}:${m.line}:${i}`} type="button" onClick={() => void openFile(m.path)} className="block w-full truncate px-2 py-1 text-left hover:bg-[var(--color-surface-raised)]"><span className="font-mono">{m.path}:{m.line}</span> {m.text}</button>)}</div>}
     <div className="min-h-0 flex-1 overflow-auto">{path !== "." && <button type="button" onClick={() => void load(parent)} className="block w-full px-3 py-1 text-left hover:bg-[var(--color-surface-raised)]">↩ ..</button>}{entries.map(e => <button key={e.path} type="button" onClick={() => e.kind === "directory" ? void load(e.path) : void openFile(e.path)} className="block w-full truncate px-3 py-1 text-left hover:bg-[var(--color-surface-raised)]">{e.kind === "directory" ? "▸ " : "· "}{e.name}</button>)}</div>
     {gitDiff !== null && (
       <section aria-label="Git diff" className="max-h-48 overflow-auto border-b border-[var(--color-edge)] bg-black/20">

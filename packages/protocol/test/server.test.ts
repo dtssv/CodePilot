@@ -236,6 +236,14 @@ describe("server / protocol handlers", () => {
   let tp: ReturnType<typeof transportPair>;
   let server: Peer;
   let client: Peer;
+  let serverHandle: ReturnType<typeof registerServer> | null = null;
+
+  /** Dispose the last registered server handle (watchers, sessions). */
+  async function serverHandleDispose(): Promise<void> {
+    const handle = serverHandle;
+    serverHandle = null;
+    if (handle) await handle.dispose();
+  }
 
   beforeEach(() => {
     sessionsById.clear();
@@ -246,6 +254,7 @@ describe("server / protocol handlers", () => {
   });
 
   afterEach(async () => {
+    await serverHandleDispose();
     tp.closeAll();
     await Promise.allSettled([server.close(), client.close()]);
   });
@@ -440,8 +449,9 @@ describe("server / protocol handlers", () => {
     expect(listed.entries.map(e => e.name)).toContain("a.ts");
     const read = await client.request("workspace/read", { path: "src/a.ts" }) as { content: string };
     expect(read.content).toContain("needle");
-    const found = await client.request("workspace/search", { query: "needle" }) as { matches: Array<{ path: string; line: number }> };
-    expect(found.matches[0]).toMatchObject({ path: "src/a.ts", line: 1 });
+    const found = await client.request("workspace/search", { query: "needle", path: "src" }) as { matches: Array<{ path: string; line: number }>; truncated: boolean };
+    expect(found.matches[0]).toMatchObject({ path: "src/a.ts", line: 1 }); expect(found.truncated).toBe(false);
+    await expect(client.request("workspace/search", { query: "needle", path: "missing" })).rejects.toBeInstanceOf(RpcError);
     const written = await client.request("workspace/write", { path: "src/a.ts", content: "const needle = 2;\n", expectedSize: 18 }) as { size: number };
     expect(written.size).toBeGreaterThan(0);
     const updated = await client.request("workspace/read", { path: "src/a.ts" }) as { content: string; hash: string };
@@ -470,6 +480,51 @@ describe("server / protocol handlers", () => {
     execFileSync("git", ["add", "a.txt"], { cwd: root });
     const staged = await client.request("workspace/git-diff", { path: "a.txt", staged: true }) as { diff: string };
     expect(staged.diff).toContain("+after");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("workspace/watch pushes debounced change notifications and is torn down", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-watch-"));
+    mkdirSync(join(root, "src")); writeFileSync(join(root, "src", "a.ts"), "v1\n", "utf8");
+    serverHandle = registerServer(server, { defaultCwd: root });
+    const changes: Array<{ path: string; kinds: string[] }> = [];
+    client.onNotification("workspace/changed", (p) => changes.push(p as { path: string; kinds: string[] }));
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+
+    const watching = await client.request("workspace/watch", {}) as { watching: boolean; path: string };
+    expect(watching).toEqual({ watching: true, path: "." });
+
+    // Two quick writes coalesce into a single debounced notification.
+    writeFileSync(join(root, "src", "a.ts"), "v2\n", "utf8");
+    writeFileSync(join(root, "src", "a.ts"), "v3\n", "utf8");
+    const deadline = Date.now() + 3000;
+    while (changes.length === 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+    expect(changes.length).toBe(1);
+    expect(changes[0]!.path).toBe(".");
+    expect(changes[0]!.kinds.length).toBeGreaterThan(0);
+
+    // Filtered trees produce no notifications.
+    mkdirSync(join(root, "node_modules"));
+    writeFileSync(join(root, "node_modules", "dep.js"), "x\n", "utf8");
+    await new Promise(r => setTimeout(r, 400));
+    expect(changes.length).toBe(1);
+
+    // Disposing the server handle stops the watcher.
+    await serverHandleDispose();
+    writeFileSync(join(root, "src", "a.ts"), "v4\n", "utf8");
+    await new Promise(r => setTimeout(r, 400));
+    expect(changes.length).toBe(1);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("workspace/watch rejects non-directories and paths outside cwd", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-watch-"));
+    writeFileSync(join(root, "file.txt"), "x\n", "utf8");
+    registerServer(server, { defaultCwd: root });
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+    await expect(client.request("workspace/watch", { path: "file.txt" })).rejects.toBeInstanceOf(RpcError);
+    await expect(client.request("workspace/watch", { path: "missing" })).rejects.toBeInstanceOf(RpcError);
+    await expect(client.request("workspace/watch", { path: "../outside" })).rejects.toBeInstanceOf(RpcError);
     rmSync(root, { recursive: true, force: true });
   });
 

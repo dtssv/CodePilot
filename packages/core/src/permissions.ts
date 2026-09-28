@@ -21,10 +21,11 @@
 //   5. dangerous-command scan (bash)    — forces "ask" even under yolo
 //   6. otherwise → "ask"
 //
-// "always" decisions from the UI are narrowed to a per-invocation RULE
-// (addSessionRule) instead of the old behaviour of flipping the whole
-// session to yolo. Rules can optionally be persisted to the repo config
-// with persistRule().
+// "always" decisions from the UI add a session rule scoped to the
+// invocation's primary argument (e.g. `bash(git status *)`), so only
+// matching commands are auto-allowed for the rest of the session — not
+// every call to that tool. deny rules still override — they are checked
+// first and are absolute.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -81,7 +82,14 @@ export class PermissionEngine {
     };
   }
 
-  /** Record an "always"-style decision as a narrowed rule for this session. */
+  /** Record an "always"-style decision as a session rule. When the user
+   *  picks "always allow", the caller narrows the grant to a rule covering
+   *  THIS invocation (e.g. `bash(npm test *)` via `suggestRule`) rather than
+   *  a bare tool name — so only matching calls are auto-allowed for the rest
+   *  of this session, not every call to that tool. The rule never persists
+   *  to disk; it lives only as long as this PermissionEngine (i.e. this
+   *  Session). deny rules still override — they are checked first in
+   *  preflight and are absolute. */
   addSessionRule(rule: string, effect: RuleEffect = "allow"): void {
     this.sessionRules[effect].push(rule);
   }

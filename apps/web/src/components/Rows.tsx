@@ -38,9 +38,9 @@ function MessageBlock({ msg }: { msg: MessageRow }): React.ReactElement {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[85ch] rounded-lg px-3.5 py-2.5 text-sm leading-6 whitespace-pre-wrap ${
+        className={`max-w-[85ch] rounded-2xl px-4 py-2.5 text-sm leading-6 whitespace-pre-wrap ${
           isUser
-            ? "bg-[var(--color-surface-raised)] text-[var(--color-ink)]"
+            ? "bg-[var(--color-accent-dim)] text-[var(--color-ink)]"
             : "bg-transparent text-[var(--color-ink)]"
         }`}
       >
@@ -61,24 +61,24 @@ function ToolBlock({ tool }: { tool: ToolRow }): React.ReactElement {
   const [open, setOpen] = useState(false);
   const hasDiff = tool.change !== null && tool.change !== undefined;
   return (
-    <div className="rounded-lg border border-[var(--color-edge)] bg-[var(--color-surface-sunken)] px-3 py-2">
+    <div className="rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] transition-colors hover:border-[var(--color-edge)]">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 text-left text-xs"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
       >
-        <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[tool.status]}`} />
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[tool.status]}`} />
         <span className="font-mono text-[var(--color-ink)]">{tool.name}</span>
         <span className="truncate text-[var(--color-ink-dim)]">
           {summarizeInput(tool.input)}
         </span>
-        <span className="ml-auto text-[var(--color-ink-dim)]">{open ? "−" : "+"}</span>
+        <span className="ml-auto text-[var(--color-ink-faint)]">{open ? "−" : "+"}</span>
       </button>
 
       {hasDiff && <DiffBlock change={tool.change!} />}
 
       {open && (
-        <div className="mt-2 space-y-2">
+        <div className="space-y-2 border-t border-[var(--color-edge-subtle)] px-3 py-2">
           <Labelled label="input">
             <pre className="overflow-x-auto text-[11px] leading-5 text-[var(--color-ink-dim)]">
               {safeJson(tool.input)}
@@ -92,7 +92,7 @@ function ToolBlock({ tool }: { tool: ToolRow }): React.ReactElement {
             </Labelled>
           )}
           {tool.artifactRef && (
-            <div className="text-[11px] text-[var(--color-ink-dim)]">
+            <div className="text-[11px] text-[var(--color-ink-faint)]">
               full output spilled to artifact{" "}
               <code className="text-[var(--color-ink)]">{tool.artifactRef}</code>
             </div>

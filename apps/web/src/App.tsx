@@ -29,19 +29,42 @@ export function App(): React.ReactElement {
 
   // The client outlives renders and must not be recreated by them: it owns a
   // socket. Callbacks only dispatch, so a single instance is enough.
+  // Mirrors of dispatch-only state that callbacks need synchronously (a
+  // reconnect fires from inside the client, before React re-renders).
+  const sessionRef = useRef<string | undefined>(undefined);
+  const modeRef = useRef<AgentMode>("agent");
+
+  const resumeCurrentRef = useRef<() => Promise<void>>(async () => {});
+
   const clientRef = useRef<CodepilotClient | null>(null);
   if (clientRef.current === null) {
     clientRef.current = new CodepilotClient({
       onEvent: (_sessionId, event) => dispatch({ type: "event", event }),
       onPermission: (req: PendingPermission) => dispatch({ type: "permission", req }),
       onQuestion: (req: PendingQuestion) => dispatch({ type: "question", req }),
-      onClose: () =>
-        dispatch({ type: "disconnected", error: "connection closed by the server" }),
+      onClose: (reason) =>
+        dispatch({ type: "disconnected", error: reason ?? "connection closed by the server" }),
+      onReconnecting: (attempt) => dispatch({ type: "reconnecting", attempt }),
+      onReconnected: () => {
+        dispatch({ type: "reconnected" });
+        void resumeCurrentRef.current();
+      },
     });
   }
   const client = clientRef.current;
 
   useEffect(() => () => void client.disconnect(), [client]);
+
+  // Auto-reconnect on page load when a valid token was persisted.
+  const didAutoConnect = useRef(false);
+  useEffect(() => {
+    if (didAutoConnect.current) return;
+    didAutoConnect.current = true;
+    if (prefs.url && prefs.token) {
+      void connect({ url: prefs.url, token: prefs.token, cwd: prefs.cwd });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -85,6 +108,8 @@ export function App(): React.ReactElement {
         cwd: state.cwd,
         agentMode: state.agentMode,
       });
+      sessionRef.current = sessionId;
+      modeRef.current = state.agentMode;
       dispatch({ type: "session-opened", sessionId, agentMode: state.agentMode });
       await refreshSessions();
     } catch (err) {
@@ -96,6 +121,8 @@ export function App(): React.ReactElement {
     async (id: string) => {
       try {
         const { sessionId, events } = await client.resumeSession(id);
+        sessionRef.current = sessionId;
+        modeRef.current = state.agentMode;
         dispatch({
           type: "session-opened",
           sessionId,
@@ -108,6 +135,33 @@ export function App(): React.ReactElement {
     },
     [client, state.agentMode],
   );
+
+  // Keep refs in sync so the reconnect callback can resume without stale
+  // closures.
+  sessionRef.current = state.sessionId;
+  modeRef.current = state.agentMode;
+  resumeCurrentRef.current = async () => {
+    const id = sessionRef.current;
+    if (!id) return;
+    try {
+      const { sessionId, events } = await client.resumeSession(id);
+      dispatch({
+        type: "session-opened",
+        sessionId,
+        agentMode: modeRef.current,
+        history: events,
+      });
+      dispatch({ type: "notice", text: "reconnected — session restored" });
+    } catch (err) {
+      sessionRef.current = undefined;
+      dispatch({ type: "session-opened", sessionId: "", agentMode: modeRef.current });
+      dispatch({ type: "notice", text: describeError(err) });
+    }
+    try {
+      const sessions = await client.listSessions();
+      dispatch({ type: "sessions", sessions });
+    } catch { /* listed on demand */ }
+  };
 
   const forkSession = useCallback(async () => {
     if (!state.sessionId) return;
@@ -250,17 +304,21 @@ export function App(): React.ReactElement {
 
 function EmptyState({ connected }: { connected: boolean }): React.ReactElement {
   return (
-    <div className="mt-16 text-center text-sm text-[var(--color-ink-dim)]">
+    <div className="mt-20 flex flex-col items-center gap-3 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--color-surface-raised)] text-lg font-bold text-[var(--color-accent)]">
+        CP
+      </div>
       {connected ? (
-        <>
-          Connected. Start a <span className="text-[var(--color-ink)]">New</span> session
-          or resume one from the list.
-        </>
+        <div className="text-sm text-[var(--color-ink-dim)]">
+          Connected. Start a <span className="font-medium text-[var(--color-ink)]">New</span> session
+          or resume one from the sidebar.
+        </div>
       ) : (
-        <>
-          Run <code className="text-[var(--color-ink)]">codepilot serve --web</code> and
+        <div className="text-sm text-[var(--color-ink-dim)]">
+          Run <code className="rounded bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-[var(--color-ink)]">codepilot serve --web</code> and
+          <br />
           paste the URL it prints above.
-        </>
+        </div>
       )}
     </div>
   );

@@ -28,20 +28,24 @@ class FakeWebSocket {
   readyState = 0;
   readonly sent: string[] = [];
   private readonly handlers = new Map<string, Set<Handler>>();
+  private readonly willFail: boolean;
 
   constructor(readonly url: string) {
     FakeWebSocket.instances.push(this);
-    const fail = FakeWebSocket.failNext;
+    this.willFail = FakeWebSocket.failNext;
     FakeWebSocket.failNext = false;
-    setTimeout(() => {
-      if (fail) {
-        this.fire("error", {});
-        this.fire("close", {});
-        return;
-      }
-      this.readyState = FakeWebSocket.OPEN;
-      this.fire("open", {});
-    }, 0);
+    if (!this.willFail) {
+      setTimeout(() => {
+        this.readyState = FakeWebSocket.OPEN;
+        this.fire("open", {});
+      }, 0);
+    }
+  }
+
+  /** Drive a socket created with `failNext` through its failed handshake. */
+  failHandshake(): void {
+    this.fire("error", {});
+    this.fire("close", {});
   }
 
   addEventListener(type: string, handler: Handler): void {
@@ -202,9 +206,10 @@ describe("CodepilotClient", () => {
     FakeWebSocket.failNext = true;
     const harness = callbacks();
     const client = new CodepilotClient(harness.cb);
-    await expect(
-      client.connect({ url: "ws://127.0.0.1:1/rpc", cwd: "/repo" }),
-    ).rejects.toThrow(/token matches|origin is allowed/);
+    const attempt = client.connect({ url: "ws://127.0.0.1:1/rpc", cwd: "/repo" });
+    await tick();
+    FakeWebSocket.instances.at(-1)!.failHandshake();
+    await expect(attempt).rejects.toThrow(/token matches|origin is allowed/);
     expect(client.connected).toBe(false);
   });
 
@@ -341,6 +346,102 @@ describe("CodepilotClient", () => {
 });
 
 // --- Transport ------------------------------------------------------------
+
+describe("automatic reconnect", () => {
+  /** Open a client under fake timers and complete the initialize handshake. */
+  async function connectFake(cb: ConstructorParameters<typeof CodepilotClient>[0]) {
+    const client = new CodepilotClient(cb);
+    const connecting = client.connect({ url: "ws://127.0.0.1:1/rpc", token: "t", cwd: "/repo" });
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await vi.advanceTimersByTimeAsync(0);
+    socket.reply("initialize", { protocolVersion: 1, capabilities: CAPABILITIES });
+    await connecting;
+    await vi.advanceTimersByTimeAsync(0);
+    return { client, socket };
+  }
+
+  it("reconnects after a drop, re-initializes, and reports the attempt", async () => {
+    vi.useFakeTimers();
+    try {
+      const reconnected: number[] = [];
+      const attempts: number[] = [];
+      const harness = callbacks();
+      const { client, socket: first } = await connectFake({
+        ...harness.cb,
+        onReconnecting: (attempt: number) => void attempts.push(attempt),
+        onReconnected: () => void reconnected.push(1),
+      });
+
+      // Drop the transport without a manual disconnect.
+      first.close();
+      expect(attempts).toEqual([1]);
+
+      // The drop schedules a 1s reconnect; `connect()` first awaits the old
+      // transport teardown (microtasks) before dialing, so run microtasks
+      // until the replacement socket actually exists.
+      let second: FakeWebSocket | undefined;
+      for (let elapsed = 0; elapsed < 5000 && !second; elapsed += 50) {
+        await vi.advanceTimersByTimeAsync(50);
+        const latest = FakeWebSocket.instances.at(-1)!;
+        if (latest !== first) second = latest;
+      }
+      expect(second).toBeDefined();
+      for (let i = 0; i < 100 && second!.sent.length === 0; i++) await vi.advanceTimersByTimeAsync(1);
+      second!.reply("initialize", { protocolVersion: 1, capabilities: CAPABILITIES });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([1]);
+      expect(client.connected).toBe(true);
+      await client.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reconnect after a manual disconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = callbacks();
+      const { client, socket } = await connectFake(harness.cb);
+      await client.disconnect();
+      socket.close();
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps retrying with backoff when the server is still down", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempts: number[] = [];
+      const harness = callbacks();
+      const { client, socket: first } = await connectFake({
+        ...harness.cb,
+        onReconnecting: (attempt: number) => void attempts.push(attempt),
+      });
+
+      first.close();
+      FakeWebSocket.failNext = true;
+      // First retry: the socket is created, then fails its handshake, which
+      // starts the next backoff (attempt 2 at 2s).
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      const second = FakeWebSocket.instances.at(-1)!;
+      second.failHandshake();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toEqual([1, 2]);
+      // After the 2s backoff a third socket is attempted.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(FakeWebSocket.instances).toHaveLength(3);
+      await client.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("BrowserWebSocketTransport", () => {
   it("splits batched documents and reports EOF after draining", async () => {

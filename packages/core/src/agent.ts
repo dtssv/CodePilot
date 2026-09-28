@@ -136,6 +136,12 @@ export async function runAgent(
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const doomLoop = new DoomLoopDetector();
+  // Plan-progress tracking: if the model keeps calling tools but the plan
+  // never advances (no step moves to completed/in_progress), it's spinning.
+  // After PLAN_STALL_TURNS turns of no progress we inject a steering nudge.
+  let planProgressSig = "";
+  let turnsSincePlanProgress = 0;
+  const PLAN_STALL_TURNS = 4;
   const emit = async (e: Event): Promise<void> => {
     produced.push(e);
     if (deps.onEvent) await deps.onEvent(e);
@@ -160,6 +166,10 @@ export async function runAgent(
   for (let turn = 0; turn < maxTurns; turn++) {
     if (deps.signal?.aborted) break;
 
+    // Snapshot the plan-progress signature at the start of the turn so we
+    // can tell whether this turn's tool calls advanced the plan.
+    const planSigBefore = planProgressSig;
+
     // Drain queued steering messages into the transcript before building
     // the provider request, so mid-run guidance reaches the model on the
     // very next turn.
@@ -173,6 +183,30 @@ export async function runAgent(
           content: [{ type: "text", text }],
         });
       }
+    }
+
+    // Plan-stall nudge: if a plan exists and we've gone several turns
+    // calling tools without any plan step advancing, the model is spinning
+    // on exploration without synthesizing. Inject one steering reminder
+    // (then reset the counter so we don't nag every turn).
+    if (planProgressSig !== "" && turnsSincePlanProgress >= PLAN_STALL_TURNS) {
+      turnsSincePlanProgress = 0;
+      await emit({
+        type: "message",
+        id: `msg_${randomUUID()}`,
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              `[plan stall] You've called tools for several turns without advancing ` +
+              `your plan. You have enough information — stop exploring and move on: ` +
+              `mark the current plan step complete, start the next one, or produce ` +
+              `the synthesis/output the task asks for. If you're stuck, summarize ` +
+              `what you've learned so far.`,
+          },
+        ],
+      });
     }
 
     await emit({ type: "status", status: "running" });
@@ -375,10 +409,19 @@ export async function runAgent(
                 approved?: boolean;
               };
               if (parsed.type === "plan" && Array.isArray(parsed.steps)) {
+                const steps = parsed.steps as { id: string; status?: string }[];
                 await emit({
                   type: "plan",
                   steps: parsed.steps as never,
                 });
+                // Update progress tracking. The signature counts completed
+                // and in_progress steps; if it changed, the plan advanced.
+                const done = steps.filter((s) => s.status === "completed" || s.status === "in_progress").length;
+                const sig = `${steps.length}:${done}`;
+                if (sig !== planProgressSig) {
+                  planProgressSig = sig;
+                  turnsSincePlanProgress = 0;
+                }
               } else if (parsed.type === "exit_plan_mode" && parsed.approved === true) {
                 await emit({
                   type: "mode_request",
@@ -392,6 +435,12 @@ export async function runAgent(
           }
         }
       }
+    }
+
+    // Plan-stall accounting: if this turn ran tools but the plan signature
+    // didn't change, the work didn't move the plan forward.
+    if (toolCalls.length > 0 && planProgressSig === planSigBefore && planProgressSig !== "") {
+      turnsSincePlanProgress++;
     }
   }
 

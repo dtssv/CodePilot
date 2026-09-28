@@ -412,11 +412,12 @@ interface TeamMessageEvent {
 >   转录并由服务端推回，再自己加一条就每句显示两遍）；②**掉线不清空转录**
 >   （只标记 disconnected，重连靠 resume 重灌）；③**running 状态不顶掉已弹出的
 >   对话框**（agent 等回答时状态事件还在来，照单全收会把权限弹窗关掉）。
-> - 安全：token 存 `sessionStorage` 而非 `localStorage`（它等价于本机执行命令的
->   权限，不该活得比标签页久；有测试锁住这个决定），页面带 CSP
+> - 安全：token 存 `localStorage` 并带 24 小时 TTL（它等价于本机执行命令的
+>   权限，24h 后自动失效需重新输入，在"刷新不丢 token"与"凭证不永久存活"间
+>   取平衡；早期用 `sessionStorage` 刷新即丢，体验太差），页面带 CSP
 >   （`default-src 'self'`，`connect-src` 只允许本机 ws）。
 >
-> **Phase 3 最小可用版本已完成** ✅ — 协议新增 `workspace/list`、`workspace/read` 与 `workspace/search`，具备 cwd 路径隔离、路径穿越拒绝、512 KiB 读取上限和忽略依赖目录的搜索；`apps/web` 新增 Workspace 面板，支持目录浏览、只读代码查看（行号）、刷新、搜索及大文件截断提示。新增轻量 Terminal 输出面板，实时汇总 transcript 中 bash 工具结果；新增轻量 Terminal 输出面板，实时汇总 transcript 中 bash 工具结果；新增 workspace 搜索协议与 cwd 安全测试；新增受控 `workspace/write` 编辑保存（512 KiB 限制 + expectedSize/sha256 expectedHash 乐观并发检查 + 临时文件原子 rename），Web 端保存前二次确认与轻量 diff 预览；补充写入成功、hash/size 冲突和越界写入测试，并在编辑器中显示 modified 状态；新增只读 `workspace/git-status` 与 `workspace/git-diff` 协议和 Web Git 变更文件树/差异预览，diff 输出限制 512 KiB 并禁用外部 diff/颜色/重命名检测；新增 `workspace/stat` hash 轮询检测，Web 编辑器发现外部修改时提示并阻止过期保存；同步补充 `docs/PROTOCOL.md`、`docs/WEB.md` 的 workspace API 文档与当前状态；git-diff 按字节限制截断，新增真实 Git 临时仓库的 staged/unstaged patch 测试与前端切换。完整 Monaco/xterm 重量级集成仍可作为后续增强。
+> **Phase 3 最小可用版本已完成** ✅ — 协议新增 `workspace/list`、`workspace/read` 与 `workspace/search`，具备 cwd 路径隔离、路径穿越拒绝、512 KiB 读取上限和忽略依赖目录的搜索；`apps/web` 新增 Workspace 面板，支持目录浏览、只读代码查看（行号）、刷新、搜索及大文件截断提示。新增轻量 Terminal 输出面板，实时汇总 transcript 中 bash 工具结果；新增轻量 Terminal 输出面板，实时汇总 transcript 中 bash 工具结果；新增 workspace 搜索协议与 cwd 安全测试；新增受控 `workspace/write` 编辑保存（512 KiB 限制 + expectedSize/sha256 expectedHash 乐观并发检查 + 临时文件原子 rename），Web 端保存前二次确认与轻量 diff 预览；补充写入成功、hash/size 冲突和越界写入测试，并在编辑器中显示 modified 状态；新增只读 `workspace/git-status` 与 `workspace/git-diff` 协议和 Web Git 变更文件树/差异预览，diff 输出限制 512 KiB 并禁用外部 diff/颜色/重命名检测；新增 `workspace/stat` hash 轮询检测，Web 编辑器发现外部修改时提示并阻止过期保存；同步补充 `docs/PROTOCOL.md`、`docs/WEB.md` 的 workspace API 文档与当前状态；git-diff 按字节限制截断，新增真实 Git 临时仓库的 staged/unstaged patch 测试与前端切换；搜索请求带目录和最新响应保护、截断提示，搜索路径必须是目录；协议经内存 transport 烟测验证（list/read/write/stat/search/路径拒绝）；新增 `workspace/watch`/`workspace/changed` 防抖文件事件与 Web 自动刷新；客户端支持指数退避自动重连，App 自动恢复当前 session；系统 Chrome CDP 真实浏览器 E2E 已覆盖连接、编辑保存、冲突检测、watch 刷新和服务重启恢复。完整 Monaco/xterm 重量级集成仍可作为后续增强。
 
  > **部署模式 Phase 4 已完成** ✅ — `codepilot serve --web --web-root [DIR]`：
  > `packages/protocol/src/ws.ts` 同端口提供安全的 SPA 静态文件服务（MIME、缓存、

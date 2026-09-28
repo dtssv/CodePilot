@@ -3,7 +3,7 @@
 // speaks the /v1/chat/completions streaming protocol.
 
 import { parseSse } from "./sse.js";
-import { fetchWithRetry } from "./retry.js";
+import { fetchWithRetry, RateLimitAbortedError } from "./retry.js";
 import type {
   ChatProvider,
   ProviderMessage,
@@ -19,6 +19,17 @@ export interface OpenAIProviderOptions {
   baseURL?: string;
   defaultModel?: string;
   smallModel?: string;
+  /** Retry config passed through to fetchWithRetry. When omitted, the
+   *  provider uses more generous defaults than the bare helper: 8 retries
+   *  with a 2s base delay, so transient 429s from rate-limited gateways
+   *  (GLM, DeepSeek, Ollama with concurrency=1) don't abort a long run. */
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  /** Fail fast once the next retry backoff would exceed this many ms, instead
+   *  of blocking the agent for tens of seconds per retry under sustained
+   *  rate-limiting. Default 30s. Set to 0 / undefined to disable. */
+  abortOnDelayMs?: number;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -29,6 +40,12 @@ export class OpenAIProvider implements ChatProvider {
   private readonly baseURL: string;
   readonly defaultModel: string;
   readonly smallModel: string;
+  private readonly retryOpts: {
+    maxRetries: number;
+    baseDelayMs: number;
+    maxDelayMs: number;
+    abortOnDelayMs?: number;
+  };
 
   constructor(opts: OpenAIProviderOptions = {}) {
     const key = opts.apiKey ?? process.env.OPENAI_API_KEY;
@@ -41,6 +58,15 @@ export class OpenAIProvider implements ChatProvider {
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.defaultModel = opts.defaultModel ?? "gpt-4o-mini";
     this.smallModel = opts.smallModel ?? "gpt-4o-mini";
+    this.retryOpts = {
+      maxRetries: opts.maxRetries ?? 8,
+      baseDelayMs: opts.baseDelayMs ?? 2000,
+      maxDelayMs: opts.maxDelayMs ?? 60_000,
+      // Fail fast under sustained 429s: once the next backoff would exceed
+      // 30s, stop waiting and surface a recoverable error instead of
+      // blocking the agent for a minute per retry.
+      abortOnDelayMs: opts.abortOnDelayMs ?? 30_000,
+    };
   }
 
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
@@ -64,17 +90,37 @@ export class OpenAIProvider implements ChatProvider {
     // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
     // includes it; many compatible gateways document the bare host).
     const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/chat/completions`;
-    const res = await fetchWithRetry(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    }, {
-      signal: opts.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      }, {
+        signal: opts.signal,
+        maxRetries: this.retryOpts.maxRetries,
+        baseDelayMs: this.retryOpts.baseDelayMs,
+        maxDelayMs: this.retryOpts.maxDelayMs,
+        abortOnDelayMs: this.retryOpts.abortOnDelayMs,
+        onRetry: (attempt, delayMs, reason) => {
+          // Surface retries on stderr so the user sees we're waiting, not hung.
+          process.stderr.write(`[retry ${attempt}] ${reason} — waiting ${Math.round(delayMs / 1000)}s\n`);
+        },
+      });
+    } catch (err) {
+      // Sustained rate-limiting: fetchWithRetry aborted rather than block for
+      // a long backoff. Surface as a recoverable error so the agent stops and
+      // the host can prompt the user to switch provider/model.
+      if (err instanceof RateLimitAbortedError) {
+        yield { kind: "error", message: err.message };
+        return;
+      }
+      throw err;
+    }
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
       yield { kind: "error", message: `OpenAI ${res.status}: ${text.slice(0, 500)}` };

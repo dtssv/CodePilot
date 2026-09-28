@@ -28,6 +28,7 @@ JSON-RPC 2.0 over stdio（换行分隔 JSON，NDJSON）。客户端 = 前端（T
 | `workspace/write` | `{ path, content, expectedSize?, expectedHash? }` | `{ path, size, hash }`（cwd 内原子写入） |
 | `workspace/search` | `{ query, path?, maxResults? }` | `{ matches: [{path, line, text}], truncated }` |
 | `workspace/stat` | `{ path }` | `{ path, exists, size, hash, modifiedAt? }` |
+| `workspace/watch` | `{ path? }` | `{ watching, path }`；随后推送 `workspace/changed` |
 | `workspace/git-status` | `{}` | `{ branch, files: [{path, index, worktree, status}] }` |
 | `workspace/git-diff` | `{ path?, staged? }` | `{ path?, diff, truncated }`（最多 512 KiB） |
 | `shutdown` | `{}` | `{}` |
@@ -59,6 +60,7 @@ JSON-RPC 2.0 over stdio（换行分隔 JSON，NDJSON）。客户端 = 前端（T
 | `permission/request` | 这是一个**请求**（非通知）：`{ sessionId, requestId, toolName, input, reason }`，客户端用 `permission/respond` 回复 |
 | `question/request` | 这是一个**请求**（非通知）：`{ sessionId, requestId, questions: [{ id, header?, question, options?: [{label, description?}], multiSelect? }] }`，客户端用 `question/respond` 回复（answers 以 question id 为键，值为选项 label、label 数组或自由文本）。由 `ask_user_question` / `plan_done` 工具触发；客户端不可达或服务端 shutdown 时按空 answers 失败关闭（plan_done 视为未批准） |
 | `session/usage` | `{ sessionId, usage: {input, output, cacheRead, cacheWrite, costUSD} }` |
+| `workspace/changed` | `{ path, kinds: ["rename"|"change"], error? }` — `workspace/watch` 的防抖文件系统通知 |
 
 ## 流式
 

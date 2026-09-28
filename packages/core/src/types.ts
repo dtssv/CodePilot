@@ -339,6 +339,15 @@ export interface CodepilotConfig {
   hooks?: HooksConfig;
   /** Ordered backup providers for automatic failover (rate limit / outage). */
   fallbacks?: ProviderFallbackConfig[];
+  /** Max HTTP retries on transient errors (429/5xx). Default 8. */
+  maxRetries?: number;
+  /** Base delay for exponential backoff (ms). Default 2000. */
+  baseRetryDelayMs?: number;
+  /** Cap for exponential backoff delay (ms). Default 60_000. */
+  maxRetryDelayMs?: number;
+  /** Abort retrying once the next backoff would exceed this (ms), surfacing
+   *  a recoverable error instead of blocking. Default 30_000. 0 disables. */
+  retryAbortOnDelayMs?: number;
   /** Default collaboration mode for new sessions (default: "agent"). */
   agentMode?: AgentMode;
   /** Auto memory master toggle (default: true). When false, the agent never

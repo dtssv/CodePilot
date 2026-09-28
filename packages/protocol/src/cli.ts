@@ -15,12 +15,15 @@ import {
   runGoal,
   createSession,
   loadConfig,
+  type AgentMode,
   type Event,
   type PermissionMode,
+  type PermissionDecision,
   type Session,
 } from "@codepilot/core";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import * as readline from "node:readline";
 import { startServer } from "./server.js";
 
 interface ParsedArgs {
@@ -58,9 +61,10 @@ function helpText(): string {
   return `codepilot — headless coding agent
 
 Usage:
-  codepilot serve                        — JSON-RPC over stdio
+  codepilot [interactive]              — interactive REPL (default when TTY)
+  codepilot serve                      — JSON-RPC over stdio
   codepilot serve --web [--port N] [--host H] [--token T]
-                        [--allow-origin O1,O2] [--no-auth] [--web-root [DIR]]
+                       [--allow-origin O1,O2] [--no-auth] [--web-root [DIR]]
                                          — same protocol over WebSocket; with
                                            --web-root also hosts the built web
                                            SPA (auto-detects apps/web/dist)
@@ -69,6 +73,11 @@ Usage:
                        [--json] [--quiet]
   codepilot goal "<objective>" [--max-rounds N]
   codepilot --help
+
+Interactive mode (REPL):
+  Just run \`codepilot\` in a TTY to enter a multi-turn conversation.
+  Slash commands: /mode <chat|plan|agent>, /clear, /exit, /help
+  Up/Down arrows recall history; Ctrl+C cancels the current turn.
 
 serve --web notes:
   Binds 127.0.0.1 and requires a token (auto-generated, printed on start).
@@ -83,7 +92,13 @@ Environment:
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
-  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(helpText() + "\n");
+    return 0;
+  }
+  if (argv.length === 0) {
+    // No args in a TTY → interactive REPL. Non-TTY (pipe/CI) → help.
+    if (process.stdin.isTTY) return cmdRepl([], {});
     process.stdout.write(helpText() + "\n");
     return 0;
   }
@@ -97,7 +112,15 @@ async function main(): Promise<number> {
       return cmdRun(positional.slice(1), flags);
     case "goal":
       return cmdGoal(positional.slice(1), flags);
+    case "chat":
+    case "repl":
+      return cmdRepl(positional.slice(1), flags);
     default:
+      // Unknown command — if it looks like a flags-only invocation
+      // (e.g. `codepilot --cwd .`), enter REPL.
+      if (Object.keys(flags).length > 0 && positional.length === 0) {
+        return cmdRepl([], flags);
+      }
       process.stderr.write(`unknown command: ${cmd ?? ""}\n\n${helpText()}`);
       return 2;
   }
@@ -545,6 +568,269 @@ async function cmdGoal(
       }
     }
   }
+}
+
+// ---------- interactive REPL ----------
+
+/**
+ * `codepilot` / `codepilot chat` / `codepilot repl`: a multi-turn interactive
+ * conversation over stdio. Thinner than the Ink TUI (`codepilot-tui`) — no
+ * fancy rendering, just readline + the same event renderer `run` uses — but
+ * it makes `codepilot` itself usable interactively without spawning a second
+ * binary.
+ *
+ * Slash commands: /mode <chat|plan|agent>, /model <name>, /clear, /help, /exit.
+ * Up/Down arrows recall history (readline native). Ctrl+C cancels the current
+ * turn (or exits if idle); Ctrl+D exits.
+ */
+async function cmdRepl(
+  positional: string[],
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const cwd = (flags["cwd"] as string | undefined) ?? process.cwd();
+  const stderr_ = process.stderr;
+
+  let config;
+  try {
+    config = await loadConfig(cwd);
+  } catch {
+    config = undefined;
+  }
+  if (flags["provider"]) {
+    config = { ...(config ?? {}), provider: flags["provider"] as "anthropic" | "openai" | "copilot" };
+  }
+  const flagModel = flags["model"] as string | undefined;
+  if (flagModel) config = { ...(config ?? {}), model: flagModel };
+
+  // Interactive mode defaults to "ask" (TTY) so the user can approve writes;
+  // an explicit --permission-mode / --yolo overrides.
+  const mode = (flags["permission-mode"] as PermissionMode | undefined) ?? null;
+  const yolo = flags["yolo"] === true || mode === "yolo";
+  const permissionMode: PermissionMode = yolo ? "yolo" : mode ?? "ask";
+
+  // An initial prompt passed as a positional arg (e.g. `codepilot chat "hi"`)
+  // is sent on the first turn, then we drop into the read loop.
+  const initialPrompt = positional.join(" ").trim() || undefined;
+
+  const session = await createSession({
+    cwd,
+    config: { ...(config ?? {}), permissionMode },
+    model: flagModel,
+    onPermissionRequest: async (req) => {
+      // Interactive: prompt on stderr and read a yes/no/always answer. The
+      // main readline interface is paused while a prompt runs, so we use a
+      // throwaway interface on the same stdin.
+      stderr_.write(
+        `\n[permission] ${req.toolName} — ${req.reason}\n` +
+          `  input: ${truncate(safeJson(req.input), 200)}\n` +
+          `  allow once (y), always this session (a), deny (n)? `,
+      );
+      const prl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      let decision: PermissionDecision = "deny";
+      try {
+        const ans = await new Promise<string>((resolve) => {
+          prl.question("", (answer) => resolve(answer));
+        });
+        const a = ans.trim().toLowerCase();
+        if (a.startsWith("a")) decision = "always";
+        else if (a.startsWith("y") || a === "") decision = "allow";
+      } catch {
+        decision = "deny";
+      } finally {
+        prl.close();
+      }
+      stderr_.write("\n");
+      return decision;
+    },
+  });
+
+  stderr_.write(
+    `[codepilot] session=${session.id} cwd=${cwd} mode=${permissionMode}\n` +
+      `Type a message and press Enter. /help for commands, Ctrl+C to cancel a turn, Ctrl+D to exit.\n`,
+  );
+
+  // Stream session events to the terminal as they arrive.
+  const renderedMsgIds = new Set<string>();
+  const assistantBuf = new AssistantBuffer();
+  let history = 0;
+  try {
+    history = session.getEvents().length;
+  } catch {
+    history = 0;
+  }
+  const unsub = session.subscribe((e) => {
+    if (history > 0) {
+      history--;
+      return;
+    }
+    if (e.type === "message_delta") renderedMsgIds.add(e.messageId);
+    const alreadyStreamed = e.type === "message" && renderedMsgIds.has(e.id);
+    renderEventText(e, stderr_, alreadyStreamed);
+    if (e.type === "message_delta" && e.delta.type === "text") assistantBuf.push(e.delta.text);
+    else if (e.type === "message" && e.role === "assistant" && !alreadyStreamed) {
+      for (const b of e.content) if (b.type === "text") assistantBuf.push(b.text);
+      assistantBuf.sealFinal();
+    }
+  });
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stderr,
+    prompt: "› ",
+    history: [],
+    terminal: process.stderr.isTTY,
+  });
+
+  let busy = false;
+
+  const setBusy = (b: boolean): void => {
+    busy = b;
+    if (b) rl.pause();
+    else rl.resume();
+  };
+
+  const sendPrompt = async (text: string): Promise<void> => {
+    setBusy(true);
+    assistantBuf.reset();
+    try {
+      await session.prompt(text);
+      assistantBuf.sealFinal();
+    } catch (err) {
+      stderr_.write(`\n[codepilot] error: ${err instanceof Error ? err.message : String(err)}\n`);
+    } finally {
+      setBusy(false);
+      stderr_.write("\n");
+      rl.prompt();
+    }
+  };
+
+  const handleLine = async (raw: string): Promise<void> => {
+    const line = raw.trim();
+    if (line.length === 0) {
+      rl.prompt();
+      return;
+    }
+    // Pause input while handling so piped/typed lines don't race the async
+    // work below; resumed by the prompt() at each exit point.
+    rl.pause();
+    try {
+      if (line.startsWith("/")) {
+        const [cmd, ...rest] = line.slice(1).split(/\s+/);
+        const arg = rest.join(" ").trim();
+        switch (cmd) {
+          case "exit":
+          case "quit":
+            rl.close();
+            return;
+          case "help":
+            stderr_.write(
+              "Commands:\n" +
+                "  /mode <chat|plan|agent>   set collaboration mode\n" +
+                "  /model <name>             set model for this session\n" +
+                "  /clear                    clear the screen\n" +
+                "  /help                     show this help\n" +
+                "  /exit                     exit (also Ctrl+D)\n",
+            );
+            break;
+          case "mode": {
+            const m = arg as AgentMode;
+            if (m === "chat" || m === "plan" || m === "agent") {
+              try {
+                await session.setAgentMode(m);
+                stderr_.write(`[mode] ${m}\n`);
+              } catch (err) {
+                stderr_.write(`[mode] failed: ${describe(err)}\n`);
+              }
+            } else {
+              stderr_.write("[mode] usage: /mode <chat|plan|agent>\n");
+            }
+            break;
+          }
+          case "model": {
+            if (!arg) {
+              stderr_.write("[model] usage: /model <name>\n");
+              break;
+            }
+            try {
+              await session.setModel(arg);
+              stderr_.write(`[model] ${arg}\n`);
+            } catch (err) {
+              stderr_.write(`[model] failed: ${describe(err)}\n`);
+            }
+            break;
+          }
+          case "clear": {
+            // Clear the visible terminal; the transcript in core is untouched.
+            stderr_.write("\x1B[2J\x1B[H");
+            break;
+          }
+          default:
+            stderr_.write(`Unknown command: /${cmd}. Try /help.\n`);
+            break;
+        }
+        rl.resume();
+        rl.prompt();
+        return;
+      }
+      // Real prompt: resume is handled in sendPrompt's finally.
+      rl.resume();
+      await sendPrompt(line);
+    } catch (err) {
+      stderr_.write(`[codepilot] error: ${describe(err)}\n`);
+      rl.resume();
+      rl.prompt();
+    }
+  };
+
+  let currentLine: Promise<void> = Promise.resolve();
+  rl.on("line", (raw) => {
+    // Chain lines so they run serially; track the tail so close can wait.
+    currentLine = currentLine.then(() => handleLine(raw), () => handleLine(raw));
+  });
+  rl.on("close", () => {
+    /* closing the interface resolves the await below and exits */
+  });
+  // Ctrl+C (SIGINT): cancel the current turn if busy, else exit. readline
+  // emits SIGINT rather than closing on Ctrl+C by default.
+  rl.on("SIGINT", () => {
+    if (busy) {
+      try {
+        session.cancel();
+        stderr_.write("\n[cancelling…]\n");
+      } catch {
+        /* ignore */
+      }
+    } else {
+      rl.close();
+    }
+  });
+
+  rl.prompt();
+
+  // Fire the initial prompt, if any, then wait for the REPL to close.
+  if (initialPrompt) {
+    void sendPrompt(initialPrompt);
+  }
+
+  await new Promise<void>((resolve) => {
+    rl.on("close", () => resolve());
+  });
+  // Wait for any in-flight line handler to finish before tearing down, so
+  // an async slash command (e.g. /mode) piped right before EOF still gets
+  // to print its result.
+  await currentLine.catch(() => {});
+
+  unsub();
+  try {
+    await session.dispose();
+  } catch {
+    /* ignore */
+  }
+  return 0;
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 main().then(

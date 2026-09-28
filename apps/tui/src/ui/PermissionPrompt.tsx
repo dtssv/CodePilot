@@ -20,7 +20,7 @@ export interface PermissionPromptProps {
 
 const OPTIONS: { label: string; decision: PermissionDecision; hint: string }[] = [
   { label: "Allow once", decision: "allow", hint: "Approve this invocation only." },
-  { label: "Always allow", decision: "always", hint: "Approve this tool for the rest of the session." },
+  { label: "Always allow", decision: "always", hint: "Approve matching commands (e.g. same prefix) for this session." },
   { label: "Deny", decision: "deny", hint: "Reject this invocation." },
 ];
 

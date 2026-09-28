@@ -24,11 +24,23 @@ export const planUpdateTool: ToolDef<typeof schema> = {
     "are always retained verbatim). For any task with >= 3 steps, call this at the start " +
     "to declare the plan, then call it again whenever a step's status changes (mark " +
     "`completed`, set the next one `in_progress`, or surface a `blocked` step). " +
-    "Each step has: `id` (stable short string, reuse across updates), `title` (one line, " +
-    "what the deliverable is), and `status` in {pending, in_progress, completed, blocked}. " +
+    "Each step is an OBJECT with fields: `id` (stable short string, reuse across updates), " +
+    "`title` (one line, what the deliverable is), and `status` (one of " +
+    "\"pending\", \"in_progress\", \"completed\", \"blocked\"). " +
     "Aim for 3-8 active steps; collapse clusters of completed steps rather than letting the " +
     "list grow unbounded. If you mark a step `blocked`, say so in its title so the user sees " +
-    "the blocker without opening a tool result.",
+    "the blocker without opening a tool result.\n\n" +
+    "Example input:\n" +
+    '```json\n' +
+    '{\n' +
+    '  "steps": [\n' +
+    '    {"id": "1", "title": "Read README and package.json", "status": "in_progress"},\n' +
+    '    {"id": "2", "title": "Analyze packages/core architecture", "status": "pending"},\n' +
+    '    {"id": "3", "title": "Summarize design", "status": "pending"}\n' +
+    '  ]\n' +
+    '}\n' +
+    '```\n' +
+    "Do NOT pass strings in the steps array — each element MUST be an object.",
   inputSchema: schema,
   permission: "read",
   async execute(input) {

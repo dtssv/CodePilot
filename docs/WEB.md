@@ -82,23 +82,25 @@ App.tsx ──useReducer──> state/reducer.ts   （纯函数：事件 → row
 **running 状态不会顶掉已弹出的对话框**。agent 等你回答时状态事件还在继续来，
 如果照单全收会把权限弹窗关掉。
 
-**token 存在 `sessionStorage`，不是 `localStorage`**。它等价于在这台机器上执行
-命令的权限，不该活得比标签页久；server URL 和 cwd 无害，放 `localStorage`。
-页面还带了 CSP：`connect-src` 只允许本机 ws，`default-src 'self'`，不加载任何
-远端资源——一个被投毒的依赖没法把转录或 token 发出去。
+**token 存在 `localStorage` 并带 24 小时 TTL**。它等价于在这台机器上执行
+命令的权限，所以加了过期：24 小时后自动失效，用户需重新输入——在"刷新页面不丢
+token"的便利和"凭证不该永久存活"之间取平衡。server URL 和 cwd 无害，同样放
+`localStorage`。页面还带了 CSP：`connect-src` 只允许本机 ws，`default-src 'self'`，
+不加载任何远端资源——一个被投毒的依赖没法把转录或 token 发出去。
+（早期版本用 `sessionStorage`，刷新即丢，体验太差；24h TTL 是折中后的选择。）
 
 **浏览器不告诉你握手为什么失败**（状态码都拿不到），所以连接失败的提示只能把三种
 常见原因列出来：服务端没起、token 不对、origin 不在白名单。
 
 ## 当前状态与后续增强
 
-已完成：文件浏览器、只读/受控编辑器、workspace 搜索/写入/stat、Git 状态与 diff、bash 输出面板、静态 SPA 托管。
+已完成：文件浏览器、只读/受控编辑器、workspace 搜索/写入/stat/watch、Git 状态与 diff、bash 输出面板、静态 SPA 托管、自动重连与会话恢复、真实浏览器 E2E 验收。
 
 ### Git diff 预览
 
 点击 Git 变更列表只加载 patch，不再隐式打开编辑器，因此删除文件也可查看 diff，且不会覆盖当前编辑缓冲区。`Toggle staged` 会对当前文件重新请求 staged/unstaged patch；加载时清空旧 patch，显示加载状态、错误和服务端截断提示。快速切换时只采用最新请求的响应，关闭面板或切换连接后丢弃迟到响应。未跟踪文件没有 Git diff patch，面板会明确提示。
 
-回归验证：`apps/web/test/gitDiff.test.ts` 覆盖请求参数、模式切换、竞态、关闭、错误和失效处理。Web 全套 54 个测试通过，typecheck 和生产构建通过；尚未进行真实浏览器交互验收。
+回归验证：`apps/web/test/gitDiff.test.ts` 覆盖请求参数、模式切换、竞态、关闭、错误和失效处理；`workspaceEditor.test.ts` 覆盖保存基线与冲突；`test/reconnect.test.ts` 使用真实 WebSocket 服务验证断线重连。`test/e2e/web.e2e.test.ts` 使用系统 Chrome CDP 验证真实 SPA、连接、session、文件编辑保存、外部修改、watch 刷新和服务重启恢复。Web 全套 63 个单元/协议客户端测试通过，另有 2 个真实浏览器 E2E 通过。
 
 ### 编辑器保存生命周期
 
@@ -112,7 +114,7 @@ App.tsx ──useReducer──> state/reducer.ts   （纯函数：事件 → row
 - xterm.js 交互式终端
 - 图片附件入口
 - 多会话并排、断线自动重连
-- 文件系统事件推送（当前使用 `workspace/stat` hash 轮询）
+- 文件系统事件推送已使用 `workspace/watch` + `workspace/changed`；`workspace/stat` hash 轮询保留为 watcher 故障时的兜底
 - Git diff staged/unstaged 的更丰富视图
 
 ## 相关文档

@@ -1,16 +1,22 @@
 @import "tailwindcss";
 
-/* Dark-first: this is a developer tool that sits next to an editor. */
+/* Dark-first: this is a developer tool that sits next to an editor.
+   Palette inspired by Linear / Vercel dashboards — cool, calm, high-contrast. */
 @theme {
-  --color-surface: oklch(0.18 0.01 260);
-  --color-surface-raised: oklch(0.23 0.012 260);
-  --color-surface-sunken: oklch(0.14 0.01 260);
-  --color-edge: oklch(0.32 0.015 260);
-  --color-ink: oklch(0.93 0.005 260);
-  --color-ink-dim: oklch(0.68 0.01 260);
-  --color-accent: oklch(0.72 0.14 230);
+  --color-surface: oklch(0.17 0.008 255);
+  --color-surface-raised: oklch(0.22 0.01 255);
+  --color-surface-sunken: oklch(0.13 0.008 255);
+  --color-surface-hover: oklch(0.26 0.012 255);
+  --color-edge: oklch(0.30 0.012 255);
+  --color-edge-subtle: oklch(0.24 0.01 255);
+  --color-ink: oklch(0.95 0.003 255);
+  --color-ink-dim: oklch(0.65 0.01 255);
+  --color-ink-faint: oklch(0.45 0.008 255);
+  --color-accent: oklch(0.70 0.15 245);
+  --color-accent-dim: oklch(0.70 0.15 245 / 0.15);
   --color-add: oklch(0.72 0.15 150);
-  --color-remove: oklch(0.7 0.17 25);
+  --color-remove: oklch(0.68 0.18 25);
+  --color-warn: oklch(0.78 0.15 85);
 }
 
 html,
@@ -24,9 +30,33 @@ body {
   background: var(--color-surface);
   color: var(--color-ink);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 code,
 pre {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+/* Subtle scrollbar — blends into the dark theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
+}
+
+/* Focus ring: accent-colored, visible but not garish */
+*:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }

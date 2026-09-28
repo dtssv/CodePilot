@@ -50,7 +50,20 @@ export interface ClientCallbacks {
   onPermission(req: PendingPermission): void;
   onQuestion(req: PendingQuestion): void;
   /** Transport went away — the UI should offer to reconnect. */
-  onClose(): void;
+  onClose(reason?: string): void;
+  /** Automatic reconnect succeeded after a transport drop. */
+  onReconnected?(init: InitializeResult): void;
+  /** Automatic reconnect is being attempted. */
+  onReconnecting?(attempt: number, delayMs: number): void;
+  /** A watched workspace directory changed on disk (debounced). */
+  onWorkspaceChanged?(params: WorkspaceChangedParams): void;
+}
+
+export interface WorkspaceChangedParams {
+  path: string;
+  kinds: Array<"rename" | "change">;
+  /** Set when the server-side watcher failed; fall back to polling. */
+  error?: string;
 }
 
 export interface ConnectOptions {
@@ -93,6 +106,16 @@ export class CodepilotClient {
   private peer: Peer | null = null;
   private transport: BrowserWebSocketTransport | null = null;
   private capabilities: InitializeResult["capabilities"] | null = null;
+  private lastConnect: ConnectOptions | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
+  private manualDisconnect = false;
+  /** UI-level workspace-change sink (the panel swaps this per render). */
+  private workspaceChangedHandler: ((p: WorkspaceChangedParams) => void) | null = null;
+
+  setWorkspaceChangedHandler(handler: ((p: WorkspaceChangedParams) => void) | null): void {
+    this.workspaceChangedHandler = handler;
+  }
 
   constructor(private readonly callbacks: ClientCallbacks) {}
 
@@ -109,7 +132,10 @@ export class CodepilotClient {
   }
 
   async connect(opts: ConnectOptions): Promise<InitializeResult> {
-    await this.disconnect();
+    this.manualDisconnect = false;
+    this.lastConnect = { ...opts };
+    this.clearReconnectTimer();
+    await this.disconnect({ markManual: false });
     const socket = new WebSocket(buildUrl(opts.url, opts.token));
     await waitForOpen(socket);
     const transport = new BrowserWebSocketTransport(socket);
@@ -123,6 +149,10 @@ export class CodepilotClient {
     // `session/usage` duplicates the `usage` event; the reducer already sums
     // those, so acknowledging it here just keeps Peer from logging a warning.
     peer.onNotification("session/usage", () => {});
+    peer.onNotification<WorkspaceChangedParams>("workspace/changed", (p) => {
+      this.workspaceChangedHandler?.(p);
+      this.callbacks.onWorkspaceChanged?.(p);
+    });
     peer.onRequest<PermissionRequestParams, Record<string, never>>(
       "permission/request",
       (p) => {
@@ -151,10 +181,12 @@ export class CodepilotClient {
     );
 
     void peer.loopDone.then(
-      () => this.handleClosed(),
-      () => this.handleClosed(),
+      () => { if (this.peer === peer) this.handleClosed("transport ended"); },
+      () => { if (this.peer === peer) this.handleClosed("transport ended"); },
     );
-    socket.addEventListener("close", () => this.handleClosed());
+    socket.addEventListener("close", () => {
+      if (this.peer === peer) this.handleClosed("socket closed");
+    });
 
     const init = await peer.request<unknown, InitializeResult>("initialize", {
       protocolVersion: PROTOCOL_VERSION,
@@ -166,7 +198,9 @@ export class CodepilotClient {
     return init;
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(opts: { markManual?: boolean } = {}): Promise<void> {
+    if (opts.markManual !== false) this.manualDisconnect = true;
+    this.clearReconnectTimer();
     const peer = this.peer;
     const transport = this.transport;
     this.peer = null;
@@ -174,6 +208,37 @@ export class CodepilotClient {
     this.capabilities = null;
     if (peer) await peer.close().catch(() => {});
     transport?.close();
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer === null) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.manualDisconnect || !this.lastConnect || this.reconnectTimer !== null) return;
+    this.reconnectAttempt++;
+    const delayMs = Math.min(1000 * 2 ** Math.min(this.reconnectAttempt - 1, 4), 15000);
+    this.callbacks.onReconnecting?.(this.reconnectAttempt, delayMs);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.reconnect();
+    }, delayMs);
+  }
+
+  private async reconnect(): Promise<void> {
+    const opts = this.lastConnect;
+    if (!opts || this.manualDisconnect) return;
+    // `connect()` remembers these options again and clears stale state; if it
+    // throws, the failure callbacks below keep the retry loop alive.
+    try {
+      const init = await this.connect(opts);
+      this.reconnectAttempt = 0;
+      this.callbacks.onReconnected?.(init);
+    } catch {
+      this.scheduleReconnect();
+    }
   }
 
   // ----- protocol methods -----
@@ -198,6 +263,11 @@ export class CodepilotClient {
 
   async workspaceStat(path: string): Promise<{ path: string; exists: boolean; size: number; hash: string; modifiedAt?: number }> {
     return this.call("workspace/stat", { path });
+  }
+
+  /** Subscribe to debounced disk-change notifications for a directory. */
+  async watchWorkspace(path = "."): Promise<{ watching: boolean; path: string }> {
+    return this.call("workspace/watch", { path });
   }
 
   async gitDiff(path?: string, staged = false): Promise<{ path?: string; diff: string; truncated: boolean }> {
@@ -268,12 +338,13 @@ export class CodepilotClient {
     return peer.request<unknown, R>(method, params);
   }
 
-  private handleClosed(): void {
+  private handleClosed(reason?: string): void {
     if (!this.peer && !this.transport) return;
     this.peer = null;
     this.transport = null;
     this.capabilities = null;
-    this.callbacks.onClose();
+    this.callbacks.onClose(reason);
+    this.scheduleReconnect();
   }
 }
 

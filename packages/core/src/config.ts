@@ -195,6 +195,17 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     maxTurns: z.number().int().positive().max(500).optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
+    // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous
+    // (8 retries, 2s base, 60s cap) so rate-limited gateways don't abort
+    // long runs. Override per-config when you know the provider's quota
+    // window (e.g. GLM's per-minute TPM resets after ~60s).
+    maxRetries: z.number().int().positive().max(20).optional(),
+    baseRetryDelayMs: z.number().int().positive().max(120_000).optional(),
+    maxRetryDelayMs: z.number().int().positive().max(600_000).optional(),
+    // Fail fast under sustained rate-limiting: once the next retry backoff
+    // would exceed this many ms, abort and surface a recoverable error
+    // instead of blocking the agent for a long backoff. Default 30000.
+    retryAbortOnDelayMs: z.number().int().nonnegative().max(600_000).optional(),
     // v2 additions -----------------------------------------------------
     models: ModelsConfigSchema.optional(),
     providers: ProvidersConfigSchema,
