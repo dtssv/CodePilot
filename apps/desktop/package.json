@@ -1,0 +1,25 @@
+{
+  "name": "@codepilot/desktop",
+  "version": "2.0.0",
+  "private": true,
+  "description": "CodePilot Agent — desktop app for task-oriented work in a folder (the shared web UI in its agent layout).",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codepilot/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@codepilot/web": "workspace:*",
+    "@types/node": "^22.10.0",
+    "electron": "^38.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

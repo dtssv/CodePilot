@@ -1,0 +1,35 @@
+{
+  "name": "codepilot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "CodePilot — token-efficient, long-horizon coding agent: core engine, CLI/TUI, web, desktop agent, VSCode & IDEA plugins",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r --workspace-concurrency=4 build",
+    "typecheck": "corepack pnpm -r typecheck",
+    "test": "corepack pnpm -r test",
+    "test:coverage": "corepack pnpm -r test:coverage",
+    "dev:tui": "corepack pnpm --filter @codepilot/tui dev",
+    "agent": "node packages/protocol/dist/cli.js agent",
+    "desktop": "corepack pnpm --filter @codepilot/desktop start",
+    "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
+    "package:idea": "cd apps/idea && ./gradlew buildPlugin",
+    "package:npm": "corepack pnpm --filter @codepilot/core --filter @codepilot/protocol --filter @codepilot/tui pack",
+    "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
+    "lint": "biome lint packages/ apps/",
+    "lint:ci": "biome lint --max-diagnostics=0 --diagnostic-level=error packages/ apps/",
+    "lint:fix": "biome lint --write packages/ apps/",
+    "format": "biome format --write packages/ apps/"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

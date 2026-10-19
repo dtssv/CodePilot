@@ -1,0 +1,206 @@
+@import "tailwindcss";
+
+/* CodePilot design tokens — shared by every surface (web, desktop agent,
+   VSCode and IDEA webviews). The TUI mirrors the same hex values in
+   apps/tui/src/ui/theme.ts and the IDEA fallback panel in Theme.kt; change
+   them together. Dark is the default; `data-theme="light"` on <html>
+   switches the palette. */
+@theme {
+  --color-bg: #0b0d12;
+  --color-surface: #10131a;
+  --color-surface-raised: #161a23;
+  --color-surface-sunken: #0c0f15;
+  --color-surface-hover: #1d2230;
+  --color-edge: #2a3142;
+  --color-edge-subtle: #1d2230;
+  --color-ink: #e9ebf1;
+  --color-ink-dim: #a3aaba;
+  --color-ink-faint: #6b7386;
+  --color-accent: #8b7cff;
+  --color-accent-strong: #6d5bf6;
+  --color-accent-fg: #ffffff;
+  --color-accent-dim: rgb(139 124 255 / 0.14);
+  --color-info: #4ba3ff;
+  --color-add: #3fb97f;
+  --color-add-dim: rgb(63 185 127 / 0.14);
+  --color-remove: #f0616d;
+  --color-remove-dim: rgb(240 97 109 / 0.14);
+  --color-warn: #e8b04a;
+  --color-warn-dim: rgb(232 176 74 / 0.14);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  --animate-breathe: breathe 1.6s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.18s ease-out;
+}
+
+:root[data-theme="light"] {
+  --color-bg: #f5f6f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f2f4f7;
+  --color-surface-hover: #eceef3;
+  --color-edge: #d9dde5;
+  --color-edge-subtle: #e7eaf0;
+  --color-ink: #181b22;
+  --color-ink-dim: #545c6c;
+  --color-ink-faint: #8a92a3;
+  --color-accent: #6d5bf6;
+  --color-accent-strong: #5b49e8;
+  --color-accent-dim: rgb(109 91 246 / 0.1);
+  --color-info: #1f7ae0;
+  --color-add: #1f9d63;
+  --color-add-dim: rgb(31 157 99 / 0.1);
+  --color-remove: #d93a49;
+  --color-remove-dim: rgb(217 58 73 / 0.08);
+  --color-warn: #b7791f;
+  --color-warn-dim: rgb(183 121 31 / 0.1);
+  color-scheme: light;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--color-accent-dim);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-ink-faint);
+}
+
+@layer base {
+  *:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: -200% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+@layer components {
+  .cp-brand-gradient {
+    background-image: linear-gradient(135deg, #8b7cff 0%, #5b8dff 55%, #3fc6ff 100%);
+  }
+
+  .cp-card {
+    @apply rounded-xl border border-edge-subtle bg-surface-raised;
+  }
+
+  .cp-btn,
+  .cp-btn-primary,
+  .cp-btn-ghost,
+  .cp-btn-danger {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .cp-btn-primary {
+    @apply bg-accent-strong text-accent-fg hover:bg-accent;
+  }
+  .cp-btn-ghost {
+    @apply border border-edge text-ink-dim hover:bg-surface-hover hover:text-ink;
+  }
+  .cp-btn-danger {
+    @apply border border-edge text-remove hover:bg-remove-dim;
+  }
+
+  .cp-icon-btn {
+    @apply inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-surface-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent;
+  }
+
+  .cp-input {
+    @apply rounded-lg border border-edge bg-surface-sunken px-3 py-2 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-faint focus:border-accent;
+  }
+
+  .cp-chip {
+    @apply inline-flex items-center gap-1 rounded-md border border-edge-subtle bg-surface-sunken px-1.5 py-0.5 font-mono text-[11px] text-ink-dim;
+  }
+
+  .cp-eyebrow {
+    @apply text-[11px] font-semibold tracking-wide text-ink-faint uppercase;
+  }
+
+  .cp-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--color-ink-faint) 0%,
+      var(--color-ink) 40%,
+      var(--color-ink-faint) 80%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 2.2s linear infinite;
+  }
+}
+
+/* Embedded (IDE sidebar) density: everything a notch tighter. */
+:root[data-layout="embedded"] body {
+  font-size: 12.5px;
+}

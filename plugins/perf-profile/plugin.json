@@ -1,0 +1,9 @@
+{
+  "name": "perf-profile",
+  "displayName": "Performance Profiler",
+  "description": "Performance profiling — identify bottlenecks, memory leaks, and optimization opportunities",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/perf-profile",
+  "enabled": true
+}

@@ -1,0 +1,54 @@
+{
+  "name": "@codepilot/protocol",
+  "version": "2.0.0",
+  "description": "CodePilot headless JSON-RPC 2.0 protocol server + CLI entry.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ws": {
+      "types": "./dist/ws.d.ts",
+      "import": "./dist/ws.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "import": "./dist/rpc.js"
+    },
+    "./agent-app": {
+      "types": "./dist/agent-app.d.ts",
+      "import": "./dist/agent-app.js"
+    },
+    "./serve-info": {
+      "types": "./dist/serve-info.d.ts",
+      "import": "./dist/serve-info.js"
+    }
+  },
+  "bin": {
+    "codepilot": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@codepilot/core": "workspace:*",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

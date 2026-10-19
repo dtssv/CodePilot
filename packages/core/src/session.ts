@@ -1,0 +1,1556 @@
+// Session: owns the tool registry, permissions, provider, and event log.
+// Persists events as JSONL under ~/.codepilot/sessions/<id>.jsonl.
+//
+// Enhancements (2025-Q1):
+// - Automatic session title: derived from the first user message; if a
+// small model is configured, a tighter 10-char title is produced and
+// cached. The model is asked via the smallModel provider; failures fall
+// back to a deterministic prefix.
+// - Checkpoint integration: a CheckpointHook is initialised in `init`;
+// on each prompt the hook inspects the event log and writes a fresh
+// checkpoint when triggered (token count, round count).
+// - searchSessions / exportSession: pure helpers, useful from CLI and
+// from `listSessions` enrichments.
+//
+// Module layout (2026-Q3 split):
+// - session.ts — the Session class itself (this file).
+// - session-mcp.ts — MCP server startup, tool registration, and the
+// `@mcp:` prompt-reference resolution.
+// - session-telemetry.ts— per-prompt span lifecycle (start/end).
+// - session-utils.ts — standalone helpers (paths, titles, providers,
+// createSession/listSessions/searchSessions/...).
+// The helpers moved to session-utils are re-exported at the bottom of this
+// file so existing `import { ... } from "./session.js"` callers keep working.
+
+import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { type AgentDeps } from "./agent.js";
+import { runtimeRegistry, type AgentRuntime } from "./runtime.js";
+import type {
+  AgentMode,
+  CodepilotConfig,
+  Event,
+  ImageAttachment,
+  PermissionDecision,
+  PermissionRequest,
+  SessionOptions,
+  SessionSummary,
+} from "./types.js";
+import { ToolRegistry } from "./tools/types.js";
+import { ArtifactStore } from "./tools/artifacts.js";
+import { PermissionEngine } from "./permissions.js";
+import { readMemory, readLayeredProjectMemory, FileMemorySink, summariseMemory } from "./memory.js";
+import { buildSystemPrompt } from "./systemPrompt.js";
+import { compact, liveTranscript, renderTranscriptArchive, shouldCompact, type CompactionOptions } from "./compaction.js";
+import { extractPlan, estimateEventTokens } from "./compaction.js";
+import { createSubagentRunner } from "./subagent.js";
+import { discoverCustomAgents, renderCustomAgentsBlock, type CustomAgent } from "./customAgents.js";
+import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
+import { writePlanFile, setPlanFileStatus } from "./plans.js";
+import { PersistentShell } from "./persistentShell.js";
+import type { McpManager } from "./mcp.js";
+import { startMcp as startMcpImpl, resolveSessionMcpReferences } from "./session-mcp.js";
+import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
+import {
+  resolveModelAlias,
+  useProvider,
+  type ResolvedCodepilotConfig,
+} from "./config.js";
+import {
+  applyProviderAndModel,
+  findProviderIdForFlat,
+  resolveDefaultModel,
+} from "./providerCatalog.js";
+import {
+  bashTool,
+  bashOutputTool,
+  bashKillTool,
+  writeStdinTool,
+  notebookEditTool,
+  webFetchTool,
+  webSearchTool,
+  readFileTool,
+  readImageTool,
+  writeFileTool,
+  editFileTool,
+  applyPatchTool,
+  diagnosticsTool,
+  globTool,
+  grepTool,
+  lsTool,
+  planUpdateTool,
+  memoryWriteTool,
+  readArtifactTool,
+  taskTool,
+  askUserQuestionTool,
+  planDoneTool,
+  filterToolsByModeFromRegistry,
+} from "./tools/index.js";
+import { onJobCompletion, readJobLog } from "./tools/bashJobs.js";
+import type { OutputStyle } from "./systemPrompt.js";
+import { resolveSandbox, detectSandboxBackend, wrapCommand, type ResolvedSandbox } from "./sandbox.js";
+import { DedupCache } from "./doomLoop.js";
+import { resolveImageMentions } from "./imageMentions.js";
+import { materializeUploads } from "./promptFiles.js";
+import type { PromptFile } from "./types.js";
+import { HookEngine } from "./hooks.js";
+import { estimateTokens, estimateCostUSD, lookupContextWindow, resolveCompactionThreshold } from "./tokens.js";
+import {
+  writeCheckpoint,
+  readCheckpoint,
+  summariseCheckpointForPrompt,
+  makeCheckpointHook,
+  type CheckpointHook,
+} from "./checkpoints.js";
+import {
+  createSnapshot,
+  rewindToSnapshot,
+  listSnapshots,
+} from "./snapshots.js";
+import {
+  SESSIONS_DIR,
+  buildProvider,
+  buildSmallProvider,
+  callTitleModel,
+  countMessages,
+  deriveTitleFromText,
+  generateSessionId,
+  loadTitleFromDisk,
+  persistSessionCwd,
+  sanitizeTitle,
+  historyArchivePath,
+  sessionPath,
+  titleSidecarPath,
+  type RichSessionSummary,
+} from "./session-utils.js";
+
+export class Session {
+  readonly id: string;
+  readonly cwd: string;
+ /** Mutable runtime config — updated by setProvider / setEndpoint. */
+  private config: CodepilotConfig;
+ /** Active model. Mutable via setModel and turn-scoped overrides. */
+  private model: string;
+ /** Active named provider preset id, when known. */
+  private activeProviderId: string | undefined;
+  private readonly systemPromptExtra: string | undefined;
+  private readonly onPermissionRequest?: (
+    req: PermissionRequest
+  ) => Promise<PermissionDecision>;
+  private readonly onAskUser?: SessionOptions["onAskUser"];
+  private readonly onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
+  private readonly onMcpOpenAuthUrl?: SessionOptions["onMcpOpenAuthUrl"];
+  private readonly diagnosticsProvider?: SessionOptions["diagnosticsProvider"];
+ /** Provider override (from Agent SDK / replay mode). When set, skips buildProvider. */
+  private readonly providerOverride?: import("./providers/types.js").ChatProvider;
+ /** Files the agent has written/edited this session, for snapshot rewind. */
+  private touchedFiles: Set<string> = new Set();
+ /** Unsubscribe functions for background-job completion listeners. */
+  private jobListeners: Array<() => void> = [];
+
+  private events: Event[] = [];
+ /** Append-only mirror of the session JSONL. `events` is the model view
+ * (may start at the last compaction); this log keeps every turn. */
+  private persisted: Event[] = [];
+  private listeners = new Set<(e: Event) => void>();
+  private cancelController: AbortController | null = null;
+ /** Session-scoped idempotent-result cache. Persists across prompts so a
+ * file read in one turn is replayed (not re-read) in the next. */
+  private readonly dedupCache = new DedupCache();
+ /** Mid-run steering messages queued via steer; drained each agent turn. */
+  private steeringQueue: string[] = [];
+  private toolRegistry: ToolRegistry;
+  private artifacts: ArtifactStore;
+  private permissions: PermissionEngine;
+  private sandbox: ResolvedSandbox;
+ /** True when sandbox mode is active but no OS backend is available and
+ * fallback is "deny". Bash commands will be refused; surfaced as a
+ * system-prompt note and via getSandboxStatus. */
+  private _sandboxUnavailable = false;
+  private hooks: HookEngine;
+  private mcp: McpManager | null = null;
+  private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string } | null = null;
+  private disposed = false;
+ /** Current Collaboration mode (default "agent"). */
+  private mode: AgentMode = "agent";
+ /** Output style (default "concise"). Controls verbosity/teaching posture. */
+  private outputStyle: OutputStyle = "concise";
+ /** Auto-title, generated after the first prompt. */
+  private title: string | null = null;
+ /** Cached checkpoint hook — initialised in `init`. */
+  private checkpointHook: CheckpointHook | null = null;
+ /** Aggregated usage across all prompts of this session. */
+  private usageTotal = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+ /** Set when the session was loaded with a stale in-flight status (the prior
+ * run was interrupted by a crash/restart). Drives a one-shot recovery
+ * instruction in the system prompt so the next turn resumes from the
+ * checkpoint instead of redoing work or drifting out of scope. Cleared
+ * after the first prompt completes. */
+  private resumedFromInterrupt = false;
+ /** Aggregate request timing across this session (persisted via `request`
+ * events; this is the in-memory rollup for getStats/summaries). */
+  private requestStats = { count: 0, totalMs: 0, lastMs: 0, lastTtftMs: 0, slowestMs: 0 };
+ /** Custom sub-agents discovered from .codepilot/agents/ + ~/.codepilot/agents/. */
+  private customAgents: Map<string, CustomAgent> = new Map();
+ /** The host surface this session is running in: "cli" | "tui" | "vscode" | "idea".
+ * Set by the host (TUI/IDE) so the prompt can tailor advice. Defaults to "cli". */
+  private hostSurface: "cli" | "tui" | "vscode" | "idea" = "cli";
+ /** The persistent shell shared across foreground bash calls. Lazily started. */
+  private persistentShell: PersistentShell | null = null;
+ /** The permission mode active before the user entered plan mode, so we can
+ * restore it on approval. */
+  private prePlanMode: AgentMode | null = null;
+ /** The slug of the plan file most recently written by plan_done, so
+ * setPlanFileStatus can update it after the user approves. */
+  private lastPlanSlug: string | null = null;
+ /** Turn-scoped overrides. Set by
+ * `setTurnOverrides` (e.g. from a custom `/name` command's frontmatter
+ * `model` / `allowed-tools`). Applied to the NEXT `prompt` only and
+ * cleared in the finally block — so the session model + permission
+ * grants resume on the user's next message. */
+  private turnOverrideModel: string | null = null;
+  private turnOverrideAllowedTools: string[] | null = null;
+ /** Saved rule list + effect so clearTurnOverrides can pop exactly what
+ * setTurnOverrides pushed (rules are append-only on the engine). */
+  private turnOverrideRuleCount = 0;
+ /** Resolved agent runtime name (default loop when undefined). */
+  private runtimeName: string | undefined;
+ /** The live runtime instance, lazily resolved at the first prompt. */
+  private runtime: AgentRuntime | null = null;
+
+  constructor(
+    id: string,
+    opts: Required<Pick<SessionOptions, "cwd" | "config" | "model">> & SessionOptions
+  ) {
+    this.id = id;
+    this.cwd = opts.cwd;
+    this.config = opts.config ?? {};
+    const resolved =
+      (opts.model && opts.model.length > 0 ? opts.model : undefined) ??
+      this.config.model ??
+      resolveDefaultModel(this.config as ResolvedCodepilotConfig)?.model;
+    this.model = resolved ?? "";
+    this.activeProviderId = findProviderIdForFlat(
+      this.config as ResolvedCodepilotConfig,
+    );
+    this.systemPromptExtra = opts.systemPromptExtra;
+    this.onPermissionRequest = opts.onPermissionRequest;
+    this.onAskUser = opts.onAskUser;
+    this.onMcpServerRequest = opts.onMcpServerRequest;
+    this.onMcpOpenAuthUrl = opts.onMcpOpenAuthUrl;
+    this.diagnosticsProvider = opts.diagnosticsProvider;
+    this.providerOverride = opts.provider;
+    this.runtimeName = opts.runtime ?? opts.config?.runtime;
+    this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
+    this.hostSurface = opts.hostSurface ?? "cli";
+    this.toolRegistry = new ToolRegistry();
+    this.artifacts = new ArtifactStore(join(opts.cwd, ".codepilot", "artifacts"));
+    this.permissions = new PermissionEngine({
+      permissionMode: this.config.permissionMode,
+      autoApprove: this.config.autoApprove,
+      permissions: this.config.permissions,
+    });
+    this.sandbox = resolveSandbox(this.config.sandbox, this.cwd);
+ // Determine whether an OS sandbox backend actually enforces the policy.
+ // When the mode is active but no backend exists, bash is NOT truly jailed
+ // (it runs unsandboxed or is refused) — so the permission engine must not
+ // treat it as sandbox-confined.
+    const osEnforced =
+      this.sandbox.mode !== "off" && detectSandboxBackend() !== "none";
+    if (this.sandbox.mode !== "off" && detectSandboxBackend() === "none" && this.sandbox.fallback === "deny") {
+      this._sandboxUnavailable = true;
+    }
+ // Let the permission engine auto-allow actions confined to the sandbox
+ // (writes inside writable roots; ordinary bash commands) — the process
+ // sandbox already contains them, so prompting is friction without safety.
+ // Only when the OS backend actually enforces the jail.
+    this.permissions.setSandbox(osEnforced ? this.sandbox : undefined, this.cwd);
+    this.hooks = new HookEngine(this.config.hooks, this.cwd);
+ // Wire hook trust (hash-based review for command hooks, ).
+    this.hooks.setTrustFile(join(this.cwd, ".codepilot", "hook_trust.json"));
+    this.hooks.onWarning = (message) => {
+      const ev: Event = { type: "error", message, recoverable: true };
+      this.events.push(ev);
+      void this.persistEvent(ev);
+      this.notify(ev);
+    };
+  }
+
+ /** Load from disk and configure registries. */
+  async init(): Promise<void> {
+    await this.artifacts.init();
+    this.registerBuiltins();
+    await this.loadFromDisk();
+ // Reconcile a stale "running" state: if the last persisted status is
+ // `running`/`waiting_permission`, the prompt that set it was interrupted
+ // by a crash or a server restart — there is no live run anymore. Without
+ // this the UI shows the session as executing forever and the stop button
+ // does nothing (there's no cancelController to abort). Stamp an `idle`
+ // status so clients reflect reality on load.
+    await this.reconcileStaleStatus();
+ // Stamp cwd sidecar so listSessions can filter by workspace.
+    await persistSessionCwd(this.id, this.cwd).catch(() => undefined);
+    this.mcp = await this.startMcp();
+ // Load trusted hook hashes (for command-hook trust enforcement).
+    await this.hooks.loadTrustedHashes();
+ // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/.
+    this.customAgents = await discoverCustomAgents(this.cwd);
+    await this.rebuildSystemPrompt();
+    this.checkpointHook = makeCheckpointHook(this.cwd, this.id);
+ // If we loaded events, the hook shouldn't immediately re-fire — mark
+ // the boundary at the end of the loaded history.
+    if (this.events.length > 0) {
+      this.checkpointHook.lastCheckpointAt = this.events.length;
+    }
+ // If a checkpoint already exists for this session, prime the title from it.
+    const existing = await readCheckpoint(this.cwd, this.id);
+    if (existing) {
+      const headerMatch = existing.match(/^#\s+(.+)$/m);
+      if (headerMatch) {
+        const candidate = headerMatch[1]!.replace(/^Checkpoint for\s+/, "").trim();
+        if (candidate) this.title = candidate;
+      }
+    }
+ // Fire SessionStart hook (resume if we loaded history, startup otherwise).
+    const source = this.events.length > 0 ? "resume" : "startup";
+    await this.hooks.runSessionStart(source).catch(() => undefined);
+ // Wire background-job completion → steering. When a detached bash job
+ // finishes, push a notice into the steering queue so the agent learns
+ // the job is done on its next turn (instead of having to poll
+ // bash_output). The unsubscribe is dropped on dispose via jobListeners.
+    this.jobListeners.push(
+      onJobCompletion(this.cwd, (meta) => {
+        const status =
+          meta.status === "exited"
+            ? `exited with code ${meta.exitCode ?? "?"}`
+            : meta.status === "killed"
+              ? "was killed"
+              : meta.status === "failed"
+                ? "failed"
+                : meta.status;
+ // Show the user's command, not the sandbox-exec wrapper (which is a
+ // giant useless string). Fall back to `command` for old jobs.
+        const shown = (meta.displayCommand ?? meta.command).replace(/\s+/g, " ").trim().slice(0, 80);
+        const failed =
+          meta.status === "failed" ||
+          (meta.status === "exited" && meta.exitCode !== 0 && meta.exitCode != null);
+ // On failure, inline the log tail so the model can diagnose without
+ // spending another large-context turn on bash_output just to see it.
+        const emit = (tail?: string): void => {
+          let msg = `Background job ${meta.id} (${shown}) ${status}.`;
+          if (failed && tail && tail.trim()) {
+            msg += `\nLast output:\n${tail.trim().slice(-800)}`;
+          } else {
+            msg += ` Use bash_output({ job_id: "${meta.id}" }) to read its output.`;
+          }
+          this.steer(msg);
+        };
+        if (failed) {
+          readJobLog(this.cwd, meta.id, 20).then(emit).catch(() => emit());
+        } else {
+          emit();
+        }
+      })
+    );
+  }
+
+  async prompt(text: string, images?: ImageAttachment[], files?: PromptFile[]): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    this.cancelController = new AbortController();
+
+ // Telemetry: wrap each prompt in a span (no-op when OTEL is not configured).
+    const promptSpan: PromptSpan = startPromptSpan(this.id, text.length);
+
+ // Run UserPromptSubmit hooks. A blocking hook stops the prompt; a
+ // rewriting hook replaces the text (first hook wins).
+    const promptHook = await this.hooks.runUserPromptSubmit(text).catch((): {
+      action: "allow";
+      rewrittenPrompt?: string;
+      warnings: string[];
+    } => ({ action: "allow", warnings: ["UserPromptSubmit hook threw; ignored"] }));
+    if (promptHook.action === "block") {
+      const ev: Event = {
+        type: "error",
+        message: `prompt blocked by UserPromptSubmit hook: ${promptHook.reason ?? "(no reason)"}`,
+        recoverable: true,
+      };
+      this.events.push(ev);
+      await this.persistEvent(ev);
+      this.notify(ev);
+      return;
+    }
+    let effectivePrompt = promptHook.rewrittenPrompt ?? text;
+
+ // Resolve `@mcp:<server>/<uri>` references into inline resource content.
+ // This lets users paste MCP resource URIs into their prompt to inject
+ // server-side context (e.g. `@mcp:github/repos/foo/bar`).
+    effectivePrompt = await resolveSessionMcpReferences(this.mcp, effectivePrompt);
+
+    const mentioned = await resolveImageMentions(effectivePrompt, this.cwd);
+    if (mentioned.failures.length > 0) {
+      const ev: Event = {
+        type: "error",
+        message: `could not attach image: ${mentioned.failures.join("; ")}`,
+        recoverable: true,
+      };
+      this.events.push(ev);
+      await this.persistEvent(ev);
+      this.notify(ev);
+    }
+    const attachedImages = [...(images ?? []), ...mentioned.images];
+
+ // Uploads are written to disk and listed on the message event. The
+ // attachment note is injected only when building the provider prompt
+ // (see agent-messages) so the user's bubble stays clean.
+    let savedUploads: Awaited<ReturnType<typeof materializeUploads>> = [];
+    if (files?.length) {
+      try {
+        savedUploads = await materializeUploads(this.cwd, files);
+        if (!effectivePrompt.trim() && savedUploads.length > 0) {
+          effectivePrompt = savedUploads.length === 1
+            ? `Please look at the attached file (${savedUploads[0]!.name}).`
+            : "Please look at the attached files.";
+        }
+      } catch (err) {
+        const ev: Event = {
+          type: "error",
+          message: `could not save attached file: ${err instanceof Error ? err.message : String(err)}`,
+          recoverable: true,
+        };
+        this.events.push(ev);
+        await this.persistEvent(ev);
+        this.notify(ev);
+        return;
+      }
+    }
+
+    try {
+ // Lazily start the persistent shell (one per session). Its cwd/env
+ // persist across foreground bash calls so `cd` / `export` carry over.
+      if (!this.persistentShell) {
+        this.persistentShell = this.startPersistentShell();
+      }
+ // Apply turn-scoped overrides.
+ // The model override applies to THIS prompt only; allowed-tools rules
+ // were already pushed onto the permission engine by setTurnOverrides
+ // and are popped in the finally block below.
+      const effectiveModel = this.turnOverrideModel ?? this.model;
+      const deps: AgentDeps = {
+        provider:
+          this.providerOverride ??
+          buildProvider({ ...this.config, model: effectiveModel }),
+        tools: this.toolRegistry,
+        artifacts: this.artifacts,
+        permissions: this.permissions,
+        config: { ...this.config, model: effectiveModel },
+        cwd: this.cwd,
+        systemPrompt: this.systemPromptCache ?? undefined,
+        signal: this.cancelController.signal,
+        agentMode: this.mode,
+        sandbox: this.sandbox,
+        hooks: this.hooks,
+        persistentShell: this.persistentShell ?? undefined,
+        diagnosticsProvider: this.diagnosticsProvider,
+        parentSpan: promptSpan,
+        dedupCache: this.dedupCache,
+        drainSteering: () => {
+          const q = this.steeringQueue;
+          this.steeringQueue = [];
+          return q;
+        },
+        onEvent: async (e) => {
+          if (e.type === "retry" || e.type === "activity") {
+ // Transient UI notice — never part of the transcript.
+            this.notify(e);
+            return;
+          }
+ // Stream deltas are for live UI only. Persisting every 1–2 char
+ // fragment balloons ~/.codepilot/sessions/*.jsonl (90%+ of events
+ // in real runs) and inflates token estimates; the final `message`
+ // event already holds the complete text / tool_use blocks.
+          if (e.type === "message_delta") {
+            this.notify(e);
+            return;
+          }
+          if (e.type === "subagent") {
+            const inner = e.event?.type;
+            const replayable = inner === undefined || inner === "message" || inner === "tool_call" ||
+              inner === "tool_result" || inner === "plan" || inner === "error";
+            if (!replayable) {
+              this.notify(e);
+              return;
+            }
+            e = slimSubagentEvent(e);
+          }
+          this.events.push(e);
+          await this.persistEvent(e);
+          this.notify(e);
+ // plan_done approval: leave plan mode. Land in `agent` so the
+ // approved plan can be executed — UNLESS the user entered plan mode
+ // from `chat` (they wanted answers + a plan, not autonomous edits),
+ // in which case restore `chat` and let them opt into agent mode.
+          if (e.type === "mode_request") {
+            const target = e.mode === "agent" && this.prePlanMode === "chat"
+              ? "chat"
+              : e.mode;
+            await this.setAgentMode(target);
+          }
+ // Track files touched by write/edit/apply_patch for snapshot rewind.
+          if (e.type === "tool_call") {
+            const t = e as { type: "tool_call"; name: string; input: unknown };
+            if (t.name === "write_file" || t.name === "edit_file" || t.name === "apply_patch") {
+              const inp = t.input as Record<string, unknown> | undefined;
+              const path = inp?.path;
+              if (typeof path === "string") this.touchedFiles.add(path);
+ // apply_patch may touch multiple files — parse is expensive, so
+ // we rely on the patch's own `*** Update/Add/Delete File:` lines.
+              if (t.name === "apply_patch" && typeof inp?.patch === "string") {
+                for (const m of (inp.patch as string).matchAll(/\*\*\* (?:Add|Delete|Update) File: (.+)/g)) {
+                  this.touchedFiles.add(m[1]!.trim());
+                }
+              }
+            }
+          }
+        },
+        onPermissionRequest: this.onPermissionRequest,
+        onAskUser: this.onAskUser,
+        onUsage: (u) => {
+          this.usageTotal.input += u.input ?? 0;
+          this.usageTotal.output += u.output ?? 0;
+          this.usageTotal.cacheRead += u.cacheRead ?? 0;
+          this.usageTotal.cacheWrite += u.cacheWrite ?? 0;
+        },
+      };
+
+ // Resolve the agent runtime. Default loop wraps
+ // runAgent; unknown explicit names throw here so a misconfigured
+ // plugin runtime never silently falls back to the default loop.
+      const runtime = this.getRuntime();
+ // Run the agent loop. Compaction may run between turns (driven by the
+ // session after each prompt completes).
+      await runtime.prompt({
+        history: this.events,
+        userText: effectivePrompt,
+        images: attachedImages.length > 0 ? attachedImages : undefined,
+        files: savedUploads.length > 0 ? savedUploads : undefined,
+      }, deps);
+
+ // The interrupt-recovery guidance (if any) has now reached the model for
+ // this turn; clear the one-shot flag so the rebuild below — and all
+ // later turns — drop it.
+      this.resumedFromInterrupt = false;
+
+ // Auto-title after the first prompt completes.
+      if (this.title == null) {
+        await this.refreshTitle(effectivePrompt);
+      }
+
+ // Post-prompt compaction.
+      await this.maybeCompact();
+
+ // Memory written during the run (memory_write, edits to CODEPILOT.md)
+ // and the latest plan must reach the next prompt's system context.
+      await this.rebuildSystemPrompt().catch(() => undefined);
+
+ // Post-prompt checkpoint.
+      await this.maybeCheckpoint();
+
+ // Stop hooks (fire-and-forget, never fatal).
+      await this.hooks.runSimple("Stop", { reason: "prompt_completed" }).catch(() => undefined);
+    } finally {
+      this.cancelController = null;
+ // Clear turn-scoped overrides so the session model + permission
+ // grants resume on the user's next message.
+      this.clearTurnOverrides();
+ // End the telemetry span (no-op when disabled).
+      endPromptSpan(promptSpan);
+    }
+  }
+
+ /**
+ * Runtime collaboration-mode switch. Takes effect on the next `prompt`
+ * (and on tool dispatch — see `runOneTool`'s mode gate in agent.ts). The
+ * system prompt is rebuilt so the new mode's guidance reaches the model
+ * on the next turn. Emits a `mode` event so subscribers (and protocol
+ * clients) can react immediately.
+ *
+ * Plan-mode bookkeeping: when the
+ * user enters `plan` mode, the previous mode is stashed in `prePlanMode`
+ * so it can be restored on approval. When the agent calls `plan_done` and
+ * the user approves, the session switches to `agent` mode (not back to
+ * plan entry) — restore the pre-plan permission *tier*
+ * but always lands in an executable mode. We mark the plan file
+ * "approved" so the artifact reflects the outcome.
+ */
+  async setAgentMode(mode: AgentMode): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    if (this.mode === mode) return;
+ // Stash the pre-plan mode so we can report it (and so the approval
+ // handler knows we came from plan mode).
+    if (mode === "plan" && this.mode !== "plan") {
+      this.prePlanMode = this.mode;
+    }
+ // If we're leaving plan mode (the plan_done approval path), mark the
+ // plan file approved regardless of whether we land in agent or restore
+ // chat — the user accepted the plan either way.
+    if (this.mode === "plan" && mode !== "plan" && this.lastPlanSlug) {
+      await setPlanFileStatus(this.cwd, this.lastPlanSlug, "approved", {
+        plansDirectory: this.config.plansDirectory,
+      }).catch(() => undefined);
+    }
+    this.mode = mode;
+    await this.rebuildSystemPrompt();
+    const ev: Event = { type: "mode", mode };
+    this.events.push(ev);
+    await this.persistEvent(ev);
+    this.notify(ev);
+  }
+
+ /** Returns the current collaboration mode (default "agent"). */
+  getAgentMode(): AgentMode {
+    return this.mode;
+  }
+
+ /** Returns the current output style (default "concise"). */
+  getOutputStyle(): OutputStyle {
+    return this.outputStyle;
+  }
+
+ /** Returns the active model (factoring in any turn-scoped override). */
+  getModel(): string {
+    return this.turnOverrideModel ?? this.model;
+  }
+
+ /** Active named provider preset id (undefined when using flat config only). */
+  getProviderId(): string | undefined {
+    return this.activeProviderId;
+  }
+
+ /** Snapshot of the runtime config (provider / baseURL / keys / models). */
+  getConfig(): CodepilotConfig {
+    return { ...this.config, model: this.model };
+  }
+
+ /** Read-only view of the system prompt the session currently sends (built
+ * on init and after each prompt). Null until first built. Useful for hosts
+ * that surface the active prompt and for tests. */
+  getSystemPrompt(): { staticPrefix: string; dynamicSuffix: string; full: string } | null {
+    return this.systemPromptCache;
+  }
+
+ /**
+ * Merge named provider presets into the live session config (e.g. after the
+ * user saves providers in Settings while a session is already open).
+ */
+  mergeProviders(providers: Record<string, import("./config.js").ProviderPreset>): void {
+    const cur = (this.config as import("./config.js").ResolvedCodepilotConfig).providers ?? {};
+    this.config = {
+      ...this.config,
+      providers: { ...cur, ...providers },
+    } as CodepilotConfig;
+  }
+
+ /**
+ * Persistently switch the session model (optionally across providers).
+ * When `providerId` is set, applies that preset first via `useProvider`.
+ * Emits a `{ type: "model" }` event for UI clients.
+ */
+  async setModel(model: string, providerId?: string): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    if (!model) return;
+    if (providerId) {
+      await this.setEndpoint({ model, providerId });
+      return;
+    }
+    const resolved = resolveModelAlias({ ...this.config, model }) ?? model;
+    if (resolved === this.model && !providerId) return;
+    this.model = resolved;
+    this.config = { ...this.config, model: resolved };
+    await this.rebuildSystemPrompt();
+    await this.emitModelEvent();
+  }
+
+ /**
+ * Switch to a named provider preset from `config.providers`. Optionally
+ * override the model (defaults to the preset's `model`).
+ */
+  async setProvider(providerId: string, model?: string): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    const applied = useProvider(this.config, providerId);
+    const nextModel =
+      model ??
+      applied.model ??
+      this.model;
+    await this.setEndpoint({ model: nextModel, providerId });
+  }
+
+ /**
+ * Switch provider + model in one step (cross-vendor picker).
+ */
+  async setEndpoint(opts: {
+    model: string;
+    providerId?: string;
+  }): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    const { config, providerId, model } = applyProviderAndModel(
+      this.config,
+      opts.providerId,
+      opts.model,
+    );
+    this.config = config;
+    this.model = model;
+    this.activeProviderId = providerId;
+    await this.rebuildSystemPrompt();
+    await this.emitModelEvent();
+  }
+
+  private async emitModelEvent(): Promise<void> {
+    const ev: Event = {
+      type: "model",
+      model: this.model,
+      providerId: this.activeProviderId,
+    };
+    this.events.push(ev);
+    await this.persistEvent(ev);
+    this.notify(ev);
+  }
+
+ /**
+ * Set turn-scoped overrides. The
+ * `model` override (use `"inherit"` to keep the session model) and the
+ * `allowedTools` permission grant apply to the NEXT `prompt` only and
+ * are cleared in that prompt's finally block — so the session resumes
+ * its normal model + permission posture on the user's next message.
+ *
+ * Calling this while a prompt is running is a no-op (the overrides would
+ * be cleared by the in-flight prompt's finally before they take effect);
+ * hosts should call it immediately before `prompt`.
+ *
+ * `allowedTools` entries are tool names (e.g. `["bash", "read_file"]`).
+ * Each becomes an "allow" session rule for the next turn.
+ */
+  setTurnOverrides(opts: { model?: string; allowedTools?: string[] } = {}): void {
+    if (this.disposed) throw new Error("session disposed");
+ // Clear any stale overrides first so we don't double-push rules.
+    this.clearTurnOverrides();
+    if (opts.model && opts.model !== "inherit") {
+      this.turnOverrideModel = opts.model;
+    }
+    if (opts.allowedTools && opts.allowedTools.length > 0) {
+      this.turnOverrideAllowedTools = opts.allowedTools.slice();
+      this.turnOverrideRuleCount = opts.allowedTools.length;
+      for (const toolName of opts.allowedTools) {
+        this.permissions.addSessionRule(toolName, "allow");
+      }
+    }
+  }
+
+ /** Clear any active turn-scoped overrides (model + permission grants). */
+  clearTurnOverrides(): void {
+    this.turnOverrideModel = null;
+    if (this.turnOverrideAllowedTools) {
+ // Pop exactly the N "allow" rules we pushed (LIFO), leaving any
+ // "always"-decision rules intact.
+      this.permissions.removeLastSessionRules("allow", this.turnOverrideRuleCount);
+      this.turnOverrideAllowedTools = null;
+      this.turnOverrideRuleCount = 0;
+    }
+  }
+
+ /** Returns the currently-active turn-scoped overrides (for UI display). */
+  getTurnOverrides(): { model: string | null; allowedTools: string[] | null } {
+    return {
+      model: this.turnOverrideModel,
+      allowedTools: this.turnOverrideAllowedTools,
+    };
+  }
+
+ /**
+ * Restrict the session's tool registry to only the named tools. Tools
+ * not in the list are removed from the registry, so the model never
+ * sees them and the agent loop cannot invoke them. This is a persistent
+ * session-level filter (unlike turn-scoped overrides).
+ *
+ * Used by headless/print mode (`--allowed-tools`) to restrict the agent
+ * to a subset of tools for CI/scripting safety.
+ */
+  filterToolRegistry(allowedTools: string[]): void {
+    const allowed = new Set(allowedTools);
+    const allTools = this.toolRegistry.all();
+    this.toolRegistry = new ToolRegistry();
+    for (const t of allTools) {
+      if (allowed.has(t.name)) {
+        this.toolRegistry.register(t);
+      }
+    }
+ // Rebuild the system prompt so the advertised tool list matches.
+    void this.rebuildSystemPrompt();
+  }
+
+ /**
+ * Switch the output style. Rebuilds the system prompt so the new style's
+ * guidance reaches the model on the next turn. Does NOT emit an event —
+ * output style is a presentation knob, not a behavioral mode.
+ */
+  async setOutputStyle(style: OutputStyle): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    if (this.outputStyle === style) return;
+    this.outputStyle = style;
+    await this.rebuildSystemPrompt();
+  }
+
+ /** Returns the host surface (default "cli"). */
+  getHostSurface(): "cli" | "tui" | "vscode" | "idea" {
+    return this.hostSurface;
+  }
+
+ /**
+ * Update the host surface. Call this when the session is attached to a
+ * different frontend (e.g. a CLI session moved into the VSCode panel).
+ * Rebuilds the prompt so platform-aware advice updates.
+ */
+  async setHostSurface(surface: "cli" | "tui" | "vscode" | "idea"): Promise<void> {
+    if (this.disposed) throw new Error("session disposed");
+    if (this.hostSurface === surface) return;
+    this.hostSurface = surface;
+    await this.rebuildSystemPrompt();
+  }
+
+ // ---- Context visualization (/context) ----
+
+ /**
+ * Produce a structured breakdown of the session's context usage for the
+ * `/context` command. Returns total estimated tokens, a per-event-type
+ * breakdown, the context window + trigger threshold, usage %, and a list
+ * of files that have been read more than once (dedup hint).
+ */
+  contextReport(): {
+    totalTokens: number;
+    window: number;
+    triggerThreshold: number;
+    triggerFraction: number;
+    usagePercent: number;
+    autoCompactEnabled: boolean;
+    byEventType: { type: string; tokens: number; count: number }[];
+    topFileReads: { path: string; reads: number; tokens: number }[];
+    duplicateReads: { path: string; reads: number }[];
+  } {
+    const window = this.config.contextWindow ??
+      lookupContextWindow(this.model).contextWindow;
+    const fraction = this.config.compactionThreshold ?? 0.92;
+    const trigger = Math.floor(window * fraction);
+    const byType = new Map<string, { tokens: number; count: number }>();
+    let total = 0;
+ // Track file reads for dedup hints.
+    const fileReads = new Map<string, { reads: number; tokens: number }>();
+    for (const e of this.events) {
+      const tok = estimateEventTokens([e], estimateTokens);
+      total += tok;
+      const key = e.type;
+      const cur = byType.get(key) ?? { tokens: 0, count: 0 };
+      cur.tokens += tok;
+      cur.count += 1;
+      byType.set(key, cur);
+ // read_file tool_call carries the path in input.path.
+      if (e.type === "tool_call" && (e as { name?: string }).name === "read_file") {
+        const inp = (e as { input?: { path?: string } }).input;
+        const p = inp?.path;
+        if (typeof p === "string") {
+          const fr = fileReads.get(p) ?? { reads: 0, tokens: 0 };
+          fr.reads += 1;
+          fr.tokens += tok;
+          fileReads.set(p, fr);
+        }
+      }
+    }
+    const byEventType = [...byType.entries()]
+      .map(([type, v]) => ({ type, tokens: v.tokens, count: v.count }))
+      .sort((a, b) => b.tokens - a.tokens);
+    const topFileReads = [...fileReads.entries()]
+      .map(([path, v]) => ({ path, reads: v.reads, tokens: v.tokens }))
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, 10);
+    const duplicateReads = topFileReads
+      .filter((f) => f.reads > 1)
+      .map((f) => ({ path: f.path, reads: f.reads }));
+    return {
+      totalTokens: total,
+      window,
+      triggerThreshold: trigger,
+      triggerFraction: fraction,
+      usagePercent: Math.round((total / window) * 100),
+      autoCompactEnabled: this.config.autoCompact !== false,
+      byEventType,
+      topFileReads,
+      duplicateReads,
+    };
+  }
+
+ // ---- Snapshot rewind ----
+
+ /**
+ * Snapshot the current on-disk state of every file the agent has touched
+ * this session. Returns a snapshot id that can be passed to `rewind`.
+ * Call this at a "known-good" boundary (e.g. after tests pass) so the
+ * user can later undo a broken sequence of edits.
+ */
+  async snapshot(label: string): Promise<string> {
+    const paths = [...this.touchedFiles];
+    if (paths.length === 0) {
+ // Nothing touched yet — still record a snapshot so rewind can detect
+ // files created after this point.
+    }
+    return createSnapshot(this.cwd, paths, label);
+  }
+
+ /** Rewind every touched file to its state at snapshot `id`. */
+  async rewind(id: string): Promise<{ restored: string[]; deleted: string[] }> {
+    return rewindToSnapshot(this.cwd, id);
+  }
+
+ /** List available snapshots (oldest first). */
+  async listSnapshots(): Promise<
+    { id: string; label: string; createdAt: string; fileCount: number }[]
+  > {
+    return listSnapshots(this.cwd);
+  }
+
+ /** Returns the auto-generated (or user-supplied) session title. */
+  getTitle(): string | null {
+    return this.title;
+  }
+
+ /** Override the session title (and persist it for `listSessions`). */
+  async setTitle(title: string): Promise<void> {
+    this.title = title;
+ // Title is stored as a tiny sidecar so listSessions doesn't have to
+ // re-parse the JSONL. Failures are non-fatal.
+    try {
+      await mkdir(SESSIONS_DIR, { recursive: true });
+      await writeFile(titleSidecarPath(this.id), title, "utf-8");
+    } catch {
+ /* ignore */
+    }
+  }
+
+  cancel(): void {
+    if (this.cancelController) {
+ // Active run: abort it. The agent loop + provider stream observe the
+ // signal and unwind; the prompt's own finally emits the idle status.
+      this.cancelController.abort();
+      return;
+    }
+ // No active run (e.g. the run was interrupted by a restart but the UI
+ // still shows it as executing). Give the client a definitive `idle` so
+ // the stop button always has an effect instead of silently no-opping.
+ // Skip during disposal — no client is listening and we don't want to
+ // append a trailing status to a session being torn down.
+    if (this.disposed) return;
+    const ev: Event = { type: "status", status: "idle" };
+    this.events.push(ev);
+    void this.persistEvent(ev).catch(() => undefined);
+    this.notify(ev);
+  }
+
+ /**
+ * Resolve the agent runtime for this session. The
+ * instance is created lazily on first use and cached. Default name
+ * (undefined or "default") yields the built-in loop that wraps
+ * `runAgent`. A plugin-registered runtime is instantiated through its
+ * `RuntimeFactory` with `cwd`; an unknown name throws.
+ */
+  getRuntime(): AgentRuntime {
+    if (this.runtime) return this.runtime;
+    this.runtime = runtimeRegistry.resolve(this.runtimeName, { cwd: this.cwd });
+    return this.runtime;
+  }
+
+ /** The configured runtime name (for `/runtime`-style introspection). */
+  getRuntimeName(): string {
+    return this.runtimeName ?? "default";
+  }
+
+ /**
+ * Queue a mid-run steering message. It is injected as a user message at
+ * the start of the agent's next turn (see `drainSteering` in agent.ts).
+ * Safe to call while a prompt is running or idle; messages queued while
+ * idle are prepended to the next prompt's transcript.
+ */
+  steer(text: string): void {
+    if (text.trim().length === 0) return;
+    this.steeringQueue.push(text);
+  }
+
+ /** The long-lived shell for foreground bash, started inside the sandbox.
+ * Null when the policy can't be enforced: bash then runs each command
+ * one-shot, where the sandbox fallback (deny / warn) applies. */
+  private startPersistentShell(): PersistentShell | null {
+    if (this.sandbox.mode === "off") return new PersistentShell({ cwd: this.cwd });
+    const shell = process.env.SHELL || "/bin/bash";
+    const wrapped = wrapCommand(`exec ${shell} -i`, this.sandbox);
+    if (!wrapped.sandboxed) return null;
+    return new PersistentShell({
+      cwd: this.cwd,
+      shell: wrapped.shell ?? "/bin/sh",
+      shellArgs: [...(wrapped.shellArgs ?? ["-c"]), wrapped.command],
+    });
+  }
+
+ /** Current sandbox policy (read-only view for hosts/tests). */
+  getSandbox(): ResolvedSandbox {
+    return this.sandbox;
+  }
+
+ /** Sandbox availability status. When `unavailable` is true, bash commands
+ * are being refused because sandbox mode is active but no OS backend
+ * exists and fallback is "deny". The host should surface this to the
+ * user (e.g. a warning banner). */
+  getSandboxStatus(): { mode: ResolvedSandbox["mode"]; unavailable: boolean; backend: string } {
+    return {
+      mode: this.sandbox.mode,
+      unavailable: this._sandboxUnavailable,
+      backend: detectSandboxBackend(),
+    };
+  }
+
+ /** Active permission rules (session + config), for UI display. */
+  getPermissionRules() {
+    return this.permissions.rules();
+  }
+
+ /**
+ * Aggregated token usage for this session plus an estimated USD cost
+ * (undefined when the model is not in the price table).
+ */
+  getUsage(): {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    costUSD?: number;
+  } {
+    return {
+      ...this.usageTotal,
+      costUSD: estimateCostUSD(this.model, this.usageTotal),
+    };
+  }
+
+ /** The MCP manager (null when no servers are configured). For `/mcp`. */
+  getMcpManager(): import("./mcp.js").McpManager | null {
+    return this.mcp;
+  }
+
+ /** The hook engine. For `/hooks`. */
+  getHookEngine(): import("./hooks.js").HookEngine {
+    return this.hooks;
+  }
+
+ /** Working directory (for agent/skill discovery). */
+  getCwd(): string {
+    return this.cwd;
+  }
+
+ /** Status-line script configuration (for the TUI custom status bar). */
+  getStatusLineConfig(): import("./types.js").StatusLineConfig | undefined {
+    return this.config.statusLine;
+  }
+
+  subscribe(listener: (e: Event) => void): () => void {
+ // Replay history first.
+    for (const e of this.events) {
+      try {
+        listener(e);
+      } catch {
+ /* ignore listener errors */
+      }
+    }
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  getEvents(): Event[] {
+    return this.events.slice();
+  }
+
+ /** Returns a short summary of this session for list/search use. */
+  async getSummary(): Promise<SessionSummary> {
+    const path = sessionPath(this.id);
+    let updatedAt = Date.now();
+    try {
+      const st = await stat(path);
+      updatedAt = st.mtimeMs;
+    } catch {
+ /* default */
+    }
+    const title = this.title ?? (await loadTitleFromDisk(this.id));
+    return {
+      id: this.id,
+      title: title ?? "(untitled)",
+      updatedAt,
+      cwd: this.cwd,
+    };
+  }
+
+ /** Returns an enriched summary including mode/model/messageCount. The
+ * base SessionSummary is kept tight for back-compat; callers that want
+ * the rich fields use this method. */
+  async getRichSummary(): Promise<RichSessionSummary> {
+    const base = await this.getSummary();
+    return {
+      ...base,
+      mode: this.mode,
+      model: this.model,
+      messageCount: countMessages(this.events),
+    };
+  }
+
+  async fork(atEventIndex?: number): Promise<Session> {
+    const newId = generateSessionId();
+    const forked = new Session(newId, {
+      cwd: this.cwd,
+      config: this.config,
+      model: this.model,
+      systemPromptExtra: this.systemPromptExtra,
+      agentMode: this.mode,
+      onPermissionRequest: this.onPermissionRequest,
+    });
+    await forked.init();
+    const slice = atEventIndex === undefined
+      ? this.events
+      : this.events.slice(0, atEventIndex);
+    for (const e of slice) {
+      forked.events.push(e);
+      await forked.persistEvent(e);
+    }
+    await forked.rebuildSystemPrompt();
+    if (this.title) {
+      await forked.setTitle(this.title);
+    }
+    return forked;
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.cancel();
+    this.listeners.clear();
+ // Detach background-job completion listeners.
+    for (const off of this.jobListeners) {
+      try { off(); } catch { /* ignore */ }
+    }
+    this.jobListeners = [];
+    if (this.persistentShell) {
+      this.persistentShell.close();
+      this.persistentShell = null;
+    }
+    if (this.mcp) {
+      await this.mcp.stopAll();
+      this.mcp = null;
+    }
+  }
+
+ // -- internals ----------------------------------------------------------
+
+  private notify(e: Event): void {
+    for (const l of this.listeners) {
+      try {
+        l(e);
+      } catch {
+ /* swallow */
+      }
+    }
+  }
+
+  private registerBuiltins(): void {
+    this.toolRegistry.register(bashTool);
+    this.toolRegistry.register(bashOutputTool);
+    this.toolRegistry.register(bashKillTool);
+    this.toolRegistry.register(writeStdinTool);
+    this.toolRegistry.register(notebookEditTool);
+    this.toolRegistry.register(webFetchTool);
+    this.toolRegistry.register(webSearchTool);
+    this.toolRegistry.register(readFileTool);
+    this.toolRegistry.register(readImageTool);
+    this.toolRegistry.register(writeFileTool);
+    this.toolRegistry.register(editFileTool);
+    this.toolRegistry.register(applyPatchTool);
+    this.toolRegistry.register(diagnosticsTool);
+    this.toolRegistry.register(globTool);
+    this.toolRegistry.register(grepTool);
+    this.toolRegistry.register(lsTool);
+    this.toolRegistry.register(planUpdateTool);
+    this.toolRegistry.register(readArtifactTool);
+    this.toolRegistry.register(askUserQuestionTool);
+
+ // The tools below carry per-session wiring (sink, plan file, sub-agent
+ // runner). The exported objects are module singletons shared by every
+ // session in the process, so each session registers its own copy —
+ // mutating the shared one let the newest session's runner (its endpoint,
+ // cwd and transcript) serve every other session's `task` calls.
+    const memoryWrite = { ...memoryWriteTool };
+    const planDone = { ...planDoneTool };
+    const task = { ...taskTool };
+    this.toolRegistry.register(memoryWrite);
+    this.toolRegistry.register(task);
+    this.toolRegistry.register(planDone);
+
+ // Wire the memory sink.
+    memoryWrite.sink = new FileMemorySink(this.cwd);
+
+ // Wire plan_done's plan-file persistence. The plan is written to
+ // .codepilot/plans/<slug>.md before the approval prompt; on approval the
+ // file's status is updated.
+    planDone.writePlan = async (summary, steps) => {
+      const pf = await writePlanFile(this.cwd, this.id, summary, steps, {
+        plansDirectory: this.config.plansDirectory,
+        status: "pending",
+      });
+      this.lastPlanSlug = pf.slug;
+      return pf.path;
+    };
+    planDone.currentPlan = () => extractPlan(this.events);
+
+ // Wire the subagent runner so `task` works. "explore" agents are
+ // read-only; "worker" agents additionally get write + bash tools.
+    task.runner = createSubagentRunner({
+      cwd: this.cwd,
+      config: this.config,
+      model: this.model,
+      getEndpoint: () => ({ config: this.config, model: this.model }),
+      permissions: this.permissions,
+      onPermissionRequest: this.onPermissionRequest,
+      buildToolRegistry: (agentType) => {
+        const r = new ToolRegistry();
+        r.register(readFileTool);
+        r.register(readImageTool);
+        r.register(globTool);
+        r.register(grepTool);
+        r.register(lsTool);
+        r.register(readArtifactTool);
+        if (agentType === "worker") {
+          r.register(writeFileTool);
+          r.register(editFileTool);
+          r.register(applyPatchTool);
+          r.register(bashTool);
+        }
+        return r;
+      },
+      hooks: this.hooks,
+      resolveCustomAgent: async (name) => this.customAgents.get(name),
+    });
+ // Per-sub-agent wall-clock budget (optional). Enforced by the task tool's
+ // shared semaphore so a stuck worker can't starve a parallel fan-out.
+    task.subagentTimeoutMs = this.config.subagentTimeoutMs;
+  }
+
+  private async startMcp(): Promise<McpManager | null> {
+    return startMcpImpl({
+      config: this.config,
+      cwd: this.cwd,
+      onMcpOpenAuthUrl: this.onMcpOpenAuthUrl,
+      onMcpServerRequest: this.onMcpServerRequest,
+      withToolRegistry: (fn) => fn(this.toolRegistry),
+    });
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    try {
+      const path = sessionPath(this.id);
+      const text = await readFile(path, "utf-8");
+      const lines = text.split("\n").filter((l) => l.trim().length > 0);
+      for (const line of lines) {
+        try {
+          this.persisted.push(JSON.parse(line) as Event);
+        } catch {
+ /* skip malformed */
+        }
+      }
+      this.events = liveTranscript(this.persisted);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw err;
+    }
+ // Hydrate title from sidecar (if any).
+    const t = await loadTitleFromDisk(this.id);
+    if (t) this.title = t;
+  }
+
+ /**
+ * After loading history, clear a stale in-flight status. A session whose
+ * last `status` event is `running` or `waiting_permission` was interrupted
+ * mid-prompt (crash/restart) — the agent loop and its AbortController are
+ * gone, so the run can never complete or be cancelled. We append a final
+ * `idle` status (and persist it) so clients stop showing "executing" and
+ * the user can prompt again. No-op for cleanly-finished sessions.
+ */
+  private async reconcileStaleStatus(): Promise<void> {
+    let lastStatus: string | null = null;
+    for (const e of this.events) {
+      if (e.type === "status") lastStatus = e.status;
+    }
+    if (lastStatus === "running" || lastStatus === "waiting_permission") {
+      const ev: Event = { type: "status", status: "idle" };
+      this.events.push(ev);
+      await this.persistEvent(ev).catch(() => undefined);
+ // The prior run was cut off mid-flight. Flag it so the next prompt's
+ // system prompt carries a recovery instruction (resume from checkpoint,
+ // don't redo finished steps).
+      this.resumedFromInterrupt = true;
+    }
+  }
+
+  private async persistEvent(e: Event): Promise<void> {
+    this.persisted.push(e);
+    const path = sessionPath(this.id);
+    await mkdir(SESSIONS_DIR, { recursive: true });
+    await appendFile(path, JSON.stringify(e) + "\n", "utf-8");
+  }
+
+  private async rebuildSystemPrompt(): Promise<void> {
+    const memory = summariseMemory(await readMemory(this.cwd));
+ // Hierarchical project memory: CODEPILOT.md / AGENTS.md from cwd upward,
+ // with @import expansion.
+    const layered = await readLayeredProjectMemory(this.cwd);
+    if (layered) memory.project = layered;
+ // Auto memory index. Loaded from
+ // ~/.codepilot/memory/<project-hash>/MEMORY.md, capped at 200 lines / 25KB.
+    const autoCfg: AutoMemoryConfig = { enabled: this.config.autoMemoryEnabled !== false };
+    const autoIndex = await loadAutoMemoryIndex(this.cwd, autoCfg);
+    if (autoIndex) {
+      memory.user = (memory.user ? memory.user + "\n\n" : "") +
+        `<!-- auto memory index -->\n${autoIndex}`;
+    }
+    const plan = extractPlan(this.events);
+ // The system prompt advertises the *mode-filtered* tool list, so the
+ // model doesn't expect tools that aren't actually available.
+    const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
+    const toolNames = visibleTools.map((t) => t.name);
+ // Sandbox posture is part of the prompt so the model knows its boundaries.
+    const sb = this.sandbox;
+    const sandboxNote =
+      `Sandbox: mode=${sb.mode}, network=${sb.network ? "allowed" : "blocked"}` +
+      (sb.mode !== "off" ? `, writes limited to ${sb.writableRoots.join(", ")}` : "") +
+      "." +
+      (this._sandboxUnavailable
+        ? " WARNING: no OS sandbox backend (sandbox-exec/bwrap) is available on this host; `bash` commands will be REFUSED. Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
+        : "");
+ // Advertise custom sub-agents.
+    const customAgentsBlock = renderCustomAgentsBlock(this.customAgents);
+ // If a checkpoint exists for this session, append a short summary of
+ // it to the system prompt. This is what enables a "resume" without
+ // replaying the JSONL: the agent sees the last checkpoint's distilled
+ // state plus the events added since the checkpoint boundary.
+    const checkpoint = await readCheckpoint(this.cwd, this.id);
+    let resumeNote = checkpoint
+      ? `\n\n${summariseCheckpointForPrompt(checkpoint)}`
+      : "";
+ // One-shot interrupt-recovery guidance: when this session was loaded after
+ // its prior run was cut off (crash/server restart), the user's next
+ // message is often just "继续"/"continue". Tell the model to resume from
+ // where it left off rather than restart the task or wander out of scope.
+    if (this.resumedFromInterrupt) {
+      resumeNote +=
+        `\n\n<interrupted_run>\n` +
+        `The previous run in this session was interrupted before it finished ` +
+        `(a crash or a server restart, not a user cancellation). The user may ` +
+        `simply say "continue". Before acting:\n` +
+        `- Read the plan and the checkpoint above to see exactly which steps are ` +
+        `already done — do NOT repeat completed work (re-reading files you've ` +
+        `read, re-running verifications that passed, re-applying edits).\n` +
+        `- Resume at the first unfinished step and keep strictly to the ` +
+        `original task scope. Do not start new sub-tasks the user didn't ask for.\n` +
+        `- If the prior state is unclear, briefly state what you think is done ` +
+        `and ask the user to confirm rather than redoing it.\n` +
+        `</interrupted_run>`;
+    }
+    this.systemPromptCache = await buildSystemPrompt({
+      cwd: this.cwd,
+      sessionId: this.id,
+      hostSurface: this.hostSurface,
+      memory,
+      plan,
+      toolNames,
+      extra: (this.systemPromptExtra ?? "") +
+        (customAgentsBlock ? `\n\n${customAgentsBlock}` : "") +
+        resumeNote +
+        `\n\n${sandboxNote}`,
+      model: this.model,
+      provider: this.config.provider ?? "anthropic",
+      mode: this.mode,
+      outputStyle: this.outputStyle,
+    });
+  }
+
+  private async maybeCompact(): Promise<void> {
+ // Master toggle: when autoCompact is explicitly false, the session
+ // never auto-compacts (the user must invoke /compact manually).
+    if (this.config.autoCompact === false) return;
+    const window = this.config.contextWindow ??
+      lookupContextWindow(this.model).contextWindow;
+ // Effective trigger point. Config may request a fraction of the window
+ // (default 0.92, ). The compaction engine's
+ // `contextWindow` option IS the trigger threshold (it compacts when
+ // tokens >= that value), so we pass the fraction-resolved threshold in.
+    const fraction = this.config.compactionThreshold ?? 0.92;
+    const trigger = Math.floor(window * fraction);
+    const decision = shouldCompact(this.events, { contextWindow: trigger });
+    if (!decision.shouldCompact) return;
+ // PreCompact hooks may block compaction (e.g. to preserve state during
+ // a long-running task). Manual compaction is trigger "manual"; the
+ // threshold-driven path here is "auto".
+    const pre = await this.hooks.runPreCompact("auto").catch(() => ({
+      action: "allow" as const,
+      warnings: [],
+    }));
+    if (pre.action === "block") {
+      process.stderr.write(
+        `[session] compaction blocked by PreCompact hook: ${pre.reason ?? "(no reason)"}\n`
+      );
+      return;
+    }
+    const result = await compact(this.events, {
+      contextWindow: trigger,
+ // Use the small provider for summarisation (best-effort).
+      summariser: buildSmallProvider(this.config),
+      summaryModel: this.config.smallModel,
+    } as CompactionOptions);
+    if (result.events === this.events) return; // no change
+    if (result.droppedRange) {
+ // The original transcript stays on disk; some UIs
+ // then tells the model where to re-read it. We do both: leave the
+ // JSONL append-only, and write a Markdown archive the model can grep.
+      const head = result.events[0];
+      if (head?.type === "compaction") {
+        let keepFrom = this.persisted.length;
+        for (const e of result.events.slice(1)) {
+          const idx = this.persisted.indexOf(e);
+          if (idx >= 0) {
+            keepFrom = idx;
+            break;
+          }
+        }
+        const archive = historyArchivePath(this.id);
+        let pointer = "";
+        try {
+          const dropped = this.events.slice(result.droppedRange.from, result.droppedRange.to);
+          await appendFile(
+            archive,
+            `\n## Compacted ${new Date().toISOString()}\n\n${renderTranscriptArchive(dropped)}`,
+            "utf-8",
+          );
+          pointer =
+            `\n\nFull text of the summarised turns: ${archive} (Markdown, oldest first). ` +
+            `When you need something exact from before this summary — a design or plan you wrote, code, ` +
+            `an error message, the user's literal words — grep that file for a keyword and read around ` +
+            `the match instead of guessing or redoing the work.`;
+        } catch {
+ /* archive is best-effort; the JSONL still has the turns */
+        }
+        result.events[0] = { ...head, keepFrom, summary: `${head.summary}${pointer}` };
+      }
+    }
+    this.events = result.events;
+ // Append only events the JSONL does not already have (the new summary,
+ // and a rescued plan if compact synthesised one). Never rewrite —
+ // dropped turns stay in the file for resume / export / grep.
+    for (const e of this.events) {
+      if (this.persisted.includes(e)) continue;
+      await this.persistEvent(e);
+    }
+ // Notify listeners of the new compaction event.
+    const compactionEvent = this.events.find((e) => e.type === "compaction");
+    if (compactionEvent) this.notify(compactionEvent);
+    await this.rebuildSystemPrompt();
+ // PostCompact hooks fire after the new state is committed.
+    const summary = compactionEvent && compactionEvent.type === "compaction"
+      ? compactionEvent.summary
+      : "";
+    await this.hooks.runPostCompact("auto", summary).catch(() => undefined);
+  }
+
+  private async maybeCheckpoint(): Promise<void> {
+    if (!this.checkpointHook) return;
+    const threshold = this.config.contextWindow
+      ? Math.floor(this.config.contextWindow * 0.8)
+      : resolveCompactionThreshold(this.model, undefined);
+    const trigger = this.checkpointHook.check(this.events, {
+      tokenThreshold: threshold,
+      turnsThreshold: 6,
+    });
+    if (!trigger.shouldCheckpoint) return;
+    try {
+      const result = await writeCheckpoint(this.cwd, this.id, this.events, {
+        tokenThreshold: threshold,
+        turnsThreshold: 6,
+        summariser: buildSmallProvider(this.config),
+        summaryModel: this.config.smallModel,
+      });
+      this.checkpointHook.hasCheckpoint = true;
+      this.checkpointHook.lastCheckpointAt = this.events.length;
+ // Clear the sidecar title if it duplicates the checkpoint header —
+ // the checkpoint now carries the canonical title.
+      if (this.title && result.bytes > 0) {
+        const cp = await readCheckpoint(this.cwd, this.id);
+        const m = cp?.match(/^#\s+Checkpoint for (.+)$/m);
+        if (m && m[1] && m[1].length <= 60 && !this.title) {
+          this.title = m[1];
+        }
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[session] checkpoint write failed: ${(err as Error).message}\n`
+      );
+    }
+  }
+
+ /** Produce a short title for the session. Tries the small model first,
+ * then falls back to a deterministic prefix of the first user text. */
+  private async refreshTitle(firstUserText: string): Promise<void> {
+    const fallback = deriveTitleFromText(firstUserText);
+    let candidate: string | null = null;
+    try {
+      const provider = buildSmallProvider(this.config);
+      candidate = await callTitleModel(provider, firstUserText, this.config.smallModel);
+    } catch {
+ /* ignore */
+    }
+    const title = sanitizeTitle(candidate ?? fallback);
+    if (title) await this.setTitle(title);
+  }
+}
+
+/** Sub-agent tool outputs are only for display; cap them so a fan-out that
+ * reads big files doesn't balloon the parent's JSONL. */
+const SUBAGENT_RESULT_CAP = 4_000;
+function slimSubagentEvent(e: Extract<Event, { type: "subagent" }>): Event {
+  const inner = e.event;
+  if (inner?.type !== "tool_result" || inner.content.length <= SUBAGENT_RESULT_CAP) return e;
+  return {
+    ...e,
+    event: {
+      ...inner,
+      content: `${inner.content.slice(0, SUBAGENT_RESULT_CAP)}\n… [${inner.content.length - SUBAGENT_RESULT_CAP} more chars]`,
+      images: undefined,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Re-exports: standalone helpers that used to live in this file. Kept so
+// existing `import { ... } from "./session.js"` callers keep working; new
+// code should import from "./session-utils.js" (or the barrel) directly.
+// ---------------------------------------------------------------------------
+export {
+  SESSIONS_DIR,
+  getSessionsDir,
+  createSession,
+  listSessions,
+  searchSessions,
+  exportSession,
+  deleteSession,
+} from "./session-utils.js";
+export type {
+  RichSessionSummary,
+  SessionExportFormat,
+} from "./session-utils.js";

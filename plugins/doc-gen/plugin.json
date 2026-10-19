@@ -1,0 +1,9 @@
+{
+  "name": "doc-gen",
+  "displayName": "Documentation Generator",
+  "description": "Generate API docs, README sections, JSDoc/TSDoc comments, and architecture diagrams",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/codepilot/plugins/tree/main/doc-gen",
+  "enabled": true
+}
