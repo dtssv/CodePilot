@@ -21,12 +21,11 @@ import {
   Composer,
   ConnectionPill,
   ConnectScreen,
-  NewButton,
-  SessionActions,
   SessionList,
   ThemeToggle,
   Toast,
   UsageLine,
+  WorkspaceSessionNav,
   useStickyScroll,
 } from "./components/Chrome.js";
 import { AgentHome, FilePreview, TaskPanel } from "./components/AgentView.js";
@@ -47,7 +46,6 @@ import {
   SidebarIcon,
   SpinnerIcon,
   WrenchIcon,
-  XIcon,
 } from "./components/Icons.js";
 import { TrajectoryPanel } from "./components/TrajectoryPanel.js";
 
@@ -273,14 +271,15 @@ function WebLayout({
   }
 
   const title = state.sessions.find((s) => s.id === state.sessionId)?.title;
- // Strict cwd binding — sessions without a persisted cwd no longer leak across workspaces.
-  const workspaceSessions = state.cwd
-    ? state.sessions.filter((s) => sameCwd(s.cwd, state.cwd))
-    : [];
 
   const openNewWorkspace = async (): Promise<void> => {
     const picked = await pickWorkspaceViaSystem(cp);
     if (picked) await cp.openWorkspace(picked);
+  };
+
+  const resumeInWorkspace = async (id: string, cwd: string): Promise<void> => {
+    if (!sameCwd(cwd, state.cwd)) await cp.openWorkspace(cwd);
+    await cp.resumeSession(id);
   };
 
   return (
@@ -290,100 +289,38 @@ function WebLayout({
           <div className="flex h-12 shrink-0 items-center gap-2 px-3">
             <LogoMark size={24} />
             <span className="text-[13.5px] font-semibold tracking-tight text-[var(--color-ink)]">CodePilot</span>
-            <div className="ml-auto flex items-center">
-              <button
-                type="button"
-                className="cp-btn-ghost flex items-center gap-1 py-1 text-[11.5px]"
-                onClick={() => setShowSettings(true)}
-                disabled={!connected}
-                title={t("Settings")}
-              >
-                <WrenchIcon className="h-3.5 w-3.5" />
-                {t("Settings")}
-              </button>
-            </div>
           </div>
 
-          <div className="cp-eyebrow px-4 pb-1">{t("Workspaces")}</div>
-          <div className="space-y-0.5 px-2 pb-2">
-            {cp.workspaces.length === 0 && (
-              <div className="px-2 py-1.5 text-[11.5px] text-[var(--color-ink-faint)]">{t("No workspace yet")}</div>
-            )}
-            {cp.workspaces.map((ws) => {
-              const active = sameCwd(ws, state.cwd);
-              const name = ws.split("/").filter(Boolean).pop() ?? ws;
-              return (
-                <div
-                  key={ws}
-                  className={`group flex items-center gap-1 rounded-lg px-1.5 py-1 ${
-                    active
-                      ? "bg-[var(--color-surface-hover)] text-[var(--color-ink)]"
-                      : "text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 px-0.5 py-0.5 text-left"
-                    title={ws}
-                    onClick={() => void cp.openWorkspace(ws)}
-                    disabled={!connected}
-                  >
-                    <FolderIcon className={`h-3.5 w-3.5 shrink-0 ${active ? "text-[var(--color-accent)]" : ""}`} />
-                    <span className="min-w-0 flex-1 truncate text-[12.5px]">{name}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="cp-icon-btn shrink-0 opacity-0 group-hover:opacity-100"
-                    title={t("Close workspace")}
-                    onClick={() => void cp.closeWorkspace(ws)}
-                  >
-                    <XIcon className="h-3 w-3" />
-                  </button>
-                </div>
-              );
-            })}
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
-              onClick={() => void openNewWorkspace()}
-              disabled={!connected}
-            >
-              <PlusIcon className="h-3.5 w-3.5" />
-              {t("Open workspace…")}
-            </button>
-          </div>
-
-          <div className="mx-3 border-t border-[var(--color-edge-subtle)]" />
-
-          <div className="flex items-center gap-1 px-3 pt-3 pb-2">
-            <div className="cp-eyebrow flex-1">{t("Sessions")}</div>
-            <SessionActions
-              canFork={!!state.sessionId}
-              canRefresh={connected}
-              onFork={() => void cp.forkSession()}
-              onRefresh={() => void cp.refreshSessions()}
-            />
-          </div>
-          <div className="px-3 pb-2">
-            <NewButton
-              label={t("New chat")}
-              onClick={() => void cp.newSession()}
-              disabled={!connected || !state.cwd}
-            />
-          </div>
-          <SessionList
-            sessions={workspaceSessions}
-            activeId={state.sessionId}
-            onResume={(id) => void cp.resumeSession(id)}
-            emptyText={
-              state.cwd
-                ? t("No saved sessions yet.")
-                : t("Open a workspace to start chatting.")
-            }
+          <WorkspaceSessionNav
+            workspaces={cp.workspaces}
+            sessions={state.sessions}
+            activeCwd={state.cwd}
+            activeSessionId={state.sessionId}
+            connected={connected}
+            newLabel={t("New chat")}
+            emptyText={t("No saved sessions yet.")}
+            onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
+            onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
+            onOpenNewWorkspace={() => void openNewWorkspace()}
+            onNewSession={() => void cp.newSession()}
+            onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
+            canFork={!!state.sessionId}
+            onFork={() => void cp.forkSession()}
+            onRefresh={() => void cp.refreshSessions()}
           />
           <div className="flex items-center gap-1 border-t border-[var(--color-edge-subtle)] px-3 py-2">
-            <ConnectionPill state={state} />
+            <button
+              type="button"
+              className="cp-btn-ghost flex items-center gap-1 py-1 text-[11.5px]"
+              onClick={() => setShowSettings(true)}
+              disabled={!connected}
+              title={t("Settings")}
+            >
+              <WrenchIcon className="h-3.5 w-3.5" />
+              {t("Settings")}
+            </button>
             <div className="ml-auto flex items-center">
+              <ConnectionPill state={state} />
               <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Agent view")}>
                 <RocketIcon className="h-4 w-4" />
               </button>
@@ -598,6 +535,11 @@ function AgentLayout({
     if (picked) await cp.openWorkspace(picked);
   };
 
+  const resumeInWorkspace = async (id: string, cwd: string): Promise<void> => {
+    if (!sameCwd(cwd, state.cwd)) await cp.openWorkspace(cwd);
+    await cp.resumeSession(id);
+  };
+
   const taskTitle =
     state.sessions.find((s) => s.id === state.sessionId)?.title ||
     state.rows.find((r): r is Extract<Row, { kind: "message" }> => r.kind === "message" && r.msg.role === "user")?.msg.text ||
@@ -614,83 +556,37 @@ function AgentLayout({
             <div className="text-[10.5px] text-[var(--color-ink-faint)]">{t("Agent")}</div>
           </div>
         </div>
-        <div className="space-y-2 px-3 pb-3">
-          <NewButton label={t("New task")} onClick={() => cp.closeSession()} disabled={!connected} />
-          <div className="cp-eyebrow px-1 pb-0.5">{t("Workspaces")}</div>
-          <div className="space-y-0.5">
-            {cp.workspaces.length === 0 && (
-              <div className="px-2 py-1 text-[11.5px] text-[var(--color-ink-faint)]">{t("No workspace yet")}</div>
-            )}
-            {cp.workspaces.map((ws) => {
-              const active = sameCwd(ws, state.cwd);
-              const name = ws.split("/").filter(Boolean).pop() ?? ws;
-              return (
-                <div
-                  key={ws}
-                  className={`group flex items-center gap-1 rounded-lg px-1.5 py-1 ${
-                    active
-                      ? "bg-[var(--color-surface-hover)] text-[var(--color-ink)]"
-                      : "text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 px-0.5 py-0.5 text-left"
-                    title={ws}
-                    onClick={() => void cp.openWorkspace(ws)}
-                    disabled={!connected}
-                  >
-                    <FolderIcon className={`h-3.5 w-3.5 shrink-0 ${active ? "text-[var(--color-accent)]" : ""}`} />
-                    <span className="min-w-0 flex-1 truncate text-[12px]">{name}</span>
-                  </button>
-                  <button
-                    type="button"
-                    className="cp-icon-btn shrink-0 opacity-0 group-hover:opacity-100"
-                    title={t("Close workspace")}
-                    onClick={() => void cp.closeWorkspace(ws)}
-                  >
-                    <XIcon className="h-3 w-3" />
-                  </button>
-                </div>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => void openNewWorkspace()}
-              disabled={!connected}
-              title={t("Open workspace…")}
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
-            >
-              <PlusIcon className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{t("Open workspace…")}</span>
-            </button>
-          </div>
-        </div>
-        <div className="cp-eyebrow px-4 pb-1">{t("Tasks")}</div>
-        <SessionList
-          sessions={
-            state.cwd ? state.sessions.filter((s) => sameCwd(s.cwd, state.cwd)) : []
-          }
-          activeId={state.sessionId}
-          onResume={(id) => void cp.resumeSession(id)}
-          emptyText={
-            state.cwd ? t("No tasks yet.") : t("Open a workspace to start chatting.")
-          }
-          icon={<RocketIcon className="h-3.5 w-3.5" />}
+        <WorkspaceSessionNav
+          workspaces={cp.workspaces}
+          sessions={state.sessions}
+          activeCwd={state.cwd}
+          activeSessionId={state.sessionId}
+          connected={connected}
+          newLabel={t("New task")}
+          emptyText={t("No tasks yet.")}
+          sessionIcon={<RocketIcon className="h-3.5 w-3.5" />}
+          onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
+          onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
+          onOpenNewWorkspace={() => void openNewWorkspace()}
+          onNewSession={() => cp.closeSession()}
+          onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
+          canFork={!!state.sessionId}
+          onFork={() => void cp.forkSession()}
+          onRefresh={() => void cp.refreshSessions()}
         />
         <div className="flex items-center gap-1 border-t border-[var(--color-edge-subtle)] px-3 py-2">
-          <ConnectionPill state={state} />
+          <button
+            type="button"
+            className="cp-btn-ghost flex items-center gap-1 py-1 text-[11.5px]"
+            onClick={() => setShowSettings(true)}
+            title={t("Settings")}
+            disabled={!connected}
+          >
+            <WrenchIcon className="h-3.5 w-3.5" />
+            {t("Settings")}
+          </button>
           <div className="ml-auto flex items-center">
-            <button
-              type="button"
-              className="cp-btn-ghost flex items-center gap-1 py-1 text-[11.5px]"
-              onClick={() => setShowSettings(true)}
-              title={t("Settings")}
-              disabled={!connected}
-            >
-              <WrenchIcon className="h-3.5 w-3.5" />
-              {t("Settings")}
-            </button>
+            <ConnectionPill state={state} />
             <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Code view")}>
               <CodeIcon className="h-4 w-4" />
             </button>

@@ -31,8 +31,8 @@ export interface EndpointPref {
 export function loadPrefs(): Prefs {
   const cwd = read(localStorage, CWD_KEY) ?? "";
   const workspaces = loadWorkspaces();
- // Ensure the remembered cwd is in the open list.
-  if (cwd && !workspaces.includes(cwd)) workspaces.unshift(cwd);
+  // Ensure the remembered cwd is in the open list — append, never reorder.
+  if (cwd && !workspaces.some((w) => sameCwd(w, cwd))) workspaces.push(cwd);
   return {
     url: read(localStorage, URL_KEY) ?? defaultUrl(),
     cwd,
@@ -74,9 +74,14 @@ function readToken(): string {
 export function addWorkspace(cwd: string): string[] {
   const trimmed = cwd.trim().replace(/\/+$/, "") || cwd.trim();
   if (!trimmed) return loadWorkspaces();
-  const next = [trimmed, ...loadWorkspaces().filter((w) => w !== trimmed)];
+  const current = loadWorkspaces();
+  // Keep existing order when focusing a workspace; only append truly new ones.
+  const existing = current.find((w) => sameCwd(w, trimmed));
+  const next = existing
+    ? current
+    : [...current, trimmed];
   saveWorkspaces(next);
-  write(localStorage, CWD_KEY, trimmed);
+  write(localStorage, CWD_KEY, existing ?? trimmed);
   return next;
 }
 
