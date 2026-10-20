@@ -10,7 +10,7 @@
 // The model calls it when the plan is ready; the host is asked to approve;
 // on approval the session emits a `mode_request` event which the Session
 // turns into a switch to agent mode. The plan is also written to
-// `.codepilot/plans/<slug>.md` so it survives as a
+// `~/.codepilot/projects/<hash>/plans/<slug>.md` so it survives as a
 // reviewable artifact.
 
 import { z } from "zod";
@@ -47,17 +47,9 @@ const askSchema = z.object({
 export const askUserQuestionTool: ToolDef<typeof askSchema> = {
   name: "ask_user_question",
   description:
-    "Ask the user one or more structured questions and wait for the answers. Use " +
-    "when a decision genuinely changes your plan (scope choices, destructive " +
-    "confirmations, ambiguous requirements) — not for things you can decide from " +
-    "the codebase. Ask at most a few questions at once; each may carry multiple " +
-    "choice options (put the recommended option first, labelled \"(Recommended)\"). " +
-    "Ask each question ONCE: when the answers come back, act on them — never " +
-    "re-ask the same question (or a reworded/re-id'd version) to \"confirm\", and " +
-    "never loop. If the user answers \"(no answer)\" or asks to stop, take the most " +
-    "reasonable default and move on. " +
-    "In headless sessions this tool errors: proceed with the most reasonable " +
-    "default and note the assumption in your final message.",
+    "Ask structured questions when a user decision changes the plan. Few at once; " +
+    "put recommended options first. Ask once, then act — never re-ask to confirm. " +
+    "Headless: tool errors — pick a reasonable default and note it.",
   inputSchema: askSchema,
   permission: "read",
   async execute(input, ctx) {
@@ -111,7 +103,7 @@ const planDoneSchema = z.object({
 
 export const planDoneTool: ToolDef<typeof planDoneSchema> & {
  /** Optional: a function the host wires up so plan_done can persist the
- * plan to `.codepilot/plans/` before asking for approval. Receives the
+ * plan to `~/.codepilot/projects/<hash>/plans/` before asking for approval. Receives the
  * summary + the current plan steps. Returns the path of the written file. */
   writePlan?: (summary: string | undefined, steps: PlanStep[]) => Promise<string>;
  /** Optional: current plan steps, injected by the session so plan_done
@@ -120,13 +112,8 @@ export const planDoneTool: ToolDef<typeof planDoneSchema> & {
 } = {
   name: "plan_done",
   description:
-    "Submit the current plan for user approval and exit plan mode. Call this ONLY " +
-    "when the plan is complete and you are confident in it. The plan is written to " +
-    "`.codepilot/plans/<slug>.md` so it survives as a reviewable artifact; the user " +
-    "is shown the plan plus the optional `summary`; on approval the session switches " +
-    "to agent mode and you may begin executing. On rejection you stay in plan mode — " +
-    "revise the plan with the feedback and submit again. Don't call this before the " +
-    "plan is actually ready.",
+    "Submit the plan for approval (writes under `~/.codepilot/projects/…/plans/`). On approve → agent " +
+    "mode; on reject → stay in plan mode and revise. Call only when the plan is ready.",
   inputSchema: planDoneSchema,
   permission: "read",
   async execute(input, ctx) {

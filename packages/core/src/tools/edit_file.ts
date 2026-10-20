@@ -238,22 +238,11 @@ function lineDelta(before: string, after: string): { added: number; removed: num
 export const editFileTool: ToolDef<typeof schema> = {
   name: "edit_file",
   description:
-    "Apply search/replace edits to a single file. ALWAYS prefer this over `write_file` " +
-    "for changes — search/replace produces a small, reviewable diff and cannot clobber " +
-    "unrelated lines.\n\n" +
-    "Two modes: (a) single edit via top-level `search`/`replace`; (b) multi-edit via " +
-    "`edits: [{search, replace, ...}]` — several edits applied in order, atomically " +
-    "(if any edit fails, nothing is written; the error names the failing index). " +
-    "Prefer multi-edit when changing several spots in one file: it saves round-trips.\n\n" +
-    "Match strategies, tried in order: (1) exact string, (2) trimmed-line (ignores " +
-    "leading/trailing whitespace per line), (3) unique single-line, (4) regex when " +
-    "`regex: true`. If the search text occurs more than once without " +
-    "`global_replace`, the call fails with 'ambiguous' — widen the search with " +
-    "surrounding context lines (copy them verbatim from `read_file` output, WITHOUT " +
-    "the line-number prefix) or set `global_replace: true`. When a match fails, use " +
-    "the error to fix the search text — don't resend the same input.\n\n" +
-    "You MUST have read the file (read_file) earlier in this session before editing " +
-    "it. Use `write_file` only for new files or near-complete rewrites.",
+    "Search/replace edit on one file (prefer over `write_file`). Single: `search`/`replace`; " +
+    "multi: `edits: [{search, replace}]` applied atomically in order. Matches exact → " +
+    "trimmed-line → unique line → optional `regex`. Ambiguous matches fail unless " +
+    "`global_replace`. Copy search text from `read_file` without line-number prefixes. " +
+    "Must have read the file earlier in this session.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

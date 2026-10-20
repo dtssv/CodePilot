@@ -103,6 +103,7 @@ function serializeEventForEstimate(e: Event): string {
     case "retry":
     case "activity":
     case "subagent":
+    case "followup":
       return "";
     case "request":
  // Pure timing metadata — never sent to the provider, so zero cost.

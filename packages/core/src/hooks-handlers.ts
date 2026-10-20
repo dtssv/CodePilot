@@ -281,6 +281,7 @@ export async function dispatchHook(
   resolvers: HookResolvers,
   isTrusted: (hook: HookEntry) => boolean,
   hashPrefix: (command: string) => string,
+  sandbox?: ResolvedSandbox,
 ): Promise<HookRawResult> {
  // HTTP handler: POST the payload to the configured URL and interpret
  // the response body as the decision JSON.
@@ -320,7 +321,7 @@ export async function dispatchHook(
       untrusted: true,
     };
   }
-  return runCommandHook(command, payload, cwd, hook.timeout);
+  return runCommandHook(command, payload, cwd, hook.timeout, sandbox);
 }
 
 // ---------------------------------------------------------------------------

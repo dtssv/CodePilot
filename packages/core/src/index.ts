@@ -35,6 +35,7 @@ export type {
   ImageAttachment,
   PromptFile,
   SavedUpload,
+  FollowUpItem,
   GoalRunOptions,
   GoalRunResult,
   ProviderName,
@@ -439,6 +440,15 @@ export type { TokenEstimator, ModelContextWindow, ModelCost } from "./tokens.js"
 export { AuditLogger, readAuditLog, auditDir } from "./audit.js";
 export type { AuditRecord } from "./audit.js";
 
+// ---- Per-project runtime state (~/.codepilot/projects/<hash>/) ----
+export {
+  projectHash,
+  projectStateRoot,
+  projectStatePath,
+  scratchDir,
+  ensureProjectState,
+} from "./projectState.js";
+
 // ---- Checkpoints (cross-session memory files) ----
 export {
   CHECKPOINT_SECTIONS,
@@ -451,6 +461,7 @@ export {
   readCheckpoint,
   checkpointExists,
   checkpointPath,
+  legacyCheckpointPath,
   summariseCheckpointForPrompt,
   makeCheckpointHook,
 } from "./checkpoints.js";

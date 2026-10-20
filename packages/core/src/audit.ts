@@ -111,7 +111,7 @@ export class AuditLogger {
   private async write(rec: AuditRecord): Promise<void> {
     try {
       await mkdir(auditDir(), { recursive: true });
-      await appendFile(this.file, JSON.stringify(rec) + "\n", "utf-8");
+      await appendFile(this.file, `${JSON.stringify(rec)}\n`, "utf-8");
     } catch (err) {
       if (!this.warned) {
         this.warned = true;

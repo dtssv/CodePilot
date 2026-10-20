@@ -89,17 +89,23 @@
         "codepilot.serverPath": {
           "type": "string",
           "default": "codepilot",
-          "description": "Path to the `codepilot` CLI executable, or an absolute path. If unset, the extension will look up `codepilot` on $PATH."
+          "description": "Path to the system `codepilot` CLI (fallback when the bundled engine is missing). Used for `engineMode: shared` spawn and `stdio` mode."
         },
         "codepilot.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Optional path to the codepilot CLI's compiled entry (cli.js). When set, the extension launches it via `node <cliPath>` instead of relying on $PATH."
+          "description": "Optional path to a CodePilot CLI entry (cli.js / codepilot-cli.cjs). When empty, the extension uses the bundled engine under resources/, then falls back to serverPath."
         },
         "codepilot.nodePath": {
           "type": "string",
           "default": "node",
-          "description": "Path to the node executable used to launch the codepilot CLI."
+          "description": "Path to the node executable used to launch the bundled / cliPath engine."
+        },
+        "codepilot.engineMode": {
+          "type": "string",
+          "enum": ["shared", "stdio"],
+          "default": "shared",
+          "description": "shared (default): attach to an existing local CodePilot daemon or spawn the bundled one over WebSocket. stdio: private legacy `codepilot serve` process (debug)."
         },
         "codepilot.permissionMode": {
           "type": "string",
@@ -184,10 +190,14 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
   "devDependencies": {
     "@codepilot/web": "workspace:*",
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.90.0",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.8",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.24.0",

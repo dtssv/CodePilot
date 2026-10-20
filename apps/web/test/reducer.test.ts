@@ -457,3 +457,25 @@ describe("sub-agent progress", () => {
     expect(s.rows).toHaveLength(0);
   });
 });
+
+describe("follow-up queue events", () => {
+  it("stores followUps from followup events", () => {
+    let s = initialState("/repo");
+    s = drive(
+      [
+        {
+          type: "followup",
+          action: "queued",
+          items: [
+            { id: "fu_1", text: "next", queuedAt: 1 },
+            { id: "fu_2", text: "after", queuedAt: 2 },
+          ],
+        },
+      ],
+      s,
+    );
+    expect(s.followUps?.map((f) => f.text)).toEqual(["next", "after"]);
+    s = drive([{ type: "followup", action: "removed", items: [{ id: "fu_2", text: "after", queuedAt: 2 }] }], s);
+    expect(s.followUps?.map((f) => f.id)).toEqual(["fu_2"]);
+  });
+});

@@ -437,7 +437,7 @@ export function App(props: AppProps): React.ReactElement {
 
  // 3. Submit handler.
   const doSubmit = React.useCallback(
-    async (text: string) => {
+    async (text: string, delivery: "auto" | "steer" = "auto") => {
       if (isCommand(text)) {
         const result = runCommandWithCustom(text, { controller, cwd }, customCommands);
         switch (result.kind) {
@@ -729,6 +729,23 @@ export function App(props: AppProps): React.ReactElement {
       }
  // Real prompt dispatch.
       try {
+        if (delivery === "steer" && state.busy) {
+          const s = session as {
+            steer?: (t: string) => void;
+            prompt: (t: string, images?: unknown, delivery?: string) => Promise<unknown>;
+          };
+          if (typeof s.steer === "function") s.steer(text);
+          else await s.prompt(text, undefined, "steer");
+          dispatch({ type: "set-notice", text: "Injected into the current run." });
+          return;
+        }
+        if (state.busy) {
+          const result = await session.prompt(text);
+          if (result === "queued" || result === undefined) {
+            dispatch({ type: "set-notice", text: "Queued — will run after the current task." });
+          }
+          return;
+        }
         dispatch({ type: "set-busy", busy: true });
         dispatch({ type: "set-status", status: "thinking" });
         await session.prompt(text);
@@ -738,14 +755,24 @@ export function App(props: AppProps): React.ReactElement {
           text: `Prompt error: ${err instanceof Error ? err.message : String(err)}`,
         });
       } finally {
-        dispatch({ type: "set-busy", busy: false });
-        dispatch({ type: "set-status", status: "idle" });
+        const stillBusy =
+          typeof (session as { isBusy?: () => boolean }).isBusy === "function"
+            ? (session as { isBusy: () => boolean }).isBusy()
+            : false;
+        if (!stillBusy && !state.busy) {
+          /* idle path clears below */
+        }
+        if (!stillBusy) {
+          dispatch({ type: "set-busy", busy: false });
+          dispatch({ type: "set-status", status: "idle" });
+        }
       }
     },
     [
       session,
       controller,
       cwd,
+      state.busy,
       state.plan,
       state.rows,
       state.permissionMode,
@@ -991,17 +1018,18 @@ export function App(props: AppProps): React.ReactElement {
           <InputBox
             value={state.input}
             onChange={(v) => dispatch({ type: "set-input", value: v })}
-            onSubmit={(t) => {
+            onSubmit={(t, delivery) => {
               dispatch({ type: "set-input", value: "" });
-              void doSubmit(t);
+              void doSubmit(t, delivery);
             }}
             onCancel={doCancel}
-            disabled={state.busy}
+            disabled={!!state.permission || !!state.question}
+            busy={state.busy}
             cwd={cwd}
             commands={commandList}
             placeholder={
               state.busy
-                ? "Working… Ctrl+C to cancel."
+                ? "Working… Enter queues · Ctrl+Enter injects · Ctrl+C cancels."
                 : "Type a message. / commands · @ files · Ctrl+R history · Ctrl+K palette."
             }
           />

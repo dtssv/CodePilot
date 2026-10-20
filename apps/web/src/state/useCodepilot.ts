@@ -50,7 +50,13 @@ export interface Codepilot {
   resumeSession(id: string): Promise<void>;
   forkSession(): Promise<void>;
   refreshSessions(): Promise<void>;
-  send(text: string, images?: ImageAttachment[], files?: PromptFile[]): Promise<void>;
+  send(
+    text: string,
+    images?: ImageAttachment[],
+    files?: PromptFile[],
+    delivery?: "auto" | "queue" | "steer",
+  ): Promise<void>;
+  removeFollowUp(id: string): Promise<void>;
  /** Fresh session in `mode`, then send — the agent app's "new task". */
   startTask(text: string, mode?: AgentMode, images?: ImageAttachment[], files?: PromptFile[]): Promise<void>;
  /** Resend the last user prompt (after an error). */
@@ -391,10 +397,21 @@ export function useCodepilot(): Codepilot {
   }, [client, refreshSessions]);
 
   const sendTo = useCallback(
-    async (sessionId: string, text: string, images?: ImageAttachment[], files?: PromptFile[]) => {
+    async (
+      sessionId: string,
+      text: string,
+      images?: ImageAttachment[],
+      files?: PromptFile[],
+      delivery?: "auto" | "queue" | "steer",
+    ) => {
       dispatch({ type: "sending" });
       try {
-        await client.send(sessionId, text, images, files);
+        const res = await client.send(sessionId, text, images, files, delivery);
+        if (res?.delivery === "queued") {
+          dispatch({ type: "notice", text: "Queued — will run after the current task" });
+        } else if (res?.delivery === "steered") {
+          dispatch({ type: "notice", text: "Injected into the current run" });
+        }
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });
         dispatch({ type: "event", event: { type: "status", status: "idle" } });
@@ -404,13 +421,27 @@ export function useCodepilot(): Codepilot {
   );
 
   const send = useCallback(
-    async (text: string, images?: ImageAttachment[], files?: PromptFile[]) => {
+    async (
+      text: string,
+      images?: ImageAttachment[],
+      files?: PromptFile[],
+      delivery?: "auto" | "queue" | "steer",
+    ) => {
       const id = live.current.sessionId ?? (await newSession());
       if (!id) return;
-      await sendTo(id, text, images, files);
+      await sendTo(id, text, images, files, delivery);
       void refreshSessions();
     },
     [newSession, sendTo, refreshSessions],
+  );
+
+  const removeFollowUp = useCallback(
+    async (followUpId: string) => {
+      const id = live.current.sessionId;
+      if (!id) return;
+      await client.removeFollowUp(id, followUpId).catch(() => {});
+    },
+    [client],
   );
 
   const startTask = useCallback(
@@ -537,6 +568,7 @@ export function useCodepilot(): Codepilot {
     forkSession,
     refreshSessions,
     send,
+    removeFollowUp,
     startTask,
     retryLast,
     cancel,

@@ -17,3 +17,17 @@
 
 export * from "./rpc.js";
 export * from "./server.js";
+export {
+  writeServeInfo,
+  clearServeInfo,
+  readLiveServeInfo,
+  serveInfoWsUrl,
+  type ServeInfo,
+} from "./serve-info.js";
+export {
+  waitForLiveServeInfo,
+  discoverOrSpawnDaemon,
+  type DiscoverOrSpawnOptions,
+  type DiscoverOrSpawnResult,
+  type Spawner as DaemonSpawner,
+} from "./engineConnect.js";

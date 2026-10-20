@@ -55,4 +55,6 @@ playground/.pytest_cache/
 *.swp
 .DS_Store
 apps/vscode/media/webview/
+apps/vscode/resources/codepilot-cli.cjs
+apps/idea/build/generated/
 apps/desktop/dist/

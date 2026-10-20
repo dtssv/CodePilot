@@ -46,36 +46,14 @@ const schema = z.object({
 export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
-    "Execute a shell command in the project working directory.\n\n" +
-    "When to use: running tests/builds/linters, git queries, package-manager " +
-    "commands, ad-hoc inspection that the dedicated tools can't do.\n" +
-    "When NOT to use: reading files (use `read_file`/`grep`/`glob` — no shell " +
-    "escaping, better output format), editing files (use `edit_file`/" +
-    "`write_file`), or communicating with the user (just write text).\n\n" +
-    "Foreground commands have a 60s default timeout (max 10 min via `timeout`), " +
-    "a 5MB output cap, and spill outputs >8KB to an artifact (the result keeps " +
-    "the head and tail plus an `art_<hash>` ref — pull slices with `read_artifact`). " +
-    "Binary bytes (e.g. `cat` of a .gz) are elided. Every byte you print stays in " +
-    "context for the rest of the task: sample data files with `wc -l` / `head -n 20` " +
-    "instead of `cat`-ing whole logs, CSVs or fixtures. " +
-    "Set `run_in_background: true` for anything long-lived (dev server, watch " +
-    "mode): the call returns a `job_<id>` immediately; poll with `bash_output`, " +
-    "stop with `bash_kill`. ALSO use background for browser/rendering commands " +
-    "(headless Chrome screenshots, Puppeteer/Playwright, PDF or WebGL rendering): " +
-    "they fork child-process trees that often outlive a foreground timeout — " +
-    "run them detached and poll `bash_output`, don't block the turn on them.\n\n" +
-    "In the main session foreground calls share one shell, so `cd` and `export` " +
-    "persist between them (a sub-agent gets a fresh shell per call — chain with " +
-    "`&&` there). File tools (read_file, edit_file, …) do NOT follow that `cd`: they " +
-    "resolve relative paths against the workspace root — pass workspace-relative " +
-    "or absolute paths to them.\n\n" +
-    "Commands run inside the configured OS sandbox. Writes are allowed in the " +
-    "workspace, the OS temp dir (`/tmp` and `os.tmpdir()`), and `~/.codepilot` " +
-    "(plus any `sandbox.writablePaths`). Prefer project-local `.tmp/` for " +
-    "artifacts you will `read_image` / edit later. Dangerous commands " +
-    "(rm -rf, force-push, drop-table, curl|sh, …) require explicit user " +
-    "authorisation — when in doubt, describe what you would run instead of " +
-    "running it.",
+    "Run a shell command in the project cwd. Prefer `read_file`/`grep`/`glob`/`edit_file` " +
+    "over shell for file I/O. Default timeout 60s (max 10m via `timeout`); output >8KB " +
+    "spills to an artifact (`read_artifact`). Use `run_in_background: true` for long-lived " +
+    "or browser/rendering jobs — then `bash_output` / `bash_kill`. Main-session foreground " +
+    "shares one shell (`cd`/`export` persist); file tools still resolve paths from the " +
+    "workspace root. Sandboxed writes: workspace, `/tmp`, `~/.codepilot`. " +
+    "Put temp scripts/screenshots/zips under the session `scratch_dir` " +
+    "(see system prompt) — not `cwd/.tmp`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

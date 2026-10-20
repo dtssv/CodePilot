@@ -19,6 +19,7 @@ import { resolveSandbox } from "./sandbox.js";
 import type { SubagentRunner } from "./tools/task.js";
 import type { ChatProvider } from "./providers/types.js";
 import { createWorktree, removeWorktree, worktreeDiffStat } from "./worktree.js";
+import { projectStatePath } from "./projectState.js";
 
 /**
  * The block appended to a sub-agent's static prefix. It makes the role
@@ -492,8 +493,7 @@ export function assessSubagentOutcome(events: Event[]): {
 }
 
 function joinCodepilot(cwd: string, sub: string): string {
- // Tiny helper; kept local to avoid a path import.
-  return `${cwd}/.codepilot/${sub}`;
+  return projectStatePath(cwd, sub);
 }
 
 /** A requested model id, unless the active preset lists its models and this

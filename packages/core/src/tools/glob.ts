@@ -22,13 +22,8 @@ const schema = z.object({
 export const globTool: ToolDef<typeof schema> = {
   name: "glob",
   description:
-    "Find files by glob pattern (e.g. \"src/**/*.ts\", \"*test*\"). Returns " +
-    "matching paths relative to the base directory, one per line, capped at " +
-    "`maxResults` (default 1000). Heavy directories (node_modules, .git, dist, " +
-    "build outputs, caches) are skipped automatically.\n\n" +
-    "When to use: locating files by name/extension before reading or editing. " +
-    "When NOT to use: searching file *contents* (use `grep`) or listing one " +
-    "directory's immediate entries (use `ls`).",
+    "Find files by glob (e.g. `src/**/*.ts`). Skips node_modules/.git/dist. " +
+    "Use `grep` for contents, `ls` for one directory.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

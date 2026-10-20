@@ -37,12 +37,8 @@ export interface MemorySink {
 export const memoryWriteTool: ToolDef<typeof schema> & { sink?: MemorySink } = {
   name: "memory_write",
   description:
-    "Append a knowledge entry to project (CODEPILOT.md) or user (~/.codepilot/MEMORY.md) memory. " +
-    "Only for durable facts a future session benefits from (how to run tests, where the source " +
-    "of truth lives, user preferences) — never for today's task, bug or plan. " +
-    "Pass `section` to target one of the canonical sections (Project context / Rules / " +
-    "Architecture decisions / Discovered durable knowledge); otherwise the sink picks one " +
-    "based on the title and content.",
+    "Append durable knowledge to project (`CODEPILOT.md`) or user memory. Not for " +
+    "today's task/plan. Optional `section` (Project context / Rules / …).",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

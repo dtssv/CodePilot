@@ -22,6 +22,8 @@ class FakeSession {
   events: unknown[] = [];
   listeners = new Set<Listener>();
   disposeCount = 0;
+  /** When true, last-client disconnect must NOT dispose (simulates in-flight prompt). */
+  busy = false;
   static counter = 0;
 
   constructor(opts: { cwd: string; id?: string }) {
@@ -49,6 +51,9 @@ class FakeSession {
       role: "assistant",
       content: [{ type: "text", text: `echo:${text}` }],
     });
+  }
+  isBusy(): boolean {
+    return this.busy;
   }
   cancel(): void {}
   async dispose(): Promise<void> {
@@ -332,9 +337,8 @@ describe("startWebSocketServer", () => {
     expect(handle.connectionCount()).toBe(1);
   });
 
-  it("disposes a client's sessions when its socket drops", async () => {
- // The point of the test: a browser tab can vanish without calling
- // `shutdown`, and its sessions must not keep running unattended.
+  it("disposes idle sessions when the last socket drops", async () => {
+ // Idle sessions should not linger after every UI disconnects.
     const handle = await serve();
     const peer = await connect(handle.url);
     await initialize(peer);
@@ -351,9 +355,40 @@ describe("startWebSocketServer", () => {
     expect(session.listeners.size).toBe(0);
   });
 
+  it("keeps a busy session alive across socket drop so refresh can resume", async () => {
+ // Browser refresh closes the WebSocket without an explicit cancel; an
+ // in-flight prompt must keep running and be reattachable via resume.
+    const handle = await serve();
+    const peer = await connect(handle.url);
+    await initialize(peer);
+    const { sessionId } = await peer.request<unknown, { sessionId: string }>(
+      "session/new",
+      { cwd: "/tmp" },
+    );
+    const session = sessionsById.get(sessionId)!;
+    session.busy = true;
+
+    await peer.close();
+    await waitFor(() => handle.connectionCount() === 0);
+    expect(session.disposeCount).toBe(0);
+
+    const peer2 = await connect(handle.url);
+    await initialize(peer2);
+    const resumed = await peer2.request<unknown, { sessionId: string }>(
+      "session/resume",
+      { sessionId },
+    );
+    expect(resumed.sessionId).toBe(sessionId);
+    expect(session.disposeCount).toBe(0);
+
+    session.busy = false;
+    await peer2.close();
+    await waitFor(() => session.disposeCount === 1);
+  });
+
   it("keeps a shared session alive until the LAST connection drops (refcount)", async () => {
  // Two clients follow the same session (e.g. web runs a task, CLI attaches).
- // Closing one must NOT dispose it — only the last one should.
+ // Closing one must NOT dispose it — only the last idle holder should.
     const handle = await serve();
     const a = await connect(handle.url);
     const b = await connect(handle.url);
@@ -376,7 +411,7 @@ describe("startWebSocketServer", () => {
     await waitFor(() => handle.connectionCount() === 1);
     expect(session.disposeCount).toBe(0);
 
- // Close B (the last holder): now it disposes.
+ // Close B (the last holder, idle): now it disposes.
     await b.close();
     await waitFor(() => session.disposeCount === 1);
     await waitFor(() => handle.connectionCount() === 0);

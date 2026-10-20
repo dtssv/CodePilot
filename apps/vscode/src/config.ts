@@ -10,6 +10,8 @@ export interface CodepilotSettings {
   serverPath: string;
   cliPath: string;
   nodePath: string;
+  /** `shared` (default) attaches to / spawns a local WS daemon; `stdio` is private legacy. */
+  engineMode: "shared" | "stdio";
   permissionMode: PermissionMode;
   model: string;
   provider: "" | "anthropic" | "openai" | "copilot";
@@ -25,6 +27,7 @@ const KEYS = {
   serverPath: "codepilot.serverPath",
   cliPath: "codepilot.cliPath",
   nodePath: "codepilot.nodePath",
+  engineMode: "codepilot.engineMode",
   permissionMode: "codepilot.permissionMode",
   model: "codepilot.model",
   provider: "codepilot.provider",
@@ -38,10 +41,12 @@ const KEYS = {
 function readConfig(cfg: vscode.WorkspaceConfiguration): CodepilotSettings {
   const provider = cfg.get<string>(KEYS.provider, "") as CodepilotSettings["provider"];
   const agentMode = cfg.get<AgentMode>(KEYS.agentMode, "agent");
+  const engineMode = cfg.get<"shared" | "stdio">(KEYS.engineMode, "shared");
   return {
     serverPath: cfg.get<string>(KEYS.serverPath, "codepilot"),
     cliPath: cfg.get<string>(KEYS.cliPath, ""),
     nodePath: cfg.get<string>(KEYS.nodePath, "node"),
+    engineMode: engineMode === "stdio" ? "stdio" : "shared",
     permissionMode: cfg.get<PermissionMode>(KEYS.permissionMode, "ask"),
     model: cfg.get<string>(KEYS.model, ""),
     provider,

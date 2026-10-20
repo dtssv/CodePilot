@@ -52,7 +52,7 @@
 // prevent CSRF.
 // - The local callback server binds to 127.0.0.1 only and shuts down
 // immediately after the first request (or a 5-minute timeout).
-// - Tokens are stored in `<cwd>/.codepilot/mcp-tokens/<server>.json` with
+// - Tokens are stored in `~/.codepilot/projects/<hash>/mcp-tokens/<server>.json` with
 // 0600 permissions.
 // - We never log `access_token` / `refresh_token` values.
 
@@ -62,7 +62,8 @@ import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
 import { createServer, type Server } from "node:http";
 import { URL } from "node:url";
-import { join } from "node:path";
+import { dirname } from "node:path";
+import { projectStatePath } from "./projectState.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -166,11 +167,11 @@ function randomState(): string {
 // Token persistence
 // ---------------------------------------------------------------------------
 
-/** Where tokens live: `<cwd>/.codepilot/mcp-tokens/<server>.json`. */
+/** Where tokens live: `~/.codepilot/projects/<hash>/mcp-tokens/<server>.json`. */
 function tokenFilePath(cwd: string, serverName: string): string {
- // Sanitize the server name so it can't escape the directory.
+  // Sanitize the server name so it can't escape the directory.
   const safe = serverName.replace(/[^A-Za-z0-9_.-]/g, "_");
-  return join(cwd, ".codepilot", "mcp-tokens", `${safe}.json`);
+  return projectStatePath(cwd, "mcp-tokens", `${safe}.json`);
 }
 
 /** Load a persisted token bundle. Returns null if absent or unreadable. */
@@ -199,7 +200,7 @@ export async function saveTokenBundle(
 ): Promise<void> {
   const path = tokenFilePath(cwd, serverName);
   try {
-    await mkdir(join(path, ".."), { recursive: true });
+    await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(bundle, null, 2), { mode: 0o600 });
  // chmod again in case the file already existed (writeFile respects the
  // existing mode for an existing file on some platforms).

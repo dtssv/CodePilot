@@ -24,15 +24,18 @@
 
 import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { type AgentDeps } from "./agent.js";
 import { runtimeRegistry, type AgentRuntime } from "./runtime.js";
 import type {
   AgentMode,
   CodepilotConfig,
   Event,
+  FollowUpItem,
   ImageAttachment,
   PermissionDecision,
   PermissionRequest,
+  PromptFile,
   SessionOptions,
   SessionSummary,
 } from "./types.js";
@@ -93,7 +96,7 @@ import { resolveSandbox, detectSandboxBackend, wrapCommand, type ResolvedSandbox
 import { DedupCache } from "./doomLoop.js";
 import { resolveImageMentions } from "./imageMentions.js";
 import { materializeUploads } from "./promptFiles.js";
-import type { PromptFile } from "./types.js";
+import { ensureProjectState, projectStatePath, scratchDir } from "./projectState.js";
 import { HookEngine } from "./hooks.js";
 import { estimateTokens, estimateCostUSD, lookupContextWindow, resolveCompactionThreshold } from "./tokens.js";
 import {
@@ -164,6 +167,10 @@ export class Session {
   * job completion) and are injected into the per-turn runtime_context so
   * they can never be mistaken for — or spoof — a user message. */
   private steeringQueue: Array<{ source: "user" | "system"; text: string }> = [];
+ /** Prompts waiting to run after the current busy `prompt()` finishes. */
+  private followUpQueue: FollowUpItem[] = [];
+ /** Prevents overlapping drainFollowUps kicks. */
+  private drainingFollowUps = false;
   private toolRegistry: ToolRegistry;
   private artifacts: ArtifactStore;
   private permissions: PermissionEngine;
@@ -249,7 +256,7 @@ export class Session {
     this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
     this.hostSurface = opts.hostSurface ?? "cli";
     this.toolRegistry = new ToolRegistry();
-    this.artifacts = new ArtifactStore(join(opts.cwd, ".codepilot", "artifacts"));
+    this.artifacts = new ArtifactStore(projectStatePath(opts.cwd, "artifacts"));
     this.permissions = new PermissionEngine({
       permissionMode: this.config.permissionMode,
       autoApprove: this.config.autoApprove,
@@ -271,8 +278,12 @@ export class Session {
  // Only when the OS backend actually enforces the jail.
     this.permissions.setSandbox(osEnforced ? this.sandbox : undefined, this.cwd);
     this.hooks = new HookEngine(this.config.hooks, this.cwd);
+ // Opt-in: run command hooks under the same OS sandbox as `bash`.
+    if (this.config.hookSandbox) {
+      this.hooks.setCommandSandbox(this.sandbox);
+    }
  // Wire hook trust (hash-based review for command hooks, ).
-    this.hooks.setTrustFile(join(this.cwd, ".codepilot", "hook_trust.json"));
+    this.hooks.setTrustFile(projectStatePath(this.cwd, "hook_trust.json"));
     this.hooks.onWarning = (message) => {
       const ev: Event = { type: "error", message, recoverable: true };
       this.events.push(ev);
@@ -281,8 +292,9 @@ export class Session {
     };
   }
 
- /** Load from disk and configure registries. */
+  /** Load from disk and configure registries. */
   async init(): Promise<void> {
+    await ensureProjectState(this.cwd, { sessionId: this.id });
     await this.artifacts.init();
     this.registerBuiltins();
     await this.loadFromDisk();
@@ -367,8 +379,21 @@ export class Session {
     }
   }
 
-  async prompt(text: string, images?: ImageAttachment[], files?: PromptFile[]): Promise<void> {
+  /**
+   * Start a user turn, or enqueue it if a turn is already running.
+   * Returns `"queued"` when the text was added to the follow-up queue
+   * instead of starting immediately.
+   */
+  async prompt(
+    text: string,
+    images?: ImageAttachment[],
+    files?: PromptFile[],
+  ): Promise<"started" | "queued"> {
     if (this.disposed) throw new Error("session disposed");
+    if (this.isBusy()) {
+      this.enqueueFollowUp({ text, images, files });
+      return "queued";
+    }
     this.cancelController = new AbortController();
 
  // Telemetry: wrap each prompt in a span (no-op when OTEL is not configured).
@@ -390,7 +415,10 @@ export class Session {
       this.events.push(ev);
       await this.persistEvent(ev);
       this.notify(ev);
-      return;
+      this.cancelController = null;
+      endPromptSpan(promptSpan);
+      void this.drainFollowUps();
+      return "started";
     }
     let effectivePrompt = promptHook.rewrittenPrompt ?? text;
 
@@ -433,7 +461,10 @@ export class Session {
         this.events.push(ev);
         await this.persistEvent(ev);
         this.notify(ev);
-        return;
+        this.cancelController = null;
+        endPromptSpan(promptSpan);
+        void this.drainFollowUps();
+        return "started";
       }
     }
 
@@ -577,7 +608,10 @@ export class Session {
       this.clearTurnOverrides();
  // End the telemetry span (no-op when disabled).
       endPromptSpan(promptSpan);
+ // Kick the next queued follow-up (if any) once we are no longer busy.
+      void this.drainFollowUps();
     }
+    return "started";
   }
 
  /**
@@ -946,6 +980,13 @@ export class Session {
     }
   }
 
+ /** True while a `prompt()` is in flight (including waiting on permission /
+  * questions). Used by the protocol layer to keep background runs alive when
+  * the last UI client disconnects (e.g. browser refresh) instead of cancelling. */
+  isBusy(): boolean {
+    return this.cancelController !== null;
+  }
+
   cancel(): void {
     if (this.cancelController) {
  // Active run: abort it. The agent loop + provider stream observe the
@@ -992,6 +1033,76 @@ export class Session {
   steer(text: string): void {
     if (text.trim().length === 0) return;
     this.steeringQueue.push({ source: "user", text });
+  }
+
+  /** Snapshot of prompts waiting to run after the current busy turn. */
+  listFollowUps(): FollowUpItem[] {
+    return this.followUpQueue.map((item) => ({ ...item }));
+  }
+
+  /**
+   * Enqueue a prompt to run after the current busy turn. Emits a `followup`
+   * event for UIs. Safe while idle too (will drain on the next `finally`).
+   */
+  enqueueFollowUp(opts: {
+    text: string;
+    images?: ImageAttachment[];
+    files?: PromptFile[];
+  }): FollowUpItem {
+    const item: FollowUpItem = {
+      id: `fu_${randomUUID().slice(0, 8)}`,
+      text: opts.text,
+      images: opts.images,
+      files: opts.files,
+      queuedAt: Date.now(),
+    };
+    this.followUpQueue.push(item);
+    this.emitFollowUp("queued");
+    return item;
+  }
+
+  /** Remove one queued follow-up by id. Returns true if it was present. */
+  removeFollowUp(id: string): boolean {
+    const before = this.followUpQueue.length;
+    this.followUpQueue = this.followUpQueue.filter((item) => item.id !== id);
+    if (this.followUpQueue.length === before) return false;
+    this.emitFollowUp("removed");
+    return true;
+  }
+
+  /** Drop every queued follow-up. */
+  clearFollowUps(): void {
+    if (this.followUpQueue.length === 0) return;
+    this.followUpQueue = [];
+    this.emitFollowUp("cleared");
+  }
+
+  private emitFollowUp(action: "queued" | "removed" | "cleared" | "started"): void {
+    const ev: Event = {
+      type: "followup",
+      action,
+      items: this.listFollowUps(),
+    };
+    this.notify(ev);
+  }
+
+  /**
+   * Start the next follow-up if idle. Called from `prompt()`'s finally and
+   * after remove/clear when appropriate. Never overlaps a busy run.
+   */
+  private async drainFollowUps(): Promise<void> {
+    if (this.disposed || this.drainingFollowUps || this.isBusy()) return;
+    if (this.followUpQueue.length === 0) return;
+    this.drainingFollowUps = true;
+    try {
+      while (!this.disposed && !this.isBusy() && this.followUpQueue.length > 0) {
+        const next = this.followUpQueue.shift()!;
+        this.emitFollowUp("started");
+        await this.prompt(next.text, next.images, next.files);
+      }
+    } finally {
+      this.drainingFollowUps = false;
+    }
   }
 
  /**
@@ -1175,6 +1286,7 @@ export class Session {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.followUpQueue = [];
     this.cancel();
     this.listeners.clear();
  // Detach background-job completion listeners.
@@ -1387,23 +1499,19 @@ export class Session {
     let resumeNote = checkpoint
       ? `\n\n${summariseCheckpointForPrompt(checkpoint)}`
       : "";
- // One-shot interrupt-recovery guidance: when this session was loaded after
- // its prior run was cut off (crash/server restart), the user's next
- // message is often just "继续"/"continue". Tell the model to resume from
- // where it left off rather than restart the task or wander out of scope.
+ // One-shot recovery only for a true crash/restart (stale running status).
+ // A normal text-only turn end is not an interrupt — do not inject this.
     if (this.resumedFromInterrupt) {
       resumeNote +=
         `\n\n<interrupted_run>\n` +
-        `The previous run in this session was interrupted before it finished ` +
-        `(a crash or a server restart, not a user cancellation). The user may ` +
-        `simply say "continue". Before acting:\n` +
-        `- Read the plan and the checkpoint above to see exactly which steps are ` +
-        `already done — do NOT repeat completed work (re-reading files you've ` +
-        `read, re-running verifications that passed, re-applying edits).\n` +
-        `- Resume at the first unfinished step and keep strictly to the ` +
-        `original task scope. Do not start new sub-tasks the user didn't ask for.\n` +
-        `- If the prior state is unclear, briefly state what you think is done ` +
-        `and ask the user to confirm rather than redoing it.\n` +
+        `The previous run in this session was cut off by a crash or server restart ` +
+        `(not a normal end-of-turn, and not a user cancel). Treat the user's next ` +
+        `message as continuing the same conversation:\n` +
+        `- Read the plan and the checkpoint above to see which steps are already ` +
+        `done — do NOT repeat completed work.\n` +
+        `- Resume at the first unfinished step and stay inside the original task.\n` +
+        `- If the prior state is unclear, briefly say what you think is done and ` +
+        `ask before redoing it.\n` +
         `</interrupted_run>`;
     }
     this.systemPromptCache = await buildSystemPrompt({
@@ -1413,6 +1521,8 @@ export class Session {
       memory,
       plan,
       toolNames,
+      scratchDir: scratchDir(this.cwd, this.id),
+      projectStateDir: projectStatePath(this.cwd),
       extra: (this.systemPromptExtra ?? "") +
         (customAgentsBlock ? `\n\n${customAgentsBlock}` : "") +
         resumeNote +

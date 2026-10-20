@@ -24,10 +24,7 @@ const schema = z.object({
 export const lsTool: ToolDef<typeof schema> = {
   name: "ls",
   description:
-    "List a single directory, one level deep, directories first (`d name/`, " +
-    "`- file`). Dotfiles are hidden unless `showHidden: true`. Cheap and fast — " +
-    "use it to orient in an unfamiliar directory before reaching for `glob`. " +
-    "Not recursive; use `glob` with a `**` pattern for tree-wide listing.",
+    "List one directory level (`d name/`, `- file`). Use `glob` for recursive trees.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

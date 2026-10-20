@@ -20,6 +20,8 @@ async function main {
  /* ignore */
     }
   }
+  // Ensure protocol is built so the extension can embed resources/codepilot-cli.cjs.
+  pnpm(["--filter", "@codepilot/protocol", "build"]);
   pnpm(["--filter", "codepilot-vscode", "build"]);
   pnpm(["--filter", "codepilot-vscode", "package"]);
   const found = readdirSync(appDir).filter((f) => f.endsWith(".vsix"));

@@ -65,13 +65,13 @@ describe("uploaded files in provider messages", () => {
         id: "u1",
         role: "user",
         content: [{ type: "text", text: "帮我分析一下该文件的平均薪资" }],
-        files: [{ name: "test.xlsx", path: ".codepilot/uploads/test.xlsx", mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes: 8290 }],
+        files: [{ name: "test.xlsx", path: "/Users/me/.codepilot/projects/abc/uploads/test.xlsx", mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes: 8290 }],
       },
     ];
     const msgs = compactTranscriptToProviderMessages(events, "");
     const text = msgs[0]!.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text).join("\n");
     expect(text).toContain("帮我分析一下该文件的平均薪资");
-    expect(text).toContain(".codepilot/uploads/test.xlsx");
+    expect(text).toContain("/Users/me/.codepilot/projects/abc/uploads/test.xlsx");
     expect(events[0]!.type === "message" && (events[0] as Extract<Event, { type: "message" }>).content[0]).toEqual({
       type: "text",
       text: "帮我分析一下该文件的平均薪资",

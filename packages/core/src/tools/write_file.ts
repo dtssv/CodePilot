@@ -18,17 +18,9 @@ const schema = z.object({
 export const writeFileTool: ToolDef<typeof schema> = {
   name: "write_file",
   description:
-    "Write text to a file, creating parent directories as needed. Overwrites the " +
-    "whole file when it exists.\n\n" +
-    "When to use: creating a NEW file, or a near-complete rewrite of an existing " +
-    "one.\n" +
-    "When NOT to use: modifying an existing file — use `edit_file` instead. A " +
-    "full-file overwrite risks silently dropping regions you did not intend to " +
-    "touch, and it erases the review trail (the diff becomes 'everything " +
-    "changed'). If the file exists, you MUST have read it earlier in the session " +
-    "before overwriting.\n" +
-    "Never write secrets (keys, tokens, passwords) into files. Writes outside the " +
-    "workspace are refused by the sandbox.",
+    "Create or fully rewrite a file (parents created as needed). Prefer `edit_file` " +
+    "for partial changes. Must have read an existing file before overwriting. " +
+    "Never write secrets; sandbox blocks out-of-workspace paths.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

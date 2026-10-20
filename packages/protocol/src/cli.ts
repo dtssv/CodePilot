@@ -90,6 +90,10 @@ Usage:
                                          — WebSocket protocol (default port
                                            18765); with --web-root hosts the SPA
                                            and opens the browser with token
+  codepilot serve --daemon [--port N]  — shared local daemon (same as --web
+                                         --no-open); writes ~/.codepilot/serve.json
+                                         (+ server.json); exits after last client
+                                         + 30s idle grace
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
                        [--yolo] [--permission-mode ask|auto-edit|yolo]
                        [--json] [--quiet]
@@ -368,6 +372,11 @@ async function cmdConfig(
 async function cmdServe(
   flags: Record<string, string | boolean>,
 ): Promise<number> {
+  // --daemon is the shared-engine mode used by IDE plugins: WebSocket + lockfile,
+  // no browser open, exit after last client + idle grace.
+  if (flags["daemon"] === true) {
+    flags = { ...flags, web: true, "no-open": true, daemon: true };
+  }
   if (flags["web"] !== true) {
     const handle = await startServer();
  // Wait until stdin closes.
@@ -428,7 +437,13 @@ async function cmdServeWeb(
     return 2;
   }
 
-  let handle;
+  const daemonMode = flags["daemon"] === true;
+  /** After the last WebSocket client leaves, wait this long then exit (daemon only). */
+  const IDLE_GRACE_MS = 30_000;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let shuttingDown = false;
+
+  let handle: Awaited<ReturnType<typeof startWebSocketServer>>;
   try {
     handle = await startWebSocketServer({
       port,
@@ -440,14 +455,38 @@ async function cmdServeWeb(
         typeof allowOrigin === "string" ? allowOrigin.split(",").map((s) => s.trim()) : undefined,
       onConnection: ({ count }) => {
         process.stderr.write(`[serve] clients: ${count}\n`);
+        if (!daemonMode) return;
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        if (count === 0 && !shuttingDown) {
+          idleTimer = setTimeout(() => {
+            process.stderr.write(
+              `[serve] no clients for ${IDLE_GRACE_MS / 1000}s — shutting down daemon\n`,
+            );
+            process.emit("SIGTERM");
+          }, IDLE_GRACE_MS);
+          idleTimer.unref?.();
+        }
       },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (port !== 0 && /EADDRINUSE|address already in use/i.test(msg)) {
-      process.stderr.write(
-        `[serve] port ${port} is already in use — stop the other process or pass --port N\n`,
-      );
+      // Another CodePilot already holds the port — clients should attach via
+      // ~/.codepilot/serve.json instead of starting a second bind.
+      const { readLiveServeInfo } = await import("./serve-info.js");
+      const live = await readLiveServeInfo();
+      if (live) {
+        process.stderr.write(
+          `[serve] port ${port} already in use by a live CodePilot at ${live.url} — attach to it instead of binding again\n`,
+        );
+      } else {
+        process.stderr.write(
+          `[serve] port ${port} is already in use — stop the other process or pass --port N\n`,
+        );
+      }
       return 2;
     }
     throw err;
@@ -463,7 +502,8 @@ async function cmdServeWeb(
 
   process.stdout.write(`${handle.url}\n`);
   process.stderr.write(
-    `[serve] CodePilot protocol on ws://${handle.host}:${handle.port}\n` +
+    `[serve] CodePilot protocol on ws://${handle.host}:${handle.port}` +
+      (daemonMode ? " (daemon)\n" : "\n") +
       (pageUrl
         ? `[serve] web UI: ${pageUrl.replace(/([?&]token=)[^&]*/g, "$1…")}\n`
         : "") +
@@ -478,9 +518,17 @@ async function cmdServeWeb(
     process.stderr.write(`[serve] opened browser\n`);
   }
 
- // Advertise this server so `codepilot chat` / `codepilot-tui` can detect it
- // and attach (follow the same sessions) instead of starting a second engine.
+ // Advertise this server so `codepilot chat` / `codepilot-tui` / IDE plugins can
+ // detect it and attach (follow the same sessions) instead of starting a second engine.
   const { writeServeInfo, clearServeInfo } = await import("./serve-info.js");
+  let version: string | undefined;
+  try {
+    const { createRequire } = await import("node:module");
+    const req = createRequire(import.meta.url);
+    version = (req("../package.json") as { version?: string }).version;
+  } catch {
+    /* optional */
+  }
   await writeServeInfo({
     url: handle.url,
     token: handle.token ?? "",
@@ -488,10 +536,17 @@ async function cmdServeWeb(
     host: handle.host,
     port: handle.port,
     startedAt: new Date().toISOString(),
+    version,
   });
 
   await new Promise<void>((resolve) => {
     const stop = (): void => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
       void clearServeInfo().finally(() => {
         void handle.close().then(resolve, () => resolve());
       });

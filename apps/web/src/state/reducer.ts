@@ -4,7 +4,7 @@
 // delta accumulation, tool pairing, status transitions, usage totals — is
 // testable without a browser. `App.tsx` is a thin `useReducer` over this.
 
-import type { AgentMode, Event, PlanStep, UsageInfo } from "@codepilot/core";
+import type { AgentMode, Event, FollowUpItem, PlanStep, UsageInfo } from "@codepilot/core";
 import { fileChangeFromToolCall, isFileMutation } from "./diff.js";
 import { messageText, type Row } from "./rows.js";
 import type { PendingPermission, PendingQuestion } from "../protocol/client.js";
@@ -44,6 +44,8 @@ export interface AppState {
  * wait here until the user switches back to them. */
   pending?: PendingPrompts;
   sessions: { id: string; title: string; updatedAt: number; cwd: string }[];
+ /** Follow-up prompts waiting while the current run is busy. */
+  followUps?: FollowUpItem[];
 }
 
 export interface SubagentRun {
@@ -463,6 +465,9 @@ function applyEvent(state: AppState, e: Event): AppState {
 
     case "activity":
       return { ...state, activity: { phase: e.phase, since: e.since, tools: e.tools } };
+
+    case "followup":
+      return { ...state, followUps: e.items };
 
     case "status":
       return {

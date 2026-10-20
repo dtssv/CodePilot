@@ -70,7 +70,7 @@ describe("buildSystemPrompt static prefix", () => {
 
   it("renders a fallback when no tools are exposed", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: [] });
-    expect(out.staticPrefix).toMatch(/no tools exposed/);
+    expect(out.staticPrefix).toMatch(/none — reason only|no tools exposed/);
   });
 
   it("appends a project-specific notes block when extra is given", async () => {
@@ -156,8 +156,25 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("<environment>");
     expect(out.dynamicSuffix).toContain("os: linux 6.0.0 x64");
     expect(out.dynamicSuffix).toContain("cwd: /work");
+    expect(out.dynamicSuffix).toContain("scratch_dir:");
+    expect(out.dynamicSuffix).toContain("project_state_dir:");
     expect(out.dynamicSuffix).toContain("now: 2025-01-01T00:00:00.000Z");
     expect(out.dynamicSuffix).toContain("</environment>");
+  });
+
+  it("advertises scratch and project state when provided", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      scratchDir: "/home/u/.codepilot/projects/abc/scratch/s1",
+      projectStateDir: "/home/u/.codepilot/projects/abc",
+    });
+    expect(out.dynamicSuffix).toContain(
+      "scratch_dir: /home/u/.codepilot/projects/abc/scratch/s1",
+    );
+    expect(out.dynamicSuffix).toContain(
+      "project_state_dir: /home/u/.codepilot/projects/abc",
+    );
+    expect(out.staticPrefix).toContain("scratch_dir");
   });
 
   it("contains a <git> block reflecting the env provider", async () => {

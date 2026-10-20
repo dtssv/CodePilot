@@ -1,8 +1,8 @@
-// Plan file persistence under `.codepilot/plans/`.
+// Plan file persistence under `~/.codepilot/projects/<hash>/plans/`.
 //
-// When the agent in `plan` mode calls `plan_done`, the plan is written to
-// `.codepilot/plans/<slug>.md` so it survives as a reviewable artifact
-// (and so a colleague can review it before the PR, not after). The plan
+// When the agent in `plan` mode calls `plan_done`, the plan is written so
+// it survives as a reviewable artifact. Override via `config.plansDirectory`
+// (relative to cwd or absolute) to keep plans inside the repo. The plan
 // file name is derived from the session id + a short slug.
 //
 // On approval, the session restores its previous permission mode
@@ -22,9 +22,10 @@
 // <free text from the plan_done summary>
 
 import { mkdir, writeFile, readFile, readdir, unlink, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import type { PlanStep } from "./types.js";
+import { projectStatePath } from "./projectState.js";
 
 export interface PlanFile {
  /** Absolute path on disk. */
@@ -44,13 +45,16 @@ export interface PlanFile {
 }
 
 /**
- * The directory where plans are written. Defaults to `<cwd>/.codepilot/plans`
- * (project-local, committable) so a colleague can review the plan before
- * the PR. The user can override via `config.plansDirectory`.
+ * The directory where plans are written. Defaults to
+ * `~/.codepilot/projects/<hash>/plans` (runtime state, not the workspace).
+ * Override via `config.plansDirectory` (absolute, or relative to cwd) when
+ * you want plans inside the repo for review.
  */
 export function plansDir(cwd: string, override?: string): string {
-  if (override) return resolve(cwd, override);
-  return join(cwd, ".codepilot", "plans");
+  if (override) {
+    return isAbsolute(override) ? override : resolve(cwd, override);
+  }
+  return projectStatePath(cwd, "plans");
 }
 
 /**

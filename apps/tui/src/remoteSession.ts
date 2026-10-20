@@ -62,6 +62,7 @@ export class RemoteSession {
   private usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUSD: 0 };
   private disposed = false;
   private cwd = "";
+  private _busy = false;
  /** Config snapshot fetched from the server (providers / statusLine), used
  * by read-only UI like the model picker and status bar. */
   private configSnapshot: Record<string, unknown> = {};
@@ -167,6 +168,9 @@ export class RemoteSession {
   private deriveState(e: Event): void {
     if (e.type === "mode") this.mode = e.mode;
     else if (e.type === "model") { this.model = e.model; this.providerId = e.providerId; }
+    else if (e.type === "status") {
+      this._busy = e.status === "running" || e.status === "waiting_permission" || e.status === "compacting";
+    }
     else if (e.type === "usage") {
       this.usage.input += e.usage.input ?? 0;
       this.usage.output += e.usage.output ?? 0;
@@ -213,8 +217,26 @@ export class RemoteSession {
     return RemoteSession.connect({ ...this.opts, sessionId, attachNewest: false, agentMode: this.mode });
   }
 
-  async prompt(text: string, images?: unknown): Promise<void> {
-    await this.peer.request("prompt/send", { sessionId: this.id, text, images });
+  async prompt(
+    text: string,
+    images?: unknown,
+    delivery?: "auto" | "queue" | "steer",
+  ): Promise<"started" | "queued" | "steered"> {
+    const res = await this.peer.request<
+      unknown,
+      { delivery?: "started" | "queued" | "steered" }
+    >("prompt/send", { sessionId: this.id, text, images, delivery: delivery ?? "auto" });
+    return res?.delivery ?? "started";
+  }
+
+  steer(text: string): void {
+    void this.peer
+      .request("prompt/send", { sessionId: this.id, text, delivery: "steer" })
+      .catch(() => {});
+  }
+
+  isBusy(): boolean {
+    return this._busy;
   }
 
   cancel(): void {

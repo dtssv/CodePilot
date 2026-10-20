@@ -257,8 +257,9 @@ export async function startWebSocketServer(
     });
     const cleanup = (): void => {
       if (!connections.delete(entry)) return;
- // A browser tab can vanish without a close frame, leaving sessions
- // running with no listener — dispose them here, not only on `shutdown`.
+ // Detach this connection's UI subscriptions. Busy sessions keep running
+ // in the process-wide live registry so a refresh can resume them; idle
+ // sessions are disposed inside handle.dispose → releaseSession.
       void handle.dispose().catch(() => {});
       void peer.close().catch(() => {});
       opts.onConnection?.({ count: connections.size, remote: req.socket.remoteAddress ?? undefined });

@@ -86,8 +86,29 @@ val copyWebview by tasks.registering(Copy::class) {
     from(rootProject.file("../web/dist-embed/index.html"))
     into(webviewResources.map { it.dir("webview") })
 }
-sourceSets.main { resources.srcDir(webviewResources) }
-tasks.processResources { dependsOn(copyWebview) }
+
+// Bundled CodePilot CLI so the plugin works without a system install.
+val engineCliResources = layout.buildDirectory.dir("generated/engine")
+val bundleEngineCli by tasks.registering(Exec::class) {
+    val outFile = engineCliResources.map { it.file("codepilot-cli.cjs").asFile }
+    outputs.file(outFile)
+    workingDir = rootProject.projectDir.resolve("../..")
+    commandLine(
+        "node",
+        rootProject.projectDir.resolve("../../scripts/package/bundle-plugin-cli.mjs").absolutePath,
+        outFile.get().absolutePath,
+    )
+    // Best-effort: if Node/protocol build is unavailable, skip (PATH fallback).
+    isIgnoreExitValue = true
+}
+sourceSets.main {
+    resources.srcDir(webviewResources)
+    resources.srcDir(engineCliResources)
+}
+tasks.processResources {
+    dependsOn(copyWebview)
+    dependsOn(bundleEngineCli)
+}
 
 // Pure unit tests (no IDE fixture) — protocol logic, serialization, settings roundtrip.
 // Anything requiring a Project/Editor must use the IDE fixture framework and live elsewhere.

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import type { AgentMode, ImageAttachment, PromptFile, SessionSummary } from "@codepilot/core";
+import type { AgentMode, FollowUpItem, ImageAttachment, PromptFile, SessionSummary } from "@codepilot/core";
 import type { AppState } from "../state/reducer.js";
 import {
   filesFromList,
@@ -45,7 +45,12 @@ const MODE_HINT: Record<AgentMode, string> = {
 export interface ComposerProps {
   value: string;
   onChange(v: string): void;
-  onSend(text: string, images?: ImageAttachment[], files?: PromptFile[]): void;
+  onSend(
+    text: string,
+    images?: ImageAttachment[],
+    files?: PromptFile[],
+    delivery?: "auto" | "queue" | "steer",
+  ): void;
   onStop(): void;
   busy: boolean;
   disabled?: boolean;
@@ -56,6 +61,8 @@ export interface ComposerProps {
   size?: "md" | "lg";
   autoFocus?: boolean;
   footer?: React.ReactNode;
+  followUps?: FollowUpItem[];
+  onRemoveFollowUp?(id: string): void;
 }
 
 /** Prompt box. Enter sends, Shift+Enter is a newline, Esc stops a run.
@@ -75,6 +82,8 @@ export function Composer({
   size = "md",
   autoFocus = false,
   footer,
+  followUps = [],
+  onRemoveFollowUp,
 }: ComposerProps): React.ReactElement {
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -108,9 +117,11 @@ export function Composer({
     if (autoFocus && !disabled) ref.current?.focus();
   }, [autoFocus, disabled]);
 
-  const canSend = !disabled && !busy && (value.trim() !== "" || attachments.length > 0);
-  const send = (): void => {
+  const canSend = !disabled && (value.trim() !== "" || attachments.length > 0);
+  const send = (delivery: "auto" | "steer" = "auto"): void => {
     if (!canSend) return;
+    // Inject-into-run is text-only (attachments stay on the queue path).
+    if (delivery === "steer" && attachments.length > 0) return;
     const { images, files } = splitAttachments(attachments);
     const fallback =
       images.length > 0 && files.length === 0
@@ -121,8 +132,9 @@ export function Composer({
     const text = value.trim() || fallback;
     onSend(
       text,
-      images.length > 0 ? images : undefined,
-      files.length > 0 ? files : undefined,
+      delivery === "steer" ? undefined : images.length > 0 ? images : undefined,
+      delivery === "steer" ? undefined : files.length > 0 ? files : undefined,
+      busy ? delivery : "auto",
     );
     onChange("");
     setAttachments([]);
@@ -201,19 +213,48 @@ export function Composer({
           if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            send();
+            if ((e.metaKey || e.ctrlKey) && busy) send("steer");
+            else send("auto");
           } else if (e.key === "Escape" && busy) {
             e.preventDefault();
             onStop();
           }
         }}
-        placeholder={placeholder ?? t("Ask CodePilot…")}
+        placeholder={
+          placeholder ??
+          (busy
+            ? t("Queued on Enter · ⌘↵ inject into current run…")
+            : t("Ask CodePilot…"))
+        }
         disabled={disabled}
         aria-label="Prompt"
         className={`block w-full resize-none bg-transparent px-4 text-[var(--color-ink)] outline-none focus-visible:outline-none placeholder:text-[var(--color-ink-faint)] ${
           size === "lg" ? "min-h-20 pt-4 pb-2 text-[14.5px] leading-6" : "min-h-11 pt-3 pb-1 text-[13px] leading-6"
         }`}
       />
+      {followUps.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-3 pb-1">
+          {followUps.map((fu) => (
+            <span
+              key={fu.id}
+              className="inline-flex max-w-full items-center gap-1 rounded-full border border-[var(--color-edge)] bg-[var(--color-surface-sunken)] px-2 py-0.5 text-[11px] text-[var(--color-ink-dim)]"
+              title={fu.text}
+            >
+              <span className="truncate">{fu.text.slice(0, 48)}{fu.text.length > 48 ? "…" : ""}</span>
+              {onRemoveFollowUp && (
+                <button
+                  type="button"
+                  aria-label={t("Remove from queue")}
+                  onClick={() => onRemoveFollowUp(fu.id)}
+                  className="rounded-full p-0.5 hover:bg-[var(--color-edge)]"
+                >
+                  <XIcon className="h-2.5 w-2.5" />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex items-center gap-2 px-2.5 pb-2.5">
         <input
           ref={fileRef}
@@ -242,19 +283,43 @@ export function Composer({
         <div className="min-w-0 flex-1 overflow-visible text-[11px] text-[var(--color-ink-faint)]">
           {footer}
         </div>
-        {busy ? (
+        {busy && (
           <button
             type="button"
-            onClick={onStop}
-            title={`${t("Stop")} (Esc)`}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-ink)] text-[var(--color-surface)] transition-transform hover:scale-105"
+            onClick={() => send("steer")}
+            disabled={!canSend || attachments.length > 0}
+            title={t("Inject into current run (⌘↵)")}
+            aria-label={t("Inject into current run")}
+            className="flex h-8 shrink-0 items-center gap-1 rounded-full border border-[var(--color-edge)] px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-30"
           >
-            <StopIcon className="h-3.5 w-3.5" />
+            {t("Inject")}
           </button>
+        )}
+        {busy ? (
+          <>
+            <button
+              type="button"
+              onClick={() => send("auto")}
+              disabled={!canSend}
+              title={t("Queue for after this run (Enter)")}
+              aria-label={t("Queue")}
+              className="cp-brand-gradient flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white shadow-md shadow-[var(--color-accent-dim)] transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100"
+            >
+              <SendIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onStop}
+              title={`${t("Stop")} (Esc)`}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-ink)] text-[var(--color-surface)] transition-transform hover:scale-105"
+            >
+              <StopIcon className="h-3.5 w-3.5" />
+            </button>
+          </>
         ) : (
           <button
             type="button"
-            onClick={send}
+            onClick={() => send("auto")}
             disabled={!canSend}
             title={t("Enter to send · Shift+Enter for newline")}
             aria-label={t("Send")}

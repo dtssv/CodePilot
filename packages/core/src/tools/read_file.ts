@@ -33,19 +33,9 @@ const MAX_LINE_CHARS = 2000;
 export const readFileTool: ToolDef<typeof schema> = {
   name: "read_file",
   description:
-    "Read a text file from disk. Output is numbered `cat -n` style — each line is " +
-    "rendered as `<lineNumber>→<content>` — so you can cite `path:line` in edits, " +
-    "reports and discussions. Lines longer than 2000 chars are truncated inline.\n\n" +
-    "When to use: any time you need to see file contents before editing (editing " +
-    "without reading first is forbidden), reviewing code, or checking exact text.\n" +
-    "When NOT to use: for discovery (prefer `grep`/`glob`), for directories " +
-    "(use `ls`), or to re-read a file already in your context (it has not changed " +
-    "unless you or a tool changed it).\n" +
-    "Use `startLine`/`maxLines` to window into large files instead of loading them " +
-    "whole. Files larger than ~60KB spill to an artifact; the result names the " +
-    "`art_<hash>` reference — pull slices with `read_artifact`. Binary files are " +
-    "detected and reported, never dumped. Reads outside the sandbox's allowed set " +
-    "(e.g. ~/.ssh) are refused.",
+    "Read a text file (`N→line` numbering). Prefer `grep`/`glob` for discovery; don't " +
+    "re-read unchanged files. Window large files with `startLine`/`maxLines`; >~60KB " +
+    "spills to an artifact (`read_artifact`). Required before editing.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

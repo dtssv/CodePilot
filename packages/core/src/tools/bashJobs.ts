@@ -1,7 +1,8 @@
 // Background job registry for the bash tool.
 //
 // A background job is a detached child process whose stdout/stderr stream
-// into `.codepilot/jobs/<jobId>.log`, with metadata in `<jobId>.json`.
+// into `~/.codepilot/projects/<hash>/jobs/<jobId>.log`, with metadata
+// in `<jobId>.json`.
 // The registry is module-level and keyed by cwd, so the `bash`,
 // `bash_output` and `bash_kill` tools share it within a session.
 //
@@ -15,6 +16,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { projectStatePath } from "../projectState.js";
 
 export interface JobMeta {
   id: string;
@@ -72,7 +74,7 @@ export function onJobCompletion(
 }
 
 export function jobsDir(cwd: string): string {
-  return join(cwd, ".codepilot", "jobs");
+  return projectStatePath(cwd, "jobs");
 }
 
 export interface SpawnJobSpec {

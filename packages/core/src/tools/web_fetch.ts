@@ -12,7 +12,7 @@
 // normal permission flow.
 // - **15-minute disk cache**: identical URLs within the TTL return the
 // cached text instead of re-fetching. Cache lives under
-// `<cwd>/.codepilot/cache/web_fetch/<hash>.json` and is shared across
+// `~/.codepilot/projects/<hash>/cache/web_fetch/<hash>.json` and is shared across
 // sessions in the same project. Set `cacheTtlMinutes: 0` to disable.
 
 import { z } from "zod";
@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDef } from "./types.js";
 import type { WebFetchConfig } from "../types.js";
+import { projectStatePath } from "../projectState.js";
 
 const schema = z.object({
   url: z.string().url().describe("http(s) URL to fetch."),
@@ -41,7 +42,6 @@ const ARTIFACT_THRESHOLD = 8_000;
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_CACHE_TTL_MIN = 15;
-const CACHE_DIR_REL = ".codepilot/cache/web_fetch";
 /** Cap cache entries per project to bound disk usage. LRU-ish: oldest
  * mtime evicted first when over the cap. */
 const MAX_CACHE_ENTRIES = 200;
@@ -56,7 +56,7 @@ interface CacheEntry {
 }
 
 function cacheDir(cwd: string): string {
-  return join(cwd, CACHE_DIR_REL);
+  return projectStatePath(cwd, "cache", "web_fetch");
 }
 
 function cachePath(cwd: string, url: string): string {
@@ -140,17 +140,9 @@ function domainGate(url: string, cfg?: WebFetchConfig): string | null {
 export const webFetchTool: ToolDef<typeof schema> = {
   name: "web_fetch",
   description:
-    "Fetch a URL and return its content as text. HTML pages are converted to " +
-    "readable plain text (scripts/styles stripped). Follows redirects and reports " +
-    "the final URL. Large pages spill to an artifact — the result keeps the head " +
-    "plus an `art_<hash>` ref.\n\n" +
-    "When to use: reading documentation, release notes, issues, API references.\n" +
-    "When NOT to use: searching the web (use `web_search`), or fetching URLs you " +
-    "cannot justify as relevant to the task. Never fetch URLs constructed from " +
-    "untrusted data without inspecting them.\n\n" +
-    "Results are cached for 15 minutes by default (configurable via " +
-    "`webFetch.cacheTtlMinutes`); pass `no_cache: true` to force a fresh fetch. " +
-    "Domains in `webFetch.blockedDomains` are refused outright.",
+    "Fetch a URL as readable text (HTML stripped). Use for docs/issues; use " +
+    "`web_search` to discover URLs. Large pages spill to an artifact. Cached ~15m " +
+    "unless `no_cache`; blocked domains refused.",
   inputSchema: schema,
   permission: "network",
   async execute(input, ctx) {

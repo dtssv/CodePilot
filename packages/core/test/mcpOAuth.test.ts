@@ -202,7 +202,7 @@ describe("token persistence", () => {
 
   it("sanitizes server names to prevent path escape", async () => {
     await saveTokenBundle(dir, "../../etc/passwd", bundle);
- // The file should be written under .codepilot/mcp-tokens/, not escape.
+ // The file should be written under ~/.codepilot/projects/<hash>/mcp-tokens/, not escape.
     const loaded = await loadTokenBundle(dir, "../../etc/passwd");
     expect(loaded).toEqual(bundle);
   });

@@ -95,9 +95,11 @@ describe("runGoal — checkpoint integration", () => {
     expect(text).toContain("Blocked reason");
   });
 
-  it("checkpoint path is under .codepilot/checkpoints/", () => {
+  it("checkpoint path is under ~/.codepilot/projects/<hash>/checkpoints/", () => {
     const p = checkpointPath(workDir, "abc");
-    expect(p).toContain(".codepilot/checkpoints/abc.md");
+    expect(p).toContain(".codepilot/projects/");
+    expect(p).toContain("/checkpoints/abc.md");
+    expect(p).not.toContain(join(workDir, ".codepilot"));
   });
 });
 

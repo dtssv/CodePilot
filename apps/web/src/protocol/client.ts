@@ -445,14 +445,26 @@ export class CodepilotClient {
     text: string,
     images?: ImageAttachment[],
     files?: PromptFile[],
-  ): Promise<void> {
-    const params: { sessionId: string; text: string; images?: ImageAttachment[]; files?: PromptFile[] } = {
+    delivery?: "auto" | "queue" | "steer",
+  ): Promise<{ delivery: "started" | "queued" | "steered" }> {
+    const params: {
+      sessionId: string;
+      text: string;
+      images?: ImageAttachment[];
+      files?: PromptFile[];
+      delivery?: "auto" | "queue" | "steer";
+    } = {
       sessionId,
       text,
     };
     if (images?.length) params.images = images;
     if (files?.length) params.files = files;
-    await this.call("prompt/send", params);
+    if (delivery) params.delivery = delivery;
+    return this.call("prompt/send", params);
+  }
+
+  async removeFollowUp(sessionId: string, id: string): Promise<void> {
+    await this.call("prompt/followup/remove", { sessionId, id });
   }
 
   async cancel(sessionId: string): Promise<void> {

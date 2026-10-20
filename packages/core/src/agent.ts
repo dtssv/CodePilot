@@ -143,10 +143,11 @@ export interface AgentRunResult {
 }
 
 /**
- * Models usually deliver the plan's last step ("write the report") as their
- * final answer, so that step is left in_progress with no turn left to mark
- * it. When the run ends normally and nothing is still pending, close the
- * in-progress steps of the plan this run produced.
+ * Convenience for a normal conversational close: models often deliver the
+ * plan's last step as their final text reply (no tool call left to mark it
+ * completed). When the turn ends with no pending steps, close leftover
+ * in_progress steps from this run. Soft stops with remaining pending work
+ * are left alone so the next user message can continue the conversation.
  */
 async function closeFinishedPlan(produced: Event[], emit: (e: Event) => Promise<void>): Promise<void> {
   const plan = [...produced].reverse().find((e): e is Extract<Event, { type: "plan" }> => e.type === "plan");
@@ -169,9 +170,8 @@ export async function runAgent(
  // after each tool result and re-run it (e.g. asking the same question twice).
   const input: AgentRunInput = { ...rawInput, history: rawInput.history.slice() };
   // Unset / 0 → unlimited. A hard default of 50 used to silently idle mid-task
-  // and force the user to type "continue"; that is not how Claude Code / Codex
-  // behave. Abnormal loops are handled by DoomLoopDetector + cancel, not by
-  // a small turn ceiling.
+  // and force the user to type "continue". Abnormal loops are handled by
+  // DoomLoopDetector + cancel, not by a small turn ceiling.
   const configuredMax = deps.maxTurns ?? deps.config.maxTurns;
   const maxTurns =
     configuredMax === undefined || configuredMax === 0 ? Number.POSITIVE_INFINITY : configuredMax;
@@ -241,9 +241,17 @@ export async function runAgent(
  // Replies cut off by the output-token limit are resumed rather than taken
  // as the final answer (bounded, so a model that always overflows can't loop).
   let truncatedInARow = 0;
-  let resumeAfterTruncation = false;
+ /** Provider-only follow-up injected on the next iteration (truncation /
+  * empty-stop / plan soft-continue). Never persisted as a user message. */
+  let pendingProviderResume: string | null = null;
  /** Text of the cut-off replies being resumed; prefixes the final answer. */
   let resumedText = "";
+ /** Bounded auto-continues for empty successful stops after tool use
+  * (Codex-style soft-stop mitigation). */
+  let emptyStopResumes = 0;
+ /** At most one soft continue when the plan is still open and the model
+  * yielded with incomplete-intent prose (not a question to the user). */
+  let planSoftResumes = 0;
 
   let hitMaxTurns = false;
   let stoppedByAbort = false;
@@ -306,10 +314,11 @@ export async function runAgent(
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages, {
       contextBudget,
     });
-    if (resumeAfterTruncation) {
- // Provider-only turn: the transcript keeps just the partial reply.
-      providerMessages.push({ role: "user", content: [{ type: "text", text: TRUNCATION_RESUME }] });
-      resumeAfterTruncation = false;
+    if (pendingProviderResume) {
+      // Provider-only: transcript keeps the real assistant text; this nudge
+      // is not a user message and must not look like one on replay.
+      providerMessages.push({ role: "user", content: [{ type: "text", text: pendingProviderResume }] });
+      pendingProviderResume = null;
     }
     const providerTools = buildProviderToolDefs(deps.tools, agentMode);
     const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices });
@@ -531,18 +540,48 @@ export async function runAgent(
     truncatedInARow = truncated ? truncatedInARow + 1 : 0;
     if (truncated && toolCalls.length === 0 && truncatedInARow <= MAX_TRUNCATION_RESUMES) {
       resumedText += assistantText.join("");
-      resumeAfterTruncation = true;
+      pendingProviderResume = TRUNCATION_RESUME;
       continue;
     }
 
- // Stop if the model didn't request any tools.
     if (toolCalls.length === 0) {
+      const finalText = resumedText + assistantText.join("");
+      const trimmed = finalText.trim();
+      const allEvents = [...input.history, ...produced];
+
+      // Empty successful stop after tools (Codex soft-stop): keep going.
+      if (
+        sawToolCalls &&
+        !sawError &&
+        trimmed === "" &&
+        emptyStopResumes < MAX_EMPTY_STOP_RESUMES
+      ) {
+        emptyStopResumes++;
+        pendingProviderResume = EMPTY_STOP_RESUME;
+        continue;
+      }
+
+      // Unfinished plan + incomplete-intent prose (not asking the user): one nudge.
+      if (
+        sawToolCalls &&
+        !sawError &&
+        planSoftResumes < MAX_PLAN_SOFT_RESUMES &&
+        hasUnfinishedPlan(allEvents) &&
+        !isWaitingForUser(trimmed) &&
+        looksLikeIncompleteTurn(trimmed)
+      ) {
+        planSoftResumes++;
+        pendingProviderResume = PLAN_SOFT_RESUME;
+        continue;
+      }
+
+      // Normal conversational end: yield the turn to the user.
       if (!sawError) await closeFinishedPlan(produced, emit);
       await emit({ type: "status", status: "idle" });
       return {
         events: produced,
         hadToolCalls: sawToolCalls,
-        finalText: resumedText + assistantText.join(""),
+        finalText,
       };
     }
     resumedText = "";
@@ -650,15 +689,16 @@ export async function runAgent(
     }
   }
 
-  // Surface turn-cap stops explicitly (Claude Code: error_max_turns). A silent
-  // idle made the UI look "interrupted" with no explanation.
+  // Turn-cap stops must be explicit: a silent idle looks like a crashed run.
+  // A normal text-only end (no tools) never reaches here — that path returns
+  // idle above as an ordinary conversational turn.
   if (hitMaxTurns) {
     const cap = Number.isFinite(maxTurns) ? String(maxTurns) : String(configuredMax);
     await emit({
       type: "error",
       message:
         `Reached maxTurns (${cap}): the model was still calling tools, so the run ` +
-        `stopped before finishing. Send another message (e.g. "continue") to resume, ` +
+        `stopped before finishing. Send another message to continue the conversation, ` +
         `or raise/remove maxTurns in config for long tasks.`,
       recoverable: true,
     });
@@ -688,11 +728,23 @@ const TRANSIENT_PATTERNS = [
 ];
 
 const MAX_TRUNCATION_RESUMES = 3;
+const MAX_EMPTY_STOP_RESUMES = 2;
+const MAX_PLAN_SOFT_RESUMES = 1;
 
 const TRUNCATION_RESUME =
   "[system] Your previous reply was cut off by the output-token limit. Continue exactly where it " +
   "stopped — don't repeat what you already wrote. If you were about to call a tool with a large " +
   "argument, split the work into smaller calls.";
+
+const EMPTY_STOP_RESUME =
+  "[system] Your previous response ended successfully but contained no visible final text after " +
+  "tool use. Continue the existing task from its current state without repeating completed work. " +
+  "Call tools if you still have autonomous work; otherwise write a short status for the user.";
+
+const PLAN_SOFT_RESUME =
+  "[system] Your plan still has unfinished steps, and your last reply looked incomplete. " +
+  "Resume at the first unfinished step — do not repeat completed work. Keep calling tools until " +
+  "the step's deliverable is done, or ask the user a clear question if you are blocked.";
 
 const TRUNCATED_CALL =
   "This tool call was cut off by the output-token limit before its arguments were complete, so it " +
@@ -706,6 +758,39 @@ const PLAN_ONLY_TURN =
 const MALFORMED_CALL =
   "This tool call's arguments were not valid JSON, so it was NOT executed. Re-issue it with " +
   "well-formed JSON arguments.";
+
+/** Latest plan still has pending or in_progress steps. */
+export function hasUnfinishedPlan(events: Event[]): boolean {
+  const plan = extractPlan(events);
+  if (!plan || plan.length === 0) return false;
+  return plan.some((s) => s.status === "pending" || s.status === "in_progress");
+}
+
+/** Assistant text that clearly hands the floor to the user. */
+export function isWaitingForUser(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/[?？]\s*$/.test(t)) return true;
+  return (
+    /请确认|请选择|请告诉我|请回复|等你|等您|waiting (for|on) (your|you)|let me know|should I\b|do you want|would you like|your (choice|preference|call)/i.test(
+      t
+    )
+  );
+}
+
+/** Soft-stop prose: model announced more work but emitted no tool calls. */
+export function looksLikeIncompleteTurn(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (
+    /\b(next[,:]?\s+I(?:'ll| will)|I(?:'ll| will)\s+(now|next|continue|proceed)|moving on to|now I(?:'ll| will)|let me (now |next )?)/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  return /接下来|下一步我|然后我(?:将|会)|我接着|继续(?:完成|处理|实现)/.test(t);
+}
 
 /** Providers hand back `{ __raw }` when a tool call's JSON didn't parse. */
 function hasUnparsedInput(tc: ToolUseBlock): boolean {

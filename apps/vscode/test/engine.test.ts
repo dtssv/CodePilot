@@ -10,6 +10,7 @@ const SETTINGS = {
   serverPath: "codepilot",
   cliPath: "",
   nodePath: "node",
+  engineMode: "stdio",
 } as CodepilotSettings;
 
 class FakeProc extends EventEmitter {
@@ -17,12 +18,13 @@ class FakeProc extends EventEmitter {
   stdout = new PassThrough();
   stderr = new PassThrough();
   killed = false;
+  unref(): void {}
   kill(): void {
     this.killed = true;
   }
 }
 
-function makeEngine() {
+function makeEngine(settings: CodepilotSettings = SETTINGS) {
   const procs: FakeProc[] = [];
   const calls: Array<{ cmd: string; args: string[]; cwd: string }> = [];
   const spawner = ((cmd: string, args: string[], opts: { cwd: string }) => {
@@ -31,19 +33,38 @@ function makeEngine() {
     procs.push(p);
     return p;
   }) as unknown as Spawner;
-  const engine = new Engine(() => SETTINGS, () => "/work", spawner);
+  const engine = new Engine(() => settings, () => "/work", undefined, spawner);
   return { engine, procs, calls };
 }
 
 describe("resolveLaunchCommand", () => {
   it("prefers node <cliPath> when set", () => {
-    expect(resolveLaunchCommand({ ...SETTINGS, cliPath: "/x/cli.js" })).toEqual({ cmd: "node", args: ["/x/cli.js", "serve"] });
-    expect(resolveLaunchCommand(SETTINGS)).toEqual({ cmd: "codepilot", args: ["serve"] });
+    expect(resolveLaunchCommand({ ...SETTINGS, cliPath: "/x/cli.js" }, undefined, "stdio")).toEqual({
+      cmd: "node",
+      args: ["/x/cli.js", "serve"],
+    });
+    expect(resolveLaunchCommand(SETTINGS, undefined, "stdio")).toEqual({
+      cmd: "codepilot",
+      args: ["serve"],
+    });
+  });
+
+  it("uses serve --daemon in shared mode", () => {
+    expect(resolveLaunchCommand(SETTINGS, undefined, "shared")).toEqual({
+      cmd: "codepilot",
+      args: ["serve", "--daemon", "--port", "18765"],
+    });
+    expect(
+      resolveLaunchCommand({ ...SETTINGS, cliPath: "/bundled/cli.cjs" }, undefined, "shared"),
+    ).toEqual({
+      cmd: "node",
+      args: ["/bundled/cli.cjs", "serve", "--daemon", "--port", "18765"],
+    });
   });
 });
 
 describe("Engine", () => {
-  it("spawns serve in the workspace and splits stdout into lines", async () => {
+  it("spawns serve in the workspace and splits stdout into lines (stdio mode)", async () => {
     const { engine, procs, calls } = makeEngine();
     const lines: string[] = [];
     engine.on("line", (l) => lines.push(l));
@@ -51,7 +72,7 @@ describe("Engine", () => {
     engine.start();
     expect(calls).toEqual([{ cmd: "codepilot", args: ["serve"], cwd: "/work" }]);
     procs[0].stdout.write('{"a":1}\n{"b"');
-    procs[0].stdout.write(':2}\n\n');
+    procs[0].stdout.write(":2}\n\n");
     await new Promise((r) => setImmediate(r));
     expect(lines).toEqual(['{"a":1}', '{"b":2}']);
   });
@@ -87,8 +108,18 @@ describe("tapServerLine", () => {
     const events: unknown[] = [];
     const usage: unknown[] = [];
     const h = { onEvent: (_s: string, e: unknown) => events.push(e), onUsage: (u: unknown) => usage.push(u) };
-    tapServerLine(JSON.stringify({ jsonrpc: "2.0", method: "event", params: { sessionId: "s", event: { type: "status", status: "idle" } } }), h);
-    tapServerLine(JSON.stringify({ jsonrpc: "2.0", method: "session/usage", params: { sessionId: "s", usage: { input: 3 } } }), h);
+    tapServerLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "event",
+        params: { sessionId: "s", event: { type: "status", status: "idle" } },
+      }),
+      h,
+    );
+    tapServerLine(
+      JSON.stringify({ jsonrpc: "2.0", method: "session/usage", params: { sessionId: "s", usage: { input: 3 } } }),
+      h,
+    );
     tapServerLine(JSON.stringify({ jsonrpc: "2.0", id: 4, method: "permission/request", params: {} }), h);
     tapServerLine(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), h);
     tapServerLine('{"method": broken', h);

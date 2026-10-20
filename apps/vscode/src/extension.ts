@@ -26,7 +26,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const statusBar = new StatusBar("codepilot.openSidebar");
   const cwd = (): string => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
-  engine = new Engine(() => settings.snapshot(), cwd);
+  const bundledCli = vscode.Uri.joinPath(context.extensionUri, "resources", "codepilot-cli.cjs").fsPath;
+  engine = new Engine(() => settings.snapshot(), cwd, bundledCli);
   engine.on("stderr", (text) => OUTPUT.append(text));
   engine.on("exit", (detail) => {
     OUTPUT.appendLine(`[engine] ${detail}`);
@@ -55,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       OUTPUT.appendLine(`[engine] ${message}`);
       void vscode.window
         .showErrorMessage(
-          `CodePilot could not start the engine: ${message}. Set \`codepilot.serverPath\` or \`codepilot.cliPath\`.`,
+          `CodePilot could not start the engine: ${message}. Install/rebuild the extension (bundled engine) or set \`codepilot.cliPath\` / \`codepilot.serverPath\`.`,
           "Open Settings",
         )
         .then((choice) => {

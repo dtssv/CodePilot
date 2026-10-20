@@ -11,6 +11,7 @@ describe("SettingsStore", () => {
       serverPath: "codepilot",
       cliPath: "",
       nodePath: "node",
+      engineMode: "shared",
       permissionMode: "ask",
       model: "",
       provider: "",

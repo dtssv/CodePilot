@@ -39,21 +39,9 @@ const schema = z.object({
 export const readImageTool: ToolDef<typeof schema> = {
   name: "read_image",
   description:
-    "Load an image file from disk and return it so you can SEE it (jpeg, " +
-    "png, gif, webp). Use this when the task involves a visual: a UI " +
-    "screenshot to reproduce, a diagram to explain, a chart to analyse, a " +
-    "design mockup to implement, or an error dialog to debug.\n\n" +
-    "When to use: any task where seeing the pixels matters more than " +
-    "reading the bytes. The image is returned as a vision block alongside " +
-    "a short text confirmation.\n\n" +
-    "When NOT to use: text files (use `read_file`), binary blobs you need " +
-    "to inspect as bytes (use `bash` with `xxd`/`file`), or images you " +
-    "already loaded this turn (re-loading wastes a tool call — the image " +
-    "is still in context), or images the user attached to the message " +
-    "(uploads and `@path` mentions are already in front of you).\n\n" +
-    "Gotchas: the path must resolve inside the sandbox. Files over 20MB are " +
-    "refused (downsample first). Unsupported extensions are refused with the " +
-    "accepted list.",
+    "Load jpeg/png/gif/webp so you can see the pixels (UI screenshots, diagrams, " +
+    "mockups). Not for text (`read_file`) or raw bytes (`bash`). Don't reload images " +
+    "already in context or user attachments. Max 20MB; sandbox paths only.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

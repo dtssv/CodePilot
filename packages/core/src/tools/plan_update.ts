@@ -19,30 +19,10 @@ const schema = z.object({
 export const planUpdateTool: ToolDef<typeof schema> = {
   name: "plan_update",
   description:
-    "Replace the current plan with a fresh list of steps. Use this to keep a structured " +
-    "todo list visible to the user AND protected from context compaction (plan events " +
-    "are always retained verbatim). Only for tasks with >= 3 distinct steps of real work " +
-    "(a single create-and-test job needs no plan). Update it when a step's status changes " +
-    "(mark `completed`, set the next one `in_progress`, or surface a `blocked` step) — and " +
-    "send it IN THE SAME RESPONSE as the tool calls for that step, never as a turn of its " +
-    "own: every extra turn re-sends the whole context. " +
-    "Each step is an OBJECT with fields: `id` (stable short string, reuse across updates), " +
-    "`title` (one line, what the deliverable is), and `status` (one of " +
-    "\"pending\", \"in_progress\", \"completed\", \"blocked\"). " +
-    "Aim for 3-8 active steps; collapse clusters of completed steps rather than letting the " +
-    "list grow unbounded. If you mark a step `blocked`, say so in its title so the user sees " +
-    "the blocker without opening a tool result.\n\n" +
-    "Example input:\n" +
-    '```json\n' +
-    '{\n' +
-    '  "steps": [\n' +
-    '    {"id": "1", "title": "Read README and package.json", "status": "in_progress"},\n' +
-    '    {"id": "2", "title": "Analyze packages/core architecture", "status": "pending"},\n' +
-    '    {"id": "3", "title": "Summarize design", "status": "pending"}\n' +
-    '  ]\n' +
-    '}\n' +
-    '```\n' +
-    "Do NOT pass strings in the steps array — each element MUST be an object.",
+    "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps. " +
+    "Each step: `{id, title, status}` where status is pending|in_progress|completed|blocked. " +
+    "Update when status changes, in the SAME response as that step's tool calls — never " +
+    "plan_update alone. Keep 3–8 active steps; put blockers in the title.",
   inputSchema: schema,
   permission: "read",
   async execute(input) {

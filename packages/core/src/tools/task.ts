@@ -363,39 +363,13 @@ export const taskTool: ToolDef<typeof schema> & {
 } = {
   name: "task",
   description:
-    "Dispatch work to sub-agents in isolated contexts. A sub-agent does not see " +
-    "your history and you do not see its intermediate steps — only its final " +
-    "structured conclusion comes back.\n\n" +
-    "When to use: open-ended exploration that would clutter your own context " +
-    "('find every callsite of X', 'what does module Y do'), or INDEPENDENT work " +
-    "streams you can fan out with `tasks: [...]` — they run in parallel. Choose " +
-    "`agent_type: \"worker\"` when the sub-agent must edit files (default " +
-    "\"explore\" is read-only).\n" +
-    "When NOT to use: a single read_file or one-line grep (do it yourself), or " +
-    "serial work whose steps depend on each other.\n" +
-    "Write each objective so a fresh agent can act on it with no further context: " +
-    "state the goal, the files/areas of interest, and exactly what to return. " +
-    "Sub-agents cannot spawn further sub-agents. A parallel fan-out waits for every " +
-    "member, so set `maxSteps` per task to bound one that might wander.\n" +
-    "Set `isolation: \"worktree\"` when a worker sub-agent will MUTATE files and " +
-    "you want its changes fully isolated in a linked git worktree (its own " +
-    "checkout + branch, never touching your working tree). Essential for " +
-    "parallel fan-outs that each edit files, or for throwaway experiments. " +
-    "Requires a git repo; falls back to the parent cwd if git is unavailable. " +
-    "The conclusion includes a diff stat of the worktree's changes.\n\n" +
-    "CSV batch mode: provide `csv` (a CSV string with a header row) and optional " +
-    "`csv_template` to spawn one sub-agent per data row. Column values are " +
-    "interpolated into the template by header name (e.g. \"Review {file} for " +
-    "security issues\"). Use for repetitive batch work across many items.\n\n" +
-    "Team mode: `objective` (the ONE shared goal) + `team: [{role, …}]`. Use when " +
-    "the work is a single job that splits by area and the pieces need to be " +
-    "reconciled — not for independent errands (that is `tasks`). A `leader` " +
-    "investigates and writes each worker's assignment, so you may omit worker " +
-    "objectives; members run in parallel and cannot talk to each other. Files " +
-    "written by two members are detected and reported as conflicts. " +
-    "`merge_strategy` controls the final answer; `shared_worktree: true` keeps all " +
-    "edits on an isolated branch. Costs one extra sub-agent run for decomposition " +
-    "and one for the merge — prefer `tasks` when you do not need either.",
+    "Run sub-agents in isolated contexts; only their final conclusion returns. " +
+    "Use for open-ended exploration or parallel independent work (`tasks: [...]`). " +
+    "Default `agent_type: \"explore\"` is read-only; use `\"worker\"` to edit. " +
+    "Skip for a single read/grep. Write self-contained objectives. " +
+    "`isolation: \"worktree\"` for mutating workers that must not touch the main tree. " +
+    "CSV: `csv` + `csv_template` → one agent per row. " +
+    "Team: `objective` + `team: [{role,…}]` when roles must be reconciled (else prefer `tasks`).",
   inputSchema: schema,
  // Dispatching is not itself an action: each tool a sub-agent calls goes
  // through the parent's permission engine and prompts (see subagent.ts).

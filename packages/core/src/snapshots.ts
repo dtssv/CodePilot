@@ -14,16 +14,16 @@
 // state at snapshot creation time. Files created after the snapshot
 // are deleted; files deleted after are restored.
 //
-// Storage: `.codepilot/snapshots/<id>/manifest.json` + per-file blobs.
-// Snapshots are pruned to a configurable max count (default 20) to bound
-// disk usage.
+// Storage: `~/.codepilot/projects/<hash>/snapshots/<id>/manifest.json`
+// + per-file blobs. Snapshots are pruned to a configurable max count
+// (default 20) to bound disk usage.
 
 import { mkdir, readFile, writeFile, readdir, rm, stat, access } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { randomUUID } from "node:crypto";
+import { projectStatePath } from "./projectState.js";
 
-const SNAPSHOTS_DIR = ".codepilot/snapshots";
 const MANIFEST_NAME = "manifest.json";
 const DEFAULT_MAX_SNAPSHOTS = 20;
 
@@ -43,7 +43,7 @@ export interface SnapshotEntry {
 }
 
 function snapshotsRoot(cwd: string): string {
-  return join(cwd, SNAPSHOTS_DIR);
+  return projectStatePath(cwd, "snapshots");
 }
 
 function snapshotDir(cwd: string, id: string): string {

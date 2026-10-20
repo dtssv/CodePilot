@@ -18,12 +18,8 @@ const schema = z.object({
 export const bashOutputTool: ToolDef<typeof schema> = {
   name: "bash_output",
   description:
-    "Read the status and recent output of a background job started with " +
-    "`bash(run_in_background: true)`. Returns the job status (running / exited / " +
-    "killed / failed / unknown) and the tail of its combined stdout+stderr log " +
-    "(\"unknown\" means CodePilot restarted since the job began; its pid may be gone). " +
-    "Poll with a small `tail` while waiting for a server to come up; read more " +
-    "lines when diagnosing a failure.",
+    "Status + log tail for a background `bash` job (`job_id`). Poll with small " +
+    "`tail` while waiting; larger `tail` when diagnosing.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

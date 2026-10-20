@@ -19,7 +19,7 @@ export interface MessageRow {
   reasoning?: string;
  /** Images the user attached (user messages only). */
   images?: ImageAttachment[];
- /** Non-image uploads written under `.codepilot/uploads/`. */
+ /** Non-image uploads written under `~/.codepilot/projects/<hash>/uploads/`. */
   files?: SavedUpload[];
   model?: string;
  /** True until the terminal `message` event lands. */

@@ -24,10 +24,8 @@ const schema = z.object({
 export const readArtifactTool: ToolDef<typeof schema> = {
   name: "read_artifact",
   description:
-    "Read a large tool result that spilled to an artifact (bash output >8KB, a big file, a web " +
-    "page). The original result keeps the head plus an `art_<hash>` ref; pass that ref here and " +
-    "use `startLine`/`maxLines` to read just the window you need. Artifacts are session-scoped — " +
-    "if a ref is gone, re-run the tool that produced it.",
+    "Read spilled tool output by `art_<hash>` ref; window with `startLine`/`maxLines`. " +
+    "Session-scoped — re-run the producer if the ref is gone.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

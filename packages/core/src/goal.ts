@@ -5,7 +5,7 @@
 // Enhancements (2025-Q1):
 // - Per-round checkpoint append: after each round we append a small
 // `### Round N — <status>` block to the session's checkpoint file
-// (under .codepilot/checkpoints/<sessionId>.md) so the next session
+// (under ~/.codepilot/projects/<hash>/checkpoints/<sessionId>.md) so the next session
 // can see not just the final state but the trajectory that got us
 // there. The structured `blocked_reason` is included verbatim when
 // the round terminates with `<goal_status>blocked</goal_status>`.

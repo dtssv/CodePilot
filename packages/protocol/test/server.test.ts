@@ -143,6 +143,28 @@ class FakeSession {
   cancel() {
     this.cancelled = true;
   }
+  busy = false;
+  steered: string[] = [];
+  followUps: Array<{ id: string; text: string }> = [];
+  isBusy(): boolean {
+    return this.busy;
+  }
+  steer(text: string) {
+    this.steered.push(text);
+  }
+  enqueueFollowUp(opts: { text: string; images?: unknown; files?: unknown }) {
+    const item = { id: `fu_${this.followUps.length + 1}`, text: opts.text };
+    this.followUps.push(item);
+    return item;
+  }
+  removeFollowUp(id: string) {
+    const before = this.followUps.length;
+    this.followUps = this.followUps.filter((x) => x.id !== id);
+    return this.followUps.length < before;
+  }
+  listFollowUps() {
+    return [...this.followUps];
+  }
   fork(atEventIndex?: number): Promise<FakeSession> {
     const child = new FakeSession({
       cwd: this.cwd,
@@ -734,6 +756,42 @@ describe("server / protocol handlers", () => {
       { sessionId: string }
     >("session/fork", { sessionId });
     expect(forkRes.sessionId).not.toBe(sessionId);
+  });
+
+  it("prompt/send queues or steers when busy", async () => {
+    registerServer(server, { defaultCwd: "/work" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>(
+      "session/new",
+      {},
+    );
+    const s = sessionsById.get(sessionId)!;
+    s.busy = true;
+    const queued = await client.request<
+      { sessionId: string; text: string; delivery?: string },
+      { delivery: string }
+    >("prompt/send", { sessionId, text: "later", delivery: "auto" });
+    expect(queued.delivery).toBe("queued");
+    expect(s.followUps.map((f) => f.text)).toEqual(["later"]);
+    expect(s.promptCalls).toHaveLength(0);
+
+    const steered = await client.request<
+      { sessionId: string; text: string; delivery?: string },
+      { delivery: string }
+    >("prompt/send", { sessionId, text: "nudge", delivery: "steer" });
+    expect(steered.delivery).toBe("steered");
+    expect(s.steered).toEqual(["nudge"]);
+
+    await client.request("prompt/followup/remove", {
+      sessionId,
+      id: s.followUps[0]!.id,
+    });
+    expect(s.followUps).toHaveLength(0);
   });
 
   it("prompt/cancel triggers session.cancel", async () => {

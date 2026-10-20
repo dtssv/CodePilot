@@ -3,15 +3,19 @@
 // Bundles src/extension.ts into dist/extension.js as CommonJS (VSCode loads
 // extensions with `require`, regardless of the package.json `type` field).
 // `vscode` is treated as an external module so it isn't inlined.
+// Also copies the web embed UI and (when protocol is built) the bundled
+// CodePilot CLI into resources/ so install-only works without a system CLI.
 
 import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const root = resolve(__dirname, "..");
+const repoRoot = resolve(root, "../..");
 const watch = process.argv.includes("--watch");
 
 /** @type {import('esbuild').BuildOptions} */
@@ -26,9 +30,7 @@ const config = {
   minify: false,
   external: ["vscode"],
   logLevel: "info",
- // `process` and `Buffer` exist in the extension host; nothing to polyfill.
   banner: {
- // vscode's loader wraps the module in a function; we don't need a banner.
     js: "// CodePilot VSCode extension — bundled by esbuild",
   },
 };
@@ -44,8 +46,26 @@ function copyWebview() {
   copyFileSync(src, resolve(root, "media/webview/index.html"));
 }
 
+/** Ship a self-contained CLI so the extension works without a system install. */
+function bundleEngineCli() {
+  const script = resolve(repoRoot, "scripts/package/bundle-plugin-cli.mjs");
+  const outfile = resolve(root, "resources/codepilot-cli.cjs");
+  mkdirSync(resolve(root, "resources"), { recursive: true });
+  const r = spawnSync(process.execPath, [script, outfile], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+  if (r.status !== 0) {
+    console.warn(
+      "! bundled engine CLI missing — extension will fall back to codepilot on PATH. " +
+        "Run `pnpm --filter @codepilot/protocol build` then rebuild the extension.",
+    );
+  }
+}
+
 async function run() {
   copyWebview();
+  bundleEngineCli();
   if (watch) {
     const ctx = await context(config);
     await ctx.watch();

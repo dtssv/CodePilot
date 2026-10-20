@@ -7,7 +7,8 @@
 // work: the compacted summary is short and lossy. Checkpoints are the
 // durable, cross-session companion: every time the session crosses a token
 // threshold or completes a goal round, the writer distils the transcript
-// into a 7-section markdown file under `.codepilot/checkpoints/<id>.md`.
+// into a 7-section markdown file under
+// `~/.codepilot/projects/<hash>/checkpoints/<id>.md`.
 //
 // When a future session is started with the same id (or the user explicitly
 // "resumes" by passing the same `sessionId` AND a checkpoint exists), we
@@ -34,6 +35,7 @@ import { randomUUID } from "node:crypto";
 import type { Event, PlanStep } from "./types.js";
 import { estimateTokens } from "./tokens.js";
 import type { ChatProvider } from "./providers/types.js";
+import { projectStatePath } from "./projectState.js";
 
 /** Canonical section order — keep aligned with the markdown layout. */
 export const CHECKPOINT_SECTIONS = [
@@ -149,6 +151,7 @@ function serializeEvent(e: Event): string {
     case "model":
       return `model:${e.model}`;
     case "team_message":
+    case "followup":
     case "retry":
     case "activity":
     case "subagent":
@@ -516,8 +519,13 @@ function mapSectionToKey(title: string): keyof CheckpointSnapshot | null {
 // File-backed store.
 // ---------------------------------------------------------------------------
 
-/** Resolve the on-disk path for a session's checkpoint. */
+/** Resolve the on-disk path for a session's checkpoint (home project state). */
 export function checkpointPath(cwd: string, sessionId: string): string {
+  return projectStatePath(cwd, "checkpoints", `${sessionId}.md`);
+}
+
+/** Pre-migration path under the workspace (read fallback only). */
+export function legacyCheckpointPath(cwd: string, sessionId: string): string {
   return join(cwd, ".codepilot", "checkpoints", `${sessionId}.md`);
 }
 
@@ -526,7 +534,11 @@ export async function readCheckpoint(cwd: string, sessionId: string): Promise<st
   try {
     return await readFile(checkpointPath(cwd, sessionId), "utf-8");
   } catch {
-    return null;
+    try {
+      return await readFile(legacyCheckpointPath(cwd, sessionId), "utf-8");
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -536,7 +548,12 @@ export async function checkpointExists(cwd: string, sessionId: string): Promise<
     await access(checkpointPath(cwd, sessionId));
     return true;
   } catch {
-    return false;
+    try {
+      await access(legacyCheckpointPath(cwd, sessionId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

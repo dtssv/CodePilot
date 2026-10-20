@@ -210,35 +210,13 @@ function spliceIn(
 export const applyPatchTool: ToolDef<typeof schema> = {
   name: "apply_patch",
   description:
-    "Apply a multi-file patch atomically. Use this for cross-file refactors " +
-    "(e.g. renaming a symbol + updating its callers) where partial application " +
-    "would leave the tree broken: if ANY hunk fails, NO file is written.\n\n" +
-    "FORMAT (CodePilot apply_patch):\n" +
-    "```\n" +
+    "Atomic multi-file patch (all-or-nothing). Format:\n" +
     "*** Begin Patch\n" +
-    "*** Add File: path/to/new.ts\n" +
-    "<full file content>\n" +
-    "*** End File\n" +
-    "*** Delete File: path/to/old.ts\n" +
-    "*** Update File: path/to/existing.ts\n" +
-    "@@\n" +
-    " <unchanged context line>\n" +
-    "-<removed line>\n" +
-    "+<added line>\n" +
-    "*** End File\n" +
+    "*** Add File: path — full content — *** End File\n" +
+    "*** Delete File: path\n" +
+    "*** Update File: path — @@ hunks with ` `/`-`/`+` lines — *** End File\n" +
     "*** End Patch\n" +
-    "```\n" +
-    "Rules:\n" +
-    "- `Add File`: full content between `*** Add File:` and `*** End File`.\n" +
-    "- `Delete File`: just the directive; the file is removed.\n" +
-    "- `Update File`: one or more hunks. Each hunk starts with `@@` (optional " +
-    "when there's only one). Inside a hunk: lines starting with ` ` (space) " +
-    "or no marker are context, `-` lines are removed, `+` lines are added. " +
-    "Context lines anchor the hunk; removed lines must match verbatim.\n" +
-    "- All operations in one patch apply atomically.\n" +
-    "- You MUST have read any file you update (via read_file) earlier in the " +
-    "session — copy context/removed lines verbatim from that output, WITHOUT " +
-    "the line-number prefix.",
+    "Must have read updated files earlier; copy context/`-` lines without line-number prefixes.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

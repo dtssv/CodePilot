@@ -46,10 +46,12 @@ class WebChatPanel private constructor(
         onEngineError = { log.warn("codepilot engine: $it") },
     )
 
-    private val engine = EngineProcess(
-        command = { engineCommand(CodepilotSettings.getInstance().state) },
+    private val engine = SharedEngineProcess(
+        daemonCommand = { daemonCommand(CodepilotSettings.getInstance().state) },
+        stdioCommand = { engineCommand(CodepilotSettings.getInstance().state) },
         workingDir = { cwd },
         env = { engineEnv(CodepilotSettings.getInstance().state) },
+        engineMode = { CodepilotSettings.getInstance().state.engineMode.ifBlank { "shared" } },
         onLine = relay::fromEngine,
         onExit = relay::engineExited,
         onStderr = { log.info("[engine] $it") },
@@ -126,6 +128,38 @@ class WebChatPanel private constructor(
  // IDEs launched from the Dock do not inherit the login shell PATH.
             cmd[0] = resolveExecutable(cmd[0], EnvironmentUtil.getValue("PATH"))
             return cmd
+        }
+
+        /** Spawn shared daemon: prefer bundled CLI, then system codepilot. */
+        internal fun daemonCommand(s: CodepilotSettings.State): List<String> {
+            val bundled = bundledCliPath()
+            val pathEnv = EnvironmentUtil.getValue("PATH")
+            return if (bundled != null) {
+                listOf(resolveExecutable("node", pathEnv), bundled, "serve", "--daemon", "--port", "18765")
+            } else {
+                val exe = resolveExecutable(s.codepilotPath.ifBlank { "codepilot" }, pathEnv)
+                listOf(exe, "serve", "--daemon", "--port", "18765") +
+                    s.extraArgs.split(Regex("\\s+")).filter { it.isNotBlank() }
+            }
+        }
+
+        /** `lib/codepilot-cli.cjs` shipped inside the plugin jar / lib dir. */
+        internal fun bundledCliPath(): String? {
+            val url = WebChatPanel::class.java.getResource("/codepilot-cli.cjs") ?: return null
+            return runCatching {
+                val uri = url.toURI()
+                if (uri.scheme == "file") File(uri).absolutePath
+                else {
+                    // Extract from jar to a temp file once per process.
+                    val tmp = File(System.getProperty("java.io.tmpdir"), "codepilot-idea-cli.cjs")
+                    if (!tmp.exists() || tmp.length() == 0L) {
+                        WebChatPanel::class.java.getResourceAsStream("/codepilot-cli.cjs")!!.use { inp ->
+                            tmp.outputStream().use { out -> inp.copyTo(out) }
+                        }
+                    }
+                    tmp.absolutePath
+                }
+            }.getOrNull()
         }
 
         internal fun engineEnv(s: CodepilotSettings.State): Map<String, String> =

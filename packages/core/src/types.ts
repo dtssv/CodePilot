@@ -51,8 +51,9 @@ export type Event =
  /** Images the user attached to this message. Persisted with the event so
  * later turns and resumed sessions still send them to the model. */
       images?: ImageAttachment[];
- /** Non-image files the user uploaded; written under `.codepilot/uploads/`
- * and referenced in the prompt so the model can read them on disk. */
+ /** Non-image files the user uploaded; written under
+ * `~/.codepilot/projects/<hash>/uploads/` and referenced in the prompt so
+ * the model can read them on disk. */
       files?: SavedUpload[];
       model?: string;
  /** Epoch ms when the event was produced. Persisted so replays show the
@@ -170,7 +171,24 @@ export type Event =
   | { type: "mode_request"; mode: AgentMode; reason?: string }
  /** Session endpoint changed via setModel / setProvider. */
   | { type: "model"; model: string; providerId?: string }
-  | TeamMessageEvent;
+  | TeamMessageEvent
+ /** Follow-up prompts queued while a run is busy. Not sent to the model;
+ * UI-only. The queue itself lives on the Session; this event mirrors it. */
+  | {
+      type: "followup";
+      action: "queued" | "removed" | "cleared" | "started";
+      items: FollowUpItem[];
+    };
+
+/** A user prompt waiting to run after the current busy turn finishes. */
+export interface FollowUpItem {
+  id: string;
+  text: string;
+  images?: ImageAttachment[];
+  files?: PromptFile[];
+  /** Epoch ms when the item was enqueued. */
+  queuedAt: number;
+}
 
 /**
  * Communication between members of an agent team:
@@ -453,6 +471,9 @@ export interface CodepilotConfig {
   subagentTimeoutMs?: number;
  /** Lifecycle hooks (PreToolUse/PostToolUse/Notification/Stop). */
   hooks?: HooksConfig;
+ /** When true, command hooks run under the same OS sandbox as `bash`
+  * (Seatbelt / bwrap) instead of at full host trust. Opt-in; default off. */
+  hookSandbox?: boolean;
  /** Ordered backup providers for automatic failover (rate limit / outage). */
   fallbacks?: ProviderFallbackConfig[];
  /** Max HTTP retries on transient errors (429/5xx). Default 8. */
@@ -469,9 +490,9 @@ export interface CodepilotConfig {
  /** Auto memory master toggle (default: true). When false, the agent never
  * writes auto-memory notes and the index is not loaded into the prompt. */
   autoMemoryEnabled?: boolean;
- /** Directory for plan files (default: <cwd>/.codepilot/plans). Relative
- * to the project root. Plan files are written here when the agent calls
- * `plan_done`, so they survive as reviewable artifacts. */
+ /** Directory for plan files. Default: `~/.codepilot/projects/<hash>/plans`.
+ * Absolute, or relative to the project root when set. Plan files are
+ * written here when the agent calls `plan_done`. */
   plansDirectory?: string;
  /** web_fetch configuration: per-domain allowlist + cache TTL. */
   webFetch?: WebFetchConfig;

@@ -194,8 +194,12 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
   return {
     value: draft,
     onChange: setDraft,
-    onSend: (text: string, images?: ImageAttachment[], files?: PromptFile[]) =>
-      void cp.send(text, images, files),
+    onSend: (
+      text: string,
+      images?: ImageAttachment[],
+      files?: PromptFile[],
+      delivery?: "auto" | "queue" | "steer",
+    ) => void cp.send(text, images, files, delivery),
     onStop: () => void cp.cancel(),
     busy,
     disabled: state.connection !== "connected",
@@ -204,6 +208,8 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
     mode: state.agentMode,
     modes: cp.client.modes,
     onMode: (m: typeof state.agentMode) => void cp.setMode(m),
+    followUps: state.followUps,
+    onRemoveFollowUp: (id: string) => void cp.removeFollowUp(id),
     footer: (
       <span className="flex flex-wrap items-center gap-2">
         <ModelPicker cp={cp} />

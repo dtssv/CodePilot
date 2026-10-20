@@ -23,18 +23,28 @@ export interface ServeInfo {
   port: number;
  /** When it started (ISO). */
   startedAt: string;
+ /** Optional package / CLI version string. */
+  version?: string;
 }
 
 function serveInfoPath(): string {
   return join(homedir(), ".codepilot", "serve.json");
 }
 
+/** Alias path from the shared-daemon plan (`server.json`). */
+function serverJsonPath(): string {
+  return join(homedir(), ".codepilot", "server.json");
+}
+
 /** Write the discovery file. Best-effort; never throws. */
 export async function writeServeInfo(info: ServeInfo): Promise<void> {
   try {
-    const path = serveInfoPath();
-    await mkdir(join(path, ".."), { recursive: true });
-    await writeFile(path, JSON.stringify(info, null, 2), "utf-8");
+    const dir = join(homedir(), ".codepilot");
+    await mkdir(dir, { recursive: true });
+    const body = JSON.stringify(info, null, 2);
+    await writeFile(serveInfoPath(), body, "utf-8");
+    // Plan alias so plugins looking for server.json find the same daemon.
+    await writeFile(serverJsonPath(), body, "utf-8");
   } catch {
  /* best-effort */
   }
@@ -47,6 +57,18 @@ export async function clearServeInfo(): Promise<void> {
   } catch {
  /* already gone */
   }
+  try {
+    await unlink(serverJsonPath());
+  } catch {
+ /* already gone */
+  }
+}
+
+/** WebSocket URL including token for attaching clients. */
+export function serveInfoWsUrl(info: ServeInfo): string {
+  const base = info.url.replace(/\/$/, "");
+  if (!info.token) return base;
+  return `${base}${base.includes("?") ? "&" : "?"}token=${encodeURIComponent(info.token)}`;
 }
 
 /** Whether a pid is a live process. */
@@ -64,14 +86,21 @@ function pidAlive(pid: number): boolean {
  * loopback server. Returns null otherwise (no file, dead pid, non-loopback,
  * or malformed). Callers treat null as "no server — run in-process".
  */
-export async function readLiveServeInfo(): Promise<ServeInfo | null> {
-  let info: ServeInfo;
-  try {
-    info = JSON.parse(await readFile(serveInfoPath(), "utf-8")) as ServeInfo;
-  } catch {
-    return null;
+async function readServeInfoFile(): Promise<ServeInfo | null> {
+  for (const path of [serveInfoPath(), serverJsonPath()]) {
+    try {
+      const info = JSON.parse(await readFile(path, "utf-8")) as ServeInfo;
+      if (info?.url && typeof info.pid === "number") return info;
+    } catch {
+      /* try next */
+    }
   }
-  if (!info?.url || typeof info.pid !== "number") return null;
+  return null;
+}
+
+export async function readLiveServeInfo(): Promise<ServeInfo | null> {
+  const info = await readServeInfoFile();
+  if (!info) return null;
  // Only auto-attach to loopback servers.
   const loopback = info.host === "127.0.0.1" || info.host === "localhost" || info.host === "::1";
   if (!loopback) return null;

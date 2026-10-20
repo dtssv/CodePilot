@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runAgent } from "../src/agent.js";
+import {
+  runAgent,
+  hasUnfinishedPlan,
+  isWaitingForUser,
+  looksLikeIncompleteTurn,
+} from "../src/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import { ArtifactStore } from "../src/tools/artifacts.js";
@@ -76,7 +81,7 @@ function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   };
 }
 
-describe("runAgent maxTurns (Claude Code–style)", () => {
+describe("runAgent maxTurns (unset = unlimited)", () => {
   it("does not cap turns when maxTurns is unset (unlimited)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
@@ -487,5 +492,142 @@ describe("runAgent plan-only turns", () => {
     const res = r.events.find((e) => e.type === "tool_result" && e.name === "plan_update");
     expect(res && res.type === "tool_result" && res.content).toBe("plan saved");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("soft-stop resume (empty / unfinished plan)", () => {
+  it("auto-continues once after an empty stop following tool use", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [
+      [
+        {
+          kind: "tool_call",
+          messageId: "m1",
+          toolCall: { type: "tool_use", id: "t1", name: "echo", input: { x: "1" } },
+        },
+        { kind: "done", finishReason: "tool_use" },
+      ],
+      // Empty successful stop — should resume, not idle.
+      [{ kind: "done", finishReason: "stop" }],
+      [
+        { kind: "text_delta", messageId: "m3", text: "resumed and done" },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const r = await runAgent({ history: [], userText: "go" }, f.deps());
+    expect(provider.calls.length).toBe(3);
+    const resumeMsg = provider.calls[2]!.messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "text" && c.text.includes("no visible final text"));
+    expect(resumeMsg).toBeTruthy();
+    expect(r.finalText).toBe("resumed and done");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("soft-continues once when plan is unfinished and reply looks incomplete", async () => {
+    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    const steps = [
+      { id: "1", title: "scaffold", status: "completed" as const },
+      { id: "2", title: "verify physics", status: "in_progress" as const },
+    ];
+    provider.responses = [
+      [
+        {
+          kind: "tool_call",
+          messageId: "m1",
+          toolCall: { type: "tool_use", id: "p1", name: "plan_update", input: { steps } },
+        },
+        { kind: "done", finishReason: "tool_use" },
+      ],
+      [
+        { kind: "text_delta", messageId: "m2", text: "Next, I will fix the physics loop." },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        { kind: "text_delta", messageId: "m3", text: "physics fixed." },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    deps.tools.register(planUpdateTool);
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(provider.calls.length).toBe(3);
+    const soft = provider.calls[2]!.messages
+      .flatMap((m) => m.content)
+      .find((c) => c.type === "text" && c.text.includes("unfinished steps"));
+    expect(soft).toBeTruthy();
+    expect(r.finalText).toBe("physics fixed.");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not soft-continue when the assistant asks the user a question", async () => {
+    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    const steps = [
+      { id: "1", title: "scaffold", status: "completed" as const },
+      { id: "2", title: "verify", status: "in_progress" as const },
+    ];
+    provider.responses = [
+      [
+        {
+          kind: "tool_call",
+          messageId: "m1",
+          toolCall: { type: "tool_use", id: "p1", name: "plan_update", input: { steps } },
+        },
+        { kind: "done", finishReason: "tool_use" },
+      ],
+      [
+        {
+          kind: "text_delta",
+          messageId: "m2",
+          text: "Next, I will verify — should I use headless Chrome or a local browser?",
+        },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    deps.tools.register(planUpdateTool);
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(provider.calls.length).toBe(2);
+    expect(r.finalText).toMatch(/should I use headless/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("helper heuristics match expected soft-stop / wait-for-user cases", () => {
+    expect(looksLikeIncompleteTurn("Next, I will patch vehicle.js")).toBe(true);
+    expect(looksLikeIncompleteTurn("接下来我会修物理")).toBe(true);
+    expect(looksLikeIncompleteTurn("here is the report")).toBe(false);
+    expect(isWaitingForUser("Should I proceed?")).toBe(true);
+    expect(isWaitingForUser("请确认是否继续")).toBe(true);
+    expect(isWaitingForUser("Next, I will patch vehicle.js")).toBe(false);
+    expect(
+      hasUnfinishedPlan([
+        {
+          type: "plan",
+          steps: [
+            { id: "1", title: "a", status: "completed" },
+            { id: "2", title: "b", status: "in_progress" },
+          ],
+        },
+      ])
+    ).toBe(true);
+    expect(
+      hasUnfinishedPlan([
+        {
+          type: "plan",
+          steps: [
+            { id: "1", title: "a", status: "completed" },
+            { id: "2", title: "b", status: "completed" },
+          ],
+        },
+      ])
+    ).toBe(false);
   });
 });

@@ -48,6 +48,9 @@ class FakeSession {
   cancel() {
     this.cancelled = true;
   }
+  isBusy(): boolean {
+    return false;
+  }
   async fork(): Promise<FakeSession> {
     return new FakeSession({ cwd: this.cwd });
   }

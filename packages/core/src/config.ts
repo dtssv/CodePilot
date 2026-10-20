@@ -226,6 +226,9 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // the agent↔tool loop for CI / unattended runs.
     maxTurns: z.number().int().min(0).max(10_000).optional(),
     turnRetries: z.number().int().min(0).max(10).optional(),
+    // When true, command hooks run under the same OS sandbox as `bash`
+    // (Seatbelt / bwrap) instead of unsandboxed. Opt-in; default off.
+    hookSandbox: z.boolean().optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
  // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous

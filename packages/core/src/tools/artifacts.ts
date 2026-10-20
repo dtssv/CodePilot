@@ -1,6 +1,7 @@
-// Artifact store: spill large tool results to disk under .codepilot/artifacts/
-// so the model's context stays small. The store returns a reference id that
-// can be passed back to read_artifact.
+// Artifact store: spill large tool results to disk under
+// `~/.codepilot/projects/<hash>/artifacts/` so the model's context stays
+// small. The store returns a reference id that can be passed back to
+// read_artifact.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";

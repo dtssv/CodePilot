@@ -47,14 +47,8 @@ interface GrepHit {
 export const grepTool: ToolDef<typeof schema> = {
   name: "grep",
   description:
-    "Search file contents with a regular expression (JavaScript syntax). Returns " +
-    "`file:line: snippet` for each match with `context` lines of surrounding code " +
-    "(default 1). Restrict the file set with `include` (a glob like \"*.ts\"). " +
-    "Files >2MB and heavy directories (node_modules, .git, dist, …) are skipped.\n\n" +
-    "When to use: locating symbols, call sites, config keys — any content-based " +
-    "discovery. Prefer it over `read_file` when you do not yet know which file " +
-    "matters. When NOT to use: when you already know the file (use `read_file`), " +
-    "or for file-name search (use `glob`).",
+    "Regex search over file contents (`file:line: snippet`). Optional `include` glob; " +
+    "`context` lines default 1. Prefer over `read_file` for discovery; use `glob` for names.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

@@ -45,13 +45,13 @@ export async function bundleNodeEntry(opts) {
  */
 export function runPkg(opts) {
   const { spawnSync } = require("node:child_process");
-  const pkgCli = ( => {
+  const pkgCli = (() => {
     try {
       return require.resolve("@yao-pkg/pkg/lib-es5/bin.js");
     } catch {
       return require.resolve("@yao-pkg/pkg/bin/pkg.js");
     }
-  });
+  })();
 
   const args = [
     pkgCli,

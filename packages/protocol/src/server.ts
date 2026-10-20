@@ -174,8 +174,24 @@ export interface PromptSendParams {
   sessionId: string;
   text: string;
   images?: { mediaType: string; base64: string }[];
- /** Non-image uploads; written under `.codepilot/uploads/` for the model. */
+ /** Non-image uploads; written under `~/.codepilot/projects/<hash>/uploads/`. */
   files?: { name: string; mediaType?: string; base64: string }[];
+  /**
+   * How to deliver the prompt when a run may already be active:
+   * - `auto` (default): idle → start; busy → enqueue follow-up
+   * - `queue`: always enqueue when busy; start when idle
+   * - `steer`: inject into the current run (next agent turn); start when idle
+   */
+  delivery?: "auto" | "queue" | "steer";
+}
+
+export interface PromptSendResult {
+  delivery: "started" | "queued" | "steered";
+}
+
+export interface PromptFollowupRemoveParams {
+  sessionId: string;
+  id: string;
 }
 
 export interface PromptCancelParams {
@@ -324,9 +340,13 @@ export function registerServer(
   peer.onRequest<WorkspaceGitDiffParams, WorkspaceGitDiffResult>("workspace/git-diff", (p) => handleWorkspaceGitDiff(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
-  peer.onRequest<PromptSendParams, Record<string, never>>(
+  peer.onRequest<PromptSendParams, PromptSendResult>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
+  );
+  peer.onRequest<PromptFollowupRemoveParams, Record<string, never>>(
+    "prompt/followup/remove",
+    (p) => handlePromptFollowupRemove(ctx, p),
   );
   peer.onRequest<PromptCancelParams, Record<string, never>>(
     "prompt/cancel",
@@ -365,12 +385,11 @@ export interface ServerHandle {
   peer: Peer;
   close(): Promise<void>;
  /**
- * Release everything this connection owns: unsubscribe from session events,
- * dispose the sessions, and fail-closed on any outstanding permission /
- * question requests. `shutdown` does this for a well-behaved client; a
- * transport that can drop without warning (a closed browser tab over
- * WebSocket) must call it from its close handler, or the sessions keep
- * running with nobody listening.
+ * Release this connection's hold on sessions (unsubscribe from events).
+ * Idle sessions with no remaining holders are disposed. Busy sessions
+ * (a prompt still running) stay in the process-wide live registry so a
+ * browser refresh can reconnect without cancelling the task. Explicit
+ * `shutdown` force-disposes even busy sessions.
  */
   dispose(): Promise<void>;
 }
@@ -398,18 +417,28 @@ interface SessionExtras {
 /**
  * Process-wide registry of LIVE session instances, shared across every client
  * connection, with a reference count. A session is created once and reused by
- * any connection that opens it (so all clients follow the same running task);
- * it is disposed only when the LAST connection releases it — closing one tab
- * must not kill a task another client (or a background run) still needs.
+ * any connection that opens it (so all clients follow the same running task).
+ * Closing the last UI does NOT cancel a busy run — the session stays here
+ * with zero holders until `session/resume` reattaches (or `shutdown` force-
+ * disposes). Idle sessions are disposed when the last holder leaves.
  */
 interface LiveSession {
   session: Session;
- /** Connections currently holding this session (refcount = size). */
+ /** Connections currently holding this session (refcount = size). May be empty
+  * while a background run continues after the last client disconnected. */
   holders: Set<ServerContext>;
  /** Permission / question requests awaiting an answer from ANY holder. */
   prompts: Map<string, PendingPrompt>;
 }
 const liveSessions = new Map<string, LiveSession>();
+
+function isBusySession(session: Session): boolean {
+  try {
+    return typeof session.isBusy === "function" && session.isBusy();
+  } catch {
+    return false;
+  }
+}
 
 /** A reverse request shown on every client following the session; the first
  * answer wins and the others are told to dismiss it. */
@@ -425,8 +454,14 @@ function retainSession(ctx: ServerContext, session: Session): void {
   else liveSessions.set(session.id, { session, holders: new Set([ctx]), prompts: new Map() });
 }
 
-/** Release `sessionId` for this connection; dispose once nobody holds it. */
-async function releaseSession(ctx: ServerContext, sessionId: string): Promise<void> {
+/** Release `sessionId` for this connection. When no holders remain: keep a busy
+ * session alive for reconnect (unless `force`), otherwise fail-closed pending
+ * prompts and dispose. */
+async function releaseSession(
+  ctx: ServerContext,
+  sessionId: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
   if (!ctx.sessions.delete(sessionId)) return; // this connection didn't hold it
   const unsub = ctx.sessionSubs.get(sessionId);
   if (unsub) { try { unsub(); } catch { /* ignore */ } ctx.sessionSubs.delete(sessionId); }
@@ -434,7 +469,12 @@ async function releaseSession(ctx: ServerContext, sessionId: string): Promise<vo
   if (!live) return;
   live.holders.delete(ctx);
   if (live.holders.size === 0) {
- // Nobody left to answer: fail closed so the run can finish.
+ // Browser refresh / tab close: detach UI but let an in-flight prompt keep
+ // running. Pending permission/question prompts stay queued for replay on
+ // the next resume. Explicit shutdown passes force to tear everything down.
+    if (!opts.force && isBusySession(live.session)) {
+      return;
+    }
     for (const p of Array.from(live.prompts.values())) failClosed(live, p, ctx.defaultPermissionMode);
     liveSessions.delete(sessionId);
     try { await live.session.dispose(); } catch { /* ignore */ }
@@ -1285,7 +1325,7 @@ async function handleWorkspaceWrite(ctx: ServerContext, params: WorkspaceWritePa
 async function handlePromptSend(
   ctx: ServerContext,
   params: PromptSendParams,
-): Promise<Record<string, never>> {
+): Promise<PromptSendResult> {
   assertInitialized(ctx);
   const session = ctx.sessions.get(params.sessionId);
   if (!session) {
@@ -1294,7 +1334,24 @@ async function handlePromptSend(
       `session not found: ${params.sessionId}`,
     );
   }
- // Fire-and-forget: events stream back as `event` notifications.
+  const delivery = params.delivery ?? "auto";
+  const busy = typeof session.isBusy === "function" && session.isBusy();
+
+  if (delivery === "steer" && busy) {
+    session.steer(params.text);
+    return { delivery: "steered" };
+  }
+
+  if ((delivery === "queue" || delivery === "auto") && busy) {
+    session.enqueueFollowUp({
+      text: params.text,
+      images: params.images,
+      files: params.files,
+    });
+    return { delivery: "queued" };
+  }
+
+  // Fire-and-forget: events stream back as `event` notifications.
   void session.prompt(params.text, params.images, params.files).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     void ctx.peer
@@ -1304,6 +1361,22 @@ async function handlePromptSend(
       })
       .catch(() => {});
   });
+  return { delivery: "started" };
+}
+
+async function handlePromptFollowupRemove(
+  ctx: ServerContext,
+  params: PromptFollowupRemoveParams,
+): Promise<Record<string, never>> {
+  assertInitialized(ctx);
+  const session = ctx.sessions.get(params.sessionId);
+  if (!session) {
+    throw new RpcError(
+      ErrorCode.SessionNotFound,
+      `session not found: ${params.sessionId}`,
+    );
+  }
+  session.removeFollowUp(params.id);
   return {};
 }
 
@@ -1373,16 +1446,15 @@ async function handleSessionFork(
   return registerSession(ctx, forked);
 }
 
-/** Release every session and pending reverse-request this connection owns. */
-async function teardown(ctx: ServerContext): Promise<void> {
+/** Release every session this connection owns. Soft by default (busy runs
+ * survive); pass `{ force: true }` from shutdown to cancel everything. */
+async function teardown(
+  ctx: ServerContext,
+  opts: { force?: boolean } = {},
+): Promise<void> {
   stopWatcher(ctx);
- // Release each held session via the shared refcount — dispose happens only
- // when the LAST connection lets go, so closing one client never kills a task
- // another client (or a background run) is still using.
- // Pending prompts fail closed inside releaseSession once no other client
- // following the session is left to answer them.
   for (const id of Array.from(ctx.sessions.keys())) {
-    await releaseSession(ctx, id);
+    await releaseSession(ctx, id, opts);
   }
   ctx.sessionSubs.clear();
 }
@@ -1390,7 +1462,8 @@ async function teardown(ctx: ServerContext): Promise<void> {
 async function handleShutdown(
   ctx: ServerContext,
 ): Promise<Record<string, never>> {
-  await teardown(ctx);
+ // Client asked to shut down this connection for real — cancel busy runs too.
+  await teardown(ctx, { force: true });
  // Tear the peer down after the response is sent.
   setImmediate(() => {
     void ctx.peer.close();

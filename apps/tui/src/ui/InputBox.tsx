@@ -38,10 +38,14 @@ import {
 export interface InputBoxProps {
   value: string;
   onChange: (next: string) => void;
-  onSubmit: (text: string) => void;
+  /** Second arg: `steer` injects into the current run (Ctrl+Enter while busy). */
+  onSubmit: (text: string, delivery?: "auto" | "steer") => void;
   onCancel: () => void;
- /** When true, input is disabled (e.g. waiting for permission or busy). */
+ /** When true, input is disabled (e.g. waiting for permission). Busy runs
+  * stay editable so the user can queue or inject. */
   disabled?: boolean;
+  /** When true, Enter queues / Ctrl+Enter injects (composer stays enabled). */
+  busy?: boolean;
   placeholder?: string;
  /** Hint shown below the box. */
   hint?: string;
@@ -83,6 +87,7 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
     onSubmit,
     onCancel,
     disabled,
+    busy = false,
     placeholder,
     hint,
     cwd,
@@ -338,7 +343,8 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
         }
         histNavIdxRef.current = -1;
         draftRef.current = "";
-        onSubmit(text);
+        const delivery = busy && key.ctrl ? "steer" : "auto";
+        onSubmit(text, delivery);
         return;
       }
       if (key.return && key.shift) {
@@ -464,7 +470,10 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
         )}
         <Box justifyContent="space-between">
           <Text dimColor>
-            {hint ?? "↵ send · ⇧↵ newline · ^K commands · ^R history · ↑↓ history · ^C cancel"}
+            {hint ??
+              (busy
+                ? "↵ queue · ⌃↵ inject into run · ^C cancel"
+                : "↵ send · ⇧↵ newline · ^K commands · ^R history · ↑↓ history · ^C cancel")}
           </Text>
         </Box>
       </Box>

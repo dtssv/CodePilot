@@ -28,6 +28,8 @@ import javax.swing.SwingConstants
 class CodepilotSettings : PersistentStateComponent<CodepilotSettings.State> {
     data class State(
         var codepilotPath: String = "codepilot",
+        /** shared (default) = attach/spawn local WS daemon; stdio = private legacy serve. */
+        var engineMode: String = "shared",
         var model: String = "",
         var permissionMode: String = "ask", // ask | auto-edit | yolo
         var defaultMode: String = "agent", // chat | plan | agent — default collaboration mode for new sessions
@@ -60,6 +62,7 @@ class CodepilotSettings : PersistentStateComponent<CodepilotSettings.State> {
 /** Settings UI rendered under Settings → Tools → CodePilot. */
 class CodepilotSettingsConfigurable : Configurable {
     private val pathField = JBTextField()
+    private val engineModeCombo = ComboBox(arrayOf("shared", "stdio"))
     private val modelField = JBTextField()
     private val permissionCombo = ComboBox(arrayOf("ask", "auto-edit", "yolo"))
     private val defaultModeCombo = ComboBox(CodepilotSettings.defaultModes.toTypedArray())
@@ -72,7 +75,9 @@ class CodepilotSettingsConfigurable : Configurable {
     override fun createComponent(): JPanel {
         val settings = CodepilotSettings.getInstance().state
         pathField.text = settings.codepilotPath
-        pathField.toolTipText = "Path to the `codepilot` executable, or a name on PATH (e.g. `codepilot`, `/usr/local/bin/codepilot`)."
+        pathField.toolTipText = "System `codepilot` on PATH (fallback when the bundled engine is missing). Prefer leaving the bundled CLI in place for install-only use."
+        engineModeCombo.selectedItem = if (settings.engineMode == "stdio") "stdio" else "shared"
+        engineModeCombo.toolTipText = "shared (default): attach to / spawn a local CodePilot daemon over WebSocket. stdio: private legacy process."
         modelField.text = settings.model
         modelField.toolTipText = "Default model (e.g. `claude-3-7-sonnet`, `gpt-4o`). Leave blank to inherit from core config."
         permissionCombo.selectedItem = settings.permissionMode
@@ -86,6 +91,7 @@ class CodepilotSettingsConfigurable : Configurable {
 
         panel = FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("`codepilot` executable:"), pathField, 1, false)
+            .addLabeledComponent(JBLabel("Engine mode:"), engineModeCombo, 1, false)
             .addLabeledComponent(JBLabel("Default model:"), modelField, 1, false)
             .addLabeledComponent(JBLabel("Permission mode:"), permissionCombo, 1, false)
             .addLabeledComponent(JBLabel("Default collaboration mode:"), defaultModeCombo, 1, false)
@@ -98,6 +104,7 @@ class CodepilotSettingsConfigurable : Configurable {
         val resetButton = JButton("Reset to defaults").apply {
             addActionListener {
                 pathField.text = "codepilot"
+                engineModeCombo.selectedItem = "shared"
                 modelField.text = ""
                 permissionCombo.selectedItem = "ask"
                 defaultModeCombo.selectedItem = "agent"
@@ -125,7 +132,9 @@ class CodepilotSettingsConfigurable : Configurable {
 
     override fun isModified(): Boolean {
         val s = CodepilotSettings.getInstance().state
+        val mode = if (engineModeCombo.selectedItem == "stdio") "stdio" else "shared"
         return pathField.text != s.codepilotPath ||
+            mode != (s.engineMode.ifBlank { "shared" }) ||
             modelField.text != s.model ||
             (permissionCombo.selectedItem as? String ?: "ask") != s.permissionMode ||
             CodepilotSettings.normalizeMode(defaultModeCombo.selectedItem as? String) != CodepilotSettings.normalizeMode(s.defaultMode) ||
@@ -136,6 +145,7 @@ class CodepilotSettingsConfigurable : Configurable {
     override fun apply() {
         val s = CodepilotSettings.getInstance().state
         s.codepilotPath = pathField.text.trim().ifEmpty { "codepilot" }
+        s.engineMode = if (engineModeCombo.selectedItem == "stdio") "stdio" else "shared"
         s.model = modelField.text.trim()
         s.permissionMode = (permissionCombo.selectedItem as? String ?: "ask").also {
             if (it !in setOf("ask", "auto-edit", "yolo")) permissionCombo.selectedItem = "ask"
@@ -150,6 +160,7 @@ class CodepilotSettingsConfigurable : Configurable {
     override fun reset() {
         val s = CodepilotSettings.getInstance().state
         pathField.text = s.codepilotPath
+        engineModeCombo.selectedItem = if (s.engineMode == "stdio") "stdio" else "shared"
         modelField.text = s.model
         permissionCombo.selectedItem = s.permissionMode
         defaultModeCombo.selectedItem = CodepilotSettings.normalizeMode(s.defaultMode)

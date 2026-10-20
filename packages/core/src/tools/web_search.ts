@@ -63,12 +63,8 @@ export function resolveSearchBackend(
 export const webSearchTool: ToolDef<typeof schema> = {
   name: "web_search",
   description:
-    "Search the web and return titles, URLs and snippets. Use it to find current " +
-    "documentation, library versions, or error messages; then open the most " +
-    "promising hit with `web_fetch`. The default DuckDuckGo backend is keyless " +
-    "and best-effort — rate limits surface as explicit errors; configure a " +
-    "`webSearch` provider (brave/serper/google) for reliable results. For " +
-    "current facts, prefer this over your training data.",
+    "Web search → titles/URLs/snippets; follow up with `web_fetch`. Prefer for " +
+    "current docs/errors over training data. Default backend is keyless best-effort.",
   inputSchema: schema,
   permission: "network",
   async execute(input, ctx) {

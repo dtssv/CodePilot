@@ -56,19 +56,9 @@ export const diagnosticsTool: ToolDef<typeof schema> & {
 } = {
   name: "diagnostics",
   description:
-    "Fetch LSP / language-server diagnostics (type errors, lint failures, " +
-    "unused imports) for a file or the whole workspace. Use this AFTER " +
-    "editing to verify the change type-checks — it is far cheaper than a " +
-    "full build and pinpoints the exact line. When no language server is " +
-    "connected the tool says so — fall back to the project's type-checker or " +
-    "linter via `bash`.\n\n" +
-    "Pass `path` for a single file; omit it for workspace-wide diagnostics " +
-    "(the host may cap the result count). `severity` filters: `error` " +
-    "(default) shows only errors; `warning` adds warnings; `info`/`hint` " +
-    "return everything.\n\n" +
-    "When the result is empty, the file is clean. When non-empty, each " +
-    "entry shows `path:line:col severity [source] message`. Fix the errors " +
-    "before declaring the task done.",
+    "LSP diagnostics for a file (`path`) or the workspace. Prefer after edits; " +
+    "cheaper than a full build. `severity` defaults to error. If no LSP is " +
+    "connected, fall back to the project's checker via `bash`.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

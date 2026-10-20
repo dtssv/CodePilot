@@ -141,6 +141,9 @@ export class HookEngine {
  * user relies on doesn't go silently inactive. */
   onWarning?: (message: string) => void;
   private warnedUntrusted = new Set<string>();
+ /** When set, command hooks run under this OS sandbox policy (opt-in via
+  * config.hookSandbox). Undefined = legacy unsandboxed behaviour. */
+  private commandSandbox?: import("./sandbox.js").ResolvedSandbox;
 
   constructor(
     config: HooksConfig | undefined,
@@ -158,6 +161,12 @@ export class HookEngine {
       Stop: config?.Stop ?? [],
     };
     this.trust = new HookTrustStore();
+  }
+
+  /** Enable OS-sandboxing of command hooks (opt-in). Pass the session's
+   * resolved sandbox policy; undefined/`off` leaves hooks unsandboxed. */
+  setCommandSandbox(policy: import("./sandbox.js").ResolvedSandbox | undefined): void {
+    this.commandSandbox = policy && policy.mode !== "off" ? policy : undefined;
   }
 
  // ---- Hook trust (hash-based review, ) ----
@@ -475,6 +484,7 @@ export class HookEngine {
       this.resolvers,
       (h) => this.trust.isTrusted(h),
       (cmd) => hashCommand(cmd).slice(0, 8),
+      this.commandSandbox,
     );
     if (r.untrusted && hook.command && !this.warnedUntrusted.has(hook.command)) {
       this.warnedUntrusted.add(hook.command);
