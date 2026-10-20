@@ -13,6 +13,10 @@ export interface MessageRow {
   role: "user" | "assistant";
  /** Grows as `message_delta` events arrive. */
   text: string;
+ /** Extended-thinking / reasoning text, accumulated from `reasoning`
+  * message deltas (Anthropic extended thinking). Rendered as a collapsible
+  * block above the answer. Empty when the model did not think out loud. */
+  reasoning?: string;
  /** Images the user attached (user messages only). */
   images?: ImageAttachment[];
  /** Non-image uploads written under `.codepilot/uploads/`. */

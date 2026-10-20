@@ -17,6 +17,7 @@
 
 import { spawn } from "node:child_process";
 import type { HookEntry } from "./hooks.js";
+import { wrapCommand, type ResolvedSandbox } from "./sandbox.js";
 
 export const HOOK_TIMEOUT_MS = 10_000;
 
@@ -42,16 +43,29 @@ export interface HookResolvers {
 // Command handler (default)
 // ---------------------------------------------------------------------------
 
-/** Spawn the hook command through the host shell (NOT the sandbox — hooks
- * are user-authored config at the same trust level as the config file).
+/** Spawn the hook command through the host shell. By default hooks are NOT
+ * sandboxed — they are user-authored config at the same trust level as the
+ * config file. When a `sandbox` policy is passed (opt-in via config), the
+ * command is wrapped with the same OS sandbox the `bash` tool uses
+ * (Seatbelt / bwrap), so a hook can't exceed what a sandboxed command could.
  * Payload is written to stdin as JSON; stdout/stderr are captured. */
 export function runCommandHook(
   command: string,
   payload: Record<string, unknown>,
   cwd: string,
   timeout: number = HOOK_TIMEOUT_MS,
+  sandbox?: ResolvedSandbox,
 ): Promise<HookRawResult> {
   return new Promise((resolve) => {
+    // Opt-in OS sandbox. A deny-fallback with no backend turns `command`
+    // into an `exit 126` stub, which is the intended fail-closed behaviour.
+    let effectiveCommand = command;
+    let sandboxWarning: string | undefined;
+    if (sandbox && sandbox.mode !== "off") {
+      const wrapped = wrapCommand(command, sandbox);
+      effectiveCommand = wrapped.command;
+      sandboxWarning = wrapped.warning;
+    }
     const shell =
       process.platform === "win32"
         ? (process.env.COMSPEC ?? "cmd.exe")
@@ -59,7 +73,7 @@ export function runCommandHook(
     const args = process.platform === "win32" ? ["/d", "/s", "/c"] : ["-c"];
     let child;
     try {
-      child = spawn(shell, [...args, command], {
+      child = spawn(shell, [...args, effectiveCommand], {
         cwd,
         env: process.env,
         stdio: ["pipe", "pipe", "pipe"],
@@ -73,6 +87,7 @@ export function runCommandHook(
       });
       return;
     }
+    if (sandboxWarning) process.stderr.write(`${sandboxWarning}\n`);
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;

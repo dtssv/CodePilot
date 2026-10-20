@@ -256,6 +256,35 @@ function applyEvent(state: AppState, e: Event): AppState {
   const at = (e as { ts?: number }).ts ?? Date.now();
   switch (e.type) {
     case "message_delta": {
+      if (e.delta.type === "reasoning") {
+        const rows = [...state.rows];
+        const idx = findStreamingMessage(rows, e.messageId);
+        if (idx >= 0) {
+          const row = rows[idx] as Extract<Row, { kind: "message" }>;
+          rows[idx] = {
+            ...row,
+            msg: {
+              ...row.msg,
+              reasoning: (row.msg.reasoning ?? "") + e.delta.text,
+              firstTokenAt: row.msg.firstTokenAt ?? at,
+            },
+          };
+        } else {
+          rows.push({
+            kind: "message",
+            at,
+            msg: {
+              id: e.messageId,
+              role: "assistant",
+              text: "",
+              reasoning: e.delta.text,
+              streaming: true,
+              firstTokenAt: at,
+            },
+          });
+        }
+        return { ...state, rows, status: "thinking" };
+      }
       if (e.delta.type !== "text") return state; // tool-input JSON is internal
       const rows = [...state.rows];
       const idx = findStreamingMessage(rows, e.messageId);

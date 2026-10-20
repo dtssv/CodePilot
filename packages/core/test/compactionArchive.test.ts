@@ -105,6 +105,21 @@ describe("compaction keeps the dropped turns reachable", () => {
     expect(live[0]?.type).toBe("compaction");
     expect(live.some((e) => e.type === "message" && e.id === "a0")).toBe(false);
 
+ // getHistory() keeps the ORIGINAL messages for display even though the
+ // model-facing getEvents() dropped them. This is the user-visible fix:
+ // compaction must not make earlier turns disappear from the UI.
+    const history = session.getHistory();
+    expect(history.some((e) => e.type === "message" && e.id === "a0")).toBe(true);
+    expect(history.some((e) => e.type === "message" && e.id === "u0")).toBe(true);
+    expect(history.some((e) => e.type === "compaction")).toBe(true);
+
+ // A fresh subscriber (e.g. a reconnecting UI) replays the full history,
+ // not the compacted set, so it sees the original turns too.
+    const replayed: Event[] = [];
+    const unsub = session.subscribe((e) => replayed.push(e));
+    unsub();
+    expect(replayed.some((e) => e.type === "message" && e.id === "a0")).toBe(true);
+
     expect(existsSync(archive)).toBe(true);
     const text = readFileSync(archive, "utf-8");
     expect(text).toContain(design);

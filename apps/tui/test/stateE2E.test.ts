@@ -228,6 +228,57 @@ describe("TUI state machine — end-to-end session lifecycle", () => {
     expect(tools[0]!.tool.status).toBe("ok");
   });
 
+  it("accumulates reasoning deltas and preserves them through the final message", () => {
+    let state: TuiState = initialState({
+      sessionId: "sr",
+      cwd: "/tmp",
+      model: "claude-sonnet-4-5",
+      permissionMode: "ask",
+      agentMode: "agent",
+    });
+
+    // Thinking streams before any answer text.
+    state = reducer(state, {
+      type: "event",
+      event: { type: "message_delta", messageId: "a1", delta: { type: "reasoning", text: "Let me " } },
+    });
+    state = reducer(state, {
+      type: "event",
+      event: { type: "message_delta", messageId: "a1", delta: { type: "reasoning", text: "reason." } },
+    });
+    let assistants = findAssistantRows(state.rows);
+    expect(assistants).toHaveLength(1);
+    if (assistants[0]!.kind === "assistant") {
+      expect(assistants[0]!.msg.reasoning).toBe("Let me reason.");
+      expect(assistants[0]!.msg.text).toBe("");
+      expect(assistants[0]!.msg.streaming).toBe(true);
+    }
+
+    // Then the visible answer streams into the same row.
+    state = reducer(state, {
+      type: "event",
+      event: { type: "message_delta", messageId: "a1", delta: { type: "text", text: "Done." } },
+    });
+    // Terminal message carries only the answer; reasoning must survive.
+    state = reducer(state, {
+      type: "event",
+      event: {
+        type: "message",
+        id: "a1",
+        role: "assistant",
+        content: [{ type: "text", text: "Done." }],
+        model: "claude-sonnet-4-5",
+      },
+    });
+    assistants = findAssistantRows(state.rows);
+    expect(assistants).toHaveLength(1);
+    if (assistants[0]!.kind === "assistant") {
+      expect(assistants[0]!.msg.reasoning).toBe("Let me reason.");
+      expect(assistants[0]!.msg.text).toBe("Done.");
+      expect(assistants[0]!.msg.streaming).toBe(false);
+    }
+  });
+
   it("sums usage across multiple turns", () => {
     let state: TuiState = initialState({
       sessionId: "s3",

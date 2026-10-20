@@ -102,11 +102,14 @@ export interface AgentDeps {
  * where a fresh run-local cache is created automatically. */
   dedupCache?: DedupCache;
  /**
- * Steering hook: called at the start of every agent turn. Returned texts
- * are injected into the transcript as additional user messages, letting a
- * host queue mid-run guidance without cancelling the run.
+ * Steering hook: called at the start of every agent turn. `user` items are
+ * genuine human input and are injected into the transcript as user messages;
+ * `system` items are engine-generated notices (background-job completion,
+ * etc.) and are surfaced via the per-turn runtime_context instead, so they
+ * can never be mistaken for — or spoof — user input. Lets a host queue
+ * mid-run guidance without cancelling the run.
  */
-  drainSteering?: () => string[];
+  drainSteering?: () => Array<{ source: "user" | "system"; text: string }>;
  /**
  * Collaboration mode. Filters the tool table sent to the
  * provider. Defaults to "agent" (no filtering).
@@ -165,7 +168,13 @@ export async function runAgent(
  // `history` and `produced`, so the model would see the user's prompt again
  // after each tool result and re-run it (e.g. asking the same question twice).
   const input: AgentRunInput = { ...rawInput, history: rawInput.history.slice() };
-  const maxTurns = deps.maxTurns ?? deps.config.maxTurns ?? 50;
+  // Unset / 0 → unlimited. A hard default of 50 used to silently idle mid-task
+  // and force the user to type "continue"; that is not how Claude Code / Codex
+  // behave. Abnormal loops are handled by DoomLoopDetector + cancel, not by
+  // a small turn ceiling.
+  const configuredMax = deps.maxTurns ?? deps.config.maxTurns;
+  const maxTurns =
+    configuredMax === undefined || configuredMax === 0 ? Number.POSITIVE_INFINITY : configuredMax;
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const doomLoop = new DoomLoopDetector(deps.dedupCache);
@@ -236,24 +245,40 @@ export async function runAgent(
  /** Text of the cut-off replies being resumed; prefixes the final answer. */
   let resumedText = "";
 
-  for (let turn = 0; turn < maxTurns; turn++) {
-    if (deps.signal?.aborted) break;
+  let hitMaxTurns = false;
+  let stoppedByAbort = false;
+  for (let turn = 0; ; turn++) {
+    if (deps.signal?.aborted) {
+      stoppedByAbort = true;
+      break;
+    }
+    if (turn >= maxTurns) {
+      hitMaxTurns = true;
+      break;
+    }
 
  // Snapshot the plan-progress signature at the start of the turn so we
  // can tell whether this turn's tool calls advanced the plan.
     const planSigBefore = planProgressSig;
 
- // Drain queued steering messages into the transcript before building
- // the provider request, so mid-run guidance reaches the model on the
- // very next turn.
+ // Drain queued steering. Genuine user input enters the transcript as a
+ // user message (so the model acts on it immediately and it persists on
+ // replay). Engine-generated notices do NOT: they ride in this turn's
+ // runtime_context (see `systemSteerNotices`), so a system notice can never
+ // impersonate user input.
+    const systemSteerNotices: string[] = [];
     if (deps.drainSteering) {
       const steered = deps.drainSteering();
-      for (const text of steered) {
+      for (const item of steered) {
+        if (item.source === "system") {
+          systemSteerNotices.push(item.text);
+          continue;
+        }
         await emit({
           type: "message",
           id: `msg_${randomUUID()}`,
           role: "user",
-          content: [{ type: "text", text }],
+          content: [{ type: "text", text: item.text }],
         });
       }
     }
@@ -287,7 +312,7 @@ export async function runAgent(
       resumeAfterTruncation = false;
     }
     const providerTools = buildProviderToolDefs(deps.tools, agentMode);
-    const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled });
+    const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices });
 
  // Debug/test consistency assertion: verify the
  // non-folded tail of the provider messages matches the persisted event
@@ -377,6 +402,16 @@ export async function runAgent(
                 type: "message_delta",
                 messageId: id,
                 delta: { type: "text", text: ev.text },
+              });
+              break;
+            case "thinking_delta":
+              markFirstToken();
+              // Reasoning is shown live but not folded into assistantText:
+              // the visible answer / tool calls are what the loop acts on.
+              await emit({
+                type: "message_delta",
+                messageId: id,
+                delta: { type: "reasoning", text: ev.text },
               });
               break;
             case "tool_input_delta":
@@ -615,6 +650,26 @@ export async function runAgent(
     }
   }
 
+  // Surface turn-cap stops explicitly (Claude Code: error_max_turns). A silent
+  // idle made the UI look "interrupted" with no explanation.
+  if (hitMaxTurns) {
+    const cap = Number.isFinite(maxTurns) ? String(maxTurns) : String(configuredMax);
+    await emit({
+      type: "error",
+      message:
+        `Reached maxTurns (${cap}): the model was still calling tools, so the run ` +
+        `stopped before finishing. Send another message (e.g. "continue") to resume, ` +
+        `or raise/remove maxTurns in config for long tasks.`,
+      recoverable: true,
+    });
+  } else if (stoppedByAbort && sawToolCalls) {
+    await emit({
+      type: "error",
+      message: "Run cancelled before the model finished.",
+      recoverable: true,
+    });
+  }
+
   await emit({ type: "status", status: "idle" });
   return {
     events: produced,
@@ -686,19 +741,24 @@ function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> 
  * long runs; without the ledger the model forgets it already did a step and
  * does it again.
  *
- * When `planStalled` is set, a stall notice is appended. It lives here (in
- * the per-turn runtime_context) rather than in the persisted transcript so
- * it steers the model without ever looking like a user message on replay.
+ * When `planStalled` is set, a stall notice is appended. `systemNotices` are
+ * engine-generated, out-of-band messages (e.g. background-job completion):
+ * they live here, in the per-turn runtime_context, rather than in the
+ * persisted transcript, so they steer the model without ever looking like —
+ * or being spoofable as — a user message on replay.
  */
 export function buildLiveContext(
   all: Event[],
   produced: Event[],
-  opts: { planStalled?: boolean } = {},
+  opts: { planStalled?: boolean; systemNotices?: string[] } = {},
 ): string {
   const parts = [renderPlanBlock(extractPlan(all))];
   const ledger = buildProgressLedger(produced);
   if (ledger) parts.push(ledger);
   if (opts.planStalled) parts.push(PLAN_STALL_NOTICE);
+  for (const notice of opts.systemNotices ?? []) {
+    parts.push(`<system_notice>\n${notice}\n</system_notice>`);
+  }
   return parts.join("\n\n");
 }
 

@@ -25,6 +25,39 @@ export interface AnthropicProviderOptions {
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
 const BETA_PROMPT_CACHING = "prompt-caching-2024-07-31";
+// Lets the model think between tool calls (not just before the first
+// response). Required for extended thinking to interleave with tool use.
+const BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14";
+
+// Map the shared `reasoningEffort` knob onto an Anthropic thinking budget
+// (in tokens) so callers don't have to configure two different things.
+// Explicit `thinkingBudget` always wins over this.
+const EFFORT_BUDGET: Record<"low" | "medium" | "high", number> = {
+  low: 4096,
+  medium: 10_000,
+  high: 24_000,
+};
+
+/**
+ * Resolve the effective thinking budget from explicit budget / effort.
+ * Returns 0 when thinking should stay off.
+ */
+export function resolveThinkingBudget(
+  thinkingBudget: number | undefined,
+  reasoningEffort: "low" | "medium" | "high" | undefined
+): number {
+  if (typeof thinkingBudget === "number") {
+    return thinkingBudget > 0 ? Math.floor(thinkingBudget) : 0;
+  }
+  if (reasoningEffort) return EFFORT_BUDGET[reasoningEffort];
+  return 0;
+}
+
+// Anthropic requires max_tokens > thinking.budget_tokens, with the budget
+// itself being at least 1024. We keep a margin so the model still has room
+// to produce a visible answer / tool calls after thinking.
+const MIN_THINKING_BUDGET = 1024;
+const ANSWER_HEADROOM = 4096;
 
 export class AnthropicProvider implements ChatProvider {
   readonly name = "anthropic";
@@ -49,12 +82,24 @@ export class AnthropicProvider implements ChatProvider {
   }
 
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
+    const budget = resolveThinkingBudget(opts.thinkingBudget, opts.reasoningEffort);
+    const thinkingOn = budget >= MIN_THINKING_BUDGET;
+    // Thinking requires max_tokens strictly greater than the budget; grow it
+    // if the caller's limit (or our 4096 default) would leave no answer room.
+    const baseMaxTokens = opts.maxTokens ?? 4096;
+    const maxTokens = thinkingOn
+      ? Math.max(baseMaxTokens, budget + ANSWER_HEADROOM)
+      : baseMaxTokens;
+
     const body: Record<string, unknown> = {
       model: opts.model,
       messages: opts.messages.map(toAnthropicMessage),
-      max_tokens: opts.maxTokens ?? 4096,
+      max_tokens: maxTokens,
       stream: true,
     };
+    if (thinkingOn) {
+      body.thinking = { type: "enabled", budget_tokens: budget };
+    }
     if (opts.systemPrompt) {
       if (this.enableCaching) {
         body.system = [
@@ -82,6 +127,12 @@ export class AnthropicProvider implements ChatProvider {
     };
     if (this.enableCaching) {
       headers["anthropic-beta"] = BETA_PROMPT_CACHING;
+    }
+    if (thinkingOn) {
+      // Append so we keep prompt-caching when both are active.
+      headers["anthropic-beta"] = headers["anthropic-beta"]
+        ? `${headers["anthropic-beta"]},${BETA_INTERLEAVED_THINKING}`
+        : BETA_INTERLEAVED_THINKING;
     }
 
     const res = await fetchWithRetry(url, {
@@ -159,12 +210,14 @@ export class AnthropicProvider implements ChatProvider {
           }
           case "content_block_delta": {
             const idx = payload.index as number;
-            const delta = payload.delta as { type: string; text?: string; partial_json?: string };
+            const delta = payload.delta as { type: string; text?: string; thinking?: string; partial_json?: string };
             const b = blocks.get(idx);
             if (!b) break;
             if (delta.type === "text_delta" && typeof delta.text === "string") {
               b.text += delta.text;
               yield { kind: "text_delta", messageId, text: delta.text };
+            } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+              yield { kind: "thinking_delta", messageId, text: delta.thinking };
             } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
               b.inputJson += delta.partial_json;
               const tcId = b.id ?? `toolu_${idx}`;

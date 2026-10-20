@@ -38,8 +38,9 @@ export interface UsageInfo {
 }
 
 export type TextDelta = { type: "text"; text: string };
+export type ReasoningDelta = { type: "reasoning"; text: string };
 export type ToolInputJsonDelta = { type: "tool_input_json"; toolCallId: string; partialJson: string };
-export type MessageDelta = TextDelta | ToolInputJsonDelta;
+export type MessageDelta = TextDelta | ReasoningDelta | ToolInputJsonDelta;
 
 export type Event =
   | {
@@ -288,7 +289,7 @@ export interface QuestionRequest {
 /** Answers keyed by question id: option label(s) or free text. */
 export type QuestionAnswers = Record<string, string | string[]>;
 
-export type ProviderName = "anthropic" | "openai" | "copilot";
+export type ProviderName = "anthropic" | "openai" | "copilot" | "gemini";
 
 /** A backup provider tried when the primary fails transiently. */
 export interface ProviderFallbackConfig {
@@ -419,6 +420,13 @@ export interface CodepilotConfig {
  * auto-compacts regardless of token pressure; the user must invoke
  * `/compact` explicitly. Default true. */
   autoCompact?: boolean;
+ /** When true, attempt to load the optional pure-JS `gpt-tokenizer` for
+  * provider-accurate token counts (falls back to the built-in heuristic
+  * when the package is not installed). Default false. */
+  preciseTokens?: boolean;
+ /** Structured audit log. `true` logs tool calls/results/errors to
+  * `~/.codepilot/audit/`; an object may set a custom `dir`. Default off. */
+  audit?: boolean | { dir?: string };
   mcpServers?: Record<string, McpServerConfig>;
  /** Tool names or bash command regexes that auto-approve.
  * @deprecated prefer `permissions.allow` (same rule syntax). */
@@ -427,7 +435,13 @@ export interface CodepilotConfig {
   permissions?: PermissionRules;
  /** OS-level sandbox policy. Default: workspace-write, fail-closed. */
   sandbox?: SandboxConfig;
- /** Maximum assistant turns per prompt (default 50). */
+ /**
+   * Cap on assistant↔tool round trips for one user prompt.
+   * Unset or `0` = no limit (same default posture as Claude Code / Codex:
+   * the run ends when the model replies without tool calls, or when a
+   * doom-loop / cancel / budget guard fires). Set a positive number for
+   * headless/CI cost bounds.
+   */
   maxTurns?: number;
  /** How many times a turn whose stream failed transiently (dropped
  * connection, overloaded gateway) is regenerated before giving up.
@@ -461,11 +475,18 @@ export interface CodepilotConfig {
   plansDirectory?: string;
  /** web_fetch configuration: per-domain allowlist + cache TTL. */
   webFetch?: WebFetchConfig;
+ /** web_search backend selection (duckduckgo | brave | serper | google). */
+  webSearch?: WebSearchConfig;
  /** Model reasoning effort. Controls how much the model
  * "thinks" before responding. Providers that support it (OpenAI o-series,
  * DeepSeek) pass this through; others ignore it. Default undefined
  * (provider default). */
   reasoningEffort?: "low" | "medium" | "high";
+ /** Extended-thinking token budget (Anthropic). When set and > 0, enables a
+  * `thinking` block with this budget; the model's reasoning streams as
+  * reasoning deltas. Overrides the budget derived from `reasoningEffort`.
+  * Non-Anthropic providers ignore it. Default undefined. */
+  thinkingBudget?: number;
  /** Model output verbosity. Unlike `outputStyle` (which controls the
  * teaching posture), this is a direct verbosity hint some providers
  * honour. Default undefined (provider default). */
@@ -510,6 +531,26 @@ export interface WebFetchConfig {
   blockedDomains?: string[];
  /** Cache TTL in minutes (default 15; set 0 to disable caching). */
   cacheTtlMinutes?: number;
+}
+
+/** Which search backend `web_search` uses. */
+export type WebSearchProvider = "duckduckgo" | "brave" | "serper" | "google";
+
+export interface WebSearchConfig {
+ /** Search backend. Defaults to auto: if a provider API key is present
+  * (config or env), that provider is used; otherwise the keyless
+  * DuckDuckGo HTML scraper. */
+  provider?: WebSearchProvider;
+ /** API key for the chosen backend. Supports `${ENV}` interpolation.
+  * When omitted, the tool falls back to the provider's conventional env
+  * var (BRAVE_API_KEY / SERPER_API_KEY / GOOGLE_API_KEY). Unused by
+  * DuckDuckGo. */
+  apiKey?: string;
+ /** Google Programmable Search Engine id (`cx`). Required for the
+  * `google` backend; falls back to the GOOGLE_CSE_ID env var. */
+  cx?: string;
+ /** Override the backend endpoint (advanced / self-hosted gateways). */
+  endpoint?: string;
 }
 
 export interface ImageAttachment {

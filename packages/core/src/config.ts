@@ -50,7 +50,7 @@ export const ModelsConfigSchema = z
 /** A named provider preset — switching to it is just `useProvider("work")`. */
 const ProviderPresetSchema = z
   .object({
-    provider: z.enum(["anthropic", "openai", "copilot"]),
+    provider: z.enum(["anthropic", "openai", "copilot", "gemini"]),
  /** Human label shown in pickers (falls back to the map key). */
     displayName: z.string().min(1).optional(),
     baseURL: z.string().min(1).optional(),
@@ -168,6 +168,15 @@ export const WebFetchConfigSchema = z
   })
   .strict();
 
+export const WebSearchConfigSchema = z
+  .object({
+    provider: z.enum(["duckduckgo", "brave", "serper", "google"]).optional(),
+    apiKey: z.string().optional(),
+    cx: z.string().optional(),
+    endpoint: z.string().url().optional(),
+  })
+  .strict();
+
 /**
  * Top-level config schema. Every field is optional because configs layer
  * from defaults up; strict-mode means unknown keys produce a readable
@@ -180,7 +189,7 @@ export const WebFetchConfigSchema = z
  */
 export const CodepilotConfigSchema: z.ZodType<unknown> = z
   .object({
-    provider: z.enum(["anthropic", "openai", "copilot"]).optional(),
+    provider: z.enum(["anthropic", "openai", "copilot", "gemini"]).optional(),
     model: z.string().min(1).optional(),
     smallModel: z.string().min(1).optional(),
     apiKey: z.string().optional(),
@@ -188,15 +197,34 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     permissionMode: z.enum(["ask", "auto-edit", "yolo"]).optional(),
     agentMode: z.enum(["chat", "plan", "agent"]).optional(),
     maxTokens: z.number().int().positive().optional(),
+    // Reasoning / thinking controls. These were part of the public config
+    // type but missing from the (strict) schema, so writing them to
+    // config.json was rejected — same latent class as `runtime` earlier.
+    reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
+    modelVerbosity: z.enum(["low", "medium", "high"]).optional(),
+    // Anthropic extended-thinking budget in tokens. 0 / undefined = off.
+    // Overrides the budget derived from reasoningEffort.
+    thinkingBudget: z.number().int().nonnegative().max(200_000).optional(),
     contextWindow: z.number().int().positive().optional(),
     maxContextTokens: z.number().int().positive().optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
+    // When true, createSession attempts to load the optional pure-JS
+    // `gpt-tokenizer` package for provider-accurate token counts; falls back
+    // to the built-in heuristic when the package is not installed.
+    preciseTokens: z.boolean().optional(),
+    // Structured audit log: when true (or an object), every tool call,
+    // result, error and compaction is appended to ~/.codepilot/audit/.
+    audit: z
+      .union([z.boolean(), z.object({ dir: z.string().min(1).optional() }).strict()])
+      .optional(),
     mcpServers: z.record(z.string().min(1), McpServerConfigSchema).optional(),
     autoApprove: z.array(z.string().min(1)).optional(),
     permissions: PermissionRulesSchema.optional(),
     sandbox: SandboxConfigSchema.optional(),
-    maxTurns: z.number().int().positive().max(500).optional(),
+    // 0 = unlimited (Claude Code / Codex default posture). Positive caps
+    // the agent↔tool loop for CI / unattended runs.
+    maxTurns: z.number().int().min(0).max(10_000).optional(),
     turnRetries: z.number().int().min(0).max(10).optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
@@ -219,6 +247,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     telemetry: TelemetryConfigSchema,
     usage: UsageConfigSchema,
     webFetch: WebFetchConfigSchema.optional(),
+    webSearch: WebSearchConfigSchema.optional(),
  // Agent runtime --------------------------------
  // Name of a registered AgentRuntime driving the prompt loop, plus a
  // free-form options bag keyed by runtime name. The values are opaque

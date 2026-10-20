@@ -54,7 +54,7 @@ export function groupRows(rows: readonly Row[]): Block[] {
         blocks.push({ kind: "user", key: `u-${r.id}-${i}`, text: r.text });
         return;
       case "assistant":
-        if (!hasVisibleAssistantContent(r.msg.text)) return;
+        if (!hasVisibleAssistantContent(r.msg.text) && !r.msg.reasoning) return;
         if (!turnKey) turnKey = `turn-${r.msg.id}`;
         turnParts.push({ kind: "message", msg: r.msg });
         return;

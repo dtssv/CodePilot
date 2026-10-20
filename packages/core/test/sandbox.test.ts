@@ -26,6 +26,11 @@ describe("resolveSandbox", () => {
     expect(s.fallback).toBe("deny");
     expect(s.network).toBe(true);
     expect(s.writableRoots[0]).toBe(cwd);
+    // OS temp (incl. /tmp aliases) so heredoc / curl -o /tmp work under Seatbelt.
+    expect(s.writableRoots).toContain(tmpdir());
+    if (process.platform === "darwin" || process.platform === "linux") {
+      expect(s.writableRoots).toContain("/tmp");
+    }
   });
 
   it("honours explicit overrides", () => {

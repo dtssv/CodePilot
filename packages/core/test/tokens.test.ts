@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import {
   estimateTokens,
+  heuristicTokens,
+  setTokenizer,
+  resetTokenizer,
+  getActiveTokenizer,
+  hasRealTokenizer,
+  tryLoadRealTokenizer,
   estimateMessagesTokens,
   estimateObjectTokens,
   estimateEventsTokens,
@@ -51,6 +57,48 @@ describe("estimateTokens", () => {
   it("handles whitespace and newlines", () => {
     const t = estimateTokens("\n\n   \t\t\n");
     expect(t).toBe(0);
+  });
+});
+
+describe("pluggable tokenizer", () => {
+  afterEach(() => resetTokenizer());
+
+  it("defaults to the heuristic", () => {
+    expect(hasRealTokenizer()).toBe(false);
+    expect(getActiveTokenizer()).toBe(heuristicTokens);
+  });
+
+  it("routes estimateTokens through an installed custom tokenizer", () => {
+    // A tokenizer that counts whitespace-separated words exactly.
+    setTokenizer((text) => (text.trim() ? text.trim().split(/\s+/).length : 0));
+    expect(estimateTokens("one two three four")).toBe(4);
+    expect(hasRealTokenizer()).toBe(true);
+  });
+
+  it("resetTokenizer restores the heuristic", () => {
+    setTokenizer(() => 999);
+    expect(estimateTokens("x")).toBe(999);
+    resetTokenizer();
+    expect(hasRealTokenizer()).toBe(false);
+    expect(estimateTokens("x")).toBe(heuristicTokens("x"));
+  });
+
+  it("the custom tokenizer flows through the higher-level estimators", () => {
+    setTokenizer((text) => (text ? text.length : 0)); // 1 token per char
+    // estimateObjectTokens stringifies non-strings, so count === JSON length.
+    expect(estimateObjectTokens("hello")).toBe(5);
+    expect(estimateEventsTokens(["ab", "cde"], (s) => s)).toBe(5);
+  });
+
+  it("tryLoadRealTokenizer is a no-op (keeps heuristic) when the package is absent", async () => {
+    // gpt-tokenizer is not a declared dependency; the loader must not throw
+    // and must leave the heuristic active when it cannot be imported.
+    const ok = await tryLoadRealTokenizer();
+    expect(typeof ok).toBe("boolean");
+    if (!ok) {
+      expect(hasRealTokenizer()).toBe(false);
+      expect(getActiveTokenizer()).toBe(heuristicTokens);
+    }
   });
 });
 

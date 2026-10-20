@@ -35,6 +35,9 @@ class FakeSession {
   getEvents() {
     return [...this.events];
   }
+  getHistory() {
+    return [...this.events];
+  }
   emit(e: unknown) {
     this.events.push(e);
     for (const l of this.listeners) l(e);

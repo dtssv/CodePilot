@@ -137,6 +137,48 @@ describe("loadPluginRuntimes", () => {
     expect(result.registered.size).toBe(0);
   });
 
+  it("does not import a runtime when the plugin opts in but omits the \"runtime\" permission", async () => {
+    // A VALID factory module that would register fine — proving the refusal
+    // is the permission gate, not a load failure.
+    writePlugin(projPlugins, "ungranted", {
+      name: "ungranted",
+      description: "d",
+      version: "1.0.0",
+      permissions: ["network"],
+      runtime: "./runtime.mjs",
+    }, { "runtime.mjs": FACTORY_MODULE });
+
+    const plugins = await discoverPlugins(base, {
+      projectDir: projPlugins,
+      userDir: userPlugins,
+    });
+    const reg = new RuntimeRegistry();
+    const result = await loadPluginRuntimes(plugins, reg);
+    expect(result.registered.size).toBe(0);
+    expect(reg.has("demo-runtime")).toBe(false);
+    expect(result.errors.get("ungranted")).toMatch(/did not declare the "runtime" permission/);
+  });
+
+  it("imports a runtime when the \"runtime\" permission is declared", async () => {
+    writePlugin(projPlugins, "granted", {
+      name: "granted",
+      description: "d",
+      version: "1.0.0",
+      permissions: ["runtime"],
+      runtime: "./runtime.mjs",
+    }, { "runtime.mjs": FACTORY_MODULE });
+
+    const plugins = await discoverPlugins(base, {
+      projectDir: projPlugins,
+      userDir: userPlugins,
+    });
+    const reg = new RuntimeRegistry();
+    const result = await loadPluginRuntimes(plugins, reg);
+    expect(result.errors.size).toBe(0);
+    expect(result.registered.get("granted")).toBe("demo-runtime");
+    expect(reg.has("demo-runtime")).toBe(true);
+  });
+
   it("rejects factories without create()", async () => {
     writePlugin(projPlugins, "nocreate", {
       name: "nocreate",

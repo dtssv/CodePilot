@@ -46,6 +46,7 @@ import { extractPlan, estimateEventTokens } from "./compaction.js";
 import { createSubagentRunner } from "./subagent.js";
 import { discoverCustomAgents, renderCustomAgentsBlock, type CustomAgent } from "./customAgents.js";
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
+import { AuditLogger } from "./audit.js";
 import { writePlanFile, setPlanFileStatus } from "./plans.js";
 import { PersistentShell } from "./persistentShell.js";
 import type { McpManager } from "./mcp.js";
@@ -157,8 +158,12 @@ export class Session {
  /** Session-scoped idempotent-result cache. Persists across prompts so a
  * file read in one turn is replayed (not re-read) in the next. */
   private readonly dedupCache = new DedupCache();
- /** Mid-run steering messages queued via steer; drained each agent turn. */
-  private steeringQueue: string[] = [];
+ /** Mid-run steering messages queued via steer; drained each agent turn.
+  * `user` items are genuine human input and enter the transcript as user
+  * messages. `system` items are engine-generated notices (e.g. background
+  * job completion) and are injected into the per-turn runtime_context so
+  * they can never be mistaken for — or spoof — a user message. */
+  private steeringQueue: Array<{ source: "user" | "system"; text: string }> = [];
   private toolRegistry: ToolRegistry;
   private artifacts: ArtifactStore;
   private permissions: PermissionEngine;
@@ -343,7 +348,7 @@ export class Session {
           } else {
             msg += ` Use bash_output({ job_id: "${meta.id}" }) to read its output.`;
           }
-          this.steer(msg);
+          this.steerSystem(msg);
         };
         if (failed) {
           readJobLog(this.cwd, meta.id, 20).then(emit).catch(() => emit());
@@ -352,6 +357,14 @@ export class Session {
         }
       })
     );
+    // Structured audit log (opt-in). Attached as a plain listener — NOT via
+    // subscribe — so it records only new events, never re-logs replayed
+    // history on resume. Fire-and-forget; never throws into the loop.
+    if (this.config.audit) {
+      const dir = typeof this.config.audit === "object" ? this.config.audit.dir : undefined;
+      const logger = new AuditLogger(this.id, dir ? { dir } : {});
+      this.listeners.add(logger.onEvent);
+    }
   }
 
   async prompt(text: string, images?: ImageAttachment[], files?: PromptFile[]): Promise<void> {
@@ -978,7 +991,19 @@ export class Session {
  */
   steer(text: string): void {
     if (text.trim().length === 0) return;
-    this.steeringQueue.push(text);
+    this.steeringQueue.push({ source: "user", text });
+  }
+
+ /**
+  * Queue an engine-generated notice for the model's next turn. Unlike
+  * {@link steer}, this is NOT persisted as a user message: it rides in the
+  * per-turn runtime_context (like the plan-stall notice), so a system
+  * notice can never be mistaken for — or impersonate — human input. Used
+  * for background-job completion and similar out-of-band events.
+  */
+  private steerSystem(text: string): void {
+    if (text.trim().length === 0) return;
+    this.steeringQueue.push({ source: "system", text });
   }
 
  /** The long-lived shell for foreground bash, started inside the sandbox.
@@ -1056,8 +1081,11 @@ export class Session {
   }
 
   subscribe(listener: (e: Event) => void): () => void {
- // Replay history first.
-    for (const e of this.events) {
+ // Replay history first — the FULL transcript (see getHistory), not the
+ // compacted model-facing set, so a UI that renders the replay keeps the
+ // user's original messages after a compaction. Before any compaction the
+ // two are identical, so this is a no-op for the common case.
+    for (const e of this.persisted) {
       try {
         listener(e);
       } catch {
@@ -1072,6 +1100,20 @@ export class Session {
 
   getEvents(): Event[] {
     return this.events.slice();
+  }
+
+ /**
+  * The full append-only transcript, including turns that compaction dropped
+  * from the model-facing set. Use this for DISPLAY (session list, resume,
+  * reconnect) so the user keeps seeing their original messages after a
+  * compaction — unlike {@link getEvents}, which returns the shortened,
+  * model-facing working set. The two intentionally diverge once a
+  * compaction has run: the model sees the summary + recent tail (token-
+  * efficient), the UI sees everything (with the `compaction` event marking
+  * where the summary was inserted).
+  */
+  getHistory(): Event[] {
+    return this.persisted.slice();
   }
 
  /** Returns a short summary of this session for list/search use. */

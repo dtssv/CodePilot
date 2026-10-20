@@ -14,4 +14,6 @@ export { OpenAIProvider } from "./openai.js";
 export type { OpenAIProviderOptions } from "./openai.js";
 export { CopilotProvider } from "./copilot.js";
 export type { CopilotProviderOptions } from "./copilot.js";
+export { GeminiProvider } from "./gemini.js";
+export type { GeminiProviderOptions } from "./gemini.js";
 export { parseSse } from "./sse.js";

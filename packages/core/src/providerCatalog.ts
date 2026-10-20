@@ -164,6 +164,14 @@ export const PROVIDER_TEMPLATES: readonly ProviderTemplate[] = [
     models: ["gpt-4.1", "gpt-4o"],
     description: "Requires GITHUB_TOKEN",
   },
+  {
+    id: "gemini",
+    displayName: "Google Gemini",
+    provider: "gemini",
+    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+    smallModel: "gemini-2.5-flash",
+    description: "Gemini generateContent API (GEMINI_API_KEY / GOOGLE_API_KEY)",
+  },
 ];
 
 /** Allocate a unique providers-map id from a template / base name. */

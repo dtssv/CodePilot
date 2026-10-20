@@ -964,7 +964,7 @@ async function handleSessionResume(
     attachSessionEvents(ctx, existing);
  // After the resume response, so the client has the session open first.
     setImmediate(() => replayPrompts(ctx, existing.id));
-    return { sessionId: existing.id, events: existing.getEvents() };
+    return { sessionId: existing.id, events: existing.getHistory() };
   }
   const cwd = ctx.defaultCwd;
   const config = await loadConfigSafe(cwd);
@@ -977,7 +977,7 @@ async function handleSessionResume(
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
   });
   registerSession(ctx, session);
-  return { sessionId: session.id, events: session.getEvents() };
+  return { sessionId: session.id, events: session.getHistory() };
 }
 
 /** Merge the session-supplied permission mode into config without overwriting other keys. */

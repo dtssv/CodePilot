@@ -21,6 +21,8 @@ export type {
   HookEntryConfig,
   ProviderFallbackConfig,
   WebFetchConfig,
+  WebSearchConfig,
+  WebSearchProvider,
   QuestionSpec,
   QuestionRequest,
   QuestionAnswers,
@@ -46,6 +48,7 @@ export {
   AnthropicProvider,
   OpenAIProvider,
   CopilotProvider,
+  GeminiProvider,
   parseSse,
   renderContent,
   userMessage,
@@ -54,6 +57,7 @@ export type {
   AnthropicProviderOptions,
   OpenAIProviderOptions,
   CopilotProviderOptions,
+  GeminiProviderOptions,
   ChatProvider,
   ProviderMessage,
   ProviderMessageContent,
@@ -416,6 +420,12 @@ export type {
 // ---- Tokens (estimator + per-model context windows) ----
 export {
   estimateTokens,
+  heuristicTokens,
+  setTokenizer,
+  resetTokenizer,
+  getActiveTokenizer,
+  hasRealTokenizer,
+  tryLoadRealTokenizer,
   estimateMessagesTokens,
   estimateObjectTokens,
   estimateEventsTokens,
@@ -424,6 +434,10 @@ export {
   estimateCostUSD,
 } from "./tokens.js";
 export type { TokenEstimator, ModelContextWindow, ModelCost } from "./tokens.js";
+
+// ---- Audit log (structured tool-call record) ----
+export { AuditLogger, readAuditLog, auditDir } from "./audit.js";
+export type { AuditRecord } from "./audit.js";
 
 // ---- Checkpoints (cross-session memory files) ----
 export {
@@ -564,10 +578,14 @@ export {
   loadPluginRuntimes,
   initPluginRuntimes,
   pluginDefaultRuntime,
+  pluginPermissionReport,
+  PLUGIN_PERMISSIONS,
 } from "./plugins.js";
 export type {
   PluginManifest,
   Plugin,
+  PluginPermission,
+  PluginPermissionReport,
   MarketplaceEntry,
   DiscoverPluginsOptions,
   InstallOptions,

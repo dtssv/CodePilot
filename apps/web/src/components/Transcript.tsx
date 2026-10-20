@@ -232,6 +232,9 @@ function AssistantTurnView({
             case "message":
               return (
                 <div key={p.msg.id}>
+                  {p.msg.reasoning ? (
+                    <ReasoningBlock text={p.msg.reasoning} streaming={p.msg.streaming && !p.msg.text} />
+                  ) : null}
                   <Markdown text={p.msg.text} />
                   {p.msg.streaming && (
                     <span className="ml-0.5 inline-block h-4 w-1.5 animate-breathe rounded-sm bg-[var(--color-accent)] align-text-bottom" />
@@ -318,6 +321,32 @@ function scrubUploadNote(text: string): string {
   return text
     .replace(/\n*\nAttached files \(saved in the workspace[\s\S]*$/i, "")
     .trim();
+}
+
+/** Collapsible "extended thinking" block shown above an assistant answer.
+ * Auto-expands while the model is still thinking (no answer text yet) so the
+ * user sees live progress; collapses once the answer starts. */
+function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean }): React.ReactElement {
+  const [userToggled, setUserToggled] = useState<boolean | null>(null);
+  const open = userToggled ?? streaming;
+  return (
+    <div className="mb-1.5 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)]">
+      <button
+        type="button"
+        onClick={() => setUserToggled(!open)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
+      >
+        <BrainIcon className="h-3 w-3" />
+        <span className="font-medium">{streaming && !userToggled ? t("Thinking…") : t("Thought process")}</span>
+        <ChevronIcon open={open} className="ml-auto h-3 w-3" />
+      </button>
+      {open && (
+        <div className="border-t border-[var(--color-edge-subtle)] px-2.5 py-2 text-[12px] leading-5 whitespace-pre-wrap text-[var(--color-ink-dim)]">
+          {text}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MessageView({ msg, density }: { msg: MessageRow; density: Density }): React.ReactElement | null {

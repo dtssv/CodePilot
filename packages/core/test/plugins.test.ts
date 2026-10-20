@@ -11,6 +11,7 @@ import {
   uninstallPlugin,
   searchMarketplace,
   derivePluginName,
+  pluginPermissionReport,
   type Plugin,
   type PluginManifest,
   type MarketplaceEntry,
@@ -664,5 +665,95 @@ describe("derivePluginName", () => {
 
   it("returns last segment for a bare name", () => {
     expect(derivePluginName("just-a-name")).toBe("just-a-name");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugin permissions
+// ---------------------------------------------------------------------------
+
+describe("plugin permissions", () => {
+  function fakePlugin(name: string, overrides: Partial<PluginManifest> = {}): Plugin {
+    return {
+      manifest: makeManifest({ name, ...overrides }),
+      path: `/tmp/${name}`,
+      source: "project",
+      paths: { skills: `/tmp/${name}/skills`, agents: `/tmp/${name}/agents`, commands: `/tmp/${name}/commands` },
+    };
+  }
+
+  describe("pluginPermissionReport", () => {
+    it("reports no enforcement / no violations when the field is absent (legacy)", () => {
+      const r = pluginPermissionReport(fakePlugin("legacy", { hooks: { PreToolUse: [{ x: 1 }] } }));
+      expect(r.enforced).toBe(false);
+      expect(r.used).toEqual(["hooks"]);
+      expect(r.violations).toEqual([]);
+    });
+
+    it("flags a used-but-undeclared capability as a violation when enforced", () => {
+      const r = pluginPermissionReport(
+        fakePlugin("p", { permissions: ["mcp"], hooks: { PreToolUse: [{ x: 1 }] } }),
+      );
+      expect(r.enforced).toBe(true);
+      expect(r.declared).toEqual(["mcp"]);
+      expect(r.used).toEqual(["hooks"]);
+      expect(r.violations).toEqual(["hooks"]);
+    });
+
+    it("has no violations when every used capability is declared", () => {
+      const r = pluginPermissionReport(
+        fakePlugin("p", { permissions: ["hooks", "mcp"], hooks: { PreToolUse: [{ x: 1 }] }, mcpServers: { s: {} } }),
+      );
+      expect(r.violations).toEqual([]);
+    });
+  });
+
+  describe("mergePluginConfig enforcement", () => {
+    it("merges hooks for a legacy plugin (no permissions field)", () => {
+      const plugins = new Map<string, Plugin>([["p", fakePlugin("p", { hooks: { PreToolUse: [{ a: 1 }] } })]]);
+      const warnings: string[] = [];
+      const merged = mergePluginConfig({}, plugins, (m) => warnings.push(m));
+      expect((merged.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+      expect(warnings).toHaveLength(0);
+    });
+
+    it("skips undeclared hooks and warns when the plugin opts into enforcement", () => {
+      const plugins = new Map<string, Plugin>([
+        ["p", fakePlugin("p", { permissions: ["network"], hooks: { PreToolUse: [{ a: 1 }] } })],
+      ]);
+      const warnings: string[] = [];
+      const merged = mergePluginConfig({}, plugins, (m) => warnings.push(m));
+      expect(merged.hooks).toBeUndefined();
+      expect(warnings.join("\n")).toMatch(/did not declare the "hooks" permission/);
+    });
+
+    it("merges declared hooks and skips undeclared mcp servers", () => {
+      const plugins = new Map<string, Plugin>([
+        ["p", fakePlugin("p", { permissions: ["hooks"], hooks: { PreToolUse: [{ a: 1 }] }, mcpServers: { srv: { command: "x" } } })],
+      ]);
+      const warnings: string[] = [];
+      const merged = mergePluginConfig({}, plugins, (m) => warnings.push(m));
+      expect((merged.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+      expect(merged.mcpServers).toBeUndefined();
+      expect(warnings.join("\n")).toMatch(/MCP servers.*"mcp" permission/);
+    });
+
+    it("drops an undeclared runtime default so it cannot be selected", () => {
+      const plugins = new Map<string, Plugin>([
+        ["p", fakePlugin("p", { permissions: [], runtime: { module: "r.mjs", name: "rt", default: true } })],
+      ]);
+      const warnings: string[] = [];
+      const merged = mergePluginConfig({}, plugins, (m) => warnings.push(m));
+      expect(merged.runtime).toBeUndefined();
+      expect(warnings.join("\n")).toMatch(/did not declare the "runtime" permission/);
+    });
+
+    it("keeps a declared runtime default", () => {
+      const plugins = new Map<string, Plugin>([
+        ["p", fakePlugin("p", { permissions: ["runtime"], runtime: { module: "r.mjs", name: "rt", default: true } })],
+      ]);
+      const merged = mergePluginConfig({}, plugins);
+      expect(merged.runtime).toBe("rt");
+    });
   });
 });

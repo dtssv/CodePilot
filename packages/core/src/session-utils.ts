@@ -15,7 +15,8 @@ import type {
   SessionSummary,
 } from "./types.js";
 import { loadConfig } from "./config.js";
-import { AnthropicProvider, OpenAIProvider, CopilotProvider } from "./providers/index.js";
+import { tryLoadRealTokenizer } from "./tokens.js";
+import { AnthropicProvider, OpenAIProvider, CopilotProvider, GeminiProvider } from "./providers/index.js";
 import { FallbackProvider } from "./providers/fallback.js";
 import type { ChatProvider } from "./providers/types.js";
 import { Session } from "./session.js";
@@ -131,6 +132,13 @@ export function buildSingleProvider(config: CodepilotConfig): ChatProvider {
       });
     case "copilot":
       return new CopilotProvider({
+        defaultModel: config.model,
+        smallModel: config.smallModel ?? config.model,
+      });
+    case "gemini":
+      return new GeminiProvider({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
         defaultModel: config.model,
         smallModel: config.smallModel ?? config.model,
       });
@@ -370,6 +378,13 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
   await mkdir(SESSIONS_DIR, { recursive: true });
   const config = { ...(await loadConfig(opts.cwd)), ...(opts.config ?? {}) };
   const id = opts.sessionId ?? generateSessionId();
+ // Opt-in provider-accurate tokenizer. Best-effort and process-wide: when
+ // `preciseTokens` is set and the optional `gpt-tokenizer` package is
+ // installed, all token budgeting switches to real BPE counts; otherwise
+ // the built-in heuristic stays active. Safe to call repeatedly.
+  if (config.preciseTokens) {
+    await tryLoadRealTokenizer().catch(() => false);
+  }
  // Model priority: explicit opts.model > a model remembered from session
  // history (this session on resume → newest session in the same cwd →
  // newest session anywhere) > config default. This keeps the model "sticky"

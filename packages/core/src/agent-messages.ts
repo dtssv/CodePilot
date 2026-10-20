@@ -360,6 +360,7 @@ export async function* streamOnce(
     signal: deps.signal,
     maxTokens: deps.config.maxTokens,
     reasoningEffort: deps.config.reasoningEffort,
+    thinkingBudget: deps.config.thinkingBudget,
     onRetry: extra.onRetry,
   });
 }

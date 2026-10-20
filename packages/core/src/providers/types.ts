@@ -49,12 +49,19 @@ export interface StreamChatOptions {
  /** Model reasoning effort. Providers that support it
  * (OpenAI o-series, DeepSeek) pass this through; others ignore it. */
   reasoningEffort?: "low" | "medium" | "high";
+ /** Extended-thinking token budget (Anthropic). When > 0 the Anthropic
+  * provider enables a `thinking` block with this budget and streams the
+  * model's reasoning as `thinking_delta` events. Other providers ignore it.
+  * Callers that only set `reasoningEffort` get a sensible budget derived
+  * from it (see `anthropic.ts`); setting this explicitly takes precedence. */
+  thinkingBudget?: number;
  /** Called before each transport-level retry (429 / 5xx / network). */
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
 }
 
 export type StreamEvent =
   | { kind: "text_delta"; messageId: string; text: string }
+  | { kind: "thinking_delta"; messageId: string; text: string }
   | {
       kind: "tool_input_delta";
       messageId: string;

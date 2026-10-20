@@ -126,7 +126,8 @@ function serializeEvent(e: Event): string {
         .map((b) => (b.type === "text" ? b.text : JSON.stringify(b)))
         .join("\n");
     case "message_delta":
-      return e.delta.type === "text" ? e.delta.text : e.delta.partialJson;
+      if (e.delta.type === "text" || e.delta.type === "reasoning") return e.delta.text;
+      return e.delta.partialJson;
     case "tool_call":
       return JSON.stringify(e.input ?? {});
     case "tool_result":

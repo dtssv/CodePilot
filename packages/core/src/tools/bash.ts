@@ -69,10 +69,13 @@ export const bashTool: ToolDef<typeof schema> = {
     "`&&` there). File tools (read_file, edit_file, …) do NOT follow that `cd`: they " +
     "resolve relative paths against the workspace root — pass workspace-relative " +
     "or absolute paths to them.\n\n" +
-    "Commands run inside the configured OS sandbox (write access is confined to " +
-    "the workspace). Dangerous commands (rm -rf, force-push, drop-table, " +
-    "curl|sh, …) require explicit user authorisation — when in doubt, describe " +
-    "what you would run instead of running it.",
+    "Commands run inside the configured OS sandbox. Writes are allowed in the " +
+    "workspace, the OS temp dir (`/tmp` and `os.tmpdir()`), and `~/.codepilot` " +
+    "(plus any `sandbox.writablePaths`). Prefer project-local `.tmp/` for " +
+    "artifacts you will `read_image` / edit later. Dangerous commands " +
+    "(rm -rf, force-push, drop-table, curl|sh, …) require explicit user " +
+    "authorisation — when in doubt, describe what you would run instead of " +
+    "running it.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -161,9 +164,17 @@ export const bashTool: ToolDef<typeof schema> = {
         `\n\n[... ${omitted.toLocaleString()} chars omitted; full output in artifact ${artifactRef} — use read_artifact with startLine/maxLines for any slice ...]\n\n` +
         content.slice(content.length - TAIL_CHARS);
     }
+    // Timeouts must surface as errors so the model changes approach (e.g.
+    // background + bash_output). Soft-cancel via SIGTERM without a timeout
+    // stays non-error so a user abort isn't mistaken for a failed command.
+    const isError =
+      timedOut ||
+      (code !== null && code !== 0) ||
+      signal === "SIGINT" ||
+      signal === "SIGKILL";
     return {
       content,
-      isError: code !== 0 && signal !== "SIGTERM",
+      isError,
       artifactRef,
     };
   },

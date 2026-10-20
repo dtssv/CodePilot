@@ -56,6 +56,29 @@ export interface ResolvedSandbox {
   writableRoots: string[];
 }
 
+/**
+ * OS temp locations shells and CLIs routinely use (`curl -o /tmp/…`, zsh
+ * heredoc scratch files, `mktemp`). `os.tmpdir()` alone is not enough on
+ * macOS: it is often under `/var/folders/…` while scripts still write `/tmp`
+ * (a symlink to `/private/tmp`). Coding agents generally allow these temps
+ * under workspace-write so banal commands don't fail with "operation not
+ * permitted".
+ */
+function defaultTempWritableRoots(): string[] {
+  const roots = new Set<string>();
+  roots.add(resolve(tmpdir()));
+  if (process.env.TMPDIR) roots.add(resolve(process.env.TMPDIR));
+  if (process.platform === "darwin" || process.platform === "linux") {
+    roots.add("/tmp");
+    roots.add("/private/tmp");
+  }
+  if (process.platform === "win32") {
+    if (process.env.TEMP) roots.add(resolve(process.env.TEMP));
+    if (process.env.TMP) roots.add(resolve(process.env.TMP));
+  }
+  return [...roots];
+}
+
 /** Resolve a (possibly partial) config into a complete policy for a cwd. */
 export function resolveSandbox(
   config: SandboxConfig | undefined,
@@ -64,7 +87,7 @@ export function resolveSandbox(
   const mode: SandboxMode = config?.mode ?? "workspace-write";
   const writableRoots = [
     resolve(cwd),
-    resolve(tmpdir()),
+    ...defaultTempWritableRoots(),
     resolve(homedir(), ".codepilot"),
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];

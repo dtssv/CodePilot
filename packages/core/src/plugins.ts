@@ -38,6 +38,33 @@ const execFileAsync = promisify(execFile);
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Capabilities a plugin may declare under `permissions`.
+ * - `hooks`    — register hooks (run shell/http/mcp/prompt/agent handlers)
+ * - `mcp`      — register MCP servers (spawn external processes / endpoints)
+ * - `runtime`  — replace the agent loop with plugin-provided Node code
+ * - `network`  — advisory: the plugin's skills/agents reach the network
+ * - `fileWrite`— advisory: the plugin's skills/agents write files
+ * - `bash`     — advisory: the plugin's skills/agents run shell commands
+ */
+export type PluginPermission =
+  | "hooks"
+  | "mcp"
+  | "runtime"
+  | "network"
+  | "fileWrite"
+  | "bash";
+
+/** All recognised plugin permissions. */
+export const PLUGIN_PERMISSIONS: readonly PluginPermission[] = [
+  "hooks",
+  "mcp",
+  "runtime",
+  "network",
+  "fileWrite",
+  "bash",
+];
+
 /** Plugin manifest (`plugin.json`). */
 export interface PluginManifest {
  /** Canonical plugin name (lowercase, hyphens). */
@@ -58,6 +85,20 @@ export interface PluginManifest {
   hooks?: Record<string, unknown[]>;
  /** MCP servers to register (merged into session mcpServers config). */
   mcpServers?: Record<string, unknown>;
+ /**
+  * Capabilities the plugin declares it needs. Enforcement is opt-in: when
+  * this field is PRESENT, the plugin may only contribute a capability-
+  * bearing resource it declared — undeclared `hooks` / `mcpServers` /
+  * `runtime` are refused at merge time (fail-closed) and a warning is
+  * surfaced. When ABSENT, the plugin keeps the legacy behaviour (no gating),
+  * so existing plugins are unaffected and declaration can roll out
+  * gradually.
+  *
+  * `hooks` / `mcp` / `runtime` gate the matching manifest resource.
+  * `network` / `fileWrite` / `bash` are advisory tags surfaced for consent
+  * (tool-level permissions still gate those at call time).
+  */
+  permissions?: PluginPermission[];
  /** Whether the plugin is enabled (default true). */
   enabled?: boolean;
  /**
@@ -180,6 +221,53 @@ async function scanPluginsDir(
 }
 
 // ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+
+/** Capability-bearing resources a plugin can contribute, and the permission
+ * each requires. These are the ones that run code or spawn processes. */
+const GATED_CAPABILITIES: ReadonlyArray<{ cap: PluginPermission; present: (m: PluginManifest) => boolean }> = [
+  { cap: "hooks", present: (m) => !!m.hooks && Object.keys(m.hooks).length > 0 },
+  { cap: "mcp", present: (m) => !!m.mcpServers && Object.keys(m.mcpServers).length > 0 },
+  { cap: "runtime", present: (m) => m.runtime !== undefined },
+];
+
+/** A plugin's declared vs. actually-used capabilities. */
+export interface PluginPermissionReport {
+  name: string;
+ /** Permissions the manifest declares (empty when the field is absent). */
+  declared: PluginPermission[];
+ /** True when the manifest opts into enforcement (has a `permissions` field). */
+  enforced: boolean;
+ /** Gated capabilities the plugin ships (hooks / mcp / runtime). */
+  used: PluginPermission[];
+ /** Gated capabilities used but NOT declared — refused when `enforced`. */
+  violations: PluginPermission[];
+}
+
+/**
+ * Report a plugin's declared permissions against the capabilities its
+ * manifest actually ships. Pure; use it to drive a consent UI (`/plugins`)
+ * or to explain why a resource was skipped. `violations` is always empty
+ * when the plugin didn't opt into enforcement (no `permissions` field).
+ */
+export function pluginPermissionReport(plugin: Plugin): PluginPermissionReport {
+  const m = plugin.manifest;
+  const enforced = Array.isArray(m.permissions);
+  const declared = enforced ? [...new Set(m.permissions!)] : [];
+  const used = GATED_CAPABILITIES.filter((g) => g.present(m)).map((g) => g.cap);
+  const violations = enforced ? used.filter((c) => !declared.includes(c)) : [];
+  return { name: m.name, declared, enforced, used, violations };
+}
+
+/** Whether a plugin may contribute the given gated capability. Only plugins
+ * that opt into enforcement are gated; others keep the legacy behaviour. */
+function allowsCapability(manifest: PluginManifest, cap: PluginPermission): boolean {
+  if (!Array.isArray(manifest.permissions)) return true; // legacy: no gating
+  return manifest.permissions.includes(cap);
+}
+
+// ---------------------------------------------------------------------------
 // Resource path aggregation
 // ---------------------------------------------------------------------------
 
@@ -206,40 +294,68 @@ export function pluginResourcePaths(
 /**
  * Merge plugin hooks and MCP server configs into a session config.
  * Returns a new config object; does not mutate the input.
+ *
+ * When a plugin opts into permission enforcement (its manifest has a
+ * `permissions` field), a capability-bearing resource it did not declare is
+ * refused (fail-closed) and reported via `onWarn`. Plugins without a
+ * `permissions` field keep the legacy behaviour (no gating).
  */
 export function mergePluginConfig(
   config: Record<string, unknown>,
-  plugins: Map<string, Plugin>
+  plugins: Map<string, Plugin>,
+  onWarn: (message: string) => void = () => {},
 ): Record<string, unknown> {
   const merged = { ...config };
- // Merge hooks.
+  const deny = (name: string, cap: PluginPermission): void =>
+    onWarn(
+      `plugin "${name}" ships ${cap === "mcp" ? "MCP servers" : cap} but did not declare the "${cap}" permission — skipped. Add "${cap}" to the plugin's permissions to allow it.`,
+    );
+
+ // Merge hooks (gated by the "hooks" permission).
   const hooks = { ...(merged.hooks as Record<string, unknown[]> ?? {}) };
   let hooksChanged = false;
   for (const p of plugins.values()) {
-    if (p.manifest.hooks) {
-      for (const [event, entries] of Object.entries(p.manifest.hooks)) {
-        if (Array.isArray(entries)) {
-          hooks[event] = [...(hooks[event] ?? []), ...entries];
-          hooksChanged = true;
-        }
+    if (!p.manifest.hooks || Object.keys(p.manifest.hooks).length === 0) continue;
+    if (!allowsCapability(p.manifest, "hooks")) {
+      deny(p.manifest.name, "hooks");
+      continue;
+    }
+    for (const [event, entries] of Object.entries(p.manifest.hooks)) {
+      if (Array.isArray(entries)) {
+        hooks[event] = [...(hooks[event] ?? []), ...entries];
+        hooksChanged = true;
       }
     }
   }
   if (hooksChanged) merged.hooks = hooks;
- // Merge MCP servers.
+ // Merge MCP servers (gated by the "mcp" permission).
   const mcpServers = { ...(merged.mcpServers as Record<string, unknown> ?? {}) };
   let mcpChanged = false;
   for (const p of plugins.values()) {
-    if (p.manifest.mcpServers) {
-      for (const [name, cfg] of Object.entries(p.manifest.mcpServers)) {
-        mcpServers[name] = cfg;
-        mcpChanged = true;
-      }
+    if (!p.manifest.mcpServers || Object.keys(p.manifest.mcpServers).length === 0) continue;
+    if (!allowsCapability(p.manifest, "mcp")) {
+      deny(p.manifest.name, "mcp");
+      continue;
+    }
+    for (const [name, cfg] of Object.entries(p.manifest.mcpServers)) {
+      mcpServers[name] = cfg;
+      mcpChanged = true;
     }
   }
   if (mcpChanged) merged.mcpServers = mcpServers;
- // Runtime: a plugin may declare itself the session runtime (`default: true`).
-  const pluginDefault = pluginDefaultRuntime(plugins, merged.runtime as string | undefined);
+ // Runtime: a plugin may declare itself the session runtime (`default: true`),
+ // gated by the "runtime" permission. Drop runtime-bearing plugins that
+ // didn't declare it before resolving the default, so an undeclared runtime
+ // can neither become the default nor be referenced.
+  const runtimeAllowed = new Map<string, Plugin>();
+  for (const [key, p] of plugins) {
+    if (p.manifest.runtime !== undefined && !allowsCapability(p.manifest, "runtime")) {
+      deny(p.manifest.name, "runtime");
+      continue;
+    }
+    runtimeAllowed.set(key, p);
+  }
+  const pluginDefault = pluginDefaultRuntime(runtimeAllowed, merged.runtime as string | undefined);
   if (pluginDefault !== undefined) merged.runtime = pluginDefault;
   return merged;
 }
@@ -318,6 +434,16 @@ export async function loadPluginRuntimes(
   for (const p of plugins.values()) {
     const rt = p.manifest.runtime;
     if (!rt) continue;
+    if (!allowsCapability(p.manifest, "runtime")) {
+      // Opted into enforcement but didn't declare "runtime": do NOT import
+      // the module (importing is itself code execution). Record it so hosts
+      // can surface the refusal via /plugins.
+      errors.set(
+        p.manifest.name,
+        `runtime module not loaded: plugin did not declare the "runtime" permission`,
+      );
+      continue;
+    }
     const relModule = typeof rt === "string" ? rt : rt.module;
     const nameOverride = typeof rt === "object" ? rt.name : undefined;
     try {

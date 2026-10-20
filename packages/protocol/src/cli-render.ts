@@ -62,6 +62,8 @@ export class PrettyRenderer {
  /** The last line is a "running" placeholder that a result may replace. */
   private pendingLine: string | null = null;
   private atLineStart = true;
+ /** Message ids for which we've already printed the "thinking" header. */
+  private reasoningOpen = new Set<string>();
 
   constructor(private readonly out: { write(s: string): unknown }) {}
 
@@ -69,6 +71,7 @@ export class PrettyRenderer {
     switch (e.type) {
       case "message_delta":
         if (e.delta.type === "text") this.text(e.messageId, e.delta.text);
+        else if (e.delta.type === "reasoning") this.reasoning(e.messageId, e.delta.text);
         return;
       case "message":
         if (e.role === "assistant" && !this.textOpen.has(e.id)) {
@@ -78,6 +81,7 @@ export class PrettyRenderer {
         this.textOpen.delete(e.id);
         this.textBuf.delete(e.id);
         this.textShown.delete(e.id);
+        this.reasoningOpen.delete(e.id);
         return;
       case "tool_call": {
         if (e.name === "plan_update") return;
@@ -133,6 +137,21 @@ export class PrettyRenderer {
       default:
         return;
     }
+  }
+
+ /** Stream extended-thinking dimmed, under a one-time "thinking" header, so
+  * it reads as a muted preamble distinct from the answer. */
+  private reasoning(id: string, chunk: string): void {
+    if (!chunk) return;
+    if (!this.reasoningOpen.has(id)) {
+      this.reasoningOpen.add(id);
+      this.breakLine();
+      this.out.write(`\n${this.tint("faint", "· thinking")}\n`);
+      this.atLineStart = true;
+    }
+    this.out.write(this.tint("faint", chunk));
+    this.pendingLine = null;
+    this.atLineStart = chunk.endsWith("\n");
   }
 
   private text(id: string, chunk: string): void {

@@ -1,35 +1,99 @@
 // Token estimation + per-model context windows.
 //
-// Why a hand-rolled estimator?
-// ----------------------------
-// We do not want a hard dependency on tiktoken (a 1MB+ native-or-WASM blob).
-// For the workloads we care about — driving compaction decisions and the
-// "is this session getting long?" threshold — a small, deterministic
-// heuristic is more than enough, and it stays correct enough across CJK /
-// English / code / JSON inputs without us needing to ship per-language
-// tokeniser tables.
+// Tokenizer strategy
+// ------------------
+// `estimateTokens` is the single primitive every budget decision routes
+// through. It delegates to a swappable *active tokenizer*:
 //
-// The estimator below is a character-class scan. Each input character is
-// classified into one of a handful of buckets:
+// - By default this is `heuristicTokens`, a zero-dependency character-class
+//   scan (below). It needs no model-specific tables and stays within a sane
+//   error band across CJK / English / code / JSON — good enough for
+//   compaction thresholds without shipping a 1MB+ BPE blob.
+// - Hosts that want provider-accurate counts call `tryLoadRealTokenizer()`,
+//   which dynamically imports the optional pure-JS `gpt-tokenizer` package
+//   (o200k_base — GPT-4o / 4.1 / 5) *if it is installed* and installs it as
+//   the active tokenizer. Core does NOT declare that dependency, so the
+//   default build stays single-dependency; the loader is a no-op (keeps the
+//   heuristic) when the package is absent.
+// - `setTokenizer` / `resetTokenizer` let embedders plug in any counter
+//   (e.g. a provider's own tokenizer) or restore the default.
 //
-// - CJK / wide characters: 1 token per character
-// - letters in latin / cyrillic / greek blocks: counted as words via a
-// 0.75-tokens-per-word heuristic
-// - digits grouped with letters or underscores (identifiers): treated as
-// part of the surrounding word
-// - JSON / code punctuation (curly, square, angle, equals, arrow, dot
-// sequences, backticks): one token per 2–3 characters
-// - whitespace: contributes 0 tokens on its own
-//
-// The output is rounded up to an integer. It is intentionally monotonic in
-// the input (longer text → equal-or-more tokens) and is *not* meant to
-// match a specific provider's BPE table.
+// The heuristic is intentionally monotonic (longer text → equal-or-more
+// tokens) and rounds up so a one-character string claims at least 1 token.
 
 /** A single estimator. Pure, total, no allocation beyond locals. */
 export type TokenEstimator = (text: string) => number;
 
-/** Estimate tokens for a single text string. */
+/** The active tokenizer. Swappable via setTokenizer; defaults to heuristic. */
+let activeTokenizer: TokenEstimator = heuristicTokens;
+
+/** Install a custom tokenizer for all subsequent estimation. */
+export function setTokenizer(fn: TokenEstimator): void {
+  activeTokenizer = fn;
+}
+
+/** Restore the built-in zero-dependency heuristic tokenizer. */
+export function resetTokenizer(): void {
+  activeTokenizer = heuristicTokens;
+}
+
+/** The tokenizer currently in effect. */
+export function getActiveTokenizer(): TokenEstimator {
+  return activeTokenizer;
+}
+
+/** True once a real (non-heuristic) tokenizer has been installed. */
+export function hasRealTokenizer(): boolean {
+  return activeTokenizer !== heuristicTokens;
+}
+
+/**
+ * Best-effort: install a provider-accurate tokenizer if the optional
+ * `gpt-tokenizer` package is available. Returns true when a real tokenizer
+ * is now active, false when it stayed on the heuristic (package missing or
+ * failed to load). Safe to call more than once and safe to call when the
+ * package was never installed — it never throws.
+ */
+export async function tryLoadRealTokenizer(): Promise<boolean> {
+  if (hasRealTokenizer()) return true;
+  try {
+    // o200k_base covers GPT-4o / 4.1 / 5 and is a close proxy for Claude /
+    // other modern models — far better than the heuristic for all of them.
+    // The specifier is built indirectly so the optional, undeclared package
+    // does not become a compile-time dependency (tsc won't try to resolve it).
+    const spec = "gpt-tokenizer";
+    const importer = new Function("s", "return import(s)") as (s: string) => Promise<unknown>;
+    const mod = (await importer(spec)) as {
+      encode?: (text: string) => number[];
+      default?: { encode?: (text: string) => number[] };
+    };
+    const encode = mod.encode ?? mod.default?.encode;
+    if (typeof encode !== "function") return false;
+    setTokenizer((text) => (text ? encode(text).length : 0));
+    return true;
+  } catch {
+    return false; // package not installed — keep the heuristic
+  }
+}
+
+/** Estimate tokens for a single text string (via the active tokenizer). */
 export function estimateTokens(text: string): number {
+  return activeTokenizer(text);
+}
+
+/**
+ * Zero-dependency heuristic tokenizer — a character-class scan:
+ *
+ * - CJK / wide characters: 1 token per character
+ * - latin / cyrillic / greek letter runs ("words"): ~0.75 tokens per word
+ * - digits grouped with letters/underscores (identifiers): part of the word
+ * - code / JSON punctuation: ~1 token per 3 characters
+ * - whitespace: 0 tokens on its own
+ *
+ * Not meant to match a specific provider's BPE table; see the module header
+ * for the accurate opt-in path.
+ */
+export function heuristicTokens(text: string): number {
   if (!text) return 0;
  // Fast path: a whitespace-only string contributes 0 tokens. Skipping
  // the loop here also avoids the `Math.max(1, ...)` floor for
@@ -206,6 +270,9 @@ const MODEL_COSTS: Array<{ match: (id: string) => boolean; cost: ModelCost }> = 
   { match: (id) => id.includes("gpt-4o"), cost: { input: 2.5, output: 10 } },
   { match: (id) => id.includes("deepseek"), cost: { input: 0.27, output: 1.1 } },
   { match: (id) => id.includes("qwen"), cost: { input: 0.3, output: 1.2 } },
+  { match: (id) => id.includes("gemini-2.5-pro") || id.includes("gemini-1.5-pro"), cost: { input: 1.25, output: 10 } },
+  { match: (id) => id.includes("gemini-2.5-flash") || id.includes("gemini-2.0-flash") || id.includes("gemini-1.5-flash"), cost: { input: 0.3, output: 2.5 } },
+  { match: (id) => id.includes("gemini"), cost: { input: 0.3, output: 2.5 } },
 ];
 
 /**
@@ -349,6 +416,20 @@ const MODEL_CONTEXT_WINDOWS: ModelEntry[] = [
   {
     match: (id) => id.startsWith("copilot-") || id.startsWith("copilot/"),
     window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 4096 },
+  },
+ // Google Gemini.
+  {
+    match: (id) => id.includes("gemini-2.5-pro") || id.includes("gemini-1.5-pro"),
+    window: { contextWindow: 2_000_000, compactionThreshold: 1_600_000, maxOutputTokens: 8192 },
+  },
+  {
+    match: (id) =>
+      id.includes("gemini-2.5-flash") || id.includes("gemini-2.0-flash") || id.includes("gemini-1.5-flash"),
+    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 8192 },
+  },
+  {
+    match: (id) => id.includes("gemini"),
+    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 8192 },
   },
 ];
 

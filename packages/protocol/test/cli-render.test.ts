@@ -44,6 +44,15 @@ describe("PrettyRenderer", () => {
     r.render({ type: "retry", attempt: 1, maxAttempts: 3, delayMs: 1500, reason: "ECONNRESET" });
     expect(text()).toBe("↻ Retrying (1/3) in 1.5s · ECONNRESET\n");
   });
+
+  it("streams reasoning under a one-time header, then the answer on its own line", () => {
+    const { r, text } = capture();
+    r.render({ type: "message_delta", messageId: "m", delta: { type: "reasoning", text: "Let me " } });
+    r.render({ type: "message_delta", messageId: "m", delta: { type: "reasoning", text: "think." } });
+    r.render({ type: "message_delta", messageId: "m", delta: { type: "text", text: "Answer" } });
+    r.render({ type: "message", id: "m", role: "assistant", content: [{ type: "text", text: "Answer" }] });
+    expect(text()).toBe("\n· thinking\nLet me think.\n\n◆ Answer");
+  });
 });
 
 describe("prettyOutput", () => {

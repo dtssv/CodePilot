@@ -35,6 +35,7 @@ function AssistantTurnBlock({ parts }: { parts: TurnPart[] }): React.ReactElemen
             case "message":
               return (
                 <Box key={p.msg.id} flexDirection="column">
+                  {p.msg.reasoning ? <ReasoningBlock text={p.msg.reasoning} /> : null}
                   <Markdown dimColor={false}>{p.msg.text}</Markdown>
                 </Box>
               );
@@ -51,6 +52,22 @@ function AssistantTurnBlock({ parts }: { parts: TurnPart[] }): React.ReactElemen
           }
         })}
       </Box>
+    </Box>
+  );
+}
+
+/** Extended-thinking shown dimmed above the answer. Kept compact: the
+ * terminal has no collapse affordance, so we label it and let the model's
+ * reasoning read as a muted preamble rather than competing with the answer. */
+function ReasoningBlock({ text }: { text: string }): React.ReactElement {
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color={color.faint}>
+        {glyph.dot} thinking
+      </Text>
+      <Text color={color.faint} dimColor>
+        {text.trim()}
+      </Text>
     </Box>
   );
 }

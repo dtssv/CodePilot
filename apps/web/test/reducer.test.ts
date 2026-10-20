@@ -76,6 +76,40 @@ describe("streaming messages", () => {
     expect(state.rows).toHaveLength(0);
   });
 
+  it("accumulates reasoning deltas into the message row and keeps text separate", () => {
+    let state = drive([
+      { type: "message_delta", messageId: "m1", delta: { type: "reasoning", text: "Let me " } },
+      { type: "message_delta", messageId: "m1", delta: { type: "reasoning", text: "think." } },
+      { type: "message_delta", messageId: "m1", delta: { type: "text", text: "Answer" } },
+    ]);
+    expect(messages(state)).toHaveLength(1);
+    expect(messages(state)[0]?.msg).toMatchObject({
+      reasoning: "Let me think.",
+      text: "Answer",
+      streaming: true,
+    });
+
+    // Reasoning survives the terminal message event (which only carries the answer).
+    state = reducer(state, {
+      type: "event",
+      event: { type: "message", id: "m1", role: "assistant", content: [{ type: "text", text: "Answer" }] },
+    });
+    expect(messages(state)[0]?.msg).toMatchObject({
+      reasoning: "Let me think.",
+      text: "Answer",
+      streaming: false,
+    });
+  });
+
+  it("starts a message row from a reasoning delta when thinking precedes any text", () => {
+    const state = drive([
+      { type: "message_delta", messageId: "m1", delta: { type: "reasoning", text: "Hmm" } },
+    ]);
+    expect(messages(state)).toHaveLength(1);
+    expect(messages(state)[0]?.msg).toMatchObject({ reasoning: "Hmm", text: "", streaming: true });
+    expect(state.status).toBe("thinking");
+  });
+
   it("keeps accumulated text when the final message carries none", () => {
  // A tool-only assistant turn has no text blocks; replacing with "" would
  // erase what the user already read.

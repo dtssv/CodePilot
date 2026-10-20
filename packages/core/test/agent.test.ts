@@ -76,6 +76,80 @@ function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   };
 }
 
+describe("runAgent maxTurns (Claude Code–style)", () => {
+  it("does not cap turns when maxTurns is unset (unlimited)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 8 tool turns then a final text reply — would fail under the old default of 50
+    // only if we somehow defaulted low; here we assert unset allows many loops.
+    provider.responses = [];
+    for (let i = 0; i < 8; i++) {
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "done", text: "finished" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    const r = await runAgent({ history: [], userText: "long task" }, deps);
+    expect(provider.calls.length).toBe(9);
+    expect(r.finalText).toBe("finished");
+    expect(r.events.some((e) => e.type === "error" && /maxTurns/i.test(e.message))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("emits a recoverable error when a configured maxTurns cap is hit mid-tools", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [
+      [
+        {
+          kind: "tool_call",
+          messageId: "m1",
+          toolCall: { type: "tool_use", id: "t1", name: "echo", input: { x: "1" } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        {
+          kind: "tool_call",
+          messageId: "m2",
+          toolCall: { type: "tool_use", id: "t2", name: "echo", input: { x: "2" } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        {
+          kind: "tool_call",
+          messageId: "m3",
+          toolCall: { type: "tool_use", id: "t3", name: "echo", input: { x: "3" } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const deps = { ...f.deps(), maxTurns: 2 };
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(provider.calls.length).toBe(2);
+    const err = r.events.find((e) => e.type === "error");
+    expect(err && err.type === "error" && err.recoverable).toBe(true);
+    expect(err && err.type === "error" && err.message).toMatch(/maxTurns \(2\)/);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("runAgent (mock provider)", () => {
   it("runs a single turn with no tool calls and returns the final text", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));

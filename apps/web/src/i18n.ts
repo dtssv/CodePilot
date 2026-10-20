@@ -133,6 +133,8 @@ const ZH: Record<string, string> = {
   Stop: "停止",
   "Enter to send · Shift+Enter for newline": "Enter 发送 · Shift+Enter 换行",
   Thinking: "思考中",
+  "Thinking…": "思考中…",
+  "Thought process": "思考过程",
   Thought: "思考过程",
   "Show thinking": "查看思考",
   "Hide thinking": "收起思考",

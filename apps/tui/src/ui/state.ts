@@ -30,6 +30,10 @@ export interface MessageRow {
   role: "user" | "assistant";
  /** Aggregated text so far. For assistant rows this grows as deltas arrive. */
   text: string;
+ /** Extended-thinking text, accumulated from `reasoning` message deltas
+  * (Anthropic extended thinking). Shown dimmed above the answer while the
+  * turn streams; empty when the model did not think out loud. */
+  reasoning?: string;
  /** Final content blocks if the full `message` event has arrived. */
   blocks?: ContentBlock[];
   model?: string;
@@ -348,7 +352,9 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           for (let i = rows.length - 1; i >= 0; i--) {
             const r = rows[i]!;
             if (r.kind === "assistant" && r.msg.streaming) {
-              rows[i] = { kind: "assistant", msg: newMsg };
+ // Carry over reasoning accumulated from deltas — the terminal
+ // `message` event only carries the visible answer.
+              rows[i] = { kind: "assistant", msg: { ...newMsg, reasoning: r.msg.reasoning ?? newMsg.reasoning } };
               replaced = true;
               break;
             }
@@ -388,9 +394,9 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
         }
         case "message_delta": {
           const d = ev.delta;
-          if (d.type === "text") {
+          if (d.type === "text" || d.type === "reasoning") {
  // Fold into the currently streaming assistant row, creating one
- // if needed.
+ // if needed. Text and reasoning share the same row.
             const rows = state.rows.slice();
             let target: MessageRow | undefined;
             for (let i = rows.length - 1; i >= 0; i--) {
@@ -410,7 +416,8 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
               rows.push({ kind: "assistant", msg: fresh });
               target = fresh;
             }
-            target.text += d.text;
+            if (d.type === "reasoning") target.reasoning = (target.reasoning ?? "") + d.text;
+            else target.text += d.text;
             return { ...state, rows, status: "thinking" };
           }
  // tool_input_json deltas update the running tool row's input summary.
