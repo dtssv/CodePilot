@@ -206,6 +206,15 @@ describe("Session", () => {
     const other = await listSessions("/tmp/other-workspace-that-does-not-match");
     expect(other.some((s) => s.id === id)).toBe(false);
   });
+
+  it("listSessions hides sessions with no messages yet", async () => {
+    const id = "list-empty-draft";
+    const path = join(getSessionsDir(), `${id}.jsonl`);
+    writeFileSync(path, "", "utf-8");
+    writeFileSync(join(getSessionsDir(), `${id}.cwd`), workDir, "utf-8");
+    const summaries = await listSessions(workDir);
+    expect(summaries.some((s) => s.id === id)).toBe(false);
+  });
 });
 
 

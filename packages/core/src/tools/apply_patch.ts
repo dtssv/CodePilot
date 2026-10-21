@@ -28,7 +28,7 @@ import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardPath } from "./_shared.js";
+import { guardDeliveryWrite, guardPath } from "./_shared.js";
 
 const schema = z.object({
   patch: z
@@ -52,6 +52,44 @@ interface FileOp {
 interface Hunk {
  /** Context + changes lines. Each entry: {type: 'ctx'|'del'|'add', text}. */
   lines: { type: "ctx" | "del" | "add"; text: string }[];
+}
+
+/** True when `line` starts the next file op (or ends the patch). */
+function isPatchSectionEnd(line: string | undefined): boolean {
+  if (line === undefined) return true;
+  return (
+    line === "*** End File" ||
+    line === "*** End Patch" ||
+    line.startsWith("*** Add File: ") ||
+    line.startsWith("*** Update File: ") ||
+    line.startsWith("*** Delete File: ")
+  );
+}
+
+/**
+ * Consume an optional `*** End File` marker. Models often omit it and jump
+ * straight to the next file header or `*** End Patch` — accept both.
+ */
+function consumeOptionalEndFile(rawLines: string[], i: number, end: number): number {
+  if (i < rawLines.length && rawLines[i] === "*** End File") return i + 1;
+  // Omitted End File is fine when we're at End Patch or the next file op.
+  if (i === end || (i < end && isPatchSectionEnd(rawLines[i]))) return i;
+  return i;
+}
+
+/** Paths touched by an apply_patch body (headers only — no full parse). */
+export function pathsFromApplyPatch(patch: string): string[] {
+  const paths: string[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    for (const prefix of ["*** Add File: ", "*** Update File: ", "*** Delete File: "]) {
+      if (line.startsWith(prefix)) {
+        const p = line.slice(prefix.length).trim();
+        if (p) paths.push(p);
+        break;
+      }
+    }
+  }
+  return paths;
 }
 
 /** Parse the apply_patch format into a list of file operations. */
@@ -78,14 +116,11 @@ export function parsePatch(patch: string): FileOp[] {
       const path = line.slice("*** Add File: ".length);
       i++;
       const content: string[] = [];
-      while (i < end && rawLines[i] !== "*** End File") {
+      while (i < end && !isPatchSectionEnd(rawLines[i])) {
         content.push(rawLines[i]!);
         i++;
       }
-      if (rawLines[i] !== "*** End File") {
-        throw new Error(`Add File ${path}: missing \`*** End File\``);
-      }
-      i++; // consume End File
+      i = consumeOptionalEndFile(rawLines, i, end);
       ops.push({ kind: "add", path, content: content.join("\n") });
     } else if (line.startsWith("*** Delete File: ")) {
       ops.push({ kind: "delete", path: line.slice("*** Delete File: ".length) });
@@ -95,7 +130,7 @@ export function parsePatch(patch: string): FileOp[] {
       i++;
       const hunks: Hunk[] = [];
       let current: Hunk | null = null;
-      while (i < end && rawLines[i] !== "*** End File") {
+      while (i < end && !isPatchSectionEnd(rawLines[i])) {
         const h = rawLines[i]!;
         if (h.startsWith("@@")) {
  // Start a new hunk. The text after @@ is context (informational).
@@ -124,11 +159,11 @@ export function parsePatch(patch: string): FileOp[] {
         }
         i++;
       }
-      if (rawLines[i] !== "*** End File") {
-        throw new Error(`Update File ${path}: missing \`*** End File\``);
-      }
-      i++; // consume End File
+      i = consumeOptionalEndFile(rawLines, i, end);
       ops.push({ kind: "update", path, hunks });
+    } else if (line === "*** End File") {
+      // Stray End File between ops — ignore.
+      i++;
     } else {
       throw new Error(`unexpected line in patch: ${line}`);
     }
@@ -216,6 +251,7 @@ export const applyPatchTool: ToolDef<typeof schema> = {
     "*** Delete File: path\n" +
     "*** Update File: path — @@ hunks with ` `/`-`/`+` lines — *** End File\n" +
     "*** End Patch\n" +
+    "`*** End File` may be omitted when the next file header or `*** End Patch` follows. " +
     "Must have read updated files earlier; copy context/`-` lines without line-number prefixes.",
   inputSchema: schema,
   permission: "write",
@@ -234,6 +270,8 @@ export const applyPatchTool: ToolDef<typeof schema> = {
     for (const op of ops) {
       const guard = await guardPath(ctx, op.path, op.kind === "delete" ? "write" : "write");
       if (guard) return guard;
+      const delivery = await guardDeliveryWrite(ctx, op.path);
+      if (delivery) return delivery;
     }
 
  // 2. Read all files that will be updated (so we can roll back cleanly).

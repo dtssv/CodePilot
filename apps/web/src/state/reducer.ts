@@ -353,6 +353,10 @@ function applyEvent(state: AppState, e: Event): AppState {
     }
 
     case "tool_call": {
+      // Silent bookkeeping — keep out of the transcript.
+      if (e.name === "memory_write") {
+        return { ...state, status: "thinking" };
+      }
       return {
         ...state,
         status: "thinking",
@@ -377,6 +381,9 @@ function applyEvent(state: AppState, e: Event): AppState {
     }
 
     case "tool_result": {
+      if (e.name === "memory_write") {
+        return state;
+      }
       const rows = [...state.rows];
       const idx = rows.findIndex(
         (r) => r.kind === "tool" && r.tool.id === e.toolCallId,
@@ -463,8 +470,17 @@ function applyEvent(state: AppState, e: Event): AppState {
         ],
       };
 
-    case "activity":
-      return { ...state, activity: { phase: e.phase, since: e.since, tools: e.tools } };
+    case "activity": {
+      const tools = e.tools?.filter((n) => n !== "memory_write");
+      return {
+        ...state,
+        activity: {
+          phase: e.phase,
+          since: e.since,
+          tools: tools && tools.length > 0 ? tools : undefined,
+        },
+      };
+    }
 
     case "followup":
       return { ...state, followUps: e.items };

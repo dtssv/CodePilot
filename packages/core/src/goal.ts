@@ -57,7 +57,7 @@ export const goalPromptBody = `You are running in a long-horizon goal loop. Each
 1. Read the current plan (the system prompt's <plan> block) to see where you left off.
 2. Identify the next step whose status is \`pending\` or whose status is \`in_progress\` from a prior round. Mark it \`in_progress\` via \`plan_update\`.
 3. Execute that step using the available tools. Read files, make edits, run commands, call sub-agents — whatever the step needs.
-4. Verify the step's deliverable (run a test, a build, a lint). Do not mark a step \`completed\` until verification passes.
+4. Verify the step's deliverable (run a test, a build, a lint, or the acceptance check the OBJECTIVE implies). Do not mark a step \`completed\` until verification passes. Do not emit \`completed\` for the whole OBJECTIVE until a verify step has succeeded.
 5. Update the plan: mark the just-finished step \`completed\`, advance the cursor.
 6. Decide whether the OBJECTIVE is fully satisfied:
    - If YES, end your turn with EXACTLY this line and nothing else after it:
@@ -69,7 +69,7 @@ export const goalPromptBody = `You are running in a long-horizon goal loop. Each
 
 Additional rules:
 - Keep plans lean (3-8 steps). If a plan grows past that, collapse completed clusters.
-- Persist anything you had to discover and that future sessions would benefit from to memory via \`memory_write\`.
+- Persist anything you had to discover and that future sessions would benefit from via \`memory_write\` (silent — do not narrate it).
 - Do not commit, push, or perform other destructive operations unless the user explicitly asked.
 - Prefer \`task\` for parallel exploration; do not serialise independent reads.
 - If a step has been \`in_progress\` for more than two rounds without progress, mark it \`blocked\` and stop.

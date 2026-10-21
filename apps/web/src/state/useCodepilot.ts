@@ -57,6 +57,7 @@ export interface Codepilot {
     delivery?: "auto" | "queue" | "steer",
   ): Promise<void>;
   removeFollowUp(id: string): Promise<void>;
+  sendFollowUpNow(id: string): Promise<void>;
  /** Fresh session in `mode`, then send — the agent app's "new task". */
   startTask(text: string, mode?: AgentMode, images?: ImageAttachment[], files?: PromptFile[]): Promise<void>;
  /** Resend the last user prompt (after an error). */
@@ -407,9 +408,7 @@ export function useCodepilot(): Codepilot {
       dispatch({ type: "sending" });
       try {
         const res = await client.send(sessionId, text, images, files, delivery);
-        if (res?.delivery === "queued") {
-          dispatch({ type: "notice", text: "Queued — will run after the current task" });
-        } else if (res?.delivery === "steered") {
+        if (res?.delivery === "steered") {
           dispatch({ type: "notice", text: "Injected into the current run" });
         }
       } catch (err) {
@@ -440,6 +439,15 @@ export function useCodepilot(): Codepilot {
       const id = live.current.sessionId;
       if (!id) return;
       await client.removeFollowUp(id, followUpId).catch(() => {});
+    },
+    [client],
+  );
+
+  const sendFollowUpNow = useCallback(
+    async (followUpId: string) => {
+      const id = live.current.sessionId;
+      if (!id) return;
+      await client.sendFollowUpNow(id, followUpId).catch(() => {});
     },
     [client],
   );
@@ -569,6 +577,7 @@ export function useCodepilot(): Codepilot {
     refreshSessions,
     send,
     removeFollowUp,
+    sendFollowUpNow,
     startTask,
     retryLast,
     cancel,

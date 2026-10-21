@@ -194,6 +194,17 @@ export interface PromptFollowupRemoveParams {
   id: string;
 }
 
+export interface PromptFollowupUpdateParams {
+  sessionId: string;
+  id: string;
+  text: string;
+}
+
+export interface PromptFollowupSendNowParams {
+  sessionId: string;
+  id: string;
+}
+
 export interface PromptCancelParams {
   sessionId: string;
 }
@@ -356,6 +367,14 @@ export function registerServer(
   peer.onRequest<PromptFollowupRemoveParams, Record<string, never>>(
     "prompt/followup/remove",
     (p) => handlePromptFollowupRemove(ctx, p),
+  );
+  peer.onRequest<PromptFollowupUpdateParams, Record<string, never>>(
+    "prompt/followup/update",
+    (p) => handlePromptFollowupUpdate(ctx, p),
+  );
+  peer.onRequest<PromptFollowupSendNowParams, Record<string, never>>(
+    "prompt/followup/sendNow",
+    (p) => handlePromptFollowupSendNow(ctx, p),
   );
   peer.onRequest<PromptCancelParams, Record<string, never>>(
     "prompt/cancel",
@@ -1399,6 +1418,42 @@ async function handlePromptFollowupRemove(
     );
   }
   session.removeFollowUp(params.id);
+  return {};
+}
+
+async function handlePromptFollowupUpdate(
+  ctx: ServerContext,
+  params: PromptFollowupUpdateParams,
+): Promise<Record<string, never>> {
+  assertInitialized(ctx);
+  const session = ctx.sessions.get(params.sessionId);
+  if (!session) {
+    throw new RpcError(
+      ErrorCode.SessionNotFound,
+      `session not found: ${params.sessionId}`,
+    );
+  }
+  if (typeof session.updateFollowUp === "function") {
+    session.updateFollowUp(params.id, params.text);
+  }
+  return {};
+}
+
+async function handlePromptFollowupSendNow(
+  ctx: ServerContext,
+  params: PromptFollowupSendNowParams,
+): Promise<Record<string, never>> {
+  assertInitialized(ctx);
+  const session = ctx.sessions.get(params.sessionId);
+  if (!session) {
+    throw new RpcError(
+      ErrorCode.SessionNotFound,
+      `session not found: ${params.sessionId}`,
+    );
+  }
+  if (typeof session.sendFollowUpNow === "function") {
+    session.sendFollowUpNow(params.id);
+  }
   return {};
 }
 

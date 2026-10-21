@@ -59,8 +59,20 @@ export interface ToolContext {
  * Absent in minimal contexts; tools must treat it as optional.
  */
   emitEvent?: (e: import("../types.js").Event) => void | Promise<void>;
- /** Id of the tool call being executed (lets `task` tag sub-agent events). */
+  /** Id of the tool call being executed (lets `task` tag sub-agent events). */
   toolCallId?: string;
+  /**
+   * Directories where intentional project deliverables should land for this
+   * task (defaults to cwd; extended from path tokens in user prompts).
+   * Distinct from sandbox writable roots.
+   */
+  deliveryRoots?: string[];
+  /** Session scratch dir — exempt from delivery-root write guard. */
+  scratchDir?: string;
+  /** Project state root (~/.codepilot/projects/<hash>/) — also exempt. */
+  projectStateDir?: string;
+  /** Add a delivery root mid-turn after the user approves an out-of-root write. */
+  addDeliveryRoot?: (dir: string) => void | Promise<void>;
 }
 
 export interface ToolResult {

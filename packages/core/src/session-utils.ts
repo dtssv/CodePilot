@@ -477,10 +477,13 @@ export async function listSessions(
  /* skip */
     }
   }
- // Filter by cwd when given (strict — unknown cwd sessions are excluded).
-  const filtered = cwd
+  // Filter by cwd when given (strict — unknown cwd sessions are excluded).
+  let filtered = cwd
     ? summaries.filter((s) => sameCwd(s.cwd, cwd))
     : summaries;
+  // Drafts: session/new creates a live session before any prompt. Keep it
+  // out of the sidebar until the user actually sends a message.
+  filtered = filtered.filter((s) => s.messageCount > 0);
   filtered.sort((a, b) => b.updatedAt - a.updatedAt);
   return filtered;
 }

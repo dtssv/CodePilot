@@ -44,7 +44,7 @@ describe("buildSystemPrompt static prefix", () => {
 
   it("requires understanding the ask before executing", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Understand before you execute/);
+    expect(out.staticPrefix).toMatch(/Understand before you mutate/);
   });
 
   it("contains every section heading", async () => {
@@ -226,7 +226,7 @@ describe("buildSystemPrompt dynamic suffix", () => {
       memory: { project: "P", user: "U" },
     });
     expect(out.dynamicSuffix).toContain("<memory>");
-    expect(out.dynamicSuffix).toContain("### Project (CODEPILOT.md)");
+    expect(out.dynamicSuffix).toContain("### Project (~/.codepilot/projects/");
     expect(out.dynamicSuffix).toContain("P");
     expect(out.dynamicSuffix).toContain("### User (~/.codepilot/MEMORY.md)");
     expect(out.dynamicSuffix).toContain("U");

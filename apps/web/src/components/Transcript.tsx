@@ -1041,6 +1041,28 @@ function formatInput(input: unknown): string {
   if (typeof input === "string") return input;
   if (typeof input === "object" && input !== null) {
     const o = input as Record<string, unknown>;
+    // apply_patch: prefer file list (+ optional patch body) over opaque JSON.
+    if (Array.isArray(o.files) && o.files.every((f) => typeof f === "string")) {
+      const files = o.files as string[];
+      const head = files.length ? `Files:\n${files.map((f) => `  ${f}`).join("\n")}` : "Files: (none)";
+      if (typeof o.patch === "string" && o.patch.length > 0) {
+        const max = 4000;
+        const body = o.patch.length > max ? `${o.patch.slice(0, max)}\n…` : o.patch;
+        return `${head}\n\n${body}`;
+      }
+      return head;
+    }
+    // Background-job tools: prefer the resolved command over bare job_id JSON.
+    if (typeof o.command === "string" && typeof o.job_id === "string") {
+      const parts = [o.command];
+      const meta = [`job ${o.job_id}`];
+      if (typeof o.status === "string") meta.push(o.status);
+      parts.push(`(${meta.join(", ")})`);
+      if (typeof o.input === "string" && o.input.length > 0) {
+        parts.push(`stdin:\n${o.input}`);
+      }
+      return parts.join("\n\n");
+    }
     if (typeof o.command === "string") return o.command;
   }
   try {

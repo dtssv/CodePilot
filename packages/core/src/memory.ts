@@ -1,6 +1,12 @@
-// Memory: read & write CODEPILOT.md (project) and ~/.codepilot/MEMORY.md (user).
+// Memory: read & write project + user durable notes.
 //
-// CODEPILOT.md / MEMORY.md are structured documents with four sections:
+// Project agent memory lives under `~/.codepilot/projects/<hash>/MEMORY.md`
+// (same project-state root as artifacts/scratch) so runs do not pollute the
+// git working tree. Optional shareable `CODEPILOT.md` / `AGENTS.md` in the
+// workspace are still *read* hierarchically for human-authored context.
+// User memory is `~/.codepilot/MEMORY.md`.
+//
+// MEMORY.md files are structured documents with four sections:
 //
 // ## Project context - what is this project, its goal
 // ## Rules - user-stated hard constraints
@@ -17,11 +23,20 @@ import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { MemorySink } from "./tools/memory_write.js";
+import { projectStatePath } from "./projectState.js";
 
+/** Legacy / shareable name still *read* from the workspace tree. */
 export const PROJECT_MEMORY_NAME = "CODEPILOT.md";
 /** Also recognised as project memory (AGENTS.md). */
 export const AGENTS_MEMORY_NAME = "AGENTS.md";
+/** Agent-written project memory filename under the project-state root. */
+export const PROJECT_STATE_MEMORY_NAME = "MEMORY.md";
 export const USER_MEMORY_PATH = join(homedir(), ".codepilot", "MEMORY.md");
+
+/** Where `memory_write(scope=project)` persists — not the workspace. */
+export function projectMemoryPath(cwd: string): string {
+  return projectStatePath(cwd, PROJECT_STATE_MEMORY_NAME);
+}
 
 /** Canonical sections for CODEPILOT.md / MEMORY.md. */
 export const MEMORY_SECTIONS = [
@@ -50,11 +65,12 @@ export interface ParsedMemory {
   raw: string;
 }
 
-/** Read project + user memory files. Missing files yield undefined. */
+/** Read project + user memory files. Missing files yield undefined.
+ * Project scope is the per-project state file (not `<cwd>/CODEPILOT.md`). */
 export async function readMemory(cwd: string): Promise<MemoryContents> {
   const out: MemoryContents = {};
   try {
-    out.project = await readFile(join(cwd, PROJECT_MEMORY_NAME), "utf-8");
+    out.project = await readFile(projectMemoryPath(cwd), "utf-8");
   } catch {
  /* missing */
   }
@@ -208,7 +224,8 @@ export function classifySection(title: string, content: string): MemorySection {
   return "Project context";
 }
 
-/** File-backed sink. Honours the `section` argument. */
+/** File-backed sink. Honours the `section` argument.
+ * Project entries go to `~/.codepilot/projects/<hash>/MEMORY.md`. */
 export class FileMemorySink implements MemorySink {
   constructor(private readonly cwd: string) {}
 
@@ -219,9 +236,7 @@ export class FileMemorySink implements MemorySink {
     section?: string
   ): Promise<string> {
     const path =
-      scope === "project"
-        ? join(this.cwd, PROJECT_MEMORY_NAME)
-        : USER_MEMORY_PATH;
+      scope === "project" ? projectMemoryPath(this.cwd) : USER_MEMORY_PATH;
     let existing = "";
     try {
       existing = await readFile(path, "utf-8");

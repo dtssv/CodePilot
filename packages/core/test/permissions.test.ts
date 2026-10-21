@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { PermissionEngine, matchRule } from "../src/permissions.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import type { ToolDef } from "../src/tools/types.js";
-import { readFileTool, bashTool, writeFileTool } from "../src/tools/index.js";
+import { readFileTool, bashTool, writeFileTool, bashKillTool } from "../src/tools/index.js";
+import { resolveSandbox } from "../src/sandbox.js";
 
 function makeTool(name: string, perm: "read" | "write" | "execute" | "network"): ToolDef {
   return {
@@ -128,5 +132,32 @@ describe("PermissionEngine with real built-in tools", () => {
       reason: "read-only tool",
     });
     expect(e.preflight(r.get("write_file")!, { path: "x" })).toBe("ask");
+  });
+
+  it("enrichForDisplay attaches the background job command for bash_kill", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "perm-job-"));
+    try {
+      const start = await bashTool.execute(
+        { command: "sleep 30", run_in_background: true },
+        {
+          cwd: dir,
+          artifact: async () => "a",
+          readArtifact: async () => "",
+          sandbox: resolveSandbox({ mode: "off" }, dir),
+        },
+      );
+      const id = start.content.match(/job_[a-f0-9]{8}/)?.[0];
+      expect(id).toBeTruthy();
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      const req = e.buildRequest("r1", bashKillTool, { job_id: id });
+      expect(JSON.stringify(req.input)).toContain("job_id");
+      expect(JSON.stringify(req.input)).not.toContain("sleep 30");
+      await e.enrichForDisplay(req, dir);
+      expect((req.input as { command?: string }).command).toContain("sleep 30");
+      expect(req.reason).toContain("sleep 30");
+      expect(req.reason).toContain(id!);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -31,8 +31,22 @@ export const planUpdateTool: ToolDef<typeof schema> = {
       title: s.title,
       status: s.status,
     }));
+    let content = `plan updated: ${steps.length} step(s)`;
+ // Soft, generic nudge: multi-step plans without a verify-ish step often
+ // end as "wrote files, claimed done". Reminder only — never refuse.
+    const VERIFY_HINT =
+      /verif|test|build|lint|check|e2e|regress|ci|typecheck|screenshot|visual|accept/i;
+    if (
+      steps.length >= 3 &&
+      !steps.some((s) => VERIFY_HINT.test(s.title))
+    ) {
+      content +=
+        `\n\n[reminder] Multi-step plans should include a verification step ` +
+        `(test/build/lint/check against acceptance criteria) before marking ` +
+        `the task done. Add one via plan_update when you next revise.`;
+    }
     return {
-      content: `plan updated: ${steps.length} step(s)`,
+      content,
       blocks: [
         { type: "text", text: JSON.stringify({ type: "plan", steps }) },
       ],

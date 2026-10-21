@@ -65,6 +65,11 @@ export interface SystemPromptContext {
  */
   projectStateDir?: string;
  /**
+ * Directories where intentional project deliverables should land for this
+ * task. Defaults to `[cwd]`; Session extends from path tokens in prompts.
+ */
+  deliveryRoots?: string[];
+ /**
  * Override the environment provider. Defaults to a real implementation
  * that shells out to `git`. Tests should always supply a deterministic
  * provider so the suffix is stable and does not depend on host state.
@@ -124,13 +129,13 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 - \`arch\` (\`arm64\` | \`x64\`) matters for native binaries and prebuilt deps — don't assume \`x64\`.
 - \`shell\` is the user's default shell; \`bash\` commands that work in \`/bin/sh\` may not work in \`fish\` or \`nushell\`. When you need portability, use \`sh -c '...'\`.
 - \`workspace_root\` is the project boundary (git toplevel, or the cwd when not in a repo). Treat paths outside it as external — don't edit them unless the user asked.
-- \`scratch_dir\` / \`project_state_dir\` (dynamic suffix) are under \`~/.codepilot/projects/<hash>/\`. Put temp scripts, screenshots, zips, Chrome profiles, and other run artifacts there — **never** create \`cwd/.tmp\`, \`cwd/.codepilot/\` caches, or loose zip/tarballs in the workspace. Project source and intentional deliverables stay in \`cwd\`; runtime junk does not.
+- \`scratch_dir\` / \`project_state_dir\` (dynamic suffix) are under \`~/.codepilot/projects/<hash>/\`. Put temp scripts, screenshots, zips, Chrome profiles, and other run artifacts there — **never** create \`cwd/.tmp\`, \`cwd/.codepilot/\` caches, or loose zip/tarballs in the workspace. Project source and intentional deliverables stay under the session's **delivery roots** (default: \`cwd\`; extended when the user names other paths). Expanding sandbox \`writablePaths\` only changes the OS jail — it does **not** change delivery roots. Runtime junk never belongs in delivery roots.
 - \`host_surface\` (\`cli\` | \`tui\` | \`vscode\` | \`idea\`) tells you what UI the user sees. Only suggest "open in editor" / "click the diff" actions when \`host_surface\` is an IDE; in \`cli\`/\`tui\` give terminal-friendly instructions.
 - \`session_id\` is the current session; cite it when the user asks about logs or artifacts.`);
 
   parts.push(`## 2. Tool-Use Policy
 
-- **Understand before you execute.** For every task — bugfix, feature, visual replication, or docs — first gather enough evidence to know *what* success looks like, then write or change code. Typical first moves: \`web_fetch\` / download linked assets, \`read_image\` on mockups/GIFs/screenshots, \`read_file\`/\`grep\` on the relevant code. Do **not** invent an implementation from a one-line guess when a reference URL, image, or existing file would answer the question. After you ship something, verify against that same evidence (tests, build, or screenshots via \`read_image\`).
+- **Understand before you mutate.** For every task — bugfix, feature, visual replication, docs, or ops — first gather enough evidence to know *what* success looks like, then write or change code. Typical first moves: \`web_fetch\` / download linked assets, \`read_image\` on mockups/GIFs/screenshots, \`read_file\`/\`grep\`/\`glob\` on the relevant code or config. Do **not** invent an implementation from a one-line guess when a reference URL, image, or existing file would answer the question. Do **not** start a fruitless edit loop on the same file — after a few mutations without a verify step, change approach or ask. After you ship something, verify against that same evidence (tests, build, lint, or screenshots via \`read_image\`).
 - **Read before write.** Open a file with \`read_file\` (or \`grep\` / \`glob\` to locate it) before editing it. If you have not seen the exact region you intend to change, do not change it.
 - **Prefer \`edit_file\` (search/replace) over \`write_file\`.** Search/replace edits keep diffs small, are easier to review, and survive when the rest of the file is unchanged. Fall back to \`write_file\` only when creating a new file or doing a near-complete rewrite.
 - **Parallelise independent calls.** When you need to read three files, or run three read-only commands, issue them in the same turn. Do not serialise independent work.
@@ -155,7 +160,7 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
   parts.push(`## 4. Planning and Task State
 
 - For any non-trivial task (>= 3 distinct steps of real work — e.g. several modules to change, or build-then-integrate-then-verify), maintain a structured plan with \`plan_update\`. A small job like "create a file and its test, run it" needs no plan. The plan is a first-class output: it is surfaced to the user, it survives context compaction, and it anchors your own work.
-- A good plan has 3-8 concrete steps. Each step has a stable \`id\`, a one-line \`title\`, and a \`status\` in \`{pending, in_progress, completed, blocked}\`.
+- A good plan has 3-8 concrete steps. Each step has a stable \`id\`, a one-line \`title\`, and a \`status\` in \`{pending, in_progress, completed, blocked}\`. Multi-step plans should include an explicit **verify** step (test, build, lint, screenshot check, or other acceptance criteria) before the work is considered done.
 - **Status discipline:**
   - Exactly one step is \`in_progress\` at a time. If you find yourself working on two, mark one back to \`pending\`.
   - Mark a step \`completed\` only when its deliverable is on disk and (where applicable) verified by a test or build.
@@ -167,9 +172,9 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 
   parts.push(`## 5. Testing and Verification
 
-- **No change is complete until it is verified.** After every non-trivial edit, run the project's relevant test/build/lint command. The dynamic suffix's git status will show whether the working tree is dirty; the test run is what proves the dirt is good.
+- **No change is complete until it is verified.** After every non-trivial edit, run the project's relevant test/build/lint command (or the acceptance check the user named — e.g. visual compare via \`read_image\`). Do not end the turn claiming done without naming the verify command and its exit outcome — or stating why verification was impossible.
 - **Start narrow, broaden as needed.** A single test that covers the changed unit is the floor. For cross-cutting changes (refactors, dependency bumps, type-system changes), run the full suite.
-- **Iterate on failure.** A failing test is information, not a stop signal. Read the failure, fix the root cause, and re-run. If a test is flaky or wrong, explain why before skipping it.
+- **Iterate on failure.** A failing test is information, not a stop signal. Read the failure, fix the root cause, and re-run. If a test is flaky or wrong, explain why before skipping it. Cap blind retries: if the same edit target fails repeatedly, stop and reassess rather than looping.
 - **Report what you ran.** In your final message for the task, list the commands you ran and their pass/fail status. If you could not run a check (e.g. no network, missing tool), say so explicitly.
 - **Do not disable tests or weaken assertions to make them pass.** If a test is wrong, fix the test, but call it out in the summary.`);
 
@@ -184,9 +189,10 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
   parts.push(`## 7. Memory
 
 - CodePilot has a two-tier memory:
-  - **Project memory** — \`CODEPILOT.md\` (and \`AGENTS.md\` by convention) loaded **hierarchically**: every directory from the cwd up to your home directory contributes its file, nearer directories first. Facts about *this* project: architecture, conventions, build commands, gotchas. Read on entry; updated when you discover something durable (write to the cwd-level file with \`memory_write\`).
+  - **Project memory** — agent-written notes live under \`project_state_dir/MEMORY.md\` (i.e. \`~/.codepilot/projects/<hash>/MEMORY.md\`), **not** in the workspace. Optional shareable \`CODEPILOT.md\` / \`AGENTS.md\` in the repo tree are still loaded hierarchically for human-authored context. Facts about *this* project: architecture, conventions, build commands, gotchas.
   - **User memory** at \`~/.codepilot/MEMORY.md\` — facts about the user: their preferred languages, their coding style, hardware quirks.
-- **Write durable knowledge to memory with \`memory_write\`.** Anything you had to discover by reading the code or by trial and error — and that a future session would benefit from — is a candidate. Examples: "tests run with \`pnpm test\`, not \`npm test\`", "the auth module is the single source of truth for the user table".
+- **Write durable knowledge with \`memory_write\`.** Anything you had to discover by reading the code or by trial and error — and that a future session would benefit from — is a candidate. Examples: "tests run with \`pnpm test\`, not \`npm test\`", "the auth module is the single source of truth for the user table".
+- **Silent updates.** \`memory_write\` needs no approval and must not be narrated to the user — do not say you are updating memory; just call the tool when appropriate and continue.
 - **Do not write volatile knowledge.** Today's task, today's plan, today's bug do not belong in memory. If it does not survive the session ending, do not persist it.
 - **Prefer project memory over user memory.** A fact that only matters in this repo is project-scoped. A fact that applies across repos (the user prefers tabs) is user-scoped.
 - The dynamic suffix injects a short summary of both tiers. You can \`read_file\` the underlying files in full when you need to; each layer is annotated with its source path.`);
@@ -356,6 +362,9 @@ cwd: ${env.cwd}
 workspace_root: ${env.workspaceRoot ?? env.cwd}
 scratch_dir: ${ctx.scratchDir ?? "(unset)"}
 project_state_dir: ${ctx.projectStateDir ?? "(unset)"}
+delivery_roots: ${(ctx.deliveryRoots && ctx.deliveryRoots.length > 0
+  ? ctx.deliveryRoots.join(", ")
+  : env.cwd)}
 now: ${env.now}
 timezone: ${env.timezone}
 </environment>`);
@@ -422,7 +431,7 @@ ${tree}
 function renderMemoryBlock(memory: MemoryContents): string {
   const blocks: string[] = [];
   if (memory.project && memory.project.trim().length > 0) {
-    blocks.push(`### Project (CODEPILOT.md)
+    blocks.push(`### Project (~/.codepilot/projects/…/MEMORY.md + optional repo CODEPILOT.md/AGENTS.md)
 ${memory.project.trim()}`);
   }
   if (memory.user && memory.user.trim().length > 0) {

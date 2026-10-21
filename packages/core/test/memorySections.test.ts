@@ -132,6 +132,7 @@ describe("FileMemorySink with sections", () => {
     expect(text).toContain("## Rules");
     expect(text).toContain("no commit without lint");
     expect(text).toContain("## Project context"); // still rendered for completeness
+    rmSync(target, { force: true });
   });
 
   it("classifies when no section given", async () => {
@@ -140,17 +141,23 @@ describe("FileMemorySink with sections", () => {
     const target = await sink.write("project", "X", "we chose bun over node");
     const text = readFileSync(target, "utf-8");
     expect(text).toContain("## Architecture decisions");
+    rmSync(target, { force: true });
   });
 
   it("appends multiple entries under the same section", async () => {
     const d = make();
     const sink = new FileMemorySink(d);
-    await sink.write("project", "First", "rule one", "Rules");
+    const file = await sink.write("project", "First", "rule one", "Rules");
     await sink.write("project", "Second", "rule two", "Rules");
-    const file = join(d, "CODEPILOT.md");
+    expect(file.includes(".codepilot/projects/")).toBe(true);
     const out = readFileSync(file, "utf-8");
     const rulesSection = out.split("## Rules")[1]?.split("## Architecture decisions")[0] ?? "";
     expect(rulesSection).toContain("rule one");
     expect(rulesSection).toContain("rule two");
+    try {
+      rmSync(file, { force: true });
+    } catch {
+ /* ignore */
+    }
   });
 });

@@ -87,6 +87,17 @@ export interface AgentDeps {
     dir: string,
     opts: { persist: boolean },
   ) => Promise<void> | void;
+  /**
+   * Task delivery roots (where intentional project deliverables should land).
+   * Defaults to `[cwd]`; Session extends from path tokens in user prompts.
+   * Live array — mid-turn `addDeliveryRoot` mutates it in place.
+   */
+  deliveryRoots?: string[];
+  /** Session scratch / project-state paths (exempt from delivery-root guard). */
+  scratchDir?: string;
+  projectStateDir?: string;
+  /** Add a delivery root after the user approves an out-of-root write. */
+  addDeliveryRoot?: (dir: string) => void | Promise<void>;
  /** Lifecycle hook engine (PreToolUse / PostToolUse). Optional. */
   hooks?: HookEngine;
  /** Structured user-question channel for ask_user_question / plan_done. */

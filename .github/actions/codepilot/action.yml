@@ -61,8 +61,6 @@ runs:
       # Needed for the in-repo source build. pnpm/action-setup is
       # idempotent and cheap, so we always set it up for simplicity.
       uses: pnpm/action-setup@v4
-      with:
-        version: 9
 
     - name: Setup Node.js
       uses: actions/setup-node@v4

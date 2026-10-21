@@ -162,6 +162,22 @@ class FakeSession {
     this.followUps = this.followUps.filter((x) => x.id !== id);
     return this.followUps.length < before;
   }
+  updateFollowUp(id: string, text: string) {
+    const item = this.followUps.find((x) => x.id === id);
+    if (!item) return false;
+    item.text = text;
+    return true;
+  }
+  sendFollowUpNow(id: string) {
+    const idx = this.followUps.findIndex((x) => x.id === id);
+    if (idx < 0) return false;
+    if (idx > 0) {
+      const [item] = this.followUps.splice(idx, 1);
+      this.followUps.unshift(item!);
+    }
+    this.busy = false;
+    return true;
+  }
   listFollowUps() {
     return [...this.followUps];
   }

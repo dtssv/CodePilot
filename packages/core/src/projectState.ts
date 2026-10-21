@@ -1,8 +1,9 @@
 // Per-project runtime state under `~/.codepilot/projects/<hash>/`.
 //
 // Aligns with Claude Code / Codex: the workspace only holds shareable
-// config (`.codepilot/config.json`, agents, skills, commands) and
-// `CODEPILOT.md`. Session transcripts stay in `~/.codepilot/sessions/`;
+// config (`.codepilot/config.json`, agents, skills, commands) and optional
+// human-authored `CODEPILOT.md` / `AGENTS.md`. Agent-written project memory
+// is `MEMORY.md` here. Session transcripts stay in `~/.codepilot/sessions/`;
 // caches, checkpoints, uploads, jobs, plans, and agent scratch live here
 // so agent runs do not pollute the git working tree.
 //

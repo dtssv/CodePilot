@@ -63,6 +63,10 @@ export interface ComposerProps {
   footer?: React.ReactNode;
   followUps?: FollowUpItem[];
   onRemoveFollowUp?(id: string): void;
+  /** Pull a queued item back into the composer for editing. */
+  onEditFollowUp?(id: string): void;
+  /** Stop the current run and start this queued item next. */
+  onSendFollowUpNow?(id: string): void;
 }
 
 /** Prompt box. Enter sends, Shift+Enter is a newline, Esc stops a run.
@@ -84,6 +88,8 @@ export function Composer({
   footer,
   followUps = [],
   onRemoveFollowUp,
+  onEditFollowUp,
+  onSendFollowUpNow,
 }: ComposerProps): React.ReactElement {
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -142,6 +148,58 @@ export function Composer({
   };
 
   return (
+    <div className="flex w-full flex-col gap-2">
+      {followUps.length > 0 && (
+        <div
+          className="flex flex-col gap-1.5 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)]/80 px-2.5 py-2"
+          aria-label={t("Queued messages")}
+        >
+          <div className="px-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-ink-faint)]">
+            {t("Queued")} · {followUps.length}
+          </div>
+          {followUps.map((fu, i) => (
+            <div
+              key={fu.id}
+              className="group flex items-start gap-1.5 rounded-lg border border-[var(--color-edge)] bg-[var(--color-surface-raised)] px-2 py-1.5"
+            >
+              <span className="mt-0.5 shrink-0 rounded bg-[var(--color-surface-sunken)] px-1.5 text-[10px] tabular-nums text-[var(--color-ink-faint)]">
+                {i + 1}
+              </span>
+              <button
+                type="button"
+                onClick={() => onEditFollowUp?.(fu.id)}
+                title={t("Edit queued message")}
+                className="min-w-0 flex-1 text-left text-[12px] leading-5 text-[var(--color-ink)] hover:text-[var(--color-accent)]"
+              >
+                <span className="line-clamp-3 whitespace-pre-wrap break-words">{fu.text}</span>
+              </button>
+              <div className="flex shrink-0 items-center gap-0.5 opacity-70 group-hover:opacity-100">
+                {onSendFollowUpNow && (
+                  <button
+                    type="button"
+                    onClick={() => onSendFollowUpNow(fu.id)}
+                    title={t("Send now (stop current run)")}
+                    aria-label={t("Send now")}
+                    className="rounded-md px-1.5 py-1 text-[11px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-ink)]"
+                  >
+                    {t("Send now")}
+                  </button>
+                )}
+                {onRemoveFollowUp && (
+                  <button
+                    type="button"
+                    aria-label={t("Remove from queue")}
+                    onClick={() => onRemoveFollowUp(fu.id)}
+                    className="rounded-md p-1 hover:bg-[var(--color-edge)]"
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     <div
       onDragOver={(e) => {
         if (disabled || !e.dataTransfer.types.includes("Files")) return;
@@ -232,29 +290,6 @@ export function Composer({
           size === "lg" ? "min-h-20 pt-4 pb-2 text-[14.5px] leading-6" : "min-h-11 pt-3 pb-1 text-[13px] leading-6"
         }`}
       />
-      {followUps.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-3 pb-1">
-          {followUps.map((fu) => (
-            <span
-              key={fu.id}
-              className="inline-flex max-w-full items-center gap-1 rounded-full border border-[var(--color-edge)] bg-[var(--color-surface-sunken)] px-2 py-0.5 text-[11px] text-[var(--color-ink-dim)]"
-              title={fu.text}
-            >
-              <span className="truncate">{fu.text.slice(0, 48)}{fu.text.length > 48 ? "…" : ""}</span>
-              {onRemoveFollowUp && (
-                <button
-                  type="button"
-                  aria-label={t("Remove from queue")}
-                  onClick={() => onRemoveFollowUp(fu.id)}
-                  className="rounded-full p-0.5 hover:bg-[var(--color-edge)]"
-                >
-                  <XIcon className="h-2.5 w-2.5" />
-                </button>
-              )}
-            </span>
-          ))}
-        </div>
-      )}
       <div className="flex items-center gap-2 px-2.5 pb-2.5">
         <input
           ref={fileRef}
@@ -329,6 +364,7 @@ export function Composer({
           </button>
         )}
       </div>
+    </div>
     </div>
   );
 }

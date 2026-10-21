@@ -210,6 +210,13 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
     onMode: (m: typeof state.agentMode) => void cp.setMode(m),
     followUps: state.followUps,
     onRemoveFollowUp: (id: string) => void cp.removeFollowUp(id),
+    onEditFollowUp: (id: string) => {
+      const fu = state.followUps?.find((x) => x.id === id);
+      if (!fu) return;
+      void cp.removeFollowUp(id);
+      setDraft(fu.text);
+    },
+    onSendFollowUpNow: (id: string) => void cp.sendFollowUpNow(id),
     footer: (
       <span className="flex flex-wrap items-center gap-2">
         <ModelPicker cp={cp} />

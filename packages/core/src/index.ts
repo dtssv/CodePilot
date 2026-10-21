@@ -148,7 +148,9 @@ export {
   FileMemorySink,
   summariseMemory,
   memoryFileExists,
+  projectMemoryPath,
   PROJECT_MEMORY_NAME,
+  PROJECT_STATE_MEMORY_NAME,
   AGENTS_MEMORY_NAME,
   USER_MEMORY_PATH,
 } from "./memory.js";
@@ -157,6 +159,16 @@ export type { MemoryContents } from "./memory.js";
 // ---- System prompt ----
 export { buildSystemPrompt } from "./systemPrompt.js";
 export type { SystemPromptContext, SystemPromptResult } from "./systemPrompt.js";
+
+// ---- Delivery roots (task deliverable targets; ≠ sandbox writable) ----
+export {
+  extractDeliveryRootsFromText,
+  formatDeliveryRoots,
+  isUnderDeliveryRoots,
+  mergeDeliveryRoots,
+  normalizeRoot,
+  rootFromPathToken,
+} from "./deliveryRoots.js";
 
 // ---- Compaction ----
 export {

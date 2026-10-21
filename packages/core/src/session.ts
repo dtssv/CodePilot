@@ -52,6 +52,12 @@ import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
 import { AuditLogger } from "./audit.js";
 import { writePlanFile, setPlanFileStatus } from "./plans.js";
 import { PersistentShell } from "./persistentShell.js";
+import {
+  extractDeliveryRootsFromText,
+  formatDeliveryRoots,
+  mergeDeliveryRoots,
+  normalizeRoot,
+} from "./deliveryRoots.js";
 import type { McpManager } from "./mcp.js";
 import { startMcp as startMcpImpl, resolveSessionMcpReferences } from "./session-mcp.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
@@ -214,8 +220,15 @@ export class Session {
  /** The host surface this session is running in: "cli" | "tui" | "vscode" | "idea".
  * Set by the host (TUI/IDE) so the prompt can tailor advice. Defaults to "cli". */
   private hostSurface: "cli" | "tui" | "vscode" | "idea" = "cli";
- /** The persistent shell shared across foreground bash calls. Lazily started. */
+  /** The persistent shell shared across foreground bash calls. Lazily started. */
   private persistentShell: PersistentShell | null = null;
+  /**
+   * Where intentional project deliverables should land for this task.
+   * Starts as `[cwd]`; extended from path tokens in user prompts and from
+   * mid-turn approval when a write falls outside. Distinct from sandbox
+   * writable roots.
+   */
+  private deliveryRoots: string[] = [];
  /** The permission mode active before the user entered plan mode, so we can
  * restore it on approval. */
   private prePlanMode: AgentMode | null = null;
@@ -243,6 +256,7 @@ export class Session {
   ) {
     this.id = id;
     this.cwd = opts.cwd;
+    this.deliveryRoots = [normalizeRoot(opts.cwd)];
     this.config = opts.config ?? {};
     const resolved =
       (opts.model && opts.model.length > 0 ? opts.model : undefined) ??
@@ -437,6 +451,16 @@ export class Session {
  // server-side context (e.g. `@mcp:github/repos/foo/bar`).
     effectivePrompt = await resolveSessionMcpReferences(this.mcp, effectivePrompt);
 
+ // Extend delivery roots from path-like tokens in the user prompt
+ // (absolute, ~/…, drive, or relative with a slash). Generic — any task.
+    const mentionedRoots = extractDeliveryRootsFromText(effectivePrompt, this.cwd);
+    if (mentionedRoots.length > 0) {
+      const merged = mergeDeliveryRoots(this.deliveryRoots, mentionedRoots);
+      this.deliveryRoots.length = 0;
+      this.deliveryRoots.push(...merged);
+      await this.rebuildSystemPrompt().catch(() => undefined);
+    }
+
     const mentioned = await resolveImageMentions(effectivePrompt, this.cwd);
     if (mentioned.failures.length > 0) {
       const ev: Event = {
@@ -504,6 +528,10 @@ export class Session {
         sandbox: this.sandbox,
         expandSandboxWritable: (dir, opts) =>
           this.expandWritablePath(dir, opts).then(() => undefined),
+        deliveryRoots: this.deliveryRoots,
+        scratchDir: scratchDir(this.cwd, this.id),
+        projectStateDir: projectStatePath(this.cwd),
+        addDeliveryRoot: (dir) => this.addDeliveryRoot(dir),
         hooks: this.hooks,
         // Live handle — expandWritablePath may close+replace the shell
         // mid-turn; do not capture the instance by value.
@@ -606,7 +634,7 @@ export class Session {
  // Post-prompt compaction.
       await this.maybeCompact();
 
- // Memory written during the run (memory_write, edits to CODEPILOT.md)
+ // Memory written during the run (memory_write → project-state MEMORY.md)
  // and the latest plan must reach the next prompt's system context.
       await this.rebuildSystemPrompt().catch(() => undefined);
 
@@ -1084,6 +1112,31 @@ export class Session {
     return true;
   }
 
+  /** Replace the text of a queued follow-up. Returns true if it was present. */
+  updateFollowUp(id: string, text: string): boolean {
+    const item = this.followUpQueue.find((x) => x.id === id);
+    if (!item) return false;
+    item.text = text;
+    this.emitFollowUp("updated");
+    return true;
+  }
+
+  /**
+   * Move a queued follow-up to the front and cancel the current run so it
+   * starts as soon as the abort unwinds (Cursor-style "send now").
+   */
+  sendFollowUpNow(id: string): boolean {
+    const idx = this.followUpQueue.findIndex((x) => x.id === id);
+    if (idx < 0) return false;
+    if (idx > 0) {
+      const [item] = this.followUpQueue.splice(idx, 1);
+      this.followUpQueue.unshift(item!);
+      this.emitFollowUp("updated");
+    }
+    this.cancel();
+    return true;
+  }
+
   /** Drop every queued follow-up. */
   clearFollowUps(): void {
     if (this.followUpQueue.length === 0) return;
@@ -1091,7 +1144,9 @@ export class Session {
     this.emitFollowUp("cleared");
   }
 
-  private emitFollowUp(action: "queued" | "removed" | "cleared" | "started"): void {
+  private emitFollowUp(
+    action: "queued" | "removed" | "cleared" | "started" | "updated",
+  ): void {
     const ev: Event = {
       type: "followup",
       action,
@@ -1177,6 +1232,20 @@ export class Session {
  * Restarts the persistent shell when an OS sandbox is active so bash
  * picks up the new roots.
  */
+  /** Add a directory as a task delivery root (session-scoped).
+   * Mutates the live array in place so mid-turn ToolContext stays current. */
+  addDeliveryRoot(dir: string): void {
+    const merged = mergeDeliveryRoots(this.deliveryRoots, [dir]);
+    this.deliveryRoots.length = 0;
+    this.deliveryRoots.push(...merged);
+    void this.rebuildSystemPrompt().catch(() => undefined);
+  }
+
+  /** Current delivery roots (copy). */
+  getDeliveryRoots(): string[] {
+    return [...this.deliveryRoots];
+  }
+
   async expandWritablePath(
     dir: string,
     opts: { persist?: boolean } = {},
@@ -1338,6 +1407,7 @@ export class Session {
       onPermissionRequest: this.onPermissionRequest,
     });
     await forked.init();
+    forked.deliveryRoots = [...this.deliveryRoots];
     const slice = atEventIndex === undefined
       ? this.events
       : this.events.slice(0, atEventIndex);
@@ -1445,6 +1515,10 @@ export class Session {
       getSandbox: () => this.sandbox,
       expandSandboxWritable: (dir, opts) =>
         this.expandWritablePath(dir, opts).then(() => undefined),
+      getDeliveryRoots: () => this.deliveryRoots,
+      addDeliveryRoot: (dir) => this.addDeliveryRoot(dir),
+      scratchDir: () => scratchDir(this.cwd, this.id),
+      projectStateDir: () => projectStatePath(this.cwd),
       buildToolRegistry: (agentType) => {
         const r = new ToolRegistry();
         r.register(readFileTool);
@@ -1534,10 +1608,14 @@ export class Session {
 
   private async rebuildSystemPrompt(): Promise<void> {
     const memory = summariseMemory(await readMemory(this.cwd));
- // Hierarchical project memory: CODEPILOT.md / AGENTS.md from cwd upward,
- // with @import expansion.
+ // Hierarchical shareable docs (CODEPILOT.md / AGENTS.md in the tree) plus
+ // agent-written project-state MEMORY.md (already in memory.project).
     const layered = await readLayeredProjectMemory(this.cwd);
-    if (layered) memory.project = layered;
+    if (layered) {
+      memory.project = memory.project
+        ? `${memory.project.trim()}\n\n---\n\n${layered}`
+        : layered;
+    }
  // Auto memory index. Loaded from
  // ~/.codepilot/memory/<project-hash>/MEMORY.md, capped at 200 lines / 25KB.
     const autoCfg: AutoMemoryConfig = { enabled: this.config.autoMemoryEnabled !== false };
@@ -1585,6 +1663,10 @@ export class Session {
         `ask before redoing it.\n` +
         `</interrupted_run>`;
     }
+    const deliveryNote =
+      `Delivery roots (intentional project deliverables — not the OS sandbox):\n` +
+      formatDeliveryRoots(this.deliveryRoots) +
+      `\nTemp/runtime files go in scratch_dir; expanding sandbox writablePaths does not change delivery roots.`;
     this.systemPromptCache = await buildSystemPrompt({
       cwd: this.cwd,
       sessionId: this.id,
@@ -1594,10 +1676,12 @@ export class Session {
       toolNames,
       scratchDir: scratchDir(this.cwd, this.id),
       projectStateDir: projectStatePath(this.cwd),
+      deliveryRoots: this.deliveryRoots,
       extra: (this.systemPromptExtra ?? "") +
         (customAgentsBlock ? `\n\n${customAgentsBlock}` : "") +
         resumeNote +
-        `\n\n${sandboxNote}`,
+        `\n\n${sandboxNote}` +
+        `\n\n${deliveryNote}`,
       model: this.model,
       provider: this.config.provider ?? "anthropic",
       mode: this.mode,

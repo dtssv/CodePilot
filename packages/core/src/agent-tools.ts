@@ -146,6 +146,7 @@ export async function runOneTool(
 
  // Doom-loop detection: refuse after repeated identical calls.
   let effectiveInput: unknown = tc.input;
+  let doomLoopPreWarn = "";
   if (doomLoop) {
     const dl = doomLoop.check(tc.name, tc.input);
     if (dl.refuse) {
@@ -155,6 +156,7 @@ export async function runOneTool(
         isError: true,
       };
     }
+    if (dl.warn && dl.message) doomLoopPreWarn = dl.message;
  // Idempotent-call de-duplication: if this exact (tool, input) already
  // succeeded earlier in the run, replay the cached result instead of
  // re-executing. This collapses the "rate-limit makes the model re-explore
@@ -206,6 +208,9 @@ export async function runOneTool(
       await emit({ type: "status", status: "waiting_permission" });
       const reqId = `perm_${randomUUID()}`;
       const req = deps.permissions.buildRequest(reqId, tool, effectiveInput);
+      // bash_kill / write_stdin only pass job_id — attach the real command
+      // so the approval UI is not opaque JSON.
+      await deps.permissions.enrichForDisplay(req, deps.cwd).catch(() => undefined);
       try {
         decision = await deps.onPermissionRequest(req);
       } catch (err) {
@@ -320,6 +325,10 @@ export async function runOneTool(
  // blocks to the assistant message.
     emitEvent: deps.onEvent ? (e) => deps.onEvent!(e) : undefined,
     toolCallId: tc.id,
+    deliveryRoots: deps.deliveryRoots,
+    scratchDir: deps.scratchDir,
+    projectStateDir: deps.projectStateDir,
+    addDeliveryRoot: deps.addDeliveryRoot,
   };
 
   try {
@@ -335,6 +344,8 @@ export async function runOneTool(
       const count = doomLoop.peekCount(tc.name, tc.input);
       if (count >= DoomLoopDetector.WARN_THRESHOLD) {
         content = `[doom_loop warning: you've called ${tc.name} with this exact input ${count} times. If previous calls didn't help, STOP and try a different approach.]\n\n${content}`;
+      } else if (doomLoopPreWarn) {
+        content = `[${doomLoopPreWarn}]\n\n${content}`;
       }
     }
  // PostToolUse hooks: stdout is appended as feedback for the model.

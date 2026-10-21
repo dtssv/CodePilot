@@ -4,7 +4,7 @@ import { z } from "zod";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardPath } from "./_shared.js";
+import { guardDeliveryWrite, guardPath } from "./_shared.js";
 
 const schema = z.object({
   path: z.string().describe("File path (absolute or relative to cwd)."),
@@ -27,6 +27,8 @@ export const writeFileTool: ToolDef<typeof schema> = {
   async execute(input, ctx) {
     const guard = await guardPath(ctx, input.path, "write");
     if (guard) return guard;
+    const delivery = await guardDeliveryWrite(ctx, input.path);
+    if (delivery) return delivery;
     const p = resolve(ctx.cwd, input.path);
     if (input.createDirs !== false) {
       await mkdir(dirname(p), { recursive: true });

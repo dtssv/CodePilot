@@ -14,7 +14,7 @@ import { z } from "zod";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardPath } from "./_shared.js";
+import { guardDeliveryWrite, guardPath } from "./_shared.js";
 
 const singleEdit = z.object({
   search: z.string().describe("Exact text to find."),
@@ -249,6 +249,8 @@ export const editFileTool: ToolDef<typeof schema> = {
   async execute(input, ctx) {
     const guard = await guardPath(ctx, input.path, "write");
     if (guard) return guard;
+    const delivery = await guardDeliveryWrite(ctx, input.path);
+    if (delivery) return delivery;
     const p = resolve(ctx.cwd, input.path);
     let original: string;
     try {

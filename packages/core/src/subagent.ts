@@ -34,7 +34,7 @@ You are a sub-agent invoked by a parent CodePilot agent via the \`task\` tool. Y
 - **Scope.** The parent has delegated one bounded objective to you (in the user message of this turn). Do exactly that objective, no more, no less.
 - **Do not address the user.** The user cannot see you. Never greet them, never ask them questions, never narrate progress. If essential information is missing, investigate with the tools available; if still blocked, return a blocker in your conclusion.
 - **No nested sub-agents.** Do not call the \`task\` tool. You are already a sub-agent.
-- **Default tool surface is read-only** (agent type \`explore\`). You have \`read_file\`, \`grep\`, \`glob\`, \`ls\`, \`read_artifact\` (and any others the parent explicitly listed). If you are a \`worker\` sub-agent, you additionally have \`write_file\` / \`edit_file\` / \`bash\` — use them to complete the delegated change, and verify it (run the relevant test/build) before reporting. \`plan_update\` and \`memory_write\` are never available. If the parent asks you to "fix" or "implement" something but you lack write tools, say so in your conclusion and stop.
+- **Default tool surface is read-only** (agent type \`explore\`). You have \`read_file\`, \`grep\`, \`glob\`, \`ls\`, \`read_artifact\` (and any others the parent explicitly listed). If you are a \`worker\` sub-agent, you additionally have \`write_file\` / \`edit_file\` / \`bash\` — complete the delegated change, then **verify before reporting**: run the relevant test/build/lint (or other acceptance check) and include the command + exit outcome in Findings. Do not report success on unverified writes. \`plan_update\` and \`memory_write\` are never available. If the parent asks you to "fix" or "implement" something but you lack write tools, say so in your conclusion and stop.
 - **Conclusion format.** End your work with a final assistant message that contains a structured conclusion. Use this exact format:
 
  ### Findings
@@ -69,6 +69,11 @@ export interface SubagentFactoryOptions {
  /** Live parent sandbox (so expand-dir grants apply to sub-agents too). */
   getSandbox?: () => import("./sandbox.js").ResolvedSandbox;
   expandSandboxWritable?: AgentDeps["expandSandboxWritable"];
+ /** Inherit parent's delivery roots / scratch so worker writes stay on-task. */
+  getDeliveryRoots?: () => string[];
+  addDeliveryRoot?: AgentDeps["addDeliveryRoot"];
+  scratchDir?: () => string | undefined;
+  projectStateDir?: () => string | undefined;
  /** Build the tool registry for the given agent type. */
   buildToolRegistry: (agentType?: "explore" | "worker") => ToolRegistry;
  /** Optional hook engine to fire SubagentStop events. */
@@ -253,6 +258,10 @@ export function createSubagentRunner(
           maxTurns: effectiveMaxSteps,
           sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
           expandSandboxWritable: opts.expandSandboxWritable,
+          deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
+          addDeliveryRoot: opts.addDeliveryRoot,
+          scratchDir: opts.scratchDir?.(),
+          projectStateDir: opts.projectStateDir?.(),
           subagentDepth: (depth ?? 0) + 1,
           onEvent: async (e) => {
             if (e.type !== "activity") events.push(e);

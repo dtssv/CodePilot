@@ -182,6 +182,41 @@ export const PATH_REFUSE_THRESHOLD = 5;
 export const SEQ_WINDOW = 6;
 export const SEQ_REPEAT = 4;
 
+/** Consecutive mutations on the same path cluster without a verify-like
+ * command. Generic fruitless-iteration brake — not task-specific. */
+export const MUTATION_BURST_WARN = 5;
+export const MUTATION_BURST_REFUSE = 8;
+
+const MUTATION_TOOLS = new Set(["write_file", "edit_file", "apply_patch"]);
+
+/** Shell commands that count as verification / progress (reset mutation burst). */
+export function isVerifyLikeCommand(command: string): boolean {
+  return /\b(test|spec|lint|build|vitest|pytest|jest|mocha|tsc|typecheck|e2e|playwright|cypress|check|cargo\s+test|go\s+test|mvn\s+|gradle|npm\s+test|pnpm\s+test|yarn\s+test|make\s+test)\b/i.test(
+    command,
+  );
+}
+
+/** Paths touched by a mutation tool call (for burst aggregation). */
+export function mutationPaths(toolName: string, input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const obj = input as Record<string, unknown>;
+  if (toolName === "write_file" || toolName === "edit_file") {
+    const p = obj.path;
+    return typeof p === "string" && p.trim() ? [normalizePathKey(p)] : [];
+  }
+  if (toolName === "apply_patch" && typeof obj.patch === "string") {
+    const paths: string[] = [];
+    const re = /^\*\*\* (?:Add|Update|Delete) File:\s*(.+)\s*$/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(obj.patch)) !== null) {
+      const p = m[1]!.trim();
+      if (p) paths.push(normalizePathKey(p));
+    }
+    return paths;
+  }
+  return [];
+}
+
 /**
  * Idempotent-call result cache. Extracted from DoomLoopDetector so it can
  * outlive a single run: a `read_file`/`grep`/`ls`/`glob` result cached in one
@@ -260,6 +295,10 @@ export class DoomLoopDetector {
  * ask whose questions are all in here is a redundant re-ask (info already
  * in hand) and is refused — regardless of how many times it happened. */
   private answeredQuestions = new Set<string>();
+ /** Consecutive mutations without an intervening verify-like command. */
+  private mutationBurst = 0;
+ /** Paths involved in the current mutation burst (normalized). */
+  private mutationPathCluster = new Set<string>();
  /** Result cache. Injected by the session so it survives across prompts;
  * defaults to a run-local cache when none is supplied (tests, subagents). */
   private readonly cache: DedupCache;
@@ -276,6 +315,8 @@ export class DoomLoopDetector {
   static readonly PATH_REFUSE_THRESHOLD = PATH_REFUSE_THRESHOLD;
   static readonly SEQ_WINDOW = SEQ_WINDOW;
   static readonly SEQ_REPEAT = SEQ_REPEAT;
+  static readonly MUTATION_BURST_WARN = MUTATION_BURST_WARN;
+  static readonly MUTATION_BURST_REFUSE = MUTATION_BURST_REFUSE;
 
  /** Record a tool call and return whether it should be warned/refused.
  *
@@ -315,6 +356,59 @@ export class DoomLoopDetector {
         };
       }
     }
+
+ // Verify-like bash / diagnostics resets the fruitless-mutation burst.
+    if (toolName === "diagnostics") {
+      this.mutationBurst = 0;
+      this.mutationPathCluster.clear();
+    } else if (toolName === "bash" && input && typeof input === "object") {
+      const cmd = (input as { command?: unknown }).command;
+      if (typeof cmd === "string" && isVerifyLikeCommand(cmd)) {
+        this.mutationBurst = 0;
+        this.mutationPathCluster.clear();
+      }
+    }
+
+ // Layer 4: consecutive mutations on the same path cluster without verify.
+    let mutationBurstHit: DoomLoopCheck | null = null;
+    if (MUTATION_TOOLS.has(toolName)) {
+      const paths = mutationPaths(toolName, input);
+      const overlaps =
+        paths.length === 0 ||
+        this.mutationPathCluster.size === 0 ||
+        paths.some((p) => this.mutationPathCluster.has(p));
+      if (overlaps) {
+        this.mutationBurst += 1;
+        for (const p of paths) this.mutationPathCluster.add(p);
+      } else {
+        this.mutationBurst = 1;
+        this.mutationPathCluster = new Set(paths);
+      }
+      if (this.mutationBurst >= MUTATION_BURST_REFUSE) {
+        mutationBurstHit = {
+          count: this.mutationBurst,
+          refuse: true,
+          warn: false,
+          message:
+            `doom_loop: ${this.mutationBurst} consecutive mutations on the same path(s) ` +
+            `without a verify step (test/build/lint/check). STOP iterating on the same ` +
+            `files — run a verification command, change approach, or ask the user. ` +
+            `Repeating edits without evidence of progress is a fruitless loop.`,
+        };
+      } else if (this.mutationBurst >= MUTATION_BURST_WARN) {
+        mutationBurstHit = {
+          count: this.mutationBurst,
+          refuse: false,
+          warn: true,
+          message:
+            `doom_loop warning: mutation #${this.mutationBurst} on the same path cluster ` +
+            `without verification. Prefer a test/build/lint (or read_image against a ` +
+            `reference) before more edits.`,
+        };
+      }
+    }
+
+    if (mutationBurstHit?.refuse) return mutationBurstHit;
 
     const pk = pathKey(toolName, input);
     let pathCount = 0;
@@ -394,6 +488,8 @@ export class DoomLoopDetector {
       };
     }
 
+    if (mutationBurstHit?.warn) return mutationBurstHit;
+
     return { count, refuse: false, warn: false, message: "" };
   }
 
@@ -471,5 +567,7 @@ export class DoomLoopDetector {
     this.seq.length = 0;
     this.pathCounts.clear();
     this.answeredQuestions.clear();
+    this.mutationBurst = 0;
+    this.mutationPathCluster.clear();
   }
 }

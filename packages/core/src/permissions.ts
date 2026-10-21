@@ -162,7 +162,14 @@ export class PermissionEngine {
 
  // Out-of-sandbox writes always ask (even under yolo / allow rules / auto-edit)
  // so the user can grant the folder before the tool-layer path guard rejects it.
-    if (this.sandboxExpandFor(tool, primary)) return "ask";
+ // apply_patch may touch several paths — any one outside is enough to ask.
+    {
+      const writePaths = extractWritePaths(tool.name, input);
+      const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+      for (const p of candidates) {
+        if (this.sandboxExpandFor(tool, p)) return "ask";
+      }
+    }
 
  // 2. ask — forces interactive confirmation.
     const ask = bash
@@ -188,6 +195,11 @@ export class PermissionEngine {
     }
 
  // 4. mode defaults.
+ // memory_write is a silent side channel (project-state / user MEMORY.md);
+ // never prompt — same posture as other read-tier bookkeeping tools.
+    if (tool.name === "memory_write") {
+      return { decision: "allow", reason: "memory_write is silent and auto-allowed" };
+    }
     if (tool.permission === "read") {
       return { decision: "allow", reason: "read-only tool" };
     }
@@ -210,21 +222,24 @@ export class PermissionEngine {
     if (tool.name === "web_search" && this.mode === "auto-edit") {
       return { decision: "allow", reason: "auto-edit mode" };
     }
- // Sandbox-confined writes: when a sandbox is active and the write target
- // resolves inside the sandbox's writable roots, the process sandbox
- // already guarantees it can't escape — so auto-allow it instead of
- // prompting. Only the write's primary path is checked; a write outside
- // the writable roots still falls through to "ask" (and the sandbox would
- // block it anyway). bash is handled separately just below.
+ // Sandbox-confined writes: when a sandbox is active and every write target
+ // resolves inside the sandbox's writable roots, auto-allow. apply_patch
+ // must have ALL touched paths inside; any outside already returned "ask"
+ // above. bash is handled separately just below.
     if (
       tool.permission === "write" &&
       tool.name !== "bash" &&
       this.sandbox &&
-      this.sandbox.policy.mode !== "off" &&
-      primary !== undefined
+      this.sandbox.policy.mode !== "off"
     ) {
-      const check = assertPathAllowed(primary, "write", this.sandbox.policy, this.sandbox.cwd);
-      if (check.ok) {
+      const writePaths = extractWritePaths(tool.name, input);
+      const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+      if (
+        candidates.length > 0 &&
+        candidates.every(
+          (p) => assertPathAllowed(p, "write", this.sandbox!.policy, this.sandbox!.cwd).ok,
+        )
+      ) {
         return { decision: "allow", reason: "write confined to sandbox writable roots" };
       }
     }
@@ -259,12 +274,21 @@ export class PermissionEngine {
   /** Build a permission request to send to the user / frontend. */
   buildRequest(requestId: string, tool: ToolDef, input: unknown): PermissionRequest {
     const primary = extractPrimaryArg(tool.name, input);
+    const writePaths = extractWritePaths(tool.name, input);
     let reason = describeReason(tool.permission, tool.name, input);
     if (tool.name === "bash" && primary) {
       const danger = checkDangerousCommand(primary);
       if (danger.dangerous) reason += ` DANGEROUS: ${danger.why}.`;
     }
-    const sandboxExpand = this.sandboxExpandFor(tool, primary);
+    if (tool.name === "apply_patch" && writePaths.length > 0) {
+      reason = `Apply patch to ${writePaths.length} file(s):\n${writePaths.map((p) => `  ${p}`).join("\n")}`;
+    }
+    let sandboxExpand: { path: string } | undefined;
+    const expandCandidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+    for (const p of expandCandidates) {
+      sandboxExpand = this.sandboxExpandFor(tool, p);
+      if (sandboxExpand) break;
+    }
     if (sandboxExpand) {
       reason =
         `Write path is outside the sandbox writable roots. ` +
@@ -279,6 +303,62 @@ export class PermissionEngine {
       reason,
       ...(sandboxExpand ? { sandboxExpand } : {}),
     };
+  }
+
+  /**
+   * Enrich a permission request so the UI can show what a `job_id` refers to.
+   * `bash_kill` / `write_stdin` only carry `{ job_id }`; without this the
+   * approval card is opaque. Mutates `req` in place. Safe no-op when the job
+   * is unknown or the tool is unrelated.
+   */
+  async enrichForDisplay(req: PermissionRequest, cwd: string): Promise<void> {
+    if (!req.input || typeof req.input !== "object") return;
+    const o = req.input as Record<string, unknown>;
+
+    // apply_patch: show file list instead of the raw multi-KB patch blob.
+    if (req.toolName === "apply_patch" && typeof o.patch === "string") {
+      const { pathsFromApplyPatch } = await import("./tools/apply_patch.js");
+      const files = pathsFromApplyPatch(o.patch);
+      req.input = {
+        files,
+        patch: o.patch,
+      };
+      if (files.length > 0) {
+        req.reason = `Apply patch to ${files.length} file(s):\n${files.map((p) => `  ${p}`).join("\n")}`;
+      }
+      void cwd;
+      return;
+    }
+
+    if (
+      req.toolName !== "bash_kill" &&
+      req.toolName !== "write_stdin" &&
+      req.toolName !== "bash_output"
+    ) {
+      return;
+    }
+    if (typeof o.job_id !== "string" || !o.job_id) return;
+    // Lazy import avoids a permissions ↔ bashJobs cycle at module load.
+    const { getJob } = await import("./tools/bashJobs.js");
+    const job = await getJob(cwd, o.job_id);
+    if (!job) {
+      req.reason = `${req.reason} (unknown job ${o.job_id})`;
+      return;
+    }
+    const command = job.meta.displayCommand ?? job.meta.command;
+    const status = job.meta.status;
+    req.input = {
+      ...o,
+      command,
+      status,
+    };
+    if (req.toolName === "bash_kill") {
+      req.reason = `Stop background job ${o.job_id} (${status}): ${command}`;
+    } else if (req.toolName === "write_stdin") {
+      req.reason = `Send stdin to background job ${o.job_id} (${status}): ${command}`;
+    } else {
+      req.reason = `Read output of background job ${o.job_id} (${status}): ${command}`;
+    }
   }
 
  /** Directory to grant when this write sits outside the sandbox. */
@@ -348,6 +428,9 @@ export function normalizeBashPrimary(command: string): string {
 function extractPrimaryArg(toolName: string, input: unknown): string | undefined {
   if (!input || typeof input !== "object") return undefined;
   const o = input as Record<string, unknown>;
+  if (toolName === "apply_patch" && typeof o.patch === "string") {
+    return pathsFromPatchHeaders(o.patch)[0];
+  }
   const field =
     toolName === "bash"
       ? "command"
@@ -363,6 +446,33 @@ function extractPrimaryArg(toolName: string, input: unknown): string | undefined
     return toolName === "bash" ? normalizeBashPrimary(raw) : raw;
   }
   return undefined;
+}
+
+/** All write targets for tools that may touch multiple paths. */
+function extractWritePaths(toolName: string, input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const o = input as Record<string, unknown>;
+  if (toolName === "apply_patch" && typeof o.patch === "string") {
+    return pathsFromPatchHeaders(o.patch);
+  }
+  if (typeof o.path === "string" && o.path) return [o.path];
+  return [];
+}
+
+/** Header-only path scan (mirrors apply_patch.pathsFromApplyPatch, inlined
+ * to keep permissions free of a hard import cycle at module init). */
+function pathsFromPatchHeaders(patch: string): string[] {
+  const paths: string[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    for (const prefix of ["*** Add File: ", "*** Update File: ", "*** Delete File: "]) {
+      if (line.startsWith(prefix)) {
+        const p = line.slice(prefix.length).trim();
+        if (p) paths.push(p);
+        break;
+      }
+    }
+  }
+  return paths;
 }
 
 const READ_ONLY_RULE = "(read-only command)";
@@ -535,6 +645,10 @@ function describeReason(
     case "write":
       return `Tool ${toolName} will modify files.`;
     case "execute":
+      if (toolName === "bash_kill") return `Stop a background shell job (SIGTERM).`;
+      if (toolName === "write_stdin") {
+        return `Send input to a background shell job's stdin.`;
+      }
       return `Tool ${toolName} will execute a shell command.`;
     case "network":
       return `Tool ${toolName} will access the network.`;

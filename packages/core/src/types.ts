@@ -176,7 +176,7 @@ export type Event =
  * UI-only. The queue itself lives on the Session; this event mirrors it. */
   | {
       type: "followup";
-      action: "queued" | "removed" | "cleared" | "started";
+      action: "queued" | "removed" | "cleared" | "started" | "updated";
       items: FollowUpItem[];
     };
 
