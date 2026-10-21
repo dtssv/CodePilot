@@ -131,7 +131,17 @@ tasks.processResources {
 // Anything requiring a Project/Editor must use the IDE fixture framework and live elsewhere.
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // MockK / Gson reflection on JDK 17+
+    jvmArgs(
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
+    )
     testLogging {
         events("passed", "failed", "skipped")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+        showStandardStreams = true
     }
 }

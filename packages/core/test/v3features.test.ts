@@ -234,6 +234,7 @@ describe("task fan-out schema", () => {
 
   it("exposes a JSON schema that tools/list consumers can read", () => {
     expect(taskTool.name).toBe("task");
-    expect(taskTool.description).toContain("fan out");
+    expect(taskTool.description).toContain("isolated contexts");
+    expect(taskTool.description).toContain("parallel independent");
   });
 });

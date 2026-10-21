@@ -153,8 +153,18 @@ jobs:
 
       - name: Run unit tests
         working-directory: apps/idea
-        # --info so failing assertions show up in the Actions log without downloading artifacts.
-        run: ./gradlew test --no-daemon --info
+        run: ./gradlew test --no-daemon --continue
+
+      - name: Upload IDEA test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: idea-test-reports
+          path: |
+            apps/idea/build/reports/tests/
+            apps/idea/build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build plugin (verify packaging)
         working-directory: apps/idea
