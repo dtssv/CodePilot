@@ -211,7 +211,11 @@ describe("sandbox-confined writes", () => {
   it("auto-allows ordinary bash in an active sandbox, but still asks for dangerous commands", () => {
     const cwd = "/repo";
     const e = new PermissionEngine({ permissionMode: "ask" });
-    e.setSandbox(resolveSandbox({ mode: "workspace-write" }, cwd), cwd);
+    // Force osEnforced: CI Linux runners often have no seatbelt/bwrap, which
+    // would otherwise leave this branch untested and return "ask".
+    e.setSandbox(resolveSandbox({ mode: "workspace-write" }, cwd), cwd, {
+      osEnforced: true,
+    });
     const t = makeTool("bash", "execute");
  // Ordinary command → auto-allowed (the OS sandbox already jails it).
     expect(e.preflight(t, { command: "echo hi > /repo/x.txt" })).toMatchObject({ decision: "allow" });

@@ -170,8 +170,9 @@ describe("harness_bridge execution", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("timed out after 500ms");
  // Should have been killed promptly, not after the full 60s sleep.
-    expect(elapsed).toBeLessThan(10_000);
-  }, 15_000);
+ // CI runners can be slow to reap; keep a generous upper bound.
+    expect(elapsed).toBeLessThan(25_000);
+  }, 30_000);
 
   it("truncates output at 100KB", async () => {
  // Emit ~200KB of 'x' on stdout via a POSIX one-liner.

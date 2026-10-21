@@ -152,6 +152,14 @@ function runHarnessCommand(
       } catch {
  /* ignore */
       }
+      // Escalate: some CI hosts leave `sleep` / stubborn children alive after SIGTERM.
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+ /* ignore */
+        }
+      }, 1_000).unref?.();
     }, opts.timeout);
 
     const onAbort = () => {

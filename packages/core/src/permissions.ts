@@ -82,12 +82,17 @@ export class PermissionEngine {
  * can offer to expand `writablePaths`. Bash auto-allow requires `osEnforced`
  * (an OS backend is actually jailing the shell).
  */
-  setSandbox(policy: ResolvedSandbox | undefined, cwd: string): void {
+  setSandbox(
+    policy: ResolvedSandbox | undefined,
+    cwd: string,
+    opts?: { osEnforced?: boolean },
+  ): void {
     if (!policy || policy.mode === "off") {
       this.sandbox = undefined;
       return;
     }
-    const osEnforced = detectSandboxBackend() !== "none";
+    const osEnforced =
+      opts?.osEnforced ?? detectSandboxBackend() !== "none";
     this.sandbox = { policy, cwd, osEnforced };
   }
 

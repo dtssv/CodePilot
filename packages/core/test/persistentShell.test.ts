@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { PersistentShell } from "../src/persistentShell.js";
 
@@ -22,10 +23,12 @@ describe("PersistentShell", () => {
 
  // zsh -i is what users get from $SHELL on macOS; it prints continuation
  // prompts for multi-line input unless the command is parsed in one go.
+ // Skip on hosts without zsh (typical GitHub Ubuntu images).
   const zsh = "/bin/zsh";
+  const hasZsh = existsSync(zsh);
   it.each([
     ["sh", "/bin/sh", [] as string[]],
-    ["zsh -i", zsh, ["-i"]],
+    ...(hasZsh ? [["zsh -i", zsh, ["-i"]] as [string, string, string[]]] : []),
   ])("runs a multi-line quoted command as one unit (%s)", async (_n, sh, args) => {
     shell = new PersistentShell({ cwd: tmpdir(), shell: sh, shellArgs: args });
     const r = await shell.run('python3 -c "\nx = 1\nprint(\'v\', x + 1)\n"', { timeout: 10_000 });
@@ -36,7 +39,7 @@ describe("PersistentShell", () => {
     expect((await shell.run("pwd; echo $CP_T", { timeout: 5_000 })).stdout.trim()).toBe("/\nok");
   }, 30_000);
 
-  it("reports an unclosed quote as an error instead of hanging", async () => {
+  it.skipIf(!hasZsh)("reports an unclosed quote as an error instead of hanging", async () => {
     shell = new PersistentShell({ cwd: tmpdir(), shell: zsh, shellArgs: ["-i"] });
     const r = await shell.run('echo "unclosed', { timeout: 10_000 });
     expect(r.timedOut).toBe(false);

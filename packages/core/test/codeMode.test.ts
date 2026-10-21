@@ -17,7 +17,12 @@ function makeCtx(cwd: string): ToolContext {
   return {
     cwd,
     signal: undefined,
-    sandbox: resolveSandbox({ mode: "workspace-write" }, cwd),
+    // allow-unsandboxed: CI Linux often has no seatbelt/bwrap; tests still
+    // exercise path policy via workspace-write roots.
+    sandbox: resolveSandbox(
+      { mode: "workspace-write", fallback: "allow-unsandboxed" },
+      cwd,
+    ),
     async artifact() {
       return "art_x";
     },
