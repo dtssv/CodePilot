@@ -3,6 +3,8 @@ package com.codepilot.idea
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
 
 class ServeDiscoveryTest {
     @Test
@@ -18,27 +20,20 @@ class ServeDiscoveryTest {
     }
 
     @Test
-    fun `readLive returns null for missing lockfile`() {
-        // Best-effort: if the developer already has a live daemon this may
-        // return non-null; we only assert the null path for a clearly dead pid.
-        val dir = ServeDiscovery.codepilotDir()
-        dir.mkdirs()
-        val backup = dir.resolve("serve.json.bak-test")
-        val serve = dir.resolve("serve.json")
-        val server = dir.resolve("server.json")
-        val hadServe = serve.isFile
-        val hadServer = server.isFile
+    fun `readLive returns null for missing lockfile`(@TempDir home: Path) {
+        val prev = System.getProperty("user.home")
         try {
-            if (hadServe) serve.copyTo(backup, overwrite = true)
-            serve.writeText(
+            System.setProperty("user.home", home.toString())
+            assertNull(ServeDiscovery.readLive())
+            // Dead pid must not look live.
+            val dir = ServeDiscovery.codepilotDir()
+            dir.mkdirs()
+            dir.resolve("serve.json").writeText(
                 """{"url":"ws://127.0.0.1:18765/rpc","token":"x","pid":999999999,"host":"127.0.0.1","port":18765,"startedAt":"2020-01-01T00:00:00.000Z"}""",
             )
-            server.delete()
             assertNull(ServeDiscovery.readLive())
         } finally {
-            if (hadServe) backup.copyTo(serve, overwrite = true) else serve.delete()
-            backup.delete()
-            if (!hadServer) server.delete()
+            if (prev != null) System.setProperty("user.home", prev) else System.clearProperty("user.home")
         }
     }
 }

@@ -85,16 +85,19 @@ intellijPlatform {
 // and compile still run; `buildPlugin` packaging should run web build first.
 val webviewResources = layout.buildDirectory.dir("generated/webview")
 val copyWebview by tasks.registering {
-    val src = rootProject.file("../web/dist-embed/index.html")
+    val srcPath = rootProject.projectDir.resolve("../web/dist-embed/index.html").normalize()
     val destDir = webviewResources.map { it.dir("webview") }
-    inputs.file(src).optional()
     outputs.dir(destDir)
+    // Do not declare optional inputs.file(...) — missing paths break configuration
+    // on some Gradle versions. Stamp the source path as a property instead.
+    inputs.property("webviewSrc", srcPath.absolutePath)
+    inputs.property("webviewSrcExists", srcPath.isFile)
     doLast {
         val out = destDir.get().asFile
         out.mkdirs()
         val target = out.resolve("index.html")
-        if (src.isFile) {
-            src.copyTo(target, overwrite = true)
+        if (srcPath.isFile) {
+            srcPath.copyTo(target, overwrite = true)
         } else {
             target.writeText(
                 "<!doctype html><html><body>CodePilot webview stub — run " +
