@@ -139,35 +139,52 @@ function runHarnessCommand(
   opts: { cwd: string; timeout: number; signal?: AbortSignal }
 ): Promise<RunHarnessResult> {
   return new Promise((resolve) => {
+    // detached so we can kill the whole process group (sh -c sleep … leaves
+    // grandchildren that otherwise keep stdout open and hang `close`).
     const child = spawn("/bin/sh", ["-c", cmd], {
       cwd: opts.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"], // no stdin: prevent interactive hangs
+      detached: true,
     });
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    let settled = false;
+    const killTree = (sig: NodeJS.Signals) => {
+      // Process-group kill is Unix-only (`-pid`); Windows falls back to child.kill.
+      if (process.platform !== "win32" && child.pid) {
+        try {
+          process.kill(-child.pid, sig);
+        } catch {
+ /* ignore — group may already be gone */
+        }
+      }
       try {
-        child.kill("SIGTERM");
+        child.kill(sig);
       } catch {
  /* ignore */
       }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree("SIGTERM");
       // Escalate: some CI hosts leave `sleep` / stubborn children alive after SIGTERM.
       setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
- /* ignore */
-        }
+        killTree("SIGKILL");
+        // Guarantee the Promise settles even if `close` never fires.
+        setTimeout(() => {
+          done({
+            stdout: Buffer.concat(outChunks).toString("utf-8"),
+            stderr: Buffer.concat(errChunks).toString("utf-8"),
+            code: null,
+            signal: "SIGKILL",
+            timedOut: true,
+          });
+        }, 500).unref?.();
       }, 1_000).unref?.();
     }, opts.timeout);
 
     const onAbort = () => {
-      try {
-        child.kill("SIGTERM");
-      } catch {
- /* ignore */
-      }
+      killTree("SIGTERM");
     };
     if (opts.signal) {
       if (opts.signal.aborted) onAbort();
@@ -180,19 +197,17 @@ function runHarnessCommand(
     const onChunk = (b: Buffer, sink: Buffer[]) => {
       total += b.length;
       if (total > SOFT_CAP_BYTES) {
-        try {
-          child.kill("SIGTERM");
-        } catch {
- /* ignore */
-        }
+        killTree("SIGTERM");
         return;
       }
       sink.push(b);
     };
-    child.stdout.on("data", (b: Buffer) => onChunk(b, outChunks));
-    child.stderr.on("data", (b: Buffer) => onChunk(b, errChunks));
+    child.stdout?.on("data", (b: Buffer) => onChunk(b, outChunks));
+    child.stderr?.on("data", (b: Buffer) => onChunk(b, errChunks));
 
     const done = (result: RunHarnessResult) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
       resolve(result);
