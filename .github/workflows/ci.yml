@@ -69,11 +69,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
+      # Workspace packages export types from dist/; typecheck needs a prior build
+      # on a clean runner (local trees often already have dist/ from `pnpm build`).
       - name: Build
         run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Test
         run: pnpm test
@@ -151,10 +153,12 @@ jobs:
 
       - name: Run unit tests
         working-directory: apps/idea
-        run: ./gradlew test --no-daemon
+        # --info so failing assertions show up in the Actions log without downloading artifacts.
+        run: ./gradlew test --no-daemon --info
 
       - name: Build plugin (verify packaging)
         working-directory: apps/idea
+        # Uses webview stub when apps/web/dist-embed is absent (see build.gradle.kts).
         run: ./gradlew buildPlugin --no-daemon
 
       - name: Upload plugin artifact

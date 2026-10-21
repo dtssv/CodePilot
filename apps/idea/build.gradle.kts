@@ -81,10 +81,27 @@ intellijPlatform {
 
 // The chat tool window runs the shared web UI: bundle apps/web's single-file
 // embed build (`pnpm --filter @codepilot/web build`) as /webview/index.html.
+// On CI / clean checkouts that file may be absent — write a stub so unit tests
+// and compile still run; `buildPlugin` packaging should run web build first.
 val webviewResources = layout.buildDirectory.dir("generated/webview")
-val copyWebview by tasks.registering(Copy::class) {
-    from(rootProject.file("../web/dist-embed/index.html"))
-    into(webviewResources.map { it.dir("webview") })
+val copyWebview by tasks.registering {
+    val src = rootProject.file("../web/dist-embed/index.html")
+    val destDir = webviewResources.map { it.dir("webview") }
+    inputs.file(src).optional()
+    outputs.dir(destDir)
+    doLast {
+        val out = destDir.get().asFile
+        out.mkdirs()
+        val target = out.resolve("index.html")
+        if (src.isFile) {
+            src.copyTo(target, overwrite = true)
+        } else {
+            target.writeText(
+                "<!doctype html><html><body>CodePilot webview stub — run " +
+                    "<code>pnpm --filter @codepilot/web build</code> before packaging.</body></html>\n",
+            )
+        }
+    }
 }
 
 // Bundled CodePilot CLI so the plugin works without a system install.

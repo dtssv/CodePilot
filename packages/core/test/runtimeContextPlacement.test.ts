@@ -8,6 +8,7 @@ function captureProvider(): { provider: ChatProvider; sent: () => ProviderMessag
   const provider = {
     defaultModel: "m",
     smallModel: "m",
+    // biome-ignore lint/correctness/useYield: mock provider only captures messages
     async *stream(opts: StreamChatOptions) {
       sent = opts.messages;
     },

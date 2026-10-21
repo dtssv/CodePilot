@@ -163,7 +163,7 @@ export const bashTool: ToolDef<typeof schema> = {
 /** Collapse runs of mostly-unprintable lines (binary bytes decoded as UTF-8)
  * into one marker: they carry no information but cost tokens every turn. */
 export function elideBinaryLines(text: string): string {
- // eslint-disable-next-line no-control-regex
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: strip binary / C0 junk from shell output
   const junk = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ufffd]/g;
   if (!new RegExp(junk.source).test(text)) return text;
   const out: string[] = [];
