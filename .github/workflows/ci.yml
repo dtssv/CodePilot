@@ -51,7 +51,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is not a CI gate yet: core shell/sandbox/harness assume
+        # POSIX (/bin/sh, seatbelt/bwrap, forward-slash path fixtures). Re-add
+        # windows-latest once those surfaces are ported or tests are OS-aware.
+        os: [ubuntu-latest, macos-latest]
         node: ["20", "22"]
     steps:
       - name: Checkout
