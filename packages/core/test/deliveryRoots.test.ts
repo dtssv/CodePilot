@@ -83,6 +83,7 @@ describe("guardDeliveryWrite", () => {
 
   it("asks and allows when user approves", async () => {
     const roots = [normalizeRoot(cwd)];
+    const expanded: string[] = [];
     const r = await guardDeliveryWrite(
       ctx({
         deliveryRoots: roots,
@@ -94,6 +95,9 @@ describe("guardDeliveryWrite", () => {
           roots.length = 0;
           roots.push(...m);
         },
+        expandSandboxWritable: async (dir) => {
+          expanded.push(dir);
+        },
       }),
       "/tmp/elsewhere/x.ts",
     );
@@ -101,5 +105,7 @@ describe("guardDeliveryWrite", () => {
     expect(roots.some((x) => x.includes("elsewhere") || x === normalizeRoot("/tmp/elsewhere"))).toBe(
       true,
     );
+    // Approving delivery root must also expand the OS sandbox jail.
+    expect(expanded.some((d) => d.includes("elsewhere"))).toBe(true);
   });
 });

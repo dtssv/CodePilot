@@ -8,7 +8,11 @@
 import { z } from "zod";
 import { spawn } from "node:child_process";
 import type { ToolDef } from "./types.js";
-import { wrapCommand, resolveSandbox } from "../sandbox.js";
+import {
+  wrapCommand,
+  resolveSandbox,
+  looksLikeSandboxWriteDenial,
+} from "../sandbox.js";
 import { spawnBackgroundJob } from "./bashJobs.js";
 
 /** Below this size, output is returned verbatim. Above, it spills to an
@@ -20,7 +24,12 @@ const HEAD_CHARS = 4_000;
 const TAIL_CHARS = 4_000;
 
 const schema = z.object({
-  command: z.string().describe("Shell command to execute (run via /bin/sh -c)."),
+  command: z
+    .string()
+    .describe(
+      "Required. The shell command string to execute via /bin/sh -c " +
+        "(e.g. builds, tests, curl, headless Chrome). This is the only way to run a process.",
+    ),
   timeout: z
     .number()
     .int()
@@ -33,29 +42,25 @@ const schema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Run detached and return immediately with a job id. Use for long-running " +
-        "commands (dev servers, watch-mode tests, builds you want to poll) AND " +
-        "for anything that launches a browser or does heavy rendering — headless " +
-        "Chrome/Puppeteer/Playwright screenshots, PDF/image rendering, WebGL. " +
-        "Those spawn child process trees that can outlive a foreground timeout " +
-        "and stall the turn; run them detached and poll instead. " +
-        "Read output with bash_output, stop with bash_kill."
+      "Run detached and return a job id immediately. Use for long-running processes " +
+        "(dev servers, watchers) and browser/rendering jobs (headless Chrome, Puppeteer, " +
+        "Playwright, PDF/WebGL) that can outlive a foreground timeout. Poll with " +
+        "`bash_output`, stop with `bash_kill`.",
     ),
 });
 
 export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
-    "Run a shell command in the project cwd. Prefer `read_file`/`grep`/`glob`/`edit_file` " +
-    "over shell for file I/O, and `read_image` over OCR/ASCII hacks when you need to " +
-    "*see* an image. Use bash to download references, run builds/tests, or capture " +
-    "headless screenshots *after* you know what you're verifying. Default timeout 60s " +
-    "(max 10m via `timeout`); output >8KB spills to an artifact (`read_artifact`). Use " +
-    "`run_in_background: true` for long-lived or browser/rendering jobs — then " +
-    "`bash_output` / `bash_kill`. Main-session foreground shares one shell " +
-    "(`cd`/`export` persist); file tools still resolve paths from the workspace root. " +
-    "Sandboxed writes: workspace, `/tmp`, `~/.codepilot`. Put temp scripts/screenshots/" +
-    "zips under the session `scratch_dir` (see system prompt) — not `cwd/.tmp`.",
+    "Execute a shell command (`command` required). Use for builds, tests, package managers, " +
+    "network downloads, and headless browser/screenshot processes. " +
+    "Not for creating or editing project files — use `write_file` / `edit_file` for that; " +
+    "prefer `read_file` / `grep` / `glob` over shell for reading code. " +
+    "Default timeout 60s (max 10m); output >8KB spills to an artifact (`read_artifact`). " +
+    "Set `run_in_background: true` for long-lived or browser jobs, then `bash_output` / `bash_kill`. " +
+    "Foreground calls share one shell (`cd`/`export` persist). " +
+    "OS sandbox limits writes to the workspace, `/tmp`, and `~/.codepilot`; put command " +
+    "outputs (screenshots, Chrome profiles, zips) under session `scratch_dir`, not `cwd/.tmp`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -129,6 +134,20 @@ export const bashTool: ToolDef<typeof schema> = {
     }
     if (code !== 0) {
       content = `[exit ${code ?? (timedOut ? "timeout" : "?")}]\n${content}`;
+    }
+    // Mechanistic: if the OS jail blocked a write, say how to expand roots —
+    // do not try to guess paths from the command text.
+    if (
+      policy.mode !== "off" &&
+      wrapped.sandboxed &&
+      looksLikeSandboxWriteDenial(content)
+    ) {
+      content +=
+        `\n\n[sandbox] Write blocked by the OS jail (writable roots: ` +
+        `${policy.writableRoots.join(", ")}). ` +
+        `To work outside them: write via write_file/edit_file so the user can ` +
+        `"Allow folder", or ask the user to add the directory to ` +
+        `sandbox.writablePaths / approve a delivery-root expand.`;
     }
     let artifactRef: string | undefined;
     if (content.length > ARTIFACT_THRESHOLD) {

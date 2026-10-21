@@ -88,14 +88,21 @@ export function useCodepilot(): Codepilot {
   if (clientRef.current === null) {
     clientRef.current = new CodepilotClient({
       onEvent: (sessionId, event) => {
- // Background sessions (another tab, a sub-run) must not bleed into
- // the transcript on screen.
-        const current = live.current.sessionId;
-        if (current && sessionId && sessionId !== current) return;
+ // Only the session currently on screen receives events. When the user
+ // leaves a running session (close, or switch workspace), sessionId is
+ // cleared — without this guard, the old run's transcript would paint
+ // onto the empty / new-workspace view.
+        if (!live.current.sessionId || sessionId !== live.current.sessionId) return;
         dispatch({ type: "event", event });
       },
-      onPermission: (req: PendingPermission) => dispatch({ type: "permission", req }),
-      onQuestion: (req: PendingQuestion) => dispatch({ type: "question", req }),
+      onPermission: (req: PendingPermission) => {
+        if (!live.current.sessionId || req.sessionId !== live.current.sessionId) return;
+        dispatch({ type: "permission", req });
+      },
+      onQuestion: (req: PendingQuestion) => {
+        if (!live.current.sessionId || req.sessionId !== live.current.sessionId) return;
+        dispatch({ type: "question", req });
+      },
       onPromptResolved: (kind: "permission" | "question", requestId: string) =>
         dispatch({ type: kind === "permission" ? "permission-resolved" : "question-resolved", requestId }),
       onClose: (reason) =>

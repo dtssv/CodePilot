@@ -194,7 +194,9 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
     try {
       roots.add(realpathSync(root));
     } catch {
- // Not created yet; the literal path is all we can grant.
+      // Not created yet — allow the parent so the OS can mkdir `root`.
+      const parent = dirname(root);
+      if (parent !== root) roots.add(parent);
     }
   }
   for (const root of roots) {
@@ -328,6 +330,8 @@ function isUnder(path: string, root: string): boolean {
 /**
  * Directory to grant when the user allows a write outside the sandbox.
  * Uses the parent of a file path (so sibling files in that folder work).
+ * If that folder does not exist yet, {@link addWritableRoot} also grants
+ * its parent so the OS sandbox can `mkdir` it.
  */
 export function writableRootForTarget(inputPath: string, cwd: string): string {
   const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
@@ -345,15 +349,36 @@ export function isWriteOutsideSandbox(
   return !assertPathAllowed(inputPath, "write", policy, cwd).ok;
 }
 
-/** Mutate `policy` to include an extra writable root (idempotent). */
+/** Mutate `policy` to include an extra writable root (idempotent).
+ * If `root` does not exist yet, also records its parent in the policy so
+ * path-guard checks and the OS profile (see {@link buildSeatbeltProfile})
+ * agree that creating `root` is allowed. */
 export function addWritableRoot(policy: ResolvedSandbox, root: string): void {
   const abs = resolve(root);
-  if (!policy.writableRoots.some((r) => normPath(r) === normPath(abs))) {
-    policy.writableRoots.push(abs);
+  const toAdd = [abs];
+  if (!existsSync(abs)) {
+    const parent = dirname(abs);
+    if (parent !== abs) toAdd.push(parent);
   }
-  if (!policy.writablePaths.some((r) => normPath(r) === normPath(abs))) {
-    policy.writablePaths.push(abs);
+  for (const p of toAdd) {
+    if (!policy.writableRoots.some((r) => normPath(r) === normPath(p))) {
+      policy.writableRoots.push(p);
+    }
+    if (!policy.writablePaths.some((r) => normPath(r) === normPath(p))) {
+      policy.writablePaths.push(p);
+    }
   }
+}
+
+/** True when command output looks like an OS-sandbox write denial (not a
+ * parsed path heuristic — just errno-style messages from seatbelt/bwrap). */
+export function looksLikeSandboxWriteDenial(text: string): boolean {
+  return (
+    /Operation not permitted/i.test(text) ||
+    /Read-only file system/i.test(text) ||
+    /Permission denied/i.test(text) ||
+    /\bEPERM\b|\bEROFS\b|\bEACCES\b/.test(text)
+  );
 }
 
 /**

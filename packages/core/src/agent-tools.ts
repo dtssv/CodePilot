@@ -331,6 +331,7 @@ export async function runOneTool(
     scratchDir: deps.scratchDir,
     projectStateDir: deps.projectStateDir,
     addDeliveryRoot: deps.addDeliveryRoot,
+    expandSandboxWritable: deps.expandSandboxWritable,
   };
 
   try {

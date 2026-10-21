@@ -367,7 +367,12 @@ export class PermissionEngine {
     }
   }
 
- /** Directory to grant when this write sits outside the sandbox. */
+ /**
+   * Directory to grant when a **file write tool** targets a path outside the
+   * sandbox. Bash is not scanned for write paths — the OS jail is the
+   * enforcement; expand happens when the user allows a folder on a write
+   * tool (or via delivery-root approval, which also expands the jail).
+   */
   sandboxExpandFor(
     tool: ToolDef,
     primary: string | undefined,

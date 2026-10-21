@@ -185,7 +185,16 @@ export function reducer(state: AppState, action: Action): AppState {
       };
     case "set-cwd":
       return { ...state, cwd: action.cwd };
-    case "session-closed":
+    case "session-closed": {
+ // Drop prompts that belonged to the session we just left; keep any
+ // parked prompts from other sessions for when the user returns.
+      const closedId = state.sessionId;
+      const pending = state.pending
+        ? {
+            permissions: state.pending.permissions.filter((p) => p.sessionId !== closedId),
+            questions: state.pending.questions.filter((x) => x.sessionId !== closedId),
+          }
+        : undefined;
       return {
         ...state,
         sessionId: undefined,
@@ -195,13 +204,15 @@ export function reducer(state: AppState, action: Action): AppState {
         rows: [],
         plan: [],
         usage: { input: 0, output: 0 },
+        activity: undefined,
+        subagents: undefined,
+        followUps: undefined,
+        lastRequest: undefined,
         permission: undefined,
         question: undefined,
-        pending: state.pending && {
-          permissions: state.pending.permissions.filter((p) => p.sessionId !== state.sessionId),
-          questions: state.pending.questions.filter((x) => x.sessionId !== state.sessionId),
-        },
+        pending,
       };
+    }
     case "event":
       return applyEvent(state, action.event);
   }
@@ -218,10 +229,13 @@ function pendingOf(state: AppState): PendingPrompts {
 
 /** Point `permission` / `question` at the oldest prompt of the session on
  * screen and derive the waiting status from them. `live` is false while a
- * session is being opened: its status then comes from the replayed history. */
+ * session is being opened: its status then comes from the replayed history.
+ * With no session open, never surface a parked prompt (switching workspace
+ * mid-run must not pop the previous session's approval dialog). */
 function showPrompts(state: AppState, pending: PendingPrompts | undefined, live = true): AppState {
   const q = pending ?? { permissions: [], questions: [] };
-  const mine = (sessionId: string): boolean => !state.sessionId || sessionId === state.sessionId;
+  const mine = (sessionId: string): boolean =>
+    Boolean(state.sessionId) && sessionId === state.sessionId;
   const permission = q.permissions.find((p) => mine(p.sessionId));
   const question = q.questions.find((x) => mine(x.sessionId));
   const waiting = state.status === "waiting_permission" || state.status === "waiting_question";

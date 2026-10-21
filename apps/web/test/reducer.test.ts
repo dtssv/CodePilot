@@ -297,6 +297,11 @@ describe("status transitions", () => {
  // The permission dialog must survive the status events that keep arriving
  // while the agent waits for the answer.
     let state = apply(initialState(), {
+      type: "session-opened",
+      sessionId: "s1",
+      agentMode: "agent",
+    });
+    state = apply(state, {
       type: "permission",
       req: {
         requestId: "r1",
@@ -433,6 +438,31 @@ describe("prompts are scoped to their session", () => {
     s = reducer(s, { type: "permission-resolved", requestId: "s1#1" });
     s = open(s, "s1");
     expect(s.permission).toBeUndefined();
+  });
+
+  it("session-closed clears the transcript and does not surface parked prompts", () => {
+    let s = open(initialState("/w"), "s1");
+    s = reducer(s, {
+      type: "event",
+      event: {
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [{ type: "text", text: "still running" }],
+      },
+    });
+    s = reducer(s, { type: "permission", req: perm("s1", "s1#1") });
+    // Park another session's prompt, then leave s1 (e.g. open a new workspace).
+    s = reducer(s, { type: "permission", req: perm("s2", "s2#1") });
+    s = reducer(s, { type: "session-closed" });
+    expect(s.sessionId).toBeUndefined();
+    expect(s.rows).toHaveLength(0);
+    expect(s.activity).toBeUndefined();
+    expect(s.permission).toBeUndefined();
+    expect(s.question).toBeUndefined();
+    expect(s.status).toBe("idle");
+    // s1's prompt is dropped; s2's stays parked but must not show with no session.
+    expect(s.pending?.permissions.map((p) => p.requestId)).toEqual(["s2#1"]);
   });
 });
 

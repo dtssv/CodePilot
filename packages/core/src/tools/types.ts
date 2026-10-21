@@ -73,6 +73,15 @@ export interface ToolContext {
   projectStateDir?: string;
   /** Add a delivery root mid-turn after the user approves an out-of-root write. */
   addDeliveryRoot?: (dir: string) => void | Promise<void>;
+  /**
+   * Expand OS-sandbox writable roots (same as permission "Allow folder").
+   * When the user approves a delivery-root add, call this too — otherwise
+   * Seatbelt/bwrap still blocks the write even though delivery roots grew.
+   */
+  expandSandboxWritable?: (
+    dir: string,
+    opts: { persist: boolean },
+  ) => Promise<void> | void;
 }
 
 export interface ToolResult {

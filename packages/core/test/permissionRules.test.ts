@@ -224,6 +224,19 @@ describe("sandbox-confined writes", () => {
     expect(e.preflight(t, { command: "rm -rf /" })).toBe("ask");
   });
 
+  it("does not offer sandboxExpand for bash (OS jail enforces; no command parsing)", () => {
+    const cwd = "/repo";
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    e.setSandbox(resolveSandbox({ mode: "workspace-write" }, cwd), cwd, {
+      osEnforced: true,
+    });
+    const t = makeTool("bash", "execute");
+    const cmd = "mkdir -p /elsewhere/newdir";
+    // Still auto-allowed under an enforcing sandbox; expand is for write tools.
+    expect(e.preflight(t, { command: cmd })).toMatchObject({ decision: "allow" });
+    expect(e.buildRequest("r1", t, { command: cmd }).sandboxExpand).toBeUndefined();
+  });
+
   it("does not auto-allow bash when no sandbox is wired", () => {
     const e = new PermissionEngine({ permissionMode: "ask" });
     const t = makeTool("bash", "execute");

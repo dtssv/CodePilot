@@ -7,8 +7,15 @@ import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardPath } from "./_shared.js";
 
 const schema = z.object({
-  path: z.string().describe("File path (absolute or relative to cwd)."),
-  content: z.string().describe("Full text content to write."),
+  path: z
+    .string()
+    .describe("Required. Destination file path (absolute or relative to cwd)."),
+  content: z
+    .string()
+    .describe(
+      "Required. UTF-8 text to persist at `path` (source, config, docs). " +
+        "Not a shell command — do not put scripts-to-run here.",
+    ),
   createDirs: z
     .boolean()
     .optional()
@@ -18,9 +25,10 @@ const schema = z.object({
 export const writeFileTool: ToolDef<typeof schema> = {
   name: "write_file",
   description:
-    "Create or fully rewrite a file (parents created as needed). Prefer `edit_file` " +
-    "for partial changes. Understand the request and related references/code first; " +
-    "must have read an existing file before overwriting. Never write secrets; " +
+    "Create or overwrite one file on disk. Requires `path` + `content` (the file body). " +
+    "Only for persisting text files — never for running shell commands, starting browsers, " +
+    "or taking screenshots (use `bash` with `command` for those). Prefer `edit_file` for " +
+    "partial edits. Read an existing file before overwriting it. Never write secrets; " +
     "sandbox blocks out-of-workspace paths.",
   inputSchema: schema,
   permission: "write",

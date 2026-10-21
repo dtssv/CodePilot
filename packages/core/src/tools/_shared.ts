@@ -140,8 +140,9 @@ export async function guardDeliveryWrite(
               `Write target is outside this task's delivery roots:\n` +
               `${rootsList}\n\n` +
               `Target: ${abs}\n` +
-              `Add “${candidateDir}” as a delivery root for this session ` +
-              `(sandbox writable ≠ delivery root)?`,
+              `Add “${candidateDir}” for this session?\n` +
+              `Approval updates both delivery roots and the OS sandbox ` +
+              `writable roots (one folder grant, both policies).`,
             options: [
               { label: allowLabel, description: candidateDir },
               { label: "Cancel — write under existing delivery roots" },
@@ -161,6 +162,10 @@ export async function guardDeliveryWrite(
           const merged = mergeDeliveryRoots(ctx.deliveryRoots, [candidateDir]);
           ctx.deliveryRoots.length = 0;
           ctx.deliveryRoots.push(...merged);
+        }
+        // Same grant must open the OS jail; delivery roots alone do not.
+        if (ctx.expandSandboxWritable) {
+          await ctx.expandSandboxWritable(candidateDir, { persist: false });
         }
         return null;
       }

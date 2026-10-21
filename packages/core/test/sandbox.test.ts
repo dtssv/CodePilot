@@ -10,6 +10,7 @@ import {
   isWriteOutsideSandbox,
   writableRootForTarget,
   buildSeatbeltProfile,
+  looksLikeSandboxWriteDenial,
   checkDangerousCommand,
   winPathToWsl,
   wrapCommand,
@@ -66,8 +67,29 @@ describe("assertPathAllowed", () => {
     expect(writableRootForTarget("/other/proj/src/a.ts", cwd)).toBe("/other/proj/src");
     const next = resolveSandbox(undefined, cwd);
     addWritableRoot(next, "/other/proj/src");
+    // Non-existent root also grants its parent so mkdir can create it.
+    expect(next.writableRoots).toContain("/other/proj/src");
+    expect(next.writableRoots).toContain("/other/proj");
     expect(isWriteOutsideSandbox("/other/proj/src/a.ts", next, cwd)).toBe(false);
     expect(assertPathAllowed("/other/proj/src/b.ts", "write", next, cwd).ok).toBe(true);
+  });
+
+  it("addWritableRoot grants parent when the new root does not exist yet", async () => {
+    const base = await mkdtemp(join(tmpdir(), "swr-"));
+    const newRoot = join(base, "newdir");
+    const next = resolveSandbox({ mode: "workspace-write" }, base);
+    addWritableRoot(next, newRoot);
+    expect(next.writableRoots).toContain(newRoot);
+    expect(next.writableRoots).toContain(base);
+    // Profile must allow writes under the parent (needed to create newdir).
+    const profile = buildSeatbeltProfile(next);
+    expect(profile).toContain(JSON.stringify(base));
+  });
+
+  it("looksLikeSandboxWriteDenial matches OS jail messages only", () => {
+    expect(looksLikeSandboxWriteDenial("mkdir: foo: Operation not permitted")).toBe(true);
+    expect(looksLikeSandboxWriteDenial("Read-only file system")).toBe(true);
+    expect(looksLikeSandboxWriteDenial("command not found: foo")).toBe(false);
   });
 
   it("denies .. escapes", () => {
