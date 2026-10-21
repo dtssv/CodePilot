@@ -431,7 +431,9 @@ describe("startWebSocketServer", () => {
     await expect(b.request("prompt/send", { sessionId, text: "hi" })).rejects.toThrow(
       RpcError,
     );
-    await expect(a.request("prompt/send", { sessionId, text: "hi" })).resolves.toEqual({});
+    await expect(a.request("prompt/send", { sessionId, text: "hi" })).resolves.toEqual({
+      delivery: "started",
+    });
   });
 
   it("answers a plain HTTP request with 426 Upgrade Required", async () => {

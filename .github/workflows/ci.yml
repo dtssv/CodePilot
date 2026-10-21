@@ -153,7 +153,14 @@ jobs:
 
       - name: Run unit tests
         working-directory: apps/idea
-        run: ./gradlew test --no-daemon --continue
+        run: |
+          set +e
+          ./gradlew test --no-daemon --continue
+          code=$?
+          echo "::group::IDEA test XML"
+          find build/test-results -name '*.xml' -print -exec cat {} \; 2>/dev/null || true
+          echo "::endgroup::"
+          exit $code
 
       - name: Upload IDEA test reports
         if: failure()
