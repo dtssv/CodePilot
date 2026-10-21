@@ -114,8 +114,23 @@ export function runCommandHook(
         timedOut,
       });
     });
-    child.stdin.write(JSON.stringify(payload));
-    child.stdin.end();
+    // Hooks that exit before reading stdin (deny stubs, instant scripts)
+    // close the pipe — treat EPIPE as benign, not an unhandled exception
+    // (Vitest fails the suite on uncaught EPIPE on Linux CI).
+    child.stdin.on("error", (e: NodeJS.ErrnoException) => {
+      if (e.code === "EPIPE" || e.code === "ERR_STREAM_DESTROYED") return;
+      // Surface unexpected stdin errors via stderr capture.
+      err.push(Buffer.from(e.message));
+    });
+    try {
+      child.stdin.write(JSON.stringify(payload));
+      child.stdin.end();
+    } catch (e) {
+      const errObj = e as NodeJS.ErrnoException;
+      if (errObj.code !== "EPIPE" && errObj.code !== "ERR_STREAM_DESTROYED") {
+        err.push(Buffer.from(errObj.message ?? String(e)));
+      }
+    }
   });
 }
 
