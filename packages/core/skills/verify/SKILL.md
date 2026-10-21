@@ -1,7 +1,7 @@
 ---
 name: verify
 description: Run the project's relevant verification (test, build, lint, or acceptance check) and report the command plus exit outcome before claiming work is done.
-when: After non-trivial edits, before marking a plan step completed, or when the user asks to verify / check / confirm the change.
+when: At a milestone or before claiming the task done (not after every tiny edit); or when the user asks to verify / check / confirm the change.
 tools:
   - bash
   - read_file
@@ -28,7 +28,8 @@ checklist, a generic verify-before-done gate.
 
 ## Notes
 
-- Visual / asset tasks: compare against the same reference evidence used to
-  implement (e.g. `read_image` on a screenshot) in addition to any build step.
+- Visual / asset tasks: after a coherent slice (or near completion), compare
+  against the same reference used in the study phase (e.g. `read_image`) in
+  addition to any build step — not an edit↔screenshot loop.
 - If verification is impossible (missing tooling, no network, no harness), say
   so explicitly instead of pretending the change was verified.

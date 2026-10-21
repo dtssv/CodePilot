@@ -42,29 +42,33 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Software Engineering Agent/);
   });
 
-  it("requires understanding the ask before executing", async () => {
+  it("requires researching the target before mutating", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Understand before you mutate/);
+    expect(out.staticPrefix).toMatch(/Research the target thoroughly before you mutate/);
+    expect(out.staticPrefix).toMatch(/study → implement/);
   });
 
   it("splits brownfield vs greenfield conventions", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Brownfield \(default\)/);
     expect(out.staticPrefix).toMatch(/Greenfield \(no prior code/);
-    expect(out.staticPrefix).toMatch(/falsifiable acceptance gates/);
+    expect(out.staticPrefix).toMatch(/fully research/);
+    expect(out.staticPrefix).toMatch(/Do not build a screenshot\/CDP harness as step 1/);
   });
 
-  it("teaches plan quality and forbids unverifiable verify steps", async () => {
+  it("teaches plan quality: research → implement → verify", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Plan quality/);
     expect(out.staticPrefix).toMatch(/Do not plan verification you cannot perform/);
-    expect(out.staticPrefix).toMatch(/quick sanity check/);
+    expect(out.staticPrefix).toMatch(/edit → screenshot → edit/);
+    expect(out.staticPrefix).toMatch(/research\/study/);
   });
 
   it("distinguishes code correctness from feature\/visual correctness", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Code correctness ≠ feature \/ visual correctness/);
     expect(out.staticPrefix).toMatch(/Define success before volume/);
+    expect(out.staticPrefix).toMatch(/Verify at milestones, not after every edit/);
   });
 
   it("contains every section heading", async () => {
