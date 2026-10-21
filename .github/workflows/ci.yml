@@ -79,7 +79,27 @@ jobs:
 
       - name: Test
         # --no-bail: finish every package so the log shows all failures, not just the first.
-        run: pnpm -r --no-bail test
+        run: |
+          set -o pipefail
+          pnpm -r --no-bail test 2>&1 | tee test-output.log
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.os }}-node${{ matrix.node }}
+          path: test-output.log
+          retention-days: 5
+
+      - name: Summarize test failures
+        if: failure()
+        run: |
+          {
+            echo "## Test failures (${{ matrix.os }} / node ${{ matrix.node }})"
+            echo '```'
+            grep -E 'FAIL |AssertionError|ELIFECYCLE|Test Files.*failed|ERR_PNPM' test-output.log | head -100 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------
   # Coverage — v8 coverage for the core package (and others, if they have
@@ -111,7 +131,9 @@ jobs:
       - name: Run tests with coverage
         # Gate on core only — other packages still sit below their historical
         # 60% thresholds (CLI/UI surface area). Raise the filter as coverage grows.
-        run: pnpm --filter @codepilot/core test:coverage
+        run: |
+          set -o pipefail
+          pnpm --filter @codepilot/core test:coverage 2>&1 | tee coverage-output.log
 
       - name: Upload coverage reports
         if: always()
@@ -121,7 +143,18 @@ jobs:
           path: |
             packages/*/coverage/
             apps/*/coverage/
+            coverage-output.log
           retention-days: 14
+
+      - name: Summarize coverage failure
+        if: failure()
+        run: |
+          {
+            echo "## Coverage failure"
+            echo '```'
+            grep -E 'ERROR:|ELIFECYCLE|FAIL |Test Files' coverage-output.log | head -80 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------
   # IDEA plugin — Gradle compile + Kotlin unit tests on Linux with JDK 17.

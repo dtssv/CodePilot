@@ -7,6 +7,9 @@ export default defineConfig({
  // logic — the interesting behaviour is tested here, not through a
  // simulated browser.
     include: ["test/**/*.test.ts", "test/**/*.test.tsx"],
+    // Real Chrome E2E is opt-in (`pnpm --filter @codepilot/web exec vitest run test/e2e`)
+    // so macOS CI runners with Chrome installed don't fail the default suite.
+    exclude: ["test/e2e/**"],
     environment: "node",
     testTimeout: 20_000,
     coverage: {
