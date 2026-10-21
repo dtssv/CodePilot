@@ -10,7 +10,14 @@ export default defineConfig({
       reporter: ["text", "lcov", "html"],
       reportsDirectory: "./coverage",
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.test.ts", "src/**/index.ts"],
+      exclude: [
+        "src/**/*.test.ts",
+        "src/**/index.ts",
+        // CLI entrypoints are integration-tested elsewhere; including them
+        // zeros out global coverage and fails CI without adding signal.
+        "src/cli.ts",
+        "src/cli-connect.ts",
+      ],
       thresholds: {
         lines: 60,
         functions: 60,

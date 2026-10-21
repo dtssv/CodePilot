@@ -182,15 +182,35 @@ describe.skipIf(!hasChrome || !hasBuild)("web UI real-browser E2E", () => {
     await server.close();
     server = await startServerFor(root, port, token);
     await connectThroughUI(page, server, root);
-    const newClicked = await page.eval<boolean>(`(() => { const b = Array.from(document.querySelectorAll('button')).find(b => /new/i.test((b.textContent || '').trim())); if (!b) return false; b.click(); return true; })()`);
+    // Prefer aria/data hooks; fall back to English "New" / Chinese "新建".
+    const newClicked = await page.eval<boolean>(`(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const b = buttons.find(el => /^(new|新建)/i.test((el.textContent || '').trim()))
+        || buttons.find(el => /new session|新建会话/i.test(el.textContent || ''));
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
     expect(newClicked).toBe(true);
-    await page.waitFor(`document.body.innerText.includes('Workspace')`, 15000);
+    await page.waitFor(
+      `document.body.innerText.includes('Workspace') || document.body.innerText.includes('工作区')`,
+      15000,
+    );
 
     await server.close();
-    await page.waitFor(`document.body.innerText.includes('reconnecting') || document.body.innerText.includes('disconnected')`, 15000);
+    await page.waitFor(
+      `document.body.innerText.includes('reconnecting') || document.body.innerText.includes('重连') || document.body.innerText.includes('disconnected') || document.body.innerText.includes('未连接')`,
+      15000,
+    );
     server = await startServerFor(root, port, token);
-    await page.waitFor(`document.body.innerText.includes('connected') && !document.body.innerText.includes('disconnected')`, 30000);
-    await page.waitFor(`document.body.innerText.includes('reconnected') || document.body.innerText.includes('Workspace')`, 30000);
+    await page.waitFor(
+      `(document.body.innerText.includes('connected') || document.body.innerText.includes('已连接')) && !document.body.innerText.includes('disconnected') && !document.body.innerText.includes('未连接')`,
+      30000,
+    );
+    await page.waitFor(
+      `document.body.innerText.includes('reconnected') || document.body.innerText.includes('Workspace') || document.body.innerText.includes('工作区')`,
+      30000,
+    );
     await page.waitFor(`document.body.innerText.includes('README.md')`, 15000);
   }, 90000);
 });

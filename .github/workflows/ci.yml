@@ -78,7 +78,8 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        # --no-bail: finish every package so the log shows all failures, not just the first.
+        run: pnpm -r --no-bail test
 
   # ---------------------------------------------------------------------
   # Coverage — v8 coverage for the core package (and others, if they have
