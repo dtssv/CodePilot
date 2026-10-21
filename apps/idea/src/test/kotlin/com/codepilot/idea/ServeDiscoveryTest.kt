@@ -22,6 +22,7 @@ class ServeDiscoveryTest {
         // Best-effort: if the developer already has a live daemon this may
         // return non-null; we only assert the null path for a clearly dead pid.
         val dir = ServeDiscovery.codepilotDir()
+        dir.mkdirs()
         val backup = dir.resolve("serve.json.bak-test")
         val serve = dir.resolve("serve.json")
         val server = dir.resolve("server.json")
