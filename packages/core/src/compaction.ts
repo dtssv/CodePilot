@@ -102,6 +102,7 @@ function serializeEventForEstimate(e: Event): string {
       return `model:${e.model}${e.providerId ? `@${e.providerId}` : ""}`;
     case "retry":
     case "activity":
+    case "stop_continue":
     case "subagent":
     case "followup":
       return "";

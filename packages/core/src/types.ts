@@ -155,6 +155,8 @@ export type Event =
  /** Live progress marker — what the run is waiting on right now (the model,
  * or the named tools). Not persisted. */
   | { type: "activity"; phase: "model" | "tools"; since: number; tools?: string[] }
+ /** Stop hook blocked ending the turn; the agent will continue. Not persisted. */
+  | { type: "stop_continue"; count: number; cap: number; reason: string }
  /** Live progress of one sub-agent spawned by a `task` call, so UIs can
  * follow it. Never sent to the model. `event` is the sub-agent's own
  * event; `state` marks start / finish. */
@@ -352,10 +354,11 @@ export interface HookEntryConfig {
  * For SessionStart/PreCompact/PostCompact/SubagentStop, matched against
  * the event's discriminator (source/trigger/agent_type) instead. */
   matcher: string;
- /** Shell command; receives a JSON payload on stdin. Exit 2 = block (where
- * the event supports blocking). Stdout JSON `{"decision":"block","reason":"..."}`
- * also blocks; PostToolUse may emit `{"feedback":"..."}`; PreToolUse may
- * emit `{"updatedInput":{...}}` to rewrite the tool input.
+  /** Shell command; receives a JSON payload on stdin. Exit 2 = block (where
+  * the event supports blocking — PreToolUse, UserPromptSubmit, PreCompact,
+  * Stop). Stdout JSON `{"decision":"block","reason":"..."}` also blocks;
+  * PostToolUse may emit `{"feedback":"..."}`; PreToolUse may emit
+  * `{"updatedInput":{...}}` to rewrite the tool input.
  *
  * Mutually exclusive with `http`, `mcp_tool`, `prompt`, and `agent`.
  * At least one handler type must be provided. */
@@ -410,9 +413,19 @@ export interface HooksConfig {
   PreCompact?: HookEntryConfig[];
  /** Fires after compaction. Matcher: trigger (manual|auto). Cannot block. */
   PostCompact?: HookEntryConfig[];
- /** Fires when a sub-agent finishes. Matcher: agent_type (explore|worker|custom). */
+ /**
+   * Fires when a sub-agent finishes. Matcher: agent_type (explore|worker|custom).
+   * Exit 2 / `decision: block` continues the sub-agent with feedback (capped
+   * by `stopHookBlockCap`), same contract as Stop.
+   */
   SubagentStop?: HookEntryConfig[];
   Notification?: HookEntryConfig[];
+  /**
+   * Fires when the agent is about to end a turn. Exit 2 / `decision: block`
+   * continues the run with the reason as feedback (capped by
+   * `stopHookBlockCap`). Payload includes `stop_hook_active`.
+   * Built-in `stopVerify` (default `"prompt"`) runs before these hooks.
+   */
   Stop?: HookEntryConfig[];
 }
 
@@ -477,6 +490,19 @@ export interface CodepilotConfig {
   subagentTimeoutMs?: number;
  /** Lifecycle hooks (PreToolUse/PostToolUse/Notification/Stop). */
   hooks?: HooksConfig;
+ /**
+   * Max consecutive Stop-hook continues before the session forces the turn
+   * to end. Default 8. Set `0` to never continue (first block still ends
+   * the turn after one forced allow). Unset uses the default.
+   */
+  stopHookBlockCap?: number;
+ /**
+   * Built-in Stop validity gate (default `"prompt"`).
+   * - `"prompt"` / `true` — small model judges feature vs code correctness
+   * - `"tests"` — run a detected project test command when present
+   * - `"off"` / `false` — disabled (user Stop hooks still run)
+   */
+  stopVerify?: boolean | "off" | "prompt" | "tests";
  /** When true, command hooks run under the same OS sandbox as `bash`
   * (Seatbelt / bwrap) instead of at full host trust. Opt-in; default off. */
   hookSandbox?: boolean;

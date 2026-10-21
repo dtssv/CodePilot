@@ -169,4 +169,30 @@ describe("webSearchTool backends", () => {
     expect(r.content).toContain("https://d.dev");
     expect(r.content).not.toContain("via"); // DDG default shows no "(via …)"
   });
+
+  it("falls back to Bing HTML when DuckDuckGo is unreachable", async () => {
+    vi.stubEnv("BRAVE_API_KEY", "");
+    vi.stubEnv("SERPER_API_KEY", "");
+    vi.stubEnv("GOOGLE_API_KEY", "");
+    vi.stubEnv("GOOGLE_CSE_ID", "");
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => {
+      urls.push(u);
+      if (u.includes("duckduckgo")) {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: new Error("Connect Timeout Error"),
+        });
+      }
+      return new Response(
+        `<li class="b_algo"><h2><a href="https://b.dev/page">Bing Title</a></h2><p>bing snip</p></li>`,
+        { status: 200 },
+      );
+    });
+    const r = await webSearchTool.execute({ query: "q" }, ctx());
+    expect(r.isError).toBeFalsy();
+    expect(urls.some((u) => u.includes("duckduckgo"))).toBe(true);
+    expect(urls.some((u) => u.includes("bing.com"))).toBe(true);
+    expect(r.content).toContain("Bing Title");
+    expect(r.content).toContain("https://b.dev/page");
+  });
 });

@@ -122,6 +122,20 @@ describe("PermissionEngine with real built-in tools", () => {
     });
   });
 
+  it("web_search and web_fetch auto-allow in ask mode (no local side effects)", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const search = makeTool("web_search", "network");
+    const fetch = makeTool("web_fetch", "network");
+    expect(e.preflight(search, { query: "x" })).toEqual({
+      decision: "allow",
+      reason: "network tool (no local side effects)",
+    });
+    expect(e.preflight(fetch, { url: "https://example.com" })).toEqual({
+      decision: "allow",
+      reason: "network tool (no local side effects)",
+    });
+  });
+
   it("PermissionEngine with a ToolRegistry", () => {
     const r = new ToolRegistry();
     r.register(readFileTool);

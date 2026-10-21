@@ -154,6 +154,7 @@ function serializeEvent(e: Event): string {
     case "followup":
     case "retry":
     case "activity":
+    case "stop_continue":
     case "subagent":
     case "request":
  // Never reaches the provider (see compaction.ts) — zero context cost.

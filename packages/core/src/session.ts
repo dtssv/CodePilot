@@ -111,6 +111,11 @@ import { resolveImageMentions } from "./imageMentions.js";
 import { materializeUploads } from "./promptFiles.js";
 import { ensureProjectState, projectStatePath, scratchDir } from "./projectState.js";
 import { HookEngine } from "./hooks.js";
+import {
+  buildStopTranscriptHint,
+  resolveStopVerifyMode,
+  runBuiltinStopVerify,
+} from "./stopVerify.js";
 import { estimateTokens, estimateCostUSD, lookupContextWindow, resolveCompactionThreshold } from "./tokens.js";
 import {
   writeCheckpoint,
@@ -140,6 +145,10 @@ import {
   titleSidecarPath,
   type RichSessionSummary,
 } from "./session-utils.js";
+
+/** Max consecutive Stop-hook continues before the session forces an end
+ * (Claude Code default posture). `0` disables continues entirely. */
+const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
 
 export class Session {
   readonly id: string;
@@ -612,37 +621,123 @@ export class Session {
  // runAgent; unknown explicit names throw here so a misconfigured
  // plugin runtime never silently falls back to the default loop.
       const runtime = this.getRuntime();
- // Run the agent loop. Compaction may run between turns (driven by the
- // session after each prompt completes).
-      await runtime.prompt({
-        history: this.events,
-        userText: effectivePrompt,
-        images: attachedImages.length > 0 ? attachedImages : undefined,
-        files: savedUploads.length > 0 ? savedUploads : undefined,
-      }, deps);
 
- // The interrupt-recovery guidance (if any) has now reached the model for
- // this turn; clear the one-shot flag so the rebuild below — and all
- // later turns — drop it.
-      this.resumedFromInterrupt = false;
+      // Stop-hook continue loop: when a Stop hook blocks ending the turn,
+      // re-enter the agent with the reason as feedback (capped).
+      const stopCap =
+        typeof this.config.stopHookBlockCap === "number" && this.config.stopHookBlockCap >= 0
+          ? this.config.stopHookBlockCap
+          : DEFAULT_STOP_HOOK_BLOCK_CAP;
+      let stopHookActive = false;
+      let stopContinueCount = 0;
+      let turnText = effectivePrompt;
+      let turnImages = attachedImages;
+      let turnFiles = savedUploads;
 
- // Auto-title after the first prompt completes.
-      if (this.title == null) {
-        await this.refreshTitle(effectivePrompt);
+      for (;;) {
+        await runtime.prompt(
+          {
+            history: this.events,
+            userText: turnText,
+            images: turnImages.length > 0 ? turnImages : undefined,
+            files: turnFiles.length > 0 ? turnFiles : undefined,
+          },
+          deps,
+        );
+
+        // The interrupt-recovery guidance (if any) has now reached the model.
+        this.resumedFromInterrupt = false;
+
+        if (this.title == null && stopContinueCount === 0) {
+          await this.refreshTitle(effectivePrompt);
+        }
+
+        await this.maybeCompact();
+        await this.rebuildSystemPrompt().catch(() => undefined);
+        await this.maybeCheckpoint();
+
+        // User cancel: do not let Stop hooks force a continue.
+        if (this.cancelController?.signal.aborted) break;
+
+        const stopMode = resolveStopVerifyMode(this.config.stopVerify);
+        const hasUserStop = this.hooks.hasHooks("Stop");
+        if (stopMode === "off" && !hasUserStop) break;
+
+        const stopPayload = {
+          reason: stopContinueCount === 0 ? "prompt_completed" : "stop_hook_continue",
+          stop_hook_active: stopHookActive,
+          stop_continue_count: stopContinueCount,
+          stop_continue_cap: stopCap,
+          session_id: this.id,
+          transcript_hint: buildStopTranscriptHint(this.events),
+        };
+
+        // Built-in validity gate first, then user-configured Stop hooks.
+        let stopResult: import("./hooks.js").PreHookResult =
+          stopMode === "off"
+            ? { action: "allow", warnings: [] }
+            : await runBuiltinStopVerify(stopMode, {
+                cwd: this.cwd,
+                ...stopPayload,
+                resolvers: this.hooks.getResolvers(),
+              }).catch((): import("./hooks.js").PreHookResult => ({
+                action: "allow",
+                warnings: ["built-in stopVerify threw; ignored"],
+              }));
+
+        if (stopResult.action !== "block" && hasUserStop) {
+          stopResult = await this.hooks
+            .runStop(stopPayload)
+            .catch((): import("./hooks.js").PreHookResult => ({
+              action: "allow",
+              warnings: ["Stop hook threw; ignored"],
+            }));
+        }
+
+        for (const w of stopResult.warnings) {
+          const ev: Event = { type: "error", message: w, recoverable: true };
+          this.events.push(ev);
+          await this.persistEvent(ev).catch(() => undefined);
+          this.notify(ev);
+        }
+
+        if (stopResult.action !== "block") break;
+
+        if (stopContinueCount >= stopCap) {
+          const ev: Event = {
+            type: "error",
+            message:
+              `Stop verify kept blocking after ${stopCap} continue(s); ending the turn ` +
+              `(set stopHookBlockCap to raise the limit, or stopVerify: "off").`,
+            recoverable: true,
+          };
+          this.events.push(ev);
+          await this.persistEvent(ev).catch(() => undefined);
+          this.notify(ev);
+          break;
+        }
+
+        stopContinueCount += 1;
+        stopHookActive = true;
+        const reason =
+          stopResult.reason?.trim() ||
+          "Stop verify blocked ending this turn without a reason.";
+        // UI-only progress event (not persisted).
+        this.notify({
+          type: "stop_continue",
+          count: stopContinueCount,
+          cap: stopCap,
+          reason,
+        });
+        turnText =
+          `<stop_hook_continue count="${stopContinueCount}" cap="${stopCap}">\n` +
+          `${reason}\n` +
+          `Address this feedback, then finish the task. Do not stop until the ` +
+          `concern is resolved or you must ask the user a clarifying question.\n` +
+          `</stop_hook_continue>`;
+        turnImages = [];
+        turnFiles = [];
       }
-
- // Post-prompt compaction.
-      await this.maybeCompact();
-
- // Memory written during the run (memory_write → project-state MEMORY.md)
- // and the latest plan must reach the next prompt's system context.
-      await this.rebuildSystemPrompt().catch(() => undefined);
-
- // Post-prompt checkpoint.
-      await this.maybeCheckpoint();
-
- // Stop hooks (fire-and-forget, never fatal).
-      await this.hooks.runSimple("Stop", { reason: "prompt_completed" }).catch(() => undefined);
     } finally {
       this.cancelController = null;
  // Clear turn-scoped overrides so the session model + permission
@@ -1122,19 +1217,30 @@ export class Session {
   }
 
   /**
-   * Move a queued follow-up to the front and cancel the current run so it
-   * starts as soon as the abort unwinds (Cursor-style "send now").
+   * Take a queued follow-up and inject it into the current run (steer),
+   * without cancelling. Text-only: attachments on the queued item are dropped
+   * with a short note. When idle, starts a normal prompt (attachments kept).
    */
-  sendFollowUpNow(id: string): boolean {
+  sendFollowUpNow(id: string): "steered" | "started" | false {
     const idx = this.followUpQueue.findIndex((x) => x.id === id);
     if (idx < 0) return false;
-    if (idx > 0) {
-      const [item] = this.followUpQueue.splice(idx, 1);
-      this.followUpQueue.unshift(item!);
-      this.emitFollowUp("updated");
+    const [item] = this.followUpQueue.splice(idx, 1);
+    if (!item) return false;
+    this.emitFollowUp("removed");
+
+    if (this.isBusy()) {
+      let text = item.text;
+      if ((item.images?.length ?? 0) > 0 || (item.files?.length ?? 0) > 0) {
+        text =
+          `${text.trim()}\n\n[note: queued attachments were not injected into the ` +
+          `current run — re-attach them if still needed.]`;
+      }
+      this.steer(text);
+      return "steered";
     }
-    this.cancel();
-    return true;
+
+    void this.prompt(item.text, item.images, item.files);
+    return "started";
   }
 
   /** Drop every queued follow-up. */
@@ -1541,6 +1647,68 @@ export class Session {
  // Per-sub-agent wall-clock budget (optional). Enforced by the task tool's
  // shared semaphore so a stuck worker can't starve a parallel fan-out.
     task.subagentTimeoutMs = this.config.subagentTimeoutMs;
+
+    this.wireHookResolvers(task.runner);
+  }
+
+  /**
+   * Wire prompt/agent/MCP resolvers so Stop (and other) hooks can use
+   * non-command handlers. Safe to call once builtins are registered.
+   */
+  private wireHookResolvers(
+    subagentRunner: ReturnType<typeof createSubagentRunner> | undefined,
+  ): void {
+    this.hooks.setResolvers({
+      prompt: async (prompt, payload) => {
+        const provider = buildSmallProvider(this.config);
+        const model = this.config.smallModel ?? provider.smallModel ?? this.model;
+        const body =
+          `${prompt}\n\n` +
+          `Respond with a single JSON object only, e.g. ` +
+          `{"decision":"allow"} or {"decision":"block","reason":"…"}.\n\n` +
+          `Payload:\n${JSON.stringify(payload).slice(0, 40_000)}`;
+        let out = "";
+        for await (const ev of provider.stream({
+          model,
+          messages: [{ role: "user", content: [{ type: "text", text: body }] }],
+          maxTokens: 1024,
+        })) {
+          if (ev.kind === "text_delta") out += ev.text;
+          if (ev.kind === "error") throw new Error(ev.message);
+        }
+        return out.trim();
+      },
+      agent: async (objective, payload) => {
+        if (!subagentRunner) {
+          return JSON.stringify({
+            decision: "allow",
+            reason: "agent hook: no sub-agent runner available",
+          });
+        }
+        const result = await subagentRunner.run({
+          objective:
+            `${objective}\n\n` +
+            `When finished, reply with JSON only: ` +
+            `{"decision":"allow"} or {"decision":"block","reason":"…"}.\n\n` +
+            `Context payload:\n${JSON.stringify(payload).slice(0, 20_000)}`,
+          cwd: this.cwd,
+          agentType: "explore",
+          maxSteps: 20,
+        });
+        return result.conclusion.trim() || JSON.stringify({ decision: "allow" });
+      },
+      // Lazy: MCP starts after builtins; read `this.mcp` at call time.
+      mcp: async (serverTool, args) => {
+        const mgr = this.mcp;
+        if (!mgr) throw new Error("MCP manager unavailable");
+        const colon = serverTool.indexOf(":");
+        const server = colon > 0 ? serverTool.slice(0, colon) : "";
+        const tool = colon > 0 ? serverTool.slice(colon + 1) : serverTool;
+        if (!server || !tool) throw new Error(`invalid mcp tool id: ${serverTool}`);
+        const r = await mgr.invoke(server, tool, args);
+        return (r.content ?? "").trim() || JSON.stringify(r);
+      },
+    });
   }
 
   private async startMcp(): Promise<McpManager | null> {

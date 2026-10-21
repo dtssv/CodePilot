@@ -168,15 +168,11 @@ class FakeSession {
     item.text = text;
     return true;
   }
-  sendFollowUpNow(id: string) {
+  sendFollowUpNow(id: string): "steered" | "started" | false {
     const idx = this.followUps.findIndex((x) => x.id === id);
     if (idx < 0) return false;
-    if (idx > 0) {
-      const [item] = this.followUps.splice(idx, 1);
-      this.followUps.unshift(item!);
-    }
-    this.busy = false;
-    return true;
+    this.followUps.splice(idx, 1);
+    return this.busy ? "steered" : "started";
   }
   listFollowUps() {
     return [...this.followUps];

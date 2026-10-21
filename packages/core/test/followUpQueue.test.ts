@@ -68,4 +68,19 @@ describe("follow-up queue", () => {
     s.clearFollowUps();
     expect(s.listFollowUps()).toEqual([]);
   });
+
+  it("sendFollowUpNow injects into the current run without cancelling", async () => {
+    const s = await makeSession();
+    const ac = new AbortController();
+    (s as unknown as { cancelController: AbortController | null }).cancelController = ac;
+    s.enqueueFollowUp({ text: "later" });
+    const now = s.enqueueFollowUp({ text: "correct course" });
+    expect(s.sendFollowUpNow(now.id)).toBe("steered");
+    expect(s.listFollowUps().map((x) => x.text)).toEqual(["later"]);
+    expect(ac.signal.aborted).toBe(false);
+    const steered = (
+      s as unknown as { steeringQueue: Array<{ source: string; text: string }> }
+    ).steeringQueue;
+    expect(steered.map((x) => x.text)).toEqual(["correct course"]);
+  });
 });

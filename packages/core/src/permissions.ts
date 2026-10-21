@@ -208,6 +208,12 @@ export class PermissionEngine {
     if (tool.permission === "read") {
       return { decision: "allow", reason: "read-only tool" };
     }
+    // Network tools (web_search / web_fetch / MCP network) have no local
+    // side effects — auto-allow in every mode. Domain denylists on web_fetch
+    // still refuse specific hosts inside the tool.
+    if (tool.permission === "network") {
+      return { decision: "allow", reason: "network tool (no local side effects)" };
+    }
     if (bash && isReadOnlyCommand(primary!) && !checkDangerousCommand(primary!).dangerous) {
       return { decision: "allow", reason: "read-only command" };
     }
@@ -220,11 +226,6 @@ export class PermissionEngine {
       return { decision: "allow", reason: "permission mode is yolo" };
     }
     if (tool.permission === "write" && this.mode === "auto-edit") {
-      return { decision: "allow", reason: "auto-edit mode" };
-    }
- // A search query reveals far less than a URL (which can carry data out),
- // so web_search rides with auto-edit while web_fetch keeps asking.
-    if (tool.name === "web_search" && this.mode === "auto-edit") {
       return { decision: "allow", reason: "auto-edit mode" };
     }
  // Sandbox-confined writes: when a sandbox is active and every write target

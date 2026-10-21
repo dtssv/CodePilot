@@ -212,7 +212,9 @@ export async function runOneTool(
       // so the approval UI is not opaque JSON.
       await deps.permissions.enrichForDisplay(req, deps.cwd).catch(() => undefined);
       try {
-        decision = await deps.onPermissionRequest(req);
+        // Stop must unblock this wait; otherwise the prompt never finishes
+        // and the follow-up queue cannot drain.
+        decision = await racePermissionWithAbort(deps.onPermissionRequest(req), deps.signal);
       } catch (err) {
         decision = "deny";
         void err;
@@ -391,6 +393,32 @@ export async function runOneTool(
       isError: true,
     };
   }
+}
+
+/** Resolve with the permission decision, or `"deny"` as soon as `signal` aborts. */
+function racePermissionWithAbort(
+  pending: Promise<import("./types.js").PermissionDecision>,
+  signal: AbortSignal | undefined,
+): Promise<import("./types.js").PermissionDecision> {
+  if (!signal) return pending;
+  if (signal.aborted) return Promise.resolve("deny");
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      resolve("deny");
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void pending.then(
+      (d) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(d);
+      },
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve("deny");
+      },
+    );
+  });
 }
 
 // Note: `redactSecrets`, `HookEngine`, and `DoomLoopDetector` are imported

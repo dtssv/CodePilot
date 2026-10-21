@@ -15,15 +15,20 @@
 // - PostToolUse matcher: tool_name regex
 // - PreCompact matcher: trigger (manual | auto)
 // - PostCompact matcher: trigger (manual | auto)
-// - SubagentStop matcher: agent_type (explore | worker | custom name)
+// - SubagentStop matcher: agent_type (explore | worker | custom name) —
+//   can BLOCK like Stop (exit 2 / decision JSON); sub-agent continues with
+//   feedback, capped by `stopHookBlockCap`.
 // - Notification matcher: "*" (legacy, fire-and-forget)
-// - Stop matcher: "*" (legacy, fire-and-forget)
+// - Stop matcher: "*" — can BLOCK ending the turn (exit 2 / decision JSON).
+//   Session continues the agent loop with the reason as feedback, capped by
+//   `stopHookBlockCap` (default 8). Payload includes `stop_hook_active`.
+//   Built-in `stopVerify` (default "prompt") runs before user Stop hooks.
 //
 // Exit codes / JSON decision:
 // - exit 0 = OK (allow / proceed)
 // - exit 2 = BLOCK (PreToolUse blocks the tool call; PreCompact blocks
-// compaction; UserPromptSubmit blocks the prompt). stderr becomes the
-// reason shown to the model.
+// compaction; UserPromptSubmit blocks the prompt; Stop blocks ending the
+// turn). stderr becomes the reason shown to the model.
 // - other non-zero = warning (surfaced in the tool result / event log,
 // never fatal).
 // - STDOUT JSON: hooks may emit a JSON object on stdout for richer
@@ -405,32 +410,53 @@ export class HookEngine {
     return { warnings };
   }
 
- /** Run SubagentStop hooks (matcher: agent_type). Fire-and-forget. */
+ /**
+   * Run SubagentStop hooks (matcher: agent_type). First blocking hook wins
+   * (exit 2 or `{"decision":"block","reason":"..."}`), same contract as Stop.
+   */
   async runSubagentStop(
     agentType: string,
     conclusion: string,
-  ): Promise<SimpleHookResult> {
+    extra: Record<string, unknown> = {},
+  ): Promise<PreHookResult> {
     const warnings: string[] = [];
-    for (const h of this.matching("SubagentStop", agentType, {
+    const payload = {
       agent_type: agentType,
-    })) {
+      conclusion: conclusion.slice(0, 50_000),
+      ...extra,
+    };
+    const hooks = this.matching("SubagentStop", agentType, payload);
+    if (hooks.length === 0) {
+      return { action: "allow", warnings };
+    }
+    for (const h of hooks) {
       const r = await this.runHook(h, {
         event: "SubagentStop",
-        agent_type: agentType,
-        conclusion: conclusion.slice(0, 50_000),
         cwd: this.cwd,
+        ...payload,
       });
-      if (r.code !== 0 && r.code !== null) {
+      const decision = interpretDecision(r);
+      if (decision.action === "block") {
+        return {
+          action: "block",
+          reason:
+            decision.reason ??
+            (r.stderr.trim() ||
+              `blocked by SubagentStop hook (${h.command ?? h.prompt ?? h.agent ?? h.http ?? "handler"})`),
+          warnings,
+        };
+      }
+      if (r.code !== 0 && r.code !== null && r.code !== 2) {
         warnings.push(
-          `SubagentStop hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
+          `SubagentStop hook "${h.command ?? h.prompt ?? "handler"}" exited ${r.code}: ${r.stderr.trim()}`,
         );
       }
-      if (r.timedOut) warnings.push(`SubagentStop hook "${h.command}" timed out`);
+      if (r.timedOut) warnings.push(`SubagentStop hook timed out`);
     }
-    return { warnings };
+    return { action: "allow", warnings };
   }
 
- /** Fire-and-forget notification/stop hooks (legacy). */
+ /** Fire-and-forget notification hooks (legacy). Prefer {@link runStop} for Stop. */
   async runSimple(
     event: "Notification" | "Stop",
     payload: Record<string, unknown>,
@@ -440,9 +466,55 @@ export class HookEngine {
     }
   }
 
+  /**
+   * Run Stop hooks at the end of a prompt. First blocking hook wins (exit 2
+   * or `{"decision":"block","reason":"..."}`). When no Stop hooks are
+   * configured, returns allow immediately.
+   *
+   * Payload should include `stop_hook_active` (true when already continuing
+   * from a prior Stop block) so handlers can avoid unresolvable loops.
+   */
+  async runStop(payload: Record<string, unknown> = {}): Promise<PreHookResult> {
+    const warnings: string[] = [];
+    const hooks = this.matching("Stop", "*", payload);
+    if (hooks.length === 0) {
+      return { action: "allow", warnings };
+    }
+    for (const h of hooks) {
+      const r = await this.runHook(h, {
+        event: "Stop",
+        cwd: this.cwd,
+        ...payload,
+      });
+      const decision = interpretDecision(r);
+      if (decision.action === "block") {
+        return {
+          action: "block",
+          reason:
+            decision.reason ??
+            (r.stderr.trim() ||
+              `blocked by Stop hook (${h.command ?? h.prompt ?? h.agent ?? h.http ?? "handler"})`),
+          warnings,
+        };
+      }
+      if (r.code !== 0 && r.code !== null && r.code !== 2) {
+        warnings.push(
+          `Stop hook "${h.command ?? h.prompt ?? "handler"}" exited ${r.code}: ${r.stderr.trim()}`,
+        );
+      }
+      if (r.timedOut) warnings.push(`Stop hook timed out`);
+    }
+    return { action: "allow", warnings };
+  }
+
  /** Wire resolvers for the new handler types. */
   setResolvers(opts: HookResolvers): void {
     this.resolvers = { ...this.resolvers, ...opts };
+  }
+
+  /** Current resolvers (for built-in stopVerify and tests). */
+  getResolvers(): HookResolvers {
+    return this.resolvers;
   }
 
  // -------------------------------------------------------------------

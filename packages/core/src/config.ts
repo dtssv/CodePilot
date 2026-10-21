@@ -170,18 +170,33 @@ export const PermissionRulesSchema = z
   })
   .strict();
 
-/** Lifecycle hook entry (see hooks.ts). */
+/** Lifecycle hook entry (see hooks.ts). At least one handler type required. */
 export const HookEntrySchema = z
   .object({
     matcher: z.string().min(1),
-    command: z.string().min(1),
+    command: z.string().min(1).optional(),
+    http: z.string().min(1).optional(),
+    httpHeaders: z.record(z.string(), z.string()).optional(),
+    timeout: z.number().int().positive().optional(),
+    mcpTool: z.string().min(1).optional(),
+    prompt: z.string().min(1).optional(),
+    agent: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (h) => !!(h.command || h.http || h.mcpTool || h.prompt || h.agent),
+    { message: "hook entry needs command, http, mcpTool, prompt, or agent" },
+  );
 
 export const HooksConfigSchema = z
   .object({
+    SessionStart: z.array(HookEntrySchema).optional(),
+    UserPromptSubmit: z.array(HookEntrySchema).optional(),
     PreToolUse: z.array(HookEntrySchema).optional(),
     PostToolUse: z.array(HookEntrySchema).optional(),
+    PreCompact: z.array(HookEntrySchema).optional(),
+    PostCompact: z.array(HookEntrySchema).optional(),
+    SubagentStop: z.array(HookEntrySchema).optional(),
     Notification: z.array(HookEntrySchema).optional(),
     Stop: z.array(HookEntrySchema).optional(),
   })
@@ -267,6 +282,12 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // When true, command hooks run under the same OS sandbox as `bash`
     // (Seatbelt / bwrap) instead of unsandboxed. Opt-in; default off.
     hookSandbox: z.boolean().optional(),
+    // Max consecutive Stop-hook continues before forcing end (default 8).
+    stopHookBlockCap: z.number().int().min(0).max(100).optional(),
+    // Built-in Stop validity gate (default prompt). See types.ts.
+    stopVerify: z
+      .union([z.boolean(), z.enum(["off", "prompt", "tests"])])
+      .optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
  // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous

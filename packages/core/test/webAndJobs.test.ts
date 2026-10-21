@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { htmlToText } from "../src/tools/web_fetch.js";
-import { parseDuckDuckGoHtml } from "../src/tools/web_search.js";
+import { parseBingHtml, parseDuckDuckGoHtml } from "../src/tools/web_search.js";
 import { bashTool, elideBinaryLines } from "../src/tools/bash.js";
 import { bashOutputTool } from "../src/tools/bash_output.js";
 import { bashKillTool } from "../src/tools/bash_kill.js";
@@ -47,6 +47,19 @@ describe("parseDuckDuckGoHtml", () => {
 
   it("returns [] on unexpected markup", () => {
     expect(parseDuckDuckGoHtml("<html><body>nothing</body></html>")).toEqual([]);
+  });
+});
+
+describe("parseBingHtml", () => {
+  it("extracts b_algo cards", () => {
+    const html = `
+      <li class="b_algo"><h2><a href="https://a.example/x">Alpha</a></h2><p>first snip</p></li>
+      <li class="b_algo"><h2><a href="/relative">Skip</a></h2><p>no</p></li>
+      <li class="b_algo"><h2><a href="https://b.example/y">Beta</a></h2><p>second</p></li>`;
+    const hits = parseBingHtml(html);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]).toMatchObject({ title: "Alpha", url: "https://a.example/x", snippet: "first snip" });
+    expect(hits[1]!.title).toBe("Beta");
   });
 });
 

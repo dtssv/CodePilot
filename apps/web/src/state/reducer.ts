@@ -8,6 +8,7 @@ import type { AgentMode, Event, FollowUpItem, PlanStep, UsageInfo } from "@codep
 import { fileChangeFromToolCall, isFileMutation } from "./diff.js";
 import { messageText, type Row } from "./rows.js";
 import type { PendingPermission, PendingQuestion } from "../protocol/client.js";
+import { t } from "../i18n.js";
 
 export type UiStatus = "idle" | "thinking" | "waiting_permission" | "waiting_question" | "compacting";
 
@@ -479,6 +480,16 @@ function applyEvent(state: AppState, e: Event): AppState {
           since: e.since,
           tools: tools && tools.length > 0 ? tools : undefined,
         },
+      };
+    }
+
+    case "stop_continue": {
+      const short =
+        e.reason.length > 160 ? `${e.reason.slice(0, 157)}…` : e.reason;
+      return {
+        ...state,
+        notice: `${t("Verifying… continuing")} (${e.count}/${e.cap}): ${short}`,
+        status: "thinking",
       };
     }
 

@@ -273,10 +273,8 @@ export async function runAgent(
   let planSoftResumes = 0;
 
   let hitMaxTurns = false;
-  let stoppedByAbort = false;
   for (let turn = 0; ; turn++) {
     if (deps.signal?.aborted) {
-      stoppedByAbort = true;
       break;
     }
     if (turn >= maxTurns) {
@@ -487,8 +485,13 @@ export async function runAgent(
           }
         }
       } catch (err) {
-        error = (err as Error).message;
-        if (llmSpan) tracer.recordError(llmSpan, err as Error);
+        // User cancel / send-now aborts the fetch/SSE — that is not a failure.
+        if (deps.signal?.aborted || isAbortError(err)) {
+          error = null;
+        } else {
+          error = (err as Error).message;
+          if (llmSpan) tracer.recordError(llmSpan, err as Error);
+        }
       }
 
       if (llmSpan) {
@@ -534,7 +537,7 @@ export async function runAgent(
     };
     await emit(assistantMessage);
 
-    if (sawError) {
+    if (sawError && !deps.signal?.aborted && !isAbortMessage(sawError)) {
       await emit({ type: "error", message: sawError, recoverable: true });
  // The stream failed mid-turn: any tool calls we did receive may have
  // been parsed from truncated input. Do NOT execute them — end the run
@@ -547,6 +550,14 @@ export async function runAgent(
           finalText: assistantText.join(""),
         };
       }
+    }
+    if (deps.signal?.aborted || (sawError && isAbortMessage(sawError))) {
+      await emit({ type: "status", status: "idle" });
+      return {
+        events: produced,
+        hadToolCalls: sawToolCalls,
+        finalText: assistantText.join(""),
+      };
     }
 
  // Fire the token-estimate hook so the session layer can decide
@@ -721,13 +732,10 @@ export async function runAgent(
         `or raise/remove maxTurns in config for long tasks.`,
       recoverable: true,
     });
-  } else if (stoppedByAbort && sawToolCalls) {
-    await emit({
-      type: "error",
-      message: "Run cancelled before the model finished.",
-      recoverable: true,
-    });
   }
+  // Intentional cancel (Stop): go idle quietly — do not emit an error row
+  // ("Something went wrong" / AbortError). Follow-ups inject via steer;
+  // the queue still drains from session.prompt's finally when a run ends.
 
   await emit({ type: "status", status: "idle" });
   return {
@@ -735,6 +743,24 @@ export async function runAgent(
     hadToolCalls: sawToolCalls,
     finalText: "",
   };
+}
+
+/** True when a thrown value is a user/system abort (DOMException or Node). */
+export function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: string; message?: string; code?: string };
+  if (e.name === "AbortError") return true;
+  if (e.code === "ABORT_ERR") return true;
+  return isAbortMessage(e.message ?? "");
+}
+
+/** Match AbortError messages across runtimes (Node undici / browsers). */
+export function isAbortMessage(message: string): boolean {
+  return (
+    /this operation was aborted/i.test(message) ||
+    /^aborted$/i.test(message.trim()) ||
+    /the operation was aborted/i.test(message)
+  );
 }
 
 const TRANSIENT_PATTERNS = [

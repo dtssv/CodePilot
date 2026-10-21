@@ -76,8 +76,14 @@ export interface SubagentFactoryOptions {
   projectStateDir?: () => string | undefined;
  /** Build the tool registry for the given agent type. */
   buildToolRegistry: (agentType?: "explore" | "worker") => ToolRegistry;
- /** Optional hook engine to fire SubagentStop events. */
-  hooks?: { runSubagentStop: (agentType: string, conclusion: string) => Promise<{ warnings: string[] }>; };
+ /** Optional hook engine to fire SubagentStop events (may block + continue). */
+  hooks?: {
+    runSubagentStop: (
+      agentType: string,
+      conclusion: string,
+      extra?: Record<string, unknown>,
+    ) => Promise<{ action: "allow" | "block"; reason?: string; warnings: string[] }>;
+  };
  /**
  * Optional resolver for custom agents (`.codepilot/agents/*.md`). When
  * the requested `agentType` is neither "explore" nor "worker", this is
@@ -330,10 +336,84 @@ export function createSubagentRunner(
           `isolated — if this was part of a parallel fan-out, verify no two sub-agents wrote ` +
           `the same files.`;
       }
- // Fire SubagentStop hook (matcher: agent_type). Fire-and-forget.
+ // SubagentStop: can block like Stop; continue the sub-agent with feedback.
       const stopType = custom?.name ?? effectiveType;
-      if (opts.hooks) {
-        await opts.hooks.runSubagentStop(stopType, finalText).catch(() => undefined);
+      const stopCap =
+        typeof opts.config.stopHookBlockCap === "number" && opts.config.stopHookBlockCap >= 0
+          ? opts.config.stopHookBlockCap
+          : 8;
+      let stopContinueCount = 0;
+      let stopHookActive = false;
+      while (opts.hooks && outcome.ok) {
+        const stopResult = await opts.hooks
+          .runSubagentStop(stopType, finalText, {
+            stop_hook_active: stopHookActive,
+            stop_continue_count: stopContinueCount,
+            stop_continue_cap: stopCap,
+          })
+          .catch(() => ({ action: "allow" as const, warnings: [] as string[] }));
+
+        if (stopResult.action !== "block") break;
+
+        if (stopContinueCount >= stopCap) {
+          finalText +=
+            `\n\n[SubagentStop kept blocking after ${stopCap} continue(s); returning as-is.]`;
+          break;
+        }
+
+        stopContinueCount += 1;
+        stopHookActive = true;
+        const reason =
+          stopResult.reason?.trim() ||
+          "SubagentStop blocked ending without a reason.";
+        const continueText =
+          `<subagent_stop_continue count="${stopContinueCount}" cap="${stopCap}">\n` +
+          `${reason}\n` +
+          `Address this feedback and produce an updated conclusion.\n` +
+          `</subagent_stop_continue>`;
+
+        const continueDeps: AgentDeps = {
+          provider,
+          tools: restricted,
+          artifacts,
+          permissions,
+          config: { ...opts.config, model: effectiveModel ?? opts.config.smallModel },
+          cwd: effectiveCwd,
+          systemPrompt: sys,
+          maxTurns: effectiveMaxSteps,
+          sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
+          expandSandboxWritable: opts.expandSandboxWritable,
+          deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
+          addDeliveryRoot: opts.addDeliveryRoot,
+          scratchDir: opts.scratchDir?.(),
+          projectStateDir: opts.projectStateDir?.(),
+          subagentDepth: (depth ?? 0) + 1,
+          onEvent: async (e) => {
+            if (e.type !== "activity") events.push(e);
+            try { onLiveEvent?.(e); } catch { /* ignore */ }
+          },
+          onPermissionRequest: opts.onPermissionRequest,
+        };
+
+        try {
+          await runAgent({ history: events.slice(), userText: continueText }, continueDeps);
+        } catch (err) {
+          outcome = {
+            ok: false,
+            steps: outcome.steps,
+            conclusion: `### Blocker\nSub-agent continue threw: ${(err as Error).message}`,
+          };
+          finalText = outcome.conclusion;
+          break;
+        }
+        outcome = assessSubagentOutcome(events);
+        finalText = outcome.conclusion;
+        if (outputSchema && outcome.ok) {
+          const parsed = extractStructuredJson(finalText);
+          if (parsed.ok) {
+            finalText = "```json\n" + JSON.stringify(parsed.value, null, 2) + "\n```";
+          }
+        }
       }
       return { conclusion: finalText, steps: outcome.steps, ok: outcome.ok };
       } finally {

@@ -47,6 +47,26 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Understand before you mutate/);
   });
 
+  it("splits brownfield vs greenfield conventions", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toMatch(/Brownfield \(default\)/);
+    expect(out.staticPrefix).toMatch(/Greenfield \(no prior code/);
+    expect(out.staticPrefix).toMatch(/falsifiable acceptance gates/);
+  });
+
+  it("teaches plan quality and forbids unverifiable verify steps", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toMatch(/Plan quality/);
+    expect(out.staticPrefix).toMatch(/Do not plan verification you cannot perform/);
+    expect(out.staticPrefix).toMatch(/quick sanity check/);
+  });
+
+  it("distinguishes code correctness from feature\/visual correctness", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toMatch(/Code correctness ≠ feature \/ visual correctness/);
+    expect(out.staticPrefix).toMatch(/Define success before volume/);
+  });
+
   it("contains every section heading", async () => {
     const out = await buildSystemPrompt(baseCtx);
     for (const heading of [

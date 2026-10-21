@@ -514,6 +514,15 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           };
         case "activity":
           return { ...state, activity: { phase: ev.phase, since: ev.since, tools: ev.tools } };
+        case "stop_continue": {
+          const short =
+            ev.reason.length > 120 ? `${ev.reason.slice(0, 117)}…` : ev.reason;
+          return {
+            ...state,
+            notice: `Verifying… continuing (${ev.count}/${ev.cap}): ${short}`,
+            status: "thinking",
+          };
+        }
         case "subagent":
           if (ev.event?.type !== "tool_call") return state;
           return {

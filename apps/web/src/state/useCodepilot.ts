@@ -447,7 +447,12 @@ export function useCodepilot(): Codepilot {
     async (followUpId: string) => {
       const id = live.current.sessionId;
       if (!id) return;
-      await client.sendFollowUpNow(id, followUpId).catch(() => {});
+      try {
+        await client.sendFollowUpNow(id, followUpId);
+        dispatch({ type: "notice", text: "Injected into the current run" });
+      } catch {
+        /* ignore */
+      }
     },
     [client],
   );

@@ -65,7 +65,7 @@ export interface ComposerProps {
   onRemoveFollowUp?(id: string): void;
   /** Pull a queued item back into the composer for editing. */
   onEditFollowUp?(id: string): void;
-  /** Stop the current run and start this queued item next. */
+  /** Inject this queued item into the current run (steer; does not cancel). */
   onSendFollowUpNow?(id: string): void;
 }
 
@@ -178,7 +178,7 @@ export function Composer({
                   <button
                     type="button"
                     onClick={() => onSendFollowUpNow(fu.id)}
-                    title={t("Send now (stop current run)")}
+                    title={t("Send now (inject into current run)")}
                     aria-label={t("Send now")}
                     className="rounded-md px-1.5 py-1 text-[11px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-ink)]"
                   >

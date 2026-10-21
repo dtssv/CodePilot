@@ -19,10 +19,11 @@ const schema = z.object({
 export const planUpdateTool: ToolDef<typeof schema> = {
   name: "plan_update",
   description:
-    "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps. " +
-    "Each step: `{id, title, status}` where status is pending|in_progress|completed|blocked. " +
-    "Update when status changes, in the SAME response as that step's tool calls — never " +
-    "plan_update alone. Keep 3–8 active steps; put blockers in the title.",
+    "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps; " +
+    "skip for roughly the easiest ~25%. Each step: `{id, title, status}` where status is " +
+    "pending|in_progress|completed|blocked. Update when status changes, in the SAME response " +
+    "as that step's tool calls — never plan_update alone. Keep 3–8 active steps; put blockers " +
+    "in the title. Verify steps must be checks you can actually run (no filler sanity checks).",
   inputSchema: schema,
   permission: "read",
   async execute(input) {
@@ -32,18 +33,17 @@ export const planUpdateTool: ToolDef<typeof schema> = {
       status: s.status,
     }));
     let content = `plan updated: ${steps.length} step(s)`;
- // Soft, generic nudge: multi-step plans without a verify-ish step often
- // end as "wrote files, claimed done". Reminder only — never refuse.
+    // Soft nudge only — never refuse. Prefer a real verify step over filler.
     const VERIFY_HINT =
-      /verif|test|build|lint|check|e2e|regress|ci|typecheck|screenshot|visual|accept/i;
+      /verif|test|build|lint|check|e2e|regress|ci|typecheck|screenshot|visual|accept|browser|spike/i;
     if (
       steps.length >= 3 &&
       !steps.some((s) => VERIFY_HINT.test(s.title))
     ) {
       content +=
-        `\n\n[reminder] Multi-step plans should include a verification step ` +
-        `(test/build/lint/check against acceptance criteria) before marking ` +
-        `the task done. Add one via plan_update when you next revise.`;
+        `\n\n[reminder] Multi-step plans should include a verification step you can ` +
+        `actually run (test/build/lint/browser/screenshot — not a fake sanity check) ` +
+        `before marking the task done. Add one via plan_update when you next revise.`;
     }
     return {
       content,

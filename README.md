@@ -14,7 +14,7 @@ Token 高效、支持长程任务的编程 Agent：核心引擎 + CLI/TUI + Agen
 - **多模型**：Anthropic（含 prompt caching）、OpenAI 兼容接口、GitHub Copilot
 - **MCP**：stdio / SSE / Streamable HTTP
 - **沙箱 + 权限**：Seatbelt / bubblewrap / WSL 进程隔离 + 路径守卫；`allow` / `ask` / `deny` 规则；「始终允许」收窄为单条规则
-- **Hooks**：`PreToolUse` / `PostToolUse` / `Notification` / `Stop`（exit 2 可阻断工具）
+- **Hooks + 完成校验**：`PreToolUse` / `PostToolUse` / `Stop` / `SubagentStop`（exit 2 可阻断）；默认 `stopVerify: "prompt"` 在收尾时用小模型判断「代码过了 ≠ 功能做完」，不通过则继续改（`stopVerify: "off"` 关闭）
 - **交互提问**：`ask_user_question` 结构化提问，`plan_done` 计划审批后切到 agent 模式
 - **Failover 与后台任务**：`fallbacks` 切换模型；后台 `bash` 可查询 / 终止
 - **结果脱敏**：回显与持久化前统一脱敏敏感串
@@ -99,11 +99,13 @@ scripts/package     各端可执行产物打包脚本
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
     }
   },
-  "autoApprove": ["read_file", "glob", "grep", "^git (status|diff|log)"]
+  "autoApprove": ["read_file", "glob", "grep", "^git (status|diff|log)"],
+  "stopVerify": "prompt",
+  "stopHookBlockCap": 8
 }
 ```
 
-可用 `providers` 保存多厂商预设；Web/Agent 设置、`codepilot config`、REPL/TUI 的 `/model` `/provider` 均可切换。项目记忆写在仓库根 `CODEPILOT.md`。`turnRetries`（0–10，默认 2）控制流式中断后的整轮重试次数。
+可用 `providers` 保存多厂商预设；Web/Agent 设置、`codepilot config`、REPL/TUI 的 `/model` `/provider` 均可切换。项目记忆写在仓库根 `CODEPILOT.md`。`turnRetries`（0–10，默认 2）控制流式中断后的整轮重试次数。`stopVerify`：`prompt`（默认）/ `tests` / `off` — 结束一轮前的内置完成校验；用户也可在 `hooks.Stop` / `hooks.SubagentStop` 里写 exit 2 脚本做同样的事。
 
 ## 协作模式
 

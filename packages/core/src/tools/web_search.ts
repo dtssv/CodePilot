@@ -101,10 +101,13 @@ export const webSearchTool: ToolDef<typeof schema> = {
       const via = backend.provider === "duckduckgo" ? "" : ` (via ${backend.provider})`;
       return { content: `Results for "${input.query}"${via}:\n\n${lines.join("\n\n")}` };
     } catch (err) {
-      const e = err as Error;
-      const msg = e.name === "AbortError" ? `timed out after ${SEARCH_TIMEOUT_MS}ms` : e.message;
+      const msg = formatFetchError(err, SEARCH_TIMEOUT_MS);
+      const hint =
+        backend.provider === "duckduckgo"
+          ? " DuckDuckGo is often blocked; set BRAVE_API_KEY / SERPER_API_KEY, or web_fetch a known URL."
+          : " Try web_fetch with a direct URL, or another webSearch.provider.";
       return {
-        content: `web_search (${backend.provider}) failed: ${msg}. Try web_fetch with a direct URL.`,
+        content: `web_search (${backend.provider}) failed: ${msg}.${hint}`,
         isError: true,
       };
     } finally {
@@ -116,16 +119,52 @@ export const webSearchTool: ToolDef<typeof schema> = {
 
 // --------------------------------------------------------------- backends
 
-async function duckDuckGoSearch(query: string, _max: number, signal: AbortSignal): Promise<SearchHit[]> {
-  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const res = await fetch(url, {
-    signal,
-    headers: { "user-agent": "Mozilla/5.0 (compatible; CodePilot)" },
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} (possibly rate-limited)`);
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+/** Unwrap undici's opaque "fetch failed" into the underlying cause. */
+export function formatFetchError(err: unknown, timeoutMs: number): string {
+  const e = err as Error & { cause?: Error };
+  if (e?.name === "AbortError") return `timed out after ${timeoutMs}ms`;
+  const cause = e?.cause?.message ?? (typeof e?.cause === "string" ? e.cause : undefined);
+  const base = e?.message ?? String(err);
+  return cause && cause !== base ? `${base} (${cause})` : base;
+}
+
+/**
+ * Keyless search: try DuckDuckGo HTML first; on network/parse failure fall
+ * back to Bing HTML (DDG is frequently unreachable from some regions/ISPs).
+ */
+async function duckDuckGoSearch(query: string, max: number, signal: AbortSignal): Promise<SearchHit[]> {
+  const errors: string[] = [];
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      signal,
+      headers: { "user-agent": BROWSER_UA, accept: "text/html" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} (possibly rate-limited)`);
+    const hits = parseDuckDuckGoHtml(await res.text());
+    if (hits.length > 0) return hits.slice(0, max);
+    errors.push("DuckDuckGo returned no parseable results");
+  } catch (err) {
+    errors.push(`DuckDuckGo: ${formatFetchError(err, SEARCH_TIMEOUT_MS)}`);
   }
-  return parseDuckDuckGoHtml(await res.text());
+  try {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      signal,
+      headers: { "user-agent": BROWSER_UA, accept: "text/html" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const hits = parseBingHtml(await res.text());
+    if (hits.length > 0) return hits.slice(0, max);
+    errors.push("Bing returned no parseable results");
+  } catch (err) {
+    errors.push(`Bing: ${formatFetchError(err, SEARCH_TIMEOUT_MS)}`);
+  }
+  throw new Error(errors.join("; "));
 }
 
 async function braveSearch(
@@ -224,6 +263,25 @@ export function parseDuckDuckGoHtml(html: string): SearchHit[] {
     const uddg = rawUrl.match(/uddg=([^&]+)/);
     const url = uddg ? decodeURIComponent(uddg[1]!) : rawUrl;
     if (title) hits.push({ title, url, snippet });
+  }
+  return hits;
+}
+
+/** Parse Bing HTML `b_algo` result cards. Kept exported for tests. */
+export function parseBingHtml(html: string): SearchHit[] {
+  const hits: SearchHit[] = [];
+  const blockRe = /<li[^>]+class="b_algo"[^>]*>([\s\S]*?)<\/li>/g;
+  for (const m of html.matchAll(blockRe)) {
+    const block = m[1] ?? "";
+    const link = block.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!link) continue;
+    const url = link[1] ?? "";
+    const title = htmlToText(link[2] ?? "");
+    const snip =
+      block.match(/<p[^>]*>([\s\S]*?)<\/p>/i) ??
+      block.match(/class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = snip ? htmlToText(snip[1] ?? "") : "";
+    if (title && url.startsWith("http")) hits.push({ title, url, snippet });
   }
   return hits;
 }

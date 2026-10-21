@@ -284,6 +284,37 @@ describe("runAgent (mock provider)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not emit an error row when the stream is aborted mid-turn (Stop)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const controller = new AbortController();
+    const provider: ChatProvider = {
+      name: "mock-abort",
+      defaultModel: "mock",
+      smallModel: "mock",
+      async *stream(_opts) {
+        yield { kind: "text_delta", messageId: "m", text: "partial" };
+        controller.abort();
+        throw new DOMException("This operation was aborted", "AbortError");
+      },
+    };
+    const events: Event[] = [];
+    const f = makeDeps(dir, new MockProvider());
+    await runAgent(
+      { history: [], userText: "go" },
+      {
+        ...f.deps(),
+        provider,
+        signal: controller.signal,
+        onEvent: (e) => {
+          events.push(e);
+        },
+      },
+    );
+    expect(events.filter((e) => e.type === "error")).toEqual([]);
+    expect(events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("emits status events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
