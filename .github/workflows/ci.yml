@@ -79,6 +79,8 @@ jobs:
 
       - name: Test
         # --no-bail: finish every package so the log shows all failures, not just the first.
+        # Explicit bash: Windows runners default to pwsh, which rejects `set -o pipefail`.
+        shell: bash
         run: |
           set -o pipefail
           pnpm -r --no-bail test 2>&1 | tee test-output.log
@@ -93,6 +95,7 @@ jobs:
 
       - name: Summarize test failures
         if: failure()
+        shell: bash
         run: |
           {
             echo "## Test failures (${{ matrix.os }} / node ${{ matrix.node }})"

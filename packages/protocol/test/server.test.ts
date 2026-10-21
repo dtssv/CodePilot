@@ -664,9 +664,8 @@ describe("server / protocol handlers", () => {
     const watching = await client.request("workspace/watch", {}) as { watching: boolean; path: string };
     expect(watching).toEqual({ watching: true, path: "." });
 
- // Two quick writes coalesce into a single debounced notification.
- // fs.watch is unreliable on some CI runners (esp. macOS) — retry writes and
- // wait longer before giving up.
+    // fs.watch is unreliable on some CI runners — retry writes until we see
+    // at least one event (or soft-skip if the host never delivers).
     const deadline = Date.now() + 12_000;
     let poke = 2;
     while (changes.length === 0 && Date.now() < deadline) {
@@ -677,22 +676,25 @@ describe("server / protocol handlers", () => {
       // Host cannot deliver fs.watch events — skip rather than flake CI.
       return;
     }
-    const first = changes[0]!;
-    changes.splice(0, changes.length, first); // keep one event for later assertions
-    expect(first.path).toBe(".");
-    expect(first.kinds.length).toBeGreaterThan(0);
+    expect(changes[0]!.path).toBe(".");
+    expect(changes[0]!.kinds.length).toBeGreaterThan(0);
 
- // Filtered trees produce no notifications.
+    // Let the debounce window drain leftover poke-loop events before asserting
+    // that filtered / torn-down watches emit nothing further.
+    await new Promise((r) => setTimeout(r, 600));
+    changes.length = 0;
+
+    // Filtered trees produce no notifications.
     mkdirSync(join(root, "node_modules"));
     writeFileSync(join(root, "node_modules", "dep.js"), "x\n", "utf8");
-    await new Promise(r => setTimeout(r, 400));
-    expect(changes.length).toBe(1);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(changes).toEqual([]);
 
- // Disposing the server handle stops the watcher.
+    // Disposing the server handle stops the watcher.
     await serverHandleDispose();
     writeFileSync(join(root, "src", "a.ts"), "v4\n", "utf8");
-    await new Promise(r => setTimeout(r, 400));
-    expect(changes.length).toBe(1);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(changes).toEqual([]);
     rmSync(root, { recursive: true, force: true });
   });
 
