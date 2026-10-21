@@ -5,13 +5,78 @@ import type {
   ConfigProviderPreset,
   ConfigProviderRedacted,
   ConfigSnapshot,
+  ModelCapabilities,
+  ModelModality,
   ProviderTemplateInfo,
+  RemoteModelInfo,
 } from "../protocol/client.js";
 import { describeError } from "../protocol/client.js";
 import { t } from "../i18n.js";
 import { PlusIcon, RefreshIcon, XIcon } from "./Icons.js";
 
 type ProviderKind = "anthropic" | "openai" | "copilot";
+
+const ALL_MODALITIES: ModelModality[] = ["text", "image", "audio", "video"];
+
+/** Defaults when the gateway does not report limits. */
+const DEFAULT_CONTEXT = 200_000;
+const DEFAULT_MAX_OUTPUT = 32_000;
+
+function clampContext(value: number, max?: number): number {
+  const n = Math.floor(value);
+  if (!Number.isFinite(n) || n < 1) {
+    return max !== undefined ? Math.max(1, Math.floor(max)) : DEFAULT_CONTEXT;
+  }
+  if (max === undefined) return n;
+  return Math.min(n, Math.max(1, Math.floor(max)));
+}
+
+function formatContextTokens(n: number): string {
+  if (n >= 1_000_000 && n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n >= 1_000 && n % 1_000 === 0) return `${n / 1_000}k`;
+  return String(n);
+}
+
+function defaultCaps(_modelId: string, remote?: RemoteModelInfo): ModelCapabilities {
+  const max = remote?.contextWindowMax;
+  return {
+    ...(max !== undefined ? { contextWindowMax: max } : {}),
+    contextWindow: max ?? DEFAULT_CONTEXT,
+    modalities: remote?.modalities?.length ? remote.modalities : ["text"],
+    maxOutputTokens: remote?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT,
+  };
+}
+
+function mergeRemoteCaps(
+  prev: Record<string, ModelCapabilities>,
+  remote: RemoteModelInfo[],
+): Record<string, ModelCapabilities> {
+  const next = { ...prev };
+  for (const m of remote) {
+    const existing = prev[m.id];
+    const max = m.contextWindowMax ?? existing?.contextWindowMax;
+    let contextWindow =
+      existing?.contextWindow ?? (max !== undefined ? max : DEFAULT_CONTEXT);
+    if (max !== undefined) {
+      contextWindow = clampContext(contextWindow, max);
+    }
+    next[m.id] = {
+      ...(max !== undefined ? { contextWindowMax: max } : {}),
+      contextWindow,
+      modalities:
+        existing?.modalities?.length
+          ? existing.modalities
+          : m.modalities?.length
+            ? m.modalities
+            : ["text"],
+      maxOutputTokens:
+        existing?.maxOutputTokens ??
+        m.maxOutputTokens ??
+        DEFAULT_MAX_OUTPUT,
+    };
+  }
+  return next;
+}
 
 /** A saved endpoint row (one providers-map entry — not bound 1:1 to a vendor). */
 type EndpointRow = {
@@ -121,7 +186,10 @@ export function SettingsPanel({
   const [enabled, setEnabled] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState("");
   const [smallModel, setSmallModel] = useState("");
-  const [remote, setRemote] = useState<string[] | null>(null);
+  const [remote, setRemote] = useState<RemoteModelInfo[] | null>(null);
+  const [caps, setCaps] = useState<Record<string, ModelCapabilities>>({});
+  /** Model ids whose context/modality panel is expanded (collapsed by default). */
+  const [expandedModels, setExpandedModels] = useState<Set<string>>(() => new Set());
   const [fetching, setFetching] = useState(false);
 
   const rows = useMemo(() => buildEndpointRows(snap), [snap]);
@@ -163,6 +231,7 @@ export function SettingsPanel({
     setRemote(null);
     setApiKey("");
     setChooserOpen(false);
+    setExpandedModels(new Set());
     if (draft.kind === "add") {
       setEndpointId(draft.id);
       setProtocol(draft.provider);
@@ -172,6 +241,7 @@ export function SettingsPanel({
       setEnabled([]);
       setDefaultModel("");
       setSmallModel("");
+      setCaps({});
       return;
     }
     if (!snap) return;
@@ -184,9 +254,21 @@ export function SettingsPanel({
     const needsBase = !tmpl || !!tmpl.requiresBaseURL;
     setShowBaseURL(needsBase);
     setBaseURL(saved.baseURL ?? tmpl?.baseURL ?? "");
-    setEnabled(saved.models?.length ? [...saved.models] : []);
+    const models = saved.models?.length ? [...saved.models] : [];
+    setEnabled(models);
     setDefaultModel(saved.model ?? "");
     setSmallModel(saved.smallModel ?? "");
+    const nextCaps: Record<string, ModelCapabilities> = {};
+    for (const [mid, c] of Object.entries(saved.modelCapabilities ?? {})) {
+      nextCaps[mid] = {
+        ...c,
+        maxOutputTokens: c.maxOutputTokens ?? DEFAULT_MAX_OUTPUT,
+      };
+    }
+    for (const m of models) {
+      if (!nextCaps[m]) nextCaps[m] = defaultCaps(m);
+    }
+    setCaps(nextCaps);
   }, [draft, snap]);
 
   useEffect(() => {
@@ -269,6 +351,7 @@ export function SettingsPanel({
         apiKey: key || undefined,
       });
       setRemote(models);
+      setCaps((prev) => mergeRemoteCaps(prev, models));
       if (models.length === 0) {
         setError(t("No models returned — check baseURL / apiKey"));
       }
@@ -280,10 +363,71 @@ export function SettingsPanel({
     }
   };
 
+  const ensureCaps = (id: string): ModelCapabilities => {
+    const existing = caps[id];
+    if (existing) return existing;
+    const fromRemote = remote?.find((m) => m.id === id);
+    return defaultCaps(id, fromRemote);
+  };
+
   const toggleModel = (id: string): void => {
-    setEnabled((prev) =>
-      prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id],
-    );
+    if (enabled.includes(id)) {
+      setEnabled(enabled.filter((m) => m !== id));
+      return;
+    }
+    setEnabled([...enabled, id]);
+    if (!caps[id]) {
+      setCaps({ ...caps, [id]: defaultCaps(id, remote?.find((r) => r.id === id)) });
+    }
+  };
+
+  const setModelContext = (id: string, value: number): void => {
+    setCaps((prev) => {
+      const cur = prev[id] ?? ensureCaps(id);
+      return {
+        ...prev,
+        [id]: {
+          ...cur,
+          contextWindow: clampContext(value, cur.contextWindowMax),
+        },
+      };
+    });
+  };
+
+  const setModelMaxOutput = (id: string, value: number): void => {
+    const n = Math.floor(value);
+    setCaps((prev) => {
+      const cur = prev[id] ?? ensureCaps(id);
+      return {
+        ...prev,
+        [id]: {
+          ...cur,
+          maxOutputTokens: Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_OUTPUT,
+        },
+      };
+    });
+  };
+
+  const toggleModality = (id: string, modality: ModelModality): void => {
+    if (modality === "text") return;
+    setCaps((prev) => {
+      const cur = prev[id] ?? ensureCaps(id);
+      const has = cur.modalities.includes(modality);
+      const modalities = has
+        ? cur.modalities.filter((m) => m !== modality)
+        : [...cur.modalities, modality];
+      if (!modalities.includes("text")) modalities.unshift("text");
+      return { ...prev, [id]: { ...cur, modalities } };
+    });
+  };
+
+  const toggleExpanded = (id: string): void => {
+    setExpandedModels((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   const save = async (): Promise<void> => {
@@ -309,6 +453,10 @@ export function SettingsPanel({
     const resolvedBase = showBaseURL
       ? baseURL.trim()
       : (tmpl?.baseURL ?? effectiveBaseURL());
+    const modelCapabilities: Record<string, ModelCapabilities> = {};
+    for (const modelId of enabled) {
+      modelCapabilities[modelId] = caps[modelId] ?? ensureCaps(modelId);
+    }
     const preset: ConfigProviderPreset = {
       provider: protocol,
       displayName: displayName.trim() || tmpl?.displayName || id,
@@ -317,6 +465,7 @@ export function SettingsPanel({
       model: defaultModel.trim() || enabled[0],
       smallModel: smallModel.trim() || undefined,
       models: enabled,
+      modelCapabilities,
     };
     setBusy(true);
     try {
@@ -370,7 +519,12 @@ export function SettingsPanel({
     }
   };
 
-  const catalog = remote ?? enabled;
+  const catalogIds = (() => {
+    const ids = new Set<string>();
+    if (remote) for (const m of remote) ids.add(m.id);
+    for (const m of enabled) ids.add(m);
+    return [...ids].sort((a, b) => a.localeCompare(b));
+  })();
   const localEndpoint = isLocalBaseURL(effectiveBaseURL());
   const canFetch =
     protocol === "copilot" ||
@@ -522,9 +676,6 @@ export function SettingsPanel({
                   <div className="text-[14px] font-semibold text-[var(--color-ink)]">
                     {draft.kind === "add" ? t("New endpoint") : editing?.displayName}
                   </div>
-                  <div className="mt-0.5 text-[11.5px] text-[var(--color-ink-faint)]">
-                    {t("Each endpoint has its own key and model list; vendors are just presets.")}
-                  </div>
                 </div>
 
                 {draft.kind === "add" && (
@@ -612,31 +763,116 @@ export function SettingsPanel({
 
                 <div>
                   <div className="cp-eyebrow mb-1.5">{t("Models")}</div>
-                  <div className="max-h-56 overflow-auto rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-bg)] p-2">
-                    {catalog.length === 0 ? (
+                  <div className="max-h-72 overflow-auto rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-bg)] p-2">
+                    {catalogIds.length === 0 ? (
                       <div className="px-2 py-3 text-[11.5px] text-[var(--color-ink-faint)]">
                         {!canFetch
                           ? t("Enter an API key, then fetch the real model list.")
                           : t("No models yet — click Fetch models, then tick what you want.")}
                       </div>
                     ) : (
-                      catalog.map((m) => {
+                      catalogIds.map((m) => {
                         const on = enabled.includes(m);
+                        const expanded = expandedModels.has(m);
+                        const c = on ? (caps[m] ?? ensureCaps(m)) : undefined;
                         return (
-                          <label
+                          <div
                             key={m}
-                            className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 hover:bg-[var(--color-surface-hover)]"
+                            className="rounded-md px-2 py-1 hover:bg-[var(--color-surface-hover)]"
                           >
-                            <input
-                              type="checkbox"
-                              checked={on}
-                              onChange={() => toggleModel(m)}
-                              className="accent-[var(--color-accent)]"
-                            />
-                            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--color-ink)]">
-                              {m}
-                            </span>
-                          </label>
+                            <div className="flex items-center gap-1.5">
+                              <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={on}
+                                  onChange={() => toggleModel(m)}
+                                  className="accent-[var(--color-accent)]"
+                                />
+                                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--color-ink)]">
+                                  {m}
+                                </span>
+                              </label>
+                              {on && (
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded p-0.5 text-[var(--color-ink-faint)] hover:bg-[var(--color-surface)] hover:text-[var(--color-ink)]"
+                                  aria-expanded={expanded}
+                                  title={expanded ? t("Collapse") : t("Expand")}
+                                  onClick={() => toggleExpanded(m)}
+                                >
+                                  <svg
+                                    className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
+                                    viewBox="0 0 16 16"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="1.75"
+                                    aria-hidden
+                                  >
+                                    <path d="M4 6l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
+                            {on && expanded && c && (
+                              <div className="ml-6 mt-1 mb-1 space-y-1.5 border-l border-[var(--color-edge-subtle)] pl-2.5">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-[10.5px] text-[var(--color-ink-faint)]">
+                                    {t("Context window")}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="cp-input w-28 font-mono text-[11px]"
+                                    min={1}
+                                    max={c.contextWindowMax}
+                                    value={c.contextWindow}
+                                    onChange={(e) =>
+                                      setModelContext(m, Number(e.target.value))
+                                    }
+                                  />
+                                  {c.contextWindowMax !== undefined && (
+                                    <span className="text-[10.5px] text-[var(--color-ink-faint)]">
+                                      / {formatContextTokens(c.contextWindowMax)}{" "}
+                                      {t("max (provider)")}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-[10.5px] text-[var(--color-ink-faint)]">
+                                    {t("Max output tokens")}
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="cp-input w-28 font-mono text-[11px]"
+                                    min={1}
+                                    value={c.maxOutputTokens ?? DEFAULT_MAX_OUTPUT}
+                                    onChange={(e) =>
+                                      setModelMaxOutput(m, Number(e.target.value))
+                                    }
+                                  />
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-[10.5px] text-[var(--color-ink-faint)]">
+                                    {t("Modalities")}
+                                  </span>
+                                  {ALL_MODALITIES.map((mod) => (
+                                    <label
+                                      key={mod}
+                                      className="flex items-center gap-1 text-[11px] text-[var(--color-ink-dim)]"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={c.modalities.includes(mod)}
+                                        disabled={mod === "text"}
+                                        onChange={() => toggleModality(m, mod)}
+                                        className="accent-[var(--color-accent)]"
+                                      />
+                                      {t(mod)}
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         );
                       })
                     )}

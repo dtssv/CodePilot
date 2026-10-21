@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   applyProviderAndModel,
+  clampContextWindow,
   listSelectableModels,
   findProviderIdForFlat,
+  parseModalities,
+  parseRemoteModelEntry,
   redactProviderPreset,
+  resolveModelCapabilities,
   resolveModelTarget,
   PROVIDER_TEMPLATES,
   templateToPreset,
@@ -67,6 +71,102 @@ describe("applyProviderAndModel", () => {
     expect(next.config.apiKey).toBe("sk-b");
     expect(next.model).toBe("qwen-plus");
     expect(next.providerId).toBe("tongyi");
+  });
+
+  it("applies user-capped contextWindow and maxTokens from modelCapabilities", () => {
+    const cfg: ResolvedCodepilotConfig = {
+      provider: "openai",
+      baseURL: "https://api.example.com/v1",
+      model: "big-model",
+      providers: {
+        custom: {
+          provider: "openai",
+          baseURL: "https://api.example.com/v1",
+          model: "big-model",
+          models: ["big-model"],
+          modelCapabilities: {
+            "big-model": {
+              contextWindowMax: 256_000,
+              contextWindow: 200_000,
+              modalities: ["text", "image"],
+              maxOutputTokens: 32_000,
+            },
+          },
+        },
+      },
+    };
+    const next = applyProviderAndModel(cfg, "custom", "big-model");
+    expect(next.config.contextWindow).toBe(200_000);
+    expect(next.config.maxTokens).toBe(32_000);
+  });
+});
+
+describe("model capabilities from /models", () => {
+  it("parses OpenRouter-style context_length and modalities", () => {
+    const info = parseRemoteModelEntry({
+      id: "vendor/model-256k",
+      context_length: 262_144,
+      architecture: { modality: "text+image" },
+    });
+    expect(info).toEqual({
+      id: "vendor/model-256k",
+      contextWindowMax: 262_144,
+      modalities: ["text", "image"],
+    });
+  });
+
+  it("clamps user context to provider max", () => {
+    expect(clampContextWindow(300_000, 256_000)).toBe(256_000);
+    expect(clampContextWindow(200_000, 256_000)).toBe(200_000);
+    const caps = resolveModelCapabilities(
+      "x",
+      { contextWindowMax: 256_000, modalities: ["text"] },
+      {
+        contextWindowMax: 256_000,
+        contextWindow: 300_000,
+        modalities: ["text"],
+      },
+    );
+    expect(caps.contextWindow).toBe(256_000);
+    expect(caps.contextWindowMax).toBe(256_000);
+  });
+
+  it("keeps a lowered user budget when remote max is unchanged", () => {
+    const caps = resolveModelCapabilities(
+      "x",
+      { contextWindowMax: 256_000 },
+      {
+        contextWindowMax: 256_000,
+        contextWindow: 200_000,
+        modalities: ["text", "audio"],
+      },
+    );
+    expect(caps.contextWindow).toBe(200_000);
+    expect(caps.modalities).toEqual(["text", "audio"]);
+  });
+
+  it("defaults to 200k context / 32k output when /models omits limits", () => {
+    const caps = resolveModelCapabilities("deepseek-v4.1-flash");
+    expect(caps.contextWindowMax).toBeUndefined();
+    expect(caps.contextWindow).toBe(200_000);
+    expect(caps.maxOutputTokens).toBe(32_000);
+    expect(caps.modalities).toEqual(["text"]);
+  });
+
+  it("uses provider max when /models reports it", () => {
+    const caps = resolveModelCapabilities("x", {
+      contextWindowMax: 1_000_000,
+      modalities: ["text", "image"],
+      maxOutputTokens: 64_000,
+    });
+    expect(caps.contextWindowMax).toBe(1_000_000);
+    expect(caps.contextWindow).toBe(1_000_000);
+    expect(caps.maxOutputTokens).toBe(64_000);
+    expect(caps.modalities).toEqual(["text", "image"]);
+  });
+
+  it("parses modality strings", () => {
+    expect(parseModalities("text+image+audio")).toEqual(["text", "image", "audio"]);
   });
 });
 

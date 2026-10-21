@@ -59,7 +59,7 @@ describe("loadConfig (legacy compat)", () => {
     const cfg = await loadConfig(dir);
     expect(cfg.permissionMode).toBe("ask");
     expect(cfg.agentMode).toBe("agent");
-    expect(cfg.contextWindow).toBe(120_000);
+    expect(cfg.contextWindow).toBe(200_000);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -314,6 +314,6 @@ describe("DEFAULT_CONFIG", () => {
   it("exposes a frozen, sensible default", () => {
     expect(DEFAULT_CONFIG.permissionMode).toBe("ask");
     expect(DEFAULT_CONFIG.agentMode).toBe("agent");
-    expect(DEFAULT_CONFIG.contextWindow).toBe(120_000);
+    expect(DEFAULT_CONFIG.contextWindow).toBe(200_000);
   });
 });

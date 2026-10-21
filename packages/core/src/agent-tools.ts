@@ -212,6 +212,26 @@ export async function runOneTool(
         decision = "deny";
         void err;
       }
+      if (decision !== "deny" && req.sandboxExpand && deps.expandSandboxWritable) {
+ // Allow once → session-only root; Always → also persist writablePaths.
+        try {
+          await deps.expandSandboxWritable(req.sandboxExpand.path, {
+            persist: decision === "always",
+          });
+        } catch (err) {
+          endToolSpan(
+            new Error(
+              `failed to expand sandbox writable path: ${(err as Error).message}`,
+            ),
+          );
+          return {
+            content:
+              `failed to expand sandbox writable path ` +
+              `${req.sandboxExpand.path}: ${(err as Error).message}`,
+            isError: true,
+          };
+        }
+      }
       if (decision === "always") {
  // Narrow the grant to a rule covering THIS invocation (e.g.
  // "bash(npm test *)") rather than flipping the whole session to
@@ -219,6 +239,8 @@ export async function runOneTool(
  // lives in memory on the PermissionEngine and is never persisted,
  // so it dies with this Session. deny rules still override — they
  // are checked first in preflight and are absolute, even under yolo.
+ // For sandbox-expand asks the folder grant above is the durable
+ // part; the tool rule is still useful for same-tool retries.
         const rule = PermissionEngine.suggestRule(tool, effectiveInput);
         deps.permissions.addSessionRule(rule, "allow");
         decision = "allow";

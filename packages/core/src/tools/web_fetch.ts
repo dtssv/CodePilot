@@ -140,9 +140,10 @@ function domainGate(url: string, cfg?: WebFetchConfig): string | null {
 export const webFetchTool: ToolDef<typeof schema> = {
   name: "web_fetch",
   description:
-    "Fetch a URL as readable text (HTML stripped). Use for docs/issues; use " +
-    "`web_search` to discover URLs. Large pages spill to an artifact. Cached ~15m " +
-    "unless `no_cache`; blocked domains refused.",
+    "Fetch a URL as readable text (HTML stripped). Prefer this early when the user " +
+    "points at a page/spec/news post — understand the linked ask (and find asset " +
+    "URLs) before coding from memory. Use `web_search` to discover URLs. Large " +
+    "pages spill to an artifact. Cached ~15m unless `no_cache`; blocked domains refused.",
   inputSchema: schema,
   permission: "network",
   async execute(input, ctx) {

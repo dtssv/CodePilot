@@ -39,6 +39,8 @@ export interface PendingPermission {
   toolName: string;
   input: unknown;
   reason: string;
+ /** Out-of-sandbox write: allow adds this folder (always also persists). */
+  sandboxExpand?: { path: string };
 }
 
 export interface PendingQuestion {
@@ -79,6 +81,23 @@ export interface ConnectOptions {
   permissionMode?: PermissionMode;
 }
 
+export type ModelModality = "text" | "image" | "audio" | "video";
+
+export interface ModelCapabilities {
+ /** Provider-reported ceiling when `/models` returns it; otherwise omitted. */
+  contextWindowMax?: number;
+  contextWindow: number;
+  modalities: ModelModality[];
+  maxOutputTokens?: number;
+}
+
+export interface RemoteModelInfo {
+  id: string;
+  contextWindowMax?: number;
+  modalities?: ModelModality[];
+  maxOutputTokens?: number;
+}
+
 /** Writable provider preset for `config/upsertProvider`. */
 export interface ConfigProviderPreset {
   provider: "anthropic" | "openai" | "copilot";
@@ -88,6 +107,7 @@ export interface ConfigProviderPreset {
   model?: string;
   smallModel?: string;
   models?: string[];
+  modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
 /** Redacted preset returned by `config/get` (no full apiKey). */
@@ -100,6 +120,7 @@ export interface ConfigProviderRedacted {
   model?: string;
   smallModel?: string;
   models?: string[];
+  modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
 export interface SelectableModelInfo {
@@ -264,6 +285,7 @@ export class CodepilotClient {
           toolName: p.toolName,
           input: p.input,
           reason: p.reason,
+          ...(p.sandboxExpand ? { sandboxExpand: p.sandboxExpand } : {}),
         });
  // The server waits for a separate `permission/respond` call, so the
  // reverse request itself is answered immediately.
@@ -530,8 +552,8 @@ export class CodepilotClient {
     provider?: "anthropic" | "openai" | "copilot";
     baseURL?: string;
     apiKey?: string;
-  }): Promise<string[]> {
-    const { models } = await this.call<{ models: string[] }>(
+  }): Promise<RemoteModelInfo[]> {
+    const { models } = await this.call<{ models: RemoteModelInfo[] }>(
       "config/listRemoteModels",
       opts,
     );

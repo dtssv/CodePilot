@@ -230,6 +230,8 @@ export interface PermissionRequestParams {
   toolName: string;
   input: unknown;
   reason: string;
+ /** Present when the write sits outside sandbox writable roots. */
+  sandboxExpand?: { path: string };
 }
 
 /** Wire params for the reverse `question/request` (ask_user_question / plan_done). */
@@ -309,7 +311,14 @@ export function registerServer(
       baseURL?: string;
       apiKey?: string;
     },
-    { models: string[] }
+    {
+      models: Array<{
+        id: string;
+        contextWindowMax?: number;
+        modalities?: Array<"text" | "image" | "audio" | "video">;
+        maxOutputTokens?: number;
+      }>;
+    }
   >("config/listRemoteModels", (p) => handleConfigListRemoteModels(ctx, p));
   peer.onRequest<SessionResumeParams, SessionResumeResult>(
     "session/resume",
@@ -799,20 +808,24 @@ async function handleConfigUpsertProvider(
   }
   const providers = await upsertUserProvider(params.id, preset);
   if (params.setActive) {
+    const activeModel = preset.model;
     await setUserActiveEndpoint({
       providerId: params.id,
       provider: preset.provider,
-      model: preset.model,
+      model: activeModel,
       smallModel: preset.smallModel,
       baseURL: preset.baseURL,
       apiKey: preset.apiKey,
+      contextWindow: activeModel
+        ? preset.modelCapabilities?.[activeModel]?.contextWindow
+        : undefined,
     });
     if (params.sessionId) {
       const session = ctx.sessions.get(params.sessionId);
       if (session) {
         await session.setEndpoint({
           providerId: params.id,
-          model: preset.model ?? session.getModel(),
+          model: activeModel ?? session.getModel(),
         });
       }
     }
@@ -848,7 +861,14 @@ async function handleConfigListRemoteModels(
     baseURL?: string;
     apiKey?: string;
   } = {},
-): Promise<{ models: string[] }> {
+): Promise<{
+  models: Array<{
+    id: string;
+    contextWindowMax?: number;
+    modalities?: Array<"text" | "image" | "audio" | "video">;
+    maxOutputTokens?: number;
+  }>;
+}> {
   assertInitialized(ctx);
   let provider: ProviderName = params.provider ?? "openai";
   let baseURL = params.baseURL;
@@ -920,6 +940,7 @@ async function handleConfigSetActive(
     );
   }
   const model = params.model ?? preset.model ?? "gpt-4o-mini";
+  const contextWindow = preset.modelCapabilities?.[model]?.contextWindow;
   if (params.persist !== false) {
     await setUserActiveEndpoint({
       providerId: params.providerId,
@@ -928,6 +949,7 @@ async function handleConfigSetActive(
       smallModel: preset.smallModel,
       baseURL: preset.baseURL,
       apiKey: preset.apiKey,
+      contextWindow,
     });
   }
   if (params.sessionId) {
@@ -1493,6 +1515,7 @@ async function requestPermissionFromClient(
     toolName: req.toolName,
     input: req.input,
     reason: req.reason,
+    ...(req.sandboxExpand ? { sandboxExpand: req.sandboxExpand } : {}),
   };
   return new Promise<PermissionDecision>((settle) => {
     const p: PendingPrompt = { kind: "permission", params, settle, declined: new Set() };

@@ -23,7 +23,7 @@
 // file so existing `import { ... } from "./session.js"` callers keep working.
 
 import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { type AgentDeps } from "./agent.js";
 import { runtimeRegistry, type AgentRuntime } from "./runtime.js";
@@ -92,7 +92,14 @@ import {
 } from "./tools/index.js";
 import { onJobCompletion, readJobLog } from "./tools/bashJobs.js";
 import type { OutputStyle } from "./systemPrompt.js";
-import { resolveSandbox, detectSandboxBackend, wrapCommand, type ResolvedSandbox } from "./sandbox.js";
+import {
+  resolveSandbox,
+  detectSandboxBackend,
+  wrapCommand,
+  addWritableRoot,
+  type ResolvedSandbox,
+} from "./sandbox.js";
+import { readUserConfigFile, writeUserConfigFile } from "./providerCatalog.js";
 import { DedupCache } from "./doomLoop.js";
 import { resolveImageMentions } from "./imageMentions.js";
 import { materializeUploads } from "./promptFiles.js";
@@ -276,7 +283,10 @@ export class Session {
  // (writes inside writable roots; ordinary bash commands) — the process
  // sandbox already contains them, so prompting is friction without safety.
  // Only when the OS backend actually enforces the jail.
-    this.permissions.setSandbox(osEnforced ? this.sandbox : undefined, this.cwd);
+ // Always wire policy so out-of-root writes can prompt to expand
+ // writablePaths. Bash auto-allow still requires OS enforcement inside
+ // PermissionEngine (osEnforced flag).
+    this.permissions.setSandbox(this.sandbox, this.cwd);
     this.hooks = new HookEngine(this.config.hooks, this.cwd);
  // Opt-in: run command hooks under the same OS sandbox as `bash`.
     if (this.config.hookSandbox) {
@@ -492,8 +502,12 @@ export class Session {
         signal: this.cancelController.signal,
         agentMode: this.mode,
         sandbox: this.sandbox,
+        expandSandboxWritable: (dir, opts) =>
+          this.expandWritablePath(dir, opts).then(() => undefined),
         hooks: this.hooks,
-        persistentShell: this.persistentShell ?? undefined,
+        // Live handle — expandWritablePath may close+replace the shell
+        // mid-turn; do not capture the instance by value.
+        persistentShell: this.livePersistentShellHandle(),
         diagnosticsProvider: this.diagnosticsProvider,
         parentSpan: promptSpan,
         dedupCache: this.dedupCache,
@@ -1132,9 +1146,63 @@ export class Session {
     });
   }
 
+  /**
+   * Stable AgentDeps handle for bash. Always forwards to the current
+   * `this.persistentShell` so a mid-turn `expandWritablePath` restart
+   * does not leave tools holding a closed instance ("PersistentShell closed").
+   */
+  private livePersistentShellHandle(): AgentDeps["persistentShell"] {
+    if (!this.persistentShell) return undefined;
+    return {
+      run: (command, opts) => {
+        if (!this.persistentShell) {
+          this.persistentShell = this.startPersistentShell();
+        }
+        if (!this.persistentShell) {
+          return Promise.reject(new Error("PersistentShell unavailable after sandbox expand"));
+        }
+        return this.persistentShell.run(command, opts);
+      },
+    };
+  }
+
  /** Current sandbox policy (read-only view for hosts/tests). */
   getSandbox(): ResolvedSandbox {
     return this.sandbox;
+  }
+
+ /**
+ * Grant an extra writable directory (Claude-style add-dir).
+ * `persist: true` also appends to user `sandbox.writablePaths`.
+ * Restarts the persistent shell when an OS sandbox is active so bash
+ * picks up the new roots.
+ */
+  async expandWritablePath(
+    dir: string,
+    opts: { persist?: boolean } = {},
+  ): Promise<string> {
+    addWritableRoot(this.sandbox, dir);
+    this.config = {
+      ...this.config,
+      sandbox: {
+        ...this.config.sandbox,
+        mode: this.config.sandbox?.mode ?? this.sandbox.mode,
+        writablePaths: [...this.sandbox.writablePaths],
+      },
+    };
+    this.permissions.setSandbox(this.sandbox, this.cwd);
+    if (this.persistentShell) {
+      try {
+        this.persistentShell.close();
+      } catch {
+ /* ignore */
+      }
+      this.persistentShell = this.startPersistentShell();
+    }
+    if (opts.persist) {
+      await persistSandboxWritablePath(dir);
+    }
+    return resolve(dir);
   }
 
  /** Sandbox availability status. When `unavailable` is true, bash commands
@@ -1374,6 +1442,9 @@ export class Session {
       getEndpoint: () => ({ config: this.config, model: this.model }),
       permissions: this.permissions,
       onPermissionRequest: this.onPermissionRequest,
+      getSandbox: () => this.sandbox,
+      expandSandboxWritable: (dir, opts) =>
+        this.expandWritablePath(dir, opts).then(() => undefined),
       buildToolRegistry: (agentType) => {
         const r = new ToolRegistry();
         r.register(readFileTool);
@@ -1670,6 +1741,23 @@ export class Session {
     const title = sanitizeTitle(candidate ?? fallback);
     if (title) await this.setTitle(title);
   }
+}
+
+/** Append a path to user-level `sandbox.writablePaths` (idempotent). */
+async function persistSandboxWritablePath(dir: string): Promise<void> {
+  const abs = resolve(dir);
+  const { raw } = await readUserConfigFile();
+  const sandbox =
+    raw.sandbox && typeof raw.sandbox === "object"
+      ? { ...(raw.sandbox as Record<string, unknown>) }
+      : {};
+  const prev = Array.isArray(sandbox.writablePaths)
+    ? (sandbox.writablePaths as string[])
+    : [];
+  if (prev.some((p) => resolve(p) === abs)) return;
+  sandbox.writablePaths = [...prev, abs];
+  raw.sandbox = sandbox;
+  await writeUserConfigFile(raw);
 }
 
 /** Sub-agent tool outputs are only for display; cap them so a fan-out that

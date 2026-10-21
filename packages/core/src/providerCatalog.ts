@@ -5,7 +5,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { CodepilotConfig, ProviderName } from "./types.js";
 import {
+  DEFAULT_MODEL_CONTEXT_WINDOW,
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   getUserConfigPath,
+  type ModelCapabilities,
+  type ModelModality,
   type ProviderPreset,
   type ProvidersConfig,
   type ResolvedCodepilotConfig,
@@ -40,6 +44,15 @@ export interface ProviderTemplate {
   requiresBaseURL?: boolean;
 }
 
+/** One model row from a provider `/models` probe (context + modalities). */
+export interface RemoteModelInfo {
+  id: string;
+ /** Provider-reported context ceiling in tokens, when known. */
+  contextWindowMax?: number;
+  modalities?: ModelModality[];
+  maxOutputTokens?: number;
+}
+
 /** Desensitized preset for `config/get`. */
 export interface RedactedProviderPreset {
   provider: ProviderName;
@@ -52,6 +65,8 @@ export interface RedactedProviderPreset {
   model?: string;
   smallModel?: string;
   models?: string[];
+ /** Per-model context ceiling + modalities (safe to show in UI). */
+  modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
 export const PROVIDER_TEMPLATES: readonly ProviderTemplate[] = [
@@ -337,6 +352,165 @@ export function redactProviderPreset(preset: ProviderPreset): RedactedProviderPr
     model: preset.model,
     smallModel: preset.smallModel,
     models: preset.models,
+    modelCapabilities: preset.modelCapabilities,
+  };
+}
+
+/** Clamp a user context budget so it never exceeds the provider max. */
+export function clampContextWindow(value: number, max: number): number {
+  const ceiling = Math.max(1, Math.floor(max));
+  const n = Math.floor(value);
+  if (!Number.isFinite(n) || n < 1) return ceiling;
+  return Math.min(n, ceiling);
+}
+
+const ALL_MODALITIES: readonly ModelModality[] = ["text", "image", "audio", "video"];
+
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value.trim());
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return undefined;
+}
+
+function nestedNumber(obj: Record<string, unknown>, ...path: string[]): number | undefined {
+  let cur: unknown = obj;
+  for (const key of path) {
+    if (!cur || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return asPositiveInt(cur);
+}
+
+/** Normalize modality tokens from vendor-specific `/models` payloads. */
+export function parseModalities(raw: unknown): ModelModality[] | undefined {
+  const found = new Set<ModelModality>();
+  const add = (token: string): void => {
+    const t = token.toLowerCase().trim();
+    if (!t) return;
+    if (t === "text" || t === "language" || t.includes("text")) found.add("text");
+    if (t === "image" || t === "vision" || t.includes("image") || t.includes("vision")) {
+      found.add("image");
+    }
+    if (t === "audio" || t === "speech" || t.includes("audio") || t.includes("speech")) {
+      found.add("audio");
+    }
+    if (t === "video" || t.includes("video")) found.add("video");
+  };
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === "string") add(item);
+    }
+  } else if (typeof raw === "string") {
+    for (const part of raw.split(/[+|,/\s->]+/)) add(part);
+  } else if (raw && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    if (o.input_text || o.text) found.add("text");
+    if (o.input_image || o.vision || o.image) found.add("image");
+    if (o.input_audio || o.audio) found.add("audio");
+    if (o.input_video || o.video) found.add("video");
+  }
+  if (found.size === 0) return undefined;
+  if (!found.has("text")) found.add("text");
+  return ALL_MODALITIES.filter((m) => found.has(m));
+}
+
+/** Parse one `/models` data entry into RemoteModelInfo. */
+export function parseRemoteModelEntry(raw: Record<string, unknown>): RemoteModelInfo | undefined {
+  const id =
+    typeof raw.id === "string" && raw.id.trim()
+      ? raw.id.trim()
+      : typeof raw.name === "string" && raw.name.trim()
+        ? raw.name.trim()
+        : undefined;
+  if (!id) return undefined;
+
+  const contextWindowMax =
+    asPositiveInt(raw.context_length) ??
+    asPositiveInt(raw.context_window) ??
+    asPositiveInt(raw.max_model_len) ??
+    asPositiveInt(raw.max_context_length) ??
+    nestedNumber(raw, "architecture", "context_length") ??
+    nestedNumber(raw, "limits", "context_window") ??
+    nestedNumber(raw, "limits", "max_context_tokens") ??
+    nestedNumber(raw, "meta", "context_length") ??
+ // Anthropic-style / some gateways
+    asPositiveInt(raw.max_input_tokens) ??
+    undefined;
+
+  const maxOutputTokens =
+    asPositiveInt(raw.max_output_tokens) ??
+    asPositiveInt(raw.max_completion_tokens) ??
+    nestedNumber(raw, "limits", "max_output_tokens") ??
+    undefined;
+
+  const modalities =
+    parseModalities(raw.modalities) ??
+    parseModalities(raw.supported_modalities) ??
+    parseModalities(raw.input_modalities) ??
+    parseModalities((raw.architecture as Record<string, unknown> | undefined)?.modality) ??
+    parseModalities((raw.architecture as Record<string, unknown> | undefined)?.input_modalities) ??
+    parseModalities((raw.capabilities as Record<string, unknown> | undefined)?.modalities) ??
+    (() => {
+      const caps = raw.capabilities;
+      if (caps && typeof caps === "object") {
+        const c = caps as Record<string, unknown>;
+        if (c.vision === true || c.image === true) return ["text", "image"] as ModelModality[];
+      }
+      return undefined;
+    })();
+
+  return {
+    id,
+    ...(contextWindowMax !== undefined ? { contextWindowMax } : {}),
+    ...(modalities ? { modalities } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+  };
+}
+
+/**
+ * Build effective model capabilities from `/models` (and optional prior edits).
+ * Provider max is only set when the gateway reports it — we do not invent one
+ * from a local model table. User budget defaults to 200k when unknown.
+ */
+export function resolveModelCapabilities(
+  _modelId: string,
+  remote?: Pick<RemoteModelInfo, "contextWindowMax" | "modalities" | "maxOutputTokens">,
+  existing?: ModelCapabilities,
+): ModelCapabilities {
+  const max = remote?.contextWindowMax ?? existing?.contextWindowMax;
+  let contextWindow =
+    existing?.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW;
+  if (max !== undefined) {
+    // First-time with a reported max: start at the provider ceiling.
+    if (existing?.contextWindow === undefined && remote?.contextWindowMax !== undefined) {
+      contextWindow = max;
+    } else {
+      contextWindow = clampContextWindow(contextWindow, max);
+    }
+  }
+  const modalities: ModelModality[] =
+    existing?.modalities?.length
+      ? existing.modalities
+      : remote?.modalities?.length
+        ? remote.modalities
+        : ["text"];
+  const normalized = modalities.includes("text")
+    ? modalities
+    : (["text", ...modalities] as ModelModality[]);
+  const maxOutputTokens =
+    remote?.maxOutputTokens ??
+    existing?.maxOutputTokens ??
+    DEFAULT_MODEL_MAX_OUTPUT_TOKENS;
+  return {
+    ...(max !== undefined ? { contextWindowMax: max } : {}),
+    contextWindow,
+    modalities: normalized,
+    maxOutputTokens,
   };
 }
 
@@ -355,8 +529,20 @@ export function applyProviderAndModel(
   }
   const withModel = { ...next, model };
   const resolved = resolveModelAlias(withModel) ?? model;
+  const extended = withModel as ResolvedCodepilotConfig;
+  const caps =
+    (resolvedProviderId &&
+      extended.providers?.[resolvedProviderId]?.modelCapabilities?.[resolved]) ||
+    undefined;
+  const out: CodepilotConfig = { ...withModel, model: resolved };
+  if (caps) {
+    out.contextWindow = caps.contextWindow;
+    if (caps.maxOutputTokens !== undefined) {
+      out.maxTokens = caps.maxOutputTokens;
+    }
+  }
   return {
-    config: { ...withModel, model: resolved },
+    config: out,
     providerId: resolvedProviderId,
     model: resolved,
   };
@@ -389,15 +575,35 @@ export async function writeUserConfigFile(
   return path;
 }
 
+/** Ensure per-model context budgets never exceed provider max (when known). */
+export function normalizeProviderPreset(preset: ProviderPreset): ProviderPreset {
+  if (!preset.modelCapabilities) return preset;
+  const modelCapabilities: Record<string, ModelCapabilities> = {};
+  for (const [modelId, caps] of Object.entries(preset.modelCapabilities)) {
+    modelCapabilities[modelId] = {
+      ...caps,
+      contextWindow:
+        caps.contextWindowMax !== undefined
+          ? clampContextWindow(caps.contextWindow, caps.contextWindowMax)
+          : Math.max(1, Math.floor(caps.contextWindow)),
+      modalities: caps.modalities.includes("text")
+        ? caps.modalities
+        : (["text", ...caps.modalities] as ModelModality[]),
+    };
+  }
+  return { ...preset, modelCapabilities };
+}
+
 /** Upsert a provider preset into the user-level config.json. */
 export async function upsertUserProvider(
   id: string,
   preset: ProviderPreset,
 ): Promise<ProvidersConfig> {
+  const normalized = normalizeProviderPreset(preset);
   const { raw } = await readUserConfigFile();
   const providers = {
     ...((raw.providers as ProvidersConfig | undefined) ?? {}),
-    [id]: preset,
+    [id]: normalized,
   };
   raw.providers = providers;
   await writeUserConfigFile(raw);
@@ -427,6 +633,8 @@ export async function setUserActiveEndpoint(opts: {
   smallModel?: string;
   baseURL?: string;
   apiKey?: string;
+ /** Effective context budget for the active model (≤ provider max). */
+  contextWindow?: number;
 }): Promise<void> {
   const { raw } = await readUserConfigFile();
   if (opts.provider !== undefined) raw.provider = opts.provider;
@@ -435,6 +643,7 @@ export async function setUserActiveEndpoint(opts: {
   if (opts.baseURL !== undefined) raw.baseURL = opts.baseURL;
   if (opts.apiKey !== undefined) raw.apiKey = opts.apiKey;
   if (opts.providerId !== undefined) raw.activeProvider = opts.providerId;
+  if (opts.contextWindow !== undefined) raw.contextWindow = opts.contextWindow;
   await writeUserConfigFile(raw);
 }
 
@@ -450,25 +659,22 @@ export function templateToPreset(template: ProviderTemplate): ProviderPreset {
 }
 
 /**
- * Resolve a `/model` argument against configured selectable models.
- * Accepts a selectable id (`providerId/model`), a bare model name, or
- * `providerId/...` when `providerId` is a known providers key.
- */
-/**
- * Probe a provider for available model ids (OpenAI-compatible `/models`
- * or Anthropic Models API). Used by settings UI so the user can pick
- * which models to enable — never logs the apiKey.
+ * Probe a provider for available models (OpenAI-compatible `/models`
+ * or Anthropic Models API), including context window + modalities when
+ * the vendor reports them. Used by settings UI — never logs the apiKey.
  */
 export async function listRemoteModels(opts: {
   provider: ProviderName;
   baseURL?: string;
   apiKey?: string;
-}): Promise<string[]> {
+}): Promise<RemoteModelInfo[]> {
   const provider = opts.provider;
   const apiKey = opts.apiKey?.trim();
   if (provider === "copilot") {
  // Copilot models are fixed; no public list endpoint without a token dance.
-    return [...(PROVIDER_TEMPLATES.find((t) => t.id === "copilot")?.models ?? [])];
+    return (PROVIDER_TEMPLATES.find((t) => t.id === "copilot")?.models ?? []).map((id) => ({
+      id,
+    }));
   }
   const local =
     !!opts.baseURL &&
@@ -497,11 +703,13 @@ export async function listRemoteModels(opts: {
     if (!res.ok) {
       throw new Error(`Anthropic models HTTP ${res.status}: ${await res.text().catch(() => "")}`);
     }
-    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    const body = (await res.json()) as { data?: Array<Record<string, unknown>> };
+ // Leave context/modalities blank when the vendor omits them — do not invent
+ // values from a local model table.
     return (body.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0)
-      .sort();
+      .map((m) => parseRemoteModelEntry(m))
+      .filter((m): m is RemoteModelInfo => !!m)
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
  // openai-compatible
   const base = (opts.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
@@ -512,11 +720,11 @@ export async function listRemoteModels(opts: {
   if (!res.ok) {
     throw new Error(`List models HTTP ${res.status}: ${await res.text().catch(() => "")}`);
   }
-  const body = (await res.json()) as { data?: Array<{ id?: string }> };
+  const body = (await res.json()) as { data?: Array<Record<string, unknown>> };
   return (body.data ?? [])
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0)
-    .sort((a, b) => a.localeCompare(b));
+    .map((m) => parseRemoteModelEntry(m))
+    .filter((m): m is RemoteModelInfo => !!m)
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export function resolveModelTarget(

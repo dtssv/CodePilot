@@ -79,6 +79,14 @@ export interface AgentDeps {
   maxTurns?: number;
  /** Active sandbox policy handed to every tool via ToolContext. */
   sandbox?: ResolvedSandbox;
+ /**
+ * Grant an extra writable directory after the user approves an out-of-root
+ * write. `persist` mirrors Claude Code's always-allow for folders.
+ */
+  expandSandboxWritable?: (
+    dir: string,
+    opts: { persist: boolean },
+  ) => Promise<void> | void;
  /** Lifecycle hook engine (PreToolUse / PostToolUse). Optional. */
   hooks?: HookEngine;
  /** Structured user-question channel for ask_user_question / plan_done. */

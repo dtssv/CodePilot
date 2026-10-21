@@ -220,7 +220,7 @@ export interface ModelContextWindow {
 /** Look up the context window for a model id, falling back to a default. */
 export function lookupContextWindow(
   model: string | undefined,
-  fallback = 128_000
+  fallback = 200_000
 ): ModelContextWindow {
   const id = (model ?? "").toLowerCase().trim();
   const m = MODEL_CONTEXT_WINDOWS.find((entry) => entry.match(id));
@@ -380,7 +380,7 @@ const MODEL_CONTEXT_WINDOWS: ModelEntry[] = [
   },
   {
     match: (id) => id.includes("deepseek"),
-    window: { contextWindow: 32_000, compactionThreshold: 25_600, maxOutputTokens: 4096 },
+    window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 8192 },
   },
  // GLM (Zhipu / Z.ai).
   {

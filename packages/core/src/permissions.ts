@@ -38,7 +38,14 @@ import type {
   PermissionRules,
 } from "./types.js";
 import type { ToolDef, PermissionLevel } from "./tools/types.js";
-import { checkDangerousCommand, assertPathAllowed, detectSandboxBackend, type ResolvedSandbox } from "./sandbox.js";
+import {
+  checkDangerousCommand,
+  assertPathAllowed,
+  detectSandboxBackend,
+  isWriteOutsideSandbox,
+  writableRootForTarget,
+  type ResolvedSandbox,
+} from "./sandbox.js";
 import { isReadOnlyCommand, isReadOnlySegment, parseCommand, type ParsedCommand } from "./commandSafety.js";
 
 export interface PermissionCheckResult {
@@ -53,11 +60,10 @@ export class PermissionEngine {
   private configRules: Required<PermissionRules>;
  /** Rules added at runtime via "always" decisions. Never persisted implicitly. */
   private sessionRules: Required<PermissionRules>;
- /** Active sandbox policy + cwd, when the session runs sandboxed. Lets
- * preflight auto-allow writes that land inside the sandbox's writable
- * roots — the process sandbox already confines them, so prompting adds
- * friction without adding safety. Undefined = no sandbox awareness. */
-  private sandbox?: { policy: ResolvedSandbox; cwd: string };
+ /** Active sandbox policy + cwd. Used for in-root write auto-allow and for
+ * detecting out-of-root writes that need a sandbox-expand prompt.
+ * `osEnforced` is true only when an OS backend actually jails bash. */
+  private sandbox?: { policy: ResolvedSandbox; cwd: string; osEnforced: boolean };
 
   constructor(
     config: Pick<CodepilotConfig, "permissionMode" | "autoApprove" | "permissions"> = {}
@@ -71,13 +77,18 @@ export class PermissionEngine {
     this.sessionRules = { allow: [], ask: [], deny: [] };
   }
 
- /** Wire the active sandbox policy so preflight can auto-allow in-sandbox
- * writes. Called by the Session once the sandbox is resolved. */
+ /**
+ * Wire the active sandbox policy. Always kept when mode ≠ off so file tools
+ * can offer to expand `writablePaths`. Bash auto-allow requires `osEnforced`
+ * (an OS backend is actually jailing the shell).
+ */
   setSandbox(policy: ResolvedSandbox | undefined, cwd: string): void {
- // A policy with no OS backend behind it confines nothing (the command
- // either runs raw or is refused), so it must not earn auto-allows.
-    const enforced = policy && policy.mode !== "off" && detectSandboxBackend() !== "none";
-    this.sandbox = enforced ? { policy, cwd } : undefined;
+    if (!policy || policy.mode === "off") {
+      this.sandbox = undefined;
+      return;
+    }
+    const osEnforced = detectSandboxBackend() !== "none";
+    this.sandbox = { policy, cwd, osEnforced };
   }
 
   setMode(mode: PermissionMode): void {
@@ -148,6 +159,10 @@ export class PermissionEngine {
       ? firstSegmentMatch(this.rules().deny, primary!, bash)
       : firstMatch(this.rules().deny, tool.name, primary, input);
     if (deny) return { decision: "deny", reason: `matched deny rule "${deny}"` };
+
+ // Out-of-sandbox writes always ask (even under yolo / allow rules / auto-edit)
+ // so the user can grant the folder before the tool-layer path guard rejects it.
+    if (this.sandboxExpandFor(tool, primary)) return "ask";
 
  // 2. ask — forces interactive confirmation.
     const ask = bash
@@ -224,7 +239,7 @@ export class PermissionEngine {
  // and fall through to "ask".
     if (
       tool.name === "bash" &&
-      this.sandbox &&
+      this.sandbox?.osEnforced &&
       this.sandbox.policy.mode !== "off" &&
       primary !== undefined
     ) {
@@ -241,7 +256,7 @@ export class PermissionEngine {
     return "ask";
   }
 
- /** Build a permission request to send to the user / frontend. */
+  /** Build a permission request to send to the user / frontend. */
   buildRequest(requestId: string, tool: ToolDef, input: unknown): PermissionRequest {
     const primary = extractPrimaryArg(tool.name, input);
     let reason = describeReason(tool.permission, tool.name, input);
@@ -249,7 +264,44 @@ export class PermissionEngine {
       const danger = checkDangerousCommand(primary);
       if (danger.dangerous) reason += ` DANGEROUS: ${danger.why}.`;
     }
-    return { requestId, toolName: tool.name, input, reason };
+    const sandboxExpand = this.sandboxExpandFor(tool, primary);
+    if (sandboxExpand) {
+      reason =
+        `Write path is outside the sandbox writable roots. ` +
+        `Allow once adds “${sandboxExpand.path}” for this session; ` +
+        `Always allow also saves it to sandbox.writablePaths. ` +
+        reason;
+    }
+    return {
+      requestId,
+      toolName: tool.name,
+      input,
+      reason,
+      ...(sandboxExpand ? { sandboxExpand } : {}),
+    };
+  }
+
+ /** Directory to grant when this write sits outside the sandbox. */
+  sandboxExpandFor(
+    tool: ToolDef,
+    primary: string | undefined,
+  ): { path: string } | undefined {
+    if (
+      !this.sandbox ||
+      this.sandbox.policy.mode === "off" ||
+      this.sandbox.policy.mode === "read-only" ||
+      tool.permission !== "write" ||
+      tool.name === "bash" ||
+      !primary
+    ) {
+      return undefined;
+    }
+    if (!isWriteOutsideSandbox(primary, this.sandbox.policy, this.sandbox.cwd)) {
+      return undefined;
+    }
+    return {
+      path: writableRootForTarget(primary, this.sandbox.cwd),
+    };
   }
 }
 

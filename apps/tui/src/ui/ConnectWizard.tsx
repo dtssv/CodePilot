@@ -8,10 +8,12 @@ import {
   PROVIDER_TEMPLATES,
   listRemoteModels,
   nextProviderId,
+  resolveModelCapabilities,
   upsertUserProvider,
   setUserActiveEndpoint,
   type ProviderPreset,
   type ProviderTemplate,
+  type RemoteModelInfo,
 } from "@codepilot/core";
 import { color as palette } from "./theme.js";
 
@@ -31,7 +33,7 @@ type Step =
       id: string;
       baseURL?: string;
       apiKey: string;
-      remote: string[];
+      remote: RemoteModelInfo[];
     }
   | { kind: "saving" };
 
@@ -142,10 +144,20 @@ export function ConnectWizard(props: ConnectWizardProps): React.ReactElement {
   }
 
   if (step.kind === "models") {
-    const options = step.remote.slice(0, 40).map((m) => ({
-      label: m,
-      value: m,
-    }));
+    const options = step.remote.slice(0, 40).map((m) => {
+      const bits = [
+        m.contextWindowMax
+          ? m.contextWindowMax >= 1000
+            ? `${Math.round(m.contextWindowMax / 1000)}k`
+            : String(m.contextWindowMax)
+          : undefined,
+        m.modalities?.join("+"),
+      ].filter(Boolean);
+      return {
+        label: bits.length ? `${m.id} (${bits.join(", ")})` : m.id,
+        value: m.id,
+      };
+    });
     return (
       <WizardFrame title={`Connect · ${step.template.displayName}`} hint="Space toggle · Enter save">
         {error && <Text color={palette.remove}>{error}</Text>}
@@ -165,6 +177,7 @@ export function ConnectWizard(props: ConnectWizardProps): React.ReactElement {
                 step.baseURL,
                 step.apiKey,
                 picked,
+                step.remote,
               );
               onDone({ id: step.id, model: picked[0]! });
             } catch (err) {
@@ -190,7 +203,13 @@ async function savePreset(
   baseURL: string | undefined,
   apiKey: string,
   models: string[],
+  remote: RemoteModelInfo[] = [],
 ): Promise<void> {
+  const modelCapabilities: NonNullable<ProviderPreset["modelCapabilities"]> = {};
+  for (const modelId of models) {
+    const info = remote.find((r) => r.id === modelId);
+    modelCapabilities[modelId] = resolveModelCapabilities(modelId, info);
+  }
   const preset: ProviderPreset = {
     provider: template.provider,
     displayName: template.displayName,
@@ -199,8 +218,10 @@ async function savePreset(
     model: models[0],
     smallModel: template.smallModel,
     models,
+    modelCapabilities,
   };
   await upsertUserProvider(id, preset);
+  const primary = models[0]!;
   await setUserActiveEndpoint({
     providerId: id,
     provider: preset.provider,
@@ -208,6 +229,7 @@ async function savePreset(
     smallModel: preset.smallModel,
     baseURL: preset.baseURL,
     apiKey: preset.apiKey,
+    contextWindow: modelCapabilities[primary]?.contextWindow,
   });
 }
 

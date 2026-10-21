@@ -881,14 +881,18 @@ export function PermissionCard({
           <button
             type="button"
             onClick={() => onDecide("always")}
-            title="Remember this command pattern for this session — other commands still ask"
+            title={
+              req.sandboxExpand
+                ? t("Save this folder to sandbox.writablePaths for future sessions")
+                : "Remember this command pattern for this session — other commands still ask"
+            }
             className="cp-btn-ghost"
           >
-            {t("Always allow")}
+            {req.sandboxExpand ? t("Always allow folder") : t("Always allow")}
           </button>
           <button ref={allowRef} type="button" onClick={() => onDecide("allow")} className="cp-btn-primary">
             <CheckIcon className="h-3 w-3" />
-            {t("Allow once")}
+            {req.sandboxExpand ? t("Allow folder once") : t("Allow once")}
           </button>
         </div>
       </div>

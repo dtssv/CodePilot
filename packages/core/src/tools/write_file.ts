@@ -19,8 +19,9 @@ export const writeFileTool: ToolDef<typeof schema> = {
   name: "write_file",
   description:
     "Create or fully rewrite a file (parents created as needed). Prefer `edit_file` " +
-    "for partial changes. Must have read an existing file before overwriting. " +
-    "Never write secrets; sandbox blocks out-of-workspace paths.",
+    "for partial changes. Understand the request and related references/code first; " +
+    "must have read an existing file before overwriting. Never write secrets; " +
+    "sandbox blocks out-of-workspace paths.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

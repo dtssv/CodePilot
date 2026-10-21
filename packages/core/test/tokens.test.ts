@@ -181,10 +181,10 @@ describe("lookupContextWindow", () => {
     expect(lookupContextWindow("kimi-k2").contextWindow).toBe(128_000);
   });
 
-  it("falls back to 128k default for unknown models", () => {
+  it("falls back to 200k default for unknown models", () => {
     const w = lookupContextWindow("totally-unknown-xyz");
-    expect(w.contextWindow).toBe(128_000);
-    expect(w.compactionThreshold).toBe(102_400);
+    expect(w.contextWindow).toBe(200_000);
+    expect(w.compactionThreshold).toBe(160_000);
   });
 
   it("respects an explicit fallback", () => {

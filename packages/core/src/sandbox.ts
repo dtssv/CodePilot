@@ -41,7 +41,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { SandboxConfig } from "./types.js";
 
@@ -323,6 +323,37 @@ function isUnder(path: string, root: string): boolean {
   const r = normPath(root);
   if (p === r) return true;
   return p.startsWith(r.endsWith(sep) ? r : r + sep);
+}
+
+/**
+ * Directory to grant when the user allows a write outside the sandbox.
+ * Uses the parent of a file path (so sibling files in that folder work).
+ */
+export function writableRootForTarget(inputPath: string, cwd: string): string {
+  const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
+  const parent = dirname(abs);
+  return parent === abs ? abs : parent;
+}
+
+/** True when `inputPath` resolves outside every writable root (write would fail). */
+export function isWriteOutsideSandbox(
+  inputPath: string,
+  policy: ResolvedSandbox,
+  cwd: string,
+): boolean {
+  if (policy.mode === "off" || policy.mode === "read-only") return false;
+  return !assertPathAllowed(inputPath, "write", policy, cwd).ok;
+}
+
+/** Mutate `policy` to include an extra writable root (idempotent). */
+export function addWritableRoot(policy: ResolvedSandbox, root: string): void {
+  const abs = resolve(root);
+  if (!policy.writableRoots.some((r) => normPath(r) === normPath(abs))) {
+    policy.writableRoots.push(abs);
+  }
+  if (!policy.writablePaths.some((r) => normPath(r) === normPath(abs))) {
+    policy.writablePaths.push(abs);
+  }
 }
 
 /**

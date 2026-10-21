@@ -186,6 +186,20 @@ describe("sandbox-confined writes", () => {
     });
  // Outside the writable roots → still asks.
     expect(e.preflight(t, { path: "/etc/x.conf", content: "x" })).toBe("ask");
+    const req = e.buildRequest("r1", t, { path: "/other/proj/a.ts", content: "x" });
+    expect(req.sandboxExpand?.path).toBe("/other/proj");
+    expect(req.reason).toMatch(/writablePaths/);
+  });
+
+  it("asks to expand sandbox even in yolo mode for out-of-root writes", () => {
+    const cwd = "/repo";
+    const e = new PermissionEngine({ permissionMode: "yolo" });
+    e.setSandbox(resolveSandbox({ mode: "workspace-write" }, cwd), cwd);
+    const t = makeTool("write_file", "write");
+    expect(e.preflight(t, { path: "/repo/ok.ts", content: "x" })).toMatchObject({
+      decision: "allow",
+    });
+    expect(e.preflight(t, { path: "/elsewhere/x.ts", content: "x" })).toBe("ask");
   });
 
   it("does not auto-allow writes when no sandbox is wired", () => {

@@ -47,6 +47,42 @@ export const ModelsConfigSchema = z
   })
   .strict();
 
+/** Input modalities a model advertises (from `/models` or user edit). */
+export const ModelModalitySchema = z.enum(["text", "image", "audio", "video"]);
+
+/** Default user context budget when `/models` does not report a window. */
+export const DEFAULT_MODEL_CONTEXT_WINDOW = 200_000;
+
+/** Default max output tokens when `/models` does not report one. */
+export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 32_000;
+
+/**
+ * Per-model context / modality settings stored on a provider preset.
+ * `contextWindowMax` is the provider-reported ceiling when known (may be
+ * omitted — gateways often leave it blank). `contextWindow` is the
+ * user-effective budget; when max is present it must be ≤ max.
+ */
+export const ModelCapabilitiesSchema = z
+  .object({
+    contextWindowMax: z.number().int().positive().optional(),
+    contextWindow: z.number().int().positive(),
+    modalities: z.array(ModelModalitySchema).min(1),
+    maxOutputTokens: z.number().int().positive().optional(),
+  })
+  .strict()
+  .superRefine((val, ctx) => {
+    if (
+      val.contextWindowMax !== undefined &&
+      val.contextWindow > val.contextWindowMax
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `contextWindow (${val.contextWindow}) cannot exceed contextWindowMax (${val.contextWindowMax})`,
+        path: ["contextWindow"],
+      });
+    }
+  });
+
 /** A named provider preset — switching to it is just `useProvider("work")`. */
 const ProviderPresetSchema = z
   .object({
@@ -59,6 +95,8 @@ const ProviderPresetSchema = z
     smallModel: z.string().min(1).optional(),
  /** Models offered in the picker for this preset. */
     models: z.array(z.string().min(1)).optional(),
+ /** Per-model context ceiling + modalities (from `/models` fetch, user-editable). */
+    modelCapabilities: z.record(z.string().min(1), ModelCapabilitiesSchema).optional(),
   })
   .strict();
 
@@ -273,6 +311,8 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
   .strict();
 
 export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
+export type ModelModality = z.infer<typeof ModelModalitySchema>;
+export type ModelCapabilities = z.infer<typeof ModelCapabilitiesSchema>;
 export type ProviderPreset = z.infer<typeof ProviderPresetSchema>;
 export type ProvidersConfig = Record<string, ProviderPreset>;
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
@@ -334,7 +374,7 @@ export const DEFAULT_CONFIG: ResolvedCodepilotConfig = {
   agentMode: "agent",
   sandbox: { mode: "workspace-write", network: true, fallback: "deny" },
   maxTokens: undefined,
-  contextWindow: 120_000,
+  contextWindow: 200_000,
   mcpServers: undefined,
   autoApprove: undefined,
   models: undefined,

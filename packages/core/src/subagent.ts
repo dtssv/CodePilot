@@ -66,6 +66,9 @@ export interface SubagentFactoryOptions {
  * dispatching a sub-agent never widens what may run unattended. */
   permissions?: PermissionEngine;
   onPermissionRequest?: AgentDeps["onPermissionRequest"];
+ /** Live parent sandbox (so expand-dir grants apply to sub-agents too). */
+  getSandbox?: () => import("./sandbox.js").ResolvedSandbox;
+  expandSandboxWritable?: AgentDeps["expandSandboxWritable"];
  /** Build the tool registry for the given agent type. */
   buildToolRegistry: (agentType?: "explore" | "worker") => ToolRegistry;
  /** Optional hook engine to fire SubagentStop events. */
@@ -248,7 +251,8 @@ export function createSubagentRunner(
           cwd: effectiveCwd,
           systemPrompt: sys,
           maxTurns: effectiveMaxSteps,
-          sandbox: resolveSandbox(opts.config.sandbox, effectiveCwd),
+          sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
+          expandSandboxWritable: opts.expandSandboxWritable,
           subagentDepth: (depth ?? 0) + 1,
           onEvent: async (e) => {
             if (e.type !== "activity") events.push(e);

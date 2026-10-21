@@ -238,11 +238,12 @@ function lineDelta(before: string, after: string): { added: number; removed: num
 export const editFileTool: ToolDef<typeof schema> = {
   name: "edit_file",
   description:
-    "Search/replace edit on one file (prefer over `write_file`). Single: `search`/`replace`; " +
-    "multi: `edits: [{search, replace}]` applied atomically in order. Matches exact → " +
-    "trimmed-line → unique line → optional `regex`. Ambiguous matches fail unless " +
-    "`global_replace`. Copy search text from `read_file` without line-number prefixes. " +
-    "Must have read the file earlier in this session.",
+    "Search/replace edit on one file (prefer over `write_file`). Understand the target " +
+    "behavior (specs, images, failing tests, surrounding code) before editing. Single: " +
+    "`search`/`replace`; multi: `edits: [{search, replace}]` applied atomically in order. " +
+    "Matches exact → trimmed-line → unique line → optional `regex`. Ambiguous matches " +
+    "fail unless `global_replace`. Copy search text from `read_file` without line-number " +
+    "prefixes. Must have read the file earlier in this session.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

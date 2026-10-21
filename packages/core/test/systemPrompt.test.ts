@@ -42,6 +42,11 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Software Engineering Agent/);
   });
 
+  it("requires understanding the ask before executing", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toMatch(/Understand before you execute/);
+  });
+
   it("contains every section heading", async () => {
     const out = await buildSystemPrompt(baseCtx);
     for (const heading of [

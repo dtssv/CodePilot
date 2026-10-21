@@ -47,13 +47,15 @@ export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
     "Run a shell command in the project cwd. Prefer `read_file`/`grep`/`glob`/`edit_file` " +
-    "over shell for file I/O. Default timeout 60s (max 10m via `timeout`); output >8KB " +
-    "spills to an artifact (`read_artifact`). Use `run_in_background: true` for long-lived " +
-    "or browser/rendering jobs — then `bash_output` / `bash_kill`. Main-session foreground " +
-    "shares one shell (`cd`/`export` persist); file tools still resolve paths from the " +
-    "workspace root. Sandboxed writes: workspace, `/tmp`, `~/.codepilot`. " +
-    "Put temp scripts/screenshots/zips under the session `scratch_dir` " +
-    "(see system prompt) — not `cwd/.tmp`.",
+    "over shell for file I/O, and `read_image` over OCR/ASCII hacks when you need to " +
+    "*see* an image. Use bash to download references, run builds/tests, or capture " +
+    "headless screenshots *after* you know what you're verifying. Default timeout 60s " +
+    "(max 10m via `timeout`); output >8KB spills to an artifact (`read_artifact`). Use " +
+    "`run_in_background: true` for long-lived or browser/rendering jobs — then " +
+    "`bash_output` / `bash_kill`. Main-session foreground shares one shell " +
+    "(`cd`/`export` persist); file tools still resolve paths from the workspace root. " +
+    "Sandboxed writes: workspace, `/tmp`, `~/.codepilot`. Put temp scripts/screenshots/" +
+    "zips under the session `scratch_dir` (see system prompt) — not `cwd/.tmp`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

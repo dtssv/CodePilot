@@ -282,6 +282,12 @@ export interface PermissionRequest {
   toolName: string;
   input: unknown;
   reason: string;
+ /**
+ * When set, this ask is because the write target sits outside the sandbox
+ * writable roots. Allow once → add `path` for this session only; Always →
+ * also persist it under `sandbox.writablePaths`.
+ */
+  sandboxExpand?: { path: string };
 }
 
 export type PermissionDecision = "allow" | "deny" | "always";

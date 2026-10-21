@@ -117,6 +117,9 @@ export {
   detectSandboxBackend,
   assertPathAllowed,
   assertPathAllowedAsync,
+  addWritableRoot,
+  isWriteOutsideSandbox,
+  writableRootForTarget,
   checkDangerousCommand,
   winPathToWsl,
   SENSITIVE_READ_PATHS,
@@ -286,6 +289,8 @@ export {
 } from "./config.js";
 export type {
   ModelsConfig,
+  ModelModality,
+  ModelCapabilities,
   ProvidersConfig,
   ProviderPreset,
   SkillsConfig,
@@ -295,6 +300,12 @@ export type {
   ResolvedCodepilotConfig,
   ConfigLayer,
   LoadConfigResult,
+} from "./config.js";
+export {
+  DEFAULT_MODEL_CONTEXT_WINDOW,
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+  ModelModalitySchema,
+  ModelCapabilitiesSchema,
 } from "./config.js";
 export {
   PROVIDER_TEMPLATES,
@@ -313,11 +324,17 @@ export {
   resolveModelTarget,
   listRemoteModels,
   nextProviderId,
+  clampContextWindow,
+  normalizeProviderPreset,
+  parseModalities,
+  parseRemoteModelEntry,
+  resolveModelCapabilities,
 } from "./providerCatalog.js";
 export type {
   SelectableModel,
   ProviderTemplate,
   RedactedProviderPreset,
+  RemoteModelInfo,
 } from "./providerCatalog.js";
 
 // ---- Bundles (config + resources export/import) ----

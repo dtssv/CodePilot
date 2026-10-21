@@ -130,6 +130,7 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 
   parts.push(`## 2. Tool-Use Policy
 
+- **Understand before you execute.** For every task — bugfix, feature, visual replication, or docs — first gather enough evidence to know *what* success looks like, then write or change code. Typical first moves: \`web_fetch\` / download linked assets, \`read_image\` on mockups/GIFs/screenshots, \`read_file\`/\`grep\` on the relevant code. Do **not** invent an implementation from a one-line guess when a reference URL, image, or existing file would answer the question. After you ship something, verify against that same evidence (tests, build, or screenshots via \`read_image\`).
 - **Read before write.** Open a file with \`read_file\` (or \`grep\` / \`glob\` to locate it) before editing it. If you have not seen the exact region you intend to change, do not change it.
 - **Prefer \`edit_file\` (search/replace) over \`write_file\`.** Search/replace edits keep diffs small, are easier to review, and survive when the rest of the file is unchanged. Fall back to \`write_file\` only when creating a new file or doing a near-complete rewrite.
 - **Parallelise independent calls.** When you need to read three files, or run three read-only commands, issue them in the same turn. Do not serialise independent work.

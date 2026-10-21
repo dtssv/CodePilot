@@ -6,6 +6,9 @@ import {
   resolveSandbox,
   assertPathAllowed,
   assertPathAllowedAsync,
+  addWritableRoot,
+  isWriteOutsideSandbox,
+  writableRootForTarget,
   buildSeatbeltProfile,
   checkDangerousCommand,
   winPathToWsl,
@@ -56,6 +59,15 @@ describe("assertPathAllowed", () => {
     const r = assertPathAllowed("/etc/hosts", "write", policy, cwd);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/outside the writable roots/);
+  });
+
+  it("detects outside writes and expands a folder root", () => {
+    expect(isWriteOutsideSandbox("/other/proj/src/a.ts", policy, cwd)).toBe(true);
+    expect(writableRootForTarget("/other/proj/src/a.ts", cwd)).toBe("/other/proj/src");
+    const next = resolveSandbox(undefined, cwd);
+    addWritableRoot(next, "/other/proj/src");
+    expect(isWriteOutsideSandbox("/other/proj/src/a.ts", next, cwd)).toBe(false);
+    expect(assertPathAllowed("/other/proj/src/b.ts", "write", next, cwd).ok).toBe(true);
   });
 
   it("denies .. escapes", () => {
