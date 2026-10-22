@@ -352,8 +352,404 @@ export function liveTranscript(persisted: Event[]): Event[] {
 }
 
 /**
+ * Hard-trim a transcript copy to fit `budget` tokens (Codex / OpenCode /
+ * Pi style send-side guard). Never mutates the input array.
+ *
+ * Semantic contract (must not break the task):
+ * - Prefer folding tool_results (artifactRef retained) over dropping turns.
+ * - When turns must drop, replace them with a structured local handoff
+ *   (user asks, plan, files, errors, next action) — never a bare "omitted".
+ * - Always keep the latest plan + the last user turn and everything after it.
+ * - Truncate oversized tool dumps before touching user / plan text.
+ */
+export function trimEventsToBudget(
+  events: Event[],
+  budget: number,
+  opts: {
+    keepRecentMessages?: number;
+    estimateTokens?: (text: string) => number;
+  } = {},
+): { events: Event[]; trimmed: boolean; foldedCount: number } {
+  const est = opts.estimateTokens ?? defaultTokenEstimator;
+  const initialKeep = opts.keepRecentMessages ?? 8;
+  if (budget <= 0) return { events: events.slice(), trimmed: false, foldedCount: 0 };
+
+  let foldedCount = 0;
+  let trimmed = false;
+  let working = events;
+  const over = (): boolean => estimateEventTokens(working, est) > budget;
+
+  // Never shrink the keep window below 2 (≈ last user + reply): dropping the
+  // active user request is the #1 cause of post-compact task derailment.
+  for (const keep of uniqueDescending([initialKeep, 6, 4, 2]).filter((k) => k >= 2)) {
+    if (!over()) break;
+    const folded = foldToolResults(working, {
+      keepRecentMessages: keep,
+      minChars: keep <= 4 ? 80 : 160,
+    });
+    working = folded.events;
+    foldedCount += folded.foldedCount;
+    if (folded.foldedCount > 0) trimmed = true;
+
+    let guard = 0;
+    while (over() && guard++ < 32) {
+      const rawCutoff = findCutoff(working, keep);
+      const lastUser = findLastUserMessageIndex(working);
+      // Do not cut into the last user turn (or anything after it).
+      const cutoff =
+        lastUser >= 0 ? Math.min(rawCutoff, lastUser) : rawCutoff;
+      if (cutoff <= 0) break;
+      const drop = working.slice(0, cutoff);
+      const recent = working.slice(cutoff);
+      const priorSummary =
+        working[0]?.type === "compaction" && working[0].kind === "summary"
+          ? working[0].summary
+          : undefined;
+      // Exclude prior compaction blobs from re-extraction — they explode the
+      // stub if re-embedded every trim pass. Semantics come from a capped
+      // merge of prior head + fresh handoff of the newly dropped turns.
+      const dropSansCompaction = drop.filter((e) => e.type !== "compaction");
+      // Cap the stub relative to the remaining budget so the handoff itself
+      // cannot consume the whole window (esp. tiny test / small-model budgets).
+      const stubCharCap = Math.min(
+        HANDOFF_MAX_CHARS,
+        Math.max(500, Math.floor(budget * 2)),
+      );
+      const stub: Event = {
+        type: "compaction",
+        kind: "summary",
+        summary: buildTrimStub(priorSummary, dropSansCompaction, stubCharCap),
+      };
+      const plan = extractPlan(drop) ?? extractPlan(recent);
+      const recentHasPlan = recent.some((e) => e.type === "plan");
+      const recentClean =
+        recent[0]?.type === "compaction" ? recent.slice(1) : recent;
+      working =
+        plan && !recentHasPlan
+          ? [stub, { type: "plan", steps: plan }, ...recentClean]
+          : [stub, ...recentClean];
+      trimmed = true;
+    }
+
+    if (over()) {
+      const stripped = stripOlderImages(working, keep);
+      if (stripped.removed > 0) {
+        working = stripped.events;
+        trimmed = true;
+      }
+    }
+  }
+
+  if (over()) {
+    // Still over: fold even inside the protected tail (tool dumps only).
+    const folded = foldToolResults(working, {
+      keepRecentMessages: 1,
+      minChars: 80,
+    });
+    working = folded.events;
+    foldedCount += folded.foldedCount;
+    if (folded.foldedCount > 0) trimmed = true;
+  }
+
+  if (over()) {
+    const shrunk = truncateOversizedPayloads(working, budget, est);
+    if (shrunk.changed) {
+      working = shrunk.events;
+      trimmed = true;
+    }
+  }
+
+  return { events: working, trimmed, foldedCount };
+}
+
+function uniqueDescending(nums: number[]): number[] {
+  return [...new Set(nums.map((n) => Math.max(0, Math.floor(n))))].sort((a, b) => b - a);
+}
+
+function findLastUserMessageIndex(events: Event[]): number {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.type === "message" && e.role === "user") return i;
+  }
+  return -1;
+}
+
+const HANDOFF_MAX_CHARS = 4_000;
+const PRIOR_HANDOFF_HEAD = 1_800;
+
+function capText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/** Merge a prior summary head with a fresh handoff, hard-capped so repeated
+ * trims cannot explode the stub (that itself would defeat compression). */
+function buildTrimStub(
+  prior: string | undefined,
+  dropped: Event[],
+  maxChars: number = HANDOFF_MAX_CHARS,
+): string {
+  const handoff = buildLocalHandoffSummary(dropped, maxChars);
+  if (!prior?.trim()) return handoff;
+  const priorHead = capText(prior.trim(), Math.min(PRIOR_HANDOFF_HEAD, Math.floor(maxChars / 3)));
+  // Prefer the newer handoff body; keep prior only as a short prefix so
+  // earlier USER REQUESTS / decisions are not lost entirely.
+  return capText(`${priorHead}\n\n---\nLater trim:\n${handoff}`, maxChars);
+}
+
+/**
+ * Deterministic handoff when turns are dropped without an LLM summariser.
+ * Mirrors the SUMMARY_SYSTEM_PROMPT sections so the agent can resume the
+ * task instead of re-asking "what were we doing?".
+ */
+export function buildLocalHandoffSummary(
+  dropped: Event[],
+  maxChars: number = HANDOFF_MAX_CHARS,
+): string {
+  const userAsks: string[] = [];
+  const files = new Set<string>();
+  const errors: string[] = [];
+  const decisions: string[] = [];
+  const askCap = Math.min(500, Math.max(120, Math.floor(maxChars / 6)));
+
+  for (const e of dropped) {
+    if (e.type === "message" && e.role === "user") {
+      const text = e.content
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .join("\n")
+        .trim();
+      if (
+        text &&
+        !text.startsWith("[Earlier conversation summary]") &&
+        !text.startsWith("HANDOFF")
+      ) {
+        userAsks.push(text.length > askCap ? `${text.slice(0, askCap)}…` : text);
+      }
+    }
+    if (e.type === "message" && e.role === "assistant") {
+      const text = e.content
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .join("\n")
+        .trim();
+      // Capture short commitment lines ("I'll…", "Next…") as decisions.
+      if (text && text.length < 400 && /(?:^|\n)(?:I(?:'ll| will)|Next|Going to|Plan:)/i.test(text)) {
+        decisions.push(text.length > 240 ? `${text.slice(0, 240)}…` : text);
+      }
+    }
+    if (e.type === "tool_call") {
+      const inp = e.input as Record<string, unknown> | undefined;
+      const path = inp?.path;
+      if (typeof path === "string" && path.length > 0) files.add(path);
+      const command = inp?.command;
+      if (typeof command === "string" && /(?:npm|pnpm|yarn|pytest|cargo|go test|make)\b/i.test(command)) {
+        decisions.push(`ran: ${command.length > 160 ? `${command.slice(0, 160)}…` : command}`);
+      }
+    }
+    if (e.type === "tool_result" && e.isError) {
+      const head = e.content.slice(0, 220).replace(/\s+/g, " ");
+      errors.push(`${e.name}: ${head}`);
+    }
+  }
+
+  const plan = extractPlan(dropped);
+  const sections: string[] = [
+    "HANDOFF (context trimmed to fit the model window — resume the task; do not restart from scratch).",
+  ];
+  if (userAsks.length > 0) {
+    const kept = userAsks.slice(-4);
+    sections.push(
+      `USER REQUESTS\n${kept.map((u, i) => `${i + 1}. ${u}`).join("\n")}`,
+    );
+  }
+  if (plan && plan.length > 0) {
+    sections.push(
+      `CURRENT STATE (plan)\n${plan.map((s) => `- [${s.status}] ${s.id}: ${s.title}`).join("\n")}`,
+    );
+  }
+  if (files.size > 0) {
+    sections.push(
+      `KEY FILES\n${[...files].slice(-24).map((p) => `- ${p}`).join("\n")}`,
+    );
+  }
+  if (decisions.length > 0) {
+    sections.push(
+      `DECISIONS / ACTIONS\n${decisions.slice(-8).map((d) => `- ${d}`).join("\n")}`,
+    );
+  }
+  if (errors.length > 0) {
+    sections.push(
+      `ERRORS AND FIXES\n${errors.slice(-6).map((err) => `- ${err}`).join("\n")}`,
+    );
+  }
+  sections.push(
+    "NEXT CONCRETE ACTION\nContinue from the recent turns below. Re-read files via tools (or read_artifact for folded results) if you need exact earlier text — do not invent requirements that are not in USER REQUESTS / plan.",
+  );
+  return capText(sections.join("\n\n"), maxChars);
+}
+
+/**
+ * Shrink oversized payloads until under budget. Prefer tool dumps; never
+ * truncate the latest user message or plan events.
+ */
+function truncateOversizedPayloads(
+  events: Event[],
+  budget: number,
+  est: (s: string) => number,
+): { events: Event[]; changed: boolean } {
+  let working = events.slice();
+  let changed = false;
+  let guard = 0;
+  const lastUser = findLastUserMessageIndex(working);
+
+  while (estimateEventTokens(working, est) > budget && guard++ < 48) {
+    let bestIdx = -1;
+    let bestScore = -1;
+    for (let i = 0; i < working.length; i++) {
+      const e = working[i]!;
+      const len = payloadLen(e);
+      if (len < 80) continue;
+      const pri = truncationPriority(e, i, lastUser);
+      if (pri < 0) continue;
+      const score = pri * 1_000_000 + len;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) break;
+    const e = working[bestIdx]!;
+    const len = payloadLen(e);
+    // Shrink aggressively when far over budget; floor at 80 so dumps can
+    // keep collapsing across iterations.
+    const keepChars = Math.max(80, Math.floor(len / 2));
+    if (e.type === "tool_result") {
+      // Fold stubs are already non-semantic dumps — collapse to a one-liner.
+      if (e.content.startsWith("[folded tool_result")) {
+        working[bestIdx] = {
+          ...e,
+          content: e.artifactRef
+            ? `[folded ${e.name} — already seen; read_artifact ${e.artifactRef} if needed]`
+            : `[folded ${e.name} — already seen; do not re-call]`,
+        };
+        changed = true;
+        continue;
+      }
+      const refHint = e.artifactRef
+        ? ` Full text: read_artifact ${e.artifactRef}.`
+        : " Re-run only if you still need the omitted bytes.";
+      const notice = `\n… [truncated to fit context window.]${refHint}\n`;
+      const bodyBudget = Math.max(40, keepChars - notice.length);
+      const head = Math.floor(bodyBudget * 0.7);
+      const tail = Math.max(0, bodyBudget - head);
+      working[bestIdx] = {
+        ...e,
+        content:
+          e.content.slice(0, head) +
+          notice +
+          (tail > 0 ? e.content.slice(-tail) : ""),
+      };
+      changed = true;
+    } else if (e.type === "message" && e.role === "assistant") {
+      working[bestIdx] = {
+        ...e,
+        content: e.content.map((b) =>
+          b.type === "text" && b.text.length > keepChars
+            ? {
+                ...b,
+                text:
+                  b.text.slice(0, keepChars) +
+                  `\n… [assistant text truncated to fit context window]`,
+              }
+            : b,
+        ),
+      };
+      changed = true;
+    } else if (e.type === "compaction" && e.summary.length > 200) {
+      // Keep the head (USER REQUESTS / plan / files) — drop the tail first.
+      working[bestIdx] = {
+        ...e,
+        summary:
+          capText(e.summary, keepChars).replace(/…$/, "") +
+          "\n… [handoff truncated; recent turns below are authoritative]",
+      };
+      changed = true;
+    } else if (e.type === "message" && e.role === "user" && iIsOldUser(bestIdx, lastUser)) {
+      // Only ancient user turns, and only when nothing else will shrink.
+      working[bestIdx] = {
+        ...e,
+        content: e.content.map((b) =>
+          b.type === "text" && b.text.length > keepChars
+            ? {
+                ...b,
+                text:
+                  b.text.slice(0, keepChars) +
+                  `\n… [earlier user message truncated — see HANDOFF USER REQUESTS]`,
+              }
+            : b,
+        ),
+      };
+      changed = true;
+    } else {
+      break;
+    }
+  }
+  return { events: working, changed };
+}
+
+function iIsOldUser(idx: number, lastUser: number): boolean {
+  return lastUser < 0 || idx < lastUser;
+}
+
+function payloadLen(e: Event): number {
+  if (e.type === "tool_result") return e.content.length;
+  if (e.type === "compaction") return e.summary.length;
+  if (e.type === "message") {
+    return e.content.reduce((n, b) => n + (b.type === "text" ? b.text.length : 0), 0);
+  }
+  return 0;
+}
+
+/** Higher = safer to shrink. Negative = protected. */
+function truncationPriority(e: Event, idx: number, lastUser: number): number {
+  if (e.type === "plan") return -1;
+  if (e.type === "message" && e.role === "user") {
+    if (idx >= lastUser && lastUser >= 0) return -1;
+    return 1; // old user asks — last resort only
+  }
+  if (e.type === "tool_result") {
+    // Fold stubs are safe to collapse further (artifactRef retained in text).
+    if (e.content.startsWith("[folded tool_result")) return 11;
+    if (e.name === "bash" || e.name === "grep" || e.name === "glob") return 10;
+    if (e.name === "read_file" || e.name === "read_artifact") return 8;
+    return 7;
+  }
+  if (e.type === "message" && e.role === "assistant") return 5;
+  if (e.type === "compaction") return 3;
+  return 0;
+}
+
+/** Drop image attachments on events before the recent cutoff (text remains). */
+function stripOlderImages(
+  events: Event[],
+  keepMessages: number,
+): { events: Event[]; removed: number } {
+  const cutoff = findCutoff(events, keepMessages);
+  if (cutoff <= 0) return { events, removed: 0 };
+  let removed = 0;
+  const out = events.map((e, idx) => {
+    if (idx >= cutoff) return e;
+    if ((e.type === "message" || e.type === "tool_result") && e.images?.length) {
+      removed += e.images.length;
+      return { ...e, images: undefined };
+    }
+    return e;
+  });
+  return { events: out, removed };
+}
+
+/**
  * Run the full layered compaction. If no summariser is provided only the
- * local fold pass is applied. The result is a new event list with a
+ * local fold + hard-trim passes run. The result is a new event list with a
  * synthetic compaction event prepended (if anything was dropped).
  */
 export async function compact(
@@ -365,37 +761,62 @@ export async function compact(
     return { events, summary: "", foldedCount: 0 };
   }
 
+  const est = opts.estimateTokens ?? defaultTokenEstimator;
+  const keep = opts.keepRecentMessages ?? 8;
+
  // Pass 1: local folding of old tool results.
-  const folded = foldToolResults(events, { keepRecentMessages: opts.keepRecentMessages });
+  const folded = foldToolResults(events, { keepRecentMessages: keep });
   let working = folded.events;
+  let droppedRange: { from: number; to: number } | undefined;
+  let summary = "";
 
  // Pass 2: model-driven summary if still over budget.
   if (
     opts.summariser &&
-    estimateEventTokens(working, opts.estimateTokens ?? defaultTokenEstimator) >=
-      opts.contextWindow
+    estimateEventTokens(working, est) >= opts.contextWindow
   ) {
-    const cutoff = findCutoff(working, opts.keepRecentMessages ?? 8);
-    const drop = working.slice(0, cutoff);
-    const recent = working.slice(cutoff);
-    const summary = await callSummariser(opts.summariser, drop, opts.summaryModel);
-    const compactionEvent: Event = { type: "compaction", kind: "summary", summary };
- // The plan is never compacted away: it is what tells the next turn
- // which steps are already done.
-    const plan = extractPlan(drop);
-    const keepPlan = plan && !recent.some((e) => e.type === "plan");
-    working = keepPlan
-      ? [compactionEvent, { type: "plan", steps: plan }, ...recent]
-      : [compactionEvent, ...recent];
-    return {
-      events: working,
-      summary,
-      foldedCount: folded.foldedCount,
-      droppedRange: { from: 0, to: cutoff },
-    };
+    const cutoff = findCutoff(working, keep);
+    if (cutoff > 0) {
+      const drop = working.slice(0, cutoff);
+      const recent = working.slice(cutoff);
+      try {
+        summary = await callSummariser(opts.summariser, drop, opts.summaryModel);
+      } catch {
+        summary = "";
+      }
+      if (summary) {
+        const compactionEvent: Event = { type: "compaction", kind: "summary", summary };
+        const plan = extractPlan(drop);
+        const keepPlan = plan && !recent.some((e) => e.type === "plan");
+        working = keepPlan
+          ? [compactionEvent, { type: "plan", steps: plan }, ...recent]
+          : [compactionEvent, ...recent];
+        droppedRange = { from: 0, to: cutoff };
+      }
+    }
   }
 
-  return { events: working, summary: "", foldedCount: folded.foldedCount };
+ // Pass 3: hard local trim so we never leave the caller over budget
+ // (Codex usable-window / OpenCode overflow guard). Runs when summariser
+ // was absent, failed, or the summary alone was not enough.
+  if (estimateEventTokens(working, est) >= opts.contextWindow) {
+    const hard = trimEventsToBudget(working, Math.max(1, opts.contextWindow - 1), {
+      keepRecentMessages: keep,
+      estimateTokens: est,
+    });
+    working = hard.events;
+    if (hard.trimmed && !summary) {
+      const head = working.find((e) => e.type === "compaction");
+      summary = head && head.type === "compaction" ? head.summary : "";
+    }
+  }
+
+  return {
+    events: working,
+    summary,
+    foldedCount: folded.foldedCount,
+    droppedRange,
+  };
 }
 
 async function callSummariser(

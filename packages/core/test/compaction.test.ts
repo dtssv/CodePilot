@@ -3,12 +3,14 @@ import {
   compact,
   shouldCompact,
   foldToolResults,
+  trimEventsToBudget,
   estimateEventTokens,
   eventsToMessages,
   extractPlan,
   liveTranscript,
 } from "../src/compaction.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
+import { buildProviderMessages } from "../src/agent-messages.js";
 
 function makeEvents(): Event[] {
   const events: Event[] = [];
@@ -178,17 +180,175 @@ describe("compact (without summariser)", () => {
     expect(r.summary).toBe("");
   });
 
-  it("folds results but produces no summary without summariser", async () => {
+  it("hard-trims when over budget even without a summariser", async () => {
     const events = makeEvents();
+    const before = estimateEventTokens(events, (s) => Math.ceil(s.length / 4));
     const r = await compact(events, {
-      contextWindow: 10,
-      keepRecentMessages: 2, // force folding of multiple earlier tool results
- // no summariser
+      contextWindow: 2_000,
+      keepRecentMessages: 2,
+      estimateTokens: (s) => Math.ceil(s.length / 4),
     });
-    expect(r.summary).toBe("");
- // Either some folding happened, or compaction is gated by `shouldCompact`
- // which it is because the window is tiny. We mainly assert no crash.
-    expect(r.events.length).toBe(events.length);
+    const after = estimateEventTokens(r.events, (s) => Math.ceil(s.length / 4));
+    // May slightly exceed a tiny budget when only the protected tail remains;
+    // the guarantee is a large reduction + semantic handoff, not byte-perfect.
+    expect(after).toBeLessThanOrEqual(2_000);
+    expect(after).toBeLessThan(before * 0.4);
+    expect(r.events.some((e) => e.type === "compaction")).toBe(true);
+  });
+});
+
+describe("trimEventsToBudget", () => {
+  it("drops oldest turns until near the hard budget", () => {
+    const events = makeEvents();
+    const before = estimateEventTokens(events, (s) => Math.ceil(s.length / 4));
+    const { events: trimmed, trimmed: did } = trimEventsToBudget(events, 2_000, {
+      keepRecentMessages: 2,
+      estimateTokens: (s) => Math.ceil(s.length / 4),
+    });
+    expect(did).toBe(true);
+    const after = estimateEventTokens(trimmed, (s) => Math.ceil(s.length / 4));
+    expect(after).toBeLessThanOrEqual(2_000);
+    expect(after).toBeLessThan(before * 0.4);
+    const handoff = trimmed.find((e) => e.type === "compaction");
+    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(/HANDOFF|USER REQUESTS/);
+  });
+
+  it("preserves plan + last user request in a semantic handoff", () => {
+    const events: Event[] = [
+      {
+        type: "plan",
+        steps: [
+          { id: "s1", title: "build HUD", status: "completed" },
+          { id: "s2", title: "wire physics", status: "in_progress" },
+        ],
+      },
+      {
+        type: "message",
+        id: "u0",
+        role: "user",
+        content: [{ type: "text", text: "Clone the GIF racing game into /tmp/race" }],
+      },
+      {
+        type: "tool_call",
+        id: "c0",
+        name: "write_file",
+        input: { path: "/tmp/race/index.html" },
+      },
+      {
+        type: "tool_result",
+        toolCallId: "c0",
+        name: "write_file",
+        content: "ok\n".repeat(2000),
+      },
+    ];
+    for (let i = 1; i < 8; i++) {
+      events.push({
+        type: "message",
+        id: `u${i}`,
+        role: "user",
+        content: [{ type: "text", text: `note ${i} ` + "padding ".repeat(40) }],
+      });
+      events.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "text", text: `work ${i} ` + "padding ".repeat(40) }],
+      });
+      events.push({
+        type: "tool_result",
+        toolCallId: `t${i}`,
+        name: "bash",
+        content: "log line\n".repeat(400),
+      });
+    }
+    events.push({
+      type: "message",
+      id: "u_final",
+      role: "user",
+      content: [{ type: "text", text: "Keep going on wire physics — do not restart" }],
+    });
+    const { events: trimmed } = trimEventsToBudget(events, 800, {
+      keepRecentMessages: 4,
+      estimateTokens: (s) => Math.ceil(s.length / 4),
+    });
+    const plan = extractPlan(trimmed);
+    expect(plan?.some((s) => s.id === "s2")).toBe(true);
+    const lastUser = [...trimmed].reverse().find(
+      (e) => e.type === "message" && e.role === "user",
+    );
+    expect(lastUser && lastUser.type === "message" ? lastUser.content[0] : null).toMatchObject({
+      type: "text",
+      text: "Keep going on wire physics — do not restart",
+    });
+    const handoff = trimmed.find((e) => e.type === "compaction");
+    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(/USER REQUESTS|HANDOFF|KEY FILES|CURRENT STATE/);
+  });
+
+  it("does not truncate the latest user message when shrinking payloads", () => {
+    const events: Event[] = [
+      {
+        type: "message",
+        id: "u",
+        role: "user",
+        content: [{ type: "text", text: "MUST_KEEP_THIS_REQUIREMENT verbatim please" }],
+      },
+      {
+        type: "tool_result",
+        toolCallId: "t1",
+        name: "bash",
+        content: "noise\n".repeat(5000),
+      },
+    ];
+    const { events: trimmed } = trimEventsToBudget(events, 400, {
+      keepRecentMessages: 2,
+      estimateTokens: (s) => Math.ceil(s.length / 4),
+    });
+    const user = trimmed.find((e) => e.type === "message" && e.role === "user");
+    const text =
+      user && user.type === "message" && user.content[0]?.type === "text"
+        ? user.content[0].text
+        : "";
+    expect(text).toContain("MUST_KEEP_THIS_REQUIREMENT");
+  });
+});
+
+describe("buildProviderMessages hardBudget", () => {
+  it("never returns a transcript over the hard budget", () => {
+    const history: Event[] = [];
+    for (let i = 0; i < 20; i++) {
+      history.push({
+        type: "message",
+        id: `u${i}`,
+        role: "user",
+        content: [{ type: "text", text: "user " + "x".repeat(800) }],
+      });
+      history.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "text", text: "asst " + "y".repeat(800) }],
+      });
+      history.push({
+        type: "tool_result",
+        toolCallId: `t${i}`,
+        name: "bash",
+        content: "out\n".repeat(400),
+      });
+    }
+    const msgs = buildProviderMessages(history, [], "hi", undefined, {
+      contextBudget: 50_000,
+      hardBudget: 2_000,
+    });
+    // Rough char/4 estimate of serialised provider content.
+    let chars = 0;
+    for (const m of msgs) {
+      for (const b of m.content) {
+        if (b.type === "text") chars += b.text.length;
+        else if (b.type === "tool_result") chars += b.content.length;
+        else chars += JSON.stringify(b).length;
+      }
+    }
+    expect(Math.ceil(chars / 4)).toBeLessThan(8_000);
   });
 });
 

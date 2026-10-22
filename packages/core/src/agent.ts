@@ -46,9 +46,9 @@ import {
   emitTokenEstimateIfNeeded,
   type ToolExecResult,
 } from "./agent-tools.js";
-import { extractPlan } from "./compaction.js";
+import { estimateEventTokens, extractPlan, shouldCompact, usageSignalsCompact } from "./compaction.js";
 import { renderPlanBlock } from "./systemPrompt.js";
-import { lookupContextWindow } from "./tokens.js";
+import { estimateTokens, lookupContextWindow } from "./tokens.js";
 
 export interface AgentDeps {
   provider: ChatProvider;
@@ -73,6 +73,14 @@ export interface AgentDeps {
  * Optional — when omitted the agent runs unchanged.
  */
   onTokenEstimate?: (estimate: { tokens: number; turns: number; window: number }) => void;
+  /**
+   * Mid-run context compaction (Codex / OpenCode / Pi): called before a
+   * provider turn when the live transcript approaches the model window.
+   * Should compact the session's authoritative event list and return the
+   * new live transcript so the agent can resync `history` / `produced`.
+   * Return `null` when nothing changed.
+   */
+  compactNow?: () => Promise<Event[] | null>;
  /** Permission request handler. */
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
  /** Maximum number of assistant turns per prompt. */
@@ -230,16 +238,30 @@ export async function runAgent(
     if (deps.onEvent) await deps.onEvent(e);
   };
   const turnRetries = deps.config.turnRetries ?? 2;
-  const contextWindow =
-    deps.config.contextWindow ?? lookupContextWindow(deps.config.model).contextWindow;
- // Mid-run fold budget. Two caps, whichever is tighter:
- // • the model's window × compaction threshold (don't overflow the window)
- // • a soft working budget (default 48K) so we don't ship ~100K tokens/turn
- // just because the window technically allows it — that is the main cause
- // of slow turns on large-window / unknown models.
-  const windowBudget = Math.floor(contextWindow * (deps.config.compactionThreshold ?? 0.92));
+  const modelWindow = lookupContextWindow(deps.config.model);
+  const contextWindow = deps.config.contextWindow ?? modelWindow.contextWindow;
+  const systemReserve = estimateTokens(deps.systemPrompt?.staticPrefix ?? "") +
+    estimateTokens(deps.systemPrompt?.dynamicSuffix ?? "");
+  const outputReserve = Math.max(
+    1_024,
+    deps.config.maxTokens ?? modelWindow.maxOutputTokens ?? 8_192,
+  );
+  // Hard send ceiling: configured window minus system prompt + output headroom
+  // (Claude Code / Pi reserveTokens; Codex ~95% usable window).
+  const hardBudget = Math.max(
+    4_000,
+    contextWindow - systemReserve - outputReserve - 1_024,
+  );
+  // Auto-compact trigger (~92% of window, Codex/default), never above hardBudget.
+  const autoTrigger = Math.min(
+    hardBudget,
+    Math.floor(contextWindow * (deps.config.compactionThreshold ?? 0.92)),
+  );
+  // Soft fold target for speed (default 48K); still capped by hardBudget.
   const softBudget = deps.config.maxContextTokens ?? 48_000;
-  const contextBudget = Math.max(8_000, Math.min(windowBudget, softBudget));
+  const contextBudget = Math.max(8_000, Math.min(hardBudget, softBudget));
+  /** Last provider-reported input size — used like OpenCode/Pi for next-turn checks. */
+  let lastInputTokens = 0;
 
  // Append the user message as a transcript event. Images and uploaded-file
  // metadata ride on the event so resume / the UI keep them.
@@ -321,15 +343,36 @@ export async function runAgent(
 
     await emit({ type: "status", status: "running" });
 
- // Micro-fold old tool_results for the provider prompt (keeps big runs
- // inside the token budget). This is a routine, lossless prune: each folded
- // stub already carries its own "don't re-read; use read_artifact" steering,
- // and the fold never reaches the provider as a separate event. We used to
- // emit a visible `compaction` notice here, but it fired on almost every
- // turn of a long session ("micro-fold: stubbed N prior tool_result(s)…")
- // and was pure noise to the user — so we prune silently now.
+    // Mid-run compaction before each model step (Codex/OpenCode/Pi): when the
+    // live transcript (or last API input) approaches the configured window,
+    // persist a summary compaction and resync history so growth stays bounded.
+    if (deps.compactNow && deps.config.autoCompact !== false) {
+      const liveTokens = estimateEventTokens([...input.history, ...produced], estimateTokens) +
+        systemReserve;
+      const pressure =
+        liveTokens >= autoTrigger ||
+        (lastInputTokens > 0 &&
+          usageSignalsCompact({ input: lastInputTokens, output: 0 }, autoTrigger)) ||
+        shouldCompact([...input.history, ...produced], { contextWindow: autoTrigger }).shouldCompact;
+      if (pressure) {
+        try {
+          const next = await deps.compactNow();
+          if (next) {
+            input.history = next;
+            produced.length = 0;
+            lastInputTokens = 0;
+          }
+        } catch {
+          /* best-effort; hard trim below still guards the request */
+        }
+      }
+    }
+
+ // Soft-fold + hard-trim for the provider prompt. Fold is silent (no UI
+ // notice); hard trim guarantees we never send past the configured window.
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages, {
       contextBudget,
+      hardBudget,
     });
     if (pendingProviderResume) {
       // Provider-only: transcript keeps the real assistant text; this nudge
@@ -473,6 +516,10 @@ export async function runAgent(
               llmUsage.output += ev.usage.output ?? 0;
               llmUsage.cacheRead += ev.usage.cacheRead ?? 0;
               llmUsage.cacheWrite += ev.usage.cacheWrite ?? 0;
+              // Prefer the latest request's input size (OpenCode/Pi style).
+              if (typeof ev.usage.input === "number" && ev.usage.input > 0) {
+                lastInputTokens = ev.usage.input + (ev.usage.cacheRead ?? 0);
+              }
               if (deps.onUsage) deps.onUsage({ ...totalUsage });
               await emit({ type: "usage", usage: ev.usage });
               break;

@@ -615,6 +615,14 @@ export class Session {
           this.usageTotal.cacheRead += u.cacheRead ?? 0;
           this.usageTotal.cacheWrite += u.cacheWrite ?? 0;
         },
+        // Mid-run compaction: agent asks us to shrink this.events when the
+        // live transcript approaches the configured contextWindow.
+        compactNow: async () => {
+          const before = this.events;
+          await this.maybeCompact();
+          if (this.events === before) return null;
+          return this.events.slice();
+        },
       };
 
  // Resolve the agent runtime. Default loop wraps
@@ -1861,14 +1869,20 @@ export class Session {
  // Master toggle: when autoCompact is explicitly false, the session
  // never auto-compacts (the user must invoke /compact manually).
     if (this.config.autoCompact === false) return;
-    const window = this.config.contextWindow ??
-      lookupContextWindow(this.model).contextWindow;
+    const modelWindow = lookupContextWindow(this.model);
+    const window = this.config.contextWindow ?? modelWindow.contextWindow;
  // Effective trigger point. Config may request a fraction of the window
- // (default 0.92, ). The compaction engine's
- // `contextWindow` option IS the trigger threshold (it compacts when
- // tokens >= that value), so we pass the fraction-resolved threshold in.
+ // (default 0.92). The compaction engine's `contextWindow` option IS the
+ // trigger threshold (it compacts when tokens >= that value). Cap by a
+ // hard usable window (reserve output tokens) so we never wait until the
+ // provider rejects the request.
     const fraction = this.config.compactionThreshold ?? 0.92;
-    const trigger = Math.floor(window * fraction);
+    const outputReserve = Math.max(
+      1_024,
+      this.config.maxTokens ?? modelWindow.maxOutputTokens ?? 8_192,
+    );
+    const hardUsable = Math.max(4_000, window - outputReserve);
+    const trigger = Math.min(hardUsable, Math.floor(window * fraction));
     const decision = shouldCompact(this.events, { contextWindow: trigger });
     if (!decision.shouldCompact) return;
  // PreCompact hooks may block compaction (e.g. to preserve state during

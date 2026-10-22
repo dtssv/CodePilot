@@ -25,7 +25,7 @@ import type {
 } from "./types.js";
 import { formatUploadNote } from "./promptFiles.js";
 import { filterToolsByMode } from "./tools/modes.js";
-import { estimateEventTokens, foldToolResults } from "./compaction.js";
+import { estimateEventTokens, foldToolResults, trimEventsToBudget } from "./compaction.js";
 import { estimateTokens } from "./tokens.js";
 
 // ---------------------------------------------------------------------------
@@ -58,10 +58,11 @@ export function buildProviderToolDefs(
  * `userText` here). The agent loop is responsible for sending the user
  * message once at the start of the run.
  *
- * Micro-compaction: before sending, fold old
- * tool_result events (everything before the last 8 messages) into short
- * stubs that keep the artifactRef. This operates on a COPY of the event
- * list — the persisted JSONL transcript is untouched.
+ * Context management (Codex / OpenCode / Pi):
+ * 1. Soft fold — stub old tool_results toward `contextBudget` (speed).
+ * 2. Hard trim — if still over `hardBudget` (model window minus reserves),
+ *    drop oldest turns / images so the request cannot exceed the configured
+ *    context length. Operates on a COPY — persisted JSONL is untouched.
  */
 export function buildProviderMessages(
   history: Event[],
@@ -69,13 +70,20 @@ export function buildProviderMessages(
   userText: string,
   images?: ImageAttachment[],
   opts: {
+    /** Soft fold target (default aggressiveness for long runs). */
     contextBudget?: number;
+    /** Hard ceiling — must not send more than this many event tokens. */
+    hardBudget?: number;
  /** Invoked when micro-compaction folds ≥1 tool_result (observability). */
     onFolded?: (foldedCount: number) => void;
   } = {},
 ): ProviderMessage[] {
   const all = [...history, ...newEvents];
-  const { events: folded, foldedCount } = foldForBudget(all, opts.contextBudget);
+  const { events: folded, foldedCount } = foldForBudget(
+    all,
+    opts.contextBudget,
+    opts.hardBudget,
+  );
   if (foldedCount > 0) {
     try {
       opts.onFolded?.(foldedCount);
@@ -92,24 +100,35 @@ export function buildProviderMessages(
 }
 
 /**
- * Fold old tool results, tightening the fold as the transcript approaches
- * the context budget. Long single-prompt runs never reach the post-prompt
- * compaction, so this is what keeps them inside the window mid-run.
+ * Fold old tool results toward the soft budget, then hard-trim to the
+ * model window. Long single-prompt runs never reach the post-prompt
+ * compaction alone, so this is what keeps each turn inside the window.
  */
 function foldForBudget(
   events: Event[],
-  budget: number | undefined,
+  softBudget: number | undefined,
+  hardBudget?: number,
 ): { events: Event[]; foldedCount: number } {
   const first = foldToolResults(events, { keepRecentMessages: 8 });
   let out = first.events;
   let totalFolded = first.foldedCount;
-  if (!budget || budget <= 0) return { events: out, foldedCount: totalFolded };
-  for (const keep of [6, 4, 2]) {
-    if (estimateEventTokens(out, estimateTokens) < budget * 0.75) break;
-    const next = foldToolResults(out, { keepRecentMessages: keep, minChars: 160 });
- // Only count newly folded stubs (already-folded are skipped by foldToolResults).
-    totalFolded += next.foldedCount;
-    out = next.events;
+  const soft = softBudget && softBudget > 0 ? softBudget : undefined;
+  if (soft) {
+    for (const keep of [6, 4, 2]) {
+      if (estimateEventTokens(out, estimateTokens) < soft * 0.75) break;
+      const next = foldToolResults(out, { keepRecentMessages: keep, minChars: 160 });
+      totalFolded += next.foldedCount;
+      out = next.events;
+    }
+  }
+  const hard =
+    hardBudget && hardBudget > 0
+      ? hardBudget
+      : soft;
+  if (hard && estimateEventTokens(out, estimateTokens) > hard) {
+    const trimmed = trimEventsToBudget(out, hard, { keepRecentMessages: 4 });
+    out = trimmed.events;
+    totalFolded += trimmed.foldedCount;
   }
   return { events: out, foldedCount: totalFolded };
 }

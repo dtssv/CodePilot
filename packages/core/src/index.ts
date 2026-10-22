@@ -175,6 +175,8 @@ export {
   compact,
   shouldCompact,
   foldToolResults,
+  trimEventsToBudget,
+  buildLocalHandoffSummary,
   estimateEventTokens,
   eventsToMessages,
   extractPlan,

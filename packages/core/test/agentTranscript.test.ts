@@ -250,7 +250,9 @@ describe("compaction", () => {
       },
     };
     const r = await compact(events, { contextWindow: 100, summariser });
-    expect(r.events[0]).toMatchObject({ type: "compaction", summary: "SUMMARY" });
-    expect(r.events[1]).toMatchObject({ type: "plan" });
+    expect(r.events[0]?.type).toBe("compaction");
+    const head = r.events[0];
+    expect(head && head.type === "compaction" ? head.summary : "").toMatch(/SUMMARY/);
+    expect(r.events.some((e) => e.type === "plan")).toBe(true);
   });
 });

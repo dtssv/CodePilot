@@ -440,18 +440,18 @@ export interface CodepilotConfig {
   permissionMode?: PermissionMode;
   maxTokens?: number;
  /** Token threshold to trigger compaction. */
+  /** Model context window (tokens). Soft auto-compact fires near
+   * `window × compactionThreshold`; every provider request is hard-trimmed
+   * to stay under the usable window (window − output reserve − system). */
   contextWindow?: number;
- /** Soft cap on how many transcript tokens are sent to the model per turn,
- * independent of the model's (often optimistic) context window. Mid-run
- * folding tightens aggressively once the transcript passes this, keeping
- * requests small and fast. Default 48_000 — a simple task should never
- * ship ~100K tokens/turn just because the window technically allows it.
- * Set higher to trade speed for keeping more raw context inline. */
+ /** Soft fold target for mid-run tool_result pruning (default 48_000).
+ * Independent of `contextWindow`: keeps routine turns small/fast. The hard
+ * window cap still applies — raising this cannot exceed `contextWindow`. */
   maxContextTokens?: number;
  /** Auto-compaction trigger as a fraction of the context window (0–1).
- * Default 0.92. Set to 1 to
- * only compact at the hard window limit, or set `autoCompact: false` to
- * disable auto-compaction entirely (manual `/compact` still works). */
+ * Default 0.92 (Codex-style). Checked before each model turn during a
+ * long tool loop, not only after the prompt ends. Set `autoCompact: false`
+ * to disable (manual `/compact` still works). */
   compactionThreshold?: number;
  /** Master toggle for auto-compaction. When false, the session never
  * auto-compacts regardless of token pressure; the user must invoke
