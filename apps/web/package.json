@@ -1,8 +1,8 @@
 {
   "name": "@codepilot/web",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "CodePilot web UI \u2014 browser client for the headless protocol over WebSocket.",
+  "description": "CodePilot web UI — browser client for the headless protocol over WebSocket.",
   "type": "module",
   "scripts": {
     "build": "vite build && vite build --config vite.embed.config.ts && node scripts/inline-embed.mjs",

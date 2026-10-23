@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/desktop",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "CodePilot Agent — desktop app for task-oriented work in a folder (the shared web UI in its agent layout).",
   "type": "module",

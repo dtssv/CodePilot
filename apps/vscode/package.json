@@ -3,7 +3,7 @@
   "displayName": "CodePilot",
   "description": "Token-efficient, long-horizon coding agent — CodePilot VSCode client",
   "publisher": "codepilot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -103,13 +103,20 @@
         },
         "codepilot.engineMode": {
           "type": "string",
-          "enum": ["shared", "stdio"],
+          "enum": [
+            "shared",
+            "stdio"
+          ],
           "default": "shared",
           "description": "shared (default): attach to an existing local CodePilot daemon or spawn the bundled one over WebSocket. stdio: private legacy `codepilot serve` process (debug)."
         },
         "codepilot.permissionMode": {
           "type": "string",
-          "enum": ["ask", "auto-edit", "yolo"],
+          "enum": [
+            "ask",
+            "auto-edit",
+            "yolo"
+          ],
           "default": "ask",
           "description": "Default permission mode passed during the `initialize` handshake."
         },
@@ -120,7 +127,12 @@
         },
         "codepilot.provider": {
           "type": "string",
-          "enum": ["anthropic", "openai", "copilot", ""],
+          "enum": [
+            "anthropic",
+            "openai",
+            "copilot",
+            ""
+          ],
           "default": "",
           "description": "Optional default provider name."
         },
@@ -131,7 +143,9 @@
         },
         "codepilot.autoApprove": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Tool names or bash command regexes that auto-approve."
         },
@@ -147,7 +161,11 @@
         },
         "codepilot.agentMode": {
           "type": "string",
-          "enum": ["chat", "plan", "agent"],
+          "enum": [
+            "chat",
+            "plan",
+            "agent"
+          ],
           "default": "agent",
           "description": "Default collaboration mode for new sessions (Ask / Plan / Agent). The webview and `CodePilot: Switch Mode` can override this at runtime; `session/setMode` is supported on an open session."
         }

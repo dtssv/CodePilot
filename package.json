@@ -1,6 +1,6 @@
 {
   "name": "codepilot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "CodePilot — token-efficient, long-horizon coding agent: core engine, CLI/TUI, web, desktop agent, VSCode & IDEA plugins",
   "type": "module",
