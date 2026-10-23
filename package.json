@@ -18,7 +18,7 @@
     "desktop": "corepack pnpm --filter @codepilot/desktop start",
     "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
-    "package:npm": "corepack pnpm --filter @codepilot/core --filter @codepilot/protocol --filter @codepilot/tui pack",
+    "package:npm": "corepack pnpm -C packages/core pack && corepack pnpm -C packages/protocol pack && corepack pnpm -C apps/tui pack",
     "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
     "lint": "biome lint packages/ apps/",
     "lint:ci": "biome lint --max-diagnostics=0 --diagnostic-level=error packages/ apps/",

@@ -6,6 +6,7 @@ dist/
 apps/idea/build/
 apps/idea/.gradle/
 *.vsix
+*.tgz
 coverage/
 .smoke/
 .gradle-home/
