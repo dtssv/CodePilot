@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/protocol",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "CodePilot headless JSON-RPC 2.0 protocol server + CLI entry.",
   "type": "module",
   "main": "./dist/index.js",

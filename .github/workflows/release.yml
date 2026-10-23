@@ -65,7 +65,7 @@ jobs:
       - name: Collect npm tarballs
         run: |
           mkdir -p artifacts/npm
-          find packages -name "*.tgz" -exec cp {} artifacts/npm/ \;
+          find packages apps/tui -name "*.tgz" -exec cp {} artifacts/npm/ \;
           ls -la artifacts/npm/
 
       # --- VSCode extension (.vsix) ---
@@ -116,6 +116,8 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: build
+    # Skip when NPM_TOKEN is unset (GitHub Release still publishes tarballs as assets).
+    if: ${{ vars.NPM_PUBLISH == 'true' || secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

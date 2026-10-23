@@ -3,7 +3,7 @@
   "displayName": "CodePilot",
   "description": "Token-efficient, long-horizon coding agent — CodePilot VSCode client",
   "publisher": "codepilot",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "license": "MIT",
   "repository": {
