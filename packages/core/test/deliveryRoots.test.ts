@@ -41,6 +41,23 @@ describe("deliveryRoots extraction", () => {
     ).toEqual([]);
   });
 
+  it("extracts 目录在:/abs/path without a space after the colon", () => {
+    const found = extractDeliveryRootsFromText(
+      "请帮我复刻示例，目录在:/Users/me/web/testnn",
+      cwd,
+    );
+    expect(found).toContain(normalizeRoot("/Users/me/web/testnn"));
+  });
+
+  it("still ignores https:// after a colon", () => {
+    expect(
+      extractDeliveryRootsFromText(
+        "参考 https://api-docs.deepseek.com/zh-cn/news/news261017，目录在:/Users/me/web/testnn",
+        cwd,
+      ),
+    ).toEqual([normalizeRoot("/Users/me/web/testnn")]);
+  });
+
   it("isUnderDeliveryRoots matches children", () => {
     const roots = [normalizeRoot("/proj")];
     expect(isUnderDeliveryRoots("/proj/src/a.ts", roots, cwd)).toBe(true);

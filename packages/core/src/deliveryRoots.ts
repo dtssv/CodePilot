@@ -10,8 +10,12 @@
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, resolve } from "node:path";
 
+// Absolute / ~/ paths. Allow a colon before the path so Chinese prompts like
+// `目录在:/Users/…/testnn` (no space after `:`) still count — otherwise the
+ // session keeps delivery_roots=cwd and every write to the named dir re-asks
+ // "Allow this folder". Reject `://` so `https://…` is not treated as a path.
 const ABS_OR_HOME =
-  /(?:^|[\s"'`(])((?:~\/|\/|[A-Za-z]:[\\/])[^\s"'`()<>|,;]+)/g;
+  /(?:^|[\s"'`(：]|:(?=\/[^/]))((?:~\/|\/|[A-Za-z]:[\\/])[^\s"'`()<>|,;]+)/g;
 /** Relative paths with at least one slash (src/foo.ts, web/test/, ../pkg). */
 const REL_PATH =
   /(?:^|[\s"'`(])((?:\.\.?\/|(?:[\w.-]+\/)+)[\w./\\-]+)/g;
