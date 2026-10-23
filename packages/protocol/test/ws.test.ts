@@ -75,6 +75,8 @@ vi.mock("@codepilot/core", () => ({
   listSessions: vi.fn(async () => []),
   loadConfig: vi.fn(async () => undefined),
   runGoal: vi.fn(),
+  // Used by ws server close() to cascade-stop background bash jobs.
+  killAllJobs: vi.fn(async () => 0),
 }));
 
 import {
