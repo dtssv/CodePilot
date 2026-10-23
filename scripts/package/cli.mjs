@@ -28,7 +28,7 @@ const cacheDir = join(CACHE_ROOT, "cli");
 const entryOut = join(cacheDir, "cli.cjs");
 const webCache = join(cacheDir, "web");
 
-async function buildWeb {
+async function buildWeb() {
   pnpm(["--filter", "@codepilot/web", "build"]);
   const webDist = join(REPO_ROOT, "apps", "web", "dist");
   if (!existsSync(join(webDist, "index.html"))) fail("web dist missing after build");
@@ -36,7 +36,7 @@ async function buildWeb {
   copyTree(webDist, webCache);
 }
 
-async function bundleCli {
+async function bundleCli() {
   pnpm(["--filter", "@codepilot/protocol", "build"]);
   await bundleNodeEntry({
     entry: join(REPO_ROOT, "packages", "protocol", "dist", "cli.js"),
@@ -44,9 +44,9 @@ async function bundleCli {
   });
 }
 
-function packageBinaries {
+function packageBinaries() {
   ensureDir(outDir);
-  const targets = resolveTargets;
+  const targets = resolveTargets();
   for (const t of targets) {
     const outName = `codepilot-${t.binarySuffix}`;
     const outPath = join(outDir, outName.replace(/\.exe$/, ""));
@@ -89,7 +89,7 @@ function packageBinaries {
   }
 }
 
-function packageNpm {
+function packageNpm() {
   const npmDir = ensureDir(join(outDir, "npm"));
   const dirs = {
     "@codepilot/core": join(REPO_ROOT, "packages", "core"),
@@ -102,16 +102,16 @@ function packageNpm {
   log(`npm packs → ${npmDir}`);
 }
 
-async function main {
+async function main() {
   ensureDir(outDir);
-  await buildWeb;
-  await bundleCli;
+  await buildWeb();
+  await bundleCli();
   packageBinaries;
   packageNpm;
   log(`CLI release → ${outDir}`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });

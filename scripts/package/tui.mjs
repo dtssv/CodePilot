@@ -25,7 +25,7 @@ import { runPkg } from "./bundle-node.mjs";
 const outDir = join(RELEASE_ROOT, "tui");
 const deployDir = join(CACHE_ROOT, "tui-deploy");
 
-async function main {
+async function main() {
   ensureDir(outDir);
   pnpm(["--filter", "@codepilot/tui", "build"]);
   const distCli = join(REPO_ROOT, "apps", "tui", "dist", "cli.js");
@@ -46,7 +46,7 @@ async function main {
     writeFileSync(pkgJsonPath, `${JSON.stringify(pj, null, 2)}\n`);
   }
 
-  for (const t of resolveTargets) {
+  for (const t of resolveTargets()) {
     const base = join(outDir, `codepilot-tui-${t.binarySuffix.replace(/\.exe$/, "")}`);
     try {
       runPkg({ entry, targets: [t.pkgTarget], outputPath: base });
@@ -74,7 +74,7 @@ async function main {
   log(`TUI release → ${outDir}`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });

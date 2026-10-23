@@ -32,10 +32,10 @@ function runBinary(bin, binArgs) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-function runDesktop {
+function runDesktop() {
   const dir = join(RELEASE_ROOT, "desktop");
   if (!existsSync(dir)) fail(`No desktop release at ${dir}. Run: pnpm package:desktop`);
-  const { family } = currentPlatform;
+  const { family } = currentPlatform();
   const files = readdirSync(dir);
   let app;
   if (family === "mac") {

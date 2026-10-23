@@ -10,7 +10,7 @@ import { RELEASE_ROOT, REPO_ROOT, ensureDir, fail, log, pnpm } from "./_util.mjs
 const outDir = join(RELEASE_ROOT, "vscode");
 const appDir = join(REPO_ROOT, "apps", "vscode");
 
-async function main {
+async function main() {
   ensureDir(outDir);
  // Remove stale vsix in the app dir so we only move fresh ones.
   for (const f of readdirSync(appDir).filter((n) => n.endsWith(".vsix"))) {
@@ -44,7 +44,7 @@ async function main {
   log(`VS Code release → ${outDir}`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });

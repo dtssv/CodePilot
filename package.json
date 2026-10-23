@@ -19,7 +19,8 @@
     "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
     "package:npm": "corepack pnpm -C packages/core pack && corepack pnpm -C packages/protocol pack && corepack pnpm -C apps/tui pack",
-    "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea",
+    "package:tui": "node scripts/package/tui.mjs",
+    "package:all": "corepack pnpm build && corepack pnpm package:vscode && corepack pnpm package:npm && corepack pnpm package:idea && corepack pnpm package:tui -- --all",
     "lint": "biome lint packages/ apps/",
     "lint:ci": "biome lint --max-diagnostics=0 --diagnostic-level=error packages/ apps/",
     "lint:fix": "biome lint --write packages/ apps/",
@@ -28,6 +29,8 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/node": "^22.10.0",
+    "@yao-pkg/pkg": "^6.23.0",
+    "esbuild": "^0.24.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"

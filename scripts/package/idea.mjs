@@ -13,7 +13,7 @@ const outDir = join(RELEASE_ROOT, "idea");
 const distDir = join(ideaDir, "build", "distributions");
 
 /** Prefer JDK 17 (IDEA 2024.1 toolchain). Avoid bleeding-edge JDKs that break Gradle. */
-function detectJavaHome {
+function detectJavaHome() {
   if (process.platform === "darwin") {
     for (const ver of ["17", "21", "11"]) {
       const r = spawnSync("/usr/libexec/java_home", ["-v", ver], { encoding: "utf8" });
@@ -26,7 +26,7 @@ function detectJavaHome {
   return undefined;
 }
 
-async function main {
+async function main() {
   ensureDir(outDir);
   const gradlew =
     process.platform === "win32" ? join(ideaDir, "gradlew.bat") : join(ideaDir, "gradlew");
@@ -64,7 +64,7 @@ async function main {
   log(`IDEA release → ${outDir}`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });

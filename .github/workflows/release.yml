@@ -89,6 +89,12 @@ jobs:
           find apps/idea/build/distributions -name "*.zip" -exec cp {} artifacts/idea/ \;
           ls -la artifacts/idea/
 
+      - name: Collect install script
+        run: |
+          mkdir -p artifacts/install
+          cp scripts/install.sh artifacts/install/install.sh
+          ls -la artifacts/install/
+
       # --- Upload all as workflow artifacts for downstream jobs ---
       - name: Upload npm tarballs
         uses: actions/upload-artifact@v4
@@ -107,6 +113,12 @@ jobs:
         with:
           name: idea-plugin
           path: artifacts/idea/*.zip
+
+      - name: Upload install script
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-script
+          path: artifacts/install/install.sh
 
   # ---------------------------------------------------------------------
   # Publish to npm. Separate job so a publish failure doesn't block the
@@ -171,8 +183,9 @@ jobs:
       - name: Flatten artifact layout
         run: |
           mkdir -p assets
-          find release-assets -type f \( -name "*.vsix" -o -name "*.zip" -o -name "*.tgz" \) \
-            -exec cp {} assets/ \;
+          find release-assets -type f \( \
+            -name "*.vsix" -o -name "*.zip" -o -name "*.tgz" -o -name "install.sh" \
+          \) -exec cp {} assets/ \;
           ls -la assets/
 
       - name: Extract version from tag
@@ -191,3 +204,4 @@ jobs:
             assets/*.vsix
             assets/*.zip
             assets/*.tgz
+            assets/install.sh

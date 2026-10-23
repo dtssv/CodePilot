@@ -2,7 +2,6 @@
  * esbuild a Node entry into a single CJS file suitable for @yao-pkg/pkg.
  */
 
-import * as esbuild from "esbuild";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
@@ -14,6 +13,7 @@ const require = createRequire(import.meta.url);
  * @param {{ entry: string, outfile: string, banner?: string }} opts
  */
 export async function bundleNodeEntry(opts) {
+  const esbuild = await import("esbuild");
   ensureDir(dirname(opts.outfile));
   log(`esbuild ${opts.entry} → ${opts.outfile}`);
   await esbuild.build({

@@ -32,7 +32,7 @@ const require = createRequire(import.meta.url);
 /**
  * @returns {{ family: OsFamily, arch: string, pkgTarget: string, binarySuffix: string }}
  */
-export function currentPlatform {
+export function currentPlatform() {
   const family =
     process.platform === "win32" ? "win" : process.platform === "darwin" ? "mac" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
@@ -46,9 +46,9 @@ export function currentPlatform {
 
 /** @param {OsFamily} family @param {string} arch */
 export function pkgTargetFor(family, arch) {
-  if (family === "win") return "node20-win-x64";
+  if (family === "win") return arch === "arm64" ? "node20-win-arm64" : "node20-win-x64";
   if (family === "mac") return arch === "arm64" ? "node20-macos-arm64" : "node20-macos-x64";
-  return "node20-linux-x64";
+  return arch === "arm64" ? "node20-linux-arm64" : "node20-linux-x64";
 }
 
 /** @param {OsFamily} family @param {string} arch */
@@ -74,14 +74,14 @@ export function resolveTargets(argv = process.argv.slice(2)) {
   } else if (env && env !== "all") {
     families = env
       .split(",")
-      .map((s) => s.trim)
+      .map((s) => s.trim())
       .filter(Boolean)
       .map((s) => (s === "darwin" ? "mac" : s === "windows" ? "win" : s));
   } else if (argv.some((a) => a.startsWith("--platform="))) {
     const raw = argv.find((a) => a.startsWith("--platform=")).slice("--platform=".length);
     families = raw.split(",").map((s) => (s === "darwin" ? "mac" : s === "windows" ? "win" : s));
   } else {
-    return [currentPlatform];
+    return [currentPlatform()];
   }
 
  /** @type {Array<{ family: OsFamily, arch: string, pkgTarget: string, binarySuffix: string }>} */
@@ -114,9 +114,15 @@ export function resolveTargets(argv = process.argv.slice(2)) {
         pkgTarget: pkgTargetFor("linux", "x64"),
         binarySuffix: binaryNameSuffix("linux", "x64"),
       });
+      out.push({
+        family: "linux",
+        arch: "arm64",
+        pkgTarget: pkgTargetFor("linux", "arm64"),
+        binarySuffix: binaryNameSuffix("linux", "arm64"),
+      });
     }
   }
-  return out.length ? out : [currentPlatform];
+  return out.length ? out : [currentPlatform()];
 }
 
 export function ensureDir(dir) {
@@ -221,7 +227,7 @@ export function listFiles(dir, pred) {
 }
 
 /** Resolve @yao-pkg/pkg binary via require.resolve. */
-export function pkgBin {
+export function pkgBin() {
   try {
     return require.resolve("@yao-pkg/pkg/lib-es5/bin.js");
   } catch {
@@ -233,7 +239,7 @@ export function pkgBin {
   }
 }
 
-export function electronBuilderBin {
+export function electronBuilderBin() {
   try {
     return join(dirname(require.resolve("electron-builder/package.json")), "cli.js");
   } catch {
@@ -247,18 +253,18 @@ export function electronBuilderBin {
  * @param {string} namePrefix e.g. "codepilot" or "codepilot-tui"
  */
 export function findHostBinary(releaseDir, namePrefix) {
-  const { binarySuffix } = currentPlatform;
+  const { binarySuffix } = currentPlatform();
   const exact = join(releaseDir, `${namePrefix}-${binarySuffix}`);
   if (existsSync(exact)) return exact;
  // loose match
-  const files = listFiles(releaseDir, (p, name, st) => st.isFile && name.startsWith(namePrefix));
-  const host = currentPlatform;
+  const files = listFiles(releaseDir, (p, name, st) => st.isFile() && name.startsWith(namePrefix));
+  const host = currentPlatform();
   const hit = files.find((f) => f.includes(host.family === "mac" ? "darwin" : host.family));
   return hit ?? files[0];
 }
 
 export function withTempDir(prefix, fn) {
-  const dir = mkdtempSync(join(tmpdir, prefix));
+  const dir = mkdtempSync(join(tmpdir(), prefix));
   try {
     return fn(dir);
   } finally {

@@ -26,7 +26,7 @@ const cacheDir = join(CACHE_ROOT, "web");
 const entryOut = join(cacheDir, "cli.cjs");
 const webCache = join(cacheDir, "web");
 
-async function main {
+async function main() {
   ensureDir(outDir);
   pnpm(["--filter", "@codepilot/web", "build"]);
   const webDist = join(REPO_ROOT, "apps", "web", "dist");
@@ -43,7 +43,7 @@ async function main {
   const sharedWeb = join(outDir, "web");
   if (!existsSync(join(sharedWeb, "index.html"))) copyTree(webCache, sharedWeb);
 
-  for (const t of resolveTargets) {
+  for (const t of resolveTargets()) {
     const base = join(outDir, `codepilot-web-${t.binarySuffix.replace(/\.exe$/, "")}`);
     try {
       runPkg({ entry: entryOut, targets: [t.pkgTarget], outputPath: base });
@@ -68,7 +68,7 @@ async function main {
   log(`Run: ./dist/release/web/codepilot-web-<platform>  (opens browser)`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });

@@ -28,7 +28,7 @@ function builderArgsForFamily(family) {
   return ["--linux", "AppImage"];
 }
 
-async function main {
+async function main() {
   ensureDir(outDir);
   pnpm(["--filter", "@codepilot/web", "build"]);
   pnpm(["--filter", "@codepilot/desktop", "build"]);
@@ -39,7 +39,7 @@ async function main {
   const staged = join(appDir, "resources", "web");
   copyTree(webDist, staged);
 
-  const families = [...new Set(resolveTargets.map((t) => t.family))];
+  const families = [...new Set(resolveTargets().map((t) => t.family))];
   for (const family of families) {
     const args = [
       "electron-builder",
@@ -60,7 +60,7 @@ async function main {
   log(`Desktop release → ${outDir}`);
 }
 
-main.catch((e) => {
+main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
