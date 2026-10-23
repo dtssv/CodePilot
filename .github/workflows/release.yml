@@ -116,8 +116,6 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: build
-    # Skip when NPM_TOKEN is unset (GitHub Release still publishes tarballs as assets).
-    if: ${{ vars.NPM_PUBLISH == 'true' || secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -144,6 +142,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN not set — skipping npm publish (tarballs remain on the GitHub Release)"
+            exit 0
+          fi
           for tgz in tarballs/*.tgz; do
             echo "Publishing $tgz …"
             npm publish "$tgz" --access public
