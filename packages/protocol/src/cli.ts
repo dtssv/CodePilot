@@ -15,6 +15,7 @@
 import {
   runGoal,
   createSession,
+  killAllJobs,
   loadConfig,
   loadConfigWithSources,
   listSelectableModels,
@@ -381,6 +382,7 @@ async function cmdServe(
     const handle = await startServer();
  // Wait until stdin closes.
     await handle.peer.loopDone;
+    await killAllJobs().catch(() => {});
     return 0;
   }
   return cmdServeWeb(flags);
@@ -548,6 +550,7 @@ async function cmdServeWeb(
         idleTimer = null;
       }
       void clearServeInfo().finally(() => {
+        // handle.close → killAllJobs (ws server teardown)
         void handle.close().then(resolve, () => resolve());
       });
     };
@@ -884,6 +887,7 @@ async function cmdRun(
     } catch {
  /* ignore */
     }
+    await killAllJobs().catch(() => {});
   }
 
  // Final assistant text → stdout on success, regardless of --json (json users
@@ -1308,6 +1312,8 @@ async function cmdRepl(
   } catch {
  /* ignore */
   }
+  // Process exit (not turn cancel): stop background servers started this run.
+  await killAllJobs().catch(() => {});
   return 0;
 }
 

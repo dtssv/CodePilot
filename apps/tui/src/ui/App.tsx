@@ -19,6 +19,7 @@ import {
   type PermissionMode,
   type Session,
   type SlashCommand,
+  killAllJobs,
   discoverSlashCommands,
   describeMcp,
   formatMcp,
@@ -824,6 +825,7 @@ export function App(props: AppProps): React.ReactElement {
       } catch {
  /* ignore */
       }
+      await killAllJobs().catch(() => {});
  // Compact the persistent prompt history on the way out.
       try {
         const { compactHistory } = await import("./history.js");

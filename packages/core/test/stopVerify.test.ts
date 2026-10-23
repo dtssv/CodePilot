@@ -15,14 +15,14 @@ import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 
 describe("resolveStopVerifyMode", () => {
-  it("defaults to prompt", () => {
-    expect(resolveStopVerifyMode(undefined)).toBe("prompt");
-    expect(resolveStopVerifyMode(true)).toBe("prompt");
-    expect(resolveStopVerifyMode("prompt")).toBe("prompt");
-  });
-  it("honours off / tests", () => {
+  it("defaults to off (no closing judge request)", () => {
+    expect(resolveStopVerifyMode(undefined)).toBe("off");
     expect(resolveStopVerifyMode(false)).toBe("off");
     expect(resolveStopVerifyMode("off")).toBe("off");
+  });
+  it("honours prompt / true / tests", () => {
+    expect(resolveStopVerifyMode(true)).toBe("prompt");
+    expect(resolveStopVerifyMode("prompt")).toBe("prompt");
     expect(resolveStopVerifyMode("tests")).toBe("tests");
   });
 });
@@ -86,6 +86,51 @@ describe("runBuiltinStopVerify", () => {
       resolvers: { prompt: async () => '{"decision":"allow"}' },
     });
     expect(r).toEqual({ action: "allow", warnings: [] });
+  });
+
+  it("prompt mode silently allows on 429 / rate-limit (no transcript warning)", async () => {
+    const { isTransientJudgeFailure } = await import("../src/stopVerify.js");
+    expect(
+      isTransientJudgeFailure(
+        'OpenAI 429: {"error":{"message":"访问限制","cause":"tokens limit for minute"}}',
+      ),
+    ).toBe(true);
+    const r = await runBuiltinStopVerify("prompt", {
+      cwd: tmpdir(),
+      reason: "prompt_completed",
+      stop_hook_active: false,
+      stop_continue_count: 0,
+      stop_continue_cap: 8,
+      session_id: "s",
+      transcript_hint: "ok",
+      resolvers: {
+        prompt: async () => {
+          throw new Error(
+            'OpenAI 429: {"error":{"cause":"tokens limit for minute","message":"访问限制"}}',
+          );
+        },
+      },
+    });
+    expect(r).toEqual({ action: "allow", warnings: [] });
+  });
+
+  it("prompt mode still warns on non-transient judge failures", async () => {
+    const r = await runBuiltinStopVerify("prompt", {
+      cwd: tmpdir(),
+      reason: "prompt_completed",
+      stop_hook_active: false,
+      stop_continue_count: 0,
+      stop_continue_cap: 8,
+      session_id: "s",
+      transcript_hint: "ok",
+      resolvers: {
+        prompt: async () => {
+          throw new Error("OpenAI 401: invalid api key");
+        },
+      },
+    });
+    expect(r.action).toBe("allow");
+    expect(r.warnings[0]).toMatch(/stopVerify=prompt failed:.*401/);
   });
 
   it("tests mode blocks when the detected test command fails", async () => {

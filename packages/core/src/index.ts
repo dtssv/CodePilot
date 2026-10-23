@@ -75,6 +75,7 @@ export {
   bashTool,
   bashOutputTool,
   bashKillTool,
+  killAllJobs,
   webFetchTool,
   webSearchTool,
   askUserQuestionTool,

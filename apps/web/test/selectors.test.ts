@@ -129,6 +129,20 @@ describe("retry events", () => {
     expect(retry?.kind === "retry" && retry.retry.attempt).toBe(2);
     expect(s.status).toBe("thinking");
   });
+
+  it("clears 429 retry banners once the stream resumes", () => {
+    let s = play([
+      user("u1", "go"),
+      { type: "retry", attempt: 1, maxAttempts: 8, delayMs: 2000, reason: "HTTP 429" },
+    ]);
+    expect(s.rows.some((r) => r.kind === "retry")).toBe(true);
+    s = play(
+      [{ type: "message_delta", messageId: "m2", delta: { type: "text", text: "ok" } }],
+      s,
+    );
+    expect(s.rows.some((r) => r.kind === "retry")).toBe(false);
+    expect(s.rows.some((r) => r.kind === "message" && r.msg.text === "ok")).toBe(true);
+  });
 });
 
 describe("derived views", () => {

@@ -284,7 +284,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     hookSandbox: z.boolean().optional(),
     // Max consecutive Stop-hook continues before forcing end (default 8).
     stopHookBlockCap: z.number().int().min(0).max(100).optional(),
-    // Built-in Stop validity gate (default prompt). See types.ts.
+    // Built-in Stop validity gate (default off). See types.ts.
     stopVerify: z
       .union([z.boolean(), z.enum(["off", "prompt", "tests"])])
       .optional(),

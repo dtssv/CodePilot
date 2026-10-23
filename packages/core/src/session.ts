@@ -703,6 +703,8 @@ export class Session {
         }
 
         for (const w of stopResult.warnings) {
+          // Soft skips / rate-limit noise from stopVerify stay off the transcript.
+          if (/rate.?limit|\b429\b|skipped|no prompt resolver/i.test(w)) continue;
           const ev: Event = { type: "error", message: w, recoverable: true };
           this.events.push(ev);
           await this.persistEvent(ev).catch(() => undefined);

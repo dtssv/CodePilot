@@ -1,13 +1,14 @@
 // Built-in Stop verification — validity gate at the completion boundary.
 //
  // Modes (config `stopVerify`):
- // - "off"    — disabled
+ // - "off"    — disabled (default). No extra request at turn end.
  // - "prompt" — small-model judge: code correctness ≠ feature/visual correctness
  // - "tests"  — run a detected project test command when one exists; else allow
  // - true     — alias for "prompt"
  //
- // Default is "prompt" so unfinished UI/feature work is challenged without
- // requiring the user to author a hook. Set "off" to restore legacy behaviour.
+ // Default is "off": a post-completion judge call shares the same provider
+ // TPM budget as the main run, so after a long task it often 429s, fails open,
+ // and adds latency/noise for no effect. Opt in with stopVerify: "prompt".
 
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,10 +22,10 @@ export type StopVerifyMode = "off" | "prompt" | "tests";
 export function resolveStopVerifyMode(
   value: boolean | StopVerifyMode | undefined,
 ): StopVerifyMode {
-  if (value === false || value === "off") return "off";
+  if (value === true || value === "prompt") return "prompt";
   if (value === "tests") return "tests";
-  // true | "prompt" | undefined → prompt (noticeable default)
-  return "prompt";
+  // false | "off" | undefined → off (no closing judge request)
+  return "off";
 }
 
 export interface StopVerifyContext {
@@ -106,10 +107,8 @@ export async function runBuiltinStopVerify(
 async function runPromptVerify(ctx: StopVerifyContext): Promise<PreHookResult> {
   const resolver = ctx.resolvers.prompt;
   if (!resolver) {
-    return {
-      action: "allow",
-      warnings: ["stopVerify=prompt: no prompt resolver; skipped"],
-    };
+    // Soft skip — no UI noise when the small-model path is unavailable.
+    return { action: "allow", warnings: [] };
   }
   // Avoid unresolvable loops: after several continues, bias toward allow
   // unless the judge is very sure (handled by cap in session anyway).
@@ -133,11 +132,25 @@ async function runPromptVerify(ctx: StopVerifyContext): Promise<PreHookResult> {
     }
     return { action: "allow", warnings: [] };
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Fail open always. Rate-limit / overloaded judge calls are expected under
+    // heavy sessions — do not surface them as transcript errors (they look like
+    // the task failed after it already finished).
+    if (isTransientJudgeFailure(message)) {
+      return { action: "allow", warnings: [] };
+    }
     return {
       action: "allow",
-      warnings: [`stopVerify=prompt failed: ${(err as Error).message}`],
+      warnings: [`stopVerify=prompt failed: ${message}`],
     };
   }
+}
+
+/** 429 / TPM / gateway overload — not a real "task failed" signal. */
+export function isTransientJudgeFailure(message: string): boolean {
+  return /\b429\b|rate.?limit|too many requests|tokens limit|访问限制|overloaded|\b529\b|sustaining heavy rate-limiting/i.test(
+    message,
+  );
 }
 
 function parseJudgeJson(raw: string): { action: "allow" | "block"; reason?: string } {

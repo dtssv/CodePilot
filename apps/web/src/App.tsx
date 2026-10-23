@@ -199,7 +199,7 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
       images?: ImageAttachment[],
       files?: PromptFile[],
       delivery?: "auto" | "queue" | "steer",
-    ) => void cp.send(text, images, files, delivery),
+    ) => cp.send(text, images, files, delivery),
     onStop: () => void cp.cancel(),
     busy,
     disabled: state.connection !== "connected",
@@ -216,7 +216,7 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
       void cp.removeFollowUp(id);
       setDraft(fu.text);
     },
-    onSendFollowUpNow: (id: string) => void cp.sendFollowUpNow(id),
+    onSendFollowUpNow: (id: string) => cp.sendFollowUpNow(id),
     footer: (
       <span className="flex flex-wrap items-center gap-2">
         <ModelPicker cp={cp} />
@@ -526,7 +526,7 @@ function AgentLayout({
   const homeComposer = {
     ...useComposer(cp, draft, setDraft, t("Describe a task for CodePilot…")),
     onSend: (text: string, images?: ImageAttachment[], files?: PromptFile[]) =>
-      void cp.startTask(text, state.agentMode, images, files),
+      cp.startTask(text, state.agentMode, images, files),
   };
   const taskComposer = useComposer(cp, draft, setDraft, t("Ask CodePilot…"));
   const canBootstrap = !!(surface.autoConnect?.token || surface.autoConnect?.url || (prefs.url && prefs.token));

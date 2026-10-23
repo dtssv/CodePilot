@@ -8,6 +8,7 @@ export { ToolRegistry, zodToJsonSchema } from "./types.js";
 export { bashTool } from "./bash.js";
 export { bashOutputTool } from "./bash_output.js";
 export { bashKillTool } from "./bash_kill.js";
+export { killAllJobs, killJob, listJobs } from "./bashJobs.js";
 export { writeStdinTool } from "./write_stdin.js";
 export { notebookEditTool } from "./notebook_edit.js";
 export type { Notebook, NotebookCell } from "./notebook_edit.js";

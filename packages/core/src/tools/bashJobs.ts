@@ -6,6 +6,12 @@
 // The registry is module-level and keyed by cwd, so the `bash`,
 // `bash_output` and `bash_kill` tools share it within a session.
 //
+// Lifecycle:
+// - Cancel / session dispose: jobs keep running (reconnect-friendly).
+// - Engine process exit (`killAllJobs` + exit hook): cascade-stop every
+ //   running job (process-group SIGTERM → SIGKILL), matching Claude Code /
+ //   Continue. Without this, `npm run dev` / `http.server` orphan on serve exit.
+//
 // Job state survives the command that started it, but NOT a process
 // restart of CodePilot itself: on disk, jobs whose metadata says
 // "running" at load time are reported as "unknown" (the pid may be dead
@@ -51,6 +57,13 @@ interface Registry {
 
 const registries = new Map<string, Registry>();
 
+/** Default grace between SIGTERM and SIGKILL for a single job. */
+const KILL_GRACE_MS = 2000;
+/** Shorter grace when sweeping all jobs on engine shutdown. */
+const KILL_ALL_GRACE_MS = 500;
+
+let exitHookInstalled = false;
+
 function registryFor(cwd: string): Registry {
   let r = registries.get(cwd);
   if (!r) {
@@ -58,6 +71,44 @@ function registryFor(cwd: string): Registry {
     registries.set(cwd, r);
   }
   return r;
+}
+
+/**
+ * Signal the whole process group (shell + grandchildren like vite/chrome).
+ * Falls back to the direct child on Windows or when the group signal fails.
+ */
+function killProcessTree(proc: ChildProcess, sig: NodeJS.Signals): void {
+  const pid = proc.pid;
+  try {
+    if (pid && process.platform !== "win32") {
+      process.kill(-pid, sig);
+      return;
+    }
+    proc.kill(sig);
+  } catch {
+    try {
+      proc.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/** Sync last-resort kill for `process.on("exit")` (no async allowed). */
+function killAllJobsSync(): void {
+  for (const reg of registries.values()) {
+    for (const job of reg.jobs.values()) {
+      if (job.meta.status !== "running" || !job.proc) continue;
+      job.meta.status = "killed";
+      killProcessTree(job.proc, "SIGKILL");
+    }
+  }
+}
+
+function ensureExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.once("exit", killAllJobsSync);
 }
 
 /** Register a listener fired when any job in this cwd finishes (exits, is
@@ -96,13 +147,17 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
   const logPath = join(jobsDir(spec.cwd), `${id}.log`);
   const metaPath = join(jobsDir(spec.cwd), `${id}.json`);
 
+  ensureExitHook();
   const log = createWriteStream(logPath, { flags: "a" });
+  // `detached: true` → own process group so killJob / killAllJobs can
+  // `process.kill(-pid)` the shell AND grandchildren (vite, chrome, …).
+  // Keep stdio piped (do not unref) so write_stdin / log tails still work
+  // and the engine can cascade-kill on shutdown.
   const proc = spawn(spec.shell, [...spec.shellArgs, spec.command], {
     cwd: spec.cwd,
     env: process.env,
- // Use "pipe" for stdin so write_stdin can send input to interactive
- // long-running processes (REPLs, servers, CLIs that read stdin).
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
   proc.stdout?.on("data", (b: Buffer) => log.write(b));
   proc.stderr?.on("data", (b: Buffer) => log.write(b));
@@ -210,18 +265,47 @@ export function describeUnknownJob(cwd: string, requestedId: string): string {
   );
 }
 
-/** Kill a job (SIGTERM). Returns false when the process is not alive. */
+/** Kill a job (process-group SIGTERM, then SIGKILL after grace). */
 export async function killJob(cwd: string, id: string): Promise<boolean> {
   const job = registryFor(cwd).jobs.get(id);
   if (!job?.proc || job.meta.status !== "running") return false;
+  await terminateJob(job, KILL_GRACE_MS);
+  return true;
+}
+
+/**
+ * Cascade-stop every running background job in this engine process.
+ * Call on serve/CLI/TUI process exit — not on turn cancel or soft session
+ * dispose (those must leave servers up for reconnect).
+ *
+ * @returns number of jobs that were signaled
+ */
+export async function killAllJobs(): Promise<number> {
+  const running: BackgroundJob[] = [];
+  for (const reg of registries.values()) {
+    for (const job of reg.jobs.values()) {
+      if (job.meta.status === "running" && job.proc) running.push(job);
+    }
+  }
+  await Promise.all(running.map((job) => terminateJob(job, KILL_ALL_GRACE_MS)));
+  return running.length;
+}
+
+async function terminateJob(job: BackgroundJob, graceMs: number): Promise<void> {
+  if (!job.proc || job.meta.status !== "running") return;
   job.meta.status = "killed";
-  try {
-    job.proc.kill("SIGTERM");
-  } catch {
- /* already dead */
+  killProcessTree(job.proc, "SIGTERM");
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      job.proc?.once("close", () => resolve());
+    }),
+    new Promise<void>((resolve) => setTimeout(resolve, graceMs)),
+  ]);
+  // Still alive after grace → escalate.
+  if (job.proc.exitCode === null && job.proc.signalCode === null) {
+    killProcessTree(job.proc, "SIGKILL");
   }
   await persistMeta(job);
-  return true;
 }
 
 /** Why a stdin write did not happen. Distinct cases, because the caller's

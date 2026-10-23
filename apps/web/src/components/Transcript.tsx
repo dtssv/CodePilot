@@ -735,18 +735,26 @@ function MiscRow({
   onRetry(): void;
 }): React.ReactElement {
   switch (row.kind) {
-    case "retry":
+    case "retry": {
+      // Don't surface raw "HTTP 429" / rate-limit codes — the friendly label
+      // is enough while backoff runs; the row is cleared once the stream resumes.
+      const showReason =
+        row.retry.reason.trim() !== "" &&
+        !/\b429\b|rate.?limit|too many requests|overloaded/i.test(row.retry.reason);
       return (
         <div className="flex animate-fade-in items-center gap-2 rounded-lg border border-[var(--color-warn-dim)] bg-[var(--color-warn-dim)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
           <RefreshIcon className="h-3.5 w-3.5 shrink-0 animate-spin [animation-duration:2s]" />
           <span className="font-medium">
             {t("Connection hiccup, retrying")} ({row.retry.attempt}/{row.retry.maxAttempts})
           </span>
-          <span className="min-w-0 truncate text-[11px] opacity-80" title={row.retry.reason}>
-            {row.retry.reason}
-          </span>
+          {showReason && (
+            <span className="min-w-0 truncate text-[11px] opacity-80" title={row.retry.reason}>
+              {row.retry.reason}
+            </span>
+          )}
         </div>
       );
+    }
     case "error":
       return (
         <div

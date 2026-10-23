@@ -372,7 +372,7 @@ export function registerServer(
     "prompt/followup/update",
     (p) => handlePromptFollowupUpdate(ctx, p),
   );
-  peer.onRequest<PromptFollowupSendNowParams, Record<string, never>>(
+  peer.onRequest<PromptFollowupSendNowParams, { delivery: "steered" | "started" | "missing" }>(
     "prompt/followup/sendNow",
     (p) => handlePromptFollowupSendNow(ctx, p),
   );
@@ -1378,9 +1378,23 @@ async function handlePromptSend(
   const delivery = params.delivery ?? "auto";
   const busy = typeof session.isBusy === "function" && session.isBusy();
 
-  if (delivery === "steer" && busy) {
-    session.steer(params.text);
-    return { delivery: "steered" };
+  if (delivery === "steer") {
+    // Steer never cancels. When idle, start a normal turn so "Inject" still
+    // delivers the text instead of silently falling through to a second path.
+    if (busy) {
+      session.steer(params.text);
+      return { delivery: "steered" };
+    }
+    void session.prompt(params.text, params.images, params.files).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      void ctx.peer
+        .notify<EventParams>("event", {
+          sessionId: session.id,
+          event: { type: "error", message, recoverable: false },
+        })
+        .catch(() => {});
+    });
+    return { delivery: "started" };
   }
 
   if ((delivery === "queue" || delivery === "auto") && busy) {
@@ -1442,7 +1456,7 @@ async function handlePromptFollowupUpdate(
 async function handlePromptFollowupSendNow(
   ctx: ServerContext,
   params: PromptFollowupSendNowParams,
-): Promise<Record<string, never>> {
+): Promise<{ delivery: "steered" | "started" | "missing" }> {
   assertInitialized(ctx);
   const session = ctx.sessions.get(params.sessionId);
   if (!session) {
@@ -1451,10 +1465,12 @@ async function handlePromptFollowupSendNow(
       `session not found: ${params.sessionId}`,
     );
   }
-  if (typeof session.sendFollowUpNow === "function") {
-    session.sendFollowUpNow(params.id);
+  if (typeof session.sendFollowUpNow !== "function") {
+    return { delivery: "missing" };
   }
-  return {};
+  const result = session.sendFollowUpNow(params.id);
+  if (result === false) return { delivery: "missing" };
+  return { delivery: result };
 }
 
 async function handlePromptCancel(

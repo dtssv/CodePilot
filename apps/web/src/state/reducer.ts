@@ -274,7 +274,9 @@ function applyEvent(state: AppState, e: Event): AppState {
   switch (e.type) {
     case "message_delta": {
       if (e.delta.type === "reasoning") {
-        const rows = [...state.rows];
+        // Stream resumed after a transport retry — drop the transient retry
+        // banner (e.g. HTTP 429) so it does not linger in the transcript.
+        const rows = clearTransientRetryRows([...state.rows]);
         const idx = findStreamingMessage(rows, e.messageId);
         if (idx >= 0) {
           const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -303,7 +305,7 @@ function applyEvent(state: AppState, e: Event): AppState {
         return { ...state, rows, status: "thinking" };
       }
       if (e.delta.type !== "text") return state; // tool-input JSON is internal
-      const rows = [...state.rows];
+      const rows = clearTransientRetryRows([...state.rows]);
       const idx = findStreamingMessage(rows, e.messageId);
       if (idx >= 0) {
         const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -333,7 +335,7 @@ function applyEvent(state: AppState, e: Event): AppState {
 
     case "message": {
       const text = messageText(e);
-      const rows = [...state.rows];
+      const rows = clearTransientRetryRows([...state.rows]);
       const idx = findStreamingMessage(rows, e.id);
       if (idx >= 0) {
         const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -376,7 +378,7 @@ function applyEvent(state: AppState, e: Event): AppState {
         ...state,
         status: "thinking",
         rows: [
-          ...state.rows,
+          ...clearTransientRetryRows(state.rows),
           {
             kind: "tool",
             at,
@@ -399,7 +401,7 @@ function applyEvent(state: AppState, e: Event): AppState {
       if (e.name === "memory_write") {
         return state;
       }
-      const rows = [...state.rows];
+      const rows = clearTransientRetryRows([...state.rows]);
       const idx = rows.findIndex(
         (r) => r.kind === "tool" && r.tool.id === e.toolCallId,
       );
@@ -602,6 +604,39 @@ function findStreamingMessage(rows: Row[], id: string): number {
     if (r && r.kind === "message" && r.msg.id === id) return i;
   }
   return -1;
+}
+
+/**
+ * Drop in-flight retry notices (and recoverable rate-limit error rows that
+ * sit next to them) once the turn has resumed. A successful HTTP/turn retry
+ * must not leave "HTTP 429" banners stuck in the transcript.
+ */
+function clearTransientRetryRows(rows: Row[]): Row[] {
+  let end = rows.length;
+  while (end > 0) {
+    const r = rows[end - 1]!;
+    if (r.kind === "retry") {
+      end--;
+      continue;
+    }
+    if (
+      r.kind === "error" &&
+      r.recoverable &&
+      isTransientRateLimitMessage(r.message)
+    ) {
+      end--;
+      continue;
+    }
+    break;
+  }
+  return end === rows.length ? rows : rows.slice(0, end);
+}
+
+/** True for rate-limit / 429 style messages that are expected during backoff. */
+export function isTransientRateLimitMessage(message: string): boolean {
+  return /\b429\b|rate.?limit|too many requests|sustaining heavy rate-limiting|overloaded/i.test(
+    message,
+  );
 }
 
 export function addUsage(a: UsageInfo, b: UsageInfo): UsageInfo {

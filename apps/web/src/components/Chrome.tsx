@@ -45,12 +45,14 @@ const MODE_HINT: Record<AgentMode, string> = {
 export interface ComposerProps {
   value: string;
   onChange(v: string): void;
+  /** Resolves when the server accepted the prompt. Reject on failure so the
+   * composer can restore the draft (avoids lost text + accidental double-send). */
   onSend(
     text: string,
     images?: ImageAttachment[],
     files?: PromptFile[],
     delivery?: "auto" | "queue" | "steer",
-  ): void;
+  ): void | Promise<void>;
   onStop(): void;
   busy: boolean;
   disabled?: boolean;
@@ -66,7 +68,7 @@ export interface ComposerProps {
   /** Pull a queued item back into the composer for editing. */
   onEditFollowUp?(id: string): void;
   /** Inject this queued item into the current run (steer; does not cancel). */
-  onSendFollowUpNow?(id: string): void;
+  onSendFollowUpNow?(id: string): void | Promise<void>;
 }
 
 /** Prompt box. Enter sends, Shift+Enter is a newline, Esc stops a run.
@@ -96,6 +98,8 @@ export function Composer({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
+  /** Guard against double Enter / double-click while a send is in flight. */
+  const sendingRef = useRef(false);
 
   const addFiles = (files: File[]): void => {
     if (files.length === 0) return;
@@ -125,10 +129,11 @@ export function Composer({
 
   const canSend = !disabled && (value.trim() !== "" || attachments.length > 0);
   const send = (delivery: "auto" | "steer" = "auto"): void => {
-    if (!canSend) return;
+    if (sendingRef.current || !canSend) return;
     // Inject-into-run is text-only (attachments stay on the queue path).
     if (delivery === "steer" && attachments.length > 0) return;
-    const { images, files } = splitAttachments(attachments);
+    const pendingAttachments = attachments;
+    const { images, files } = splitAttachments(pendingAttachments);
     const fallback =
       images.length > 0 && files.length === 0
         ? t("See the attached image.")
@@ -136,15 +141,29 @@ export function Composer({
           ? t("See the attached file.")
           : t("See the attached image.");
     const text = value.trim() || fallback;
-    onSend(
-      text,
-      delivery === "steer" ? undefined : images.length > 0 ? images : undefined,
-      delivery === "steer" ? undefined : files.length > 0 ? files : undefined,
-      busy ? delivery : "auto",
-    );
+    const resolvedDelivery = busy ? delivery : "auto";
+    // Clear optimistically for snappy UX, but restore the draft if the
+    // server rejects the send — otherwise the text is lost and a retype
+    // often produces a duplicate once the first request actually lands.
     onChange("");
     setAttachments([]);
     setAttachError(null);
+    sendingRef.current = true;
+    void Promise.resolve(
+      onSend(
+        text,
+        resolvedDelivery === "steer" ? undefined : images.length > 0 ? images : undefined,
+        resolvedDelivery === "steer" ? undefined : files.length > 0 ? files : undefined,
+        resolvedDelivery,
+      ),
+    )
+      .catch(() => {
+        onChange(text);
+        setAttachments(pendingAttachments);
+      })
+      .finally(() => {
+        sendingRef.current = false;
+      });
   };
 
   return (
@@ -177,7 +196,13 @@ export function Composer({
                 {onSendFollowUpNow && (
                   <button
                     type="button"
-                    onClick={() => onSendFollowUpNow(fu.id)}
+                    onClick={() => {
+                      if (sendingRef.current) return;
+                      sendingRef.current = true;
+                      void Promise.resolve(onSendFollowUpNow(fu.id)).finally(() => {
+                        sendingRef.current = false;
+                      });
+                    }}
                     title={t("Send now (inject into current run)")}
                     aria-label={t("Send now")}
                     className="rounded-md px-1.5 py-1 text-[11px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-ink)]"

@@ -18,6 +18,7 @@
 import { createSession } from "./session.js";
 import type { GoalRunOptions, GoalRunResult, Event } from "./types.js";
 import { appendCheckpointRound, checkpointPath } from "./checkpoints.js";
+import { killAllJobs } from "./tools/bashJobs.js";
 
 /**
  * The two goal-completion markers the loop scans the final assistant text
@@ -143,6 +144,7 @@ export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
     }
   } finally {
     await session.dispose();
+    await killAllJobs().catch(() => {});
   }
 
   if (status === "round_limit") {

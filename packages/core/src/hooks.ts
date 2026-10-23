@@ -22,7 +22,8 @@
 // - Stop matcher: "*" — can BLOCK ending the turn (exit 2 / decision JSON).
 //   Session continues the agent loop with the reason as feedback, capped by
 //   `stopHookBlockCap` (default 8). Payload includes `stop_hook_active`.
-//   Built-in `stopVerify` (default "prompt") runs before user Stop hooks.
+//   Built-in `stopVerify` (default "off"; opt in with "prompt") runs before
+//   user Stop hooks when enabled.
 //
 // Exit codes / JSON decision:
 // - exit 0 = OK (allow / proceed)

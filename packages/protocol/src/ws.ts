@@ -36,6 +36,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { killAllJobs } from "@codepilot/core";
 import { Peer, type RpcTransport } from "./rpc.js";
 import { registerServer, type ServerHandle, type ServerOptions } from "./server.js";
 
@@ -308,6 +309,9 @@ export async function startWebSocketServer(
     connectionCount: () => connections.size,
     close: async () => {
       if (heartbeat) clearInterval(heartbeat);
+      // Engine teardown: stop every background bash job (dev servers, etc.).
+      // Session dispose / cancel deliberately leave jobs alone for reconnect.
+      await killAllJobs().catch(() => {});
       const entries = [...connections];
       connections.clear();
       for (const e of entries) {

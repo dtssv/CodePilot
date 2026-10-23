@@ -424,7 +424,7 @@ export interface HooksConfig {
    * Fires when the agent is about to end a turn. Exit 2 / `decision: block`
    * continues the run with the reason as feedback (capped by
    * `stopHookBlockCap`). Payload includes `stop_hook_active`.
-   * Built-in `stopVerify` (default `"prompt"`) runs before these hooks.
+   * Built-in `stopVerify` (default `"off"`) runs before these hooks when enabled.
    */
   Stop?: HookEntryConfig[];
 }
@@ -496,11 +496,11 @@ export interface CodepilotConfig {
    * the turn after one forced allow). Unset uses the default.
    */
   stopHookBlockCap?: number;
- /**
-   * Built-in Stop validity gate (default `"prompt"`).
+  /**
+   * Built-in Stop validity gate (default `"off"` — no extra request at turn end).
    * - `"prompt"` / `true` — small model judges feature vs code correctness
    * - `"tests"` — run a detected project test command when present
-   * - `"off"` / `false` — disabled (user Stop hooks still run)
+   * - `"off"` / `false` / omit — disabled (user Stop hooks still run)
    */
   stopVerify?: boolean | "off" | "prompt" | "tests";
  /** When true, command hooks run under the same OS sandbox as `bash`

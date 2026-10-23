@@ -243,12 +243,17 @@ function RowView({ row }: { row: Extract<TurnPart, { kind: "row" }>["row"] }): R
   switch (row.kind) {
     case "retry": {
       const wait = row.delayMs > 0 ? ` in ${formatDuration(row.delayMs)}` : "";
+      const showReason =
+        row.reason.trim() !== "" &&
+        !/\b429\b|rate.?limit|too many requests|overloaded/i.test(row.reason);
       return (
         <Box marginTop={1}>
           <Text color={color.warn}>
             {glyph.retry} Retrying ({row.attempt}/{row.maxAttempts}){wait}
           </Text>
-          <Text color={color.faint}> {glyph.dot} {oneLine(row.reason, 120)}</Text>
+          {showReason ? (
+            <Text color={color.faint}> {glyph.dot} {oneLine(row.reason, 120)}</Text>
+          ) : null}
         </Box>
       );
     }

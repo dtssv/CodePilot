@@ -493,8 +493,11 @@ export class CodepilotClient {
     await this.call("prompt/followup/update", { sessionId, id, text });
   }
 
-  async sendFollowUpNow(sessionId: string, id: string): Promise<void> {
-    await this.call("prompt/followup/sendNow", { sessionId, id });
+  async sendFollowUpNow(
+    sessionId: string,
+    id: string,
+  ): Promise<{ delivery: "steered" | "started" | "missing" }> {
+    return this.call("prompt/followup/sendNow", { sessionId, id });
   }
 
   async cancel(sessionId: string): Promise<void> {

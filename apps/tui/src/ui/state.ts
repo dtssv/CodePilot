@@ -397,7 +397,8 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           if (d.type === "text" || d.type === "reasoning") {
  // Fold into the currently streaming assistant row, creating one
  // if needed. Text and reasoning share the same row.
-            const rows = state.rows.slice();
+ // Clear transient retry banners (e.g. HTTP 429) once the stream resumes.
+            const rows = clearTransientRetryRows(state.rows.slice());
             let target: MessageRow | undefined;
             for (let i = rows.length - 1; i >= 0; i--) {
               const r = rows[i]!;
@@ -431,13 +432,13 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           return {
             ...state,
             rows: [
-              ...state.rows,
+              ...clearTransientRetryRows(state.rows),
               { kind: "tool", tool: newToolRow(ev.id, ev.name, ev.input) },
             ],
           };
         }
         case "tool_result": {
-          const rows = state.rows.slice();
+          const rows = clearTransientRetryRows(state.rows.slice());
           for (let i = rows.length - 1; i >= 0; i--) {
             const r = rows[i]!;
             if (r.kind === "tool" && r.tool.id === ev.toolCallId) {
@@ -607,4 +608,26 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
     default:
       return state;
   }
+}
+
+/** Drop in-flight retry / rate-limit banners once the turn has resumed. */
+function clearTransientRetryRows(rows: TuiState["rows"]): TuiState["rows"] {
+  let end = rows.length;
+  while (end > 0) {
+    const r = rows[end - 1]!;
+    if (r.kind === "retry") {
+      end--;
+      continue;
+    }
+    if (
+      r.kind === "error" &&
+      r.recoverable &&
+      /\b429\b|rate.?limit|too many requests|overloaded|sustaining heavy rate-limiting/i.test(r.message)
+    ) {
+      end--;
+      continue;
+    }
+    break;
+  }
+  return end === rows.length ? rows : rows.slice(0, end);
 }

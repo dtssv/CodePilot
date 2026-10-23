@@ -57,7 +57,7 @@ export interface Codepilot {
     delivery?: "auto" | "queue" | "steer",
   ): Promise<void>;
   removeFollowUp(id: string): Promise<void>;
-  sendFollowUpNow(id: string): Promise<void>;
+  sendFollowUpNow(id: string): Promise<void>; // rejects if the RPC fails
  /** Fresh session in `mode`, then send — the agent app's "new task". */
   startTask(text: string, mode?: AgentMode, images?: ImageAttachment[], files?: PromptFile[]): Promise<void>;
  /** Resend the last user prompt (after an error). */
@@ -420,7 +420,12 @@ export function useCodepilot(): Codepilot {
         }
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });
-        dispatch({ type: "event", event: { type: "status", status: "idle" } });
+        // Only force idle when we were not mid-run; a failed inject must not
+        // look like the whole task stopped.
+        if (delivery !== "steer") {
+          dispatch({ type: "event", event: { type: "status", status: "idle" } });
+        }
+        throw err;
       }
     },
     [client],
@@ -434,7 +439,7 @@ export function useCodepilot(): Codepilot {
       delivery?: "auto" | "queue" | "steer",
     ) => {
       const id = live.current.sessionId ?? (await newSession());
-      if (!id) return;
+      if (!id) throw new Error("could not open a session");
       await sendTo(id, text, images, files, delivery);
       void refreshSessions();
     },
@@ -455,10 +460,15 @@ export function useCodepilot(): Codepilot {
       const id = live.current.sessionId;
       if (!id) return;
       try {
-        await client.sendFollowUpNow(id, followUpId);
-        dispatch({ type: "notice", text: "Injected into the current run" });
-      } catch {
-        /* ignore */
+        const res = await client.sendFollowUpNow(id, followUpId);
+        if (res?.delivery === "steered" || res?.delivery === "started") {
+          dispatch({ type: "notice", text: "Injected into the current run" });
+        } else {
+          dispatch({ type: "notice", text: "Could not send queued message (already gone?)" });
+        }
+      } catch (err) {
+        dispatch({ type: "notice", text: describeError(err) });
+        throw err;
       }
     },
     [client],
@@ -467,7 +477,7 @@ export function useCodepilot(): Codepilot {
   const startTask = useCallback(
     async (text: string, mode: AgentMode = "agent", images?: ImageAttachment[], files?: PromptFile[]) => {
       const id = await newSession(mode);
-      if (!id) return;
+      if (!id) throw new Error("could not open a session");
       await sendTo(id, text, images, files);
       void refreshSessions();
     },

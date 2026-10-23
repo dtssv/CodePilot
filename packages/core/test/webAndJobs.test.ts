@@ -108,6 +108,20 @@ describe("bash background jobs", () => {
     expect(out.content).toMatch(/killed/);
   });
 
+  it("killAllJobs stops every running job (engine-exit path)", async () => {
+    const { killAllJobs, getJob } = await import("../src/tools/bashJobs.js");
+    const start = await bashTool.execute(
+      { command: "sleep 60", run_in_background: true },
+      sandboxOffCtx(),
+    );
+    const id = start.content.match(/job_[a-f0-9]{8}/)![0];
+    const n = await killAllJobs();
+    expect(n).toBeGreaterThanOrEqual(1);
+    await new Promise((r) => setTimeout(r, 400));
+    const job = await getJob(dir, id);
+    expect(job?.meta.status).toMatch(/killed|exited/);
+  });
+
   it("reports unknown jobs", async () => {
     const out = await bashOutputTool.execute({ job_id: "job_00000000" }, sandboxOffCtx());
     expect(out.isError).toBe(true);

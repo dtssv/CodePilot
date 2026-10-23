@@ -289,7 +289,10 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
           <span className="font-mono text-[11px] text-[var(--color-ink)]">{step.mode}</span>
         </Block>
       );
-    case "retry":
+    case "retry": {
+      const showReason =
+        step.reason.trim() !== "" &&
+        !/\b429\b|rate.?limit|too many requests|overloaded/i.test(step.reason);
       return (
         <Block
           index={index}
@@ -297,11 +300,16 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
           tone="running"
           right={formatClock(step.at)}
         >
-          <pre className="whitespace-pre-wrap font-mono text-[11px] text-[var(--color-ink-dim)]">
-            {step.reason}
-          </pre>
+          {showReason ? (
+            <pre className="whitespace-pre-wrap font-mono text-[11px] text-[var(--color-ink-dim)]">
+              {step.reason}
+            </pre>
+          ) : (
+            <span className="text-[11px] text-[var(--color-ink-dim)]">{t("Connection hiccup, retrying")}</span>
+          )}
         </Block>
       );
+    }
     case "team":
       return (
         <Block
