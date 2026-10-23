@@ -225,15 +225,17 @@ describe("Session built-in stopVerify", () => {
     expect(streamCalls).toBe(2);
     expect(judgeCalls).toBe(2);
     expect(events.some((e) => e.type === "stop_continue")).toBe(true);
-    const continues = events.filter(
+    const userMsgs = events.filter(
       (e): e is Extract<Event, { type: "message" }> =>
         e.type === "message" && e.role === "user",
     );
+    // Only the real user prompt — stopVerify continue must not fake a user bubble.
+    expect(userMsgs).toHaveLength(1);
     expect(
-      continues.some((m) =>
+      userMsgs.some((m) =>
         m.content.some((b) => b.type === "text" && b.text.includes("missing verification")),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 });
 

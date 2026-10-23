@@ -477,7 +477,16 @@ function applyEvent(state: AppState, e: Event): AppState {
         rows: [...state.rows, { kind: "compaction", at, summary: e.summary, foldKind: e.kind }],
       };
 
-    case "error":
+    case "error": {
+      // Mid-backoff rate-limit noise: keep a short toast, don't sticky-append
+      // a red/amber error card that outlives the successful retry.
+      if (e.recoverable && isTransientRateLimitMessage(e.message)) {
+        return {
+          ...state,
+          status: state.status === "idle" ? "thinking" : state.status,
+          notice: t("Connection hiccup, retrying"),
+        };
+      }
       return {
         ...state,
         status: e.recoverable ? state.status : "idle",
@@ -486,6 +495,7 @@ function applyEvent(state: AppState, e: Event): AppState {
           { kind: "error", at, message: e.message, recoverable: e.recoverable },
         ],
       };
+    }
 
     case "activity": {
       const tools = e.tools?.filter((n) => n !== "memory_write");
@@ -512,9 +522,14 @@ function applyEvent(state: AppState, e: Event): AppState {
     case "followup":
       return { ...state, followUps: e.items };
 
-    case "status":
+    case "status": {
+      const rows =
+        e.status === "idle"
+          ? state.rows.filter((r) => r.kind !== "retry")
+          : state.rows;
       return {
         ...state,
+        rows,
         activity: e.status === "idle" ? undefined : state.activity,
         status:
           e.status === "idle"
@@ -529,6 +544,7 @@ function applyEvent(state: AppState, e: Event): AppState {
                   ? state.status
                   : "thinking",
       };
+    }
 
     case "mode":
       return {
@@ -607,35 +623,32 @@ function findStreamingMessage(rows: Row[], id: string): number {
 }
 
 /**
- * Drop in-flight retry notices (and recoverable rate-limit error rows that
- * sit next to them) once the turn has resumed. A successful HTTP/turn retry
- * must not leave "HTTP 429" banners stuck in the transcript.
+ * Drop retry banners and recoverable rate-limit errors once the turn has
+ * resumed (or finished successfully). Must strip from anywhere in the list —
+ * a trailing `usage` / tool row used to sit after the 429 banner and the old
+ * "trim suffix only" logic left HTTP 429 stuck in the transcript forever.
  */
 function clearTransientRetryRows(rows: Row[]): Row[] {
-  let end = rows.length;
-  while (end > 0) {
-    const r = rows[end - 1]!;
-    if (r.kind === "retry") {
-      end--;
-      continue;
-    }
+  const next = rows.filter((r) => {
+    if (r.kind === "retry") return false;
     if (
       r.kind === "error" &&
       r.recoverable &&
       isTransientRateLimitMessage(r.message)
     ) {
-      end--;
-      continue;
+      return false;
     }
-    break;
-  }
-  return end === rows.length ? rows : rows.slice(0, end);
+    return true;
+  });
+  return next.length === rows.length ? rows : next;
 }
 
 /** True for rate-limit / 429 style messages that are expected during backoff. */
 export function isTransientRateLimitMessage(message: string): boolean {
-  return /\b429\b|rate.?limit|too many requests|sustaining heavy rate-limiting|overloaded/i.test(
-    message,
+  return (
+    /\b429\b|rate.?limit|too many requests|sustaining heavy rate-limiting|overloaded|\b529\b|tokens?\s*limit|访问限制|tpm|quota.?exceed/i.test(
+      message,
+    )
   );
 }
 

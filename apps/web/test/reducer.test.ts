@@ -281,11 +281,19 @@ describe("status transitions", () => {
   it("returns to idle on a fatal error but not a recoverable one", () => {
     let state = drive([{ type: "status", status: "running" }]);
     expect(state.status).toBe("thinking");
+    // Recoverable rate-limit noise is toast-only (no sticky error row).
     state = reducer(state, {
       type: "event",
       event: { type: "error", message: "rate limited, retrying", recoverable: true },
     });
     expect(state.status).toBe("thinking");
+    expect(state.rows.some((r) => r.kind === "error")).toBe(false);
+    state = reducer(state, {
+      type: "event",
+      event: { type: "error", message: "tool failed: boom", recoverable: true },
+    });
+    expect(state.status).toBe("thinking");
+    expect(state.rows.some((r) => r.kind === "error")).toBe(true);
     state = reducer(state, {
       type: "event",
       event: { type: "error", message: "no api key", recoverable: false },

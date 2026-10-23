@@ -195,6 +195,22 @@ describe("compact (without summariser)", () => {
     expect(after).toBeLessThan(before * 0.4);
     expect(r.events.some((e) => e.type === "compaction")).toBe(true);
   });
+
+  it("force=true still shrinks when local estimate is under the trigger", async () => {
+    const events = makeEvents();
+    const est = (s: string) => Math.ceil(s.length / 4);
+    const before = estimateEventTokens(events, est);
+    // Trigger far above local estimate — without force this would no-op.
+    const r = await compact(events, {
+      contextWindow: before * 10,
+      force: true,
+      keepRecentMessages: 2,
+      estimateTokens: est,
+    });
+    const after = estimateEventTokens(r.events, est);
+    expect(after).toBeLessThan(before);
+    expect(r.events).not.toBe(events);
+  });
 });
 
 describe("trimEventsToBudget", () => {

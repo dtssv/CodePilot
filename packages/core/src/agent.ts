@@ -149,6 +149,12 @@ export interface AgentDeps {
  * disabled — all span creation is gated on `tracer.enabled`.
  */
   parentSpan?: Span;
+  /**
+   * Last single-request provider input size from a prior turn/prompt.
+   * Seeds mid-run pressure detection so the first request of a new prompt
+   * does not re-send an already-oversize transcript.
+   */
+  lastProviderInputTokens?: number;
 }
 
 export interface AgentRunInput {
@@ -158,6 +164,13 @@ export interface AgentRunInput {
   images?: ImageAttachment[];
  /** Files already written under the workspace for this prompt. */
   files?: import("./types.js").SavedUpload[];
+  /**
+   * Stop-hook / stopVerify continue feedback. Sent to the model as a
+   * provider-only resume (same channel as truncation resume) and never
+   * persisted as a `role: user` transcript event — so the UI does not show
+   * a fake user bubble for `<stop_hook_continue>…`.
+   */
+  systemContinue?: string;
 }
 
 export interface AgentRunResult {
@@ -261,21 +274,27 @@ export async function runAgent(
   const softBudget = deps.config.maxContextTokens ?? 48_000;
   const contextBudget = Math.max(8_000, Math.min(hardBudget, softBudget));
   /** Last provider-reported input size — used like OpenCode/Pi for next-turn checks. */
-  let lastInputTokens = 0;
+  let lastInputTokens = Math.max(0, deps.lastProviderInputTokens ?? 0);
 
- // Append the user message as a transcript event. Images and uploaded-file
- // metadata ride on the event so resume / the UI keep them.
-  const userMessageId = `msg_${randomUUID()}`;
-  const userEvent: Event = {
-    type: "message",
-    id: userMessageId,
-    role: "user",
-    content: [{ type: "text", text: input.userText }],
-    ...(input.images?.length ? { images: input.images } : {}),
-    ...(input.files?.length ? { files: input.files } : {}),
-  };
-  await emit(userEvent);
-  const userImages = input.images;
+ // Append the user message as a transcript event — unless this run is a
+ // Stop-hook continue (systemContinue): that feedback must reach the model
+ // without impersonating the user in the UI / persisted JSONL.
+  const userImages = input.systemContinue ? undefined : input.images;
+  let pendingProviderResume: string | null = input.systemContinue?.trim()
+    ? input.systemContinue
+    : null;
+  if (!input.systemContinue) {
+    const userMessageId = `msg_${randomUUID()}`;
+    const userEvent: Event = {
+      type: "message",
+      id: userMessageId,
+      role: "user",
+      content: [{ type: "text", text: input.userText }],
+      ...(input.images?.length ? { images: input.images } : {}),
+      ...(input.files?.length ? { files: input.files } : {}),
+    };
+    await emit(userEvent);
+  }
 
   let totalUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawToolCalls = false;
@@ -283,8 +302,8 @@ export async function runAgent(
  // as the final answer (bounded, so a model that always overflows can't loop).
   let truncatedInARow = 0;
  /** Provider-only follow-up injected on the next iteration (truncation /
-  * empty-stop / plan soft-continue). Never persisted as a user message. */
-  let pendingProviderResume: string | null = null;
+  * empty-stop / plan soft-continue). Never persisted as a user message.
+  * Also seeded from `systemContinue` (Stop verify) above. */
  /** Text of the cut-off replies being resumed; prefixes the final answer. */
   let resumedText = "";
  /** Bounded auto-continues for empty successful stops after tool use
@@ -369,10 +388,21 @@ export async function runAgent(
     }
 
  // Soft-fold + hard-trim for the provider prompt. Fold is silent (no UI
- // notice); hard trim guarantees we never send past the configured window.
+ // notice); hard trim must account for estimator lag vs gateway tokenizers.
+    const estLive = estimateEventTokens([...input.history, ...produced], estimateTokens);
+    let sendHardBudget = hardBudget;
+    if (lastInputTokens > 0 && estLive > 0) {
+      const ratio = lastInputTokens / estLive;
+      if (ratio > 1.05) {
+        sendHardBudget = Math.max(4_000, Math.floor(hardBudget / ratio));
+      }
+    } else {
+      // No calibration yet — keep headroom; heuristic under-counts CJK/tools.
+      sendHardBudget = Math.max(4_000, Math.floor(hardBudget * 0.8));
+    }
     const providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages, {
       contextBudget,
-      hardBudget,
+      hardBudget: sendHardBudget,
     });
     if (pendingProviderResume) {
       // Provider-only: transcript keeps the real assistant text; this nudge
@@ -517,8 +547,10 @@ export async function runAgent(
               llmUsage.cacheRead += ev.usage.cacheRead ?? 0;
               llmUsage.cacheWrite += ev.usage.cacheWrite ?? 0;
               // Prefer the latest request's input size (OpenCode/Pi style).
+              // Do not add cacheRead — providers already include cached tokens
+              // in `input` (or report them separately without double-billing).
               if (typeof ev.usage.input === "number" && ev.usage.input > 0) {
-                lastInputTokens = ev.usage.input + (ev.usage.cacheRead ?? 0);
+                lastInputTokens = ev.usage.input;
               }
               if (deps.onUsage) deps.onUsage({ ...totalUsage });
               await emit({ type: "usage", usage: ev.usage });

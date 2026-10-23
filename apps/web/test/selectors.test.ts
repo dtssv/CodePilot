@@ -143,6 +143,20 @@ describe("retry events", () => {
     expect(s.rows.some((r) => r.kind === "retry")).toBe(false);
     expect(s.rows.some((r) => r.kind === "message" && r.msg.text === "ok")).toBe(true);
   });
+
+  it("clears 429 banners even when a usage row sits after the retry", () => {
+    let s = play([
+      user("u1", "go"),
+      { type: "retry", attempt: 1, maxAttempts: 8, delayMs: 2000, reason: "HTTP 429: 访问限制" },
+      { type: "usage", usage: { input: 100, output: 1 } },
+    ]);
+    expect(s.rows.some((r) => r.kind === "retry")).toBe(true);
+    s = play(
+      [{ type: "message_delta", messageId: "m2", delta: { type: "text", text: "done" } }],
+      s,
+    );
+    expect(s.rows.some((r) => r.kind === "retry")).toBe(false);
+  });
 });
 
 describe("derived views", () => {

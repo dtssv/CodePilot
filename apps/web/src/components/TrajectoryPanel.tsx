@@ -292,7 +292,9 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
     case "retry": {
       const showReason =
         step.reason.trim() !== "" &&
-        !/\b429\b|rate.?limit|too many requests|overloaded/i.test(step.reason);
+        !/\b429\b|rate.?limit|too many requests|overloaded|\b529\b|tokens?\s*limit|访问限制|tpm/i.test(
+          step.reason,
+        );
       return (
         <Block
           index={index}

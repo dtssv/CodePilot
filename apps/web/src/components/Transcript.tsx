@@ -740,7 +740,9 @@ function MiscRow({
       // is enough while backoff runs; the row is cleared once the stream resumes.
       const showReason =
         row.retry.reason.trim() !== "" &&
-        !/\b429\b|rate.?limit|too many requests|overloaded/i.test(row.retry.reason);
+        !/\b429\b|rate.?limit|too many requests|overloaded|\b529\b|tokens?\s*limit|访问限制|tpm/i.test(
+          row.retry.reason,
+        );
       return (
         <div className="flex animate-fade-in items-center gap-2 rounded-lg border border-[var(--color-warn-dim)] bg-[var(--color-warn-dim)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
           <RefreshIcon className="h-3.5 w-3.5 shrink-0 animate-spin [animation-duration:2s]" />

@@ -215,6 +215,8 @@ export class Session {
   private checkpointHook: CheckpointHook | null = null;
  /** Aggregated usage across all prompts of this session. */
   private usageTotal = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  /** Latest single-request provider `input` tokens (not cumulative). */
+  private lastProviderInputTokens = 0;
  /** Set when the session was loaded with a stale in-flight status (the prior
  * run was interrupted by a crash/restart). Drives a one-shot recovery
  * instruction in the system prompt so the next turn resumes from the
@@ -522,6 +524,8 @@ export class Session {
  // were already pushed onto the permission engine by setTurnOverrides
  // and are popped in the finally block below.
       const effectiveModel = this.turnOverrideModel ?? this.model;
+      // Shrink an already-oversize resumed transcript before the first send.
+      await this.ensureContextUnderWindow();
       const deps: AgentDeps = {
         provider:
           this.providerOverride ??
@@ -580,6 +584,13 @@ export class Session {
           this.events.push(e);
           await this.persistEvent(e);
           this.notify(e);
+          if (
+            e.type === "usage" &&
+            typeof e.usage?.input === "number" &&
+            e.usage.input > 0
+          ) {
+            this.lastProviderInputTokens = e.usage.input;
+          }
  // plan_done approval: leave plan mode. Land in `agent` so the
  // approved plan can be executed — UNLESS the user entered plan mode
  // from `chat` (they wanted answers + a plan, not autonomous edits),
@@ -615,14 +626,17 @@ export class Session {
           this.usageTotal.cacheRead += u.cacheRead ?? 0;
           this.usageTotal.cacheWrite += u.cacheWrite ?? 0;
         },
-        // Mid-run compaction: agent asks us to shrink this.events when the
-        // live transcript approaches the configured contextWindow.
+        // Mid-run compaction: agent already detected pressure (local estimate
+        // OR last provider inputTokens). Force — do not re-gate on the local
+        // estimator, which under-counts vs gateway usage and previously let
+        // requests climb past the configured contextWindow (e.g. 220k > 200k).
         compactNow: async () => {
           const before = this.events;
-          await this.maybeCompact();
+          await this.maybeCompact({ force: true });
           if (this.events === before) return null;
           return this.events.slice();
         },
+        lastProviderInputTokens: this.lastProviderInputTokens,
       };
 
  // Resolve the agent runtime. Default loop wraps
@@ -643,12 +657,19 @@ export class Session {
       let turnFiles = savedUploads;
 
       for (;;) {
+        // Continues after Stop/stopVerify inject feedback for the model only
+        // (`systemContinue`) — never as a persisted user bubble.
+        const isStopContinue = stopContinueCount > 0;
         await runtime.prompt(
           {
             history: this.events,
-            userText: turnText,
-            images: turnImages.length > 0 ? turnImages : undefined,
-            files: turnFiles.length > 0 ? turnFiles : undefined,
+            userText: isStopContinue ? "" : turnText,
+            ...(isStopContinue
+              ? { systemContinue: turnText }
+              : {
+                  images: turnImages.length > 0 ? turnImages : undefined,
+                  files: turnFiles.length > 0 ? turnFiles : undefined,
+                }),
           },
           deps,
         );
@@ -1867,7 +1888,29 @@ export class Session {
     });
   }
 
-  private async maybeCompact(): Promise<void> {
+  /**
+   * If the last provider input (or a usage event on a resumed transcript)
+   * already nears the configured window, force compaction before sending.
+   */
+  private async ensureContextUnderWindow(): Promise<void> {
+    if (this.config.autoCompact === false) return;
+    const window =
+      this.config.contextWindow ?? lookupContextWindow(this.model).contextWindow;
+    if (this.lastProviderInputTokens <= 0) {
+      for (let i = this.events.length - 1; i >= 0; i--) {
+        const e = this.events[i]!;
+        if (e.type === "usage" && typeof e.usage?.input === "number" && e.usage.input > 0) {
+          this.lastProviderInputTokens = e.usage.input;
+          break;
+        }
+      }
+    }
+    if (this.lastProviderInputTokens >= Math.floor(window * 0.9)) {
+      await this.maybeCompact({ force: true });
+    }
+  }
+
+  private async maybeCompact(opts: { force?: boolean } = {}): Promise<void> {
  // Master toggle: when autoCompact is explicitly false, the session
  // never auto-compacts (the user must invoke /compact manually).
     if (this.config.autoCompact === false) return;
@@ -1885,8 +1928,10 @@ export class Session {
     );
     const hardUsable = Math.max(4_000, window - outputReserve);
     const trigger = Math.min(hardUsable, Math.floor(window * fraction));
-    const decision = shouldCompact(this.events, { contextWindow: trigger });
-    if (!decision.shouldCompact) return;
+    if (!opts.force) {
+      const decision = shouldCompact(this.events, { contextWindow: trigger });
+      if (!decision.shouldCompact) return;
+    }
  // PreCompact hooks may block compaction (e.g. to preserve state during
  // a long-running task). Manual compaction is trigger "manual"; the
  // threshold-driven path here is "auto".
@@ -1902,11 +1947,14 @@ export class Session {
     }
     const result = await compact(this.events, {
       contextWindow: trigger,
+      force: opts.force === true,
  // Use the small provider for summarisation (best-effort).
       summariser: buildSmallProvider(this.config),
       summaryModel: this.config.smallModel,
     } as CompactionOptions);
     if (result.events === this.events) return; // no change
+    // Local estimate no longer reflects the last oversize API call.
+    if (opts.force) this.lastProviderInputTokens = 0;
     if (result.droppedRange) {
  // The original transcript stays on disk; some UIs
  // then tells the model where to re-read it. We do both: leave the

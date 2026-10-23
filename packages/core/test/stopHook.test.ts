@@ -138,10 +138,10 @@ exit 0
     const userTexts = events
       .filter((e): e is Extract<Event, { type: "message" }> => e.type === "message" && e.role === "user")
       .map((e) => e.content.find((b) => b.type === "text" && "text" in b)?.text ?? "");
-    expect(userTexts[0]).toBe("do the thing");
-    expect(userTexts.some((t) => t.includes("stop_hook_continue") && t.includes("need another pass"))).toBe(
-      true,
-    );
+    expect(userTexts).toEqual(["do the thing"]);
+    // Continue feedback reaches the model via systemContinue, not a user bubble.
+    expect(userTexts.some((t) => t.includes("stop_hook_continue"))).toBe(false);
+    expect(events.some((e) => e.type === "stop_continue")).toBe(true);
   });
 
   it("forces end after stopHookBlockCap continues", async () => {

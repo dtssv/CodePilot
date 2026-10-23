@@ -3,7 +3,7 @@
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { ToolContext, ToolResult } from "./types.js";
-import { assertPathAllowedAsync } from "../sandbox.js";
+import { assertPathAllowed, assertPathAllowedAsync } from "../sandbox.js";
 import {
   isUnderDeliveryRoots,
   mergeDeliveryRoots,
@@ -109,10 +109,15 @@ function isDeliveryExempt(abs: string, ctx: ToolContext): boolean {
 
 /**
  * Keep intentional project writes inside the session's delivery roots
- * (defaults to cwd; extended from path tokens in user prompts). Distinct
- * from the OS sandbox: expanding writablePaths does not change delivery
- * roots. When the target is outside, ask the user (if possible) whether
- * to add that folder for this task; otherwise refuse with guidance.
+ * (defaults to cwd; extended from path tokens in user prompts).
+ *
+ * If the OS sandbox already allows the write (path is under a granted
+ * writable root), do **not** re-ask — silently extend delivery roots.
+ * Users already answered via sandbox "Allow folder" / writablePaths; a
+ * second delivery-root prompt for the same tree is pure friction.
+ *
+ * When the target is outside both delivery roots and the sandbox jail,
+ * ask whether to add that folder for this task; otherwise refuse.
  */
 export async function guardDeliveryWrite(
   ctx: ToolContext,
@@ -126,6 +131,19 @@ export async function guardDeliveryWrite(
   if (isUnderDeliveryRoots(abs, roots, ctx.cwd)) return null;
 
   const candidateDir = normalizeRoot(dirname(abs));
+
+  // Sandbox already writable → treat as an implied delivery grant.
+  const sb = ctx.sandbox;
+  if (
+    sb &&
+    sb.mode !== "off" &&
+    sb.mode !== "read-only" &&
+    assertPathAllowed(abs, "write", sb, ctx.cwd).ok
+  ) {
+    await adoptDeliveryRoot(ctx, roots, candidateDir);
+    return null;
+  }
+
   const rootsList = roots.map((r) => `  - ${r}`).join("\n");
 
   if (ctx.askUser) {
@@ -156,13 +174,7 @@ export async function guardDeliveryWrite(
         (Array.isArray(picked) && picked.includes(allowLabel)) ||
         (typeof picked === "string" && /allow this folder/i.test(picked));
       if (allow) {
-        if (ctx.addDeliveryRoot) {
-          await ctx.addDeliveryRoot(candidateDir);
-        } else if (ctx.deliveryRoots) {
-          const merged = mergeDeliveryRoots(ctx.deliveryRoots, [candidateDir]);
-          ctx.deliveryRoots.length = 0;
-          ctx.deliveryRoots.push(...merged);
-        }
+        await adoptDeliveryRoot(ctx, roots, candidateDir);
         // Same grant must open the OS jail; delivery roots alone do not.
         if (ctx.expandSandboxWritable) {
           await ctx.expandSandboxWritable(candidateDir, { persist: false });
@@ -184,4 +196,19 @@ export async function guardDeliveryWrite(
       `whether to add it as a delivery root, then retry.`,
     isError: true,
   };
+}
+
+/** Extend session delivery roots (via callback or in-place mutate). */
+async function adoptDeliveryRoot(
+  ctx: ToolContext,
+  roots: string[],
+  dir: string,
+): Promise<void> {
+  if (ctx.addDeliveryRoot) {
+    await ctx.addDeliveryRoot(dir);
+    return;
+  }
+  const merged = mergeDeliveryRoots(roots, [dir]);
+  roots.length = 0;
+  roots.push(...merged);
 }

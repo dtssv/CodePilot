@@ -125,4 +125,35 @@ describe("guardDeliveryWrite", () => {
     // Approving delivery root must also expand the OS sandbox jail.
     expect(expanded.some((d) => d.includes("elsewhere"))).toBe(true);
   });
+
+  it("does not re-ask when the sandbox already allows the write", async () => {
+    const roots = [normalizeRoot(cwd)];
+    let asked = 0;
+    const r = await guardDeliveryWrite(
+      ctx({
+        deliveryRoots: roots,
+        askUser: async () => {
+          asked += 1;
+          return { delivery_root: "Cancel — write under existing delivery roots" };
+        },
+        addDeliveryRoot: (dir) => {
+          const m = mergeDeliveryRoots(roots, [dir]);
+          roots.length = 0;
+          roots.push(...m);
+        },
+        sandbox: {
+          mode: "workspace-write",
+          network: false,
+          writablePaths: ["/tmp/allowed"],
+          denyPaths: [],
+          writableRoots: ["/tmp/allowed"],
+          cwd,
+        },
+      }),
+      "/tmp/allowed/proj/a.ts",
+    );
+    expect(r).toBeNull();
+    expect(asked).toBe(0);
+    expect(roots.some((x) => x.includes("allowed"))).toBe(true);
+  });
 });

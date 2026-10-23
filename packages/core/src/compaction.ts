@@ -29,6 +29,12 @@ export interface CompactionOptions {
   summariser?: ChatProvider;
  /** Model to use for summarisation. */
   summaryModel?: string;
+  /**
+   * Skip the local-estimate gate and shrink toward ~50% of `contextWindow`.
+   * Needed when the gateway already reported input over the configured
+   * window but `estimateEventTokens` still under-counts (CJK/tools/images).
+   */
+  force?: boolean;
 }
 
 export interface CompactionDecision {
@@ -757,12 +763,17 @@ export async function compact(
   opts: CompactionOptions
 ): Promise<CompactionResult> {
   const decision = shouldCompact(events, opts);
-  if (!decision.shouldCompact) {
+  if (!opts.force && !decision.shouldCompact) {
     return { events, summary: "", foldedCount: 0 };
   }
 
   const est = opts.estimateTokens ?? defaultTokenEstimator;
   const keep = opts.keepRecentMessages ?? 8;
+  // Forced runs (API already over window) must aim well below the trigger;
+  // otherwise the under-counting estimator thinks we're "fine" and drops nothing.
+  const target = opts.force
+    ? Math.min(opts.contextWindow, Math.max(8_000, Math.floor(opts.contextWindow * 0.5)))
+    : opts.contextWindow;
 
  // Pass 1: local folding of old tool results.
   const folded = foldToolResults(events, { keepRecentMessages: keep });
@@ -773,7 +784,7 @@ export async function compact(
  // Pass 2: model-driven summary if still over budget.
   if (
     opts.summariser &&
-    estimateEventTokens(working, est) >= opts.contextWindow
+    (opts.force || estimateEventTokens(working, est) >= target)
   ) {
     const cutoff = findCutoff(working, keep);
     if (cutoff > 0) {
@@ -799,8 +810,8 @@ export async function compact(
  // Pass 3: hard local trim so we never leave the caller over budget
  // (Codex usable-window / OpenCode overflow guard). Runs when summariser
  // was absent, failed, or the summary alone was not enough.
-  if (estimateEventTokens(working, est) >= opts.contextWindow) {
-    const hard = trimEventsToBudget(working, Math.max(1, opts.contextWindow - 1), {
+  if (opts.force || estimateEventTokens(working, est) >= target) {
+    const hard = trimEventsToBudget(working, Math.max(1, target - 1), {
       keepRecentMessages: keep,
       estimateTokens: est,
     });
@@ -841,9 +852,13 @@ async function callSummariser(
   return collected.join("").trim() || "(no summary produced)";
 }
 
-/** Decide whether a usage update means compaction should run. */
+/** Decide whether a usage update means compaction should run.
+ * Trigger a bit before the hard window so the next request does not
+ * overshoot (local char/4 estimates lag gateway tokenizers). */
 export function usageSignalsCompact(usage: UsageInfo, window: number): boolean {
-  return (usage.input ?? 0) >= window;
+  const input = usage.input ?? 0;
+  if (input <= 0 || window <= 0) return false;
+  return input >= Math.floor(window * 0.9);
 }
 
 /** Internal helper used by session — extract the most recent plan. */
