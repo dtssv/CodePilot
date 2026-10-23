@@ -423,6 +423,7 @@ export async function runAgent(
 
     let messageId = `msg_${randomUUID()}`;
     let assistantText: string[] = [];
+    let assistantReasoning: string[] = [];
     let toolCalls: ToolUseBlock[] = [];
     let sawError: string | null = null;
     let finishReason = "stop";
@@ -430,6 +431,7 @@ export async function runAgent(
     for (let attempt = 0; ; attempt++) {
       messageId = `msg_${randomUUID()}`;
       assistantText = [];
+      assistantReasoning = [];
       toolCalls = [];
       sawError = null;
       finishReason = "stop";
@@ -505,8 +507,11 @@ export async function runAgent(
               break;
             case "thinking_delta":
               markFirstToken();
-              // Reasoning is shown live but not folded into assistantText:
+              // Reasoning streams live for the UI and is also accumulated so
+              // the final assistant `message` can persist a `reasoning` block
+              // (transcript / export). It is NOT folded into assistantText —
               // the visible answer / tool calls are what the loop acts on.
+              assistantReasoning.push(ev.text);
               await emit({
                 type: "message_delta",
                 messageId: id,
@@ -601,6 +606,9 @@ export async function runAgent(
     }
 
     const assistantContent: ContentBlock[] = [];
+    if (assistantReasoning.length > 0) {
+      assistantContent.push({ type: "reasoning", text: assistantReasoning.join("") });
+    }
     if (assistantText.length > 0) {
       assistantContent.push({ type: "text", text: assistantText.join("") });
     }

@@ -194,16 +194,18 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 - **Honour \`.gitignore\`.** Do not stage build outputs (\`dist/\`, \`node_modules/\`). Do not create or stage runtime junk in the workspace (\`.tmp/\`, screenshots, Chrome profiles, zips); use \`scratch_dir\` instead. Shareable config under \`.codepilot/\` (agents, skills, commands, config) is fine; do not invent new runtime folders there.
 - When you are asked to commit, group the work into a logical commit, write a message that explains *why* (not *what*), and stop. If the change is large, suggest splitting it into multiple commits rather than cramming everything into one.`);
 
-  parts.push(`## 7. Memory
+  parts.push(`## 7. Memory (progressive disclosure)
 
-- CodePilot has a two-tier memory:
-  - **Project memory** — agent-written notes live under \`project_state_dir/MEMORY.md\` (i.e. \`~/.codepilot/projects/<hash>/MEMORY.md\`), **not** in the workspace. Optional shareable \`CODEPILOT.md\` / \`AGENTS.md\` in the repo tree are still loaded hierarchically for human-authored context. Facts about *this* project: architecture, conventions, build commands, gotchas.
-  - **User memory** at \`~/.codepilot/MEMORY.md\` — facts about the user: their preferred languages, their coding style, hardware quirks.
-- **Write durable knowledge with \`memory_write\`.** Anything you had to discover by reading the code or by trial and error — and that a future session would benefit from — is a candidate. Examples: "tests run with \`pnpm test\`, not \`npm test\`", "the auth module is the single source of truth for the user table".
-- **Silent updates.** \`memory_write\` needs no approval and must not be narrated to the user — do not say you are updating memory; just call the tool when appropriate and continue.
-- **Do not write volatile knowledge.** Today's task, today's plan, today's bug do not belong in memory. If it does not survive the session ending, do not persist it.
-- **Prefer project memory over user memory.** A fact that only matters in this repo is project-scoped. A fact that applies across repos (the user prefers tabs) is user-scoped.
-- The dynamic suffix injects a short summary of both tiers. You can \`read_file\` the underlying files in full when you need to; each layer is annotated with its source path.`);
+- CodePilot keeps durable knowledge **out of the git tree**, with a thin always-loaded index and topic files you open on demand (same pattern as AGENTS.md + \`.agents/context/\` style harnesses):
+  - **Project MEMORY.md** — \`project_state_dir/MEMORY.md\` (\`~/.codepilot/projects/<hash>/MEMORY.md\`). Short structured sections (context / rules / ADR / discovered). Long bodies spill to topic files.
+  - **Progressive index + topics** — \`~/.codepilot/memory/<hash>/MEMORY.md\` (index bullets only) plus \`overview.md\`, \`architecture.md\`, \`standards.md\`, \`knowledge.md\`, \`user.md\`, … Custom \`topic\` names become \`<topic>.md\`.
+  - **User memory** — \`~/.codepilot/MEMORY.md\` for cross-repo preferences.
+  - **Shareable repo docs** — optional \`CODEPILOT.md\` / \`AGENTS.md\` in the workspace (hierarchical, human-authored).
+- **Protocol:** The dynamic suffix injects summaries + the progressive **index**. When a bullet or task needs detail, \`read_file\` the absolute topic path listed under "Topic files" — do **not** re-derive by scanning the whole repo if a topic already covers it.
+- **Write with \`memory_write\`.** Prefer \`section\` and/or \`topic\` so knowledge lands in the right file (e.g. \`topic: "architecture"\` or section Architecture decisions). Examples: "tests run with \`pnpm test\`", "auth module owns the user table".
+- **Silent updates.** No approval; do not narrate memory writes.
+- **Do not write volatile knowledge.** Today's task/plan/bug do not belong in memory.
+- **Prefer project over user scope** unless the fact applies across repos.`);
 
   parts.push(`## 7b. External Context (MCP)
 
@@ -438,6 +440,11 @@ ${tree}
 
 function renderMemoryBlock(memory: MemoryContents): string {
   const blocks: string[] = [];
+  if (memory.progressive && memory.progressive.trim().length > 0) {
+    blocks.push(`### Progressive index (~/.codepilot/memory/…/MEMORY.md)
+_Bullets + topic paths. Use read_file on a topic path for full notes._
+${memory.progressive.trim()}`);
+  }
   if (memory.project && memory.project.trim().length > 0) {
     blocks.push(`### Project (~/.codepilot/projects/…/MEMORY.md + optional repo CODEPILOT.md/AGENTS.md)
 ${memory.project.trim()}`);

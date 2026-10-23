@@ -6,7 +6,7 @@
 
 import type { AgentMode, Event, FollowUpItem, PlanStep, UsageInfo } from "@codepilot/core";
 import { fileChangeFromToolCall, isFileMutation } from "./diff.js";
-import { messageText, type Row } from "./rows.js";
+import { messageReasoning, messageText, type Row } from "./rows.js";
 import type { PendingPermission, PendingQuestion } from "../protocol/client.js";
 import { t } from "../i18n.js";
 
@@ -335,6 +335,7 @@ function applyEvent(state: AppState, e: Event): AppState {
 
     case "message": {
       const text = messageText(e);
+      const reasoning = messageReasoning(e);
       const rows = clearTransientRetryRows([...state.rows]);
       const idx = findStreamingMessage(rows, e.id);
       if (idx >= 0) {
@@ -347,11 +348,12 @@ function applyEvent(state: AppState, e: Event): AppState {
           msg: {
             ...row.msg,
             text: text || row.msg.text,
+            reasoning: reasoning || row.msg.reasoning,
             model: e.model ?? row.msg.model,
             streaming: false,
           },
         };
-      } else if (text !== "" || e.images?.length || e.files?.length) {
+      } else if (text !== "" || reasoning !== "" || e.images?.length || e.files?.length) {
         rows.push({
           kind: "message",
           at,
@@ -359,6 +361,7 @@ function applyEvent(state: AppState, e: Event): AppState {
             id: e.id,
             role: e.role,
             text,
+            ...(reasoning ? { reasoning } : {}),
             images: e.images,
             files: e.files,
             model: e.model,

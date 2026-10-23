@@ -46,6 +46,7 @@ import {
   WrenchIcon,
   XIcon,
 } from "./Icons.js";
+import { looksLikeWorkspacePath } from "../state/paths.js";
 import { Markdown } from "./Markdown.js";
 
 export type Density = "comfortable" | "compact";
@@ -64,6 +65,8 @@ export interface TranscriptProps {
   onRetry(): void;
  /** Sub-agents spawned by `task` calls, keyed by the parent tool call id. */
   subagents?: Record<string, SubagentRun[]>;
+  /** Open a workspace path in the in-app preview (or host editor). */
+  onOpenPath?: (path: string) => void;
 }
 
 interface SubagentNav {
@@ -72,6 +75,7 @@ interface SubagentNav {
 }
 
 const SubagentContext = createContext<SubagentNav | undefined>(undefined);
+const OpenPathContext = createContext<((path: string) => void) | undefined>(undefined);
 
 export function Transcript(props: TranscriptProps): React.ReactElement {
   const [viewing, setViewing] = useState<{ toolCallId: string; index: number } | undefined>();
@@ -81,35 +85,39 @@ export function Transcript(props: TranscriptProps): React.ReactElement {
 
   if (!run) {
     return (
-      <SubagentContext.Provider value={nav}>
-        <MainTranscript {...props} />
-      </SubagentContext.Provider>
+      <OpenPathContext.Provider value={props.onOpenPath}>
+        <SubagentContext.Provider value={nav}>
+          <MainTranscript {...props} />
+        </SubagentContext.Provider>
+      </OpenPathContext.Provider>
     );
   }
   return (
-    <div className="flex flex-col gap-3">
-      <div className="sticky top-0 z-10 flex items-center gap-2 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2 text-[12px]">
-        <button
-          type="button"
-          onClick={() => setViewing(undefined)}
-          className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
-        >
-          ← {t("Back to main task")}
-        </button>
-        <SubagentStateIcon state={run.state} />
-        <span className="min-w-0 truncate text-[var(--color-ink)]" title={run.objective}>
-          {t("Subtask")} #{run.index + 1}: {run.objective}
-        </span>
+    <OpenPathContext.Provider value={props.onOpenPath}>
+      <div className="flex flex-col gap-3">
+        <div className="sticky top-0 z-10 flex items-center gap-2 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2 text-[12px]">
+          <button
+            type="button"
+            onClick={() => setViewing(undefined)}
+            className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
+          >
+            ← {t("Back to main task")}
+          </button>
+          <SubagentStateIcon state={run.state} />
+          <span className="min-w-0 truncate text-[var(--color-ink)]" title={run.objective}>
+            {t("Subtask")} #{run.index + 1}: {run.objective}
+          </span>
+        </div>
+        <Transcript
+          {...props}
+          rows={run.view.rows}
+          status={run.state === "running" ? "thinking" : "idle"}
+          activity={run.view.activity}
+          subagents={run.view.subagents}
+          planInline
+        />
       </div>
-      <Transcript
-        {...props}
-        rows={run.view.rows}
-        status={run.state === "running" ? "thinking" : "idle"}
-        activity={run.view.activity}
-        subagents={run.view.subagents}
-        planInline
-      />
-    </div>
+    </OpenPathContext.Provider>
   );
 }
 
@@ -214,6 +222,7 @@ function AssistantTurnView({
   canRetry: boolean;
   onRetry(): void;
 }): React.ReactElement | null {
+  const onOpenPath = useContext(OpenPathContext);
   if (parts.length === 0) return null;
   const messages = parts.filter((p): p is Extract<typeof p, { kind: "message" }> => p.kind === "message");
   const streaming = messages.some((m) => m.msg.streaming);
@@ -235,7 +244,7 @@ function AssistantTurnView({
                   {p.msg.reasoning ? (
                     <ReasoningBlock text={p.msg.reasoning} streaming={p.msg.streaming && !p.msg.text} />
                   ) : null}
-                  <Markdown text={p.msg.text} />
+                  <Markdown text={p.msg.text} onOpenPath={onOpenPath} />
                   {p.msg.streaming && (
                     <span className="ml-0.5 inline-block h-4 w-1.5 animate-breathe rounded-sm bg-[var(--color-accent)] align-text-bottom" />
                   )}
@@ -541,8 +550,33 @@ function SubagentChips({ toolCallId }: { toolCallId: string }): React.ReactEleme
   );
 }
 
+function PathChip({ path }: { path: string }): React.ReactElement {
+  const onOpen = useContext(OpenPathContext);
+  if (!onOpen || !looksLikeWorkspacePath(path)) {
+    return (
+      <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-ink)]" title={path}>
+        {path}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      title={`${t("Preview")} ${path}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen(path);
+      }}
+      className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-accent)] underline-offset-2 hover:underline"
+    >
+      {path}
+    </button>
+  );
+}
+
 function StepItem({ tool }: { tool: ToolRow }): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const onOpenPath = useContext(OpenPathContext);
   const category = toolCategory(tool.name);
   const target = toolTarget(tool.input);
   const duration =
@@ -570,9 +604,11 @@ function StepItem({ tool }: { tool: ToolRow }): React.ReactElement {
           )}
         </span>
         <span className="shrink-0 text-[var(--color-ink-dim)]">{t(CATEGORY_VERB[category])}</span>
-        <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-ink)]" title={target}>
-          {target || tool.name}
-        </span>
+        {target ? (
+          <PathChip path={target} />
+        ) : (
+          <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-ink)]">{tool.name}</span>
+        )}
         {tool.change && (
           <span className="shrink-0 font-mono text-[10.5px]">
             {tool.change.added > 0 && <span className="text-[var(--color-add)]">+{tool.change.added}</span>}
@@ -591,7 +627,7 @@ function StepItem({ tool }: { tool: ToolRow }): React.ReactElement {
       {open && (
         <div className="space-y-2 px-3 pt-1 pb-2.5 pl-10">
           {tool.change ? (
-            <DiffBlock change={tool.change} />
+            <DiffBlock change={tool.change} onOpenPath={onOpenPath} />
           ) : (
             <Labelled label={t("input")}>
               <pre className="max-h-48 overflow-auto rounded-lg bg-[var(--color-surface-sunken)] p-2 text-[11px] leading-5 whitespace-pre-wrap text-[var(--color-ink-dim)]">

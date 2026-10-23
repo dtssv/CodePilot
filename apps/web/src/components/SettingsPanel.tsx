@@ -12,7 +12,15 @@ import type {
 } from "../protocol/client.js";
 import { describeError } from "../protocol/client.js";
 import { t } from "../i18n.js";
+import { detectSurface } from "../surface.js";
 import { PlusIcon, RefreshIcon, XIcon } from "./Icons.js";
+
+type EngineUpdateRow = {
+  current: string;
+  latest: string | null;
+  available: boolean;
+  canAutoApply: boolean;
+};
 
 type ProviderKind = "anthropic" | "openai" | "copilot";
 
@@ -191,9 +199,54 @@ export function SettingsPanel({
   /** Model ids whose context/modality panel is expanded (collapsed by default). */
   const [expandedModels, setExpandedModels] = useState<Set<string>>(() => new Set());
   const [fetching, setFetching] = useState(false);
+  const [engineUpdate, setEngineUpdate] = useState<EngineUpdateRow | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState<string | undefined>();
+  const surface = useMemo(detectSurface, []);
+  const embeddedHost = surface.host;
 
   const rows = useMemo(() => buildEndpointRows(snap), [snap]);
   const editing = draft?.kind === "edit" ? rows.find((r) => r.id === draft.id) : null;
+
+  const checkUpdates = useCallback(async (): Promise<void> => {
+    if (state.connection !== "connected") return;
+    setUpdateBusy(true);
+    setUpdateMsg(undefined);
+    try {
+      const { engine } = await client.checkEngineUpdate();
+      setEngineUpdate({
+        current: engine.current,
+        latest: engine.latest,
+        available: engine.available,
+        canAutoApply: engine.canAutoApply,
+      });
+      if (!engine.available) setUpdateMsg(t("Up to date"));
+    } catch (err) {
+      setUpdateMsg(describeError(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [client, state.connection]);
+
+  const applyEngine = useCallback(async (): Promise<void> => {
+    setUpdateBusy(true);
+    setUpdateMsg(undefined);
+    try {
+      const r = await client.applyEngineUpdate();
+      setUpdateMsg(r.message ?? (r.applied ? t("Restart CodePilot after updating the engine.") : undefined));
+      if (r.applied) {
+        setEngineUpdate((prev) =>
+          prev
+            ? { ...prev, current: r.version, available: false, latest: r.version }
+            : { current: r.version, latest: r.version, available: false, canAutoApply: true },
+        );
+      }
+    } catch (err) {
+      setUpdateMsg(describeError(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [client]);
 
   const reload = useCallback(async () => {
     if (state.connection !== "connected") return;
@@ -942,6 +995,73 @@ export function SettingsPanel({
               </div>
             )}
           </div>
+        </div>
+
+        <div className="shrink-0 border-t border-[var(--color-edge-subtle)] px-4 py-3">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="text-[12.5px] font-semibold text-[var(--color-ink)]">{t("Updates")}</span>
+            <button
+              type="button"
+              className="cp-btn-ghost ml-auto py-0.5 text-[11.5px]"
+              disabled={updateBusy || state.connection !== "connected"}
+              onClick={() => void checkUpdates()}
+            >
+              <RefreshIcon className="h-3 w-3" />
+              {updateBusy ? t("Checking…") : t("Check for updates")}
+            </button>
+          </div>
+          <p className="mb-2 text-[11px] leading-4 text-[var(--color-ink-faint)]">
+            {t("Engine updates apply to the CLI/daemon (~/.codepilot). Extension updates are separate.")}
+          </p>
+          <div className="space-y-2">
+            <div className="flex items-start gap-2 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-[12px] font-medium text-[var(--color-ink)]">{t("Engine")}</div>
+                <div className="font-mono text-[11px] text-[var(--color-ink-faint)]">
+                  {engineUpdate
+                    ? engineUpdate.available && engineUpdate.latest
+                      ? `${engineUpdate.current} → ${engineUpdate.latest}`
+                      : engineUpdate.current
+                    : "—"}
+                </div>
+                {engineUpdate?.available && !engineUpdate.canAutoApply && (
+                  <div className="mt-1 text-[11px] text-[var(--color-warn)]">
+                    {t("Cannot auto-apply here (not a prefix install). Run: codepilot update")}
+                  </div>
+                )}
+              </div>
+              {engineUpdate?.available ? (
+                <button
+                  type="button"
+                  className="cp-btn shrink-0 py-1 text-[11.5px]"
+                  disabled={updateBusy || !engineUpdate.canAutoApply}
+                  onClick={() => void applyEngine()}
+                >
+                  {t("Apply engine update")}
+                </button>
+              ) : engineUpdate ? (
+                <span className="shrink-0 text-[11px] text-[var(--color-add)]">{t("Up to date")}</span>
+              ) : null}
+            </div>
+            <div className="rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2">
+              <div className="text-[12px] font-medium text-[var(--color-ink)]">{t("Extension")}</div>
+              <div className="mt-0.5 text-[11px] leading-4 text-[var(--color-ink-faint)]">
+                {t("Extension updates install via VSIX / IDE marketplace — not via the engine updater.")}
+                {embeddedHost ? ` (${embeddedHost})` : ""}
+              </div>
+              <a
+                className="mt-1 inline-block text-[11.5px] text-[var(--color-accent)] hover:underline"
+                href="https://github.com/dtssv/CodePilot/releases"
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t("Open releases")}
+              </a>
+            </div>
+          </div>
+          {updateMsg && (
+            <div className="mt-2 text-[11.5px] text-[var(--color-ink-dim)]">{updateMsg}</div>
+          )}
         </div>
       </aside>
     </div>

@@ -50,6 +50,10 @@ import {
   setUserActiveEndpoint,
   templateToPreset,
   findProviderIdForFlat,
+  applyUpdate,
+  checkEngineUpdate,
+  currentInstalledVersion,
+  type EngineUpdateInfo,
   type ProviderPreset,
   type ProviderName,
   type ResolvedCodepilotConfig,
@@ -85,6 +89,18 @@ export interface InitializeResult {
     config?: boolean;
     setModel?: boolean;
   };
+  /** Running engine (CLI/daemon) version — distinct from IDE plugin / VSIX. */
+  serverInfo?: { name: string; version: string; channel: "engine" };
+}
+
+export interface SystemUpdateCheckResult {
+  engine: EngineUpdateInfo;
+}
+
+export interface SystemUpdateApplyResult {
+  applied: boolean;
+  version: string;
+  message?: string;
 }
 
 export interface SessionSetModelParams {
@@ -150,7 +166,17 @@ export interface WorkspaceBrowseResult {
   roots: Array<{ label: string; path: string }>;
 }
 export interface WorkspaceReadParams { path: string; }
-export interface WorkspaceReadResult { path: string; content: string; size: number; hash: string; truncated: boolean; }
+export interface WorkspaceReadResult {
+  path: string;
+  content: string;
+  size: number;
+  hash: string;
+  truncated: boolean;
+  /** utf8 (default) or base64 for binary previews (images). */
+  encoding?: "utf8" | "base64";
+  /** MIME hint when encoding is base64 (e.g. image/png). */
+  mediaType?: string;
+}
 export interface WorkspaceSearchParams { query: string; path?: string; maxResults?: number; }
 export interface WorkspaceSearchResult { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean; }
 export interface WorkspaceWriteParams { path: string; content: string; expectedSize?: number; expectedHash?: string; }
@@ -360,6 +386,12 @@ export function registerServer(
   peer.onRequest<WorkspaceGitDiffParams, WorkspaceGitDiffResult>("workspace/git-diff", (p) => handleWorkspaceGitDiff(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
+  peer.onRequest<Record<string, never>, SystemUpdateCheckResult>("system/update-check", () =>
+    handleSystemUpdateCheck(),
+  );
+  peer.onRequest<Record<string, never>, SystemUpdateApplyResult>("system/update-apply", () =>
+    handleSystemUpdateApply(),
+  );
   peer.onRequest<PromptSendParams, PromptSendResult>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
@@ -646,6 +678,61 @@ async function handleInitialize(
   return {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: ctx.capabilities,
+    serverInfo: {
+      name: "codepilot",
+      version: currentInstalledVersion(),
+      channel: "engine",
+    },
+  };
+}
+
+async function handleSystemUpdateCheck(): Promise<SystemUpdateCheckResult> {
+  const engine = await checkEngineUpdate({ checkOnly: true });
+  if (!engine) {
+    return {
+      engine: {
+        channel: "engine",
+        current: currentInstalledVersion(),
+        latest: null,
+        available: false,
+        installRoot: null,
+        canAutoApply: false,
+      },
+    };
+  }
+  return { engine };
+}
+
+async function handleSystemUpdateApply(): Promise<SystemUpdateApplyResult> {
+  const check = await checkEngineUpdate();
+  if (!check) {
+    return {
+      applied: false,
+      version: currentInstalledVersion(),
+      message: "Update check disabled or failed",
+    };
+  }
+  if (!check.available || !check.latest || !check.tag) {
+    return { applied: false, version: check.current, message: "Already up to date" };
+  }
+  if (!check.canAutoApply || !check.installRoot) {
+    return {
+      applied: false,
+      version: check.current,
+      message: "Cannot auto-apply here (not a ~/.codepilot prefix install). Run: codepilot update",
+    };
+  }
+  const version = await applyUpdate({
+    current: check.current,
+    latest: check.latest,
+    tag: check.tag,
+    available: true,
+    installRoot: check.installRoot,
+  });
+  return {
+    applied: true,
+    version,
+    message: "Updated. Restart CodePilot to load the new engine.",
   };
 }
 
@@ -1210,13 +1297,45 @@ async function handleWorkspaceBrowse(
   return { path: abs, parent, entries, roots };
 }
 
+const IMAGE_EXT_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+};
+
 async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadParams): Promise<WorkspaceReadResult> {
   assertInitialized(ctx);
   const target = workspacePath(ctx, params.path);
   const data = await readFile(target.abs);
   const truncated = data.byteLength > WORKSPACE_MAX_BYTES;
-  const content = data.subarray(0, WORKSPACE_MAX_BYTES).toString("utf8");
-  return { path: target.rel, content, size: data.byteLength, hash: createHash("sha256").update(data).digest("hex"), truncated };
+  const slice = data.subarray(0, WORKSPACE_MAX_BYTES);
+  const hash = createHash("sha256").update(data).digest("hex");
+  const ext = target.rel.includes(".") ? target.rel.slice(target.rel.lastIndexOf(".")).toLowerCase() : "";
+  const mediaType = IMAGE_EXT_MIME[ext];
+  if (mediaType) {
+    return {
+      path: target.rel,
+      content: slice.toString("base64"),
+      size: data.byteLength,
+      hash,
+      truncated,
+      encoding: "base64",
+      mediaType,
+    };
+  }
+  return {
+    path: target.rel,
+    content: slice.toString("utf8"),
+    size: data.byteLength,
+    hash,
+    truncated,
+    encoding: "utf8",
+  };
 }
 
 async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearchParams): Promise<WorkspaceSearchResult> {

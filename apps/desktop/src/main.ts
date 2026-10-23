@@ -109,6 +109,16 @@ app.on("will-quit", () => {
 });
 
 void app.whenReady().then(() => {
+  if (
+    process.env.CODEPILOT_SKIP_UPDATE !== "1" &&
+    process.env.CODEPILOT_NO_UPDATE !== "1"
+  ) {
+    void import("@codepilot/core")
+      .then((core) => {
+        core.startSelfUpdateWatcher();
+      })
+      .catch(() => undefined);
+  }
   const folder = initialFolder(process.argv.slice(app.isPackaged ? 1 : 2), settings, app.getPath("home"), process.cwd());
   settings.lastFolder = folder;
   saveSettings(settingsFile, settings);

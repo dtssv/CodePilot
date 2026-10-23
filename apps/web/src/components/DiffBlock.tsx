@@ -20,11 +20,28 @@ const PREFIX: Record<DiffLine["kind"], string> = {
  * diff — for `edit_file` these are the exact search/replace texts the agent
  * submitted, which is what a reviewer needs to see before approving.
  */
-export function DiffBlock({ change }: { change: FileChange }): React.ReactElement {
+export function DiffBlock({
+  change,
+  onOpenPath,
+}: {
+  change: FileChange;
+  onOpenPath?: (path: string) => void;
+}): React.ReactElement {
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--color-edge-subtle)]">
       <div className="flex items-center gap-2 bg-[var(--color-surface-raised)] px-3 py-1.5 text-xs">
-        <span className="font-mono text-[var(--color-ink)]">{change.path}</span>
+        {onOpenPath ? (
+          <button
+            type="button"
+            className="font-mono text-[var(--color-accent)] underline-offset-2 hover:underline"
+            title={change.path}
+            onClick={() => onOpenPath(change.path)}
+          >
+            {change.path}
+          </button>
+        ) : (
+          <span className="font-mono text-[var(--color-ink)]">{change.path}</span>
+        )}
         <span className="rounded border border-[var(--color-edge-subtle)] px-1 text-[9px] uppercase tracking-wider text-[var(--color-ink-faint)]">{change.operation}</span>
         <div className="ml-auto flex gap-1.5 font-mono">
           {change.added > 0 && (

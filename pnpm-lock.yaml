@@ -32,6 +32,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@codepilot/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@codepilot/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

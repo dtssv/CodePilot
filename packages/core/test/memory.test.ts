@@ -26,7 +26,7 @@ describe("memory", () => {
 
   it("FileMemorySink writes under ~/.codepilot/projects/<hash>/", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-"));
-    const sink = new FileMemorySink(dir);
+    const sink = new FileMemorySink(dir, { autoMemory: false });
     const target = await sink.write("project", "Title", "Body content");
     expect(target).toBe(projectMemoryPath(dir));
     expect(target.includes(".codepilot/projects/")).toBe(true);
@@ -34,6 +34,18 @@ describe("memory", () => {
     const text = readFileSync(target, "utf-8");
     expect(text).toContain("Title");
     expect(text).toContain("Body content");
+    rmSync(target, { force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("spills long MEMORY.md bodies to a short blurb", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-spill-"));
+    const sink = new FileMemorySink(dir, { autoMemory: false });
+    const long = "x".repeat(800);
+    const target = await sink.write("project", "Long", long, "Project context");
+    const text = readFileSync(target, "utf-8");
+    expect(text).toContain("progressive memory");
+    expect(text.length).toBeLessThan(long.length);
     rmSync(target, { force: true });
     rmSync(dir, { recursive: true, force: true });
   });

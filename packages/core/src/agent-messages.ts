@@ -216,6 +216,9 @@ export function compactTranscriptToProviderMessages(
         for (const b of e.content) {
           if (b.type === "text") {
             if (b.text !== "") blocks.push({ type: "text", text: b.text });
+          } else if (b.type === "reasoning") {
+            // Persisted for audit/export only — do not re-send to the provider.
+            continue;
           } else if (b.type === "tool_use") {
             const call = addCall(b.id, b.name, b.input);
             if (call) blocks.push(call);

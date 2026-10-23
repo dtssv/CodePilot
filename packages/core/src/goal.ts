@@ -70,7 +70,7 @@ export const goalPromptBody = `You are running in a long-horizon goal loop. Each
 
 Additional rules:
 - Keep plans lean (3-8 steps). If a plan grows past that, collapse completed clusters.
-- Persist anything you had to discover and that future sessions would benefit from via \`memory_write\` (silent — do not narrate it).
+- Persist anything you had to discover and that future sessions would benefit from via \`memory_write\` (silent — prefer a \`section\`/\`topic\` so progressive memory stays navigable).
 - Do not commit, push, or perform other destructive operations unless the user explicitly asked.
 - Prefer \`task\` for parallel exploration; do not serialise independent reads.
 - If a step has been \`in_progress\` for more than two rounds without progress, mark it \`blocked\` and stop.

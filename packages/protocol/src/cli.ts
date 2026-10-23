@@ -28,6 +28,10 @@ import {
   templateToPreset,
   PROVIDER_TEMPLATES,
   redactApiKey,
+  exportSession,
+  listSessions,
+  startSelfUpdateWatcher,
+  runUpdateCheck,
   type AgentMode,
   type Event,
   type PermissionMode,
@@ -35,8 +39,10 @@ import {
   type ProviderPreset,
   type ResolvedCodepilotConfig,
   type Session,
+  type SessionExportFormat,
 } from "@codepilot/core";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
@@ -105,6 +111,10 @@ Usage:
                                            in a Chrome/Edge app window
   codepilot config show|providers|add|remove|use|templates
                                          — manage ~/.codepilot/config.json providers
+  codepilot export [session-id] [--format md|jsonl] [-o PATH]
+                                         — export a session transcript (default: newest)
+  codepilot update [--check]             — in-place update from GitHub Releases
+                                         (or only check with --check)
   codepilot --help
 
 Interactive mode (REPL):
@@ -130,6 +140,15 @@ async function main(): Promise<number> {
     process.stdout.write(helpText() + "\n");
     return 0;
   }
+  const skipUpdate =
+    argv.includes("--no-update") ||
+    process.env.CODEPILOT_SKIP_UPDATE === "1" ||
+    process.env.CODEPILOT_NO_UPDATE === "1";
+  // Background update watcher: once at startup, then every 24h while alive.
+  // Skipped for explicit `update` (handled below) and when disabled.
+  if (!skipUpdate && argv[0] !== "update") {
+    startSelfUpdateWatcher();
+  }
   if (argv.length === 0) {
  // No args in a TTY → interactive REPL. Non-TTY (pipe/CI) → help.
     if (process.stdin.isTTY) return cmdRepl([], {});
@@ -150,6 +169,10 @@ async function main(): Promise<number> {
       return cmdAgent(positional.slice(1), flags);
     case "config":
       return cmdConfig(positional.slice(1), flags);
+    case "export":
+      return cmdExport(positional.slice(1), flags);
+    case "update":
+      return cmdUpdate(flags);
     case "chat":
     case "repl":
       return cmdRepl(positional.slice(1), flags);
@@ -175,6 +198,57 @@ async function main(): Promise<number> {
       process.stderr.write(`unknown command: ${cmd ?? ""}\n\n${helpText()}`);
       return 2;
   }
+}
+
+async function cmdUpdate(
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const checkOnly = flags["check"] === true;
+  const result = await runUpdateCheck({ checkOnly });
+  if (!result) {
+    process.stderr.write(
+      "update: skipped (not a ~/.codepilot prefix install, or check failed / disabled)\n",
+    );
+    return 1;
+  }
+  if (!result.available && checkOnly) {
+    process.stdout.write(`up to date: ${result.current}\n`);
+    return 0;
+  }
+  if (checkOnly && result.available) {
+    process.stdout.write(`update available: ${result.current} → ${result.latest}\n`);
+    return 0;
+  }
+  process.stdout.write(`current: ${result.current}\n`);
+  return 0;
+}
+
+async function cmdExport(
+  positional: string[],
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const formatRaw = String(flags["format"] ?? "md").toLowerCase();
+  const format: SessionExportFormat =
+    formatRaw === "jsonl" || formatRaw === "json" ? "jsonl" : "markdown";
+  let id = positional[0];
+  if (!id) {
+    const sessions = await listSessions();
+    id = sessions[0]?.id;
+    if (!id) {
+      process.stderr.write("export: no sessions found\n");
+      return 1;
+    }
+  }
+  const body = await exportSession(id, format);
+  const outFlag = flags["o"] ?? flags["out"] ?? flags["output"];
+  if (typeof outFlag === "string" && outFlag) {
+    const dest = resolve(outFlag);
+    await writeFile(dest, body, "utf-8");
+    process.stderr.write(`exported ${format} → ${dest}\n`);
+    return 0;
+  }
+  process.stdout.write(body.endsWith("\n") ? body : body + "\n");
+  return 0;
 }
 
 function configHelp(): string {

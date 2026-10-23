@@ -22,8 +22,13 @@
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
-import type { MemorySink } from "./tools/memory_write.js";
+import type { MemorySink, MemoryWriteOpts } from "./tools/memory_write.js";
 import { projectStatePath } from "./projectState.js";
+import {
+  resolveMemoryTopic,
+  writeAutoMemoryNote,
+  type AutoMemoryConfig,
+} from "./autoMemory.js";
 
 /** Legacy / shareable name still *read* from the workspace tree. */
 export const PROJECT_MEMORY_NAME = "CODEPILOT.md";
@@ -51,6 +56,8 @@ export type MemorySection = (typeof MEMORY_SECTIONS)[number];
 export interface MemoryContents {
   project?: string;
   user?: string;
+  /** Progressive index (~/.codepilot/memory/<hash>/MEMORY.md) — bullets + topic paths. */
+  progressive?: string;
 }
 
 /** A single section's contents, parsed from a memory file. */
@@ -225,15 +232,21 @@ export function classifySection(title: string, content: string): MemorySection {
 }
 
 /** File-backed sink. Honours the `section` argument.
- * Project entries go to `~/.codepilot/projects/<hash>/MEMORY.md`. */
+ * Project entries go to `~/.codepilot/projects/<hash>/MEMORY.md`.
+ * Also mirrors into progressive index + topic files under
+ * `~/.codepilot/memory/<hash>/` (unless auto-memory is disabled). */
 export class FileMemorySink implements MemorySink {
-  constructor(private readonly cwd: string) {}
+  constructor(
+    private readonly cwd: string,
+    private readonly opts?: { autoMemory?: AutoMemoryConfig | false },
+  ) {}
 
   async write(
     scope: "project" | "user",
     title: string,
     content: string,
-    section?: string
+    section?: string,
+    writeOpts?: MemoryWriteOpts,
   ): Promise<string> {
     const path =
       scope === "project" ? projectMemoryPath(this.cwd) : USER_MEMORY_PATH;
@@ -241,19 +254,58 @@ export class FileMemorySink implements MemorySink {
     try {
       existing = await readFile(path, "utf-8");
     } catch {
- /* fresh */
+      /* fresh */
     }
     const parsed = parseMemory(existing);
-    const target = canonicaliseSection(section) ??
-      classifySection(title, content);
+    const target = canonicaliseSection(section) ?? classifySection(title, content);
     const stamp = new Date().toISOString().slice(0, 10);
-    const block = `\n### ${title} (${stamp})\n\n${content.trim()}\n`;
+    const body = content.trim();
+    // Keep MEMORY.md lean: long bodies live in progressive topic files;
+    // the section only keeps a short blurb + pointer when spilling.
+    const { blurb, spilled } = spillBlurb(body);
+    const block = spilled
+      ? `\n### ${title} (${stamp})\n\n${blurb}\n\n_Full note in progressive memory (see topic files under \`~/.codepilot/memory/\`)._\n`
+      : `\n### ${title} (${stamp})\n\n${body}\n`;
     parsed.sections[target] = (parsed.sections[target] || "").trimEnd() + "\n" + block;
     const newText = renderMemory(parsed);
     await mkdir(join(path, ".."), { recursive: true }).catch(() => undefined);
     await writeFile(path, newText, "utf-8");
+
+    const am = this.opts?.autoMemory;
+    if (am !== false && (am?.enabled !== false)) {
+      const resolved = resolveMemoryTopic({
+        scope,
+        section: section ?? target,
+        title,
+        content: body,
+        topic: writeOpts?.topic,
+        category: writeOpts?.category,
+      });
+      await writeAutoMemoryNote(
+        this.cwd,
+        {
+          category: resolved.category,
+          topic: resolved.topic,
+          summary: title,
+          body,
+          source: path,
+        },
+        am,
+      ).catch(() => undefined);
+    }
     return path;
   }
+}
+
+/** Spill long MEMORY.md entries so the always-injected summary stays small. */
+const MEMORY_BLURB_CHARS = 400;
+
+function spillBlurb(body: string): { blurb: string; spilled: boolean } {
+  if (body.length <= MEMORY_BLURB_CHARS) return { blurb: body, spilled: false };
+  const cut = body.slice(0, MEMORY_BLURB_CHARS);
+  const at = Math.max(cut.lastIndexOf("\n"), cut.lastIndexOf(". "));
+  const blurb = (at > 80 ? cut.slice(0, at + 1) : cut).trimEnd() + "…";
+  return { blurb, spilled: true };
 }
 
 function canonicaliseSection(s: string | undefined): MemorySection | null {

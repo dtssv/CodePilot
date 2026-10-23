@@ -77,3 +77,11 @@ export function messageText(e: Extract<Event, { type: "message" }>): string {
     .map((b) => b.text)
     .join("");
 }
+
+/** Persisted extended-thinking blocks on an assistant message (resume / export). */
+export function messageReasoning(e: Extract<Event, { type: "message" }>): string {
+  return e.content
+    .filter((b): b is { type: "reasoning"; text: string } => b.type === "reasoning")
+    .map((b) => b.text)
+    .join("");
+}

@@ -5,7 +5,9 @@ export type {
   TextBlock,
   ToolUseBlock,
   ToolResultBlock,
+  ReasoningBlock,
   ContentBlock,
+  EventMeta,
   PlanStep,
   UsageInfo,
   Event,
@@ -156,6 +158,24 @@ export {
   USER_MEMORY_PATH,
 } from "./memory.js";
 export type { MemoryContents } from "./memory.js";
+export {
+  MEMORY_TOPICS,
+  autoMemoryDir,
+  autoMemoryExists,
+  classifyNote,
+  clearAutoMemory,
+  loadAutoMemoryIndex,
+  resolveMemoryTopic,
+  sanitizeTopic,
+  writeAutoMemoryNote,
+} from "./autoMemory.js";
+// projectHash is exported from projectState.js (same implementation).
+export type {
+  AutoMemoryCategory,
+  AutoMemoryConfig,
+  AutoMemoryNote,
+  MemoryTopic,
+} from "./autoMemory.js";
 
 // ---- System prompt ----
 export { buildSystemPrompt } from "./systemPrompt.js";
@@ -535,6 +555,26 @@ export type {
   RichSessionSummary,
   SessionExportFormat,
 } from "./session-utils.js";
+export { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
+export {
+  DAY_MS,
+  applyUpdate,
+  checkEngineUpdate,
+  checkForUpdate,
+  compareVersions,
+  currentInstalledVersion,
+  detectInstallRoot,
+  normalizeVersion,
+  resetSelfUpdateWatcherForTests,
+  runUpdateCheck,
+  startSelfUpdateWatcher,
+} from "./selfUpdate.js";
+export type {
+  EngineUpdateInfo,
+  SelfUpdateOptions,
+  SelfUpdateWatcherHandle,
+  UpdateCheckResult,
+} from "./selfUpdate.js";
 
 // ---- Session internals (split modules — MCP wiring + prompt telemetry) ----
 export {

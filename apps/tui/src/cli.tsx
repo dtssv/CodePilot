@@ -445,6 +445,20 @@ async function main(): Promise<void> {
     process.exit(await runBundle(args.subcommandArgs, args));
   }
 
+  // In-place update check (startup + daily). No-op outside ~/.codepilot installs.
+  if (
+    process.env.CODEPILOT_SKIP_UPDATE !== "1" &&
+    process.env.CODEPILOT_NO_UPDATE !== "1" &&
+    !process.argv.includes("--no-update")
+  ) {
+    try {
+      const { startSelfUpdateWatcher } = await import("@codepilot/core");
+      startSelfUpdateWatcher();
+    } catch {
+      /* optional */
+    }
+  }
+
   if (!existsSync(args.cwd)) {
     process.stderr.write(`codepilot-tui: --cwd not found: ${args.cwd}\n`);
     process.exit(2);

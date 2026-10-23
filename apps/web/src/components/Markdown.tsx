@@ -11,10 +11,17 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { t } from "../i18n.js";
+import { looksLikeWorkspacePath } from "../state/paths.js";
 import { splitThinking } from "../state/stripThinking.js";
 import { CheckIcon, ChevronIcon, CopyIcon } from "./Icons.js";
 
-export function Markdown({ text }: { text: string }): React.ReactElement {
+export function Markdown({
+  text,
+  onOpenPath,
+}: {
+  text: string;
+  onOpenPath?: (path: string) => void;
+}): React.ReactElement {
   const segments = useMemo(() => splitThinking(text), [text]);
   if (segments.length === 0) {
     return <div className="cp-md text-[13.5px] leading-[1.7] text-[var(--color-ink-faint)]" />;
@@ -25,17 +32,23 @@ export function Markdown({ text }: { text: string }): React.ReactElement {
         seg.kind === "think" ? (
           <ThinkingFold key={i} text={seg.text} incomplete={seg.incomplete} />
         ) : (
-          <MarkdownBody key={i} text={seg.text} />
+          <MarkdownBody key={i} text={seg.text} onOpenPath={onOpenPath} />
         ),
       )}
     </div>
   );
 }
 
-function MarkdownBody({ text }: { text: string }): React.ReactElement | null {
+function MarkdownBody({
+  text,
+  onOpenPath,
+}: {
+  text: string;
+  onOpenPath?: (path: string) => void;
+}): React.ReactElement | null {
   const blocks = useMemo(() => parseBlocks(text), [text]);
   if (blocks.length === 0) return null;
-  return <>{blocks.map(renderBlock)}</>;
+  return <>{blocks.map((b, i) => renderBlock(b, i, onOpenPath))}</>;
 }
 
 /** Collapsed by default; click to reveal model chain-of-thought. */
@@ -253,14 +266,14 @@ function parseBlocks(src: string): Block[] {
 
 const HEADING_SIZE = ["text-[17px]", "text-[15.5px]", "text-[14px]", "text-[13.5px]"];
 
-function renderBlock(b: Block, i: number): ReactNode {
+function renderBlock(b: Block, i: number, onOpenPath?: (path: string) => void): ReactNode {
   switch (b.kind) {
     case "code":
       return <CodeBlock key={i} lang={b.lang} code={b.lines.join("\n")} />;
     case "heading":
       return (
         <div key={i} className={`${HEADING_SIZE[b.level - 1]} pt-1 font-semibold tracking-tight text-[var(--color-ink)]`}>
-          {inline(b.text)}
+          {inline(b.text, onOpenPath)}
         </div>
       );
     case "list": {
@@ -275,7 +288,7 @@ function renderBlock(b: Block, i: number): ReactNode {
               {it.done && <CheckIcon className="h-2.5 w-2.5" />}
             </span>
           )}
-          <span className={it.done ? "text-[var(--color-ink-faint)] line-through" : undefined}>{inline(it.text)}</span>
+          <span className={it.done ? "text-[var(--color-ink-faint)] line-through" : undefined}>{inline(it.text, onOpenPath)}</span>
         </li>
       ));
       return b.ordered ? (
@@ -291,7 +304,7 @@ function renderBlock(b: Block, i: number): ReactNode {
     case "quote":
       return (
         <blockquote key={i} className="border-l-[3px] border-[var(--color-accent)]/50 pl-3 whitespace-pre-wrap text-[var(--color-ink-dim)]">
-          {inline(b.text)}
+          {inline(b.text, onOpenPath)}
         </blockquote>
       );
     case "table":
@@ -306,7 +319,7 @@ function renderBlock(b: Block, i: number): ReactNode {
                     style={{ textAlign: b.align[j] ?? "left" }}
                     className="border-b border-[var(--color-edge-subtle)] px-3 py-1.5 font-semibold text-[var(--color-ink)]"
                   >
-                    {inline(h)}
+                    {inline(h, onOpenPath)}
                   </th>
                 ))}
               </tr>
@@ -316,7 +329,7 @@ function renderBlock(b: Block, i: number): ReactNode {
                 <tr key={ri} className="border-b border-[var(--color-edge-subtle)] last:border-b-0">
                   {b.header.map((_, j) => (
                     <td key={j} style={{ textAlign: b.align[j] ?? "left" }} className="px-3 py-1.5 align-top text-[var(--color-ink-dim)]">
-                      {inline(r[j] ?? "")}
+                      {inline(r[j] ?? "", onOpenPath)}
                     </td>
                   ))}
                 </tr>
@@ -330,7 +343,7 @@ function renderBlock(b: Block, i: number): ReactNode {
     case "para":
       return (
         <p key={i} className="whitespace-pre-wrap">
-          {inline(b.text)}
+          {inline(b.text, onOpenPath)}
         </p>
       );
   }
@@ -369,7 +382,7 @@ function CodeBlock({ lang, code }: { lang?: string; code: string }): React.React
 const INLINE_RE =
   /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(~~[^~\n]+~~)|(\[[^\]\n]+\]\((?:https?:\/\/|mailto:)[^)\s]+\))|(\*[^*\n]+\*)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
 
-function inline(text: string): ReactNode {
+function inline(text: string, onOpenPath?: (path: string) => void): ReactNode {
   if (!/[*`_~[]|https?:/.test(text)) return text;
   const out: ReactNode[] = [];
   let last = 0;
@@ -380,20 +393,35 @@ function inline(text: string): ReactNode {
     if (at > last) out.push(<Fragment key={k++}>{text.slice(last, at)}</Fragment>);
     last = at + part.length;
     if (m[1]) {
-      out.push(
-        <code key={k++} className="rounded-md bg-[var(--color-surface-sunken)] px-1.5 py-0.5 font-mono text-[0.86em] text-[var(--color-accent)]">
-          {part.slice(1, -1)}
-        </code>,
-      );
+      const code = part.slice(1, -1);
+      if (onOpenPath && looksLikeWorkspacePath(code)) {
+        out.push(
+          <button
+            key={k++}
+            type="button"
+            title={t("Preview")}
+            onClick={() => onOpenPath(code)}
+            className="rounded-md bg-[var(--color-surface-sunken)] px-1.5 py-0.5 font-mono text-[0.86em] text-[var(--color-accent)] underline-offset-2 hover:underline"
+          >
+            {code}
+          </button>,
+        );
+      } else {
+        out.push(
+          <code key={k++} className="rounded-md bg-[var(--color-surface-sunken)] px-1.5 py-0.5 font-mono text-[0.86em] text-[var(--color-accent)]">
+            {code}
+          </code>,
+        );
+      }
     } else if (m[2] || m[3]) {
-      out.push(<strong key={k++} className="font-semibold">{inline(part.slice(2, -2))}</strong>);
+      out.push(<strong key={k++} className="font-semibold">{inline(part.slice(2, -2), onOpenPath)}</strong>);
     } else if (m[4]) {
-      out.push(<del key={k++} className="text-[var(--color-ink-faint)]">{inline(part.slice(2, -2))}</del>);
+      out.push(<del key={k++} className="text-[var(--color-ink-faint)]">{inline(part.slice(2, -2), onOpenPath)}</del>);
     } else if (m[5]) {
       const mm = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      out.push(<Link key={k++} href={mm?.[2] ?? "#"}>{inline(mm?.[1] ?? part)}</Link>);
+      out.push(<Link key={k++} href={mm?.[2] ?? "#"}>{inline(mm?.[1] ?? part, onOpenPath)}</Link>);
     } else if (m[6]) {
-      out.push(<em key={k++}>{inline(part.slice(1, -1))}</em>);
+      out.push(<em key={k++}>{inline(part.slice(1, -1), onOpenPath)}</em>);
     } else if (m[7]) {
       out.push(<Link key={k++} href={part}>{part}</Link>);
     }

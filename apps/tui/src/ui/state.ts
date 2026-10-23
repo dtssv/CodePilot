@@ -328,6 +328,10 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
       switch (ev.type) {
         case "message": {
           const text = ev.content.filter(isTextBlock).map((b) => b.text).join("");
+          const reasoningFromBlocks = ev.content
+            .filter((b): b is { type: "reasoning"; text: string } => b.type === "reasoning")
+            .map((b) => b.text)
+            .join("");
           const toolUses = ev.content.filter(isToolUseBlock);
           const toolResults = ev.content.filter(isToolResultBlock);
           if (ev.role === "user") {
@@ -342,6 +346,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             id: ev.id,
             role: "assistant",
             text,
+            ...(reasoningFromBlocks ? { reasoning: reasoningFromBlocks } : {}),
             blocks: ev.content,
             model: ev.model,
             streaming: false,
@@ -352,9 +357,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           for (let i = rows.length - 1; i >= 0; i--) {
             const r = rows[i]!;
             if (r.kind === "assistant" && r.msg.streaming) {
- // Carry over reasoning accumulated from deltas — the terminal
- // `message` event only carries the visible answer.
-              rows[i] = { kind: "assistant", msg: { ...newMsg, reasoning: r.msg.reasoning ?? newMsg.reasoning } };
+ // Prefer persisted reasoning blocks; fall back to streamed deltas.
+              rows[i] = {
+                kind: "assistant",
+                msg: {
+                  ...newMsg,
+                  reasoning: reasoningFromBlocks || r.msg.reasoning || newMsg.reasoning,
+                },
+              };
               replaced = true;
               break;
             }

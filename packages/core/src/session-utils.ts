@@ -231,15 +231,29 @@ export function renderMarkdownTranscript(events: Event[], id: string): string {
   const out: string[] = [];
   out.push(`# Session ${id}`, "");
   out.push(`Exported at ${new Date().toISOString()}`, "");
+  const first = events.find((e) => e.cwd || e.gitBranch || e.version);
+  if (first) {
+    const bits: string[] = [];
+    if (first.cwd) bits.push(`cwd: \`${first.cwd}\``);
+    if (first.gitBranch) bits.push(`branch: \`${first.gitBranch}\``);
+    if (first.version) bits.push(`core: ${first.version}`);
+    if (bits.length) out.push(bits.join(" · "), "");
+  }
   let msgIdx = 0;
   for (const e of events) {
+    const when = e.ts ? ` · ${new Date(e.ts).toISOString()}` : "";
     if (e.type === "message") {
       msgIdx++;
       const speaker = e.role === "user" ? "**User**" : "**Assistant**";
-      out.push(`## Turn ${msgIdx} — ${speaker}`);
-      out.push("");
+      out.push(`## Turn ${msgIdx} — ${speaker}${when}`);
+      if (e.model) out.push(`_model: ${e.model}_`, "");
+      else out.push("");
       for (const b of e.content) {
-        if (b.type === "text") {
+        if (b.type === "reasoning") {
+          out.push("<details><summary>Thinking</summary>", "");
+          out.push(b.text.trim(), "");
+          out.push("</details>", "");
+        } else if (b.type === "text") {
           out.push(b.text.trim(), "");
         } else if (b.type === "tool_use") {
           out.push(`> _tool call: \`${b.name}\`_`);
@@ -259,6 +273,31 @@ export function renderMarkdownTranscript(events: Event[], id: string): string {
           out.push("```", "");
         }
       }
+    } else if (e.type === "tool_call") {
+      out.push(`### Tool \`${e.name}\`${when}`);
+      out.push("");
+      out.push("```json");
+      out.push(JSON.stringify(e.input ?? {}, null, 2));
+      out.push("```", "");
+    } else if (e.type === "tool_result") {
+      out.push(`### Result \`${e.name}\`${e.isError ? " (error)" : ""}${when}`);
+      out.push("");
+      if (e.artifactRef) out.push(`artifact: \`${e.artifactRef}\``, "");
+      const c = e.content.length > 1500
+        ? e.content.slice(0, 1500) + `\n\n[...truncated ${e.content.length - 1500} chars]`
+        : e.content;
+      out.push("```");
+      out.push(c);
+      out.push("```", "");
+    } else if (e.type === "request") {
+      const tokens = [
+        e.inputTokens !== undefined ? `in=${e.inputTokens}` : null,
+        e.outputTokens !== undefined ? `out=${e.outputTokens}` : null,
+        e.ttftMs !== undefined ? `ttft=${e.ttftMs}ms` : null,
+        `${e.durationMs}ms`,
+        e.ok ? "ok" : "fail",
+      ].filter(Boolean).join(" · ");
+      out.push(`_request${e.model ? ` (${e.model})` : ""}: ${tokens}_`, "");
     } else if (e.type === "plan") {
       out.push("## Plan");
       out.push("");
@@ -267,7 +306,7 @@ export function renderMarkdownTranscript(events: Event[], id: string): string {
       }
       out.push("");
     } else if (e.type === "compaction") {
-      out.push("## Compaction");
+      out.push(`## Compaction (${e.kind ?? "summary"})`);
       out.push("");
       out.push(e.summary, "");
     } else if (e.type === "mode") {

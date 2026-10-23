@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@codepilot/core": "workspace:*",
     "@codepilot/protocol": "workspace:*"
   },
   "devDependencies": {

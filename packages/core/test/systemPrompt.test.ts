@@ -247,14 +247,22 @@ describe("buildSystemPrompt dynamic suffix", () => {
   it("contains a <memory> block with project and user sections when present", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
-      memory: { project: "P", user: "U" },
+      memory: { project: "P", user: "U", progressive: "INDEX" },
     });
     expect(out.dynamicSuffix).toContain("<memory>");
+    expect(out.dynamicSuffix).toContain("### Progressive index");
+    expect(out.dynamicSuffix).toContain("INDEX");
     expect(out.dynamicSuffix).toContain("### Project (~/.codepilot/projects/");
     expect(out.dynamicSuffix).toContain("P");
     expect(out.dynamicSuffix).toContain("### User (~/.codepilot/MEMORY.md)");
     expect(out.dynamicSuffix).toContain("U");
     expect(out.dynamicSuffix).toContain("</memory>");
+  });
+
+  it("documents progressive disclosure in the static memory section", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toContain("progressive disclosure");
+    expect(out.staticPrefix).toContain("Topic files");
   });
 
   it("memory block falls back to 'no memory files yet' when both are empty", async () => {

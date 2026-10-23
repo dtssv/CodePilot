@@ -32,8 +32,11 @@ import {
   formatContext,
   discoverPlugins,
   sameCwd,
+  exportSession,
   type RichSessionSummary,
 } from "@codepilot/core";
+import { writeFile } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
 
 import { BlockView } from "./EventView.js";
 import { InputBox } from "./InputBox.js";
@@ -720,6 +723,24 @@ export function App(props: AppProps): React.ReactElement {
               }
             } catch (err: unknown) {
               dispatch({ type: "set-notice", text: `Failed to query plugins: ${err instanceof Error ? err.message : String(err)}` });
+            }
+            return;
+          }
+          case "export": {
+            try {
+              const body = await exportSession(session.id, result.format);
+              const ext = result.format === "jsonl" ? "jsonl" : "md";
+              const dest = resolvePath(
+                cwd,
+                result.outPath ?? `codepilot-session-${session.id}.${ext}`,
+              );
+              await writeFile(dest, body, "utf-8");
+              dispatch({ type: "set-notice", text: `Exported ${result.format} → ${dest}` });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: `Export failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
             }
             return;
           }

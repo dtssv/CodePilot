@@ -262,6 +262,7 @@ function WebLayout({
   const [showWorkspace, setShowWorkspace] = useState(true);
   const [showTrajectory, setShowTrajectory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
   const scrollRef = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const composer = useComposer(cp, draft, setDraft, t("Ask CodePilot…"));
   const connected = state.connection === "connected";
@@ -405,6 +406,7 @@ function WebLayout({
                 onDecide={(d) => void cp.decidePermission(d)}
                 onAnswer={(a) => void cp.answerQuestion(a)}
                 onRetry={() => void cp.retryLast()}
+                onOpenPath={(p) => setPreview(p)}
               />
             )}
           </div>
@@ -428,6 +430,18 @@ function WebLayout({
       )}
       {connected && showWorkspace && state.cwd && (
         <WorkspacePanel client={cp.client} cwd={state.cwd} connected={connected} rows={state.rows} />
+      )}
+      {preview && (
+        <FilePreview
+          client={cp.client}
+          path={preview}
+          onClose={() => setPreview(null)}
+          onOpenExternally={
+            window.codepilotDesktop
+              ? (p) => window.codepilotDesktop?.openPath(joinPath(state.cwd, p))
+              : undefined
+          }
+        />
       )}
       <SettingsPanel cp={cp} open={showSettings} onClose={() => setShowSettings(false)} />
     </div>
@@ -635,6 +649,7 @@ function AgentLayout({
                   onDecide={(d) => void cp.decidePermission(d)}
                   onAnswer={(a) => void cp.answerQuestion(a)}
                   onRetry={() => void cp.retryLast()}
+                  onOpenPath={(p) => setPreview(p)}
                 />
               </div>
             </div>
@@ -803,6 +818,7 @@ function EmbeddedLayout({
               onDecide={(d) => void cp.decidePermission(d)}
               onAnswer={(a) => void cp.answerQuestion(a)}
               onRetry={() => void cp.retryLast()}
+              onOpenPath={onOpenFile}
             />
           )}
           <EmbeddedFiles cp={cp} onOpenFile={onOpenFile} />

@@ -426,8 +426,39 @@ export class CodepilotClient {
     return this.call("workspace/search", { query, path, maxResults });
   }
 
-  async readWorkspace(path: string): Promise<{ path: string; content: string; size: number; hash: string; truncated: boolean }> {
+  async readWorkspace(path: string): Promise<{
+    path: string;
+    content: string;
+    size: number;
+    hash: string;
+    truncated: boolean;
+    encoding?: "utf8" | "base64";
+    mediaType?: string;
+  }> {
     return this.call("workspace/read", { path });
+  }
+
+  /** Engine (CLI/daemon) update channel — not the IDE plugin / VSIX. */
+  async checkEngineUpdate(): Promise<{
+    engine: {
+      channel: "engine";
+      current: string;
+      latest: string | null;
+      available: boolean;
+      tag?: string;
+      installRoot: string | null;
+      canAutoApply: boolean;
+    };
+  }> {
+    return this.call("system/update-check", {});
+  }
+
+  async applyEngineUpdate(): Promise<{
+    applied: boolean;
+    version: string;
+    message?: string;
+  }> {
+    return this.call("system/update-apply", {});
   }
 
  /**

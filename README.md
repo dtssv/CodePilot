@@ -68,7 +68,12 @@ corepack pnpm package:tui -- --all
 
 - 用户：`~/.codepilot/config.json`
 - 项目：`<repo>/.codepilot/config.json`（覆盖同名项）
-- 项目说明：仓库根 `CODEPILOT.md`
+- 项目说明：仓库根 `CODEPILOT.md` / `AGENTS.md`
+- **渐进式项目记忆**（不进 git）：会话只注入薄索引；细节按需 `read_file`
+  - `~/.codepilot/projects/<hash>/MEMORY.md` — 分节摘要
+  - `~/.codepilot/memory/<hash>/MEMORY.md` — 索引子弹 + topic 路径
+  - 同目录 `overview.md` / `architecture.md` / `standards.md` / `knowledge.md` / … — 全文
+  - Agent 用 `memory_write`（可带 `section` / `topic`）静默写入；`autoMemoryEnabled: false` 可关
 
 ```json
 {
@@ -141,8 +146,36 @@ codepilot          # 多轮 REPL
 codepilot-tui      # 全屏 TUI
 ```
 
-常用：`/mode chat|plan|agent`、`/model`、`/provider`、`/clear`、`/exit`。  
+常用：`/mode chat|plan|agent`、`/model`、`/provider`、`/export`、`/clear`、`/exit`。  
 Ctrl+C：忙时取消当前轮，空闲时退出。
+
+导出会话（排查用）：
+
+```bash
+codepilot export                 # 最新会话 → stdout（markdown）
+codepilot export <id> -o out.md
+codepilot export <id> --format jsonl -o out.jsonl
+# TUI 内：/export 或 /export jsonl ./trace.jsonl
+```
+
+### 自动更新（引擎 vs 插件）
+
+升级分两条通道，互不替代：
+
+| 通道 | 内容 | 方式 |
+|---|---|---|
+| **执行引擎** | CLI / daemon / `~/.codepilot` 下的 npm 包 | 启动与每日检查；或 `codepilot update`；图形端 **设置 → 更新** |
+| **IDE 插件** | VS Code `.vsix` / IntelliJ zip（含内嵌 UI） | Releases 下载安装；VS Code 命令「Check Extension Update」 |
+
+通过 `install.sh` 装到 `~/.codepilot` 时，引擎会在**每次启动**检查一次 GitHub Release；进程一直不关则**每 24 小时**再查一次。有新版本时对同一 prefix 做 `npm install` 原地升级（不是重新跑安装脚本），然后提示重启生效。
+
+```bash
+codepilot update          # 立刻检查并升级引擎
+codepilot update --check  # 只检查不安装
+# 关闭：CODEPILOT_SKIP_UPDATE=1 或启动加 --no-update
+```
+
+Web / Agent 客户端里，对话中的文件路径与产出文件可**点击预览**（Markdown、代码、图片等），不必再开外部软件。
 
 ### 浏览器界面
 

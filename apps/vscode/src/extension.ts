@@ -15,6 +15,7 @@ import { SettingsStore, StatusBar, modeLabel } from "./config.js";
 import { Engine, tapServerLine } from "./engine.js";
 import { ChatViewProvider } from "./sidebar.js";
 import { AGENT_MODES, type AgentMode, type Event } from "./types.js";
+import { notifyExtensionUpdateIfAvailable, runCheckUpdatesCommand } from "./updates.js";
 
 const OUTPUT = vscode.window.createOutputChannel("CodePilot");
 
@@ -25,6 +26,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const settings = new SettingsStore();
   const statusBar = new StatusBar("codepilot.openSidebar");
   const cwd = (): string => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  process.env.CODEPILOT_CLIENT_VERSION = String(context.extension.packageJSON.version ?? "");
 
   const bundledCli = vscode.Uri.joinPath(context.extensionUri, "resources", "codepilot-cli.cjs").fsPath;
   engine = new Engine(() => settings.snapshot(), cwd, bundledCli);
@@ -103,7 +105,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       ),
     ),
     vscode.commands.registerCommand("codepilot.showOutput", () => OUTPUT.show()),
+    vscode.commands.registerCommand("codepilot.checkUpdates", () => runCheckUpdatesCommand(context)),
   );
+
+  // Plugin channel only — engine updates live in Settings → Updates / `codepilot update`.
+  void notifyExtensionUpdateIfAvailable(context);
 }
 
 export function deactivate(): void {

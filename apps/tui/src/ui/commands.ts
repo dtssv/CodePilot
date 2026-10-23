@@ -39,6 +39,7 @@ export type CommandResult =
   | { kind: "show-skills" }
   | { kind: "show-context" }
   | { kind: "show-plugins" }
+  | { kind: "export"; format: "markdown" | "jsonl"; outPath?: string }
   | {
       kind: "custom-command";
       prompt: string;
@@ -80,6 +81,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "skills", description: "Show available skills" },
   { name: "context", description: "Show context window usage" },
   { name: "plugins", description: "Show installed plugins" },
+  { name: "export", description: "Export session transcript (markdown or jsonl)", args: "[md|jsonl] [path]" },
   { name: "exit", description: "Exit CodePilot" },
 ];
 
@@ -105,6 +107,7 @@ export const HELP_TEXT = `Available commands:
 
   -- runtime introspection --
   /mcp  /hooks  /agents  /skills  /context  /plugins
+  /export [md|jsonl] [path]          Export this session transcript
 
   /exit                              Exit CodePilot
 
@@ -182,6 +185,18 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "show-context" };
     case "plugins":
       return { kind: "show-plugins" };
+    case "export": {
+      const parts = rest.split(/\s+/).filter(Boolean);
+      let format: "markdown" | "jsonl" = "markdown";
+      let outPath: string | undefined;
+      for (const p of parts) {
+        const low = p.toLowerCase();
+        if (low === "md" || low === "markdown") format = "markdown";
+        else if (low === "jsonl" || low === "json") format = "jsonl";
+        else outPath = p;
+      }
+      return { kind: "export", format, outPath };
+    }
     case "clear":
       return { kind: "clear" };
     case "exit":
@@ -212,6 +227,7 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "skills",
   "context",
   "plugins",
+  "export",
   "exit",
   "quit",
   "retry",

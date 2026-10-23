@@ -81,7 +81,9 @@ function serializeEventForEstimate(e: Event): string {
   switch (e.type) {
     case "message":
       return e.content
-        .map((b) => (b.type === "text" ? b.text : JSON.stringify(b)))
+        .map((b) =>
+          b.type === "text" || b.type === "reasoning" ? b.text : JSON.stringify(b),
+        )
         .join("\n");
     case "message_delta":
       if (e.delta.type === "text" || e.delta.type === "reasoning") return e.delta.text;

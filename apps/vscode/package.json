@@ -62,6 +62,11 @@
         "command": "codepilot.showOutput",
         "title": "CodePilot: Show Output Channel",
         "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.checkUpdates",
+        "title": "CodePilot: Check Extension Update",
+        "category": "CodePilot"
       }
     ],
     "viewsContainers": {

@@ -61,6 +61,7 @@ import {
 import type { McpManager } from "./mcp.js";
 import { startMcp as startMcpImpl, resolveSessionMcpReferences } from "./session-mcp.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
+import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
 import {
   resolveModelAlias,
   useProvider,
@@ -178,6 +179,10 @@ export class Session {
  /** Append-only mirror of the session JSONL. `events` is the model view
  * (may start at the last compaction); this log keeps every turn. */
   private persisted: Event[] = [];
+ /** Parent-chain tip for the next persisted event (`EventMeta.parentId`). */
+  private lastPersistedLinkId: string | undefined;
+ /** Cached `git rev-parse --abbrev-ref HEAD` for event metadata. */
+  private gitBranchCache: string | undefined;
   private listeners = new Set<(e: Event) => void>();
   private cancelController: AbortController | null = null;
  /** Session-scoped idempotent-result cache. Persists across prompts so a
@@ -342,6 +347,7 @@ export class Session {
     await this.reconcileStaleStatus();
  // Stamp cwd sidecar so listSessions can filter by workspace.
     await persistSessionCwd(this.id, this.cwd).catch(() => undefined);
+    this.gitBranchCache = readGitBranch(this.cwd);
     this.mcp = await this.startMcp();
  // Load trusted hook hashes (for command-hook trust enforcement).
     await this.hooks.loadTrustedHashes();
@@ -1624,8 +1630,11 @@ export class Session {
     this.toolRegistry.register(task);
     this.toolRegistry.register(planDone);
 
- // Wire the memory sink.
-    memoryWrite.sink = new FileMemorySink(this.cwd);
+ // Wire the memory sink (MEMORY.md + progressive index/topic mirror).
+    memoryWrite.sink = new FileMemorySink(this.cwd, {
+      autoMemory:
+        this.config.autoMemoryEnabled === false ? false : { enabled: true },
+    });
 
  // Wire plan_done's plan-file persistence. The plan is written to
  // .codepilot/plans/<slug>.md before the approval prompt; on approval the
@@ -1765,6 +1774,13 @@ export class Session {
         }
       }
       this.events = liveTranscript(this.persisted);
+      for (let i = this.persisted.length - 1; i >= 0; i--) {
+        const link = linkIdForEvent(this.persisted[i]!);
+        if (link) {
+          this.lastPersistedLinkId = link;
+          break;
+        }
+      }
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw err;
@@ -1799,10 +1815,22 @@ export class Session {
   }
 
   private async persistEvent(e: Event): Promise<void> {
-    this.persisted.push(e);
+    // Refresh branch occasionally (cheap spawn); keep last known value on miss.
+    if (this.persisted.length % 25 === 0) {
+      this.gitBranchCache = readGitBranch(this.cwd) ?? this.gitBranchCache;
+    }
+    const stamped = stampEventMeta(e, {
+      cwd: this.cwd,
+      gitBranch: this.gitBranchCache,
+      parentId: this.lastPersistedLinkId,
+      version: CORE_VERSION,
+    });
+    const link = linkIdForEvent(stamped);
+    if (link) this.lastPersistedLinkId = link;
+    this.persisted.push(stamped);
     const path = sessionPath(this.id);
     await mkdir(SESSIONS_DIR, { recursive: true });
-    await appendFile(path, JSON.stringify(e) + "\n", "utf-8");
+    await appendFile(path, JSON.stringify(stamped) + "\n", "utf-8");
   }
 
   private async rebuildSystemPrompt(): Promise<void> {
@@ -1815,13 +1843,12 @@ export class Session {
         ? `${memory.project.trim()}\n\n---\n\n${layered}`
         : layered;
     }
- // Auto memory index. Loaded from
- // ~/.codepilot/memory/<project-hash>/MEMORY.md, capped at 200 lines / 25KB.
+ // Progressive memory index (thin). Full topic bodies via read_file.
+ // ~/.codepilot/memory/<project-hash>/MEMORY.md — capped at 200 lines / 25KB.
     const autoCfg: AutoMemoryConfig = { enabled: this.config.autoMemoryEnabled !== false };
     const autoIndex = await loadAutoMemoryIndex(this.cwd, autoCfg);
     if (autoIndex) {
-      memory.user = (memory.user ? memory.user + "\n\n" : "") +
-        `<!-- auto memory index -->\n${autoIndex}`;
+      memory.progressive = autoIndex;
     }
     const plan = extractPlan(this.events);
  // The system prompt advertises the *mode-filtered* tool list, so the

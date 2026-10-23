@@ -28,6 +28,7 @@ import {
   WrenchIcon,
   XIcon,
 } from "./Icons.js";
+import { previewKind } from "../state/paths.js";
 import { Markdown } from "./Markdown.js";
 import { PlanChecklist, ProgressBar } from "./Transcript.js";
 
@@ -246,7 +247,7 @@ function Section({
   );
 }
 
-/** Read-only preview of a deliverable; markdown renders, code stays raw. */
+/** In-app preview for deliverables / transcript paths (md, code, images, text). */
 export function FilePreview({
   client,
   path,
@@ -258,16 +259,29 @@ export function FilePreview({
   onClose(): void;
   onOpenExternally?: (path: string) => void;
 }): React.ReactElement {
-  const [content, setContent] = useState<string | null>(null);
+  const [payload, setPayload] = useState<{
+    content: string;
+    encoding: "utf8" | "base64";
+    mediaType?: string;
+    truncated?: boolean;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
-    setContent(null);
+    setPayload(null);
     setError(null);
     client
       .readWorkspace(path)
-      .then((r) => live && setContent(r.content))
+      .then((r) => {
+        if (!live) return;
+        setPayload({
+          content: r.content,
+          encoding: r.encoding ?? "utf8",
+          mediaType: r.mediaType,
+          truncated: r.truncated,
+        });
+      })
       .catch((err) => live && setError(String(err instanceof Error ? err.message : err)));
     return () => {
       live = false;
@@ -282,16 +296,21 @@ export function FilePreview({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const isMarkdown = /\.(md|markdown)$/i.test(path);
+  const kind = previewKind(path);
+  const name = path.split(/[/\\]/).pop() ?? path;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm sm:p-6" onClick={onClose}>
       <div
-        className="flex max-h-full w-full max-w-3xl animate-fade-in flex-col overflow-hidden rounded-2xl border border-[var(--color-edge)] bg-[var(--color-surface)] shadow-2xl"
+        className="flex max-h-full w-full max-w-4xl animate-fade-in flex-col overflow-hidden rounded-2xl border border-[var(--color-edge)] bg-[var(--color-surface)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-[var(--color-edge-subtle)] px-4 py-2.5">
-          <FileIcon className="h-4 w-4 text-[var(--color-accent)]" />
-          <span className="min-w-0 truncate font-mono text-[12.5px] text-[var(--color-ink)]">{path}</span>
+          <FileIcon className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium text-[var(--color-ink)]">{name}</div>
+            <div className="truncate font-mono text-[10.5px] text-[var(--color-ink-faint)]">{path}</div>
+          </div>
           <div className="ml-auto flex items-center gap-1">
             {onOpenExternally && (
               <button type="button" className="cp-icon-btn" title={t("Open in editor")} onClick={() => onOpenExternally(path)}>
@@ -303,15 +322,28 @@ export function FilePreview({
             </button>
           </div>
         </div>
-        <div className="min-h-40 overflow-auto p-4">
+        <div className="min-h-40 flex-1 overflow-auto p-4">
           {error ? (
             <div className="text-[12.5px] text-[var(--color-remove)]">{error}</div>
-          ) : content === null ? (
+          ) : payload === null ? (
             <SpinnerIcon className="h-4 w-4 text-[var(--color-accent)]" />
-          ) : isMarkdown ? (
-            <Markdown text={content} />
+          ) : payload.encoding === "base64" && (kind === "image" || payload.mediaType?.startsWith("image/")) ? (
+            <div className="flex justify-center">
+              <img
+                src={`data:${payload.mediaType ?? "image/png"};base64,${payload.content}`}
+                alt={name}
+                className="max-h-[70vh] max-w-full rounded-lg border border-[var(--color-edge-subtle)] object-contain"
+              />
+            </div>
+          ) : kind === "markdown" ? (
+            <Markdown text={payload.content} />
           ) : (
-            <pre className="font-mono text-[12px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">{content}</pre>
+            <pre className="overflow-x-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-3 font-mono text-[12px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">
+              {payload.content}
+            </pre>
+          )}
+          {payload?.truncated && (
+            <div className="mt-3 text-[11px] text-[var(--color-ink-faint)]">{t("Preview truncated (file larger than 512 KiB).")}</div>
           )}
         </div>
       </div>

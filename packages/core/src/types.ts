@@ -21,7 +21,33 @@ export interface ToolResultBlock {
   artifactRef?: string;
 }
 
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+/** Extended-thinking / chain-of-thought text (Anthropic thinking, Gemini
+ * thought parts, etc.). Persisted on the assistant `message` for replay and
+ * export; stripped when rebuilding provider messages so it is not re-sent. */
+export interface ReasoningBlock {
+  type: "reasoning";
+  text: string;
+}
+
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
+
+/**
+ * Optional envelope fields stamped onto every persisted session event so
+ * transcripts can be audited like mainstream harness JSONL (cwd / branch /
+ * version / parent chain) without bloating the live UI event stream.
+ */
+export interface EventMeta {
+  /** Epoch ms when the event was produced. */
+  ts?: number;
+  /** Link id of the previous persisted event (`message.id`, `tool_call.id`, …). */
+  parentId?: string;
+  /** Workspace cwd at persist time. */
+  cwd?: string;
+  /** Current git branch when available. */
+  gitBranch?: string;
+  /** `@codepilot/core` version that wrote the event. */
+  version?: string;
+}
 
 export interface PlanStep {
   id: string;
@@ -42,7 +68,7 @@ export type ReasoningDelta = { type: "reasoning"; text: string };
 export type ToolInputJsonDelta = { type: "tool_input_json"; toolCallId: string; partialJson: string };
 export type MessageDelta = TextDelta | ReasoningDelta | ToolInputJsonDelta;
 
-export type Event =
+type EventBody =
   | {
       type: "message";
       id: string;
@@ -56,9 +82,6 @@ export type Event =
  * the model can read them on disk. */
       files?: SavedUpload[];
       model?: string;
- /** Epoch ms when the event was produced. Persisted so replays show the
- * original time, not the replay time. Stamped by the agent loop. */
-      ts?: number;
     }
   | {
       type: "message_delta";
@@ -70,8 +93,6 @@ export type Event =
       id: string;
       name: string;
       input: unknown;
- /** Epoch ms when the call was issued. */
-      ts?: number;
     }
   | {
       type: "tool_result";
@@ -84,8 +105,6 @@ export type Event =
  * emitted alongside the tool_result as image content blocks so the
  * model can see them. */
       images?: ImageAttachment[];
- /** Epoch ms when the result was recorded. */
-      ts?: number;
     }
   | { type: "plan"; steps: PlanStep[] }
   | { type: "usage"; usage: UsageInfo }
@@ -167,7 +186,6 @@ export type Event =
       objective: string;
       state?: "running" | "ok" | "failed";
       event?: Event;
-      ts?: number;
     }
   | { type: "mode"; mode: AgentMode }
   | { type: "mode_request"; mode: AgentMode; reason?: string }
@@ -181,6 +199,8 @@ export type Event =
       action: "queued" | "removed" | "cleared" | "started" | "updated";
       items: FollowUpItem[];
     };
+
+export type Event = EventBody & EventMeta;
 
 /** A user prompt waiting to run after the current busy turn finishes. */
 export interface FollowUpItem {
