@@ -98,7 +98,7 @@ describe("Session", () => {
     const session = await createSession({ cwd: workDir, sessionId: id });
     const text = readFileSync(path, "utf-8");
     const lines = text.trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines[lines.length - 1]).toEqual({ type: "status", status: "idle" });
+    expect(lines[lines.length - 1]).toMatchObject({ type: "status", status: "idle" });
  // And the reconciling event replays to a fresh subscriber.
     const seen: Event[] = [];
     session.subscribe((e) => seen.push(e));

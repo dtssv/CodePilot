@@ -77,6 +77,10 @@ vi.mock("@codepilot/core", () => ({
   runGoal: vi.fn(),
   // Used by ws server close() to cascade-stop background bash jobs.
   killAllJobs: vi.fn(async () => 0),
+  // Used by initialize / system/update-* (engine channel).
+  currentInstalledVersion: vi.fn(() => "0.0.0-test"),
+  checkEngineUpdate: vi.fn(async () => null),
+  applyUpdate: vi.fn(async () => "0.0.0-test"),
 }));
 
 import {

@@ -84,6 +84,9 @@ vi.mock("@codepilot/core", () => ({
   }),
   listSessions: vi.fn(async () => []),
   loadConfig: vi.fn(async () => undefined),
+  currentInstalledVersion: vi.fn(() => "0.0.0-test"),
+  checkEngineUpdate: vi.fn(async () => null),
+  applyUpdate: vi.fn(async () => "0.0.0-test"),
 }));
 
 import {
