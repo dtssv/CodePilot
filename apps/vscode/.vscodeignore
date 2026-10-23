@@ -1,9 +1,12 @@
 .vscode/
 scripts/
 src/
+test/
+coverage/
 **/*.tsbuildinfo
 **/*.map
 tsconfig.json
+vitest.config.ts
 node_modules/
 *.vsix
 *.tsbuildinfo
