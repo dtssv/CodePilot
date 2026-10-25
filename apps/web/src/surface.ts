@@ -19,6 +19,8 @@ export interface Surface {
   host: HostKind | null;
  /** Launched by the desktop app (Electron) rather than a browser tab. */
   desktop: boolean;
+ /** Phone QR remote-control session (`?remote=1`). */
+  remote: boolean;
  /** Connection given in the URL (`?ws=…&token=…&cwd=…`), stripped after read. */
   autoConnect?: { url: string; token?: string; cwd: string };
 }
@@ -27,11 +29,12 @@ export function detectSurface(): Surface {
   const host = detectHostKind();
   const params = safeParams();
   const desktop = params.get("desktop") === "1";
+  const remote = params.get("remote") === "1";
   const asked = params.get("layout");
   let layout: Layout;
   if (host) layout = "embedded";
   else if (asked === "agent" || asked === "web" || asked === "embedded") layout = asked;
-  else if (desktop) layout = "agent";
+  else if (desktop || remote) layout = "agent";
   else layout = (readStore(LAYOUT_KEY) as Layout | null) === "agent" ? "agent" : "web";
 
   let autoConnect: Surface["autoConnect"];
@@ -52,7 +55,7 @@ export function detectSurface(): Surface {
  /* not fatal */
     }
   }
-  return { layout, host, desktop, autoConnect };
+  return { layout, host, desktop, remote, autoConnect };
 }
 
 export function saveLayout(layout: Layout): void {

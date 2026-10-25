@@ -8,6 +8,7 @@ import {
   CATEGORY_VERB,
   endsInError,
   formatDuration,
+  formatTokens,
   groupRows,
   planProgress,
   toolCategory,
@@ -107,6 +108,11 @@ export function Transcript(props: TranscriptProps): React.ReactElement {
           <span className="min-w-0 truncate text-[var(--color-ink)]" title={run.objective}>
             {t("Subtask")} #{run.index + 1}: {run.objective}
           </span>
+          {(run.view.usage.input > 0 || run.view.usage.output > 0) && (
+            <span className="ml-auto shrink-0 text-[10.5px] text-[var(--color-ink-faint)]">
+              {formatTokens(run.view.usage.input)} / {formatTokens(run.view.usage.output)} {t("tokens")}
+            </span>
+          )}
         </div>
         <Transcript
           {...props}
@@ -454,10 +460,12 @@ export function CategoryIcon({ name, className }: { name: string; className?: st
 function StepGroup({ tools, live }: { tools: ToolRow[]; live: boolean }): React.ReactElement {
   const running = tools.some((x) => x.status === "running");
   const failed = tools.filter((x) => x.status === "error").length;
+  const taskTools = tools.filter((x) => x.name === "task");
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
  // Live groups stay open so progress is visible; finished ones fold to a
- // one-line summary unless the user opened them.
-  const open = userOpen ?? (running || live || tools.length <= 2);
+ // one-line summary unless the user opened them — keep open when the group
+ // delegated to sub-agents so their transcripts stay one click away.
+  const open = userOpen ?? (running || live || tools.length <= 2 || taskTools.length > 0);
 
   const categories = [...new Set(tools.map((x) => toolCategory(x.name)))].slice(0, 5);
   const startedAt = tools[0]?.startedAt;
@@ -499,9 +507,17 @@ function StepGroup({ tools, live }: { tools: ToolRow[]; live: boolean }): React.
       {open && (
         <ul className="border-t border-[var(--color-edge-subtle)] py-1">
           {tools.map((tool) => (
-            <StepItem key={tool.id} tool={tool} />
+            <StepItem key={tool.id} tool={tool} showSubagents={false} />
           ))}
         </ul>
+      )}
+      {/* Always reachable after the main turn finishes — even if the step list is folded. */}
+      {taskTools.length > 0 && (
+        <div className={`space-y-1 px-2 pb-2 ${open ? "pt-0" : "border-t border-[var(--color-edge-subtle)] pt-1.5"}`}>
+          {taskTools.map((tool) => (
+            <SubagentChips key={tool.id} toolCallId={tool.id} />
+          ))}
+        </div>
       )}
     </div>
   );
@@ -513,35 +529,50 @@ function SubagentStateIcon({ state }: { state: SubagentRun["state"] }): React.Re
   return <CheckIcon className="h-3 w-3 shrink-0 text-[var(--color-add)]" />;
 }
 
-/** One clickable chip per sub-agent of a `task` call. */
+/** One clickable chip per sub-agent of a `task` call (available after completion too). */
 function SubagentChips({ toolCallId }: { toolCallId: string }): React.ReactElement | null {
   const nav = useContext(SubagentContext);
   const runs = nav?.runs[toolCallId];
   if (!nav || !runs?.length) return null;
   return (
-    <div className="flex flex-col gap-1 px-3 pb-1.5 pl-10">
+    <div className="flex flex-col gap-1 px-1">
       {runs.map((r) => {
         const steps = r.view.rows.filter((x) => x.kind === "tool").length;
         const last = [...r.view.rows].reverse().find((x) => x.kind === "tool");
-        const doing = r.state === "running" && last?.kind === "tool" ? toolTarget(last.tool.input) || last.tool.name : "";
+        const doing =
+          r.state === "running" && last?.kind === "tool"
+            ? toolTarget(last.tool.input) || last.tool.name
+            : "";
+        const statusLabel =
+          r.state === "running" ? t("Running") : r.state === "failed" ? t("failed") : t("done");
+        const tok =
+          r.view.usage.input > 0 || r.view.usage.output > 0
+            ? `${formatTokens(r.view.usage.input)} / ${formatTokens(r.view.usage.output)}`
+            : "";
         return (
           <button
             key={r.index}
             type="button"
             onClick={() => nav.open(toolCallId, r.index)}
             title={t("View subtask")}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] px-2 py-1 text-left text-[11.5px] transition-colors hover:border-[var(--color-accent)]"
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] px-2 py-1.5 text-left text-[11.5px] transition-colors hover:border-[var(--color-accent)]"
           >
             <SubagentStateIcon state={r.state} />
             <span className="shrink-0 text-[var(--color-ink-faint)]">#{r.index + 1}</span>
-            <span className="min-w-0 truncate text-[var(--color-ink)]">{r.objective}</span>
+            <span className="min-w-0 flex-1 truncate text-[var(--color-ink)]">{r.objective}</span>
             {doing && (
-              <span className="min-w-0 max-w-[40%] truncate font-mono text-[10.5px] text-[var(--color-ink-faint)]">
+              <span className="min-w-0 max-w-[35%] truncate font-mono text-[10.5px] text-[var(--color-ink-faint)]">
                 {doing}
               </span>
             )}
-            <span className="ml-auto shrink-0 text-[10.5px] text-[var(--color-ink-faint)]">
-              {steps} {t(steps === 1 ? "step" : "steps")} ›
+            {tok && (
+              <span className="shrink-0 text-[10.5px] text-[var(--color-ink-faint)]" title={t("tokens")}>
+                {tok}
+              </span>
+            )}
+            <span className="shrink-0 text-[10.5px] text-[var(--color-ink-faint)]">{statusLabel}</span>
+            <span className="shrink-0 text-[10.5px] text-[var(--color-accent)]">
+              {steps} {t(steps === 1 ? "step" : "steps")} · {t("View subtask")} ›
             </span>
           </button>
         );
@@ -574,7 +605,14 @@ function PathChip({ path }: { path: string }): React.ReactElement {
   );
 }
 
-function StepItem({ tool }: { tool: ToolRow }): React.ReactElement {
+function StepItem({
+  tool,
+  showSubagents = true,
+}: {
+  tool: ToolRow;
+  /** When false, parent (StepGroup) already renders SubagentChips. */
+  showSubagents?: boolean;
+}): React.ReactElement {
   const [open, setOpen] = useState(false);
   const onOpenPath = useContext(OpenPathContext);
   const category = toolCategory(tool.name);
@@ -623,7 +661,7 @@ function StepItem({ tool }: { tool: ToolRow }): React.ReactElement {
           <ChevronIcon open={open} className="h-3 w-3" />
         </span>
       </button>
-      {tool.name === "task" && <SubagentChips toolCallId={tool.id} />}
+      {showSubagents && tool.name === "task" && <SubagentChips toolCallId={tool.id} />}
       {open && (
         <div className="space-y-2 px-3 pt-1 pb-2.5 pl-10">
           {tool.change ? (

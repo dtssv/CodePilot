@@ -27,6 +27,20 @@ function writeSkill(
   writeFileSync(join(skillDir, "SKILL.md"), text, "utf-8");
 }
 
+describe("compat skill dirs", () => {
+  it("discovers .claude/skills and .agents/skills", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "sk-compat-"));
+    writeSkill(join(cwd, ".claude", "skills"), "from-claude", "body", "name: from-claude\ndescription: c");
+    writeSkill(join(cwd, ".agents", "skills"), "from-agents", "body", "name: from-agents\ndescription: a");
+    const skills = await discoverSkills(cwd, { includeCompatDirs: true, builtinDir: join(cwd, "_nobuiltin") });
+    const names = skills.map((s) => s.name);
+    expect(names).toContain("from-claude");
+    expect(names).toContain("from-agents");
+    expect(skills.find((s) => s.name === "from-claude")?.source).toBe("compat");
+    rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
 describe("parseSkillMd", () => {
   it("extracts the four recognised keys", () => {
     const fm = parseSkillMd(

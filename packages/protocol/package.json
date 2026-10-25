@@ -38,14 +38,18 @@
     "build": "tsc -b",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "postinstall": "node ./scripts/fix-node-pty-spawn-helper.mjs"
   },
   "dependencies": {
     "@codepilot/core": "workspace:*",
+    "node-pty": "^1.1.0",
+    "qrcode": "^1.5.4",
     "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.8",
     "typescript": "^5.6.3",

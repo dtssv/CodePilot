@@ -6,12 +6,17 @@
 // one simply fails auth until the user opens the new link, which overwrites
 // the saved token.
 
+import type { AgentMode, PermissionMode, ReasoningEffort } from "@codepilot/core";
+
 const URL_KEY = "codepilot.url";
 const CWD_KEY = "codepilot.cwd";
 const WORKSPACES_KEY = "codepilot.workspaces";
 const TOKEN_KEY = "codepilot.token";
 const ENDPOINTS_KEY = "codepilot.workspaceEndpoints";
 const LAST_ENDPOINT_KEY = "codepilot.lastEndpoint";
+const PERMISSION_MODE_KEY = "codepilot.permissionMode";
+const AGENT_MODE_KEY = "codepilot.defaultAgentMode";
+const REASONING_EFFORT_KEY = "codepilot.reasoningEffortByModel";
 
 export interface Prefs {
   url: string;
@@ -200,6 +205,68 @@ export function normalizeCwd(cwd: string): string {
 export function sameCwd(a: string | undefined, b: string | undefined): boolean {
   if (!a || !b || a === "(unknown)" || b === "(unknown)") return false;
   return normalizeCwd(a) === normalizeCwd(b);
+}
+
+/** Tool permission posture for new connections (ask / auto-edit / yolo). */
+export function loadPermissionMode(): PermissionMode {
+  const v = read(localStorage, PERMISSION_MODE_KEY);
+  if (v === "ask" || v === "auto-edit" || v === "yolo") return v;
+  return "ask";
+}
+
+export function savePermissionMode(mode: PermissionMode): void {
+  write(localStorage, PERMISSION_MODE_KEY, mode);
+}
+
+/** Default collaboration mode for new sessions (chat / plan / agent). */
+export function loadDefaultAgentMode(): AgentMode {
+  const v = read(localStorage, AGENT_MODE_KEY);
+  if (v === "chat" || v === "plan" || v === "agent") return v;
+  return "agent";
+}
+
+export function saveDefaultAgentMode(mode: AgentMode): void {
+  write(localStorage, AGENT_MODE_KEY, mode);
+}
+
+function reasoningEffortMapKey(model: string, providerId?: string): string {
+  return `${providerId?.trim() || "_"}::${model.trim()}`;
+}
+
+/** Per-model reasoning effort preference (`undefined` = off / unset). */
+export function loadReasoningEffort(
+  model: string,
+  providerId?: string,
+): ReasoningEffort | undefined {
+  if (!model.trim()) return undefined;
+  try {
+    const raw = localStorage.getItem(REASONING_EFFORT_KEY);
+    if (!raw) return undefined;
+    const map = JSON.parse(raw) as Record<string, unknown>;
+    const v = map[reasoningEffortMapKey(model, providerId)];
+    if (v === "low" || v === "medium" || v === "high") return v;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveReasoningEffort(
+  model: string,
+  providerId: string | undefined,
+  effort: ReasoningEffort | undefined,
+): void {
+  if (!model.trim()) return;
+  try {
+    const raw = localStorage.getItem(REASONING_EFFORT_KEY);
+    const map = (raw ? JSON.parse(raw) : {}) as Record<string, string>;
+    const key = reasoningEffortMapKey(model, providerId);
+    if (!effort) delete map[key];
+    else map[key] = effort;
+    localStorage.setItem(REASONING_EFFORT_KEY, JSON.stringify(map));
+  } catch {
+    /* non-fatal */
+  }
 }
 
 function loadEndpointMap(): Record<string, EndpointPref> {

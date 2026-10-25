@@ -4,7 +4,14 @@
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import type { AgentMode, ImageAttachment, PermissionDecision, PromptFile, QuestionAnswers } from "@codepilot/core";
+import type {
+  AgentMode,
+  ImageAttachment,
+  PermissionDecision,
+  PromptFile,
+  QuestionAnswers,
+  ReasoningEffort,
+} from "@codepilot/core";
 
 import {
   CodepilotClient,
@@ -16,11 +23,16 @@ import {
 import { bridgeOpener, type HostBridge } from "../protocol/bridge.js";
 import {
   addWorkspace,
+  loadDefaultAgentMode,
+  loadPermissionMode,
   loadPrefs,
+  loadReasoningEffort,
   removeWorkspace,
   matchPreferredEndpoint,
+  saveDefaultAgentMode,
   saveEndpointPref,
   savePrefs,
+  saveReasoningEffort,
 } from "../prefs.js";
 import { initialState, reducer, type AppState } from "./reducer.js";
 import { lastUserPrompt } from "./selectors.js";
@@ -65,7 +77,11 @@ export interface Codepilot {
   cancel(): Promise<void>;
   setMode(mode: AgentMode): Promise<void>;
  /** Switch model (and optionally provider preset) for the current session. */
-  setModel(model: string, providerId?: string): Promise<void>;
+  setModel(
+    model: string,
+    providerId?: string,
+    reasoningEffort?: ReasoningEffort | null,
+  ): Promise<void>;
   decidePermission(decision: PermissionDecision): Promise<void>;
   answerQuestion(answers: QuestionAnswers): Promise<void>;
   notify(text?: string): void;
@@ -75,7 +91,7 @@ export interface Codepilot {
 
 export function useCodepilot(): Codepilot {
   const prefs = useMemo(loadPrefs, []);
-  const [state, dispatch] = useReducer(reducer, initialState(prefs.cwd));
+  const [state, dispatch] = useReducer(reducer, initialState(prefs.cwd, loadDefaultAgentMode()));
   const [workspaces, setWorkspaces] = useState<string[]>(prefs.workspaces);
 
  // Mirrors of state the client callbacks need synchronously (a reconnect
@@ -157,6 +173,7 @@ export function useCodepilot(): Codepilot {
           url: parsed.url,
           token: effectiveToken || undefined,
           cwd: effectiveCwd || undefined,
+          permissionMode: loadPermissionMode(),
         });
         lastWs.current = { url: parsed.url, token: effectiveToken, cwd: effectiveCwd };
         dispatch({ type: "connected", cwd: effectiveCwd, modes: init.capabilities.modes });
@@ -349,7 +366,13 @@ export function useCodepilot(): Codepilot {
         dispatch({ type: "session-opened", sessionId, agentMode });
         if (model && providerId) {
           try {
-            const result = await client.setModel(sessionId, model, providerId);
+            const effort = loadReasoningEffort(model, providerId);
+            const result = await client.setModel(
+              sessionId,
+              model,
+              providerId,
+              effort === undefined ? null : effort,
+            );
             const next = {
               model: result.model,
               providerId: result.providerId ?? providerId,
@@ -500,6 +523,7 @@ export function useCodepilot(): Codepilot {
     async (mode: AgentMode) => {
       const id = live.current.sessionId;
  // Before a session exists the choice applies to the next one.
+      saveDefaultAgentMode(mode);
       dispatch({ type: "agent-mode", mode });
       if (!id) return;
       try {
@@ -512,18 +536,34 @@ export function useCodepilot(): Codepilot {
   );
 
   const setModel = useCallback(
-    async (model: string, providerId?: string) => {
+    async (
+      model: string,
+      providerId?: string,
+      reasoningEffort?: ReasoningEffort | null,
+    ) => {
       const pref = { model, providerId: providerId ?? live.current.providerId ?? "_active" };
+      const effort =
+        reasoningEffort !== undefined
+          ? reasoningEffort
+          : loadReasoningEffort(model, pref.providerId);
  // Always remember for this cwd (and as last-used) so the next visit
  // restores: cwd → previous workspace → first model.
       saveEndpointPref(live.current.cwd || undefined, pref);
+      if (reasoningEffort !== undefined) {
+        saveReasoningEffort(model, pref.providerId, effort ?? undefined);
+      }
       dispatch({ type: "endpoint", model, providerId: pref.providerId });
       live.current = { ...live.current, model, providerId: pref.providerId };
 
       const id = live.current.sessionId;
       if (!id) return; // no live session yet — applied on next newSession / send
       try {
-        const result = await client.setModel(id, model, providerId);
+        const result = await client.setModel(
+          id,
+          model,
+          providerId,
+          effort === undefined ? null : effort,
+        );
         dispatch({
           type: "endpoint",
           model: result.model,

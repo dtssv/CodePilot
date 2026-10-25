@@ -36,7 +36,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { killAllJobs } from "@codepilot/core";
+import { killAllJobs, redeemRemotePairing, resolveRemoteGrant, type RemoteGrant } from "@codepilot/core";
 import { Peer, type RpcTransport } from "./rpc.js";
 import { registerServer, type ServerHandle, type ServerOptions } from "./server.js";
 
@@ -214,6 +214,14 @@ export async function startWebSocketServer(
   const staticRoot = opts.staticRoot ? resolve(opts.staticRoot) : undefined;
 
   const http = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (
+      (req.method === "GET" || req.method === "HEAD") &&
+      url.pathname === "/remote/pair"
+    ) {
+      void serveRemotePair(req, res, url, () => boundPort(http));
+      return;
+    }
     if (staticRoot && (req.method === "GET" || req.method === "HEAD")) {
       void serveStatic(staticRoot, req, res);
       return;
@@ -229,25 +237,30 @@ export async function startWebSocketServer(
 
   http.on("upgrade", (req, socket, head) => {
     const port = boundPort(http);
-    const verdict = checkUpgrade(req, {
+    void authorizeUpgrade(req, {
       token,
       allowedOrigins: opts.allowedOrigins,
       port,
       atCapacity: connections.size >= maxConnections,
-    });
-    if (!verdict.ok) {
-      rejectUpgrade(socket, verdict.status, verdict.reason);
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      acceptConnection(ws, req);
+    }).then((verdict) => {
+      if (!verdict.ok) {
+        rejectUpgrade(socket, verdict.status, verdict.reason);
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        acceptConnection(ws, req, verdict.remoteGrant);
+      });
     });
   });
 
-  function acceptConnection(ws: WebSocket, req: IncomingMessage): void {
+  function acceptConnection(
+    ws: WebSocket,
+    req: IncomingMessage,
+    remoteGrant?: RemoteGrant,
+  ): void {
     const transport = new WebSocketTransport(ws);
     const peer = new Peer({ transport, debug: false });
-    const handle = registerServer(peer, opts);
+    const handle = registerServer(peer, { ...opts, remoteGrant });
     void peer.loopDone.catch(() => {});
     const entry = { socket: ws, handle, alive: true };
     connections.add(entry);
@@ -352,7 +365,11 @@ export function checkUpgrade(
   if (check.atCapacity) {
     return { ok: false, status: 503, reason: "too many connections" };
   }
-  if (!originAllowed(req.headers.origin, check.allowedOrigins, check.port)) {
+  const hostHdr =
+    typeof req.headers.host === "string" ? req.headers.host : undefined;
+  if (
+    !originAllowed(req.headers.origin, check.allowedOrigins, check.port, hostHdr)
+  ) {
     return {
       ok: false,
       status: 403,
@@ -365,6 +382,100 @@ export function checkUpgrade(
   return { ok: true };
 }
 
+export type AuthorizeUpgradeVerdict =
+  | { ok: true; remoteGrant?: RemoteGrant }
+  | { ok: false; status: number; reason: string };
+
+/**
+ * Like {@link checkUpgrade}, but also accepts a scoped one-time remote-control
+ * grant token (from QR redeem) when the master serve token does not match.
+ */
+export async function authorizeUpgrade(
+  req: IncomingMessage,
+  check: UpgradeCheck,
+): Promise<AuthorizeUpgradeVerdict> {
+  const sync = checkUpgrade(req, check);
+  if (sync.ok) return { ok: true };
+  if (sync.status !== 401 || check.token === undefined) return sync;
+  const presented = presentedToken(req);
+  if (!presented) return sync;
+  const grant = await resolveRemoteGrant(presented);
+  if (!grant) return sync;
+  return { ok: true, remoteGrant: grant };
+}
+
+/**
+ * One-time QR landing page: redeem `code`+`s`, then redirect into the SPA with
+ * a scoped grant token (not the master serve token).
+ */
+async function serveRemotePair(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  portOf: () => number,
+): Promise<void> {
+  const code = url.searchParams.get("code") ?? "";
+  const secret = url.searchParams.get("s") ?? "";
+  if (!code || !secret) {
+    res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      "<!doctype html><meta charset=utf-8><title>Pairing failed</title>" +
+        "<body style='font-family:system-ui;padding:2rem'><h1>Invalid pairing link</h1>" +
+        "<p>Missing code or secret. Generate a new one-time QR from CodePilot.</p></body>\n",
+    );
+    return;
+  }
+  try {
+    const redeemed = await redeemRemotePairing(code, secret);
+    const port = portOf();
+    const hostHdr = typeof req.headers.host === "string" ? req.headers.host : `${DEFAULT_HOST}:${port}`;
+    const q = new URLSearchParams({
+      layout: "agent",
+      token: redeemed.grant.token,
+      remote: "1",
+    });
+    if (redeemed.cwd) q.set("cwd", redeemed.cwd);
+    const location = `http://${hostHdr}/?${q.toString()}`;
+    if (req.method === "HEAD") {
+      res.writeHead(302, { location });
+      res.end();
+      return;
+    }
+    res.writeHead(302, {
+      location,
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(
+      `<!doctype html><meta charset=utf-8><title>Connecting…</title>` +
+        `<meta http-equiv="refresh" content="0;url=${escapeHtmlAttr(location)}">` +
+        `<body style="font-family:system-ui;padding:2rem"><p>Pairing OK — opening CodePilot…</p>` +
+        `<p><a href="${escapeHtmlAttr(location)}">Continue</a></p>` +
+        `<p style="color:#666;font-size:13px">This link was single-use and is now consumed.</p></body>\n`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.writeHead(410, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(
+      `<!doctype html><meta charset=utf-8><title>Pairing failed</title>` +
+        `<body style="font-family:system-ui;padding:2rem"><h1>Pairing failed</h1>` +
+        `<p>${escapeHtml(msg)}</p>` +
+        `<p>Codes are one-time and expire quickly. Generate a new QR on the desktop.</p></body>\n`,
+    );
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttr(s: string): string {
+  return escapeHtml(s).replace(/"/g, "&quot;");
+}
+
 /**
  * A browser always sends `Origin`; other clients (TUI, curl, tests) do not.
  * We therefore only police the value when it is present: an absent Origin
@@ -375,6 +486,8 @@ export function originAllowed(
   origin: string | undefined,
   allowed: string[] | undefined,
   port: number,
+  /** `Host` header from the upgrade — allows phone clients on LAN IP. */
+  requestHost?: string,
 ): boolean {
   if (origin === undefined || origin === "" || origin === "null") return true;
   if (allowed?.includes("*")) return true;
@@ -383,7 +496,14 @@ export function originAllowed(
     `http://127.0.0.1:${port}`,
     `http://[::1]:${port}`,
   ];
-  return defaults.includes(origin) || (allowed?.includes(origin) ?? false);
+  if (defaults.includes(origin) || (allowed?.includes(origin) ?? false)) return true;
+  // Same host the browser used to load the page (e.g. http://192.168.x.x:18765).
+  if (requestHost) {
+    if (origin === `http://${requestHost}` || origin === `https://${requestHost}`) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function tokenMatches(req: IncomingMessage, expected: string): boolean {

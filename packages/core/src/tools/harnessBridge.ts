@@ -141,7 +141,11 @@ function runHarnessCommand(
   return new Promise((resolve) => {
     // detached so we can kill the whole process group (sh -c sleep … leaves
     // grandchildren that otherwise keep stdout open and hang `close`).
-    const child = spawn("/bin/sh", ["-c", cmd], {
+    // Windows has no POSIX /bin/sh; use cmd.exe like the bash tool does.
+    const isWin = process.platform === "win32";
+    const shell = isWin ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh";
+    const shellArgs = isWin ? ["/d", "/s", "/c", cmd] : ["-c", cmd];
+    const child = spawn(shell, shellArgs, {
       cwd: opts.cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"], // no stdin: prevent interactive hangs

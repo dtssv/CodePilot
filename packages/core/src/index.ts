@@ -217,6 +217,13 @@ export { runAgent } from "./agent.js";
 export type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
 export { stripThinking, splitThinking, hasVisibleAssistantContent } from "./stripThinking.js";
 export type { ThinkingSegment } from "./stripThinking.js";
+export {
+  reasoningEffortChoicesForModel,
+  supportsReasoningEffort,
+  reasoningEffortFromChoice,
+  reasoningEffortToChoice,
+} from "./reasoningEffort.js";
+export type { ReasoningEffort, ReasoningEffortChoice } from "./reasoningEffort.js";
 export { formatUploadNote, materializeUploads } from "./promptFiles.js";
 
 // ---- Agent runtime (pluggable loop) ----
@@ -344,6 +351,7 @@ export {
 } from "./config.js";
 export {
   PROVIDER_TEMPLATES,
+  listProviderTemplates,
   listSelectableModels,
   resolveDefaultModel,
   findProviderIdForFlat,
@@ -533,6 +541,137 @@ export {
   listSnapshots,
   deleteSnapshot,
 } from "./snapshots.js";
+
+// ---- /init project guidance ----
+export { initProjectGuidance } from "./projectInit.js";
+export type { InitProjectOptions, InitProjectResult } from "./projectInit.js";
+
+// ---- One-time QR remote control ----
+export {
+  mintRemotePairing,
+  redeemRemotePairing,
+  resolveRemoteGrant,
+  remoteGrantAllows,
+  revokeAllRemoteControl,
+  cancelUnusedPairings,
+} from "./remoteControl.js";
+export type {
+  MintRemotePairingOpts,
+  MintRemotePairingResult,
+  RedeemRemotePairingResult,
+  RemoteGrant,
+  RemotePairing,
+} from "./remoteControl.js";
+
+// ---- Scheduled / idle tasks ----
+export {
+  listScheduledTasks,
+  addScheduledTask,
+  updateScheduledTask,
+  removeScheduledTask,
+  schedulerTick,
+  startSchedulerWatcher,
+} from "./scheduler.js";
+export type {
+  ScheduledTask,
+  ScheduledTaskKind,
+  SchedulerTickContext,
+  SchedulerWatcherHandle,
+} from "./scheduler.js";
+
+// ---- LAN advertise (phone QR) ----
+export { listLanIPv4, advertiseUrl, isLoopbackHost } from "./netAdvertise.js";
+
+// ---- MCP marketplace links + paste JSON ----
+export {
+  listMcpMarkets,
+  installMcpJson,
+  listInstalledMcpServers,
+  setMcpServerEnabled,
+  inspectMcpServer,
+  authorizeMcpServer,
+} from "./mcpRegistry.js";
+export type {
+  McpMarketLink,
+  InstallMcpJsonResult,
+  InstalledMcpServer,
+  InspectMcpServerResult,
+  AuthorizeMcpServerResult,
+  McpCapabilityTool,
+  McpCapabilityResource,
+  McpCapabilityPrompt,
+} from "./mcpRegistry.js";
+export {
+  acquireSharedMcp,
+  releaseSharedMcp,
+  mcpServersKey,
+  resetMcpPoolForTests,
+} from "./mcp-pool.js";
+
+// ---- Office connectors (Feishu / DingTalk / …) ----
+export {
+  CONNECTOR_CATALOG,
+  listConnectors,
+  listConnectorsWithStatus,
+  queryConnectorsWithStatus,
+  getConnector,
+  getConnectorStatus,
+  installConnector,
+  updateConnector,
+  setConnectorEnabled,
+  connectorInstalled,
+} from "./connectors.js";
+
+// ---- Skills install / enable / disable ----
+export {
+  listManagedSkills,
+  queryManagedSkills,
+  installSkillFromConnector,
+  installSkillFromArchive,
+  supportedSkillArchiveExts,
+  setSkillEnabled,
+  userSkillInstalled,
+  getSkillContent,
+  getSkillFile,
+  saveSkillContent,
+  saveSkillFile,
+  SKILL_CREATOR_STARTER_PROMPT,
+} from "./skillManage.js";
+export type {
+  ManagedSkill,
+  ManagedSkillState,
+  InstallSkillResult,
+  InstallSkillArchiveResult,
+  SkillContent,
+  SkillFileContent,
+  SaveSkillResult,
+  SkillListQuery,
+  SkillListPage,
+  SkillListTab,
+} from "./skillManage.js";
+export { readDisabledSkillNames } from "./skills.js";
+
+// ---- Remote catalogs (GitHub JSON, once-per-day update) ----
+export {
+  loadCatalogDocument,
+  refreshAllCatalogs,
+  shouldAttemptDailyUpdate,
+  resetCatalogMemoryForTests,
+} from "./remoteCatalog.js";
+export type { CatalogName, CacheFile as CatalogCacheFile } from "./remoteCatalog.js";
+export type {
+  ConnectorRecipe,
+  ConnectorKind,
+  ConnectorCredentialField,
+  ConnectorStatus,
+  ConnectorWithStatus,
+  ConnectorInstallState,
+  InstallConnectorInput,
+  InstallConnectorResult,
+  CatalogListTab,
+  ConnectorListQuery,
+  ConnectorListPage,
+} from "./connectors.js";
 
 // ---- Memory (structured sections) ----
 export {

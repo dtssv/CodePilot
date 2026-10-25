@@ -1,8 +1,10 @@
-// Provider catalog: built-in vendor templates, selectable model listing,
-// user-config persistence, and apiKey redaction for protocol clients.
+// Provider catalog: vendor templates (GitHub JSON + daily cache), selectable
+// model listing, user-config persistence, and apiKey redaction for clients.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { CodepilotConfig, ProviderName } from "./types.js";
 import {
   DEFAULT_MODEL_CONTEXT_WINDOW,
@@ -16,6 +18,7 @@ import {
   useProvider,
   resolveModelAlias,
 } from "./config.js";
+import { loadCatalogDocument } from "./remoteCatalog.js";
 
 /** One row in the cross-provider model picker. */
 export interface SelectableModel {
@@ -69,125 +72,57 @@ export interface RedactedProviderPreset {
   modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
-export const PROVIDER_TEMPLATES: readonly ProviderTemplate[] = [
-  {
-    id: "anthropic",
-    displayName: "Anthropic",
-    provider: "anthropic",
-    models: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"],
-    smallModel: "claude-haiku-4-5",
-    description: "Claude Messages API",
-  },
-  {
-    id: "openai",
-    displayName: "OpenAI",
-    provider: "openai",
-    baseURL: "https://api.openai.com/v1",
-    models: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "o4-mini"],
-    smallModel: "gpt-4.1-mini",
-    description: "OpenAI Chat Completions",
-  },
-  {
-    id: "deepseek",
-    displayName: "DeepSeek",
-    provider: "openai",
-    baseURL: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
-    smallModel: "deepseek-chat",
-    description: "OpenAI-compatible",
-  },
-  {
-    id: "tongyi",
-    displayName: "通义千问",
-    provider: "openai",
-    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    models: ["qwen-plus", "qwen-turbo", "qwen-max"],
-    smallModel: "qwen-turbo",
-    description: "DashScope OpenAI-compatible",
-  },
-  {
-    id: "moonshot",
-    displayName: "Moonshot / Kimi",
-    provider: "openai",
-    baseURL: "https://api.moonshot.cn/v1",
-    models: ["kimi-k2-turbo-preview", "moonshot-v1-128k", "moonshot-v1-32k"],
-    smallModel: "moonshot-v1-32k",
-    description: "OpenAI-compatible",
-  },
-  {
-    id: "zhipu",
-    displayName: "智谱 GLM",
-    provider: "openai",
-    baseURL: "https://open.bigmodel.cn/api/paas/v4",
-    models: ["glm-4.5", "glm-4.5-air", "glm-4-flash"],
-    smallModel: "glm-4-flash",
-    description: "OpenAI-compatible",
-  },
-  {
-    id: "siliconflow",
-    displayName: "SiliconFlow",
-    provider: "openai",
-    baseURL: "https://api.siliconflow.cn/v1",
-    models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"],
-    description: "OpenAI-compatible aggregator",
-  },
-  {
-    id: "ollama",
-    displayName: "Ollama",
-    provider: "openai",
-    baseURL: "http://127.0.0.1:11434/v1",
-    models: ["llama3.2", "qwen2.5-coder", "deepseek-r1"],
-    smallModel: "llama3.2",
-    description: "Local OpenAI-compatible",
-  },
-  {
-    id: "openrouter",
-    displayName: "OpenRouter",
-    provider: "openai",
-    baseURL: "https://openrouter.ai/api/v1",
-    models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4.1"],
-    description: "OpenAI-compatible multi-vendor gateway",
-  },
-  {
-    id: "groq",
-    displayName: "Groq",
-    provider: "openai",
-    baseURL: "https://api.groq.com/openai/v1",
-    models: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"],
-    description: "OpenAI-compatible",
-  },
-  {
-    id: "custom-openai",
-    displayName: "Custom (OpenAI protocol)",
-    provider: "openai",
-    models: [],
-    requiresBaseURL: true,
-    description: "Any Chat Completions gateway — set baseURL yourself",
-  },
-  {
-    id: "custom-anthropic",
-    displayName: "Custom (Claude protocol)",
-    provider: "anthropic",
-    models: [],
-    requiresBaseURL: true,
-    description: "Any Anthropic Messages-compatible gateway — set baseURL yourself",
-  },
-  {
-    id: "copilot",
-    displayName: "GitHub Copilot",
-    provider: "copilot",
-    models: ["gpt-4.1", "gpt-4o"],
-    description: "Requires GITHUB_TOKEN",
-  },
-  {
-    id: "gemini",
-    displayName: "Google Gemini",
-    provider: "gemini",
-    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
-    smallModel: "gemini-2.5-flash",
-    description: "Gemini generateContent API (GEMINI_API_KEY / GOOGLE_API_KEY)",
-  },
-];
+interface ProviderTemplatesDoc {
+  version?: number;
+  updatedAt?: string;
+  templates?: ProviderTemplate[];
+}
+
+function bundledProviderTemplates(): ProviderTemplate[] {
+  try {
+    const path = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "catalog",
+      "provider-templates.json",
+    );
+    const doc = JSON.parse(readFileSync(path, "utf-8")) as ProviderTemplatesDoc;
+    return Array.isArray(doc.templates) ? doc.templates : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Offline / boot fallback (bundled JSON). Prefer {@link listProviderTemplates}. */
+export const PROVIDER_TEMPLATES: readonly ProviderTemplate[] = bundledProviderTemplates();
+
+function mergeTemplates(
+  base: readonly ProviderTemplate[],
+  overlay: ProviderTemplate[],
+): ProviderTemplate[] {
+  const map = new Map<string, ProviderTemplate>();
+  for (const t of base) map.set(t.id, t);
+  for (const t of overlay) {
+    if (t?.id) map.set(t.id, t);
+  }
+  return [...map.values()];
+}
+
+/** GitHub catalog (update once per day; keep local forever on failure). */
+export async function listProviderTemplates(opts?: {
+  force?: boolean;
+}): Promise<ProviderTemplate[]> {
+  try {
+    const { data } = await loadCatalogDocument<ProviderTemplatesDoc>(
+      "provider-templates",
+      opts,
+    );
+    const remote = Array.isArray(data.templates) ? data.templates : [];
+    return mergeTemplates(PROVIDER_TEMPLATES, remote);
+  } catch {
+    return [...PROVIDER_TEMPLATES];
+  }
+}
 
 /** Allocate a unique providers-map id from a template / base name. */
 export function nextProviderId(base: string, existing: Iterable<string>): string {

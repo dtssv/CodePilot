@@ -26,7 +26,7 @@ import {
   deleteUserProvider,
   setUserActiveEndpoint,
   templateToPreset,
-  PROVIDER_TEMPLATES,
+  listProviderTemplates,
   redactApiKey,
   exportSession,
   listSessions,
@@ -332,7 +332,8 @@ async function cmdConfig(
       return 0;
     }
     case "templates": {
-      for (const t of PROVIDER_TEMPLATES) {
+      const templates = await listProviderTemplates();
+      for (const t of templates) {
         process.stdout.write(
           `${t.id}\t${t.displayName}\t${t.provider}` +
             (t.baseURL ? `\t${t.baseURL}` : "") +
@@ -353,7 +354,7 @@ async function cmdConfig(
       const fromTemplate =
         typeof flags["from-template"] === "string" ? flags["from-template"] : undefined;
       if (fromTemplate) {
-        const tmpl = PROVIDER_TEMPLATES.find((t) => t.id === fromTemplate);
+        const tmpl = (await listProviderTemplates()).find((t) => t.id === fromTemplate);
         if (!tmpl) {
           process.stderr.write(`unknown template: ${fromTemplate}\n`);
           return 2;
@@ -416,7 +417,7 @@ async function cmdConfig(
       const { config } = await loadConfigWithSources(cwd);
       let preset = config.providers?.[id];
       if (!preset) {
-        const tmpl = PROVIDER_TEMPLATES.find((t) => t.id === id);
+        const tmpl = (await listProviderTemplates()).find((t) => t.id === id);
         if (!tmpl) {
           process.stderr.write(`unknown provider: ${id}\n`);
           return 2;
@@ -615,10 +616,59 @@ async function cmdServeWeb(
     version,
   });
 
+  // Idle / scheduled tasks: run when no live session is busy.
+  const { startSchedulerWatcher, createSession } = await import("@codepilot/core");
+  const { anyLiveSessionBusy } = await import("./server.js");
+  let idleSince = Date.now();
+  const scheduler = startSchedulerWatcher({
+    isIdle: () => {
+      const busy = anyLiveSessionBusy();
+      if (busy) idleSince = Date.now();
+      return !busy;
+    },
+    idleForMs: () => (anyLiveSessionBusy() ? 0 : Date.now() - idleSince),
+    run: async (task) => {
+      try {
+        const agentMode = task.agentMode ?? "agent";
+        const session = await createSession({
+          cwd: task.cwd,
+          model: task.model,
+          agentMode,
+          config: {
+            permissionMode: "ask",
+            agentMode,
+            ...(task.model ? { model: task.model } : {}),
+          },
+        });
+        try {
+          if (task.model) {
+            await session.setModel(task.model, task.providerId).catch(() => undefined);
+          }
+          await session.prompt(task.prompt);
+          // Wait until the turn finishes (idle again) or timeout.
+          const deadline = Date.now() + 30 * 60 * 1000;
+          while (session.isBusy() && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          return { ok: true };
+        } finally {
+          await session.dispose().catch(() => {});
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  });
+  process.stderr.write(`[serve] scheduler watching idle/scheduled tasks\n`);
+
   await new Promise<void>((resolve) => {
     const stop = (): void => {
       if (shuttingDown) return;
       shuttingDown = true;
+      scheduler.stop();
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;

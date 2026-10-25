@@ -83,11 +83,11 @@ export type Action =
   | { type: "set-cwd"; cwd: string }
   | { type: "session-closed" };
 
-export function initialState(cwd = ""): AppState {
+export function initialState(cwd = "", agentMode: AgentMode = "agent"): AppState {
   return {
     connection: "disconnected",
     cwd,
-    agentMode: "agent",
+    agentMode,
     status: "idle",
     rows: [],
     plan: [],

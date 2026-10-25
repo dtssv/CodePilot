@@ -18,7 +18,12 @@
 // Team members are peers, not a hierarchy of processes: every member runs at
 // the same nesting depth, and (like all sub-agents) cannot spawn its own team.
 
-import type { SubagentRunner, SubagentRunSpec } from "./tools/task.js";
+import {
+  emitParentUsage,
+  type SubagentRunner,
+  type SubagentRunResult,
+  type SubagentRunSpec,
+} from "./tools/task.js";
 import type { Event, TeamMessageEvent } from "./types.js";
 import {
   createWorktree,
@@ -692,9 +697,13 @@ async function mergeResults(
 async function runMember(
   deps: TeamRunDeps,
   spec: SubagentRunSpec,
-): Promise<{ conclusion: string; steps: number; ok: boolean }> {
-  if (!deps.semaphore) return deps.runner.run(spec);
-  return deps.semaphore.withPermit(() => deps.runner.run(spec));
+): Promise<SubagentRunResult> {
+  const r = deps.semaphore
+    ? await deps.semaphore.withPermit(() => deps.runner.run(spec))
+    : await deps.runner.run(spec);
+  // Same rollup as `task`: child tokens stay separate until the member ends.
+  emitParentUsage(deps.emitEvent, r.usage);
+  return r;
 }
 
 function firstObjective(spec: TeamSpec): string | undefined {

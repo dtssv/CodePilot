@@ -41,7 +41,8 @@ import {
   listSessions as coreListSessions,
   loadConfig as coreLoadConfig,
   loadConfigWithSources,
-  PROVIDER_TEMPLATES,
+  listProviderTemplates,
+  queryConnectorsWithStatus,
   listSelectableModels,
   listRemoteModels,
   redactProviderPreset,
@@ -53,12 +54,45 @@ import {
   applyUpdate,
   checkEngineUpdate,
   currentInstalledVersion,
+  mintRemotePairing,
+  redeemRemotePairing,
+  revokeAllRemoteControl,
+  remoteGrantAllows,
+  initProjectGuidance,
+  installConnector,
+  updateConnector,
+  setConnectorEnabled,
+  queryManagedSkills,
+  installSkillFromConnector,
+  installSkillFromArchive,
+  setSkillEnabled,
+  getSkillContent,
+  getSkillFile,
+  saveSkillContent,
+  saveSkillFile,
+  SKILL_CREATOR_STARTER_PROMPT,
+  listScheduledTasks,
+  addScheduledTask,
+  updateScheduledTask,
+  removeScheduledTask,
+  listMcpMarkets,
+  installMcpJson,
+  listInstalledMcpServers,
+  setMcpServerEnabled,
+  inspectMcpServer,
+  authorizeMcpServer,
+  listLanIPv4,
   type EngineUpdateInfo,
   type ProviderPreset,
   type ProviderName,
   type ResolvedCodepilotConfig,
+  type RemoteGrant,
+  type CatalogListTab,
+  type SkillListTab,
 } from "@codepilot/core";
+import QRCode from "qrcode";
 import { ErrorCode, Peer, RpcError, StdioTransport } from "./rpc.js";
+import { listTerminalShells, TerminalHost } from "./terminalHost.js";
 
 /** Mirrors the headless protocol's `event` notification params. */
 export interface EventParams {
@@ -88,6 +122,10 @@ export interface InitializeResult {
  /** Config / model management methods available on this server. */
     config?: boolean;
     setModel?: boolean;
+    /** Native/system folder picker (`workspace/pickFolder`) is available. */
+    workspacePick?: boolean;
+    /** Scoped phone QR remote-control session (limited RPCs). */
+    remoteControl?: boolean;
   };
   /** Running engine (CLI/daemon) version — distinct from IDE plugin / VSIX. */
   serverInfo?: { name: string; version: string; channel: "engine" };
@@ -108,6 +146,11 @@ export interface SessionSetModelParams {
   model: string;
  /** Named provider preset id; when set, switches vendor + model. */
   providerId?: string;
+  /**
+   * Reasoning / extended-thinking effort. `null` turns thinking off;
+   * omit to leave the session's current effort unchanged.
+   */
+  reasoningEffort?: "low" | "medium" | "high" | null;
 }
 
 export interface ConfigUpsertProviderParams {
@@ -297,15 +340,36 @@ export function registerServer(
   peer: Peer,
   opts: ServerOptions = {},
 ): ServerHandle {
+  const baseCaps = opts.capabilities ?? defaultCapabilities();
   const ctx: ServerContext = {
     peer,
     sessions: new Map(),
-    defaultCwd: opts.defaultCwd ?? process.cwd(),
+    defaultCwd: opts.remoteGrant?.cwd ?? opts.defaultCwd ?? process.cwd(),
     defaultPermissionMode: opts.defaultPermissionMode ?? "ask",
-    capabilities: opts.capabilities ?? defaultCapabilities(),
+    capabilities: opts.remoteGrant
+      ? {
+          ...baseCaps,
+          remoteControl: true,
+          workspacePick: false,
+          config: false,
+        }
+      : baseCaps,
     initialized: false,
     sessionSubs: new Map(),
+    remoteGrant: opts.remoteGrant,
+    terminals: new TerminalHost(),
   };
+
+  if (opts.remoteGrant) {
+    const grant = opts.remoteGrant;
+    const orig = peer.onRequest.bind(peer);
+    peer.onRequest = (<P, R>(method: string, handler: (params: P) => R | Promise<R>): void => {
+      orig(method, async (params: P) => {
+        assertRemoteMethodAllowed(grant, method);
+        return handler(params);
+      });
+    }) as typeof peer.onRequest;
+  }
 
   peer.onRequest<InitializeParams, InitializeResult>("initialize", (p) =>
     handleInitialize(ctx, p),
@@ -392,6 +456,236 @@ export function registerServer(
   peer.onRequest<Record<string, never>, SystemUpdateApplyResult>("system/update-apply", () =>
     handleSystemUpdateApply(),
   );
+  peer.onRequest<
+    { serveUrl: string; cwd?: string; sessionId?: string },
+    {
+      code: string;
+      url: string;
+      qrPayload: string;
+      expiresAt: number;
+      qrDataUrl: string;
+      rewritten?: boolean;
+      warning?: string;
+      lanIp?: string;
+    }
+  >("remote/pair-mint", (p) => handleRemotePairMint(ctx, p));
+  peer.onRequest<Record<string, never>, { lanIps: string[]; bindHostHint: string }>(
+    "system/lan-ips",
+    () => ({
+      lanIps: listLanIPv4(),
+      bindHostHint: "0.0.0.0",
+    }),
+  );
+  peer.onRequest<Record<string, never>, { markets: Awaited<ReturnType<typeof listMcpMarkets>> }>(
+    "mcp/markets",
+    async () => ({ markets: await listMcpMarkets() }),
+  );
+  peer.onRequest<
+    { json: string; name?: string },
+    Awaited<ReturnType<typeof installMcpJson>>
+  >("mcp/install-json", (p) => {
+    if (!p?.json?.trim()) throw new RpcError(ErrorCode.InvalidParams, "json required");
+    return installMcpJson(p.json, { name: p.name });
+  });
+  peer.onRequest<
+    Record<string, never>,
+    { servers: Awaited<ReturnType<typeof listInstalledMcpServers>> }
+  >("mcp/list", async () => ({ servers: await listInstalledMcpServers() }));
+  peer.onRequest<
+    { name: string; enabled: boolean },
+    { name: string; enabled: boolean; message: string }
+  >("mcp/set-enabled", (p) => {
+    if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+    return setMcpServerEnabled(p.name, p.enabled);
+  });
+  peer.onRequest<{ name: string }, Awaited<ReturnType<typeof inspectMcpServer>>>(
+    "mcp/inspect",
+    (p) => {
+      if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+      return inspectMcpServer(p.name, {
+        cwd: ctx.defaultCwd,
+        openAuthUrl: makeMcpOpenAuthUrl(ctx),
+      });
+    },
+  );
+  peer.onRequest<{ name: string }, { state: McpOauthState; url?: string; error?: string }>(
+    "mcp/oauth-start",
+    (p) => handleMcpOauthStart(ctx, p),
+  );
+  peer.onRequest<{ name: string }, { state: McpOauthState; url?: string; error?: string }>(
+    "mcp/oauth-status",
+    (p) => {
+      if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+      const entry = mcpOauthByName.get(p.name.trim());
+      if (!entry) return { state: "idle" as const };
+      return { state: entry.state, url: entry.url, error: entry.error };
+    },
+  );
+  peer.onRequest<{ name: string }, { state: McpOauthState }>("mcp/oauth-cancel", (p) => {
+    if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+    const name = p.name.trim();
+    mcpOauthByName.set(name, { state: "idle" });
+    return { state: "idle" as const };
+  });
+  peer.onRequest<{ code: string; secret: string }, { token: string; cwd: string; sessionId?: string; caps: string[] }>(
+    "remote/pair-redeem",
+    (p) => handleRemotePairRedeem(p),
+  );
+  peer.onRequest<Record<string, never>, { revoked: boolean }>("remote/revoke-all", async () => {
+    await revokeAllRemoteControl();
+    return { revoked: true };
+  });
+  peer.onRequest<{ force?: boolean; filename?: "AGENTS.md" | "CODEPILOT.md" }, { path: string; created: boolean; skipped: boolean }>(
+    "workspace/init",
+    (p) => handleWorkspaceInit(ctx, p),
+  );
+  peer.onRequest<{ sessionId: string }, { restored: string[]; deleted: string[]; label: string }>(
+    "session/undo",
+    (p) => handleSessionUndo(ctx, p),
+  );
+  peer.onRequest<{ sessionId: string }, { restored: string[]; deleted: string[]; label: string }>(
+    "session/redo",
+    (p) => handleSessionRedo(ctx, p),
+  );
+  peer.onRequest<
+    { q?: string; tab?: CatalogListTab; offset?: number; limit?: number },
+    Awaited<ReturnType<typeof queryConnectorsWithStatus>>
+  >("connectors/list", async (p) =>
+    queryConnectorsWithStatus({
+      q: p?.q,
+      tab: p?.tab,
+      offset: p?.offset,
+      limit: p?.limit,
+    }),
+  );
+  peer.onRequest<
+    { connectorId: string; values: Record<string, string> },
+    { mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }
+  >("connectors/install", (p) => installConnector(p));
+  peer.onRequest<
+    { connectorId: string; values: Record<string, string> },
+    { mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }
+  >("connectors/update", (p) => updateConnector(p));
+  peer.onRequest<
+    { connectorId: string; enabled: boolean },
+    { connectorId: string; enabled: boolean; message: string }
+  >("connectors/set-enabled", (p) => setConnectorEnabled(p.connectorId, p.enabled));
+  peer.onRequest<
+    { q?: string; tab?: SkillListTab; offset?: number; limit?: number },
+    Awaited<ReturnType<typeof queryManagedSkills>>
+  >("skills/list", async (p) =>
+    queryManagedSkills({
+      cwd: ctx.defaultCwd,
+      q: p?.q,
+      tab: p?.tab,
+      offset: p?.offset,
+      limit: p?.limit,
+    }),
+  );
+  peer.onRequest<{ connectorId: string }, { skillPath: string; message: string }>(
+    "skills/install",
+    (p) => installSkillFromConnector(p.connectorId),
+  );
+  peer.onRequest<
+    { filename: string; dataBase64: string },
+    Awaited<ReturnType<typeof installSkillFromArchive>>
+  >("skills/install-archive", (p) => {
+    if (!p?.filename?.trim() || !p?.dataBase64?.trim()) {
+      throw new RpcError(ErrorCode.InvalidParams, "filename and dataBase64 required");
+    }
+    return installSkillFromArchive({ filename: p.filename, dataBase64: p.dataBase64 });
+  });
+  peer.onRequest<
+    { name: string; enabled: boolean },
+    { name: string; enabled: boolean; message: string }
+  >("skills/set-enabled", (p) => setSkillEnabled(p.name, p.enabled));
+  peer.onRequest<{ name: string }, Awaited<ReturnType<typeof getSkillContent>>>(
+    "skills/get",
+    (p) => getSkillContent(p.name, ctx.defaultCwd),
+  );
+  peer.onRequest<
+    { name: string; relativePath: string },
+    Awaited<ReturnType<typeof getSkillFile>>
+  >("skills/get-file", (p) => {
+    if (!p?.name?.trim() || !p?.relativePath?.trim()) {
+      throw new RpcError(ErrorCode.InvalidParams, "name and relativePath required");
+    }
+    return getSkillFile(p.name, p.relativePath, ctx.defaultCwd);
+  });
+  peer.onRequest<
+    { name: string; markdown: string },
+    Awaited<ReturnType<typeof saveSkillContent>>
+  >("skills/save", (p) => saveSkillContent(p.name, p.markdown, ctx.defaultCwd));
+  peer.onRequest<
+    { name: string; relativePath: string; content: string },
+    Awaited<ReturnType<typeof saveSkillFile>>
+  >("skills/save-file", (p) => {
+    if (!p?.name?.trim() || !p?.relativePath?.trim()) {
+      throw new RpcError(ErrorCode.InvalidParams, "name and relativePath required");
+    }
+    return saveSkillFile(p.name, p.relativePath, p.content ?? "", ctx.defaultCwd);
+  });
+  peer.onRequest<Record<string, never>, { prompt: string }>(
+    "skills/creator-prompt",
+    async () => ({ prompt: SKILL_CREATOR_STARTER_PROMPT }),
+  );
+  peer.onRequest<Record<string, never>, { tasks: Awaited<ReturnType<typeof listScheduledTasks>> }>(
+    "schedule/list",
+    async () => ({ tasks: await listScheduledTasks() }),
+  );
+  peer.onRequest<
+    {
+      title: string;
+      prompt: string;
+      cwd?: string;
+      kind: "idle" | "daily" | "interval";
+      at?: string;
+      everyMinutes?: number;
+      idleAfterMs?: number;
+      model?: string;
+      providerId?: string;
+      agentMode?: "chat" | "plan" | "agent";
+    },
+    { task: Awaited<ReturnType<typeof addScheduledTask>> }
+  >("schedule/add", async (p) => ({
+    task: await addScheduledTask({
+      title: p.title,
+      prompt: p.prompt,
+      cwd: p.cwd || ctx.defaultCwd,
+      kind: p.kind,
+      at: p.at,
+      everyMinutes: p.everyMinutes,
+      idleAfterMs: p.idleAfterMs,
+      model: p.model,
+      providerId: p.providerId,
+      agentMode: p.agentMode,
+    }),
+  }));
+  peer.onRequest<
+    {
+      id: string;
+      title?: string;
+      prompt?: string;
+      cwd?: string;
+      at?: string;
+      everyMinutes?: number;
+      idleAfterMs?: number;
+      model?: string;
+      providerId?: string;
+      agentMode?: "chat" | "plan" | "agent";
+      enabled?: boolean;
+    },
+    { task: NonNullable<Awaited<ReturnType<typeof updateScheduledTask>>> }
+  >("schedule/update", async (p) => {
+    if (!p?.id?.trim()) throw new RpcError(ErrorCode.InvalidParams, "id required");
+    const { id, ...patch } = p;
+    const task = await updateScheduledTask(id, patch);
+    if (!task) throw new RpcError(ErrorCode.InvalidParams, `unknown task: ${id}`);
+    return { task };
+  });
+  peer.onRequest<{ id: string }, { removed: boolean }>("schedule/remove", async (p) => ({
+    removed: await removeScheduledTask(p.id),
+  }));
   peer.onRequest<PromptSendParams, PromptSendResult>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
@@ -428,6 +722,71 @@ export function registerServer(
     handleShutdown(ctx),
   );
 
+  // Interactive workspace terminal (PTY). Not available to remote QR grants
+  // (method absent from REMOTE_METHOD_CAPS → denied).
+  peer.onRequest<Record<string, never>, ReturnType<typeof listTerminalShells>>(
+    "terminal/list-shells",
+    () => listTerminalShells(),
+  );
+  peer.onRequest<
+    { shell?: string; cwd?: string; cols?: number; rows?: number },
+    { terminalId: string; shell: string }
+  >("terminal/open", async (p) => {
+    if (ctx.remoteGrant) {
+      throw new RpcError(ErrorCode.InvalidRequest, "Interactive terminal is not available over remote control");
+    }
+    const box: { id: string } = { id: "" };
+    const handle = await ctx.terminals.open({
+      shell: p?.shell,
+      cwd: p?.cwd?.trim() || ctx.defaultCwd,
+      cols: p?.cols,
+      rows: p?.rows,
+      onData: (data) => {
+        const terminalId = box.id;
+        if (!terminalId) return;
+        void ctx.peer
+          .notify<{ terminalId: string; data: string }>("terminal/data", {
+            terminalId,
+            data,
+          })
+          .catch(() => {});
+      },
+      onExit: (exitCode) => {
+        const terminalId = box.id;
+        if (!terminalId) return;
+        void ctx.peer
+          .notify<{ terminalId: string; exitCode: number }>("terminal/exit", {
+            terminalId,
+            exitCode,
+          })
+          .catch(() => {});
+      },
+    });
+    box.id = handle.id;
+    return { terminalId: handle.id, shell: handle.shell };
+  });
+  peer.onRequest<{ terminalId: string; data: string }, Record<string, never>>(
+    "terminal/write",
+    (p) => {
+      if (!p?.terminalId?.trim()) throw new RpcError(ErrorCode.InvalidParams, "terminalId required");
+      ctx.terminals.write(p.terminalId, p.data ?? "");
+      return {};
+    },
+  );
+  peer.onRequest<{ terminalId: string; cols: number; rows: number }, Record<string, never>>(
+    "terminal/resize",
+    (p) => {
+      if (!p?.terminalId?.trim()) throw new RpcError(ErrorCode.InvalidParams, "terminalId required");
+      ctx.terminals.resize(p.terminalId, p.cols ?? 80, p.rows ?? 24);
+      return {};
+    },
+  );
+  peer.onRequest<{ terminalId: string }, Record<string, never>>("terminal/close", (p) => {
+    if (!p?.terminalId?.trim()) throw new RpcError(ErrorCode.InvalidParams, "terminalId required");
+    ctx.terminals.close(p.terminalId);
+    return {};
+  });
+
   return {
     peer,
     close: () => peer.close(),
@@ -439,6 +798,64 @@ export interface ServerOptions {
   defaultCwd?: string;
   defaultPermissionMode?: PermissionMode;
   capabilities?: InitializeResult["capabilities"];
+  /**
+   * Scoped phone remote-control grant. When set, privileged RPCs
+   * (config, updates, workspace write, minting new QR, etc.) are denied.
+   */
+  remoteGrant?: RemoteGrant;
+}
+
+/** Methods a scoped remote grant may call, keyed by required capability. */
+const REMOTE_METHOD_CAPS: Record<string, RemoteGrant["caps"][number] | "any"> = {
+  initialize: "any",
+  shutdown: "any",
+  "session/list": "follow",
+  "session/resume": "follow",
+  "session/new": "follow",
+  "session/setMode": "follow",
+  "session/setModel": "follow",
+  "session/getEndpoint": "follow",
+  "session/fork": "follow",
+  "config/get": "follow",
+  "workspace/list": "follow",
+  "workspace/read": "follow",
+  "workspace/stat": "follow",
+  "workspace/git-status": "follow",
+  "workspace/git-diff": "follow",
+  "workspace/browse": "follow",
+  "workspace/search": "follow",
+  "workspace/watch": "follow",
+  "prompt/send": "prompt",
+  "prompt/cancel": "cancel",
+  "prompt/followup/remove": "prompt",
+  "prompt/followup/update": "prompt",
+  "prompt/followup/sendNow": "prompt",
+  "permission/respond": "answer",
+  "question/respond": "answer",
+};
+
+function assertRemoteMethodAllowed(grant: RemoteGrant, method: string): void {
+  const need = REMOTE_METHOD_CAPS[method];
+  if (need === undefined) {
+    throw new RpcError(
+      ErrorCode.InvalidRequest,
+      `Remote grant does not allow method: ${method}`,
+    );
+  }
+  if (need !== "any" && !remoteGrantAllows(grant, need)) {
+    throw new RpcError(
+      ErrorCode.InvalidRequest,
+      `Remote grant missing capability: ${need}`,
+    );
+  }
+}
+
+/** True when any process-wide live session is mid-prompt (for idle scheduler). */
+export function anyLiveSessionBusy(): boolean {
+  for (const live of liveSessions.values()) {
+    if (typeof live.session.isBusy === "function" && live.session.isBusy()) return true;
+  }
+  return false;
 }
 
 export interface ServerHandle {
@@ -454,6 +871,86 @@ export interface ServerHandle {
   dispose(): Promise<void>;
 }
 
+type McpOauthState = "idle" | "pending" | "authorized" | "error";
+
+interface McpOauthEntry {
+  state: McpOauthState;
+  url?: string;
+  error?: string;
+  running?: Promise<void>;
+}
+
+/** Process-wide MCP OAuth status so Settings can poll across connections. */
+const mcpOauthByName = new Map<string, McpOauthEntry>();
+
+function notifyMcpOauthRequired(name: string, url: string): void {
+  for (const live of liveSessions.values()) {
+    for (const holder of live.holders) {
+      void holder.peer
+        .notify<{ name: string; url: string }>("mcp/oauth-required", { name, url })
+        .catch(() => {});
+    }
+  }
+}
+
+function makeMcpOpenAuthUrl(ctx: ServerContext): (serverName: string, url: string) => Promise<void> {
+  return async (serverName, url) => {
+    const prev = mcpOauthByName.get(serverName);
+    mcpOauthByName.set(serverName, {
+      state: "pending",
+      url,
+      error: undefined,
+      running: prev?.running,
+    });
+    void ctx.peer
+      .notify<{ name: string; url: string }>("mcp/oauth-required", { name: serverName, url })
+      .catch(() => {});
+    notifyMcpOauthRequired(serverName, url);
+  };
+}
+
+async function handleMcpOauthStart(
+  ctx: ServerContext,
+  params: { name?: string },
+): Promise<{ state: McpOauthState; url?: string; error?: string }> {
+  const name = params?.name?.trim();
+  if (!name) throw new RpcError(ErrorCode.InvalidParams, "name required");
+  const existing = mcpOauthByName.get(name);
+  if (existing?.state === "pending" && existing.running) {
+    return { state: "pending", url: existing.url, error: existing.error };
+  }
+  const entry: McpOauthEntry = { state: "pending" };
+  mcpOauthByName.set(name, entry);
+  entry.running = (async () => {
+    try {
+      const r = await authorizeMcpServer(name, {
+        cwd: ctx.defaultCwd,
+        openAuthUrl: makeMcpOpenAuthUrl(ctx),
+      });
+      const cur = mcpOauthByName.get(name);
+      if (!cur || cur.state === "idle") return; // cancelled
+      if (r.authorized) {
+        mcpOauthByName.set(name, { state: "authorized", url: cur.url });
+      } else {
+        mcpOauthByName.set(name, {
+          state: "error",
+          url: cur.url,
+          error: r.error ?? "授权失败",
+        });
+      }
+    } catch (err) {
+      const cur = mcpOauthByName.get(name);
+      if (!cur || cur.state === "idle") return;
+      mcpOauthByName.set(name, {
+        state: "error",
+        url: cur.url,
+        error: (err as Error).message,
+      });
+    }
+  })();
+  return { state: "pending", url: entry.url };
+}
+
 interface ServerContext {
   peer: Peer;
   sessions: Map<string, Session>;
@@ -461,12 +958,16 @@ interface ServerContext {
   defaultPermissionMode: PermissionMode;
   capabilities: InitializeResult["capabilities"];
   initialized: boolean;
- /** At most one workspace watcher per connection (re-watch replaces). */
+  /** At most one workspace watcher per connection (re-watch replaces). */
   watcher?: { watcher: FSWatcher; debounce?: ReturnType<typeof setTimeout>; kinds: Set<"rename" | "change">; path: string };
- /** Per-connection event subscriptions, keyed by session id. Each client
+  /** Per-connection event subscriptions, keyed by session id. Each client
  * connection subscribes independently so several clients can follow the
  * same live session at once (and a reconnect re-subscribes cleanly). */
   sessionSubs: Map<string, () => void>;
+  /** Present when this connection authenticated via QR remote grant. */
+  remoteGrant?: RemoteGrant;
+  /** Interactive PTYs owned by this connection. */
+  terminals: TerminalHost;
 }
 
 /** Per-session bookkeeping kept off the session itself. */
@@ -620,6 +1121,8 @@ function defaultCapabilities(): InitializeResult["capabilities"] {
     modes: [...SUPPORTED_MODES],
     config: true,
     setModel: true,
+    workspacePick: true,
+    remoteControl: false,
   };
 }
 
@@ -703,6 +1206,97 @@ async function handleSystemUpdateCheck(): Promise<SystemUpdateCheckResult> {
   return { engine };
 }
 
+async function handleRemotePairMint(
+  ctx: ServerContext,
+  params: { serveUrl: string; cwd?: string; sessionId?: string },
+): Promise<{
+  code: string;
+  url: string;
+  qrPayload: string;
+  expiresAt: number;
+  qrDataUrl: string;
+  rewritten?: boolean;
+  warning?: string;
+  lanIp?: string;
+}> {
+  assertInitialized(ctx);
+  if (!params?.serveUrl || typeof params.serveUrl !== "string") {
+    throw new RpcError(ErrorCode.InvalidParams, "serveUrl required");
+  }
+  const minted = await mintRemotePairing({
+    serveUrl: params.serveUrl,
+    cwd: params.cwd || ctx.defaultCwd,
+    sessionId: params.sessionId,
+  });
+  const qrDataUrl = await QRCode.toDataURL(minted.qrPayload, {
+    width: 280,
+    margin: 2,
+    errorCorrectionLevel: "M",
+  });
+  return {
+    code: minted.code,
+    url: minted.url,
+    qrPayload: minted.qrPayload,
+    expiresAt: minted.expiresAt,
+    qrDataUrl,
+    rewritten: minted.rewritten,
+    warning: minted.warning,
+    lanIp: minted.lanIp,
+  };
+}
+
+async function handleRemotePairRedeem(
+  params: { code: string; secret: string },
+): Promise<{ token: string; cwd: string; sessionId?: string; caps: string[] }> {
+  if (!params?.code || !params?.secret) {
+    throw new RpcError(ErrorCode.InvalidParams, "code and secret required");
+  }
+  const r = await redeemRemotePairing(params.code, params.secret);
+  return {
+    token: r.grant.token,
+    cwd: r.cwd,
+    sessionId: r.sessionId,
+    caps: [...r.grant.caps],
+  };
+}
+
+async function handleWorkspaceInit(
+  ctx: ServerContext,
+  params: { force?: boolean; filename?: "AGENTS.md" | "CODEPILOT.md" },
+): Promise<{ path: string; created: boolean; skipped: boolean }> {
+  assertInitialized(ctx);
+  return initProjectGuidance(ctx.defaultCwd, {
+    force: params?.force === true,
+    filename: params?.filename,
+  });
+}
+
+async function handleSessionUndo(
+  ctx: ServerContext,
+  params: { sessionId: string },
+): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+  assertInitialized(ctx);
+  const live = liveSessions.get(params.sessionId);
+  if (!live) throw new RpcError(ErrorCode.InvalidParams, "session not found");
+  if (typeof live.session.undo !== "function") {
+    throw new RpcError(ErrorCode.InvalidRequest, "undo not supported");
+  }
+  return live.session.undo();
+}
+
+async function handleSessionRedo(
+  ctx: ServerContext,
+  params: { sessionId: string },
+): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+  assertInitialized(ctx);
+  const live = liveSessions.get(params.sessionId);
+  if (!live) throw new RpcError(ErrorCode.InvalidParams, "session not found");
+  if (typeof live.session.redo !== "function") {
+    throw new RpcError(ErrorCode.InvalidRequest, "redo not supported");
+  }
+  return live.session.redo();
+}
+
 async function handleSystemUpdateApply(): Promise<SystemUpdateApplyResult> {
   const check = await checkEngineUpdate();
   if (!check) {
@@ -772,6 +1366,7 @@ async function handleSessionNew(
     agentMode: params?.agentMode ?? effectiveConfig.agentMode,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
+    onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
   });
   return registerSession(ctx, session);
 }
@@ -782,7 +1377,11 @@ async function handleSessionNew(
 async function handleSessionSetModel(
   ctx: ServerContext,
   params: SessionSetModelParams,
-): Promise<{ model: string; providerId?: string }> {
+): Promise<{
+  model: string;
+  providerId?: string;
+  reasoningEffort?: "low" | "medium" | "high";
+}> {
   assertInitialized(ctx);
   if (!params?.sessionId || !params.model) {
     throw new RpcError(ErrorCode.InvalidParams, "sessionId and model required");
@@ -808,9 +1407,15 @@ async function handleSessionSetModel(
   } else {
     await session.setModel(params.model);
   }
+  if (params.reasoningEffort !== undefined) {
+    session.setReasoningEffort(
+      params.reasoningEffort === null ? undefined : params.reasoningEffort,
+    );
+  }
   return {
     model: session.getModel(),
     providerId: session.getProviderId(),
+    reasoningEffort: session.getReasoningEffort(),
   };
 }
 
@@ -822,6 +1427,7 @@ async function handleSessionGetEndpoint(
   providerId?: string;
   provider?: string;
   baseURL?: string;
+  reasoningEffort?: "low" | "medium" | "high";
 }> {
   assertInitialized(ctx);
   if (!params?.sessionId) {
@@ -834,6 +1440,7 @@ async function handleSessionGetEndpoint(
     providerId: session.getProviderId(),
     provider: cfg.provider,
     baseURL: cfg.baseURL,
+    reasoningEffort: session.getReasoningEffort(),
   };
 }
 
@@ -852,7 +1459,7 @@ async function handleConfigGet(
   };
   providers: Record<string, ReturnType<typeof redactProviderPreset>>;
   selectableModels: ReturnType<typeof listSelectableModels>;
-  templates: typeof PROVIDER_TEMPLATES;
+  templates: Awaited<ReturnType<typeof listProviderTemplates>>;
 }> {
   assertInitialized(ctx);
   const cwd = params?.cwd ?? ctx.defaultCwd;
@@ -875,6 +1482,7 @@ async function handleConfigGet(
       apiKeyHint: key.length <= 4 ? "****" : key.slice(-4),
     };
   })();
+  const templates = await listProviderTemplates();
   return {
     active: {
       provider: config.provider,
@@ -887,7 +1495,7 @@ async function handleConfigGet(
     },
     providers,
     selectableModels: listSelectableModels(config),
-    templates: [...PROVIDER_TEMPLATES],
+    templates,
   };
 }
 
@@ -980,7 +1588,7 @@ async function handleConfigListRemoteModels(
   let baseURL = params.baseURL;
   let apiKey = params.apiKey;
   if (params.providerId) {
-    const tmpl = PROVIDER_TEMPLATES.find((t) => t.id === params.providerId);
+    const tmpl = (await listProviderTemplates()).find((t) => t.id === params.providerId);
     if (tmpl) {
       provider = tmpl.provider;
       baseURL = baseURL || tmpl.baseURL;
@@ -1000,7 +1608,8 @@ async function handleConfigListRemoteModels(
   if (provider === "openai" && !baseURL) {
     throw new RpcError(
       ErrorCode.InvalidParams,
-      "baseURL required to list models for OpenAI-compatible providers",
+      "baseURL required to list models for OpenAI-compatible providers " +
+        "(they have no fixed endpoint; Anthropic/Copilot/Gemini use their vendor default)",
     );
   }
   try {
@@ -1032,8 +1641,8 @@ async function handleConfigSetActive(
   }
   if (!preset) {
  // Allow activating a freshly-templated id that isn't saved yet by
- // looking up built-in templates.
-    const tmpl = PROVIDER_TEMPLATES.find((t) => t.id === params.providerId);
+ // looking up catalog templates.
+    const tmpl = (await listProviderTemplates()).find((t) => t.id === params.providerId);
     if (tmpl) {
       preset = templateToPreset(tmpl);
       await upsertUserProvider(params.providerId, preset);
@@ -1045,7 +1654,13 @@ async function handleConfigSetActive(
       `unknown provider preset: ${params.providerId}`,
     );
   }
-  const model = params.model ?? preset.model ?? "gpt-4o-mini";
+  const model = params.model ?? preset.model ?? preset.models?.[0];
+  if (!model) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `no model specified for provider "${params.providerId}"; pass a model or set one in the provider preset`,
+    );
+  }
   const contextWindow = preset.modelCapabilities?.[model]?.contextWindow;
   if (params.persist !== false) {
     await setUserActiveEndpoint({
@@ -1143,6 +1758,7 @@ async function handleSessionResume(
     sessionId: params.sessionId,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
+    onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
   });
   registerSession(ctx, session);
   return { sessionId: session.id, events: session.getHistory() };
@@ -1665,6 +2281,7 @@ async function teardown(
   opts: { force?: boolean } = {},
 ): Promise<void> {
   stopWatcher(ctx);
+  ctx.terminals.disposeAll();
   for (const id of Array.from(ctx.sessions.keys())) {
     await releaseSession(ctx, id, opts);
   }

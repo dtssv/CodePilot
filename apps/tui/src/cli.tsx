@@ -640,6 +640,7 @@ async function main(): Promise<void> {
  // its permissionMode: yolo auto-approves everything; ask/auto-edit
  // deny any tool call that would normally prompt. The user gets a
  // clear result object either way.
+    const headlessStartedAt = Date.now();
     try {
       await runHeadless({
         session,
@@ -662,7 +663,9 @@ async function main(): Promise<void> {
             result: msg,
             session_id: session.id,
             usage: session.getUsage(),
-            duration_ms: 0,
+            duration_ms: Date.now() - headlessStartedAt,
+            // num_turns / had_tool_calls are tallied inside runHeadless and are
+            // not recoverable once it throws; report conservative placeholders.
             num_turns: 0,
             had_tool_calls: false,
             errors: [msg],
@@ -751,8 +754,12 @@ const __entry =
     : resolve(__filename);
 if (__entry === __filename) {
   main().catch((err: unknown) => {
-    const msg = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    const debug = process.env.CODEPILOT_LOG_LEVEL === "debug";
+    const msg = err instanceof Error ? (debug ? (err.stack ?? err.message) : err.message) : String(err);
     process.stderr.write(`codepilot-tui: ${msg}\n`);
+    if (err instanceof Error && !debug) {
+      process.stderr.write("(set CODEPILOT_LOG_LEVEL=debug for details)\n");
+    }
     process.exit(1);
   });
 }

@@ -65,6 +65,13 @@ class FakeSession {
     await this.setEndpoint({ model: model ?? this.model, providerId });
   }
 
+  setReasoningEffort(effort: "low" | "medium" | "high" | undefined) {
+    this.config = { ...this.config, reasoningEffort: effort, thinkingBudget: undefined };
+  }
+  getReasoningEffort(): "low" | "medium" | "high" | undefined {
+    return this.config.reasoningEffort as "low" | "medium" | "high" | undefined;
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     for (const e of this.events) listener(e);

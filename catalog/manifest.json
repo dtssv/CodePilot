@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-24",
+  "catalogs": {
+    "connectors": "connectors.json",
+    "provider-templates": "provider-templates.json",
+    "mcp-markets": "mcp-markets.json"
+  },
+  "refresh": "once-per-calendar-day; keep local forever on failure"
+}

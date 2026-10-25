@@ -146,7 +146,7 @@ codepilot          # 多轮 REPL
 codepilot-tui      # 全屏 TUI
 ```
 
-常用：`/mode chat|plan|agent`、`/model`、`/provider`、`/export`、`/clear`、`/exit`。  
+常用：`/agent chat|plan|agent`（协作模式）、`/mode ask|auto-edit|yolo`（权限模式）、`/model`、`/provider`、`/export`、`/clear`、`/exit`。  
 Ctrl+C：忙时取消当前轮，空闲时退出。
 
 导出会话（排查用）：
@@ -159,15 +159,6 @@ codepilot export <id> --format jsonl -o out.jsonl
 ```
 
 ### 自动更新（引擎 vs 插件）
-
-升级分两条通道，互不替代：
-
-| 通道 | 内容 | 方式 |
-|---|---|---|
-| **执行引擎** | CLI / daemon / `~/.codepilot` 下的 npm 包 | 启动与每日检查；或 `codepilot update`；图形端 **设置 → 更新** |
-| **IDE 插件** | VS Code `.vsix` / IntelliJ zip（含内嵌 UI） | Releases 下载安装；VS Code 命令「Check Extension Update」 |
-
-通过 `install.sh` 装到 `~/.codepilot` 时，引擎会在**每次启动**检查一次 GitHub Release；进程一直不关则**每 24 小时**再查一次。有新版本时对同一 prefix 做 `npm install` 原地升级（不是重新跑安装脚本），然后提示重启生效。
 
 ```bash
 codepilot update          # 立刻检查并升级引擎
@@ -191,6 +182,25 @@ codepilot connect
 codepilot connect 127.0.0.1:18765 --token <token>
 ```
 
+设置面板子页：
+
+| 页 | 说明 |
+|---|---|
+| 连接器 | 飞书 / 钉钉 / 企微 / Notion / GitHub 等；可跳转官方授权页后填写凭证安装 |
+| MCP 市场 | 打开 mcp.so / Smithery 等开源市场链接；找到后粘贴 JSON 安装 |
+| 远程 | 一次性二维码（局域网 IP，非 127.0.0.1）；手机 scoped 授权 |
+| 定时 | 闲时任务（`serve` 内调度） |
+
+连接器与模型服务商列表来自仓库 `catalog/*.json`（GitHub raw），本地在 `~/.codepilot/catalog/`：**每天最多尝试更新一次**；弱网/离线失败则**一直沿用本地**。可用 `CODEPILOT_CATALOG_BASE_URL` 覆盖源地址。
+
+手机扫码请用局域网监听：
+
+```bash
+codepilot serve --web --web-root --host 0.0.0.0
+```
+
+TUI：`/undo` `/redo`、`/init`、`/remote`、`/schedule`。
+
 ### Agent 窗 / 桌面
 
 ```bash
@@ -206,7 +216,7 @@ corepack pnpm desktop
 | `plan` | 只读摸清情况并出计划 |
 | `agent` | 默认：可改代码、跑命令（按权限模式确认） |
 
-图形端切换「问答 / 计划 / 智能体」；命令行 `--mode`；TUI `/mode`。
+图形端切换「问答 / 计划 / 智能体」；命令行 `--mode`；TUI `/agent`。
 
 ### VS Code / IntelliJ
 

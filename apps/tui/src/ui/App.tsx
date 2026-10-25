@@ -726,6 +726,122 @@ export function App(props: AppProps): React.ReactElement {
             }
             return;
           }
+          case "undo": {
+            try {
+              if (typeof session.undo !== "function") {
+                dispatch({ type: "set-notice", text: "Undo is only available for local sessions." });
+                return;
+              }
+              const r = await session.undo();
+              dispatch({
+                type: "set-notice",
+                text: `Undid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}.`,
+              });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
+          case "redo": {
+            try {
+              if (typeof session.redo !== "function") {
+                dispatch({ type: "set-notice", text: "Redo is only available for local sessions." });
+                return;
+              }
+              const r = await session.redo();
+              dispatch({
+                type: "set-notice",
+                text: `Redid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}.`,
+              });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
+          case "init": {
+            try {
+              const { initProjectGuidance } = await import("@codepilot/core");
+              const r = await initProjectGuidance(cwd, { force: result.force });
+              dispatch({
+                type: "set-notice",
+                text: r.skipped
+                  ? `Already exists: ${r.path} (pass --force to overwrite)`
+                  : `Wrote ${r.path} — review and commit so future sessions inherit it.`,
+              });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
+          case "remote-qr": {
+            try {
+              const { mintRemotePairing } = await import("@codepilot/core");
+              let serveUrl =
+                process.env.CODEPILOT_SERVE_URL ?? "http://127.0.0.1:18765";
+              try {
+                const { readLiveServeInfo } = await import("@codepilot/protocol/serve-info");
+                const live = await readLiveServeInfo();
+                if (live?.host && live.port) {
+                  serveUrl = `http://${live.host}:${live.port}`;
+                }
+              } catch {
+                /* optional: use default / env */
+              }
+              const minted = await mintRemotePairing({
+                serveUrl,
+                cwd,
+                sessionId: session.id,
+              });
+              dispatch({
+                type: "set-notice",
+                text:
+                  `One-time remote QR (expires soon, single use):\n` +
+                  `${minted.qrPayload}\n` +
+                  `Code: ${minted.code}\n` +
+                  `Open on phone once. Do not screenshot/share; revoke via Extensions if leaked.`,
+              });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
+          case "schedule-list": {
+            try {
+              const { listScheduledTasks } = await import("@codepilot/core");
+              const tasks = await listScheduledTasks();
+              if (tasks.length === 0) {
+                dispatch({
+                  type: "set-notice",
+                  text: "No scheduled/idle tasks. Add via Settings → Schedule or connectors UI.",
+                });
+              } else {
+                const lines = tasks.map(
+                  (t) =>
+                    `${t.enabled ? "●" : "○"} ${t.id} [${t.kind}] ${t.title}` +
+                    (t.lastStatus ? ` last=${t.lastStatus}` : ""),
+                );
+                dispatch({ type: "set-notice", text: lines.join("\n") });
+              }
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
           case "export": {
             try {
               const body = await exportSession(session.id, result.format);

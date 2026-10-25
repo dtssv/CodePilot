@@ -13,6 +13,9 @@
   },
   "files": [
     "dist",
+    "catalog",
+    "skills",
+    "commands",
     "README.md"
   ],
   "scripts": {

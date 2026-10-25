@@ -1,4 +1,4 @@
-// Custom sub-agent discovery from `.codepilot/agents/` (and legacy `.claude/agents/` if present).
+// Custom sub-agent discovery from `.codepilot/agents/`.
 //
 // A custom agent is a Markdown file with YAML frontmatter. The frontmatter
 // declares the agent's identity, tool allowlist, model, and behaviour; the

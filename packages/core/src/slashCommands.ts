@@ -43,6 +43,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, basename, dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ export interface SlashCommand {
   body: string;
 }
 
-export type SlashCommandSource = "project" | "user";
+export type SlashCommandSource = "project" | "user" | "builtin";
 
 export interface DiscoverSlashCommandsOptions {
  /** Override the project-local commands directory
@@ -78,11 +79,22 @@ export interface DiscoverSlashCommandsOptions {
  /** Override the user-global commands directory
  * (defaults to `~/.codepilot/commands`). */
   userDir?: string;
+ /** Override the built-in commands directory (shipped with `@codepilot/core`). */
+  builtinDir?: string;
+ /** When false, skip built-in commands. Default true. */
+  includeBuiltins?: boolean;
  /** Names that are reserved by built-in TUI commands and cannot be
  * overridden by custom files. Files matching a reserved name are
  * skipped (with a warning surfaced via `loadWarnings`). Defaults to
  * the empty set — the TUI populates this. */
   reservedNames?: ReadonlySet<string>;
+}
+
+/** Absolute path to `packages/core/commands/` (next to dist/ or src/). */
+export function defaultBuiltinCommandsDir(): string {
+  const here = fileURLToPath(import.meta.url);
+  const pkgRoot = resolve(dirname(here), "..");
+  return join(pkgRoot, "commands");
 }
 
 export interface DiscoverSlashCommandsResult {
@@ -302,8 +314,19 @@ export async function discoverSlashCommands(
   for (const c of user.commands) add(c);
   warnings.push(...user.warnings);
 
+  if (opts.includeBuiltins !== false) {
+    const builtinDir = opts.builtinDir ?? defaultBuiltinCommandsDir();
+    const builtin = await scanDirForCommands(builtinDir, "builtin", reserved);
+    for (const c of builtin.commands) add(c);
+    warnings.push(...builtin.warnings);
+  }
+
  // Stable order: by source priority (project first), then alphabetically.
-  const priority: Record<SlashCommandSource, number> = { project: 0, user: 1 };
+  const priority: Record<SlashCommandSource, number> = {
+    project: 0,
+    user: 1,
+    builtin: 2,
+  };
   collected.sort((a, b) => {
     const pa = priority[a.source] - priority[b.source];
     if (pa !== 0) return pa;

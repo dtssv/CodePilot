@@ -7,7 +7,7 @@
 // via Promise.all; each returns its own structured conclusion.
 
 import { z } from "zod";
-import type { Event } from "../types.js";
+import type { Event, UsageInfo } from "../types.js";
 import type { ToolDef } from "./types.js";
 
 /** Named sub-agent types. "explore" is read-only; "worker" may edit files. */
@@ -229,6 +229,24 @@ export interface SubagentRunResult {
  * — do not report it as a successful exploration.
  */
   ok: boolean;
+ /** Token usage for the adopted attempt only (retries excluded). Tracked
+ * separately during the run; callers should roll this into the parent
+ * after the sub-agent finishes. */
+  usage?: UsageInfo;
+}
+
+/** Emit sub-agent usage onto the parent event stream so session totals
+ * include it after the child completes. Nested under a parent sub-agent,
+ * this lands in that child's transcript and is summed into its result. */
+export function emitParentUsage(
+  emitEvent: ((e: Event) => void | Promise<void>) | undefined,
+  usage: UsageInfo | undefined,
+): void {
+  if (!emitEvent || !usage) return;
+  if (usage.input <= 0 && usage.output <= 0) return;
+  void Promise.resolve(
+    emitEvent({ type: "usage", usage, rollup: true, ts: Date.now() }),
+  ).catch(() => {});
 }
 
 export interface SubagentRunner {
@@ -504,6 +522,8 @@ export const taskTool: ToolDef<typeof schema> & {
             { signal: ctx.signal, timeoutMs: this.subagentTimeoutMs },
           );
           progress({ state: r.ok ? "ok" : "failed" });
+          // Roll sub-agent tokens into the parent only after it finishes.
+          emitParentUsage(ctx.emitEvent, r.usage);
  // Honour the runner's soft-failure flag (empty conclusion /
  // provider error). Previously we marked every non-throwing run
  // as ok, so "Model not exist" sub-agents looked like successful

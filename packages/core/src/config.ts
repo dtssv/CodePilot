@@ -109,6 +109,8 @@ export const SkillsConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
     dirs: z.array(z.string().min(1)).optional(),
+    /** Skill names that stay on disk but are not advertised / loadable. */
+    disabled: z.array(z.string().min(1)).optional(),
   })
   .strict()
   .optional();
@@ -149,6 +151,7 @@ export const McpServerConfigSchema = z.union([
       command: z.string().min(1),
       args: z.array(z.string()).optional(),
       env: z.record(z.string(), z.string()).optional(),
+      disabled: z.boolean().optional(),
     })
     .strict(),
  // Streamable HTTP (2025-03-26) and SSE transports
@@ -157,6 +160,7 @@ export const McpServerConfigSchema = z.union([
       type: z.enum(["http", "sse"]),
       url: z.string().min(1),
       headers: z.record(z.string(), z.string()).optional(),
+      disabled: z.boolean().optional(),
     })
     .strict(),
 ]);
@@ -362,6 +366,7 @@ export interface ConfigLayer {
     | "defaults"
     | "managed"
     | "user"
+    | "user-mcp"
     | "repo"
     | "mcp-json"
     | "env"
@@ -700,7 +705,13 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 export function readEnvOverrides(): Partial<CodepilotConfig> {
   const out: Partial<CodepilotConfig> = {};
   const provider = process.env.CODEPILOT_PROVIDER;
-  if (provider && (provider === "anthropic" || provider === "openai" || provider === "copilot")) {
+  if (
+    provider &&
+    (provider === "anthropic" ||
+      provider === "openai" ||
+      provider === "copilot" ||
+      provider === "gemini")
+  ) {
     out.provider = provider as ProviderName;
   }
   const model = process.env.CODEPILOT_MODEL;
@@ -796,6 +807,16 @@ export async function loadConfigWithSources(
     const parsed = await readAndParse(userPath);
     if (parsed !== undefined) {
       sources.push({ name: "user", source: userPath, value: parsed });
+    }
+  }
+
+ // 2b) user-level MCP installs from Settings → 连接器 / MCP 市场
+ // (`~/.codepilot/mcp.json`). Same shape as project `.mcp.json`.
+  const userMcpPath = join(homedir(), ".codepilot", "mcp.json");
+  if (readFiles && existsSync(userMcpPath)) {
+    const parsed = await readAndParse(userMcpPath);
+    if (parsed !== undefined && parsed.mcpServers && typeof parsed.mcpServers === "object") {
+      sources.push({ name: "user-mcp", source: userMcpPath, value: parsed });
     }
   }
 

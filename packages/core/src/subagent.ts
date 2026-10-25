@@ -8,11 +8,11 @@
 
 import { randomUUID } from "node:crypto";
 import { runAgent, type AgentDeps, isTransientError } from "./agent.js";
-import type { CodepilotConfig, Event } from "./types.js";
+import type { CodepilotConfig, Event, UsageInfo } from "./types.js";
 import { ToolRegistry } from "./tools/types.js";
 import { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
-import { AnthropicProvider, OpenAIProvider, CopilotProvider } from "./providers/index.js";
+import { AnthropicProvider, OpenAIProvider, CopilotProvider, GeminiProvider } from "./providers/index.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { readMemory, summariseMemory } from "./memory.js";
 import { resolveSandbox } from "./sandbox.js";
@@ -20,6 +20,27 @@ import type { SubagentRunner } from "./tools/task.js";
 import type { ChatProvider } from "./providers/types.js";
 import { createWorktree, removeWorktree, worktreeDiffStat } from "./worktree.js";
 import { projectStatePath } from "./projectState.js";
+
+/** Sum usage events from a sub-agent transcript (adopted attempt only). */
+function sumUsageFromEvents(events: Event[]): UsageInfo {
+  let usage: UsageInfo = { input: 0, output: 0 };
+  for (const e of events) {
+    if (e.type !== "usage") continue;
+    usage = {
+      input: usage.input + e.usage.input,
+      output: usage.output + e.usage.output,
+      cacheRead: sumOptional(usage.cacheRead, e.usage.cacheRead),
+      cacheWrite: sumOptional(usage.cacheWrite, e.usage.cacheWrite),
+      costUSD: sumOptional(usage.costUSD, e.usage.costUSD),
+    };
+  }
+  return usage;
+}
+
+function sumOptional(a?: number, b?: number): number | undefined {
+  if (a === undefined && b === undefined) return undefined;
+  return (a ?? 0) + (b ?? 0);
+}
 
 /**
  * The block appended to a sub-agent's static prefix. It makes the role
@@ -415,7 +436,12 @@ export function createSubagentRunner(
           }
         }
       }
-      return { conclusion: finalText, steps: outcome.steps, ok: outcome.ok };
+      return {
+        conclusion: finalText,
+        steps: outcome.steps,
+        ok: outcome.ok,
+        usage: sumUsageFromEvents(events),
+      };
       } finally {
  // Always clean up the worktree (forced removal). The diff stat was
  // already appended to the conclusion above, so the parent has a
@@ -610,11 +636,22 @@ function buildProvider(config: CodepilotConfig, model: string | undefined): Chat
         smallModel: model,
       });
     case "copilot":
-      return new CopilotProvider({});
+      return new CopilotProvider({
+        defaultModel: model,
+        smallModel: model,
+      });
+    case "gemini":
+      return new GeminiProvider({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        defaultModel: model,
+        smallModel: model,
+      });
     case "anthropic":
     default:
       return new AnthropicProvider({
         apiKey: config.apiKey,
+        baseURL: config.baseURL,
         defaultModel: model,
         smallModel: model,
       });

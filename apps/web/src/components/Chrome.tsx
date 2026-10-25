@@ -587,6 +587,7 @@ export function WorkspaceSessionNav({
   newLabel,
   emptyText,
   sessionIcon,
+  canOpenNewWorkspace = true,
   onOpenWorkspace,
   onCloseWorkspace,
   onOpenNewWorkspace,
@@ -604,6 +605,8 @@ export function WorkspaceSessionNav({
   newLabel: string;
   emptyText: string;
   sessionIcon?: React.ReactNode;
+  /** When false, hide “Open workspace…” (e.g. remote control). */
+  canOpenNewWorkspace?: boolean;
   onOpenWorkspace(cwd: string): void;
   onCloseWorkspace(cwd: string): void;
   onOpenNewWorkspace(): void;
@@ -781,15 +784,17 @@ export function WorkspaceSessionNav({
             </div>
           );
         })}
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
-          onClick={onOpenNewWorkspace}
-          disabled={!connected}
-        >
-          <PlusIcon className="h-3.5 w-3.5" />
-          {t("Open workspace…")}
-        </button>
+        {canOpenNewWorkspace && (
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
+            onClick={onOpenNewWorkspace}
+            disabled={!connected}
+          >
+            <PlusIcon className="h-3.5 w-3.5" />
+            {t("Open workspace…")}
+          </button>
+        )}
       </div>
     </div>
   );

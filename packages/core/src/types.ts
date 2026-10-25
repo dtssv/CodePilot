@@ -107,7 +107,14 @@ type EventBody =
       images?: ImageAttachment[];
     }
   | { type: "plan"; steps: PlanStep[] }
-  | { type: "usage"; usage: UsageInfo }
+  | {
+      type: "usage";
+      usage: UsageInfo;
+      /** True when this event rolls sub-agent tokens into the parent after
+       * the child finished. Must not update last-provider-input heuristics
+       * used for auto-compaction (it is a sum, not a single request size). */
+      rollup?: boolean;
+    }
   | {
  /**
  * Timing record for a single LLM request (one provider stream within a
@@ -366,6 +373,8 @@ export interface McpServerConfig {
  /** sse / http: OAuth scopes to request. Defaults to the server-advertised
  * scopes or "openid profile". */
   oauthScopes?: string[];
+  /** When true, keep the entry but do not start the server. */
+  disabled?: boolean;
 }
 
 /** A user-configured lifecycle hook. */

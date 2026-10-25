@@ -13,6 +13,7 @@ import {
   resolveMcpReferences,
   normalizeMcpToolName,
 } from "./mcp.js";
+import { acquireSharedMcp } from "./mcp-pool.js";
 import type { ToolRegistry } from "./tools/types.js";
 import type { CodepilotConfig, SessionOptions } from "./types.js";
 
@@ -27,21 +28,26 @@ export interface SessionMcpHost {
   withToolRegistry<T>(fn: (registry: ToolRegistry) => T): T;
 }
 
-/** Start all configured MCP servers and register their tools. Errors are
- * non-fatal (written to stderr) so a broken server can't block the session. */
+/** Start configured MCP servers (shared process-wide) and register tools.
+ * Errors are non-fatal so a broken server can't block the session. */
 export async function startMcp(host: SessionMcpHost): Promise<McpManager | null> {
   if (!host.config.mcpServers) return null;
-  const mcp = new McpManager(host.config.mcpServers, {
-    cwd: host.cwd,
-    openAuthUrl: host.onMcpOpenAuthUrl ?? null,
-  });
-  if (host.onMcpServerRequest) {
-    mcp.setServerRequestHandler(
-      async (server, method, params) => host.onMcpServerRequest!(server, method, params)
-    );
-  }
+  const active = Object.fromEntries(
+    Object.entries(host.config.mcpServers).filter(([, cfg]) => !cfg?.disabled),
+  );
+  if (Object.keys(active).length === 0) return null;
+  let mcp: McpManager | null = null;
   try {
-    await mcp.startAll();
+    mcp = await acquireSharedMcp(active, {
+      cwd: host.cwd,
+      openAuthUrl: host.onMcpOpenAuthUrl ?? null,
+    });
+    if (!mcp) return null;
+    if (host.onMcpServerRequest) {
+      mcp.setServerRequestHandler(
+        async (server, method, params) => host.onMcpServerRequest!(server, method, params)
+      );
+    }
     for (const t of mcp.listAllTools()) {
  // Normalize the tool name to fit provider limits (64 chars) and
  // prevent collisions between long names. The original (server, name)
@@ -56,7 +62,7 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
           permission: "network",
           execute: async (input) => {
             const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-            const r = await mcp.invoke(t.server, t.name, args);
+            const r = await mcp!.invoke(t.server, t.name, args);
             return { content: r.content, isError: r.isError };
           },
         })

@@ -1,0 +1,360 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-23",
+  "connectors": [
+    {
+      "id": "feishu",
+      "name": "飞书 / Lark",
+      "description": "消息、云文档、日历与任务。适合催办、纪要与协作。",
+      "category": "im",
+      "kind": "tool+skill",
+      "docsUrl": "https://open.feishu.cn/document",
+      "authUrl": "https://open.feishu.cn/app",
+      "credentials": [
+        {
+          "key": "APP_ID",
+          "label": "App ID",
+          "required": true
+        },
+        {
+          "key": "APP_SECRET",
+          "label": "App Secret",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "feishu",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@larksuiteoapi/lark-mcp",
+          "mcp",
+          "-m",
+          "stdio"
+        ],
+        "envFromCredentials": [
+          "APP_ID",
+          "APP_SECRET"
+        ]
+      },
+      "skill": {
+        "name": "feishu-office",
+        "description": "Use Feishu/Lark tools for messaging, docs, and calendar.",
+        "body": "# 飞书办公助手\n\n用户提到飞书/Lark 时优先使用已安装的飞书连接器工具。\n发送消息或改文档前先确认对象与内容；勿泄露密钥。\n"
+      },
+      "securityNotice": "以你的企业应用身份访问数据。请用最小权限应用，勿分享 App Secret。"
+    },
+    {
+      "id": "dingtalk",
+      "name": "钉钉",
+      "description": "群通知、工作消息与审批提醒。",
+      "category": "im",
+      "kind": "tool+skill",
+      "docsUrl": "https://open.dingtalk.com",
+      "authUrl": "https://open-dev.dingtalk.com/fe/app",
+      "credentials": [
+        {
+          "key": "DINGTALK_Client_ID",
+          "label": "Client ID (AppKey)",
+          "required": true
+        },
+        {
+          "key": "DINGTALK_Client_Secret",
+          "label": "Client Secret",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "dingtalk",
+        "command": "npx",
+        "args": [
+          "-y",
+          "dingtalk-mcp"
+        ],
+        "envFromCredentials": [
+          "DINGTALK_Client_ID",
+          "DINGTALK_Client_Secret"
+        ]
+      },
+      "skill": {
+        "name": "dingtalk-office",
+        "description": "Use DingTalk tools for group messages and office workflows.",
+        "body": "# 钉钉办公助手\n\n发群消息前确认内容。优先简洁中文摘要。\n"
+      },
+      "securityNotice": "凭证可代表企业应用发消息。请限制可见范围并定期轮换 Secret。"
+    },
+    {
+      "id": "wecom",
+      "name": "企业微信",
+      "description": "应用消息、群机器人与通讯录查询。",
+      "category": "im",
+      "kind": "tool+skill",
+      "docsUrl": "https://developer.work.weixin.qq.com/document",
+      "authUrl": "https://work.weixin.qq.com/wework_admin/frame#apps",
+      "credentials": [
+        {
+          "key": "WECOM_CORP_ID",
+          "label": "企业 ID (CorpId)",
+          "required": true
+        },
+        {
+          "key": "WECOM_SECRET",
+          "label": "应用 Secret",
+          "secret": true,
+          "required": true
+        },
+        {
+          "key": "WECOM_AGENT_ID",
+          "label": "AgentId",
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "wecom",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@china-mcp/wecom-mcp"
+        ],
+        "envFromCredentials": [
+          "WECOM_CORP_ID",
+          "WECOM_SECRET",
+          "WECOM_AGENT_ID"
+        ]
+      },
+      "skill": {
+        "name": "wecom-office",
+        "description": "Use WeCom tools for work messages when the user mentions 企业微信.",
+        "body": "# 企业微信助手\n\n确认接收人后再发送。\n"
+      },
+      "securityNotice": "企业微信应用可触达员工。请按部门最小化授权。"
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "description": "读写页面与数据库，整理笔记与知识库。",
+      "category": "docs",
+      "kind": "tool+skill",
+      "docsUrl": "https://developers.notion.com",
+      "authUrl": "https://www.notion.so/my-integrations",
+      "credentials": [
+        {
+          "key": "NOTION_TOKEN",
+          "label": "Integration Token",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "notion",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@notionhq/notion-mcp-server"
+        ],
+        "envFromCredentials": [
+          "NOTION_TOKEN"
+        ]
+      },
+      "skill": {
+        "name": "notion-docs",
+        "description": "Use Notion connector for pages and databases.",
+        "body": "# Notion\n\n先确认页面/数据库范围，再批量改写。\n"
+      },
+      "securityNotice": "Integration 只能访问你勾选的页面。勿分享 Token。"
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "description": "Issue、PR、仓库只读/协作（开发与办公文档仓均可）。",
+      "category": "dev",
+      "kind": "tool+skill",
+      "docsUrl": "https://github.com/settings/tokens",
+      "authUrl": "https://github.com/settings/personal-access-tokens",
+      "credentials": [
+        {
+          "key": "GITHUB_TOKEN",
+          "label": "Personal Access Token",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "github",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "envFromCredentials": [
+          "GITHUB_TOKEN"
+        ]
+      },
+      "skill": {
+        "name": "github-collab",
+        "description": "Use GitHub connector for issues and pull requests.",
+        "body": "# GitHub\n\n写评论/改 issue 前确认仓库与编号。\n"
+      },
+      "securityNotice": "Token 权限尽量只读或最小 scope。"
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "description": "项目与 Issue 跟踪。",
+      "category": "dev",
+      "kind": "tool",
+      "docsUrl": "https://linear.app/docs",
+      "authUrl": "https://linear.app/settings/api",
+      "credentials": [
+        {
+          "key": "LINEAR_API_KEY",
+          "label": "API Key",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "linear",
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-linear"
+        ],
+        "envFromCredentials": [
+          "LINEAR_API_KEY"
+        ]
+      },
+      "securityNotice": "API Key 可读写工作区 Issue，请妥善保管。"
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "description": "频道消息与工作区协作。",
+      "category": "im",
+      "kind": "tool",
+      "docsUrl": "https://api.slack.com/apps",
+      "authUrl": "https://api.slack.com/apps",
+      "credentials": [
+        {
+          "key": "SLACK_BOT_TOKEN",
+          "label": "Bot Token (xoxb-…)",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "slack",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-slack"
+        ],
+        "envFromCredentials": [
+          "SLACK_BOT_TOKEN"
+        ]
+      },
+      "securityNotice": "Bot 只能访问已邀请的频道。"
+    },
+    {
+      "id": "canva",
+      "name": "Canva",
+      "description": "设计资产与品牌模板（需 Canva 开发者应用）。",
+      "category": "design",
+      "kind": "tool",
+      "docsUrl": "https://www.canva.com/developers/",
+      "authUrl": "https://www.canva.com/developers/integrations",
+      "credentials": [
+        {
+          "key": "CANVA_API_KEY",
+          "label": "API Key / Client 凭证",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "canva",
+        "command": "npx",
+        "args": [
+          "-y",
+          "canva-mcp"
+        ],
+        "envFromCredentials": [
+          "CANVA_API_KEY"
+        ]
+      },
+      "securityNotice": "按 Canva 开发者条款使用；勿分享客户端密钥。"
+    },
+    {
+      "id": "wps",
+      "name": "金山文档 / WPS",
+      "description": "在线文档与表格协作。",
+      "category": "docs",
+      "kind": "tool",
+      "docsUrl": "https://open.wps.cn/",
+      "authUrl": "https://open.wps.cn/developer",
+      "credentials": [
+        {
+          "key": "WPS_APP_ID",
+          "label": "App ID",
+          "required": true
+        },
+        {
+          "key": "WPS_APP_SECRET",
+          "label": "App Secret",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "wps",
+        "command": "npx",
+        "args": [
+          "-y",
+          "wps-mcp"
+        ],
+        "envFromCredentials": [
+          "WPS_APP_ID",
+          "WPS_APP_SECRET"
+        ]
+      },
+      "securityNotice": "仅授予所需文档范围。"
+    },
+    {
+      "id": "google-calendar",
+      "name": "Google 日历",
+      "description": "查看与创建日程。",
+      "category": "calendar",
+      "kind": "tool",
+      "docsUrl": "https://console.cloud.google.com/apis/credentials",
+      "authUrl": "https://console.cloud.google.com/apis/credentials",
+      "credentials": [
+        {
+          "key": "GOOGLE_CLIENT_ID",
+          "label": "OAuth Client ID",
+          "required": true
+        },
+        {
+          "key": "GOOGLE_CLIENT_SECRET",
+          "label": "Client Secret",
+          "secret": true,
+          "required": true
+        }
+      ],
+      "mcp": {
+        "name": "google-calendar",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@cocal/google-calendar-mcp"
+        ],
+        "envFromCredentials": [
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ]
+      },
+      "securityNotice": "OAuth 客户端请限制重定向 URI，勿公开 Secret。"
+    }
+  ]
+}

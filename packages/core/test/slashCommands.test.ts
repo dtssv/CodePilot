@@ -136,6 +136,7 @@ describe("discoverSlashCommands", () => {
     writeCommand(commandsDirFor(projectDir), "review", "Review the PR $1");
     const { commands, warnings } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "no-user-cmds"),
+      includeBuiltins: false,
     });
     expect(warnings).toEqual([]);
     expect(commands).toHaveLength(1);
@@ -147,7 +148,10 @@ describe("discoverSlashCommands", () => {
   it("discovers from user-global dir too", async () => {
     const userDir = join(tmp, "user-cmds");
     writeCommand(userDir, "deploy", "Deploy $ARGUMENTS");
-    const { commands } = await discoverSlashCommands(projectDir, { userDir });
+    const { commands } = await discoverSlashCommands(projectDir, {
+      userDir,
+      includeBuiltins: false,
+    });
     expect(commands.find((c) => c.name === "deploy")).toBeDefined();
     expect(commands.find((c) => c.name === "deploy")!.source).toBe("user");
   });
@@ -156,7 +160,10 @@ describe("discoverSlashCommands", () => {
     const userDir = join(tmp, "user-cmds");
     writeCommand(userDir, "review", "user version");
     writeCommand(commandsDirFor(projectDir), "review", "project version");
-    const { commands } = await discoverSlashCommands(projectDir, { userDir });
+    const { commands } = await discoverSlashCommands(projectDir, {
+      userDir,
+      includeBuiltins: false,
+    });
     expect(commands).toHaveLength(1);
     expect(commands[0]!.source).toBe("project");
     expect(commands[0]!.body).toContain("project version");
@@ -168,6 +175,7 @@ describe("discoverSlashCommands", () => {
     const { commands, warnings } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
       reservedNames: new Set(["model", "help"]),
+      includeBuiltins: false,
     });
     expect(commands.map((c) => c.name)).toEqual(["review"]);
     expect(warnings.some((w) => w.includes("reserved"))).toBe(true);
@@ -178,6 +186,7 @@ describe("discoverSlashCommands", () => {
     writeCommand(commandsDirFor(projectDir), "good", "ok");
     const { commands, warnings } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     expect(commands.map((c) => c.name)).toEqual(["good"]);
     expect(warnings.some((w) => w.includes("Skipping"))).toBe(true);
@@ -190,6 +199,7 @@ describe("discoverSlashCommands", () => {
     writeFileSync(join(dir, ".hidden.md"), "nope");
     const { commands } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     expect(commands.map((c) => c.name)).toEqual(["review"]);
   });
@@ -198,6 +208,7 @@ describe("discoverSlashCommands", () => {
     writeCommand(commandsDirFor(projectDir), "review-pr", "body");
     const { commands } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     expect(commands[0]!.name).toBe("review-pr");
   });
@@ -206,6 +217,7 @@ describe("discoverSlashCommands", () => {
     writeCommand(commandsDirFor(projectDir), "Review-PR", "body");
     const { commands, warnings } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     expect(commands).toEqual([]);
     expect(warnings.some((w) => w.includes("lowercase"))).toBe(true);
@@ -219,6 +231,7 @@ describe("discoverSlashCommands", () => {
     );
     const { commands } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     expect(commands[0]!.description).toBe("Explain what this function does.");
   });
@@ -227,6 +240,7 @@ describe("discoverSlashCommands", () => {
     const { commands, warnings } = await discoverSlashCommands(projectDir, {
       projectDir: join(tmp, "missing-project"),
       userDir: join(tmp, "missing-user"),
+      includeBuiltins: false,
     });
     expect(commands).toEqual([]);
     expect(warnings).toEqual([]);
@@ -241,6 +255,7 @@ describe("discoverSlashCommands", () => {
     );
     const { commands } = await discoverSlashCommands(projectDir, {
       userDir: join(tmp, "none"),
+      includeBuiltins: false,
     });
     const c = commands[0]!;
     expect(c.description).toBe("Review a PR.");
@@ -255,13 +270,27 @@ describe("discoverSlashCommands", () => {
     writeCommand(userDir, "beta", "u");
     writeCommand(commandsDirFor(projectDir), "zeta", "p");
     writeCommand(commandsDirFor(projectDir), "alpha", "p");
-    const { commands } = await discoverSlashCommands(projectDir, { userDir });
+    const { commands } = await discoverSlashCommands(projectDir, {
+      userDir,
+      includeBuiltins: false,
+    });
  // project "alpha" first, then project "zeta", then user "beta" (user "alpha" suppressed by collision)
     expect(commands.map((c) => `${c.source}:${c.name}`)).toEqual([
       "project:alpha",
       "project:zeta",
       "user:beta",
     ]);
+  });
+
+  it("includes built-in /skill-creator command", async () => {
+    const { commands } = await discoverSlashCommands(projectDir, {
+      projectDir: join(tmp, "missing-project"),
+      userDir: join(tmp, "missing-user"),
+    });
+    const sc = commands.find((c) => c.name === "skill-creator");
+    expect(sc).toBeDefined();
+    expect(sc!.source).toBe("builtin");
+    expect(sc!.body).toMatch(/skill-creator/);
   });
 });
 

@@ -15,7 +15,7 @@ import {
   type Surface,
   type Theme,
 } from "./surface.js";
-import { setLocale, t } from "./i18n.js";
+import { applyHostLocale, t, useLocale } from "./i18n.js";
 import { Transcript } from "./components/Transcript.js";
 import {
   Composer,
@@ -46,6 +46,7 @@ import {
   SidebarIcon,
   SpinnerIcon,
   WrenchIcon,
+  XIcon,
 } from "./components/Icons.js";
 import { TrajectoryPanel } from "./components/TrajectoryPanel.js";
 
@@ -79,6 +80,7 @@ async function pickWorkspaceViaSystem(cp: Codepilot): Promise<string | null> {
 }
 
 export function App(): React.ReactElement {
+  useLocale();
   const surface = useMemo<Surface>(detectSurface, []);
   const [layout, setLayout] = useState<Layout>(surface.layout);
   const [theme, setTheme] = useState<Theme>(() => initialTheme(surface.host));
@@ -100,6 +102,11 @@ export function App(): React.ReactElement {
     });
   }, []);
 
+  const setThemePersist = useCallback((next: Theme) => {
+    applyTheme(next, true);
+    setTheme(next);
+  }, []);
+
   const switchLayout = useCallback((next: Layout) => {
     saveLayout(next);
     setLayout(next);
@@ -114,7 +121,7 @@ export function App(): React.ReactElement {
     if (bridge) {
       bridge.on((msg) => {
         if (msg.type === "host/init") {
-          setLocale(msg.locale);
+          applyHostLocale(msg.locale);
           if (msg.theme) setTheme(msg.theme);
         } else if (msg.type === "host/theme") {
           setTheme(msg.theme);
@@ -164,7 +171,16 @@ export function App(): React.ReactElement {
     [cp.state.cwd],
   );
 
-  const common = { cp, draft, setDraft, theme, toggleTheme };
+  const common = {
+    cp,
+    draft,
+    setDraft,
+    theme,
+    toggleTheme,
+    setThemePersist,
+    layout,
+    switchLayout,
+  };
 
   return (
     <>
@@ -186,6 +202,9 @@ interface LayoutProps {
   setDraft(v: string): void;
   theme: Theme;
   toggleTheme(): void;
+  setThemePersist(theme: Theme): void;
+  layout: Layout;
+  switchLayout(layout: Layout): void;
 }
 
 function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void, placeholder?: string) {
@@ -253,6 +272,9 @@ function WebLayout({
   setDraft,
   theme,
   toggleTheme,
+  setThemePersist,
+  layout,
+  switchLayout,
   surface,
   onSwitch,
 }: LayoutProps & { surface: Surface; onSwitch(): void }): React.ReactElement {
@@ -286,7 +308,9 @@ function WebLayout({
 
   const title = state.sessions.find((s) => s.id === state.sessionId)?.title;
 
+  const canPickWorkspace = !surface.remote && cp.client.canPickWorkspace();
   const openNewWorkspace = async (): Promise<void> => {
+    if (!canPickWorkspace) return;
     const picked = await pickWorkspaceViaSystem(cp);
     if (picked) await cp.openWorkspace(picked);
   };
@@ -313,6 +337,7 @@ function WebLayout({
             connected={connected}
             newLabel={t("New chat")}
             emptyText={t("No saved sessions yet.")}
+            canOpenNewWorkspace={canPickWorkspace}
             onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
             onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
             onOpenNewWorkspace={() => void openNewWorkspace()}
@@ -381,7 +406,7 @@ function WebLayout({
               <PanelRightIcon className="h-4 w-4" />
             </button>
             <button type="button" onClick={() => void cp.disconnect()} className="cp-btn-ghost py-1">
-              Disconnect
+              {t("Disconnect")}
             </button>
           </div>
         </header>
@@ -392,6 +417,7 @@ function WebLayout({
               <ChatEmpty
                 hasSession={!!state.sessionId}
                 hasWorkspace={!!state.cwd}
+                canOpenWorkspace={canPickWorkspace}
                 onOpenWorkspace={() => void openNewWorkspace()}
                 onPick={(p) => setDraft(p)}
               />
@@ -443,7 +469,19 @@ function WebLayout({
           }
         />
       )}
-      <SettingsPanel cp={cp} open={showSettings} onClose={() => setShowSettings(false)} />
+      <SettingsPanel
+        cp={cp}
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        theme={theme}
+        onTheme={setThemePersist}
+        layout={layout}
+        onLayout={switchLayout}
+        onComposePrompt={(text) => {
+          setDraft(text);
+          setShowSettings(false);
+        }}
+      />
     </div>
   );
 }
@@ -457,11 +495,13 @@ const CHAT_SUGGESTIONS = [
 function ChatEmpty({
   hasSession,
   hasWorkspace,
+  canOpenWorkspace = true,
   onOpenWorkspace,
   onPick,
 }: {
   hasSession: boolean;
   hasWorkspace: boolean;
+  canOpenWorkspace?: boolean;
   onOpenWorkspace(): void;
   onPick(p: string): void;
 }): React.ReactElement {
@@ -470,15 +510,19 @@ function ChatEmpty({
       <div className="mt-[12vh] flex flex-col items-center text-center">
         <FolderIcon className="mb-4 h-12 w-12 text-[var(--color-accent)]" />
         <div className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
-          {t("Open a workspace")}
+          {canOpenWorkspace ? t("Open a workspace") : t("Waiting for workspace")}
         </div>
         <div className="mt-1.5 max-w-sm text-[13px] leading-5 text-[var(--color-ink-dim)]">
-          {t("Sessions are tied to a workspace. Open one or more from the sidebar.")}
+          {canOpenWorkspace
+            ? t("Sessions are tied to a workspace. Open one or more from the sidebar.")
+            : t("This remote session uses the host workspace. Ask the host to open a folder first.")}
         </div>
-        <button type="button" className="cp-btn-primary mt-6" onClick={onOpenWorkspace}>
-          <FolderIcon className="h-3.5 w-3.5" />
-          {t("Open workspace…")}
-        </button>
+        {canOpenWorkspace && (
+          <button type="button" className="cp-btn-primary mt-6" onClick={onOpenWorkspace}>
+            <FolderIcon className="h-3.5 w-3.5" />
+            {t("Open workspace…")}
+          </button>
+        )}
       </div>
     );
   }
@@ -526,6 +570,9 @@ function AgentLayout({
   setDraft,
   theme,
   toggleTheme,
+  setThemePersist,
+  layout,
+  switchLayout,
   surface,
   onSwitch,
 }: LayoutProps & { surface: Surface; onSwitch(): void }): React.ReactElement {
@@ -533,6 +580,9 @@ function AgentLayout({
   const prefs = useMemo(loadPrefs, []);
   const [preview, setPreview] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const remote = surface.remote || cp.client.isRemoteControl();
+  const canPickWorkspace = !remote && cp.client.canPickWorkspace();
+  const [showNav, setShowNav] = useState(() => !remote);
   const scrollRef = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const connected = state.connection === "connected";
   const inTask = !!state.sessionId;
@@ -558,6 +608,7 @@ function AgentLayout({
   }
 
   const openNewWorkspace = async (): Promise<void> => {
+    if (!canPickWorkspace) return;
     const picked = await pickWorkspaceViaSystem(cp);
     if (picked) await cp.openWorkspace(picked);
   };
@@ -565,6 +616,7 @@ function AgentLayout({
   const resumeInWorkspace = async (id: string, cwd: string): Promise<void> => {
     if (!sameCwd(cwd, state.cwd)) await cp.openWorkspace(cwd);
     await cp.resumeSession(id);
+    if (remote) setShowNav(false);
   };
 
   const taskTitle =
@@ -572,36 +624,49 @@ function AgentLayout({
     state.rows.find((r): r is Extract<Row, { kind: "message" }> => r.kind === "message" && r.msg.role === "user")?.msg.text ||
     t("New task");
 
-  return (
-    <div className="flex h-full bg-[var(--color-bg)]">
-      <aside className="flex w-64 shrink-0 flex-col border-r border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
-        {window.codepilotDesktop?.platform === "darwin" && <div className="h-7 shrink-0 [-webkit-app-region:drag]" />}
-        <div className={`flex h-14 shrink-0 items-center gap-2.5 px-4 ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
-          <LogoMark size={26} />
-          <div className="leading-tight">
-            <div className="text-[13.5px] font-semibold tracking-tight text-[var(--color-ink)]">CodePilot</div>
-            <div className="text-[10.5px] text-[var(--color-ink-faint)]">{t("Agent")}</div>
+  const nav = (
+    <>
+      <div className={`flex h-14 shrink-0 items-center gap-2.5 px-4 ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
+        <LogoMark size={26} />
+        <div className="min-w-0 flex-1 leading-tight">
+          <div className="text-[13.5px] font-semibold tracking-tight text-[var(--color-ink)]">CodePilot</div>
+          <div className="text-[10.5px] text-[var(--color-ink-faint)]">
+            {remote ? t("Remote control") : t("Agent")}
           </div>
         </div>
-        <WorkspaceSessionNav
-          workspaces={cp.workspaces}
-          sessions={state.sessions}
-          activeCwd={state.cwd}
-          activeSessionId={state.sessionId}
-          connected={connected}
-          newLabel={t("New task")}
-          emptyText={t("No tasks yet.")}
-          sessionIcon={<RocketIcon className="h-3.5 w-3.5" />}
-          onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
-          onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
-          onOpenNewWorkspace={() => void openNewWorkspace()}
-          onNewSession={() => cp.closeSession()}
-          onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
-          canFork={!!state.sessionId}
-          onFork={() => void cp.forkSession()}
-          onRefresh={() => void cp.refreshSessions()}
-        />
-        <div className="flex items-center gap-1 border-t border-[var(--color-edge-subtle)] px-3 py-2">
+        {remote && (
+          <button type="button" className="cp-icon-btn shrink-0" title={t("Close")} onClick={() => setShowNav(false)}>
+            <XIcon className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+      <WorkspaceSessionNav
+        workspaces={cp.workspaces}
+        sessions={state.sessions}
+        activeCwd={state.cwd}
+        activeSessionId={state.sessionId}
+        connected={connected}
+        newLabel={t("New task")}
+        emptyText={t("No tasks yet.")}
+        sessionIcon={<RocketIcon className="h-3.5 w-3.5" />}
+        canOpenNewWorkspace={canPickWorkspace}
+        onOpenWorkspace={(ws) => {
+          void cp.openWorkspace(ws);
+          if (remote) setShowNav(false);
+        }}
+        onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
+        onOpenNewWorkspace={() => void openNewWorkspace()}
+        onNewSession={() => {
+          cp.closeSession();
+          if (remote) setShowNav(false);
+        }}
+        onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
+        canFork={!!state.sessionId}
+        onFork={() => void cp.forkSession()}
+        onRefresh={() => void cp.refreshSessions()}
+      />
+      <div className="flex items-center gap-1 border-t border-[var(--color-edge-subtle)] px-3 py-2">
+        {!remote && (
           <button
             type="button"
             className="cp-btn-ghost flex items-center gap-1 py-1 text-[11.5px]"
@@ -612,32 +677,75 @@ function AgentLayout({
             <WrenchIcon className="h-3.5 w-3.5" />
             {t("Settings")}
           </button>
-          <div className="ml-auto flex items-center">
-            <ConnectionPill state={state} />
+        )}
+        <div className="ml-auto flex items-center">
+          <ConnectionPill state={state} />
+          {!remote && (
             <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Code view")}>
               <CodeIcon className="h-4 w-4" />
             </button>
-            <ThemeToggle theme={theme} onToggle={toggleTheme} />
-          </div>
+          )}
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
         </div>
-      </aside>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="relative flex h-full bg-[var(--color-bg)]">
+      {!remote && (
+        <aside className="flex w-64 shrink-0 flex-col border-r border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
+          {window.codepilotDesktop?.platform === "darwin" && <div className="h-7 shrink-0 [-webkit-app-region:drag]" />}
+          {nav}
+        </aside>
+      )}
+
+      {remote && showNav && (
+        <div className="absolute inset-0 z-40 flex">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/40"
+            aria-label={t("Close")}
+            onClick={() => setShowNav(false)}
+          />
+          <aside className="relative z-10 flex h-full w-[min(18rem,88vw)] flex-col bg-[var(--color-surface)] shadow-2xl">
+            {nav}
+          </aside>
+        </div>
+      )}
 
       <main className="flex min-w-0 flex-1 flex-col">
-        {window.codepilotDesktop?.platform === "darwin" && <div className="h-7 shrink-0 [-webkit-app-region:drag]" />}
+        {window.codepilotDesktop?.platform === "darwin" && !remote && (
+          <div className="h-7 shrink-0 [-webkit-app-region:drag]" />
+        )}
         {inTask ? (
           <>
-            <header className={`flex h-14 shrink-0 items-center gap-3 border-b border-[var(--color-edge-subtle)] px-5 ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
-              <span className="min-w-0 truncate text-[14px] font-semibold text-[var(--color-ink)]">{taskTitle}</span>
+            <header
+              className={`flex h-14 shrink-0 items-center gap-2 border-b border-[var(--color-edge-subtle)] px-3 sm:gap-3 sm:px-5 ${
+                surface.desktop ? "[-webkit-app-region:drag]" : ""
+              }`}
+            >
+              {remote && (
+                <button
+                  type="button"
+                  className="cp-icon-btn shrink-0"
+                  title={t("Sessions")}
+                  onClick={() => setShowNav(true)}
+                >
+                  <SidebarIcon className="h-4 w-4" />
+                </button>
+              )}
+              <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--color-ink)]">{taskTitle}</span>
               <TaskStatusChip cp={cp} />
-              <div className="ml-auto flex items-center gap-1.5 [-webkit-app-region:no-drag]">
+              <div className="ml-auto flex shrink-0 items-center gap-1.5 [-webkit-app-region:no-drag]">
                 <button type="button" className="cp-btn-ghost py-1" onClick={() => cp.closeSession()}>
                   <PlusIcon className="h-3 w-3" />
-                  {t("New task")}
+                  <span className="hidden sm:inline">{t("New task")}</span>
                 </button>
               </div>
             </header>
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
-              <div className="mx-auto w-full max-w-3xl px-6 py-6">
+              <div className="mx-auto w-full max-w-3xl px-4 py-4 sm:px-6 sm:py-6">
                 <Transcript
                   rows={state.rows}
                   subagents={state.subagents}
@@ -645,7 +753,7 @@ function AgentLayout({
                   activity={state.activity}
                   permission={state.permission}
                   question={state.question}
-                  planInline={false}
+                  planInline={remote}
                   onDecide={(d) => void cp.decidePermission(d)}
                   onAnswer={(a) => void cp.answerQuestion(a)}
                   onRetry={() => void cp.retryLast()}
@@ -653,7 +761,7 @@ function AgentLayout({
                 />
               </div>
             </div>
-            <div className="shrink-0 px-6 pb-5">
+            <div className="shrink-0 px-3 pb-4 sm:px-6 sm:pb-5">
               <div className="mx-auto w-full max-w-3xl">
                 <ReconnectBanner cp={cp} />
                 <Composer {...taskComposer} />
@@ -661,7 +769,19 @@ function AgentLayout({
             </div>
           </>
         ) : (
-          <div className={`min-h-0 flex-1 overflow-auto ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
+          <div className={`relative min-h-0 flex-1 overflow-auto ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
+            {remote && (
+              <div className="absolute left-2 top-2 z-10 [-webkit-app-region:no-drag]">
+                <button
+                  type="button"
+                  className="cp-icon-btn bg-[var(--color-surface)] shadow"
+                  title={t("Sessions")}
+                  onClick={() => setShowNav(true)}
+                >
+                  <SidebarIcon className="h-4 w-4" />
+                </button>
+              </div>
+            )}
             <div className="[-webkit-app-region:no-drag]">
               <AgentHome
                 composer={homeComposer}
@@ -673,7 +793,7 @@ function AgentLayout({
         )}
       </main>
 
-      {inTask && <TaskPanel state={state} onOpenFile={(p) => setPreview(p)} />}
+      {inTask && !remote && <TaskPanel state={state} onOpenFile={(p) => setPreview(p)} />}
       {preview && (
         <FilePreview
           client={cp.client}
@@ -682,7 +802,21 @@ function AgentLayout({
           onOpenExternally={window.codepilotDesktop ? (p) => window.codepilotDesktop?.openPath(joinPath(state.cwd, p)) : undefined}
         />
       )}
-      <SettingsPanel cp={cp} open={showSettings} onClose={() => setShowSettings(false)} />
+      {!remote && (
+        <SettingsPanel
+          cp={cp}
+          open={showSettings}
+          onClose={() => setShowSettings(false)}
+          theme={theme}
+          onTheme={setThemePersist}
+          layout={layout}
+          onLayout={switchLayout}
+          onComposePrompt={(text) => {
+            setDraft(text);
+            setShowSettings(false);
+          }}
+        />
+      )}
     </div>
   );
 }

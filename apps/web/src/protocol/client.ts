@@ -61,8 +61,10 @@ export interface ClientCallbacks {
   onReconnected?(init: InitializeResult): void;
  /** Automatic reconnect is being attempted. */
   onReconnecting?(attempt: number, delayMs: number): void;
- /** A watched workspace directory changed on disk (debounced). */
+  /** A watched workspace directory changed on disk (debounced). */
   onWorkspaceChanged?(params: WorkspaceChangedParams): void;
+  /** MCP OAuth: open / show this authorization URL (loopback callback pending). */
+  onMcpOauthRequired?(params: { name: string; url: string }): void;
 }
 
 export interface WorkspaceChangedParams {
@@ -212,9 +214,30 @@ export class CodepilotClient {
   private manualDisconnect = false;
  /** UI-level workspace-change sink (the panel swaps this per render). */
   private workspaceChangedHandler: ((p: WorkspaceChangedParams) => void) | null = null;
+  private mcpOauthRequiredHandler: ((p: { name: string; url: string }) => void) | null = null;
+  private terminalDataHandler:
+    | ((p: { terminalId: string; data: string }) => void)
+    | null = null;
+  private terminalExitHandler:
+    | ((p: { terminalId: string; exitCode: number }) => void)
+    | null = null;
 
   setWorkspaceChangedHandler(handler: ((p: WorkspaceChangedParams) => void) | null): void {
     this.workspaceChangedHandler = handler;
+  }
+
+  setMcpOauthRequiredHandler(
+    handler: ((p: { name: string; url: string }) => void) | null,
+  ): void {
+    this.mcpOauthRequiredHandler = handler;
+  }
+
+  setTerminalHandlers(handlers: {
+    onData?: ((p: { terminalId: string; data: string }) => void) | null;
+    onExit?: ((p: { terminalId: string; exitCode: number }) => void) | null;
+  } | null): void {
+    this.terminalDataHandler = handlers?.onData ?? null;
+    this.terminalExitHandler = handlers?.onExit ?? null;
   }
 
   constructor(private readonly callbacks: ClientCallbacks) {}
@@ -229,6 +252,18 @@ export class CodepilotClient {
 
   get modes(): AgentMode[] {
     return this.capabilities?.modes ?? ["chat", "plan", "agent"];
+  }
+
+  /** Phone QR remote-control (scoped grant). */
+  isRemoteControl(): boolean {
+    return this.capabilities?.remoteControl === true;
+  }
+
+  /** Whether the UI may offer “open / add workspace” (native folder picker). */
+  canPickWorkspace(): boolean {
+    if (this.capabilities?.remoteControl === true) return false;
+    if (this.capabilities?.workspacePick === false) return false;
+    return true;
   }
 
  /** Connect over WebSocket to `codepilot serve --web`. */
@@ -269,6 +304,16 @@ export class CodepilotClient {
     peer.onNotification<WorkspaceChangedParams>("workspace/changed", (p) => {
       this.workspaceChangedHandler?.(p);
       this.callbacks.onWorkspaceChanged?.(p);
+    });
+    peer.onNotification<{ name: string; url: string }>("mcp/oauth-required", (p) => {
+      this.mcpOauthRequiredHandler?.(p);
+      this.callbacks.onMcpOauthRequired?.(p);
+    });
+    peer.onNotification<{ terminalId: string; data: string }>("terminal/data", (p) => {
+      this.terminalDataHandler?.(p);
+    });
+    peer.onNotification<{ terminalId: string; exitCode: number }>("terminal/exit", (p) => {
+      this.terminalExitHandler?.(p);
     });
     peer.onNotification<{ requestId: string }>("permission/resolved", (p) => {
       this.callbacks.onPromptResolved?.("permission", p.requestId);
@@ -461,6 +506,302 @@ export class CodepilotClient {
     return this.call("system/update-apply", {});
   }
 
+  async mintRemotePairing(opts: {
+    serveUrl: string;
+    cwd?: string;
+    sessionId?: string;
+  }): Promise<{
+    code: string;
+    url: string;
+    qrPayload: string;
+    expiresAt: number;
+    qrDataUrl: string;
+    rewritten?: boolean;
+    warning?: string;
+    lanIp?: string;
+  }> {
+    return this.call("remote/pair-mint", opts);
+  }
+
+  async listMcpMarkets(): Promise<{
+    markets: Array<{ id: string; name: string; description: string; url: string }>;
+  }> {
+    return this.call("mcp/markets", {});
+  }
+
+  async installMcpJson(json: string, name?: string): Promise<{
+    mcpConfigPath: string;
+    names: string[];
+    message: string;
+  }> {
+    return this.call("mcp/install-json", { json, name });
+  }
+
+  async listInstalledMcp(): Promise<{
+    servers: Array<{
+      name: string;
+      enabled: boolean;
+      summary: string;
+      command?: string;
+      url?: string;
+      type?: string;
+    }>;
+  }> {
+    return this.call("mcp/list", {});
+  }
+
+  async setMcpEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ name: string; enabled: boolean; message: string }> {
+    return this.call("mcp/set-enabled", { name, enabled });
+  }
+
+  async inspectMcp(name: string): Promise<{
+    name: string;
+    connected: boolean;
+    tools: Array<{ name: string; description: string }>;
+    resources: Array<{ uri: string; name: string; description?: string }>;
+    prompts: Array<{ name: string; description?: string }>;
+    error?: string;
+    needsAuth?: boolean;
+  }> {
+    return this.call("mcp/inspect", { name });
+  }
+
+  async startMcpOauth(name: string): Promise<{
+    state: "idle" | "pending" | "authorized" | "error";
+    url?: string;
+    error?: string;
+  }> {
+    return this.call("mcp/oauth-start", { name });
+  }
+
+  async mcpOauthStatus(name: string): Promise<{
+    state: "idle" | "pending" | "authorized" | "error";
+    url?: string;
+    error?: string;
+  }> {
+    return this.call("mcp/oauth-status", { name });
+  }
+
+  async cancelMcpOauth(name: string): Promise<{ state: "idle" | "pending" | "authorized" | "error" }> {
+    return this.call("mcp/oauth-cancel", { name });
+  }
+
+  async revokeAllRemote(): Promise<{ revoked: boolean }> {
+    return this.call("remote/revoke-all", {});
+  }
+
+  async initWorkspace(opts?: {
+    force?: boolean;
+    filename?: "AGENTS.md" | "CODEPILOT.md";
+  }): Promise<{ path: string; created: boolean; skipped: boolean }> {
+    return this.call("workspace/init", opts ?? {});
+  }
+
+  async undoSession(sessionId: string): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+    return this.call("session/undo", { sessionId });
+  }
+
+  async redoSession(sessionId: string): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+    return this.call("session/redo", { sessionId });
+  }
+
+  async listConnectors(opts?: {
+    q?: string;
+    tab?: "all" | "installed" | "available";
+    offset?: number;
+    limit?: number;
+  }): Promise<{
+    connectors: unknown[];
+    total: number;
+    offset: number;
+    limit: number;
+  }> {
+    return this.call("connectors/list", opts ?? {});
+  }
+
+  async installConnector(
+    connectorId: string,
+    values: Record<string, string>,
+  ): Promise<{ mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }> {
+    return this.call("connectors/install", { connectorId, values });
+  }
+
+  async updateConnector(
+    connectorId: string,
+    values: Record<string, string>,
+  ): Promise<{ mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }> {
+    return this.call("connectors/update", { connectorId, values });
+  }
+
+  async setConnectorEnabled(
+    connectorId: string,
+    enabled: boolean,
+  ): Promise<{ connectorId: string; enabled: boolean; message: string }> {
+    return this.call("connectors/set-enabled", { connectorId, enabled });
+  }
+
+  async listSkills(opts?: {
+    q?: string;
+    tab?: "all" | "installed" | "available";
+    offset?: number;
+    limit?: number;
+  }): Promise<{
+    skills: Array<{
+      name: string;
+      description: string;
+      state: "installed" | "available";
+      enabled: boolean;
+      source?: string;
+      connectorId?: string;
+      when?: string;
+    }>;
+    total: number;
+    offset: number;
+    limit: number;
+  }> {
+    return this.call("skills/list", opts ?? {});
+  }
+
+  async installSkill(connectorId: string): Promise<{ skillPath: string; message: string }> {
+    return this.call("skills/install", { connectorId });
+  }
+
+  async installSkillArchive(
+    filename: string,
+    dataBase64: string,
+  ): Promise<{
+    names: string[];
+    replaced: string[];
+    skillPaths: string[];
+    message: string;
+  }> {
+    return this.call("skills/install-archive", { filename, dataBase64 });
+  }
+
+  async setSkillEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<{ name: string; enabled: boolean; message: string }> {
+    return this.call("skills/set-enabled", { name, enabled });
+  }
+
+  async getSkillContent(name: string): Promise<{
+    name: string;
+    markdown: string;
+    path: string;
+    source?: string;
+    editablePath: string;
+    readOnlySource: boolean;
+    rootDir?: string;
+    files?: string[];
+  }> {
+    return this.call("skills/get", { name });
+  }
+
+  async getSkillFile(
+    name: string,
+    relativePath: string,
+  ): Promise<{
+    name: string;
+    relativePath: string;
+    content: string;
+    rootDir: string;
+    readOnlySource: boolean;
+  }> {
+    return this.call("skills/get-file", { name, relativePath });
+  }
+
+  async saveSkillContent(
+    name: string,
+    markdown: string,
+  ): Promise<{ name: string; path: string; message: string }> {
+    return this.call("skills/save", { name, markdown });
+  }
+
+  async saveSkillFile(
+    name: string,
+    relativePath: string,
+    content: string,
+  ): Promise<{ name: string; path: string; message: string }> {
+    return this.call("skills/save-file", { name, relativePath, content });
+  }
+
+  async skillCreatorPrompt(): Promise<{ prompt: string }> {
+    return this.call("skills/creator-prompt", {});
+  }
+
+  async listScheduledTasks(): Promise<{ tasks: unknown[] }> {
+    return this.call("schedule/list", {});
+  }
+
+  async addScheduledTask(task: {
+    title: string;
+    prompt: string;
+    cwd?: string;
+    kind: "idle" | "daily" | "interval";
+    at?: string;
+    everyMinutes?: number;
+    idleAfterMs?: number;
+    model?: string;
+    providerId?: string;
+    agentMode?: "chat" | "plan" | "agent";
+  }): Promise<{ task: unknown }> {
+    return this.call("schedule/add", task);
+  }
+
+  async updateScheduledTask(
+    id: string,
+    patch: {
+      title?: string;
+      prompt?: string;
+      cwd?: string;
+      at?: string;
+      everyMinutes?: number;
+      idleAfterMs?: number;
+      model?: string;
+      providerId?: string;
+      agentMode?: "chat" | "plan" | "agent";
+      enabled?: boolean;
+    },
+  ): Promise<{ task: unknown }> {
+    return this.call("schedule/update", { id, ...patch });
+  }
+
+  async removeScheduledTask(id: string): Promise<{ removed: boolean }> {
+    return this.call("schedule/remove", { id });
+  }
+
+  async listTerminalShells(): Promise<{
+    platform: "darwin" | "linux" | "win32" | "other";
+    shells: Array<{ id: string; path: string; label: string }>;
+  }> {
+    return this.call("terminal/list-shells", {});
+  }
+
+  async openTerminal(opts: {
+    shell?: string;
+    cwd?: string;
+    cols?: number;
+    rows?: number;
+  }): Promise<{ terminalId: string; shell: string }> {
+    return this.call("terminal/open", opts);
+  }
+
+  async writeTerminal(terminalId: string, data: string): Promise<void> {
+    await this.call("terminal/write", { terminalId, data });
+  }
+
+  async resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void> {
+    await this.call("terminal/resize", { terminalId, cols, rows });
+  }
+
+  async closeTerminal(terminalId: string): Promise<void> {
+    await this.call("terminal/close", { terminalId });
+  }
+
  /**
  * List sessions. Pass `cwd` to filter; omit to return every session
  * (client groups them by workspace).
@@ -543,8 +884,18 @@ export class CodepilotClient {
     sessionId: string,
     model: string,
     providerId?: string,
-  ): Promise<{ model: string; providerId?: string }> {
-    return this.call("session/setModel", { sessionId, model, providerId });
+    reasoningEffort?: "low" | "medium" | "high" | null,
+  ): Promise<{
+    model: string;
+    providerId?: string;
+    reasoningEffort?: "low" | "medium" | "high";
+  }> {
+    return this.call("session/setModel", {
+      sessionId,
+      model,
+      providerId,
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    });
   }
 
   async getEndpoint(sessionId: string): Promise<{
@@ -552,6 +903,7 @@ export class CodepilotClient {
     providerId?: string;
     provider?: string;
     baseURL?: string;
+    reasoningEffort?: "low" | "medium" | "high";
   }> {
     return this.call("session/getEndpoint", { sessionId });
   }

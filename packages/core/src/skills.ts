@@ -48,18 +48,24 @@ export interface Skill {
   body: string;
 }
 
-export type SkillSource = "project" | "user" | "builtin";
+export type SkillSource = "project" | "user" | "builtin" | "compat";
 
 export interface DiscoverOptions {
- /** Override the project-local skills directory (defaults to `<cwd>/.codepilot/skills`). */
+  /** Override the project-local skills directory (defaults to `<cwd>/.codepilot/skills`). */
   projectDir?: string;
- /** Override the user-global skills directory (defaults to `~/.codepilot/skills`). */
+  /** Override the user-global skills directory (defaults to `~/.codepilot/skills`). */
   userDir?: string;
- /** Override the built-in skills directory. Defaults to the directory shipped
+  /** Override the built-in skills directory. Defaults to the directory shipped
  * with `@codepilot/core` (resolved from this module's location). */
   builtinDir?: string;
- /** Extra explicit skill directories to scan (lowest priority after builtins). */
+  /** Extra explicit skill directories to scan (lowest priority after builtins). */
   extraDirs?: string[];
+  /** Also scan Claude / Agents / OpenCode-compatible skill roots (default true). */
+  includeCompatDirs?: boolean;
+  /** Skill names to omit (from `config.skills.disabled`). Empty = include all. */
+  disabledNames?: readonly string[];
+  /** When false, skip reading `~/.codepilot/config.json` for disabled names. Default true. */
+  applyConfigDisabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +302,24 @@ export async function discoverSkills(
   for (const s of projectSkills) add(s);
   const userSkills = await scanDirForSkills(userDir, "user");
   for (const s of userSkills) add(s);
+
+  // Ecosystem paths (Claude Code / Codex / OpenCode / Agents standard).
+  if (opts.includeCompatDirs !== false) {
+    const home = homedir();
+    const compatDirs = [
+      join(cwd, ".claude", "skills"),
+      join(cwd, ".agents", "skills"),
+      join(cwd, ".opencode", "skills"),
+      join(home, ".claude", "skills"),
+      join(home, ".agents", "skills"),
+      join(home, ".config", "opencode", "skills"),
+    ];
+    for (const d of compatDirs) {
+      const more = await scanDirForSkills(d, "compat");
+      for (const s of more) add(s);
+    }
+  }
+
   for (const ed of extra) {
     if (!ed) continue;
     const abs = isAbsolute(ed) ? ed : resolve(cwd, ed);
@@ -312,13 +336,39 @@ export async function discoverSkills(
   }
 
  // Stable order: by source priority, then alphabetically by name.
-  const priority: Record<SkillSource, number> = { project: 0, user: 1, builtin: 2 };
+  const priority: Record<SkillSource, number> = {
+    project: 0,
+    user: 1,
+    compat: 2,
+    builtin: 3,
+  };
   collected.sort((a, b) => {
     const pa = priority[a.source] - priority[b.source];
     if (pa !== 0) return pa;
     return a.name.localeCompare(b.name);
   });
-  return collected;
+
+  const disabled = new Set<string>(
+    (opts.disabledNames ?? []).map((n) => n.trim()).filter(Boolean),
+  );
+  if (opts.applyConfigDisabled !== false) {
+    for (const n of await readDisabledSkillNames()) disabled.add(n);
+  }
+  if (disabled.size === 0) return collected;
+  return collected.filter((s) => !disabled.has(s.name));
+}
+
+/** Names listed in `~/.codepilot/config.json` → `skills.disabled`. */
+export async function readDisabledSkillNames(): Promise<string[]> {
+  try {
+    const raw = await readFile(join(homedir(), ".codepilot", "config.json"), "utf-8");
+    const cfg = JSON.parse(raw) as { skills?: { disabled?: unknown } };
+    const list = cfg.skills?.disabled;
+    if (!Array.isArray(list)) return [];
+    return list.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +578,98 @@ Use this skill when the user asks for a code review of a change set.
    - One-line per-file takeaway.
    - Anything you explicitly did **not** review (e.g. generated code,
      vendored dependencies).
+`,
+  },
+  {
+    name: "skill-creator",
+    markdown: `---
+name: skill-creator
+description: Create, improve, and edit CodePilot skills (SKILL.md). Use whenever the user wants to create a skill, write /skill-creator, turn a workflow into a skill, or edit an existing skill under ~/.codepilot/skills or .codepilot/skills.
+when: The user asks to create or improve a skill, mentions skill-creator, or wants to capture a repeatable workflow as a skill.
+tools:
+  - write_file
+  - edit_file
+  - read_file
+  - bash
+  - grep
+---
+
+# skill-creator
+
+Help the user create or improve a **CodePilot skill** — a folder with \`SKILL.md\` that the agent loads on demand via the \`skill\` tool.
+
+## CodePilot skill locations
+
+| Scope | Path | When to use |
+|-------|------|-------------|
+| User (default) | \`~/.codepilot/skills/<name>/SKILL.md\` | Personal skills across projects |
+| Project | \`<cwd>/.codepilot/skills/<name>/SKILL.md\` | Shared with the repo |
+| Builtin | shipped with CodePilot | Do not overwrite; copy to user/project to customize |
+
+Directory name **must** match frontmatter \`name\` (lowercase, digits, hyphens).
+
+## Capture intent
+
+If the conversation already contains a workflow ("turn this into a skill"), extract steps, tools, corrections, and I/O formats first. Otherwise ask:
+
+1. What should this skill enable the agent to do?
+2. When should it trigger? (phrases / contexts)
+3. Expected output format?
+4. User-global or project-local?
+
+Confirm before writing files.
+
+## Write SKILL.md
+
+\`\`\`markdown
+---
+name: my-skill
+description: What it does AND when to use it (include trigger phrases; be a bit pushy so it is not under-triggered).
+when: Optional short hint.
+tools:
+  - read_file
+  - bash
+---
+
+# my-skill
+
+## Workflow
+1. …
+2. …
+
+## Examples
+…
+\`\`\`
+
+### Description rules
+
+- Third person; include **what** + **when**.
+- Put all "when to use" info in \`description\`, not only in the body.
+- Prefer imperative steps in the body; keep body under ~500 lines.
+- Optional: \`references/\`, \`scripts/\`, \`assets/\` next to \`SKILL.md\` for progressive disclosure.
+
+### Writing style
+
+Prefer explaining *why* over heavy MUSTs. Stay general; avoid malware or deceptive skills.
+
+## After writing
+
+1. Write the file with \`write_file\` / \`edit_file\`.
+2. Tell the user the path and that **new sessions** pick it up (or reload).
+3. Suggest a short test prompt they can send to verify triggering.
+4. Offer to iterate on the description if it under-triggers.
+
+## Editing existing skills
+
+- User/project skills: edit the \`SKILL.md\` in place.
+- Builtin skills: copy to \`~/.codepilot/skills/<name>/SKILL.md\` first (user copy wins), then edit.
+- Settings → 技能 also allows viewing/editing markdown; keep that file valid.
+
+## Do not
+
+- Create skills under Cursor-only paths (\`~/.cursor/skills-cursor/\`).
+- Invent secrets or hard-code API keys into skills.
+- Overwrite project skills without asking when a user copy would suffice.
 `,
   },
 ];

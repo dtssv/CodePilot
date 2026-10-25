@@ -12,8 +12,11 @@ import type {
 } from "../protocol/client.js";
 import { describeError } from "../protocol/client.js";
 import { t } from "../i18n.js";
-import { detectSurface } from "../surface.js";
 import { PlusIcon, RefreshIcon, XIcon } from "./Icons.js";
+import type { Layout, Theme } from "../surface.js";
+import { SettingsExtras, type SettingsExtraSection } from "./SettingsExtras.js";
+
+type SettingsNav = "models" | SettingsExtraSection;
 
 type EngineUpdateRow = {
   current: string;
@@ -173,10 +176,21 @@ export function SettingsPanel({
   cp,
   open,
   onClose,
+  onComposePrompt,
+  theme,
+  onTheme,
+  layout,
+  onLayout,
 }: {
   cp: Codepilot;
   open: boolean;
   onClose(): void;
+  /** Prefill the main composer (e.g. skill-creator) and close settings. */
+  onComposePrompt?: (text: string) => void;
+  theme: Theme;
+  onTheme(theme: Theme): void;
+  layout: Layout;
+  onLayout(layout: Layout): void;
 }): React.ReactElement | null {
   const { state, client } = cp;
   const [snap, setSnap] = useState<ConfigSnapshot | null>(null);
@@ -202,8 +216,7 @@ export function SettingsPanel({
   const [engineUpdate, setEngineUpdate] = useState<EngineUpdateRow | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | undefined>();
-  const surface = useMemo(detectSurface, []);
-  const embeddedHost = surface.host;
+  const [nav, setNav] = useState<SettingsNav>("general");
 
   const rows = useMemo(() => buildEndpointRows(snap), [snap]);
   const editing = draft?.kind === "edit" ? rows.find((r) => r.id === draft.id) : null;
@@ -220,7 +233,11 @@ export function SettingsPanel({
         available: engine.available,
         canAutoApply: engine.canAutoApply,
       });
-      if (!engine.available) setUpdateMsg(t("Up to date"));
+      // Up-to-date is shown inline next to the button; clear prior messages.
+      if (!engine.available) setUpdateMsg(undefined);
+      else if (!engine.canAutoApply) {
+        setUpdateMsg(t("Cannot auto-apply here (not a prefix install). Run: codepilot update"));
+      }
     } catch (err) {
       setUpdateMsg(describeError(err));
     } finally {
@@ -558,7 +575,7 @@ export function SettingsPanel({
 
   const remove = async (): Promise<void> => {
     if (!editing) return;
-    if (!window.confirm(t(`Remove saved config for “${editing.displayName}”?`))) return;
+    if (!window.confirm(`${t("Remove saved config for")} “${editing.displayName}”?`)) return;
     setBusy(true);
     try {
       await client.deleteProvider(editing.id);
@@ -592,16 +609,18 @@ export function SettingsPanel({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
       onClick={onClose}
     >
-      <aside
-        className="flex h-full w-full max-w-3xl animate-fade-in flex-col border-l border-[var(--color-edge)] bg-[var(--color-surface)] shadow-2xl"
+      <div
+        className="flex h-[min(720px,90vh)] w-full max-w-3xl animate-fade-in flex-col overflow-hidden rounded-2xl border border-[var(--color-edge)] bg-[var(--color-surface)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("Settings")}
       >
         <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[var(--color-edge-subtle)] px-4">
           <span className="text-[13.5px] font-semibold text-[var(--color-ink)]">{t("Settings")}</span>
-          <span className="text-[11.5px] text-[var(--color-ink-faint)]">{t("Providers & models")}</span>
           <div className="ml-auto flex items-center gap-1">
             <button type="button" className="cp-icon-btn" title={t("Refresh")} onClick={() => void reload()}>
               <RefreshIcon className="h-4 w-4" />
@@ -612,12 +631,54 @@ export function SettingsPanel({
           </div>
         </div>
 
-        {error && (
-          <div className="mx-4 mt-3 rounded-lg border border-[var(--color-remove)]/30 bg-[var(--color-remove)]/10 px-3 py-2 text-[12px] text-[var(--color-remove)]">
+        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--color-edge-subtle)] px-3 py-2">
+          {(
+            [
+              ["general", t("General")],
+              ["models", t("Models")],
+              ["connectors", t("Connectors")],
+              ["custom-mcp", t("Custom connectors")],
+              ["skills", t("Skills")],
+              ["remote", t("Remote")],
+              ["schedule", t("Schedule")],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={`shrink-0 rounded-lg px-2.5 py-1 text-[12px] ${
+                nav === id
+                  ? "bg-[var(--color-accent-dim)] text-[var(--color-ink)]"
+                  : "text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)]"
+              }`}
+              onClick={() => setNav(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {error && nav === "models" && (
+          <div className="mx-4 mt-3 shrink-0 rounded-lg border border-[var(--color-remove)]/30 bg-[var(--color-remove)]/10 px-3 py-2 text-[12px] text-[var(--color-remove)]">
             {error}
           </div>
         )}
 
+        {nav !== "models" ? (
+          <SettingsExtras
+            cp={cp}
+            section={nav}
+            theme={theme}
+            onTheme={onTheme}
+            layout={layout}
+            onLayout={onLayout}
+            onComposePrompt={(text) => {
+              onComposePrompt?.(text);
+              onClose();
+            }}
+          />
+        ) : (
         <div className="flex min-h-0 flex-1">
           <div className="flex w-56 shrink-0 flex-col border-r border-[var(--color-edge-subtle)]">
             <div className="cp-eyebrow px-3 pt-3 pb-1">{t("Endpoints")}</div>
@@ -996,74 +1057,51 @@ export function SettingsPanel({
             )}
           </div>
         </div>
+        )}
 
+        {nav === "models" && (
         <div className="shrink-0 border-t border-[var(--color-edge-subtle)] px-4 py-3">
-          <div className="mb-2 flex items-center gap-2">
-            <span className="text-[12.5px] font-semibold text-[var(--color-ink)]">{t("Updates")}</span>
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              className="cp-btn-ghost ml-auto py-0.5 text-[11.5px]"
+              className="cp-btn-ghost py-0.5 text-[11.5px]"
               disabled={updateBusy || state.connection !== "connected"}
               onClick={() => void checkUpdates()}
             >
               <RefreshIcon className="h-3 w-3" />
               {updateBusy ? t("Checking…") : t("Check for updates")}
             </button>
-          </div>
-          <p className="mb-2 text-[11px] leading-4 text-[var(--color-ink-faint)]">
-            {t("Engine updates apply to the CLI/daemon (~/.codepilot). Extension updates are separate.")}
-          </p>
-          <div className="space-y-2">
-            <div className="flex items-start gap-2 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2">
-              <div className="min-w-0 flex-1">
-                <div className="text-[12px] font-medium text-[var(--color-ink)]">{t("Engine")}</div>
-                <div className="font-mono text-[11px] text-[var(--color-ink-faint)]">
-                  {engineUpdate
-                    ? engineUpdate.available && engineUpdate.latest
-                      ? `${engineUpdate.current} → ${engineUpdate.latest}`
-                      : engineUpdate.current
-                    : "—"}
-                </div>
-                {engineUpdate?.available && !engineUpdate.canAutoApply && (
-                  <div className="mt-1 text-[11px] text-[var(--color-warn)]">
-                    {t("Cannot auto-apply here (not a prefix install). Run: codepilot update")}
-                  </div>
-                )}
-              </div>
-              {engineUpdate?.available ? (
+            {engineUpdate && !engineUpdate.available && (
+              <span className="text-[11.5px] text-[var(--color-add)]">{t("Up to date")}</span>
+            )}
+            {engineUpdate?.available && engineUpdate.latest && (
+              <>
+                <span className="font-mono text-[11.5px] text-[var(--color-ink-dim)]">
+                  {engineUpdate.current} → {engineUpdate.latest}
+                </span>
                 <button
                   type="button"
-                  className="cp-btn shrink-0 py-1 text-[11.5px]"
+                  className="cp-btn py-0.5 text-[11.5px]"
                   disabled={updateBusy || !engineUpdate.canAutoApply}
                   onClick={() => void applyEngine()}
+                  title={
+                    engineUpdate.canAutoApply
+                      ? undefined
+                      : t("Cannot auto-apply here (not a prefix install). Run: codepilot update")
+                  }
                 >
-                  {t("Apply engine update")}
+                  {t("Confirm update")}
                 </button>
-              ) : engineUpdate ? (
-                <span className="shrink-0 text-[11px] text-[var(--color-add)]">{t("Up to date")}</span>
-              ) : null}
-            </div>
-            <div className="rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2">
-              <div className="text-[12px] font-medium text-[var(--color-ink)]">{t("Extension")}</div>
-              <div className="mt-0.5 text-[11px] leading-4 text-[var(--color-ink-faint)]">
-                {t("Extension updates install via VSIX / IDE marketplace — not via the engine updater.")}
-                {embeddedHost ? ` (${embeddedHost})` : ""}
-              </div>
-              <a
-                className="mt-1 inline-block text-[11.5px] text-[var(--color-accent)] hover:underline"
-                href="https://github.com/dtssv/CodePilot/releases"
-                target="_blank"
-                rel="noreferrer"
-              >
-                {t("Open releases")}
-              </a>
-            </div>
+              </>
+            )}
           </div>
           {updateMsg && (
-            <div className="mt-2 text-[11.5px] text-[var(--color-ink-dim)]">{updateMsg}</div>
+            <div className="mt-1.5 text-[11.5px] text-[var(--color-ink-dim)]">{updateMsg}</div>
           )}
         </div>
-      </aside>
+        )}
+        </div>
+      </div>
     </div>
   );
 }

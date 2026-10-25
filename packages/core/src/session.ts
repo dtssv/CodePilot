@@ -130,6 +130,8 @@ import {
   rewindToSnapshot,
   listSnapshots,
 } from "./snapshots.js";
+import { existsSync } from "node:fs";
+import { resolve as pathResolve } from "node:path";
 import {
   SESSIONS_DIR,
   buildProvider,
@@ -172,6 +174,13 @@ export class Session {
   private readonly providerOverride?: import("./providers/types.js").ChatProvider;
  /** Files the agent has written/edited this session, for snapshot rewind. */
   private touchedFiles: Set<string> = new Set();
+  /** Snapshot id taken at the start of the current prompt (undo baseline). */
+  private turnBaselineId: string | null = null;
+  /** Files touched during the current prompt only. */
+  private turnTouchedFiles: Set<string> = new Set();
+  /** Undo stack: baseline (pre-turn) + after (post-turn) snapshot ids. */
+  private undoStack: Array<{ baselineId: string; afterId: string; label: string }> = [];
+  private redoStack: Array<{ baselineId: string; afterId: string; label: string }> = [];
  /** Unsubscribe functions for background-job completion listeners. */
   private jobListeners: Array<() => void> = [];
 
@@ -208,6 +217,8 @@ export class Session {
   private _sandboxUnavailable = false;
   private hooks: HookEngine;
   private mcp: McpManager | null = null;
+ /** Background MCP bring-up; session resume must not await this (npx is slow). */
+  private mcpReady: Promise<McpManager | null> = Promise.resolve(null);
   private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string } | null = null;
   private disposed = false;
  /** Current Collaboration mode (default "agent"). */
@@ -348,7 +359,25 @@ export class Session {
  // Stamp cwd sidecar so listSessions can filter by workspace.
     await persistSessionCwd(this.id, this.cwd).catch(() => undefined);
     this.gitBranchCache = readGitBranch(this.cwd);
-    this.mcp = await this.startMcp();
+ // MCP (esp. `npx -y …`) can take many seconds — do not block resume/UI.
+ // Tools register when ready; prompt() awaits mcpReady before the agent turn.
+    this.mcpReady = this.startMcp()
+      .then(async (mcp) => {
+        if (this.disposed) {
+          const { releaseSharedMcp } = await import("./mcp-pool.js");
+          await releaseSharedMcp(mcp);
+          return null;
+        }
+        this.mcp = mcp;
+        await this.rebuildSystemPrompt().catch(() => undefined);
+        return mcp;
+      })
+      .catch((err) => {
+        process.stderr.write(
+          `[session] MCP background start failed: ${(err as Error).message}\n`,
+        );
+        return null;
+      });
  // Load trusted hook hashes (for command-hook trust enforcement).
     await this.hooks.loadTrustedHashes();
  // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/.
@@ -437,6 +466,14 @@ export class Session {
     }
     this.cancelController = new AbortController();
 
+    // Undo baseline: capture pre-turn state of files we already know about.
+    this.turnTouchedFiles = new Set();
+    try {
+      this.turnBaselineId = await this.snapshot(`pre-turn-${Date.now()}`);
+    } catch {
+      this.turnBaselineId = null;
+    }
+
  // Telemetry: wrap each prompt in a span (no-op when OTEL is not configured).
     const promptSpan: PromptSpan = startPromptSpan(this.id, text.length);
 
@@ -463,6 +500,8 @@ export class Session {
     }
     let effectivePrompt = promptHook.rewrittenPrompt ?? text;
 
+ // Wait for background MCP (if still starting) so tools / @mcp refs work.
+    await this.mcpReady.catch(() => null);
  // Resolve `@mcp:<server>/<uri>` references into inline resource content.
  // This lets users paste MCP resource URIs into their prompt to inject
  // server-side context (e.g. `@mcp:github/repos/foo/bar`).
@@ -579,8 +618,10 @@ export class Session {
           }
           if (e.type === "subagent") {
             const inner = e.event?.type;
+            // Persist usage so sub-agent token totals survive resume and can
+            // be shown separately from the parent until rollup.
             const replayable = inner === undefined || inner === "message" || inner === "tool_call" ||
-              inner === "tool_result" || inner === "plan" || inner === "error";
+              inner === "tool_result" || inner === "plan" || inner === "error" || inner === "usage";
             if (!replayable) {
               this.notify(e);
               return;
@@ -592,6 +633,7 @@ export class Session {
           this.notify(e);
           if (
             e.type === "usage" &&
+            !e.rollup &&
             typeof e.usage?.input === "number" &&
             e.usage.input > 0
           ) {
@@ -613,12 +655,17 @@ export class Session {
             if (t.name === "write_file" || t.name === "edit_file" || t.name === "apply_patch") {
               const inp = t.input as Record<string, unknown> | undefined;
               const path = inp?.path;
-              if (typeof path === "string") this.touchedFiles.add(path);
+              if (typeof path === "string") {
+                this.touchedFiles.add(path);
+                this.turnTouchedFiles.add(path);
+              }
  // apply_patch may touch multiple files — parse is expensive, so
  // we rely on the patch's own `*** Update/Add/Delete File:` lines.
               if (t.name === "apply_patch" && typeof inp?.patch === "string") {
                 for (const m of (inp.patch as string).matchAll(/\*\*\* (?:Add|Delete|Update) File: (.+)/g)) {
-                  this.touchedFiles.add(m[1]!.trim());
+                  const p = m[1]!.trim();
+                  this.touchedFiles.add(p);
+                  this.turnTouchedFiles.add(p);
                 }
               }
             }
@@ -776,6 +823,26 @@ export class Session {
         turnFiles = [];
       }
     } finally {
+      // Record undo boundary when this turn mutated files.
+      if (
+        this.turnBaselineId &&
+        this.turnTouchedFiles.size > 0 &&
+        !this.cancelController?.signal.aborted
+      ) {
+        try {
+          const afterId = await this.snapshot(`post-turn-${Date.now()}`);
+          this.undoStack.push({
+            baselineId: this.turnBaselineId,
+            afterId,
+            label: `turn ${this.undoStack.length + 1}`,
+          });
+          this.redoStack = [];
+        } catch {
+          /* ignore snapshot failures */
+        }
+      }
+      this.turnBaselineId = null;
+      this.turnTouchedFiles = new Set();
       this.cancelController = null;
  // Clear turn-scoped overrides so the session model + permission
  // grants resume on the user's next message.
@@ -889,6 +956,24 @@ export class Session {
     this.config = { ...this.config, model: resolved };
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
+  }
+
+  /**
+   * Set reasoning / extended-thinking effort for subsequent turns.
+   * Pass `undefined` (or call with no effort) to turn thinking off.
+   * Clears any explicit `thinkingBudget` so effort mapping takes effect.
+   */
+  setReasoningEffort(effort: "low" | "medium" | "high" | undefined): void {
+    if (this.disposed) throw new Error("session disposed");
+    this.config = {
+      ...this.config,
+      reasoningEffort: effort,
+      thinkingBudget: undefined,
+    };
+  }
+
+  getReasoningEffort(): "low" | "medium" | "high" | undefined {
+    return this.config.reasoningEffort;
   }
 
  /**
@@ -1134,6 +1219,66 @@ export class Session {
     { id: string; label: string; createdAt: string; fileCount: number }[]
   > {
     return listSnapshots(this.cwd);
+  }
+
+  /** Undo the last agent turn's file edits (OpenCode-style `/undo`). */
+  async undo(): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+    const entry = this.undoStack.pop();
+    if (!entry) throw new Error("Nothing to undo.");
+    const result = await rewindToSnapshot(this.cwd, entry.baselineId);
+    // Delete files created during the turn (present in after, absent/tombstone in baseline).
+    try {
+      const afterPath = pathResolve(
+        projectStatePath(this.cwd, "snapshots"),
+        entry.afterId,
+        "manifest.json",
+      );
+      const beforePath = pathResolve(
+        projectStatePath(this.cwd, "snapshots"),
+        entry.baselineId,
+        "manifest.json",
+      );
+      if (existsSync(afterPath) && existsSync(beforePath)) {
+        const after = JSON.parse(await readFile(afterPath, "utf-8")) as {
+          files: Record<string, string>;
+        };
+        const before = JSON.parse(await readFile(beforePath, "utf-8")) as {
+          files: Record<string, string>;
+        };
+        const { rm } = await import("node:fs/promises");
+        for (const rel of Object.keys(after.files)) {
+          const prev = before.files[rel];
+          if (!prev || prev === "__TOMBSTONE__") {
+            const abs = pathResolve(this.cwd, rel);
+            if (existsSync(abs)) {
+              await rm(abs, { force: true });
+              if (!result.deleted.includes(rel)) result.deleted.push(rel);
+            }
+          }
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+    this.redoStack.push(entry);
+    return { ...result, label: entry.label };
+  }
+
+  /** Re-apply the last undone turn's file edits (`/redo`). */
+  async redo(): Promise<{ restored: string[]; deleted: string[]; label: string }> {
+    const entry = this.redoStack.pop();
+    if (!entry) throw new Error("Nothing to redo.");
+    const result = await rewindToSnapshot(this.cwd, entry.afterId);
+    this.undoStack.push(entry);
+    return { ...result, label: entry.label };
+  }
+
+  undoDepth(): number {
+    return this.undoStack.length;
+  }
+
+  redoDepth(): number {
+    return this.redoStack.length;
   }
 
  /** Returns the auto-generated (or user-supplied) session title. */
@@ -1579,9 +1724,12 @@ export class Session {
       this.persistentShell.close();
       this.persistentShell = null;
     }
-    if (this.mcp) {
-      await this.mcp.stopAll();
-      this.mcp = null;
+    const mcp = this.mcp;
+    this.mcp = null;
+    this.mcpReady = Promise.resolve(null);
+    if (mcp) {
+      const { releaseSharedMcp } = await import("./mcp-pool.js");
+      await releaseSharedMcp(mcp);
     }
   }
 
@@ -1926,7 +2074,12 @@ export class Session {
     if (this.lastProviderInputTokens <= 0) {
       for (let i = this.events.length - 1; i >= 0; i--) {
         const e = this.events[i]!;
-        if (e.type === "usage" && typeof e.usage?.input === "number" && e.usage.input > 0) {
+        if (
+          e.type === "usage" &&
+          !e.rollup &&
+          typeof e.usage?.input === "number" &&
+          e.usage.input > 0
+        ) {
           this.lastProviderInputTokens = e.usage.input;
           break;
         }
@@ -2081,7 +2234,7 @@ export class Session {
     } catch {
  /* ignore */
     }
-    const title = sanitizeTitle(candidate ?? fallback);
+    const title = sanitizeTitle(candidate ?? "") ?? sanitizeTitle(fallback) ?? fallback;
     if (title) await this.setTitle(title);
   }
 }

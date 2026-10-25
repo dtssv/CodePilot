@@ -23,6 +23,7 @@ import { Session } from "./session.js";
 import { initPluginRuntimes } from "./plugins.js";
 import { createLogger } from "./logger.js";
 import { resolveDefaultModel, resolveModelTarget, applyProviderAndModel } from "./providerCatalog.js";
+import { stripThinking } from "./stripThinking.js";
 
 export const SESSIONS_DIR = join(homedir(), ".codepilot", "sessions");
 
@@ -45,12 +46,24 @@ export type SessionExportFormat = "markdown" | "jsonl";
 
 export function sanitizeTitle(raw: string): string | null {
   if (!raw) return null;
-  let t = raw.replace(/^["'`]+|["'`]+$/g, "").trim();
+ // Small models (e.g. MiniMax) often stream chain-of-thought as
+ // `<think>…</think>` text_delta. That must never become the sidebar title.
+  let t = stripThinking(raw);
+  t = t.replace(/^["'`]+|["'`]+$/g, "").trim();
  // Strip leading numbering like "1. " or "- ".
   t = t.replace(/^[\-\d.\)\s]+/, "");
  // Collapse whitespace.
   t = t.replace(/\s+/g, " ").trim();
   if (!t) return null;
+ // Reject leftover meta-reasoning that never closed a think tag, e.g.
+ // `<think>We need answer to user Chinese: …` or "We need answer title only…".
+  if (
+    /^<think\b/i.test(t) ||
+    /<\/?(?:think|thinking|redacted_reasoning)\b/i.test(t) ||
+    /^(we need|let me|i need|the user|title only|according to)\b/i.test(t)
+  ) {
+    return null;
+  }
  // Hard cap at 60 chars; the small model is asked for 10 but the fallback
  // may be longer. Truncate at a word boundary when possible.
   if (t.length > 60) {
@@ -87,7 +100,7 @@ export async function callTitleModel(
     if (ev.kind === "text_delta") collected.push(ev.text);
     if (ev.kind === "error") return null;
   }
-  const joined = collected.join("").trim();
+  const joined = stripThinking(collected.join("")).trim();
   return joined || null;
 }
 

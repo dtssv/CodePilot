@@ -40,6 +40,11 @@ export type CommandResult =
   | { kind: "show-context" }
   | { kind: "show-plugins" }
   | { kind: "export"; format: "markdown" | "jsonl"; outPath?: string }
+  | { kind: "undo" }
+  | { kind: "redo" }
+  | { kind: "init"; force: boolean }
+  | { kind: "remote-qr" }
+  | { kind: "schedule-list" }
   | {
       kind: "custom-command";
       prompt: string;
@@ -82,6 +87,11 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "context", description: "Show context window usage" },
   { name: "plugins", description: "Show installed plugins" },
   { name: "export", description: "Export session transcript (markdown or jsonl)", args: "[md|jsonl] [path]" },
+  { name: "undo", description: "Undo last agent file edits" },
+  { name: "redo", description: "Redo last undone file edits" },
+  { name: "init", description: "Scaffold AGENTS.md for this project", args: "[--force]" },
+  { name: "remote", description: "Mint a one-time QR for phone remote control" },
+  { name: "schedule", description: "List scheduled / idle tasks" },
   { name: "exit", description: "Exit CodePilot" },
 ];
 
@@ -108,6 +118,10 @@ export const HELP_TEXT = `Available commands:
   -- runtime introspection --
   /mcp  /hooks  /agents  /skills  /context  /plugins
   /export [md|jsonl] [path]          Export this session transcript
+  /undo · /redo                      Undo/redo last agent file edits
+  /init [--force]                    Scaffold AGENTS.md (commit-ready)
+  /remote                            One-time QR for phone remote control
+  /schedule                          List idle/scheduled tasks
 
   /exit                              Exit CodePilot
 
@@ -197,6 +211,16 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       }
       return { kind: "export", format, outPath };
     }
+    case "undo":
+      return { kind: "undo" };
+    case "redo":
+      return { kind: "redo" };
+    case "init":
+      return { kind: "init", force: /\b--force\b/.test(rest) };
+    case "remote":
+      return { kind: "remote-qr" };
+    case "schedule":
+      return { kind: "schedule-list" };
     case "clear":
       return { kind: "clear" };
     case "exit":
@@ -228,6 +252,11 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "context",
   "plugins",
   "export",
+  "undo",
+  "redo",
+  "init",
+  "remote",
+  "schedule",
   "exit",
   "quit",
   "retry",

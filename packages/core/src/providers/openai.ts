@@ -230,8 +230,9 @@ export class OpenAIProvider implements ChatProvider {
       return;
     }
 
- // Flush any fully-collected tool calls.
-    for (const t of [...tools.values()].sort((a, b) => 0)) {
+ // Flush any fully-collected tool calls. Map preserves insertion order,
+ // which matches the tool_call index order the deltas arrived in.
+    for (const t of tools.values()) {
       if (t.emitted) continue;
       let input: unknown = {};
       if (t.args.length > 0) {

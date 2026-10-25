@@ -81,6 +81,89 @@ vi.mock("@codepilot/core", () => ({
   currentInstalledVersion: vi.fn(() => "0.0.0-test"),
   checkEngineUpdate: vi.fn(async () => null),
   applyUpdate: vi.fn(async () => "0.0.0-test"),
+  mintRemotePairing: vi.fn(async () => ({
+    code: "abc",
+    url: "http://x/remote/pair?code=abc&s=s",
+    qrPayload: "http://x/remote/pair?code=abc&s=s",
+    expiresAt: Date.now() + 60_000,
+  })),
+  redeemRemotePairing: vi.fn(async () => ({
+    grant: { token: "t", createdAt: 0, expiresAt: Date.now() + 1, cwd: "/tmp", caps: ["prompt"] },
+    cwd: "/tmp",
+    serveUrl: "http://x",
+  })),
+  resolveRemoteGrant: vi.fn(async () => null),
+  revokeAllRemoteControl: vi.fn(async () => undefined),
+  initProjectGuidance: vi.fn(async () => ({ path: "/tmp/AGENTS.md", created: true, skipped: false })),
+  CONNECTOR_CATALOG: [],
+  listConnectors: vi.fn(async () => []),
+  listConnectorsWithStatus: vi.fn(async () => []),
+  queryConnectorsWithStatus: vi.fn(async () => ({
+    connectors: [],
+    total: 0,
+    offset: 0,
+    limit: 0,
+  })),
+  listProviderTemplates: vi.fn(async () => []),
+  installConnector: vi.fn(async () => ({ mcpConfigPath: "/tmp/mcp.json", message: "ok" })),
+  updateConnector: vi.fn(async () => ({ mcpConfigPath: "/tmp/mcp.json", message: "ok" })),
+  setConnectorEnabled: vi.fn(async () => ({ connectorId: "x", enabled: true, message: "ok" })),
+  listManagedSkills: vi.fn(async () => []),
+  queryManagedSkills: vi.fn(async () => ({ skills: [], total: 0, offset: 0, limit: 0 })),
+  installSkillFromConnector: vi.fn(async () => ({ skillPath: "/tmp/s", message: "ok" })),
+  installSkillFromArchive: vi.fn(async () => ({
+    names: ["x"],
+    replaced: [],
+    skillPaths: ["/tmp/x"],
+    message: "ok",
+  })),
+  setSkillEnabled: vi.fn(async () => ({ name: "x", enabled: true, message: "ok" })),
+  getSkillContent: vi.fn(async () => ({
+    name: "x",
+    markdown: "---\nname: x\n---\n",
+    path: "/tmp/x",
+    editablePath: "/tmp/x",
+    readOnlySource: false,
+    rootDir: "/tmp/x",
+    files: ["SKILL.md"],
+  })),
+  saveSkillContent: vi.fn(async () => ({ name: "x", path: "/tmp/x", message: "ok" })),
+  getSkillFile: vi.fn(async () => ({
+    name: "x",
+    relativePath: "SKILL.md",
+    content: "---\nname: x\n---\n",
+    rootDir: "/tmp/x",
+    readOnlySource: false,
+  })),
+  saveSkillFile: vi.fn(async () => ({ name: "x", path: "/tmp/x", message: "ok" })),
+  SKILL_CREATOR_STARTER_PROMPT: "create skill",
+  listScheduledTasks: vi.fn(async () => []),
+  addScheduledTask: vi.fn(async (t: unknown) => t),
+  updateScheduledTask: vi.fn(async (id: string, patch: Record<string, unknown>) => ({
+    id,
+    title: "t",
+    prompt: "p",
+    cwd: "/tmp",
+    kind: "idle",
+    enabled: true,
+    createdAt: 0,
+    ...patch,
+  })),
+  removeScheduledTask: vi.fn(async () => true),
+  listMcpMarkets: vi.fn(async () => []),
+  installMcpJson: vi.fn(async () => ({ mcpConfigPath: "/tmp/mcp.json", names: [], message: "ok" })),
+  listInstalledMcpServers: vi.fn(async () => []),
+  setMcpServerEnabled: vi.fn(async () => ({ name: "x", enabled: true, message: "ok" })),
+  inspectMcpServer: vi.fn(async () => ({
+    name: "x",
+    connected: true,
+    tools: [],
+    resources: [],
+    prompts: [],
+  })),
+  authorizeMcpServer: vi.fn(async () => ({ name: "x", authorized: true })),
+  listLanIPv4: vi.fn(() => ["192.168.1.2"]),
+  remoteGrantAllows: vi.fn(() => true),
 }));
 
 import {
@@ -188,6 +271,12 @@ describe("originAllowed", () => {
   it("allows localhost on the server's own port", () => {
     expect(originAllowed("http://localhost:1234", undefined, 1234)).toBe(true);
     expect(originAllowed("http://127.0.0.1:1234", undefined, 1234)).toBe(true);
+  });
+
+  it("allows Origin that matches the request Host (LAN phone)", () => {
+    expect(originAllowed("http://192.168.1.10:18765", undefined, 18765, "192.168.1.10:18765")).toBe(
+      true,
+    );
   });
 
   it("rejects other browser origins, including a different port", () => {

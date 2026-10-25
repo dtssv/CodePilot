@@ -54,11 +54,16 @@ export function findAppBrowser(
   return candidates.find((c) => exists(c.path)) ?? null;
 }
 
+/** Browsers cannot open http://0.0.0.0/ — map wildcard bind to loopback for local UI. */
+function browserHost(host: string): string {
+  return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+}
+
 /** The page URL that opens the agent layout and connects with `token`. */
 export function agentPageUrl(host: string, port: number, token: string | undefined, cwd: string): string {
   const q = new URLSearchParams({ layout: "agent", cwd });
   if (token) q.set("token", token);
-  return `http://${host}:${port}/?${q.toString()}`;
+  return `http://${browserHost(host)}:${port}/?${q.toString()}`;
 }
 
 /** Web layout URL with token so the SPA auto-connects (token stripped from history). */
@@ -69,7 +74,7 @@ export function webPageUrl(
 ): string {
   const q = new URLSearchParams({ layout: "web" });
   if (token) q.set("token", token);
-  return `http://${host}:${port}/?${q.toString()}`;
+  return `http://${browserHost(host)}:${port}/?${q.toString()}`;
 }
 
 /** Open a URL in the default browser (tab), fire-and-forget. */
