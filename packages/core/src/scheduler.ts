@@ -3,7 +3,7 @@
  *
  * Idle tasks: queued with `kind: "idle"`; a watcher runs them when the local
  * engine reports no busy sessions for `idleAfterMs` (default 10 min).
- * Scheduled tasks: simple cron-ish `HH:MM` daily or interval minutes.
+ * Scheduled tasks: one-time (`once`), daily `HH:MM`, or interval minutes.
  *
  * Persistence: `~/.codepilot/scheduled-tasks.json`
  * Execution is host-driven (`startSchedulerWatcher` from CLI/desktop).
@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 const STORE = join(homedir(), ".codepilot", "scheduled-tasks.json");
 
-export type ScheduledTaskKind = "idle" | "daily" | "interval";
+export type ScheduledTaskKind = "idle" | "once" | "daily" | "interval";
 
 export interface ScheduledTask {
   id: string;
@@ -24,8 +24,10 @@ export interface ScheduledTask {
   prompt: string;
   cwd: string;
   kind: ScheduledTaskKind;
-  /** For daily: "HH:MM" local time. */
+  /** For daily/once: "HH:MM" local time. */
   at?: string;
+  /** For once: absolute epoch ms to run at (takes precedence over `at`). */
+  runAt?: number;
   /** For interval: minutes between runs. */
   everyMinutes?: number;
   /** Idle: how long with no busy sessions before run (ms). */
@@ -44,6 +46,8 @@ export interface ScheduledTask {
   lastRunAt?: number;
   lastStatus?: "ok" | "error" | "skipped";
   lastError?: string;
+  /** How many times this task has run (for the execution-history view). */
+  runCount?: number;
 }
 
 interface StoreFile {
@@ -139,6 +143,14 @@ export async function schedulerTick(ctx: SchedulerTickContext): Promise<string[]
       due = ctx.isIdle && ctx.idleForMs >= need;
       // At most once per idle window: skip if ran in last need/2
       if (task.lastRunAt && now - task.lastRunAt < need / 2) due = false;
+    } else if (task.kind === "once") {
+      // Fire once when we reach the target time, then auto-disable so it
+      // never repeats. `runAt` (absolute epoch) wins over `at` ("HH:MM" today).
+      if (typeof task.runAt === "number") {
+        due = !task.lastRunAt && now >= task.runAt;
+      } else if (task.at) {
+        due = !task.lastRunAt && matchesDaily(task.at, date);
+      }
     } else if (task.kind === "daily" && task.at) {
       due = matchesDaily(task.at, date);
       if (task.lastRunAt) {
@@ -165,11 +177,15 @@ export async function schedulerTick(ctx: SchedulerTickContext): Promise<string[]
       task.lastRunAt = now;
       task.lastStatus = r.ok ? "ok" : "error";
       task.lastError = r.error;
+      task.runCount = (task.runCount ?? 0) + 1;
     } catch (err) {
       task.lastRunAt = now;
       task.lastStatus = "error";
       task.lastError = err instanceof Error ? err.message : String(err);
+      task.runCount = (task.runCount ?? 0) + 1;
     }
+    // A one-time task never repeats: disable it once it has fired.
+    if (task.kind === "once") task.enabled = false;
   }
   await save(store);
   return ran;

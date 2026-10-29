@@ -48,6 +48,15 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/study → implement/);
   });
 
+  it("carries the evidence/honesty discipline (anti-laziness rules)", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toMatch(/Evidence and Honesty/);
+    expect(out.staticPrefix).toMatch(/Evidence before synthesis/);
+    expect(out.staticPrefix).toMatch(/Comparisons are two-sided/);
+    expect(out.staticPrefix).toMatch(/Follow the user's explicit constraints exactly/);
+    expect(out.staticPrefix).toMatch(/Self-check before you conclude/);
+  });
+
   it("splits brownfield vs greenfield conventions", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Brownfield \(default\)/);
@@ -95,6 +104,22 @@ describe("buildSystemPrompt static prefix", () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "bash"] });
     expect(out.staticPrefix).toContain("`read_file`");
     expect(out.staticPrefix).toContain("`bash`");
+  });
+
+  it("advertises discovered skills in the stable cached block", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      skills: [
+        { name: "commit", description: "write a commit message", source: "project", path: "/x/SKILL.md", body: "do the thing", when: undefined, tools: undefined } as never,
+      ],
+    });
+    // Skills ride in the stable (cached) tier, not the static prefix.
+    expect(out.stableContext).toContain("<skills>");
+    expect(out.stableContext).toContain("`commit`");
+    expect(out.stableContext).toMatch(/skill` tool/);
+    // No skills → no section.
+    const empty = await buildSystemPrompt({ ...baseCtx, skills: [] });
+    expect(empty.stableContext).not.toContain("<skills>");
   });
 
   it("renders a fallback when no tools are exposed", async () => {
@@ -187,7 +212,8 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("cwd: /work");
     expect(out.dynamicSuffix).toContain("scratch_dir:");
     expect(out.dynamicSuffix).toContain("project_state_dir:");
-    expect(out.dynamicSuffix).toContain("now: 2025-01-01T00:00:00.000Z");
+    // `now` is volatile and no longer inside <environment>.
+    expect(out.volatileSuffix).toContain("now: 2025-01-01T00:00:00.000Z");
     expect(out.dynamicSuffix).toContain("</environment>");
   });
 
@@ -234,9 +260,10 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("<git>");
     expect(out.dynamicSuffix).toContain("in_repo: true");
     expect(out.dynamicSuffix).toContain("branch: main");
-    expect(out.dynamicSuffix).toContain("dirty: true");
     expect(out.dynamicSuffix).toContain("last_commit: abc1234");
     expect(out.dynamicSuffix).toContain("</git>");
+    // Dirty working-tree is volatile now, not in the stable <git> identity.
+    expect(out.volatileSuffix).toContain("working_tree: 1 changed file(s)");
   });
 
   it("falls back to a not-a-git message when git.inRepo is false", async () => {
@@ -244,19 +271,72 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("not a git working tree");
   });
 
-  it("contains a <memory> block with project and user sections when present", async () => {
+  it("injects the progressive index and advertises project/user memory paths (not full text)", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
-      memory: { project: "P", user: "U", progressive: "INDEX" },
+      memory: {
+        project: "## Section A\nproject-body-text",
+        user: "## Pref\nuser-body-text",
+        progressive: "INDEX",
+      },
     });
     expect(out.dynamicSuffix).toContain("<memory>");
     expect(out.dynamicSuffix).toContain("### Progressive index");
     expect(out.dynamicSuffix).toContain("INDEX");
-    expect(out.dynamicSuffix).toContain("### Project (~/.codepilot/projects/");
-    expect(out.dynamicSuffix).toContain("P");
-    expect(out.dynamicSuffix).toContain("### User (~/.codepilot/MEMORY.md)");
-    expect(out.dynamicSuffix).toContain("U");
+    // Project/user memory are advertised by path + headings, not pasted in full.
+    expect(out.dynamicSuffix).toContain("Project memory available");
+    expect(out.dynamicSuffix).toContain("User memory available");
+    expect(out.dynamicSuffix).toContain("## Section A");
+    expect(out.dynamicSuffix).not.toContain("project-body-text");
+    expect(out.dynamicSuffix).not.toContain("user-body-text");
     expect(out.dynamicSuffix).toContain("</memory>");
+  });
+
+  it("does not inject project/user memory bodies into the per-turn suffix", async () => {
+    const body = "secret-long-note ".repeat(100);
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      memory: { user: `## Heading\n${body}` },
+    });
+    expect(out.dynamicSuffix).toContain("User memory available");
+    expect(out.dynamicSuffix).toContain("read_file");
+    // The body must never be injected verbatim.
+    expect(out.dynamicSuffix).not.toContain(body.trim());
+  });
+
+  it("reports git working tree as a count only, never the file list", async () => {
+    const changes = Array.from({ length: 30 }, (_, i) => ` M file${i}.ts`).join("\n");
+    const provider: EnvironmentProvider = {
+      async snapshot(cwd) {
+        return {
+          os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
+          now: "t", timezone: "UTC",
+          git: { inRepo: true, root: "/w", branch: "main", dirty: true, statusShort: `## main\n${changes}` },
+        };
+      },
+    };
+    const out = await buildSystemPrompt({ ...baseCtx, environmentProvider: provider });
+    expect(out.volatileSuffix).toContain("30 changed file(s)");
+    expect(out.volatileSuffix).toContain("git status");
+    // No individual paths are listed anywhere in the context.
+    expect(out.full).not.toContain("file0.ts");
+    expect(out.full).not.toContain("file29.ts");
+  });
+
+  it("does not inject a project_tree block in the per-turn suffix", async () => {
+    const provider: EnvironmentProvider = {
+      async snapshot(cwd) {
+        return {
+          os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
+          now: "t", timezone: "UTC",
+          directoryTree: "src/\n  a.ts\n  b.ts",
+          git: { inRepo: false },
+        };
+      },
+    };
+    const out = await buildSystemPrompt({ ...baseCtx, environmentProvider: provider });
+    expect(out.dynamicSuffix).not.toContain("<project_tree>");
+    expect(out.dynamicSuffix).not.toContain("a.ts");
   });
 
   it("documents progressive disclosure in the static memory section", async () => {
@@ -280,28 +360,61 @@ describe("buildSystemPrompt dynamic suffix", () => {
         { id: "d", title: "fourth", status: "blocked" },
       ],
     });
-    expect(out.dynamicSuffix).toContain("<plan>");
-    expect(out.dynamicSuffix).toContain("[x] a — first (completed)");
-    expect(out.dynamicSuffix).toContain("[~] b — second (in_progress)");
-    expect(out.dynamicSuffix).toContain("[ ] c — third (pending)");
-    expect(out.dynamicSuffix).toContain("[!] d — fourth (blocked)");
-    expect(out.dynamicSuffix).toContain("</plan>");
+    expect(out.volatileSuffix).toContain("<plan>");
+    expect(out.volatileSuffix).toContain("[x] a — first (completed)");
+    expect(out.volatileSuffix).toContain("[~] b — second (in_progress)");
+    expect(out.volatileSuffix).toContain("[ ] c — third (pending)");
+    expect(out.volatileSuffix).toContain("[!] d — fourth (blocked)");
+    expect(out.volatileSuffix).toContain("</plan>");
   });
 
   it("plan block falls back to a hint when no plan exists", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, plan: undefined });
-    expect(out.dynamicSuffix).toContain("(no plan yet");
+    expect(out.volatileSuffix).toContain("(no plan yet");
   });
 
-  it("contains a <tools> block listing the configured tool names", async () => {
+  it("keeps the stable context byte-identical when only volatile state changes", async () => {
+    // Two snapshots differing ONLY in `now`, git dirty count, and plan — the
+    // stable context must stay byte-for-byte identical so the cached system
+    // block (staticPrefix + stableContext) never busts the prompt cache.
+    const mk = (now: string, changed: number, plan: typeof baseCtx.plan) => ({
+      ...baseCtx,
+      plan,
+      environmentProvider: {
+        async snapshot(cwd: string) {
+          return {
+            os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
+            now, timezone: "UTC",
+            git: {
+              inRepo: true, root: "/w", branch: "main",
+              statusShort: `## main\n${Array.from({ length: changed }, (_, i) => ` M f${i}.ts`).join("\n")}`,
+            },
+          };
+        },
+      } as EnvironmentProvider,
+    });
+    const a = await buildSystemPrompt(mk("2026-01-01T00:00:00Z", 3, []));
+    const b = await buildSystemPrompt(mk("2026-06-30T23:59:59Z", 41, [
+      { id: "s", title: "work", status: "in_progress" },
+    ]));
+    expect(a.staticPrefix).toBe(b.staticPrefix);
+    expect(a.stableContext).toBe(b.stableContext); // ← the invariant
+    // And the volatile tiers DO differ (sanity: we didn't accidentally freeze them).
+    expect(a.volatileSuffix).not.toBe(b.volatileSuffix);
+    expect(a.volatileSuffix).toContain("3 changed file(s)");
+    expect(b.volatileSuffix).toContain("41 changed file(s)");
+  });
+
+  it("does not duplicate the tool list in the suffix (names live in §12 + the tools array)", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
       toolNames: ["bash", "edit_file"],
     });
-    expect(out.dynamicSuffix).toContain("<tools>");
-    expect(out.dynamicSuffix).toContain("- bash");
-    expect(out.dynamicSuffix).toContain("- edit_file");
-    expect(out.dynamicSuffix).toContain("</tools>");
+    // The redundant <tools> block was removed to avoid re-listing tools every
+    // turn (grows with MCP). §12 of the static prefix names them instead.
+    expect(out.dynamicSuffix).not.toContain("<tools>");
+    expect(out.staticPrefix).toContain("bash");
+    expect(out.staticPrefix).toContain("edit_file");
   });
 });
 

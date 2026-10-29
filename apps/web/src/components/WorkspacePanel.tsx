@@ -8,6 +8,7 @@ import {
   FileIcon,
   FolderIcon,
   GitIcon,
+  PanelRightIcon,
   RefreshIcon,
   SaveIcon,
   SearchIcon,
@@ -18,7 +19,7 @@ import { InteractiveTerminal } from "./InteractiveTerminal.js";
 
 type Entry = { name: string; path: string; kind: "file" | "directory"; size?: number };
 
-export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: CodepilotClient; cwd: string; connected: boolean; rows?: Row[] }): React.ReactElement {
+export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = false, onToggleMaximize, onClose }: { client: CodepilotClient; cwd: string; connected: boolean; rows?: Row[]; maximized?: boolean; onToggleMaximize?: () => void; onClose?: () => void }): React.ReactElement {
   const [path, setPath] = useState(".");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<EditorFile | null>(null);
@@ -35,15 +36,15 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
   const [gitDiff, setGitDiff] = useState<GitDiffState | null>(null);
   const [diffStaged, setDiffStaged] = useState(false);
   const diffController = useMemo(() => new GitDiffController(
-    (file, staged) => client.gitDiff(file, staged), setGitDiff,
-  ), [client]);
+    (file, staged) => client.gitDiff(file, staged, cwd), setGitDiff,
+  ), [client, cwd]);
   useEffect(() => {
     diffController.close();
     return () => diffController.invalidate();
   }, [diffController, cwd, connected]);
   const [externalChanged, setExternalChanged] = useState(false);
   const [watchError, setWatchError] = useState<string | null>(null);
-  const [terminalOpen, setTerminalOpen] = useState(true);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [terminalTab, setTerminalTab] = useState<"pty" | "bash">("pty");
   const bashRuns = useMemo(() => {
     return rows
@@ -64,7 +65,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
     if (saving || (dirty && !window.confirm("Discard unsaved changes and reload?"))) return;
     const revision = ++readRevision.current;
     try {
-      const result = await client.readWorkspace(file);
+      const result = await client.readWorkspace(file, cwd);
       if (revision !== readRevision.current) return;
       setSelected({ ...result, original: result.content, originalHash: result.hash });
       setDirty(false); setExternalChanged(false); setShowDiff(false); setError(null);
@@ -76,7 +77,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
     if (saving || (dirty && !window.confirm("Discard unsaved changes?"))) return;
     const revision = ++readRevision.current;
     try {
-      const result = await client.listWorkspace(next);
+      const result = await client.listWorkspace(next, cwd);
       if (revision !== readRevision.current) return;
       setError(null); setEntries(result.entries); setPath(next); setSelected(null); setDirty(false);
     } catch (err) { if (revision === readRevision.current) setError(String(err)); }
@@ -96,9 +97,9 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
     client.setWorkspaceChangedHandler((params) => {
       if (params.error) { setWatchError(params.error); return; }
       setWatchError(null);
-      void client.listWorkspace(path).then(r => setEntries(r.entries)).catch(() => {});
+      void client.listWorkspace(path, cwd).then(r => setEntries(r.entries)).catch(() => {});
       if (selected) {
-        void client.workspaceStat(selected.path).then(s => {
+        void client.workspaceStat(selected.path, cwd).then(s => {
           setExternalChanged(changedExternally(selected, s));
         }).catch(() => {});
       }
@@ -107,7 +108,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
   }, [client, path, selected?.path, selected?.originalHash, selected]);
   useEffect(() => {
     if (!connected) return;
-    void client.watchWorkspace(".").catch(() => setWatchError("watch unavailable — polling"));
+    void client.watchWorkspace(".", cwd).catch(() => setWatchError("watch unavailable — polling"));
   }, [client, connected, cwd]);
   useEffect(() => { setDirty(false); setExternalChanged(false); }, [selected?.path]);
   useEffect(() => {
@@ -125,20 +126,36 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
   }, [client, connected, saving, selected?.path, selected?.originalHash]);
   const parent = path === "." ? "." : path.split("/").slice(0, -1).join("/") || ".";
   return (
-    <aside className="flex w-[min(42rem,52vw)] min-w-[22rem] shrink-0 flex-col border-l border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
+    <aside className={`flex ${maximized ? "flex-1" : "w-[min(42rem,52vw)] min-w-[22rem] shrink-0"} flex-col border-l border-[var(--color-edge-subtle)] bg-[var(--color-surface)]`}>
       <PanelHeader>
         <span className="text-[11px] font-semibold tracking-wide text-[var(--color-ink-dim)]">{t("Workspace")}</span>
         <div className="ml-auto flex items-center gap-1">
+          {onToggleMaximize && (
+            <HeaderButton
+              onClick={onToggleMaximize}
+              active={maximized}
+              title={maximized ? t("Show chat") : t("Workspace only")}
+            >
+              <PanelRightIcon className="h-3.5 w-3.5" />
+              <span className="ml-1 text-[10.5px]">{maximized ? t("Show chat") : t("Workspace only")}</span>
+            </HeaderButton>
+          )}
           <HeaderButton
             onClick={() => setTerminalOpen((v) => !v)}
             active={terminalOpen}
             title={t("Open terminal")}
           >
             <TerminalIcon className="h-3.5 w-3.5" />
+            <span className="ml-1 text-[10.5px]">{t("Terminal")}</span>
           </HeaderButton>
           <HeaderButton onClick={() => void load()} title="Refresh listing">
             <RefreshIcon className="h-3.5 w-3.5" />
           </HeaderButton>
+          {onClose && (
+            <HeaderButton onClick={onClose} title={t("Close")}>
+              <XIcon className="h-3.5 w-3.5" />
+            </HeaderButton>
+          )}
         </div>
       </PanelHeader>
 
@@ -147,7 +164,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
         <span className="truncate">{path}</span>
       </div>
 
-      <button type="button" onClick={() => void client.gitStatus().then(setGit).catch(err => setError(String(err)))}
+      <button type="button" onClick={() => void client.gitStatus(cwd).then(setGit).catch(err => setError(String(err)))}
         className="group flex w-full items-center gap-1.5 border-b border-[var(--color-edge-subtle)] px-3 py-1.5 text-left text-[10px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-raised)]">
         <GitIcon className="h-3 w-3 shrink-0 text-[var(--color-ink-faint)] group-hover:text-[var(--color-accent)]" />
         <span className="font-mono">{git?.branch ?? "load status"}</span>
@@ -170,7 +187,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
       <form className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-edge-subtle)] p-2" onSubmit={e => {
         e.preventDefault();
         const revision = ++searchRevision.current;
-        void client.searchWorkspace(query, path).then(r => {
+        void client.searchWorkspace(query, path, 100, cwd).then(r => {
           if (revision === searchRevision.current) { setMatches(r.matches); setSearchTruncated(r.truncated); setError(null); }
         }).catch(err => { if (revision === searchRevision.current) setError(String(err)); });
       }}>
@@ -260,7 +277,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [] }: { client: 
                       onClick={() => {
                         if (!window.confirm("Save changes to this file?")) return;
                         readRevision.current++; setSaving(true);
-                        void client.writeWorkspace(selected.path, selected.content, selected.size, selected.originalHash)
+                        void client.writeWorkspace(selected.path, selected.content, selected.size, selected.originalHash, cwd)
                           .then(r => { setSelected(acceptSave(selected, r)); setDirty(false); setExternalChanged(false); })
                           .catch(err => setError(String(err)))
                           .finally(() => setSaving(false));
@@ -400,7 +417,7 @@ function HeaderButton({ onClick, active, title, children }: {
 }): React.ReactElement {
   return (
     <button type="button" onClick={onClick} title={title} aria-pressed={active}
-      className={`rounded-md border p-1 transition-colors ${
+      className={`inline-flex items-center rounded-md border px-1.5 py-1 transition-colors ${
         active
           ? "border-[var(--color-accent-dim)] bg-[var(--color-accent-dim)] text-[var(--color-accent)]"
           : "border-transparent text-[var(--color-ink-faint)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"

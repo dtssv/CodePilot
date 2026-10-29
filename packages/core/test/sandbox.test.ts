@@ -12,6 +12,7 @@ import {
   buildSeatbeltProfile,
   looksLikeSandboxWriteDenial,
   checkDangerousCommand,
+  sensitivePathHit,
   winPathToWsl,
   wrapCommand,
   detectSandboxBackend,
@@ -111,9 +112,23 @@ describe("assertPathAllowed", () => {
     expect(assertPathAllowed("/usr/share/dict/words", "read", policy, cwd).ok).toBe(true);
   });
 
-  it("mode off allows everything", () => {
+  it("mode off allows ordinary writes (writable-root math is skipped)", () => {
     const off = resolveSandbox({ mode: "off" }, cwd);
     expect(assertPathAllowed("/etc/hosts", "write", off, cwd).ok).toBe(true);
+  });
+
+  it("STILL blocks sensitive reads even when mode is off (safety floor)", () => {
+    // With mode="off" file tools otherwise have no floor; the sensitive-read
+    // block must survive so a secret can't be slurped by turning the sandbox off.
+    const off = resolveSandbox({ mode: "off" }, cwd);
+    const r = assertPathAllowed(
+      "~/.ssh/id_rsa".replace("~", process.env.HOME ?? ""),
+      "read",
+      off,
+      cwd,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/sensitive path/);
   });
 });
 
@@ -163,6 +178,29 @@ describe("buildSeatbeltProfile", () => {
     expect(buildSeatbeltProfile(p)).toContain("(deny network*)");
   });
 
+  it("scopes network to the loopback proxy in proxy mode (non-cooperative)", () => {
+    const p = {
+      ...resolveSandbox({ network: { mode: "proxy", allow: ["*.npmjs.org"] } }, cwd),
+      proxyUrl: "http://127.0.0.1:54321",
+    };
+    const profile = buildSeatbeltProfile(p);
+    expect(profile).toContain("(deny network*)");
+    expect(profile).toContain('(allow network-outbound (remote ip "localhost:54321"))');
+  });
+
+  it("leaves network open in proxy mode when the proxy is not started yet", () => {
+    // No proxyUrl → cooperative/best-effort, so the profile must not lock the
+    // network down (that would block the un-proxied command entirely).
+    const p = resolveSandbox({ network: { mode: "proxy", allow: ["x"] } }, cwd);
+    const profile = buildSeatbeltProfile(p);
+    expect(profile).not.toContain("(deny network*)");
+  });
+
+  it("does not touch network for full mode", () => {
+    const p = resolveSandbox({ network: { mode: "full" } }, cwd);
+    expect(buildSeatbeltProfile(p)).not.toContain("(deny network*)");
+  });
+
   it("denies sensitive reads", () => {
     const p = resolveSandbox(undefined, cwd);
     expect(buildSeatbeltProfile(p)).toMatch(/\(deny file-read\* \(subpath ".*\.ssh"\)\)/);
@@ -189,11 +227,48 @@ describe("checkDangerousCommand", () => {
     expect(checkDangerousCommand("psql -c 'DROP TABLE users'").dangerous).toBe(true);
   });
 
+  it("flags the newly-added destructive patterns", () => {
+    expect(checkDangerousCommand("git push --force-with-lease origin main").dangerous).toBe(true);
+    expect(checkDangerousCommand("shred -u /etc/passwd").dangerous).toBe(true);
+    expect(checkDangerousCommand("truncate -s 0 /etc/hosts").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf /*").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf /home/*").dangerous).toBe(true);
+  });
+
   it("passes benign commands", () => {
     expect(checkDangerousCommand("npm test").dangerous).toBe(false);
     expect(checkDangerousCommand("git status").dangerous).toBe(false);
     expect(checkDangerousCommand("rm -rf ./dist").dangerous).toBe(false);
     expect(checkDangerousCommand("curl -s example.com -o page.html").dangerous).toBe(false);
+    // force-with-lease is flagged, but a normal push is not.
+    expect(checkDangerousCommand("git push origin main").dangerous).toBe(false);
+    // shred/truncate of a PROJECT file is fine — only system paths are flagged.
+    expect(checkDangerousCommand("shred -u ./tmp/secret").dangerous).toBe(false);
+    expect(checkDangerousCommand("truncate -s 0 ./build.log").dangerous).toBe(false);
+  });
+});
+
+describe("sensitivePathHit (mode-independent sensitive-path floor)", () => {
+  it("flags writes under system / credential roots", () => {
+    expect(sensitivePathHit("/etc/hosts", "write", cwd)).toBe("/etc");
+    expect(sensitivePathHit("/boot/grub/grub.cfg", "write", cwd)).toBe("/boot");
+    const ssh = "~/.ssh/authorized_keys".replace("~", process.env.HOME ?? "");
+    expect(sensitivePathHit(ssh, "write", cwd)).toContain(".ssh");
+    const zshrc = "~/.zshrc".replace("~", process.env.HOME ?? "");
+    expect(sensitivePathHit(zshrc, "write", cwd)).toContain(".zshrc");
+  });
+
+  it("does NOT flag ordinary project writes", () => {
+    expect(sensitivePathHit("src/app.ts", "write", cwd)).toBeNull();
+    expect(sensitivePathHit("/repo/project/out/x.txt", "write", cwd)).toBeNull();
+  });
+
+  it("flags sensitive reads (ssh, /etc/shadow)", () => {
+    const ssh = "~/.ssh/id_rsa".replace("~", process.env.HOME ?? "");
+    expect(sensitivePathHit(ssh, "read", cwd)).toContain(".ssh");
+    expect(sensitivePathHit("/etc/shadow", "read", cwd)).toBe("/etc/shadow");
+    // /etc at large is a WRITE-sensitive root, not a blanket read block.
+    expect(sensitivePathHit("/etc/hosts", "read", cwd)).toBeNull();
   });
 });
 

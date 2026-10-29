@@ -68,6 +68,10 @@ export interface TranscriptProps {
   subagents?: Record<string, SubagentRun[]>;
   /** Open a workspace path in the in-app preview (or host editor). */
   onOpenPath?: (path: string) => void;
+  /** The scroll container that wraps this transcript. When provided, drilling
+   * into a sub-agent and back restores each view's own scroll position instead
+   * of leaking the sub-agent's scroll offset onto the main task view. */
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 interface SubagentNav {
@@ -82,7 +86,38 @@ export function Transcript(props: TranscriptProps): React.ReactElement {
   const [viewing, setViewing] = useState<{ toolCallId: string; index: number } | undefined>();
   const runs = props.subagents ?? {};
   const run = viewing ? runs[viewing.toolCallId]?.find((r) => r.index === viewing.index) : undefined;
-  const nav: SubagentNav = { runs, open: (toolCallId, index) => setViewing({ toolCallId, index }) };
+
+  // Remember each view's scroll offset so drilling into a sub-agent and back
+  // does not drag the main task view to the sub-agent's position. Keyed by
+  // "main" or the sub-agent's stable `toolCallId:index`. We snapshot the
+  // OUTGOING view's offset as we leave it, then restore the INCOMING view's.
+  const scrollRef = props.scrollContainerRef;
+  const savedScroll = useRef<Map<string, number>>(new Map());
+  const prevKey = useRef<string>("main");
+  const viewKey = viewing ? `${viewing.toolCallId}:${viewing.index}` : "main";
+  const open = (toolCallId: string, index: number): void => {
+    const el = scrollRef?.current;
+    if (el) savedScroll.current.set(prevKey.current, el.scrollTop);
+    setViewing({ toolCallId, index });
+  };
+  const back = (): void => {
+    const el = scrollRef?.current;
+    if (el) savedScroll.current.set(prevKey.current, el.scrollTop);
+    setViewing(undefined);
+  };
+  useEffect(() => {
+    const el = scrollRef?.current;
+    if (!el) return;
+    // Restore after the new view has laid out; default sub-agent views to the
+    // top (where their first message is) and the main view to its saved spot.
+    const target = savedScroll.current.get(viewKey) ?? (viewKey === "main" ? el.scrollTop : 0);
+    requestAnimationFrame(() => {
+      el.scrollTop = target;
+    });
+    prevKey.current = viewKey;
+  }, [viewKey, scrollRef]);
+
+  const nav: SubagentNav = { runs, open };
 
   if (!run) {
     return (
@@ -99,14 +134,14 @@ export function Transcript(props: TranscriptProps): React.ReactElement {
         <div className="sticky top-0 z-10 flex items-center gap-2 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2 text-[12px]">
           <button
             type="button"
-            onClick={() => setViewing(undefined)}
+            onClick={back}
             className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
           >
             ← {t("Back to main task")}
           </button>
           <SubagentStateIcon state={run.state} />
           <span className="min-w-0 truncate text-[var(--color-ink)]" title={run.objective}>
-            {t("Subtask")} #{run.index + 1}: {run.objective}
+            {t("Subtask")} {subagentTag(viewing!.toolCallId, run)}: {run.objective}
           </span>
           {(run.view.usage.input > 0 || run.view.usage.output > 0) && (
             <span className="ml-auto shrink-0 text-[10.5px] text-[var(--color-ink-faint)]">
@@ -523,6 +558,22 @@ function StepGroup({ tools, live }: { tools: ToolRow[]; live: boolean }): React.
   );
 }
 
+/**
+ * A stable, human-distinguishable tag for one sub-agent. The per-`task` `index`
+ * restarts at 0 every call, so a bare `#1` repeats and the user sees "all the
+ * same id". We prefer the session-global `runSeq` (a true monotonic `#N`) plus
+ * a short slice of the sub-agent's own id (`sub_…`) so every dispatch reads
+ * differently (e.g. `#3·a9f2`); we fall back to the parent tool-call id prefix
+ * when a run predates these fields.
+ */
+function subagentTag(toolCallId: string, run: { index: number; runSeq?: number; sessionId?: string }): string {
+  const seq = run.runSeq ?? run.index + 1;
+  const id = run.sessionId
+    ? run.sessionId.replace(/[^a-z0-9]/gi, "").slice(-4)
+    : toolCallId.replace(/[^a-z0-9]/gi, "").slice(-4) || toolCallId.slice(0, 4);
+  return `#${seq}·${id}`;
+}
+
 function SubagentStateIcon({ state }: { state: SubagentRun["state"] }): React.ReactElement {
   if (state === "running") return <SpinnerIcon className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />;
   if (state === "failed") return <XIcon className="h-3 w-3 shrink-0 text-[var(--color-remove)]" />;
@@ -551,14 +602,14 @@ function SubagentChips({ toolCallId }: { toolCallId: string }): React.ReactEleme
             : "";
         return (
           <button
-            key={r.index}
+            key={`${toolCallId}:${r.index}`}
             type="button"
             onClick={() => nav.open(toolCallId, r.index)}
             title={t("View subtask")}
             className="flex items-center gap-2 rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] px-2 py-1.5 text-left text-[11.5px] transition-colors hover:border-[var(--color-accent)]"
           >
             <SubagentStateIcon state={r.state} />
-            <span className="shrink-0 text-[var(--color-ink-faint)]">#{r.index + 1}</span>
+            <span className="shrink-0 font-mono text-[var(--color-ink-faint)]">{subagentTag(toolCallId, r)}</span>
             <span className="min-w-0 flex-1 truncate text-[var(--color-ink)]">{r.objective}</span>
             {doing && (
               <span className="min-w-0 max-w-[35%] truncate font-mono text-[10.5px] text-[var(--color-ink-faint)]">

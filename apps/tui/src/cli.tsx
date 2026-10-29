@@ -12,7 +12,7 @@ import { render } from "ink";
 import React from "react";
 
 import { App as AppUI } from "./ui/App.js";
-import { createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
+import { createGoalBridge, createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
 import { runHeadless, parseOutputFormat } from "./headless.js";
 
@@ -475,6 +475,7 @@ async function main(): Promise<void> {
   let model: string | undefined = args.model;
   const bridge = createPermissionBridge();
   const questionBridge = createQuestionBridge();
+  const goalBridge = createGoalBridge();
 
  // Attach to a running `serve` when one is live locally, so the TUI FOLLOWS
  // the same session the web (or any client) is driving — events stream in
@@ -577,6 +578,7 @@ async function main(): Promise<void> {
       agentMode,
       onPermissionRequest: (req) => bridge.waitDecision(req),
       onAskUser: (req) => questionBridge.waitAnswers(req),
+      onGoalRequest: (req) => goalBridge.request(session.id, req),
       onMcpOpenAuthUrl: (server, url) => {
  // Surface the authorization URL: print to stderr (so it's visible
  // even while the TUI owns stdout) and attempt to open it in the
@@ -717,6 +719,7 @@ async function main(): Promise<void> {
       controller,
       permissionBridge: bridge,
       questionBridge,
+      goalBridge,
       cwd: args.cwd,
       model,
       permissionMode,

@@ -113,6 +113,79 @@ describe("editFileTool (integration with disk)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("emits one edit_delta per applied edit after a successful multi-edit write", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "edit-"));
+    const file = join(dir, "f.txt");
+    writeFileSync(file, "aaa bbb ccc\n", "utf-8");
+    const events: { type: string; index?: number; total?: number }[] = [];
+    const ctx = {
+      cwd: dir,
+      signal: undefined,
+      async artifact() {
+        return "art_x";
+      },
+      async readArtifact() {
+        return "";
+      },
+      emitEvent: (e: { type: string; index?: number; total?: number }) => {
+        events.push(e);
+      },
+    };
+    const r = await editFileTool.execute(
+      {
+        path: file,
+        edits: [
+          { search: "aaa", replace: "A" },
+          { search: "bbb", replace: "B" },
+          { search: "ccc", replace: "C" },
+        ],
+      },
+      ctx,
+    );
+    expect(r.isError).toBeFalsy();
+    expect(readFileSync(file, "utf-8")).toBe("A B C\n");
+    const deltas = events.filter((e) => e.type === "edit_delta");
+    expect(deltas).toHaveLength(3);
+    expect(deltas.map((d) => d.index)).toEqual([0, 1, 2]);
+    expect(deltas.every((d) => d.total === 3)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("emits NO edit_delta when the edit fails (transactional rollback)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "edit-"));
+    const file = join(dir, "f.txt");
+    writeFileSync(file, "aaa bbb\n", "utf-8");
+    const events: { type: string }[] = [];
+    const ctx = {
+      cwd: dir,
+      signal: undefined,
+      async artifact() {
+        return "art_x";
+      },
+      async readArtifact() {
+        return "";
+      },
+      emitEvent: (e: { type: string }) => {
+        events.push(e);
+      },
+    };
+    const r = await editFileTool.execute(
+      {
+        path: file,
+        edits: [
+          { search: "aaa", replace: "A" },
+          { search: "NOPE", replace: "X" },
+        ],
+      },
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    // File untouched, and no deltas streamed for the rolled-back batch.
+    expect(readFileSync(file, "utf-8")).toBe("aaa bbb\n");
+    expect(events.filter((e) => e.type === "edit_delta")).toHaveLength(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("returns isError on missing file", async () => {
     const dir = mkdtempSync(join(tmpdir(), "edit-"));
     const ctx = {

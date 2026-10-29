@@ -139,6 +139,14 @@ export interface WebSocketServerOptions extends ServerOptions {
  /** Interface to bind. Default `127.0.0.1` — see the security notes above. */
   host?: string;
  /**
+  * Host to ADVERTISE in the handle's `host`/`url` (and thus serve.json),
+  * when it must differ from the bind `host`. Use case: bind `0.0.0.0` for LAN
+  * access while still advertising `127.0.0.1` so loopback-only discovery
+  * (readLiveServeInfo) keeps working and local clients connect over loopback.
+  * Defaults to `host`.
+  */
+  advertiseHost?: string;
+ /**
  * Shared secret every upgrade must present, as `?token=<t>` or
  * `Authorization: Bearer <t>`. Generated randomly when omitted. Set
  * `auth: "none"` to disable the check entirely (tests / trusted networks).
@@ -312,11 +320,12 @@ export async function startWebSocketServer(
   });
 
   const port = boundPort(http);
-  const url = `ws://${host}:${port}/rpc${token ? `?token=${token}` : ""}`;
+  const advertiseHost = opts.advertiseHost ?? host;
+  const url = `ws://${advertiseHost}:${port}/rpc${token ? `?token=${token}` : ""}`;
 
   return {
     port,
-    host,
+    host: advertiseHost,
     token,
     url,
     connectionCount: () => connections.size,
@@ -435,6 +444,11 @@ async function serveRemotePair(
       remote: "1",
     });
     if (redeemed.cwd) q.set("cwd", redeemed.cwd);
+    // Seed the phone's workspace list with the authorized set so it shows every
+    // workspace the host picked, not just the active one. JSON keeps paths with
+    // commas/spaces intact; the SPA parses this and ignores it if malformed.
+    const extra = redeemed.cwds.filter((c) => c && c !== redeemed.cwd);
+    if (extra.length) q.set("cwds", JSON.stringify(redeemed.cwds));
     const location = `http://${hostHdr}/?${q.toString()}`;
     if (req.method === "HEAD") {
       res.writeHead(302, { location });
@@ -489,7 +503,12 @@ export function originAllowed(
   /** `Host` header from the upgrade — allows phone clients on LAN IP. */
   requestHost?: string,
 ): boolean {
+  // Absent / opaque origins come from non-browser clients and sandboxed
+  // (file://) pages. The Electron desktop app loads its SPA over file://,
+  // whose WebSocket Origin is the literal "file://". These are still gated by
+  // the loopback bind + token, so allow them.
   if (origin === undefined || origin === "" || origin === "null") return true;
+  if (origin === "file://" || origin.startsWith("file://")) return true;
   if (allowed?.includes("*")) return true;
   const defaults = [
     `http://localhost:${port}`,
@@ -571,6 +590,24 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
  * (that DO have an extension) get 404. Everything is resolved through
  * `normalize` + a root prefix check, never raw concatenation.
  */
+/**
+ * Add `ws://<host> wss://<host>` to the entry HTML's CSP `connect-src` so a
+ * page served over a non-loopback host (phone on the LAN) may open its
+ * WebSocket back to the same host. The static CSP ships loopback-only; this
+ * widens it to exactly the host that served the page, nothing more. A no-op
+ * when there is no Host header or no connect-src directive to extend.
+ */
+export function withHostConnectSrc(html: string, host: string | undefined): string {
+  if (!host) return html;
+  // Guard against header injection / odd values: host[:port] only.
+  if (!/^[a-zA-Z0-9.\-[\]:]+$/.test(host)) return html;
+  const extra = `ws://${host} wss://${host}`;
+  if (html.includes(extra)) return html;
+  // Append to the end of the connect-src directive, i.e. just before the next
+  // "; " directive separator or the closing quote of the content attribute.
+  return html.replace(/(connect-src[^;"]*?)(\s*)(;|")/i, (_m, dir, _ws, tail) => `${dir} ${extra}${tail}`);
+}
+
 async function serveStatic(
   root: string,
   req: IncomingMessage,
@@ -588,9 +625,17 @@ async function serveStatic(
   }
   const send = async (filePath: string): Promise<boolean> => {
     try {
-      const body = await readFile(filePath);
+      let body = await readFile(filePath);
       const type = STATIC_CONTENT_TYPES[extname(filePath).toLowerCase()] ??
         "application/octet-stream";
+      // The SPA's CSP only allows a ws connection back to loopback. When the
+      // page is loaded over a LAN IP (phone remote control), the SPA dials
+      // `ws://<that-host>/rpc`, which loopback-only CSP would block. Rewrite the
+      // entry HTML's connect-src to also allow ws/wss to the exact host the
+      // request came in on — no wider than the origin already serving the page.
+      if (filePath.endsWith(".html")) {
+        body = Buffer.from(withHostConnectSrc(body.toString("utf8"), req.headers.host), "utf8");
+      }
       res.writeHead(200, {
         "content-type": type,
         "content-length": body.length,

@@ -72,6 +72,19 @@ export const writeStdinTool: ToolDef<typeof schema> = {
     if (!job) {
       return { content: describeUnknownJob(ctx.cwd, input.job_id), isError: true };
     }
+    // Ownership guard: the bashJobs registry is keyed only by cwd, so parallel
+    // sub-agents that fell back to a shared parent cwd (worktree isolation
+    // unavailable) share a job table. Refuse to write to a job started by a
+    // DIFFERENT session/sub-agent — otherwise one sub-agent could inject into
+    // another's interactive process stdin. Only enforced when BOTH sides carry
+    // an identity (older jobs / minimal contexts stay unrestricted).
+    if (job.meta.ownerSessionId && ctx.sessionId && job.meta.ownerSessionId !== ctx.sessionId) {
+      return {
+        content:
+          `job ${input.job_id} belongs to a different agent and cannot be written to from here`,
+        isError: true,
+      };
+    }
     if (job.meta.status !== "running") {
       return {
         content: `job ${input.job_id} is not running (status: ${job.meta.status})`,

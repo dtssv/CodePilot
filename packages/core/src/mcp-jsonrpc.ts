@@ -123,7 +123,11 @@ export abstract class BaseJsonRpcClient implements McpClient {
   }
 
  /** Issue a JSON-RPC request and resolve with the `result` field. */
-  protected request(method: string, params: unknown): Promise<unknown> {
+  protected async request(method: string, params: unknown): Promise<unknown> {
+    // Transports may transparently re-establish a dropped connection here
+    // (default: no-op). This makes a request after a server crash reconnect
+    // instead of failing permanently with "not running".
+    await this.ensureConnected();
     const id = this.nextId++;
     const msg: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
@@ -136,6 +140,13 @@ export abstract class BaseJsonRpcClient implements McpClient {
       }
     });
   }
+
+ /** Re-establish the connection if it dropped. Default: assume always
+ * connected (overridden by transports that can respawn, e.g. stdio). */
+  protected async ensureConnected(): Promise<void> {
+    /* no-op by default */
+  }
+
 
  /** Send a notification (no id, no response). */
   protected notify(method: string, params: unknown): void {

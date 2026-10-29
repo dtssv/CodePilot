@@ -60,7 +60,7 @@ export interface DiscoverOptions {
   builtinDir?: string;
   /** Extra explicit skill directories to scan (lowest priority after builtins). */
   extraDirs?: string[];
-  /** Also scan Claude / Agents / OpenCode-compatible skill roots (default true). */
+  /** Also scan ecosystem-compatible skill roots (default true). */
   includeCompatDirs?: boolean;
   /** Skill names to omit (from `config.skills.disabled`). Empty = include all. */
   disabledNames?: readonly string[];
@@ -303,7 +303,7 @@ export async function discoverSkills(
   const userSkills = await scanDirForSkills(userDir, "user");
   for (const s of userSkills) add(s);
 
-  // Ecosystem paths (Claude Code / Codex / OpenCode / Agents standard).
+  // Ecosystem-compatible skill roots.
   if (opts.includeCompatDirs !== false) {
     const home = homedir();
     const compatDirs = [

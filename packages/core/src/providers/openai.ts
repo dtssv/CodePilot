@@ -4,6 +4,7 @@
 
 import { parseSse } from "./sse.js";
 import { fetchWithRetry, RateLimitAbortedError } from "./retry.js";
+import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
   ProviderMessage,
@@ -19,6 +20,15 @@ export interface OpenAIProviderOptions {
   baseURL?: string;
   defaultModel?: string;
   smallModel?: string;
+  /**
+   * API dialect. "openai" (default) targets `/v1/chat/completions` with a
+   * Bearer token. "azure" targets Azure OpenAI's
+   * `/openai/deployments/{model}/chat/completions?api-version=...` with an
+   * `api-key` header; the model id is used as the Azure deployment name.
+   */
+  apiStyle?: "openai" | "azure";
+  /** Azure `api-version` query param (required when apiStyle === "azure"). */
+  azureApiVersion?: string;
  /** Retry config passed through to fetchWithRetry. When omitted, the
  * provider uses more generous defaults than the bare helper: 8 retries
  * with a 2s base delay, so transient 429s from rate-limited gateways
@@ -33,11 +43,14 @@ export interface OpenAIProviderOptions {
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
+const DEFAULT_AZURE_API_VERSION = "2024-10-21";
 
 export class OpenAIProvider implements ChatProvider {
   readonly name = "openai";
   private readonly apiKey: string;
   private readonly baseURL: string;
+  private readonly apiStyle: "openai" | "azure";
+  private readonly azureApiVersion: string;
   readonly defaultModel: string;
   readonly smallModel: string;
   private readonly retryOpts: {
@@ -55,6 +68,8 @@ export class OpenAIProvider implements ChatProvider {
       );
     }
     this.apiKey = key;
+    this.apiStyle = opts.apiStyle ?? "openai";
+    this.azureApiVersion = opts.azureApiVersion ?? DEFAULT_AZURE_API_VERSION;
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.defaultModel = opts.defaultModel ?? "gpt-4o-mini";
     this.smallModel = opts.smallModel ?? "gpt-4o-mini";
@@ -69,6 +84,26 @@ export class OpenAIProvider implements ChatProvider {
     };
   }
 
+  /** Request URL for the active dialect. Azure routes by deployment name
+   * (the model id) and carries the api-version as a query param. */
+  private requestURL(model: string): string {
+    if (this.apiStyle === "azure") {
+      const deployment = encodeURIComponent(model);
+      return `${this.baseURL}/openai/deployments/${deployment}/chat/completions?api-version=${encodeURIComponent(this.azureApiVersion)}`;
+    }
+    // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
+    // includes it; many compatible gateways document the bare host).
+    return `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/chat/completions`;
+  }
+
+  /** Auth headers for the active dialect. Azure uses `api-key`, OpenAI uses a
+   * Bearer token. */
+  private authHeaders(): Record<string, string> {
+    return this.apiStyle === "azure"
+      ? { "api-key": this.apiKey }
+      : { authorization: `Bearer ${this.apiKey}` };
+  }
+
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
     const body: Record<string, unknown> = {
       model: opts.model,
@@ -77,6 +112,9 @@ export class OpenAIProvider implements ChatProvider {
       messages: buildOpenAIMessages(opts.systemPrompt, opts.messages),
     };
     if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+    // Stable cache-affinity key so a session's requests reuse the same cached
+    // prefix (OpenAI prompt caching is prefix-automatic; this improves routing).
+    if (opts.promptCacheKey) body.prompt_cache_key = opts.promptCacheKey;
     if (opts.tools && opts.tools.length > 0) {
       body.tools = opts.tools.map(toOpenAITool);
     }
@@ -86,17 +124,31 @@ export class OpenAIProvider implements ChatProvider {
     if (opts.reasoningEffort) {
       body.reasoning_effort = opts.reasoningEffort;
     }
+    // Provider-enforced structured output (OpenAI json_schema). The model is
+    // constrained to the supplied schema. Non-supporting gateways 400 on this;
+    // callers opt in explicitly via responseFormat.
+    if (opts.responseFormat) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: opts.responseFormat.name,
+          schema: opts.responseFormat.schema,
+          strict: opts.responseFormat.strict ?? true,
+        },
+      };
+    }
 
  // Tolerate baseURL with or without a trailing "/v1" (OpenAI SDK convention
- // includes it; many compatible gateways document the bare host).
-    const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/chat/completions`;
+ // includes it; many compatible gateways document the bare host). Azure
+ // routes by deployment name and api-version — see requestURL/authHeaders.
+    const url = this.requestURL(opts.model);
     let res: Response;
     try {
       res = await fetchWithRetry(url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`,
+          ...this.authHeaders(),
         },
         body: JSON.stringify(body),
         signal: opts.signal,
@@ -260,15 +312,23 @@ export function buildOpenAIMessages(
 ): unknown[] {
   const out: unknown[] = [];
   if (systemPrompt) out.push({ role: "system", content: systemPrompt });
+  // Have we emitted anything other than a leading system block yet? Once the
+  // conversation proper has started, a later `system` message is a
+  // mid-conversation system — which some OpenAI-compatible backends (GLM-5.2
+  // via the jdcloud gateway) reject with `invalid_argument`. We demote those
+  // to `user` (same as the Anthropic adapter), keeping the content while
+  // satisfying "system must lead" backends. A leading system is unaffected.
+  let conversationStarted = false;
   for (const m of messages) {
     if (m.role === "system") {
       const text = m.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")
         .map((c) => c.text)
         .join("\n");
-      if (text) out.push({ role: "system", content: text });
+      if (text) out.push({ role: conversationStarted ? "user" : "system", content: text });
       continue;
     }
+    conversationStarted = true;
     if (m.role === "user") {
       const parts: unknown[] = [];
  // Tool results travel as `tool` messages, which must directly follow
@@ -342,7 +402,50 @@ export function buildOpenAIMessages(
       continue;
     }
   }
-  return out;
+  return mergeConsecutiveRoles(out);
+}
+
+/** Normalize an OpenAI message's content to an array of content parts so two
+ * same-role messages can be concatenated regardless of whether each carried a
+ * bare string or a parts array. */
+function toParts(content: unknown): unknown[] {
+  if (typeof content === "string") return content === "" ? [] : [{ type: "text", text: content }];
+  if (Array.isArray(content)) return content;
+  return [];
+}
+
+/**
+ * Collapse adjacent same-role messages for `system` and `user`.
+ *
+ * Two sources create same-role runs that strict OpenAI-compatible backends —
+ * notably GLM-5.2 via the jdcloud gateway — reject with `invalid_argument`:
+ *   1. The leading `systemPrompt` plus a harness-injected `<runtime_context>`
+ *      system message can land back to back (a sub-agent's first turn, where
+ *      history is just the user objective and runtime_context inserts at 0) →
+ *      two consecutive `system`.
+ *   2. A mid-conversation `system` (runtime_context inserted before the current
+ *      turn) is demoted to `user` by `buildOpenAIMessages`, which can place it
+ *      right after the opening user message → two consecutive `user`.
+ *
+ * Merging the content keeps everything the model should see while satisfying
+ * backends that require non-repeating roles, mirroring the Anthropic adapter's
+ * `mergeConsecutiveRoles`.
+ */
+function mergeConsecutiveRoles(messages: unknown[]): unknown[] {
+  return mergeAdjacentRoles(messages, (prevRaw, curRaw) => {
+    const prev = prevRaw as { role?: string; content?: unknown };
+    const cur = curRaw as { role?: string; content?: unknown };
+    if (prev.role !== cur.role || (cur.role !== "system" && cur.role !== "user")) return false;
+    if (cur.role === "system" && typeof prev.content === "string" && typeof cur.content === "string") {
+      prev.content = `${prev.content}\n\n${cur.content}`;
+      return true;
+    }
+    if (cur.role === "user") {
+      prev.content = [...toParts(prev.content), ...toParts(cur.content)];
+      return true;
+    }
+    return false;
+  });
 }
 
 function toOpenAITool(tool: ProviderToolDef): Record<string, unknown> {

@@ -6,11 +6,8 @@
 // 3. Plan steps and the most recent N turns are always kept verbatim.
 
 import type {
-  ContentBlock,
   Event,
   PlanStep,
-  ToolResultBlock,
-  ToolUseBlock,
   UsageInfo,
 } from "./types.js";
 import type { ChatProvider } from "./providers/types.js";
@@ -57,6 +54,72 @@ export function shouldCompact(
         ? `tokens ${tokens} >= window ${opts.contextWindow}`
         : `tokens ${tokens} < window ${opts.contextWindow}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Compaction trigger geometry — ONE place for every coefficient.
+//
+// These ratios used to be written inline at ~10 sites across agent.ts,
+// session.ts and this file (0.92 / 0.9 / 0.85 / 0.8 / 0.5), which made the
+// actual trigger order hard to reason about and easy to drift. They now live
+// here and feed `compactionGeometry`, the single function that turns a model
+// window + config into the concrete trigger set every caller shares.
+// ---------------------------------------------------------------------------
+
+/** Default fraction of the context window at which we compact, unless the
+ * config overrides it via `compactionThreshold`. */
+export const DEFAULT_COMPACTION_FRACTION = 0.92;
+/** Pre-compaction soft band: start compacting one turn early at this fraction
+ * of the hard trigger (so the hot path reuses a ready summary). */
+export const SOFT_COMPACTION_RATIO = 0.85;
+/** Provider-reported-input safety net: force a compaction when the gateway
+ * says the last request already used this fraction of the window, even if the
+ * local estimate under-counted. */
+export const PROVIDER_INPUT_COMPACTION_RATIO = 0.9;
+/** Hard-trim the provider prompt to this fraction of the usable budget to
+ * absorb estimator lag vs. the gateway's tokenizer. */
+export const HARD_TRIM_RATIO = 0.8;
+/** Task-boundary / forced-shrink target: collapse toward this fraction of the
+ * window so a cleared context starts small. */
+export const FORCED_SHRINK_RATIO = 0.5;
+/** Floor for any derived trigger so a tiny/unknown window still leaves room. */
+const MIN_TRIGGER_TOKENS = 4_000;
+
+/** The concrete compaction trigger set derived from a model window + config.
+ * Every auto-compaction caller shares this so their thresholds can't drift. */
+export interface CompactionGeometry {
+  /** The effective context window (config override or model lookup). */
+  window: number;
+  /** The fraction applied (config `compactionThreshold` or the default). */
+  fraction: number;
+  /** Output tokens reserved so we compact before the provider would reject. */
+  outputReserve: number;
+  /** Usable window after reserving output (never below the floor). */
+  hardUsable: number;
+  /** The hard trigger: compact synchronously at/above this token count. */
+  hardTrigger: number;
+  /** The soft trigger: pre-compact in the background at/above this count. */
+  softTrigger: number;
+}
+
+/** Compute the shared compaction trigger geometry. Pure and side-effect free
+ * so both the session and tests can call it. */
+export function compactionGeometry(input: {
+  window: number;
+  /** `config.compactionThreshold` (fraction of the window). */
+  thresholdFraction?: number;
+  /** `config.maxTokens` — the caller's requested max output. */
+  maxTokens?: number;
+  /** Model's max output tokens, used when `maxTokens` is unset. */
+  maxOutputTokens?: number;
+}): CompactionGeometry {
+  const window = input.window;
+  const fraction = input.thresholdFraction ?? DEFAULT_COMPACTION_FRACTION;
+  const outputReserve = Math.max(1_024, input.maxTokens ?? input.maxOutputTokens ?? 8_192);
+  const hardUsable = Math.max(MIN_TRIGGER_TOKENS, window - outputReserve);
+  const hardTrigger = Math.min(hardUsable, Math.floor(window * fraction));
+  const softTrigger = Math.floor(hardTrigger * SOFT_COMPACTION_RATIO);
+  return { window, fraction, outputReserve, hardUsable, hardTrigger, softTrigger };
 }
 
 /** Providers bill a downscaled image at roughly 1–1.6K tokens; base64 length
@@ -106,6 +169,12 @@ function serializeEventForEstimate(e: Event): string {
       return `mode:${e.mode}`;
     case "mode_request":
       return `mode_request:${e.mode}`;
+    case "goal_request":
+      return `goal_request:${e.objective}`;
+    case "goal_progress":
+      return `goal_progress:${e.round}:${e.status}`;
+    case "edit_delta":
+      return "";
     case "model":
       return `model:${e.model}${e.providerId ? `@${e.providerId}` : ""}`;
     case "retry":
@@ -166,6 +235,16 @@ export interface CompactionResult {
 export interface FoldOptions {
   keepRecentMessages?: number;
   minChars?: number;
+ /** Rolling tool-output window.
+ * When set, any tool_result older than the keep window is folded once the
+ * number of still-unfolded old results exceeds this count — regardless of
+ * each result's size or the overall token budget. This is an *early*,
+ * token-independent trigger: it keeps the live transcript's tool-output
+ * backlog bounded (so a long run of small-but-numerous results can't quietly
+ * accumulate), rather than waiting for a budget/compaction threshold. The
+ * `minChars` floor is ignored for these overflow results (they are folded
+ * even when individually small). */
+  maxUnfoldedToolResults?: number;
  /** Tool names whose results are folded only after every other eligible
  * result has been folded. File reads are the model's working memory in
  * analysis tasks — folding them early triggers re-read spirals, while
@@ -198,19 +277,58 @@ export function foldToolResults(
     e.content.length > minChars &&
     !e.content.startsWith("[folded tool_result") &&
     (allowDeferred || !defer.has(e.name));
+  const foldAt = (e: Event & { type: "tool_result" }) => {
+    folded++;
+    return { ...e, content: summariseToolResult(e), artifactRef: e.artifactRef ?? undefined };
+  };
   let out = events.map((e, idx) => {
     if (idx >= cutoff || !eligible(e, false)) return e;
-    folded++;
-    return { ...e, content: summariseToolResult(e as Event & { type: "tool_result" }), artifactRef: (e as Event & { type: "tool_result" }).artifactRef ?? undefined };
+    return foldAt(e as Event & { type: "tool_result" });
   });
   if (folded === 0) {
     out = events.map((e, idx) => {
       if (idx >= cutoff || !eligible(e, true)) return e;
-      folded++;
-      return { ...e, content: summariseToolResult(e as Event & { type: "tool_result" }), artifactRef: (e as Event & { type: "tool_result" }).artifactRef ?? undefined };
+      return foldAt(e as Event & { type: "tool_result" });
     });
   }
+  // Rolling tool-output window: once the live transcript carries more than
+  // `maxUnfoldedToolResults` still-unfolded old
+  // results, fold the oldest ones down to that count — even if each is under
+  // `minChars`. This is an early, token-independent trim so numerous small
+  // results can't quietly accumulate while every single one stays under the
+  // size floor. Deferred tools (read_file) are folded last, preserving order.
+  const cap = options.maxUnfoldedToolResults;
+  if (cap !== undefined && cap >= 0) {
+    out = foldRollingWindow(out, cutoff, cap, defer, foldAt);
+  }
   return { events: out, foldedCount: folded };
+}
+
+/** Fold the oldest unfolded tool_results before `cutoff` until at most `cap`
+ * remain, ignoring the per-result size floor. Oldest first; within the same
+ * age, non-deferred (bash/grep) before deferred (read_file). */
+function foldRollingWindow(
+  events: Event[],
+  cutoff: number,
+  cap: number,
+  defer: ReadonlySet<string>,
+  foldAt: (e: Event & { type: "tool_result" }) => Event,
+): Event[] {
+  const isUnfolded = (e: Event): e is Event & { type: "tool_result" } =>
+    e.type === "tool_result" && !e.content.startsWith("[folded tool_result");
+  const oldIdx: number[] = [];
+  for (let i = 0; i < cutoff; i++) if (isUnfolded(events[i]!)) oldIdx.push(i);
+  const overflow = oldIdx.length - cap;
+  if (overflow <= 0) return events;
+  // Prefer folding non-deferred results first; take the oldest `overflow`.
+  const ordered = [
+    ...oldIdx.filter((i) => !defer.has((events[i] as Event & { type: "tool_result" }).name)),
+    ...oldIdx.filter((i) => defer.has((events[i] as Event & { type: "tool_result" }).name)),
+  ];
+  const toFold = new Set(ordered.slice(0, overflow));
+  return events.map((e, idx) =>
+    toFold.has(idx) ? foldAt(e as Event & { type: "tool_result" }) : e,
+  );
 }
 
 function summariseToolResult(e: Event & { type: "tool_result" }): string {
@@ -225,9 +343,33 @@ function summariseToolResult(e: Event & { type: "tool_result" }): string {
   const refetch = e.artifactRef
     ? ` If you truly need the full text again, call read_artifact with ref ${e.artifactRef} — do NOT re-call ${e.name} on the same target.`
     : ` Do NOT re-call ${e.name} for the same target; work from the summary below or ask the user.`;
-  return `[folded tool_result of ${e.name} (${e.content.length} chars) — this call already ran and you already saw its output.${refetch}${
+ // Provenance tag so a later summary (or the model) can tell a tool-verified
+ // fact from an unverified claim. Read/search tools yield ground truth about
+ // files; mutating/exec tools are actions, not facts to cite.
+  const tag = provenanceTag(e.name, e.isError === true);
+  return `[folded tool_result of ${e.name} (${e.content.length} chars) ${tag} — this call already ran and you already saw its output.${refetch}${
     e.artifactRef ? ` artifactRef=${e.artifactRef}` : ""
   }]\n${head}${tail}`;
+}
+
+/** Classify a folded tool result's provenance for later citation/summary. */
+function provenanceTag(toolName: string, isError: boolean): string {
+  if (isError) return "[ERROR]";
+  switch (toolName) {
+    case "read_file":
+    case "read_artifact":
+    case "grep":
+    case "glob":
+    case "ls":
+    case "diagnostics":
+    case "lsp_navigate":
+      return "[VERIFIED via tool output]";
+    case "web_fetch":
+    case "web_search":
+      return "[EXTERNAL — verify before citing]";
+    default:
+      return "[ACTION]";
+  }
 }
 
 function findCutoff(events: Event[], keep: number): number {
@@ -292,6 +434,8 @@ Rules:
 - Preserve verbatim: exact command lines, file paths, error messages, env var values, branch names, commit hashes, and any literal string the user gave (connection strings, ports, seeds, tokens). Never paraphrase these.
 - Drop: conversational filler, duplicate tool outputs, intermediate reasoning that did not lead to a decision.
 - When in doubt about whether something is verbatim-form, treat it as verbatim and quote it.
+- **Source separation — do not conflate tasks.** This session may contain several distinct tasks or several different materials the user asked about. Keep them separate. Do NOT merge an entity, file, topic, or conclusion from an EARLIER task into the CURRENT one. If you write that a document/material "contains" or "concluded" X, that X must have actually appeared in that material in the dropped turns — never carry a topic over from a different task just because it was discussed in this session.
+- **Distinguish verified from assumed.** A fact that came from a tool result (read_file/grep/glob output, a passing test) is VERIFIED — state it plainly. A claim the agent made without tool backing is an ASSUMPTION — mark it as such ("assumed", "unverified"). Never promote an assumption to a fact in the summary.
 - Do not address the user. Do not say "I". Do not add a closing line. The seven sections are the entire output.`;
 
 const ARCHIVE_TOOL_RESULT_CHARS = 20_000;
@@ -360,8 +504,8 @@ export function liveTranscript(persisted: Event[]): Event[] {
 }
 
 /**
- * Hard-trim a transcript copy to fit `budget` tokens (Codex / OpenCode /
- * Pi style send-side guard). Never mutates the input array.
+ * Hard-trim a transcript copy to fit `budget` tokens. Never mutates the
+ * input array.
  *
  * Semantic contract (must not break the task):
  * - Prefer folding tool_results (artifactRef retained) over dropping turns.
@@ -774,7 +918,7 @@ export async function compact(
   // Forced runs (API already over window) must aim well below the trigger;
   // otherwise the under-counting estimator thinks we're "fine" and drops nothing.
   const target = opts.force
-    ? Math.min(opts.contextWindow, Math.max(8_000, Math.floor(opts.contextWindow * 0.5)))
+    ? Math.min(opts.contextWindow, Math.max(8_000, Math.floor(opts.contextWindow * FORCED_SHRINK_RATIO)))
     : opts.contextWindow;
 
  // Pass 1: local folding of old tool results.
@@ -809,9 +953,9 @@ export async function compact(
     }
   }
 
- // Pass 3: hard local trim so we never leave the caller over budget
- // (Codex usable-window / OpenCode overflow guard). Runs when summariser
- // was absent, failed, or the summary alone was not enough.
+ // Pass 3: hard local trim so we never leave the caller over budget.
+ // Runs when summariser was absent, failed, or the summary alone was
+ // not enough.
   if (opts.force || estimateEventTokens(working, est) >= target) {
     const hard = trimEventsToBudget(working, Math.max(1, target - 1), {
       keepRecentMessages: keep,
@@ -860,7 +1004,7 @@ async function callSummariser(
 export function usageSignalsCompact(usage: UsageInfo, window: number): boolean {
   const input = usage.input ?? 0;
   if (input <= 0 || window <= 0) return false;
-  return input >= Math.floor(window * 0.9);
+  return input >= Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO);
 }
 
 /** Internal helper used by session — extract the most recent plan. */
@@ -872,97 +1016,4 @@ export function extractPlan(events: Event[]): PlanStep[] | undefined {
   return undefined;
 }
 
-/** Map Event list back to provider-friendly messages, applying folds. */
-export function eventsToMessages(
-  events: Event[]
-): { role: "user" | "assistant" | "system"; content: ContentBlock[] }[] {
- // Merge message_deltas back into the parent message where present.
- // We walk the events linearly and keep the latest `message` plus its
- // tool_call + tool_result sequence.
-  const out: { role: "user" | "assistant" | "system"; content: ContentBlock[] }[] = [];
-  type MessageEvent = Extract<Event, { type: "message" }>;
-  let pending: MessageEvent | null = null;
 
-  for (const e of events) {
-    if (e.type === "message") {
- // If we have a previous user/assistant message, flush it.
-      if (pending) {
-        out.push({
-          role: pending.role,
-          content: pending.content,
-        });
-      }
-      pending = e;
-      continue;
-    }
-    if (e.type === "message_delta") {
- // Apply delta to the pending assistant message.
-      if (pending && pending.role === "assistant") {
-        if (e.delta.type === "text") {
-          const last: ContentBlock | undefined = pending.content[pending.content.length - 1];
-          if (last && last.type === "text") {
-            pending = {
-              ...pending,
-              content: [
-                ...pending.content.slice(0, -1),
-                { type: "text", text: last.text + e.delta.text },
-              ],
-            };
-          } else {
-            pending = {
-              ...pending,
-              content: [...pending.content, { type: "text", text: e.delta.text }],
-            };
-          }
-        }
- // tool_input_json delta: represented by the eventual tool_call event.
-      }
-      continue;
-    }
-    if (e.type === "tool_call") {
-      const t: ToolUseBlock = { type: "tool_use", id: e.id, name: e.name, input: e.input };
-      if (pending && pending.role === "assistant") {
-        pending = {
-          ...pending,
-          content: [...pending.content, t],
-        };
-      } else {
-        out.push({
-          role: "assistant",
-          content: [t],
-        });
-      }
-      continue;
-    }
-    if (e.type === "tool_result") {
-      const r: ToolResultBlock = {
-        type: "tool_result",
-        toolCallId: e.toolCallId,
-        content: e.content,
-        isError: e.isError,
-        artifactRef: e.artifactRef,
-      };
- // Push as its own user-style message so providers see it in order.
-      out.push({
-        role: "user",
-        content: [r],
-      });
-      continue;
-    }
-    if (e.type === "compaction") {
-      out.push({
-        role: "user",
-        content: [
-          { type: "text", text: `[Earlier conversation summary]\n${e.summary}` },
-        ],
-      });
-      continue;
-    }
- // Other event types (plan/usage/status/error) are skipped from the
- // provider-facing transcript; the agent loop handles them separately.
-  }
-  if (pending) {
-    out.push({ role: pending.role, content: pending.content });
-  }
-  return out;
-}

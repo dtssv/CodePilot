@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/sdk",
-  "version": "2.1.1",
+  "version": "1.0.0",
   "description": "CodePilot Agent SDK — embed CodePilot agents in scripts, CI pipelines, and backend services.",
   "type": "module",
   "main": "./dist/index.js",

@@ -137,9 +137,13 @@ export function AgentHome({
 export function TaskPanel({
   state,
   onOpenFile,
+  client,
+  sessionId,
 }: {
   state: AppState;
   onOpenFile(path: string): void;
+  client?: CodepilotClient;
+  sessionId?: string;
 }): React.ReactElement {
   const progress = planProgress(state.plan);
   const files = touchedFiles(state.rows);
@@ -183,6 +187,16 @@ export function TaskPanel({
           </div>
         )}
       </Section>
+
+      {client && sessionId && (
+        <ContextSection
+          client={client}
+          sessionId={sessionId}
+          // Re-fetch when the transcript grows or a run settles — the report
+          // reflects the current event log + prompt/tool schemas.
+          refreshKey={`${state.rows.length}:${state.status}`}
+        />
+      )}
 
       <Section title={t("Deliverables")} right={files.length > 0 ? String(files.length) : undefined}>
         {files.length === 0 ? (
@@ -247,15 +261,101 @@ function Section({
   );
 }
 
+/** Human labels + accent tints for the semantic context categories. */
+const CONTEXT_CATEGORY_LABELS: Record<string, string> = {
+  system: "System prompt",
+  skills: "Skills",
+  tools: "Tool definitions",
+  mcp: "MCP tools",
+  conversation: "Conversation",
+  subagent: "Sub-agents",
+};
+
+/**
+ * Context-window usage with a semantic breakdown (system prompt, skills,
+ * tool/MCP schemas, conversation, sub-agents) and each one's share. Fetched
+ * from the live session over the protocol; re-fetched when `refreshKey`
+ * changes. Fails quietly (the panel just omits itself) so a remote/stub
+ * session without the report never breaks the view.
+ */
+function ContextSection({
+  client,
+  sessionId,
+  refreshKey,
+}: {
+  client: CodepilotClient;
+  sessionId: string;
+  refreshKey: string;
+}): React.ReactElement | null {
+  const [report, setReport] = useState<Awaited<
+    ReturnType<CodepilotClient["sessionContextReport"]>
+  > | null>(null);
+  useEffect(() => {
+    // `refreshKey` is a trigger-only dep: changing it (transcript grew / run
+    // settled) re-runs the fetch so the report stays current. Read it so the
+    // dependency is not flagged as unused.
+    void refreshKey;
+    let alive = true;
+    client
+      .sessionContextReport(sessionId)
+      .then((r) => {
+        if (alive) setReport(r);
+      })
+      .catch(() => {
+        if (alive) setReport(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [client, sessionId, refreshKey]);
+
+  if (!report || !report.byCategory || report.byCategory.length === 0) return null;
+  const cats = report.byCategory;
+  const catTotal = cats.reduce((n, c) => n + c.tokens, 0);
+  const pct = report.window > 0 ? (report.totalTokens / report.window) * 100 : 0;
+
+  return (
+    <Section title={t("Context window")} right={`${pct.toFixed(1)}%`}>
+      <div className="mb-2">
+        <ProgressBar done={report.totalTokens} total={report.window || 1} />
+        <div className="mt-1 text-[11px] text-[var(--color-ink-faint)]">
+          {formatTokens(report.totalTokens)} / {formatTokens(report.window)} {t("tokens")}
+          {report.autoCompactEnabled
+            ? ` · ${t("auto-compact at")} ${(report.triggerFraction * 100).toFixed(0)}%`
+            : ""}
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        {cats.map((c) => {
+          const share = catTotal > 0 ? (c.tokens / catTotal) * 100 : 0;
+          return (
+            <div key={c.category}>
+              <div className="flex items-center justify-between text-[11px] text-[var(--color-ink-dim)]">
+                <span>{t(CONTEXT_CATEGORY_LABELS[c.category] ?? c.category)}</span>
+                <span className="tabular-nums text-[var(--color-ink-faint)]">
+                  {share.toFixed(1)}% · {formatTokens(c.tokens)}
+                </span>
+              </div>
+              <ProgressBar done={c.tokens} total={catTotal || 1} />
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
 /** In-app preview for deliverables / transcript paths (md, code, images, text). */
 export function FilePreview({
   client,
   path,
+  cwd,
   onClose,
   onOpenExternally,
 }: {
   client: CodepilotClient;
   path: string;
+  cwd?: string;
   onClose(): void;
   onOpenExternally?: (path: string) => void;
 }): React.ReactElement {
@@ -265,16 +365,23 @@ export function FilePreview({
     mediaType?: string;
     truncated?: boolean;
   } | null>(null);
+  // The server resolves a bare/relative name to the real workspace-relative
+  // path (e.g. "subagent.ts" → "packages/core/src/subagent.ts"). Open-in-editor
+  // must use THAT, not the original prop, or it joins the wrong path and the
+  // host reports "Failed to open path".
+  const [resolvedPath, setResolvedPath] = useState<string>(path);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     setPayload(null);
     setError(null);
+    setResolvedPath(path);
     client
-      .readWorkspace(path)
+      .readWorkspace(path, cwd)
       .then((r) => {
         if (!live) return;
+        if (r.path) setResolvedPath(r.path);
         setPayload({
           content: r.content,
           encoding: r.encoding ?? "utf8",
@@ -286,7 +393,7 @@ export function FilePreview({
     return () => {
       live = false;
     };
-  }, [client, path]);
+  }, [client, path, cwd]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -313,7 +420,7 @@ export function FilePreview({
           </div>
           <div className="ml-auto flex items-center gap-1">
             {onOpenExternally && (
-              <button type="button" className="cp-icon-btn" title={t("Open in editor")} onClick={() => onOpenExternally(path)}>
+              <button type="button" className="cp-icon-btn" title={t("Open in editor")} onClick={() => onOpenExternally(resolvedPath)}>
                 <ExternalIcon />
               </button>
             )}

@@ -3,6 +3,8 @@
 // is to be small. All icons are 16×16, stroke-based, and inherit `currentColor`
 // so they tone with the text around them.
 
+import { brandMarkDataUrl } from "./brandAsset.js";
+
 type IconProps = { className?: string };
 
 function Svg({ className, children }: IconProps & { children: React.ReactNode }): React.ReactElement {
@@ -389,22 +391,36 @@ export function LayersIcon(p: IconProps): React.ReactElement {
   );
 }
 
-/** The CodePilot mark: a gradient tile with a compass-like spark. */
+/** The CodePilot mark: the brand icon (dark tile + blue glyph) shown as the
+ * assistant avatar in chat and as the app's logo across every surface. The PNG
+ * is baked in as a data URL so it resolves identically in the web app, the
+ * VSCode webview, and the IntelliJ JCEF panel (see brandAsset.ts). Clipped to a
+ * rounded square to match the source art and the packaged app icons. */
 export function LogoMark({ className, size = 28 }: { className?: string; size?: number }): React.ReactElement {
-  const id = "cp-logo-grad";
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" className={className}>
-      <defs>
-        <linearGradient id={id} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#8b7cff" />
-          <stop offset="0.55" stopColor="#5b8dff" />
-          <stop offset="1" stopColor="#3fc6ff" />
-        </linearGradient>
-      </defs>
-      <rect x="1" y="1" width="30" height="30" rx="9" fill={`url(#${id})`} />
-      <path d="M16 7.5 18.4 13.6 24.5 16 18.4 18.4 16 24.5 13.6 18.4 7.5 16 13.6 13.6Z" fill="#fff" />
-      <circle cx="16" cy="16" r="2" fill={`url(#${id})`} />
-    </svg>
+    <img
+      src={brandMarkDataUrl}
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      className={className}
+      // Lock the box in `style` (not just the width/height attributes): as a
+      // flex child the default `align-items: stretch` would otherwise stretch a
+      // replaced <img> along the cross axis and distort it. `flexShrink: 0`,
+      // fixed width/height, and `objectFit: contain` keep it a crisp square.
+      style={{
+        width: size,
+        height: size,
+        minWidth: size,
+        minHeight: size,
+        flexShrink: 0,
+        objectFit: "contain",
+        borderRadius: Math.round(size * 0.28),
+        display: "block",
+      }}
+      draggable={false}
+    />
   );
 }
 

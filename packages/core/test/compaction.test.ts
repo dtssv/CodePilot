@@ -5,9 +5,11 @@ import {
   foldToolResults,
   trimEventsToBudget,
   estimateEventTokens,
-  eventsToMessages,
   extractPlan,
   liveTranscript,
+  compactionGeometry,
+  DEFAULT_COMPACTION_FRACTION,
+  SOFT_COMPACTION_RATIO,
 } from "../src/compaction.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
 import { buildProviderMessages } from "../src/agent-messages.js";
@@ -85,6 +87,40 @@ describe("foldToolResults", () => {
     const events = makeEvents().slice(0, 2);
     const { foldedCount } = foldToolResults(events, { keepRecentMessages: 8 });
     expect(foldedCount).toBe(0);
+  });
+
+  it("rolling window folds numerous small old results the size gate would skip", () => {
+    // Twelve user/assistant/result triples, each result tiny (< minChars) so
+    // the size-based pass folds nothing. The rolling window (cap 3) should
+    // still fold the oldest small results down to 3 unfolded, independent of
+    // the token budget — Claude Code `clear_tool_uses` semantics.
+    const events: Event[] = [];
+    for (let i = 0; i < 12; i++) {
+      events.push({ type: "message", id: `u${i}`, role: "user", content: [{ type: "text", text: "p" + i }] });
+      events.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "tool_use", id: `tc${i}`, name: "bash", input: { command: "ls" } }],
+      });
+      events.push({ type: "tool_result", toolCallId: `tc${i}`, name: "bash", content: "small ok" });
+    }
+    // Baseline: size gate alone folds nothing (all results are tiny).
+    const sizeOnly = foldToolResults(events, { keepRecentMessages: 4 });
+    expect(sizeOnly.foldedCount).toBe(0);
+    // With the rolling cap, oldest small results fold down to the cap. The cap
+    // bounds the OLD backlog (before the keep window); recent results stay.
+    const rolled = foldToolResults(events, { keepRecentMessages: 4, maxUnfoldedToolResults: 3 });
+    expect(rolled.foldedCount).toBeGreaterThan(0);
+    const folded = rolled.events.filter(
+      (e) => e.type === "tool_result" && e.content.startsWith("[folded tool_result"),
+    );
+    // 12 results total; 4-message keep window protects the recent ones, and
+    // the cap keeps 3 of the remaining old ones unfolded — so some are folded.
+    expect(folded.length).toBeGreaterThanOrEqual(1);
+    // Raising the cap above the old-backlog size folds nothing extra.
+    const loose = foldToolResults(events, { keepRecentMessages: 4, maxUnfoldedToolResults: 100 });
+    expect(loose.foldedCount).toBe(0);
   });
 
   it("never folds large results in a transcript shorter than keepRecentMessages", () => {
@@ -392,28 +428,6 @@ describe("extractPlan", () => {
   });
 });
 
-describe("eventsToMessages", () => {
-  it("merges message_deltas into the parent message", () => {
-    const events: Event[] = [
-      { type: "message", id: "m1", role: "assistant", content: [{ type: "text", text: "hello " }] },
-      { type: "message_delta", messageId: "m1", delta: { type: "text", text: "world" } },
-    ];
-    const out = eventsToMessages(events);
-    expect(out[0]?.role).toBe("assistant");
-    expect((out[0]?.content[0] as { text: string }).text).toBe("hello world");
-  });
-
-  it("emits tool_result as its own user message", () => {
-    const events: Event[] = [
-      { type: "tool_result", toolCallId: "x", name: "bash", content: "ok" },
-    ];
-    const out = eventsToMessages(events);
-    expect(out.length).toBe(1);
-    expect(out[0]?.role).toBe("user");
-    expect(out[0]?.content[0]?.type).toBe("tool_result");
-  });
-});
-
 describe("liveTranscript", () => {
   it("keeps the full log until a summary compaction, then starts there", () => {
     const early: Event = { type: "message", id: "u0", role: "user", content: [{ type: "text", text: "design" }] };
@@ -422,5 +436,37 @@ describe("liveTranscript", () => {
     const later: Event = { type: "message", id: "u9", role: "user", content: [{ type: "text", text: "after" }] };
     const live = liveTranscript([early, kept, compact, later]);
     expect(live).toEqual([compact, kept, later]);
+  });
+});
+
+describe("compactionGeometry", () => {
+  it("derives hard/soft triggers from the window and default fraction", () => {
+    const g = compactionGeometry({ window: 200_000, maxOutputTokens: 8_192 });
+    expect(g.fraction).toBe(DEFAULT_COMPACTION_FRACTION);
+    expect(g.outputReserve).toBe(8_192);
+    expect(g.hardUsable).toBe(200_000 - 8_192);
+    // hardTrigger = min(hardUsable, floor(window * fraction))
+    expect(g.hardTrigger).toBe(Math.min(200_000 - 8_192, Math.floor(200_000 * DEFAULT_COMPACTION_FRACTION)));
+    expect(g.softTrigger).toBe(Math.floor(g.hardTrigger * SOFT_COMPACTION_RATIO));
+    expect(g.softTrigger).toBeLessThan(g.hardTrigger);
+  });
+
+  it("honours a config threshold override and reserves maxTokens over the model default", () => {
+    const g = compactionGeometry({
+      window: 100_000,
+      thresholdFraction: 0.8,
+      maxTokens: 16_000,
+      maxOutputTokens: 4_096,
+    });
+    expect(g.fraction).toBe(0.8);
+    expect(g.outputReserve).toBe(16_000); // maxTokens wins over maxOutputTokens
+    expect(g.hardTrigger).toBe(Math.min(100_000 - 16_000, Math.floor(100_000 * 0.8)));
+  });
+
+  it("floors the usable window so a tiny window still leaves room", () => {
+    const g = compactionGeometry({ window: 5_000, maxOutputTokens: 8_192 });
+    // window - reserve would go negative; clamp to the 4000 floor.
+    expect(g.hardUsable).toBe(4_000);
+    expect(g.hardTrigger).toBeLessThanOrEqual(g.hardUsable);
   });
 });

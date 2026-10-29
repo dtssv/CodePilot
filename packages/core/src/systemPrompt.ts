@@ -18,6 +18,8 @@
 // design.
 
 import type { MemoryContents } from "./memory.js";
+import type { Skill } from "./skills.js";
+import { skillsPromptSection } from "./skills.js";
 import type { AgentMode, PlanStep } from "./types.js";
 import {
   defaultEnvironmentProvider,
@@ -75,10 +77,28 @@ export interface SystemPromptContext {
  * provider so the suffix is stable and does not depend on host state.
  */
   environmentProvider?: EnvironmentProvider;
+ /** Skills discovered for this session. Advertised (one line each) in the
+ * stable cached block via `skillsPromptSection` so the model knows which
+ * skills it can load on demand with the `skill` tool. Session-stable; empty
+ * or undefined omits the `<skills>` section. */
+  skills?: Skill[];
 }
 
 export interface SystemPromptResult {
   staticPrefix: string;
+  /**
+   * Session-stable context (environment + memory index). Byte-stable across
+   * turns, so it rides inside the cached system block and is sent once — the
+   * provider's prompt cache keeps it off the wire on later turns.
+   */
+  stableContext: string;
+  /**
+   * Volatile per-turn context (current time, git working-tree summary, live
+   * plan, steer notices). Small and expected-fresh, so it rides the last user
+   * message each turn. This is the only part that changes turn-to-turn.
+   */
+  volatileSuffix: string;
+  /** staticPrefix + stableContext — the full cacheable system block. */
   dynamicSuffix: string;
   full: string;
 }
@@ -87,13 +107,16 @@ export async function buildSystemPrompt(
   ctx: SystemPromptContext
 ): Promise<SystemPromptResult> {
   const staticPrefix = buildStaticPrefix(ctx);
-  const dynamicSuffix = await buildDynamicSuffix(ctx);
+  const { stable, volatile } = await buildTieredSuffix(ctx);
+  // `dynamicSuffix` kept for back-compat consumers; it is the stable tier.
+  const dynamicSuffix = stable;
   const full =
     staticPrefix +
     (staticPrefix.endsWith("\n") ? "" : "\n") +
     "\n" +
-    dynamicSuffix;
-  return { staticPrefix, dynamicSuffix, full };
+    stable +
+    (volatile ? `\n\n${volatile}` : "");
+  return { staticPrefix, stableContext: stable, volatileSuffix: volatile, dynamicSuffix, full };
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +142,8 @@ You are **CodePilot**, a careful, token-efficient software engineering agent run
 
 - You are the **CodePilot** agent. Core logic lives in \`packages/core\`; user-facing surfaces (TUI/VSCode/IDEA) are thin protocol clients.
 - You run in a sandboxed shell. The dynamic suffix at the end of this prompt gives you the live \`cwd\`, OS, Node version, git state, project memory, and the current plan.
-- The user may switch collaboration modes at runtime (\`chat\` / \`plan\` / \`agent\`). The active mode is also restated in the dynamic suffix. Stay within the mode's constraints — a tool that is not exposed is not available.
+- The user may switch collaboration modes at runtime (\`chat\` / \`plan\` / \`agent\`). The active mode is also restated in the dynamic suffix. Stay within the mode's constraints — a tool that is not exposed is not available. You may also propose a switch with \`suggest_mode\` (the user confirms); see its tool description for when.
+- For a genuinely large, multi-round objective that will not fit one turn, you may escalate it into a long-horizon goal loop with \`start_goal\` (the host then drives rounds until you report completed/blocked or hit a round cap); see its tool description for when.
 - All events you produce are streamed to the host UI and persisted to \`~/.codepilot/sessions/<id>.jsonl\`. Tool calls and tool results are the source of truth for what happened.
 
 ### Runtime platform
@@ -146,7 +170,19 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 - **Do not empty-stop on unfinished work.** If the plan still has \`pending\`/\`in_progress\` steps and you do not need a user decision, keep calling tools in this turn. An empty reply (or "Next I'll…") with no tool calls after tool use is a soft-stop — avoid it; either act or ask a clear question.
 - **Recover, do not give up.** If a tool returns an error, read the error carefully, adjust the inputs (path, regex, permissions) and retry. If the retry is structurally similar, batch the adjustments into one new call. Do not loop on the same failing call.
 - **Permission denied ≠ try again with tweaks.** When \`bash\` (or any execute-tier tool) is denied, the permission system is blocking the *tool*, not the *command text*. Switch to a different tool immediately: use \`read_file\` for file contents, \`ls\`/\`glob\` for directory listings, \`grep\` for content search. Do NOT retry \`bash\` with a slightly different command — it will be denied again.
-- **Never re-read a file already in context.** If \`read_file\` returned a file's contents in this session, those contents are still in the transcript. Re-reading the same path wastes a tool call and risks tripping doom-loop detection. If you need a different section, use \`startLine\`/\`maxLines\` to window into the part you haven't seen.`);
+- **Avoid redundant re-reads, but re-read when the content is gone.** If \`read_file\` returned a file's contents earlier *and those contents are still visible in the transcript*, do not re-read the same region — window into a new part with \`startLine\`/\`maxLines\` instead. BUT if the earlier output was folded/summarised away (you see a \`[folded tool_result …]\` stub, not the real lines), or you are now doing a different task that needs the exact text, or you must enumerate a file's real structure (sections, symbols, line counts), you MUST re-read it (or call \`read_artifact\` on its \`artifactRef\`). Reasoning from a fold stub or from memory instead of the real bytes is how fabrication happens — a fresh read is always cheaper than a wrong answer.`);
+
+  parts.push(`## 2a. Evidence and Honesty (non-negotiable)
+
+These rules exist because the single most damaging failure mode is confidently stating something you did not verify. They override convenience every time.
+
+- **Evidence before synthesis.** Any factual claim about THIS codebase — "X is not implemented", "there is no Y", "we don't support Z" — must be backed by a search/read you actually ran (\`grep\`/\`glob\`/\`read_file\`) in THIS repo, in this session. Never let "I already checked", "it's obvious", or "the docs say" substitute for a cheap local check. If you have not looked, say "I have not verified this yet" instead of asserting.
+- **The same rule applies to any material the user gives you.** When you summarise, quote, or draw conclusions from a file, document, URL, or pasted text, your claims about *its contents* must come from actually reading *that material in this turn* — not from memory of a similar file, not from a related thing you analysed earlier. Before writing "this document contains section/conclusion X", \`read_file\`/\`grep\` the document and confirm X is really there (cite the line). If you only have a folded stub, re-read it.
+- **"I analysed X earlier" ≠ "this material mentions X".** A topic you investigated in a previous task (e.g. a source tree you read) does NOT mean the current material references it. Do not import entities, sections, or conclusions from earlier context into a new material unless they literally appear in that material. When enumerating a document's parts, first list the parts that actually exist (e.g. \`grep\` its headings), then reason only over that list — never pad the structure with topics carried over from prior turns.
+- **Comparisons are two-sided.** When comparing this project to another tool, "the other tool has capability X" does NOT imply "this project lacks X". Before writing "we are missing X", grep THIS repo for X and cite what you found (file:line) or confirm its genuine absence. A gap claim without a this-repo search is a guess, not a finding — present it as a hypothesis to verify, never as a conclusion.
+- **Follow the user's explicit constraints exactly.** If the user names a path, directory, branch, file, or command, use that one — do not substitute a more convenient alternative (e.g. cloning to \`/tmp\` when a path was given). If a constraint collides with the sandbox or permissions, request the needed access (or ask), rather than silently routing around it.
+- **Say "I don't know" / "unverified".** When you are uncertain, state the uncertainty and either verify it or flag it. A precise "I didn't check the Windows path" beats a confident wrong claim. Trust evidence over speculation; if a finding contradicts an earlier claim (yours or the user's), surface the discrepancy and go with the evidence.
+- **Self-check before you conclude.** Before delivering an analysis, a gap report, or a "done" claim, re-read your own assertions and confirm each has backing (a run command, a test, a file you read). Deliver the verification, not just the conclusion.`);
 
   parts.push(`## 3. Code Conventions
 
@@ -172,8 +208,9 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
   - Mark a step \`completed\` only when its deliverable is on disk and (where applicable) verified by a check that matches the claim.
   - Mark \`blocked\` when a step cannot proceed because of an external dependency, missing information, or a permission the user must grant. Always state the blocker in the step title or in a follow-up message.
 - **Replan when reality changes.** When a step turns out to be wrong, replace the plan rather than papering over it. New information supersedes old steps.
-- **Call \`plan_update\` when a step's status actually changes** (a step completes, a new step starts, a blocker appears). Do NOT call it every turn reflexively — re-sending an unchanged plan wastes a tool call and a cache slot.
-- **Never spend a turn on \`plan_update\` alone.** Send it in the same response as the tool calls for the work it describes (e.g. mark step 2 in_progress alongside the edits for step 2). Every extra turn re-sends the whole context.
+- **Update the plan AS YOU GO, not at the end.** Call \`plan_update\` the moment a step's status actually changes — the instant a step completes, when the next one starts, or when a blocker appears. The plan is a live progress indicator the user watches during execution; do NOT batch all status changes into one final \`plan_update\` after the work is done. A plan that only updates once at the very end is a bug, not economy.
+- **Fold the update into the same response as the work, so progress is continuous.** When you finish one step and begin the next, mark the finished step \`completed\` AND the next \`in_progress\` in the same response that carries the next step's tool calls (e.g. alongside the edits for step 3, flip step 2 → completed and step 3 → in_progress). This advances the plan every working turn without ever spending a turn on \`plan_update\` alone.
+- Do NOT re-send an **unchanged** plan — that wastes a tool call and a cache slot. The rule is "update on every real status change," not "never update" and not "update reflexively every turn regardless of change."
 - **Unfinished plan ⇒ keep working or ask.** While any step is \`pending\` or \`in_progress\` and you are not blocked on the user, prefer tool calls over a text-only yield. Text-only is fine when reporting a blocker or asking one clarifying question.`);
 
   parts.push(`## 5. Testing and Verification
@@ -210,6 +247,7 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
   parts.push(`## 7b. External Context (MCP)
 
 - Tools prefixed \`mcp__<server>__\` are provided by external MCP servers. Their \`description\` carries the server name in brackets, e.g. \`[mcp:github]\`. Treat them exactly like built-in tools: read the description, honour the input schema, prefer them over manual \`web_fetch\` when they expose a structured API.
+- **Many MCP tools? Use the \`mcp\` meta-tool.** When a server exposes lots of tools, the individual \`mcp__…\` tools are not listed directly (to save context). Call \`mcp\` with \`action:"list"\` to see them, \`action:"describe"\` + \`name\` for one tool's input schema, then \`action:"call"\` + \`name\` + \`args\` to invoke it. If an \`mcp__…\` tool is already in your tool list, call it directly instead.
 - **\`@mcp:<server>/<uri>\` in the user prompt** is an MCP resource reference. The referenced resource contents are already inlined above the prompt — you do **not** need to call any tool to fetch them. Cite the inlined content directly.
 - MCP servers may also expose **prompts** (parameterised templates). These are not tools; if a user references one, use the \`read_artifact\`-style path your host provides, or ask.
 - **Reverse requests:** a server may ask *you* (via \`elicitation\` or \`sampling\`) mid-tool-call. The host handles the interaction; you will see the resolved result in the tool output. Do not try to satisfy these yourself.`);
@@ -218,7 +256,7 @@ The dynamic suffix's environment block (rendered as \`platform\`, \`arch\`, \`sh
 
 This prompt and the conversation you are reading cost real money. Treat tokens like disk space: be parsimonious.
 
-- **Never re-read a file you have already seen.** If \`read_file\` returned a region, the model still has it in context. Re-reading wastes a tool call and a cache slot.
+- **Never re-read a file you have already seen *and still have in context*.** If \`read_file\` returned a region that is still visible in the transcript, re-reading wastes a tool call and a cache slot. (Exception: if the region was folded away, or you now need its exact structure/text for a different task, re-read it — see §2. A correct re-read beats a fabricated recollection.)
 - **Prefer \`grep\` / \`glob\` to \`read_file\` for discovery.** A targeted regex on a glob is usually cheaper than opening every candidate file.
 - **Use \`startLine\` and \`maxLines\` on \`read_file\`.** Do not load a 4000-line file when you need line 312.
 - **Sample data before loading it.** Every byte a tool prints is re-sent with every later request. For logs, CSVs and fixtures run \`wc -l\` / \`head -n 20\` (or \`read_file\` with \`maxLines\`) to learn the format; never \`cat\` a whole data file or a glob of them.
@@ -346,15 +384,27 @@ function outputStyleGuidance(style: OutputStyle): string {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic suffix
+// Tiered suffix: stable (cached, sent once) vs volatile (per-turn tail)
 // ---------------------------------------------------------------------------
 
-async function buildDynamicSuffix(ctx: SystemPromptContext): Promise<string> {
+/**
+ * Split the dynamic context into a byte-stable tier (environment identity +
+ * memory index + tool list) and a volatile tier (current time, git working
+ * tree, live plan). The stable tier is appended to the cached system block so
+ * it is sent once and then served from the provider's prompt cache; only the
+ * volatile tier rides each turn's last user message.
+ */
+async function buildTieredSuffix(
+  ctx: SystemPromptContext,
+): Promise<{ stable: string; volatile: string }> {
   const provider = ctx.environmentProvider ?? defaultEnvironmentProvider;
   const env = await provider.snapshot(ctx.cwd);
-  const out: string[] = [];
 
-  out.push(`<environment>
+  // --- Stable tier: identity that does not change within a session. Note the
+  // deliberate OMISSION of `now` (every-turn churn) — it lives in the volatile
+  // tier so the stable block stays byte-identical and cacheable.
+  const stableOut: string[] = [];
+  stableOut.push(`<environment>
 provider: ${ctx.provider ?? "auto"}
 model: ${ctx.model ?? "(default)"}
 mode: ${ctx.mode ?? "agent"}
@@ -373,36 +423,39 @@ workspace_root: ${env.workspaceRoot ?? env.cwd}
 scratch_dir: ${ctx.scratchDir ?? "(unset)"}
 project_state_dir: ${ctx.projectStateDir ?? "(unset)"}
 delivery_roots: ${(ctx.deliveryRoots && ctx.deliveryRoots.length > 0
-  ? ctx.deliveryRoots.join(", ")
-  : env.cwd)}
-now: ${env.now}
+    ? ctx.deliveryRoots.join(", ")
+    : env.cwd)}
 timezone: ${env.timezone}
 </environment>`);
+  // Git identity (repo/branch/last-commit) is stable; the dirty working-tree
+  // count is volatile and rendered below.
+  stableOut.push(renderGitIdentityBlock(env.git));
+  stableOut.push(renderMemoryBlock(ctx.memory));
+  // Advertise installed skills (one line each) so the model can load them on
+  // demand with the `skill` tool. Part of the stable cached block — changes
+  // only when skills are added/removed.
+  if (ctx.skills && ctx.skills.length > 0) {
+    const section = skillsPromptSection(ctx.skills);
+    if (section) stableOut.push(section);
+  }
+  // The tool list is NOT repeated here — §12 of the static prefix already names
+  // the available tools, and the provider `tools` array carries their schemas.
+  // Re-listing them in the suffix is pure duplication (and grows with MCP).
 
-  out.push(renderGitBlock(env.git));
+  // --- Volatile tier: refreshed every turn.
+  const volatileOut: string[] = [];
+  volatileOut.push(`<runtime>
+now: ${env.now}${renderGitWorkingTree(env.git)}
+</runtime>`);
+  volatileOut.push(renderPlanBlock(ctx.plan));
 
-  out.push(renderDirectoryTreeBlock(env.directoryTree));
-
-  out.push(renderMemoryBlock(ctx.memory));
-
-  out.push(renderPlanBlock(ctx.plan));
-
-  out.push(`<tools>
-${ctx.toolNames.length > 0
-  ? ctx.toolNames.map((n) => `- ${n}`).join("\n")
-  : "(none)"}
-</tools>`);
-
-  return out.join("\n\n");
+  return { stable: stableOut.join("\n\n"), volatile: volatileOut.join("\n\n") };
 }
 
-function renderGitBlock(git: EnvironmentSnapshot["git"]): string {
-  if (!git) {
-    return `<git>
-not a git working tree
-</git>`;
-  }
-  if (!git.inRepo) {
+/** Stable git identity: repo / root / branch / last commit. No dirty state —
+ * that churns and lives in the volatile `renderGitWorkingTree`. */
+function renderGitIdentityBlock(git: EnvironmentSnapshot["git"]): string {
+  if (!git || !git.inRepo) {
     return `<git>
 not a git working tree
 </git>`;
@@ -411,47 +464,55 @@ not a git working tree
   lines.push("in_repo: true");
   if (git.root) lines.push(`root: ${git.root}`);
   if (git.branch) lines.push(`branch: ${git.branch}`);
-  if (typeof git.dirty === "boolean") lines.push(`dirty: ${git.dirty}`);
   if (git.lastCommitSha) lines.push(`last_commit: ${git.lastCommitSha}`);
   if (git.lastCommit) lines.push(`last_commit_subject: ${git.lastCommit}`);
-  if (git.statusShort) {
- // Indent multi-line status output for readability.
-    const indented = git.statusShort
-      .split("\n")
-      .map((l) => `  ${l}`)
-      .join("\n");
-    lines.push(`status:\n${indented}`);
-  }
   return `<git>
 ${lines.join("\n")}
 </git>`;
 }
 
-function renderDirectoryTreeBlock(tree: string | undefined): string {
-  if (!tree || tree.trim().length === 0) {
-    return `<project_tree>
-(unavailable)
-</project_tree>`;
-  }
-  return `<project_tree>
-${tree}
-</project_tree>`;
+/** Volatile git working-tree summary (dirty count only, no file list). Returns
+ * a leading newline + one line, or "" when not a repo. Runs `git status` for
+ * the paths — never dump them every turn. */
+function renderGitWorkingTree(git: EnvironmentSnapshot["git"]): string {
+  if (!git || !git.inRepo || !git.statusShort) return "";
+  const changeLines = git.statusShort
+    .split("\n")
+    .filter((l) => l.trim().length > 0 && !l.startsWith("##"));
+  return changeLines.length === 0
+    ? "\nworking_tree: clean"
+    : `\nworking_tree: ${changeLines.length} changed file(s) — run \`git status\` for the list`;
 }
 
 function renderMemoryBlock(memory: MemoryContents): string {
+  // Per-turn memory stays an INDEX only (progressive disclosure, §7): bullets +
+  // topic paths that the model opens on demand with read_file. Full user/project
+  // bodies are NOT injected every turn — that bloats the request and defeats the
+  // prompt cache.
   const blocks: string[] = [];
   if (memory.progressive && memory.progressive.trim().length > 0) {
     blocks.push(`### Progressive index (~/.codepilot/memory/…/MEMORY.md)
 _Bullets + topic paths. Use read_file on a topic path for full notes._
 ${memory.progressive.trim()}`);
   }
+  // Project / user memory: advertise their paths + section headings only, so the
+  // model knows they exist and can read_file them when a task needs the detail.
+  const headingsOnly = (text: string): string =>
+    text
+      .split(/\r?\n/)
+      .filter((l) => /^#{1,4}\s/.test(l.trim()))
+      .map((l) => l.trim())
+      .slice(0, 12)
+      .join("\n");
   if (memory.project && memory.project.trim().length > 0) {
-    blocks.push(`### Project (~/.codepilot/projects/…/MEMORY.md + optional repo CODEPILOT.md/AGENTS.md)
-${memory.project.trim()}`);
+    const h = headingsOnly(memory.project);
+    blocks.push(`### Project memory available (~/.codepilot/projects/…/MEMORY.md)
+_read_file the path above for full notes._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
   }
   if (memory.user && memory.user.trim().length > 0) {
-    blocks.push(`### User (~/.codepilot/MEMORY.md)
-${memory.user.trim()}`);
+    const h = headingsOnly(memory.user);
+    blocks.push(`### User memory available (~/.codepilot/MEMORY.md)
+_read_file the path above for full notes._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
   }
   if (blocks.length === 0) {
     return `<memory>

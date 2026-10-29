@@ -9,7 +9,7 @@
 // the bundle. The runtime import is `@codepilot/protocol/rpc`, which has no
 // dependencies at all.
 
-import { Peer, RpcError, type RpcTransport } from "@codepilot/protocol/rpc";
+import { Peer, RpcError, PROTOCOL_VERSION, type RpcTransport } from "@codepilot/protocol/rpc";
 import type {
   AgentMode,
   Event,
@@ -31,7 +31,10 @@ import type {
 
 import { BrowserWebSocketTransport, waitForOpen } from "./transport.js";
 
-export const PROTOCOL_VERSION = 1;
+// Single source of truth: the protocol version comes from the dependency-free
+// @codepilot/protocol/rpc module (same constant the server advertises), not a
+// local literal that could drift on a version bump. Re-exported for callers.
+export { PROTOCOL_VERSION };
 
 export interface PendingPermission {
   requestId: string;
@@ -41,6 +44,20 @@ export interface PendingPermission {
   reason: string;
  /** Out-of-sandbox write: allow adds this folder (always also persists). */
   sandboxExpand?: { path: string };
+}
+
+/** Context-window usage report (mirrors core Session.contextReport). */
+export interface ContextReport {
+  totalTokens: number;
+  window: number;
+  triggerThreshold: number;
+  triggerFraction: number;
+  usagePercent: number;
+  autoCompactEnabled: boolean;
+  byEventType: { type: string; tokens: number; count: number }[];
+  byCategory?: { category: string; tokens: number }[];
+  topFileReads: { path: string; reads: number; tokens: number }[];
+  duplicateReads: { path: string; reads: number }[];
 }
 
 export interface PendingQuestion {
@@ -157,6 +174,7 @@ export interface ConfigSnapshot {
   providers: Record<string, ConfigProviderRedacted>;
   selectableModels: SelectableModelInfo[];
   templates: ProviderTemplateInfo[];
+  imageGen?: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
 }
 
 export interface SessionOptions {
@@ -427,8 +445,8 @@ export class CodepilotClient {
     return this.call<SessionResumeResult>("session/resume", { sessionId });
   }
 
-  async listWorkspace(path = "."): Promise<{ path: string; entries: Array<{ name: string; path: string; kind: "file" | "directory"; size?: number }> }> {
-    return this.call("workspace/list", { path });
+  async listWorkspace(path = ".", cwd?: string): Promise<{ path: string; entries: Array<{ name: string; path: string; kind: "file" | "directory"; size?: number }> }> {
+    return this.call("workspace/list", { path, cwd });
   }
 
  /** Native folder dialog on the serve host (may return null if cancelled). */
@@ -446,32 +464,107 @@ export class CodepilotClient {
     return this.call("workspace/browse", { path });
   }
 
-  async workspaceStat(path: string): Promise<{ path: string; exists: boolean; size: number; hash: string; modifiedAt?: number }> {
-    return this.call("workspace/stat", { path });
+  async workspaceStat(path: string, cwd?: string): Promise<{ path: string; exists: boolean; size: number; hash: string; modifiedAt?: number }> {
+    return this.call("workspace/stat", { path, cwd });
+  }
+
+  /** Manual compaction (`/compact`): summarise now, keep going on the task. */
+  async sessionCompact(sessionId: string): Promise<{ ok: true }> {
+    return this.call("session/compact", { sessionId });
+  }
+
+  /** Task boundary (`/clear`): archive context, continue with a clean slate. */
+  async sessionClearContext(sessionId: string, reason?: string): Promise<{ cleared: boolean }> {
+    return this.call("session/clear-context", { sessionId, reason });
+  }
+
+  /** Context-window usage report for the live session: totals + a semantic
+   * breakdown (system prompt, skills, tool/MCP schemas, conversation,
+   * sub-agents). Used by the context-usage panel. */
+  async sessionContextReport(sessionId: string): Promise<ContextReport> {
+    return this.call("session/contextReport", { sessionId });
+  }
+
+  /** List slash commands for the `/` menu (shared built-ins + md commands). */
+  async commandsList(cwd?: string): Promise<{
+    commands: Array<{ name: string; description: string; argumentHint?: string; source: "builtin" | "project" | "user" }>;
+    warnings: string[];
+  }> {
+    return this.call("commands/list", { cwd });
+  }
+
+  /** `@`-mention completion candidates (file/dir/mcp/git/skill). */
+  async workspaceComplete(
+    query: string,
+    opts: { kinds?: Array<"file" | "dir" | "mcp" | "git" | "skill">; maxResults?: number; cwd?: string } = {},
+  ): Promise<{
+    candidates: Array<{ kind: "file" | "dir" | "mcp" | "git" | "skill"; value: string; label: string; detail?: string }>;
+  }> {
+    return this.call("workspace/complete", { query, ...opts });
   }
 
  /** Subscribe to debounced disk-change notifications for a directory. */
-  async watchWorkspace(path = "."): Promise<{ watching: boolean; path: string }> {
-    return this.call("workspace/watch", { path });
+  async watchWorkspace(path = ".", cwd?: string): Promise<{ watching: boolean; path: string }> {
+    return this.call("workspace/watch", { path, cwd });
   }
 
-  async gitDiff(path?: string, staged = false): Promise<{ path?: string; diff: string; truncated: boolean }> {
-    return this.call("workspace/git-diff", { path, staged });
+  async gitDiff(path?: string, staged = false, cwd?: string): Promise<{ path?: string; diff: string; truncated: boolean }> {
+    return this.call("workspace/git-diff", { path, staged, cwd });
   }
 
-  async gitStatus(): Promise<{ branch: string; files: Array<{ path: string; index: string; worktree: string; status: string }> }> {
-    return this.call("workspace/git-status", {});
+  async gitStatus(cwd?: string): Promise<{ branch: string; files: Array<{ path: string; index: string; worktree: string; status: string }> }> {
+    return this.call("workspace/git-status", { cwd });
   }
 
-  async writeWorkspace(path: string, content: string, expectedSize?: number, expectedHash?: string): Promise<{ path: string; size: number; hash: string }> {
-    return this.call("workspace/write", { path, content, expectedSize, expectedHash });
+  async gitBranches(cwd?: string): Promise<{ current: string; branches: Array<{ name: string; current: boolean; upstream?: string; ahead?: number; behind?: number }>; tags: string[]; detached: boolean }> {
+    return this.call("git/branches", { cwd });
   }
 
-  async searchWorkspace(query: string, path = ".", maxResults = 100): Promise<{ matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }> {
-    return this.call("workspace/search", { query, path, maxResults });
+  async gitInit(cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/init", { cwd });
   }
 
-  async readWorkspace(path: string): Promise<{
+  async gitStage(paths?: string[], cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/stage", { paths, cwd });
+  }
+
+  async gitUnstage(paths?: string[], cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/unstage", { paths, cwd });
+  }
+
+  async gitCommit(message: string, all = false, cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/commit", { message, all, cwd });
+  }
+
+  async gitPush(opts: { remote?: string; branch?: string; setUpstream?: boolean; cwd?: string } = {}): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/push", opts);
+  }
+
+  async gitPull(opts: { remote?: string; branch?: string; cwd?: string } = {}): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/pull", opts);
+  }
+
+  async gitFetch(cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/fetch", { cwd });
+  }
+
+  async gitCheckout(branch: string, create = false, cwd?: string): Promise<{ ok: boolean; output: string }> {
+    return this.call("git/checkout", { branch, create, cwd });
+  }
+
+  async gitCommitMessage(cwd?: string, sessionId?: string): Promise<{ message: string }> {
+    return this.call("git/commit-message", { cwd, sessionId });
+  }
+
+  async writeWorkspace(path: string, content: string, expectedSize?: number, expectedHash?: string, cwd?: string): Promise<{ path: string; size: number; hash: string }> {
+    return this.call("workspace/write", { path, content, expectedSize, expectedHash, cwd });
+  }
+
+  async searchWorkspace(query: string, path = ".", maxResults = 100, cwd?: string): Promise<{ matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }> {
+    return this.call("workspace/search", { query, path, maxResults, cwd });
+  }
+
+  async readWorkspace(path: string, cwd?: string): Promise<{
     path: string;
     content: string;
     size: number;
@@ -480,7 +573,17 @@ export class CodepilotClient {
     encoding?: "utf8" | "base64";
     mediaType?: string;
   }> {
-    return this.call("workspace/read", { path });
+    return this.call("workspace/read", { path, cwd });
+  }
+
+  /** Resolve a (bare/relative) path to an absolute one the host can open,
+   * using the server's workspace basename fallback. */
+  async resolveWorkspace(path: string, cwd?: string): Promise<{
+    path: string;
+    absolute: string;
+    exists: boolean;
+  }> {
+    return this.call("workspace/resolve", { path, cwd });
   }
 
   /** Engine (CLI/daemon) update channel — not the IDE plugin / VSIX. */
@@ -509,6 +612,7 @@ export class CodepilotClient {
   async mintRemotePairing(opts: {
     serveUrl: string;
     cwd?: string;
+    cwds?: string[];
     sessionId?: string;
   }): Promise<{
     code: string;
@@ -741,8 +845,9 @@ export class CodepilotClient {
     title: string;
     prompt: string;
     cwd?: string;
-    kind: "idle" | "daily" | "interval";
+    kind: "idle" | "once" | "daily" | "interval";
     at?: string;
+    runAt?: number;
     everyMinutes?: number;
     idleAfterMs?: number;
     model?: string;
@@ -759,6 +864,7 @@ export class CodepilotClient {
       prompt?: string;
       cwd?: string;
       at?: string;
+      runAt?: number;
       everyMinutes?: number;
       idleAfterMs?: number;
       model?: string;
@@ -832,6 +938,16 @@ export class CodepilotClient {
       },
     });
     if (last) last.opts.cwd = cwd;
+  }
+
+  /** Pin / unpin a session (pin is one-per-workspace, enforced server-side). */
+  async pinSession(sessionId: string, pinned: boolean): Promise<void> {
+    await this.call("session/pin", { sessionId, pinned });
+  }
+
+  /** Archive / unarchive a session (archived sessions are hidden by default). */
+  async archiveSession(sessionId: string, archived: boolean): Promise<void> {
+    await this.call("session/archive", { sessionId, archived });
   }
 
   async send(
@@ -910,6 +1026,15 @@ export class CodepilotClient {
 
   async getConfig(cwd?: string): Promise<ConfigSnapshot> {
     return this.call("config/get", { cwd });
+  }
+
+  async setImageGen(patch: {
+    baseURL?: string;
+    apiKey?: string;
+    model?: string;
+    enabled?: boolean;
+  }): Promise<{ imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }> {
+    return this.call("config/setImageGen", patch);
   }
 
   async upsertProvider(

@@ -53,6 +53,10 @@ export interface SubagentRun {
   index: number;
   objective: string;
   state: "running" | "ok" | "failed";
+ /** Session-global unique sequence for this dispatch (for a stable `#N`). */
+  runSeq?: number;
+ /** The sub-agent's stable id (`sub_…`); the handle for continuation. */
+  sessionId?: string;
  /** The sub-agent's own transcript, reduced like a session. */
   view: AppState;
 }
@@ -253,13 +257,22 @@ function applySubagent(state: AppState, e: Extract<Event, { type: "subagent" }>)
   const runs = [...(state.subagents?.[e.parentToolCallId] ?? [])];
   let i = runs.findIndex((r) => r.index === e.index);
   if (i < 0) {
-    runs.push({ index: e.index, objective: e.objective, state: "running", view: initialState(state.cwd) });
+    runs.push({
+      index: e.index,
+      objective: e.objective,
+      state: "running",
+      runSeq: e.runSeq,
+      sessionId: e.sessionId,
+      view: initialState(state.cwd),
+    });
     runs.sort((a, b) => a.index - b.index);
     i = runs.findIndex((r) => r.index === e.index);
   }
   const run = runs[i]!;
   runs[i] = {
     ...run,
+    runSeq: e.runSeq ?? run.runSeq,
+    sessionId: e.sessionId ?? run.sessionId,
     state: e.state ?? run.state,
     view: e.event ? applyEvent(run.view, e.event) : run.view,
   };
@@ -572,6 +585,37 @@ function applyEvent(state: AppState, e: Event): AppState {
         ...state,
         notice: `agent asked for ${e.mode} mode${e.reason ? `: ${e.reason}` : ""}`,
       };
+
+    case "goal_request":
+      return {
+        ...state,
+        notice: `goal loop requested: ${e.objective}`,
+      };
+
+    case "goal_progress": {
+      const cap = e.maxRounds ? `/${e.maxRounds}` : "";
+      const tail =
+        e.status === "running"
+          ? "running…"
+          : e.status === "completed"
+            ? `completed${e.reason ? ` — ${e.reason}` : ""}`
+            : e.status === "blocked"
+              ? `blocked${e.blockedReason ? ` — ${e.blockedReason}` : ""}`
+              : `round limit${e.reason ? ` — ${e.reason}` : ""}`;
+      return {
+        ...state,
+        notice: `goal · round ${e.round}${cap} · ${tail}`,
+      };
+    }
+
+    case "edit_delta": {
+      if (e.total <= 1) return state;
+      const name = e.path.split("/").pop() ?? e.path;
+      return {
+        ...state,
+        notice: `editing ${name} · ${e.index + 1}/${e.total}`,
+      };
+    }
 
     case "team_message":
       return {

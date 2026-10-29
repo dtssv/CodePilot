@@ -17,7 +17,7 @@
 // available sub-agent tools when omitted
 // disallowedTools string[] — denylist, applied after the allowlist
 // model string optional — "sonnet" | "opus" | "haiku" | full model id | "inherit"
-// maxTurns number optional — max agentic turns for this sub-agent
+// maxTurns number optional — max agentic turns; omit for unlimited
 // permissionMode string — "ask" | "auto-edit" | "yolo" (default: auto-edit)
 //
 // The body is plain markdown. It is injected as `extra` when the sub-agent

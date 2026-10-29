@@ -107,6 +107,12 @@ export function resolveTargets(argv = process.argv.slice(2)) {
         pkgTarget: pkgTargetFor("win", "x64"),
         binarySuffix: binaryNameSuffix("win", "x64"),
       });
+      out.push({
+        family: "win",
+        arch: "arm64",
+        pkgTarget: pkgTargetFor("win", "arm64"),
+        binarySuffix: binaryNameSuffix("win", "arm64"),
+      });
     } else if (family === "linux") {
       out.push({
         family: "linux",

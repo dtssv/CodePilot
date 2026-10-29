@@ -23,6 +23,7 @@ import type { HookEngine } from "./hooks.js";
 import { DoomLoopDetector } from "./doomLoop.js";
 import { redactSecrets } from "./redact.js";
 import { estimateTokens, lookupContextWindow } from "./tokens.js";
+import { estimateEventTokens } from "./compaction.js";
 import { getTracer } from "./telemetry.js";
 
 // ---------------------------------------------------------------------------
@@ -40,24 +41,14 @@ export function emitTokenEstimateIfNeeded(
 ): void {
   if (!deps.onTokenEstimate) return;
   const all = [...input.history, ...produced];
-  let tokens = 0;
+  // Use the ONE canonical estimator (compaction.ts) so the session-level
+  // estimate matches the compaction gate and checkpoint gate — previously this
+  // was a separate per-block loop that ignored image tokens, so a session with
+  // images under-counted here while the compaction gate counted them.
+  const tokens = estimateEventTokens(all, estimateTokens);
   let turns = 0;
   for (const e of all) {
-    if (e.type === "message") {
-      if (e.role === "user") turns++;
-      for (const b of e.content) {
-        if (b.type === "text") tokens += estimateTokens(b.text);
-        else tokens += estimateTokens(JSON.stringify(b));
-      }
-    } else if (e.type === "compaction") {
-      tokens += estimateTokens(e.summary);
-    } else if (e.type === "tool_call") {
-      tokens += estimateTokens(JSON.stringify(e.input ?? {}));
-    } else if (e.type === "tool_result") {
-      tokens += estimateTokens(e.content);
-    } else if (e.type === "plan") {
-      tokens += estimateTokens(JSON.stringify(e.steps));
-    }
+    if (e.type === "message" && e.role === "user") turns++;
   }
   const window =
     deps.config.contextWindow ??
@@ -312,6 +303,7 @@ export async function runOneTool(
 
   const ctx: ToolContext = {
     cwd: deps.cwd,
+    sessionId: deps.sessionId,
     signal: deps.signal,
     artifact: async (blob, hint) => deps.artifacts.write(blob, hint),
     readArtifact: async (ref) => deps.artifacts.read(ref),
@@ -332,6 +324,15 @@ export async function runOneTool(
     projectStateDir: deps.projectStateDir,
     addDeliveryRoot: deps.addDeliveryRoot,
     expandSandboxWritable: deps.expandSandboxWritable,
+    observeFile: deps.fileObservations
+      ? (p, s) => deps.fileObservations!.observe(p, s)
+      : undefined,
+    checkFileFresh: deps.fileObservations
+      ? (p, s) => deps.fileObservations!.checkFresh(p, s)
+      : undefined,
+    reobserveFile: deps.fileObservations
+      ? (p, s) => deps.fileObservations!.reobserveAfterWrite(p, s)
+      : undefined,
   };
 
   try {

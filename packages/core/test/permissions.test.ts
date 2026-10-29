@@ -81,6 +81,42 @@ describe("PermissionEngine", () => {
     });
     expect(e.preflight(t, { command: "git push" })).toBe("ask");
   });
+
+  it("forces ask for a write onto a sensitive system path — even in yolo", () => {
+    // The sensitive-path floor is independent of mode: a write under /etc or
+    // ~/.ssh must prompt, not run silently, regardless of yolo/auto-edit.
+    const home = process.env.HOME ?? "/root";
+    for (const mode of ["ask", "auto-edit", "yolo"] as const) {
+      const e = new PermissionEngine({ permissionMode: mode });
+      const w = makeTool("write_file", "write");
+      expect(e.preflight(w, { path: "/etc/hosts" })).toBe("ask");
+      expect(e.preflight(w, { path: `${home}/.ssh/authorized_keys` })).toBe("ask");
+    }
+  });
+
+  it("does NOT force ask for ordinary project writes under yolo/auto-edit", () => {
+    for (const mode of ["auto-edit", "yolo"] as const) {
+      const e = new PermissionEngine({ permissionMode: mode });
+      const w = makeTool("write_file", "write");
+      const res = e.preflight(w, { path: "src/app.ts" });
+      expect(res).not.toBe("ask");
+    }
+  });
+
+  it("forces ask for a bash command mutating a system path — even in yolo", () => {
+    const e = new PermissionEngine({ permissionMode: "yolo" });
+    const t = makeTool("bash", "execute");
+    // Mutating /etc → ask; reading it is fine.
+    expect(e.preflight(t, { command: "echo x > /etc/motd" })).toBe("ask");
+    expect(e.preflight(t, { command: "tee /etc/hosts" })).toBe("ask");
+  });
+
+  it("an explicit deny rule still wins over the sensitive-path ask", () => {
+    const e = new PermissionEngine({ permissionMode: "yolo", permissions: { deny: ["write_file"] } });
+    const w = makeTool("write_file", "write");
+    const res = e.preflight(w, { path: "/etc/hosts" });
+    expect(typeof res === "object" && res.decision).toBe("deny");
+  });
 });
 
 describe("matchRule", () => {

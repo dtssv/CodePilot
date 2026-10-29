@@ -83,6 +83,13 @@ class FakeSession {
   getHistory() {
     return [...this.events];
   }
+  async compact(): Promise<void> {
+    /* no-op in the mock */
+  }
+  async clearWorkingContext(_reason?: string): Promise<boolean> {
+    // Mirror real semantics: nothing to clear when there's no assistant work.
+    return this.events.some((e: { type?: string; role?: string }) => e.type === "message" && e.role === "assistant");
+  }
   emit(e: unknown) {
     this.events.push(e);
     for (const l of this.listeners) l(e);
@@ -389,13 +396,19 @@ describe("server / protocol handlers", () => {
       InitializeParams,
       {
         protocolVersion: number;
-        capabilities: { config?: boolean; setModel?: boolean };
+        capabilities: { config?: boolean; setModel?: boolean; providers?: string[] };
       }
     >("initialize", initParams);
     expect(res.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(res.capabilities).toBeTruthy();
     expect(res.capabilities.config).toBe(true);
     expect(res.capabilities.setModel).toBe(true);
+    // Advertised providers must match the implemented set (ProviderName) — a
+    // regression previously dropped gemini/azure here while they were fully
+    // wired in the provider factory.
+    expect([...(res.capabilities.providers ?? [])].sort()).toEqual(
+      ["anthropic", "azure", "copilot", "gemini", "openai"],
+    );
   });
 
   it("config/get redacts api keys and lists selectable models", async () => {
@@ -575,6 +588,77 @@ describe("server / protocol handlers", () => {
     expect(final?.content?.[0]?.text).toContain('"confirm":"Yes"');
   });
 
+  it("commands/list returns shared built-in commands for the /menu", async () => {
+    registerServer(server, { defaultCwd: process.cwd(), defaultPermissionMode: "ask" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: process.cwd(),
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<{ cwd?: string }, { commands: Array<{ name: string; source: string }>; warnings: string[] }>(
+      "commands/list",
+      {},
+    );
+    const names = res.commands.map((c) => c.name);
+    // Shared built-ins are advertised; TUI-only ones (exit/remote/connect) are not.
+    expect(names).toContain("compact");
+    expect(names).toContain("clear");
+    expect(names).toContain("model");
+    expect(names).not.toContain("exit");
+    expect(names).not.toContain("remote");
+  });
+
+  it("workspace/complete returns file candidates for an @mention query", async () => {
+    registerServer(server, { defaultCwd: process.cwd(), defaultPermissionMode: "ask" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: process.cwd(),
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<
+      { query: string; kinds?: string[]; cwd?: string },
+      { candidates: Array<{ kind: string; value: string; label: string }> }
+    >("workspace/complete", { query: "package", kinds: ["file"], cwd: process.cwd() });
+    expect(Array.isArray(res.candidates)).toBe(true);
+    // The protocol package has a package.json → should surface as a file candidate.
+    expect(res.candidates.some((c) => c.kind === "file" && c.value.includes("package.json"))).toBe(true);
+  });
+
+  it("session/compact and session/clear-context are handled (local actions)", async () => {
+    registerServer(server, { defaultCwd: process.cwd(), defaultPermissionMode: "ask" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: process.cwd(),
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    // compact on a fresh session is a no-op but must resolve ok (not error).
+    const c = await client.request<{ sessionId: string }, { ok: true }>("session/compact", { sessionId });
+    expect(c.ok).toBe(true);
+    // clear-context with no prior work returns cleared:false (nothing to archive).
+    const cl = await client.request<{ sessionId: string }, { cleared: boolean }>("session/clear-context", { sessionId });
+    expect(cl.cleared).toBe(false);
+  });
+
+  it("session/compact rejects an unknown session", async () => {
+    registerServer(server, { defaultCwd: process.cwd(), defaultPermissionMode: "ask" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: process.cwd(),
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    try {
+      await client.request("session/compact", { sessionId: "nope" });
+      throw new Error("should have rejected");
+    } catch (err) {
+      expect(err).toBeInstanceOf(RpcError);
+    }
+  });
+
   it("question/respond without a pending request returns -32602", async () => {
     registerServer(server);
     await client.request("initialize", {
@@ -613,6 +697,65 @@ describe("server / protocol handlers", () => {
     expect(listSessions).toHaveBeenCalled();
   });
 
+  it("session/list over a remote grant is scoped to the granted cwds", async () => {
+    // Seed sessions in two different workspaces.
+    await (createSession as unknown as ReturnType<typeof vi.fn>)({ cwd: "/work/a" });
+    await (createSession as unknown as ReturnType<typeof vi.fn>)({ cwd: "/work/b" });
+    // Register a server whose connection is a QR remote grant for ONLY /work/a.
+    serverHandle = registerServer(server, {
+      defaultCwd: "/work/a",
+      remoteGrant: {
+        token: "t",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+        cwd: "/work/a",
+        cwds: ["/work/a"],
+        caps: ["prompt", "cancel", "follow", "answer"],
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<{}, { sessions: Array<{ id: string; cwd?: string }> }>(
+      "session/list",
+      {},
+    );
+    // Only the /work/a session is visible; /work/b is withheld.
+    expect(res.sessions.length).toBeGreaterThanOrEqual(1);
+    expect(res.sessions.every((s) => s.cwd === "/work/a")).toBe(true);
+    expect(res.sessions.some((s) => s.cwd === "/work/b")).toBe(false);
+  });
+
+  it("session/resume over a remote grant refuses an out-of-scope workspace", async () => {
+    // A session living in /work/b, which the grant does NOT authorize.
+    const outside = await (createSession as unknown as ReturnType<typeof vi.fn>)({
+      cwd: "/work/b",
+    });
+    serverHandle = registerServer(server, {
+      defaultCwd: "/work/a",
+      remoteGrant: {
+        token: "t",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+        cwd: "/work/a",
+        cwds: ["/work/a"],
+        caps: ["prompt", "cancel", "follow", "answer"],
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await expect(
+      client.request("session/resume", { sessionId: outside.id }),
+    ).rejects.toBeInstanceOf(RpcError);
+  });
+
   it("workspace list/read/search are cwd-confined", async () => {
     const root = mkdtempSync(join(tmpdir(), "cp-workspace-"));
     mkdirSync(join(root, "src")); writeFileSync(join(root, "src", "a.ts"), "const needle = 1;\n", "utf8");
@@ -635,6 +778,53 @@ describe("server / protocol handlers", () => {
     expect(stat).toMatchObject({ exists: true, size: updated.content.length });
     expect(stat.hash).toHaveLength(64);
     await expect(client.request("workspace/write", { path: "../outside", content: "x" })).rejects.toBeInstanceOf(RpcError);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("workspace/read resolves a bare/relative name to the real nested file", async () => {
+    // Regression: the model references "subagent.ts" (bare) or
+    // "src/subagent.ts" (repo-relative, not rooted at the open workspace),
+    // which joins to a non-existent path. Instead of ENOENT, read should find
+    // the real file by basename/suffix and open it.
+    const root = mkdtempSync(join(tmpdir(), "cp-resolve-"));
+    mkdirSync(join(root, "packages", "core", "src"), { recursive: true });
+    writeFileSync(join(root, "packages", "core", "src", "subagent.ts"), "export const SUB = 1;\n", "utf8");
+    registerServer(server, { defaultCwd: root });
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+
+    // Bare filename → resolved to the nested real file.
+    const bare = (await client.request("workspace/read", { path: "subagent.ts" })) as { path: string; content: string };
+    expect(bare.content).toContain("SUB = 1");
+    expect(bare.path.replace(/\\/g, "/")).toBe("packages/core/src/subagent.ts");
+
+    // Repo-relative suffix → same resolution.
+    const suffix = (await client.request("workspace/read", { path: "core/src/subagent.ts" })) as { content: string };
+    expect(suffix.content).toContain("SUB = 1");
+
+    // A truly missing file still errors.
+    await expect(client.request("workspace/read", { path: "does-not-exist.xyz" })).rejects.toBeInstanceOf(RpcError);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("workspace/resolve returns the absolute path for a bare name (open-in-editor)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-resolve2-"));
+    mkdirSync(join(root, "packages", "core", "src"), { recursive: true });
+    writeFileSync(join(root, "packages", "core", "src", "subagent.ts"), "x\n", "utf8");
+    registerServer(server, { defaultCwd: root });
+    await client.request("initialize", { protocolVersion: PROTOCOL_VERSION, cwd: root, permissionMode: "ask", clientInfo: { name: "t", version: "0" } });
+
+    // Bare name → absolute path of the real nested file (what the host opens).
+    const bare = (await client.request("workspace/resolve", { path: "subagent.ts" })) as { path: string; absolute: string; exists: boolean };
+    expect(bare.exists).toBe(true);
+    expect(bare.absolute.replace(/\\/g, "/")).toBe(join(root, "packages", "core", "src", "subagent.ts").replace(/\\/g, "/"));
+
+    // A path that already resolves directly is returned as-is.
+    const direct = (await client.request("workspace/resolve", { path: "packages/core/src/subagent.ts" })) as { exists: boolean; absolute: string };
+    expect(direct.exists).toBe(true);
+
+    // Missing → exists:false, no throw (caller decides).
+    const missing = (await client.request("workspace/resolve", { path: "nope.zzz" })) as { exists: boolean };
+    expect(missing.exists).toBe(false);
     rmSync(root, { recursive: true, force: true });
   });
 

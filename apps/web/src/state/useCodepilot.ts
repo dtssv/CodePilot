@@ -56,12 +56,17 @@ export interface Codepilot {
   changeCwd(cwd: string): Promise<void>;
  /** Add/focus a workspace folder and bind subsequent sessions to it. */
   openWorkspace(cwd: string): Promise<void>;
+ /** Merge workspaces into the local list without switching the active one
+  * (used to seed a remote phone with the authorized set). */
+  seedWorkspaces(cwds: string[]): void;
  /** Remove a workspace from the open list (does not delete sessions on disk). */
   closeWorkspace(cwd: string): Promise<void>;
   newSession(mode?: AgentMode): Promise<string | undefined>;
   resumeSession(id: string): Promise<void>;
   forkSession(): Promise<void>;
   refreshSessions(): Promise<void>;
+  pinSession(id: string, pinned: boolean): Promise<void>;
+  archiveSession(id: string, archived: boolean): Promise<void>;
   send(
     text: string,
     images?: ImageAttachment[],
@@ -100,6 +105,10 @@ export function useCodepilot(): Codepilot {
   live.current = state;
   const lastWs = useRef<WsTarget | null>(null);
 
+  // Lets the client's onEvent handler (created once, before refreshSessions is
+  // defined) ask for a sidebar refresh without a stale closure.
+  const refreshSessionsRef = useRef<() => void>(() => {});
+
   const clientRef = useRef<CodepilotClient | null>(null);
   if (clientRef.current === null) {
     clientRef.current = new CodepilotClient({
@@ -110,6 +119,19 @@ export function useCodepilot(): Codepilot {
  // onto the empty / new-workspace view.
         if (!live.current.sessionId || sessionId !== live.current.sessionId) return;
         dispatch({ type: "event", event });
+        // A brand-new session is a "draft" until its first message is
+        // persisted, so listSessions() (and the sidebar) omits it. The old
+        // refreshSessions() in newSession/send ran before that first event was
+        // flushed, so the session only appeared after a later manual refresh.
+        // When the first user message for the on-screen session arrives and it
+        // is not yet in the sidebar, refresh once so it shows immediately.
+        if (
+          event.type === "message" &&
+          event.role === "user" &&
+          !live.current.sessions.some((s) => s.id === sessionId)
+        ) {
+          refreshSessionsRef.current();
+        }
       },
       onPermission: (req: PendingPermission) => {
         if (!live.current.sessionId || req.sessionId !== live.current.sessionId) return;
@@ -141,6 +163,8 @@ export function useCodepilot(): Codepilot {
       dispatch({ type: "notice", text: describeError(err) });
     }
   }, [client]);
+  // Keep the ref used by onEvent pointed at the latest refreshSessions.
+  refreshSessionsRef.current = () => void refreshSessions();
 
   async function resumeCurrent(): Promise<void> {
     const id = live.current.sessionId;
@@ -288,6 +312,15 @@ export function useCodepilot(): Codepilot {
     },
     [client, refreshSessions, applyPreferredModel],
   );
+
+  const seedWorkspaces = useCallback((cwds: string[]) => {
+    let next = loadPrefs().workspaces;
+    for (const raw of cwds) {
+      const cwd = raw.trim().replace(/\/+$/, "") || raw.trim();
+      if (cwd) next = addWorkspace(cwd);
+    }
+    setWorkspaces(next);
+  }, []);
 
   const changeCwd = useCallback(
     async (cwd: string) => {
@@ -623,6 +656,22 @@ export function useCodepilot(): Codepilot {
     dispatch({ type: "session-closed" });
   }, []);
 
+  const pinSession = useCallback(
+    async (id: string, pinned: boolean) => {
+      await client.pinSession(id, pinned);
+      await refreshSessions();
+    },
+    [client, refreshSessions],
+  );
+
+  const archiveSession = useCallback(
+    async (id: string, archived: boolean) => {
+      await client.archiveSession(id, archived);
+      await refreshSessions();
+    },
+    [client, refreshSessions],
+  );
+
   return {
     state,
     client,
@@ -632,11 +681,14 @@ export function useCodepilot(): Codepilot {
     disconnect,
     changeCwd,
     openWorkspace,
+    seedWorkspaces,
     closeWorkspace,
     newSession,
     resumeSession,
     forkSession,
     refreshSessions,
+    pinSession,
+    archiveSession,
     send,
     removeFollowUp,
     sendFollowUpNow,

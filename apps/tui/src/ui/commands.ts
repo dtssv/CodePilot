@@ -79,7 +79,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "resume", description: "Pick a session to resume (↑↓ + Enter)", args: "[session-id]" },
   { name: "sessions", description: "Pick a session to resume (↑↓ + Enter)" },
   { name: "goal", description: "Start a long-running goal (prompts for objective)", args: "[objective]" },
-  { name: "clear", description: "Clear the visible event log" },
+  { name: "clear", description: "Start a fresh task: archive prior context (kept on disk) and clear the log" },
   { name: "mcp", description: "Show MCP server status & tools" },
   { name: "hooks", description: "Show configured hooks" },
   { name: "agents", description: "Show custom sub-agents" },

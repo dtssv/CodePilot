@@ -33,6 +33,7 @@ import {
   discoverPlugins,
   sameCwd,
   exportSession,
+  driveGoalRounds,
   type RichSessionSummary,
 } from "@codepilot/core";
 import { writeFile } from "node:fs/promises";
@@ -56,13 +57,14 @@ import {
   buildCommandList,
   BUILTIN_COMMAND_NAMES,
 } from "./commands.js";
-import type { PermissionBridge, QuestionBridge, SessionController } from "./controller.js";
+import type { GoalBridge, PermissionBridge, QuestionBridge, SessionController } from "./controller.js";
 
 export interface AppProps {
   session: Session;
   controller: SessionController;
   permissionBridge: PermissionBridge;
   questionBridge: QuestionBridge;
+  goalBridge: GoalBridge;
   cwd: string;
   model: string | undefined;
   permissionMode: PermissionMode;
@@ -92,6 +94,7 @@ export function App(props: AppProps): React.ReactElement {
     controller,
     permissionBridge,
     questionBridge,
+    goalBridge,
     cwd,
     model,
     permissionMode,
@@ -102,6 +105,14 @@ export function App(props: AppProps): React.ReactElement {
  // Live session can be swapped by /resume without restarting the TUI.
   const [session, setSession] = React.useState(initialSession);
 
+ // Goal loop requested by the model (via `start_goal`) but not yet driven,
+ // keyed by session id. Consumed when the triggering turn settles (idle), then
+ // `driveGoalRounds` takes over. `activeGoalLoops` guards against re-entry on
+ // the per-round idle events the loop itself produces. Refs (not state) so the
+ // event subscription reads current values without re-subscribing.
+  const pendingGoalRef = React.useRef<Map<string, { objective: string; maxRounds?: number }>>(new Map());
+  const activeGoalLoopsRef = React.useRef<Set<string>>(new Set());
+
   const [state, dispatch] = React.useReducer(reducer, undefined, () =>
     initialState({
       sessionId: initialSession.id,
@@ -110,6 +121,65 @@ export function App(props: AppProps): React.ReactElement {
       permissionMode,
       agentMode: initialAgentMode,
     }),
+  );
+
+ // Record a model-requested goal loop (from `start_goal`). Not started here:
+ // `session.prompt()` enqueues while busy, so we wait for the triggering turn
+ // to settle. Returning true tells the tool the host accepted.
+  const recordPendingGoal = React.useCallback(
+    (sid: string, req: { objective: string; maxRounds?: number }): boolean => {
+      pendingGoalRef.current.set(sid, {
+        objective: req.objective,
+        ...(req.maxRounds ? { maxRounds: req.maxRounds } : {}),
+      });
+      dispatch({ type: "set-notice", text: `Goal loop requested: ${req.objective}` });
+      return true;
+    },
+    [],
+  );
+
+ // On idle: if this session has a pending goal and no loop is already driving,
+ // consume it and drive rounds. The loop's own prompts produce more idle
+ // events, but `activeGoalLoops` guards re-entry so we drive one loop at a time.
+  const maybeStartGoalLoop = React.useCallback(
+    (sess: Session): void => {
+      const sid = sess.id;
+      if (activeGoalLoopsRef.current.has(sid)) return;
+      const pending = pendingGoalRef.current.get(sid);
+      if (!pending) return;
+      pendingGoalRef.current.delete(sid);
+      activeGoalLoopsRef.current.add(sid);
+      void driveGoalRounds(sess, {
+        objective: pending.objective,
+        maxRounds: pending.maxRounds,
+        // Surface per-round progress into the session event stream so the
+        // transcript shows goal rounds (same channel the server uses).
+        onCheckpoint: (info) =>
+          sess.emitGoalProgress({
+            round: info.round,
+            status: info.status,
+            maxRounds: pending.maxRounds,
+            reason: info.reason,
+            blockedReason: info.blockedReason,
+          }),
+      })
+        .then((r) => {
+          dispatch({
+            type: "set-notice",
+            text: `Goal ${r.status}${r.reason ? `: ${r.reason}` : ""}`,
+          });
+        })
+        .catch((err: unknown) => {
+          dispatch({
+            type: "set-notice",
+            text: `Goal failed: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        })
+        .finally(() => {
+          activeGoalLoopsRef.current.delete(sid);
+        });
+    },
+    [],
   );
 
  // Custom slash commands discovered from .codepilot/commands/*.md and
@@ -182,9 +252,10 @@ export function App(props: AppProps): React.ReactElement {
       dispatch({ type: "event", event: ev });
       if (ev.type === "status" && ev.status === "idle") {
         dispatch({ type: "set-busy", busy: false });
+        maybeStartGoalLoop(session);
       }
     });
-  }, [session]);
+  }, [session, maybeStartGoalLoop]);
 
  // 2. Permission bridge: when core calls onPermissionRequest, it pushes
  // a request into the bridge and awaits a decision. The UI side reacts
@@ -211,6 +282,14 @@ export function App(props: AppProps): React.ReactElement {
       dispatch({ type: "question-pending", req });
     });
   }, [questionBridge]);
+
+ // 2c. Goal bridge: core's onGoalRequest (from `start_goal`) records a pending
+ // goal here; it is driven when the triggering turn settles idle (see effect 1).
+  React.useEffect(() => {
+    return goalBridge.onPending((sid, req) => {
+      recordPendingGoal(sid, req);
+    });
+  }, [goalBridge, recordPendingGoal]);
 
  // 2c. Another client following the same server session answered first.
   React.useEffect(() => {
@@ -371,6 +450,7 @@ export function App(props: AppProps): React.ReactElement {
             sessionId: id,
             onPermissionRequest: (req) => permissionBridge.waitDecision(req),
             onAskUser: (req) => questionBridge.waitAnswers(req),
+            onGoalRequest: (req) => goalBridge.request(id, req),
           });
         }
         const prev = session;
@@ -659,10 +739,25 @@ export function App(props: AppProps): React.ReactElement {
           case "goal":
             await runGoal(result.objective);
             return;
-          case "clear":
+          case "clear": {
+            // Archive the model-facing working context (task boundary), then
+            // clear the visible log. Without the core call, /clear was purely
+            // cosmetic — the model still saw the whole prior transcript.
+            let archived = false;
+            try {
+              archived = await session.clearWorkingContext("user ran /clear");
+            } catch {
+              /* fall back to UI-only clear */
+            }
             dispatch({ type: "clear" });
-            dispatch({ type: "set-notice", text: "Cleared." });
+            dispatch({
+              type: "set-notice",
+              text: archived
+                ? "Cleared — prior context archived; starting fresh (full transcript kept on disk)."
+                : "Cleared.",
+            });
             return;
+          }
           case "show-mcp": {
             try {
               const summary = describeMcp(session.getMcpManager());

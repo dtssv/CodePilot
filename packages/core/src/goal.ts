@@ -15,7 +15,7 @@
 // reason, and the checkpoint path. It is part of `GoalRunOptionsEx`
 // to preserve the existing `GoalRunOptions` shape.
 
-import { createSession } from "./session.js";
+import { createSession, type Session } from "./session.js";
 import type { GoalRunOptions, GoalRunResult, Event } from "./types.js";
 import { appendCheckpointRound, checkpointPath } from "./checkpoints.js";
 import { killAllJobs } from "./tools/bashJobs.js";
@@ -78,8 +78,29 @@ Additional rules:
 The loop will continue until you emit one of the status markers or it hits the round cap.`;
 
 export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
-  const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
   const session = await createSession(opts);
+  try {
+    return await driveGoalRounds(session, opts);
+  } finally {
+    await session.dispose();
+    await killAllJobs().catch(() => {});
+  }
+}
+
+/**
+ * Drive the goal loop over an ALREADY-CREATED session, without creating or
+ * disposing it. This is the reusable core of `runGoal`: `runGoal` owns the
+ * session lifecycle and delegates the round loop here, while a host that wants
+ * to escalate the CURRENT session into a goal loop (via the `start_goal` tool /
+ * `goal_request` event) can call this directly on its live session — the loop
+ * just keeps `prompt()`ing that session, so the user's existing context carries
+ * through. The caller is responsible for the session's lifecycle.
+ */
+export async function driveGoalRounds(
+  session: Session,
+  opts: Pick<GoalRunOptionsEx, "objective" | "maxRounds" | "onRound" | "onCheckpoint">
+): Promise<GoalRunResult> {
+  const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
   let round = 0;
   let status: "completed" | "blocked" | "round_limit" = "round_limit";
   let reason: string | undefined;
@@ -117,34 +138,29 @@ export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
     }
   };
 
-  try {
-    for (round = 1; round <= maxRounds; round++) {
-      opts.onRound?.(round, "running");
-      await fireCheckpoint(round, "running");
-      const userText = renderRoundPrompt(round, opts.objective);
-      await session.prompt(userText);
+  for (round = 1; round <= maxRounds; round++) {
+    opts.onRound?.(round, "running");
+    await fireCheckpoint(round, "running");
+    const userText = renderRoundPrompt(round, opts.objective);
+    await session.prompt(userText);
 
-      const events = session.getEvents();
-      const lastAssistant = lastAssistantText(events);
-      if (!lastAssistant) continue;
-      const found = scanForStatus(lastAssistant);
-      if (found === "completed") {
-        status = "completed";
-        reason = extractCompletedReason(lastAssistant) ?? "model reported completed";
-        await fireCheckpoint(round, "completed", reason);
-        break;
-      }
-      if (found === "blocked") {
-        status = "blocked";
-        blockedReason = extractBlockedReason(lastAssistant);
-        reason = blockedReason ?? "model reported blocked";
-        await fireCheckpoint(round, "blocked", reason, blockedReason);
-        break;
-      }
+    const events = session.getEvents();
+    const lastAssistant = lastAssistantText(events);
+    if (!lastAssistant) continue;
+    const found = scanForStatus(lastAssistant);
+    if (found === "completed") {
+      status = "completed";
+      reason = extractCompletedReason(lastAssistant) ?? "model reported completed";
+      await fireCheckpoint(round, "completed", reason);
+      break;
     }
-  } finally {
-    await session.dispose();
-    await killAllJobs().catch(() => {});
+    if (found === "blocked") {
+      status = "blocked";
+      blockedReason = extractBlockedReason(lastAssistant);
+      reason = blockedReason ?? "model reported blocked";
+      await fireCheckpoint(round, "blocked", reason, blockedReason);
+      break;
+    }
   }
 
   if (status === "round_limit") {

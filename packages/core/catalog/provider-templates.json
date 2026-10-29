@@ -142,6 +142,14 @@
       "description": "Any Anthropic Messages-compatible gateway — set baseURL yourself"
     },
     {
+      "id": "azure-openai",
+      "displayName": "Azure OpenAI",
+      "provider": "azure",
+      "models": [],
+      "requiresBaseURL": true,
+      "description": "Azure OpenAI — set baseURL to your resource endpoint (https://<resource>.openai.azure.com) and model to the deployment name"
+    },
+    {
       "id": "copilot",
       "displayName": "GitHub Copilot",
       "provider": "copilot",

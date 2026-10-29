@@ -6,9 +6,12 @@
 // and returns only its final conclusion. Parallel tasks run concurrently
 // via Promise.all; each returns its own structured conclusion.
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Event, UsageInfo } from "../types.js";
 import type { ToolDef } from "./types.js";
+import { SubagentCache } from "../subagentCache.js";
+import { isTransientError } from "../transientError.js";
 
 /** Named sub-agent types. "explore" is read-only; "worker" may edit files. */
 export const AGENT_TYPES = ["explore", "worker"] as const;
@@ -29,9 +32,14 @@ const taskSpec = z.object({
     .number()
     .int()
     .positive()
-    .max(50)
+    .max(1000)
     .optional()
-    .describe("Maximum tool steps for the sub-agent (default 15)."),
+    .describe(
+      "Optional max agentic turns for the sub-agent. Omit for no turn limit " +
+        "(recommended unless you need a hard cost bound). When set, the sub-agent " +
+        "is urged to synthesize before the cap; on hit the user is asked whether to " +
+        "grant more turns (interactive) — not treated as a hard error.",
+    ),
   output_schema: z
     .record(z.string(), z.unknown())
     .optional()
@@ -86,7 +94,7 @@ const teamMemberSpec = z.object({
     ),
   tools: z.array(z.string()).optional().describe("Restrict this member's tools."),
   model: z.string().optional().describe("Override this member's model."),
-  maxSteps: z.number().int().positive().max(50).optional(),
+  maxSteps: z.number().int().positive().max(1000).optional(),
 });
 
 const schema = z
@@ -111,7 +119,13 @@ const schema = z
       .optional()
       .describe("Tool subset for single-task mode."),
     model: z.string().optional().describe("Model override for single-task mode."),
-    maxSteps: z.number().int().positive().max(50).optional(),
+    maxSteps: z
+      .number()
+      .int()
+      .positive()
+      .max(1000)
+      .optional()
+      .describe("Optional turn cap for single-task mode; omit for unlimited."),
     output_schema: z
       .record(z.string(), z.unknown())
       .optional()
@@ -120,6 +134,17 @@ const schema = z
       .enum(["none", "worktree"])
       .optional()
       .describe("Filesystem isolation for single-task mode (default \"none\")."),
+    continue_session_id: z
+      .string()
+      .optional()
+      .describe(
+        "Continue a PREVIOUS sub-agent instead of spawning a new one. Pass the " +
+          "`session_id` a prior `task` result reported; `objective` is then sent " +
+          "to that existing sub-agent as a follow-up and it keeps its full " +
+          "conversation and gathered context — do NOT re-describe earlier work. " +
+          "Use this to iterate with the same sub-agent (single-task mode only). " +
+          "Omit to start a fresh sub-agent."
+      ),
     csv: z
       .string()
       .optional()
@@ -214,6 +239,19 @@ export interface SubagentRunSpec {
  * runs the sub-agent there; "none" (default) runs in the parent cwd.
  * See ../worktree.ts. */
   isolation?: Isolation;
+ /** Continue an EXISTING sub-agent instead of spawning a fresh one. When set,
+  * the runner loads that sub-agent's stored transcript as history and sends
+  * `objective` (or `continueText`) as a follow-up — the sub-agent keeps its
+  * full conversation. The id is the `sessionId` a prior run returned. */
+  resumeSessionId?: string;
+ /** The follow-up message when continuing (defaults to `objective`). Sent
+  * WITHOUT the "you are a sub-agent" preamble — the resumed agent already has
+  * that context. */
+  continueText?: string;
+ /** The sub-agent's stable id. Set by the `task` tool so the id in the
+  * progress events, the persisted transcript, and the returned
+  * `session_id` all match. When omitted the runner generates one. */
+  ownerId?: string;
 }
 
 /** Sub-agent filesystem isolation modes. */
@@ -233,6 +271,10 @@ export interface SubagentRunResult {
  * separately during the run; callers should roll this into the parent
  * after the sub-agent finishes. */
   usage?: UsageInfo;
+ /** The sub-agent's stable, unique run id (`sub_…`). The parent surfaces this
+  * so a later `task` call can pass it as `continue_session_id` to continue
+  * the SAME sub-agent instead of dispatching a new one. */
+  sessionId?: string;
 }
 
 /** Emit sub-agent usage onto the parent event stream so session totals
@@ -369,15 +411,28 @@ export const taskTool: ToolDef<typeof schema> & {
   runner?: SubagentRunner;
  /** Max sub-agent nesting depth (default 2). Set by the session. */
   maxDepth?: number;
- /** Max concurrently-running sub-agents (default 4). Set by the session.
+ /** Max concurrently-running sub-agents (default 6). Set by the session.
  * A shared Semaphore enforces this across all task calls. */
   maxThreads?: number;
+ /** Max total sub-agents a session may spawn across the whole run (default
+ * 200). Guards against runaway累计 fan-out even when depth/concurrency are
+ * within bounds. Enforced via the shared `_spawned` counter. */
+  maxTotal?: number;
  /** Optional per-sub-agent wall-clock budget in milliseconds. When set, a
  * sub-agent that runs longer is abandoned and its permit released so the
  * rest of the fan-out proceeds. Unset (default) means no timeout. */
   subagentTimeoutMs?: number;
  /** The semaphore instance (lazily created from maxThreads). */
   _sem?: Semaphore;
+ /** Running total of sub-agents spawned this session (for maxTotal). */
+  _spawned?: number;
+ /** Session-global monotonic counter so every dispatched sub-agent gets a
+  * unique display sequence (`#3`), unlike the per-fan-out `index`. */
+  _runSeq?: number;
+ /** Durable-cache policy from config. `cacheEnabled` default true; `cacheTtlMs`
+  * from `subagentCache.ttlHours`. Set by the session. */
+  cacheEnabled?: boolean;
+  cacheTtlMs?: number;
 } = {
   name: "task",
   description:
@@ -398,10 +453,10 @@ export const taskTool: ToolDef<typeof schema> & {
     }
  // Recursion guard: refuse to spawn beyond the max nesting depth. The
  // top-level call is depth 0; a sub-agent calling task is depth 1, etc.
- // Default max 2 (parent → subagent → subagent), configurable via the
+ // Default max 3 (coordinator → orchestrator → worker), configurable via the
  // runner's `maxDepth` option (set on the factory).
     const currentDepth = ctx.subagentDepth ?? 0;
-    const maxDepth = this.maxDepth ?? 2;
+    const maxDepth = this.maxDepth ?? 3;
     if (currentDepth >= maxDepth) {
       return {
         content:
@@ -413,12 +468,41 @@ export const taskTool: ToolDef<typeof schema> & {
     }
  // Concurrency guard: cap the number of sub-agents running at once.
     if (!this._sem) {
-      this._sem = new Semaphore(this.maxThreads ?? 4);
+      this._sem = new Semaphore(this.maxThreads ?? 6);
     }
     const sem = this._sem;
 
+    // Total-spawn guard, shared by BOTH the team path and the fan-out path so a
+    // team can't bypass the session-wide fork-bomb cap. `tryReserve` checks the
+    // cumulative `_spawned` counter against `maxTotal`, increments it by the
+    // granted amount, and returns how many spawns are allowed now (0 = at cap).
+    // Fan-out trims to fit; a team roster is atomic, so it refuses wholesale
+    // when it would overflow rather than running a partial team.
+    const maxTotal = this.maxTotal ?? 200;
+    const tryReserve = (want: number): number => {
+      const already = this._spawned ?? 0;
+      const grant = Math.max(0, Math.min(want, maxTotal - already));
+      this._spawned = already + grant;
+      return grant;
+    };
+
  // Team mode: one goal, several roles, merged result. See ../teams.ts.
     if (input.team && input.team.length > 0) {
+      // A team dispatches its members (plus at most an internal leader/merger,
+      // which are bounded and not user-controlled); the members are the fan-out
+      // that the cap exists to bound, so count the roster against maxTotal.
+      const granted = tryReserve(input.team.length);
+      if (granted < input.team.length) {
+        // Roll back the partial reservation — teams run whole or not at all.
+        this._spawned = (this._spawned ?? 0) - granted;
+        return {
+          content:
+            `Refused: this session has already spawned ${this._spawned ?? 0} sub-agents; ` +
+            `a team of ${input.team.length} would exceed the cap of ${maxTotal}. ` +
+            `Reconcile the remaining work directly instead of delegating further.`,
+          isError: true,
+        };
+      }
       const { runTeam, renderTeamResult } = await import("../teams.js");
       try {
         const result = await runTeam(
@@ -497,11 +581,46 @@ export const taskTool: ToolDef<typeof schema> & {
           depth: currentDepth + 1,
           outputSchema: input.output_schema,
           isolation: input.isolation,
+          resumeSessionId: input.continue_session_id,
         },
       ];
     })();
+    // Total-spawn guard (shared with the team path above): cap cumulative
+    // sub-agents across the whole session so a deep/wide tree can't fork-bomb
+    // the token budget. Enforced on top of depth + concurrency (the two
+    // independent brakes). A fan-out trims to fit under the cap rather than
+    // rejecting wholesale.
+    const alreadySpawned = this._spawned ?? 0;
+    if (alreadySpawned >= maxTotal) {
+      return {
+        content:
+          `Refused: this session has already spawned ${alreadySpawned} sub-agents, ` +
+          `reaching the cap of ${maxTotal}. Do the remaining work directly ` +
+          `instead of delegating further.`,
+        isError: true,
+      };
+    }
+    const granted = tryReserve(specs.length);
+    if (granted < specs.length) {
+      specs.length = granted;
+    }
+    // Durable conclusion cache: a crashed fan-out resumes without re-running
+    // sub-agents that already succeeded. Keyed by (objective+type+cwd+model).
+    // Disabled when there's no project state dir (minimal/test contexts) or
+    // when `subagentCache.enabled` is false. TTL from `subagentCache.ttlHours`.
+    const cacheOn = this.cacheEnabled !== false;
+    const cache =
+      cacheOn && ctx.projectStateDir
+        ? new SubagentCache(ctx.projectStateDir, this.cacheTtlMs)
+        : null;
     const results = await Promise.all(
       specs.map(async (spec, i) => {
+        // Session-global unique sequence for this dispatch (for UI labels).
+        const runSeq = (this._runSeq = (this._runSeq ?? 0) + 1);
+        // The sub-agent's stable id: a resumed run keeps its id; a fresh run
+        // gets one now so the progress events (and the parent's returned
+        // `session_id`) carry it from the very first "running" marker.
+        const ownerId = spec.resumeSessionId ?? `sub_${randomUUID()}`;
         const progress = (extra: { state?: "running" | "ok" | "failed"; event?: Event }): void => {
           if (!ctx.emitEvent || !ctx.toolCallId) return;
           void Promise.resolve(
@@ -510,28 +629,73 @@ export const taskTool: ToolDef<typeof schema> & {
               parentToolCallId: ctx.toolCallId,
               index: i,
               objective: spec.objective,
+              sessionId: ownerId,
+              runSeq,
               ts: Date.now(),
               ...extra,
             }),
           ).catch(() => {});
         };
         progress({ state: "running" });
-        try {
-          const r = await sem.withPermit(
-            () => this.runner!.run({ ...spec, onLiveEvent: (event) => progress({ event }) }),
+        // Durable resume: if this exact sub-agent already succeeded (same
+        // objective/type/cwd/model) in an earlier, interrupted run, reuse the
+        // cached conclusion instead of re-running it. NOT when continuing an
+        // existing sub-agent — a follow-up must reach the live session, never a
+        // cached prior answer.
+        const cacheKey =
+          cache && !spec.resumeSessionId
+            ? { objective: spec.objective, agentType: spec.agentType, cwd: spec.cwd, model: spec.model }
+            : null;
+        if (cache && cacheKey) {
+          const hit = await cache.get(cacheKey);
+          if (hit) {
+            progress({ state: "ok" });
+            return { i, ok: true, text: hit.conclusion, steps: hit.steps, sessionId: ownerId };
+          }
+        }
+        // Self-heal: retry a transient failure once (rate-limit / overloaded /
+        // timeout / network). Deterministic failures (bad model, empty result)
+        // are not retried — they won't改善 on a second try. Uses the shared
+        // classifier so the sub-agent retry policy matches the agent loop's.
+        const isTransient = isTransientError;
+        const runOnce = () =>
+          sem.withPermit(
+            () => this.runner!.run({ ...spec, ownerId, onLiveEvent: (event) => progress({ event }) }),
             { signal: ctx.signal, timeoutMs: this.subagentTimeoutMs },
           );
+        try {
+          let r = await runOnce();
+          if (!r.ok && isTransient(r.conclusion ?? "") && !ctx.signal?.aborted) {
+            r = await runOnce();
+          }
           progress({ state: r.ok ? "ok" : "failed" });
           // Roll sub-agent tokens into the parent only after it finishes.
           emitParentUsage(ctx.emitEvent, r.usage);
+          // Persist a successful conclusion so a later resume can skip it.
+          if (cache && cacheKey && r.ok) {
+            await cache.put(cacheKey, { ok: true, conclusion: r.conclusion, steps: r.steps, ts: Date.now() });
+          }
  // Honour the runner's soft-failure flag (empty conclusion /
  // provider error). Previously we marked every non-throwing run
  // as ok, so "Model not exist" sub-agents looked like successful
  // 0-step explorations.
-          return { i, ok: r.ok, text: r.conclusion, steps: r.steps };
+          return { i, ok: r.ok, text: r.conclusion, steps: r.steps, sessionId: r.sessionId ?? ownerId };
         } catch (err) {
+          const msg = (err as Error).message;
+          // One retry for transient throws too (e.g. timeout rejection).
+          if (isTransient(msg) && !ctx.signal?.aborted) {
+            try {
+              const r = await runOnce();
+              progress({ state: r.ok ? "ok" : "failed" });
+              emitParentUsage(ctx.emitEvent, r.usage);
+              return { i, ok: r.ok, text: r.conclusion, steps: r.steps, sessionId: r.sessionId ?? ownerId };
+            } catch (err2) {
+              progress({ state: "failed" });
+              return { i, ok: false as const, text: (err2 as Error).message, steps: 0, sessionId: ownerId };
+            }
+          }
           progress({ state: "failed" });
-          return { i, ok: false as const, text: (err as Error).message, steps: 0 };
+          return { i, ok: false as const, text: msg, steps: 0, sessionId: ownerId };
         }
       })
     );
@@ -540,9 +704,12 @@ export const taskTool: ToolDef<typeof schema> & {
     }
     if (results.length === 1) {
       const r = results[0]!;
+      // Surface the sub-agent's session_id so a follow-up can continue the SAME
+      // sub-agent via `continue_session_id` instead of spawning a fresh one.
+      const handle = r.sessionId ? ` session_id: ${r.sessionId} (pass as continue_session_id to continue this sub-agent)` : "";
       return r.ok
-        ? { content: `sub-agent completed in ${r.steps} step(s). Conclusion:\n\n${r.text}` }
-        : { content: `sub-agent failed: ${r.text}`, isError: true };
+        ? { content: `sub-agent completed in ${r.steps} step(s).${handle}\n\nConclusion:\n\n${r.text}` }
+        : { content: `sub-agent failed: ${r.text}${handle}`, isError: true };
     }
     const body = results
       .map(

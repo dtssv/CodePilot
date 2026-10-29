@@ -32,4 +32,34 @@ describe("remoteControl one-time pairing", () => {
     await expect(redeemRemotePairing(code, secret)).rejects.toThrow(/already-used|Invalid/i);
     void homedir;
   });
+
+  it("authorizes multiple workspaces (active first, deduped)", async () => {
+    const a = mkdtempSync(join(tmpdir(), "rc-a-"));
+    const b = mkdtempSync(join(tmpdir(), "rc-b-"));
+    const minted = await mintRemotePairing({
+      serveUrl: "http://127.0.0.1:18765",
+      cwd: a,
+      // Include a duplicate of the active cwd and an extra; both are normalized.
+      cwds: [a, b],
+    });
+    const url = new URL(minted.url);
+    const redeemed = await redeemRemotePairing(
+      url.searchParams.get("code")!,
+      url.searchParams.get("s")!,
+    );
+    expect(redeemed.cwd).toBe(a);
+    expect(redeemed.cwds).toEqual([a, b]);
+    expect(redeemed.grant.cwds).toEqual([a, b]);
+  });
+
+  it("defaults cwds to the single bound workspace", async () => {
+    const a = mkdtempSync(join(tmpdir(), "rc-single-"));
+    const minted = await mintRemotePairing({ serveUrl: "http://127.0.0.1:18765", cwd: a });
+    const url = new URL(minted.url);
+    const redeemed = await redeemRemotePairing(
+      url.searchParams.get("code")!,
+      url.searchParams.get("s")!,
+    );
+    expect(redeemed.cwds).toEqual([a]);
+  });
 });

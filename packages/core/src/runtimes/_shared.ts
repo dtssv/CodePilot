@@ -12,25 +12,28 @@ import type { Event } from "../types.js";
 export type SystemPromptParts = NonNullable<AgentDeps["systemPrompt"]>;
 
 /**
- * Append runtime instructions to the system prompt's dynamic suffix.
+ * Append runtime instructions to the system prompt's volatile per-turn tier.
  *
- * The suffix is injected into the last user message as a `<runtime_context>`
- * note rather than into the system prompt itself, so the cached static prefix
- * stays byte-identical and prompt-cache hit rates are unaffected.
+ * The suffix is injected as the per-turn `<runtime_context>` message (its own
+ * `system`-role message, placed just before the current turn) rather than into
+ * the cached static+stable system block — so the cacheable prefix stays
+ * byte-identical and prompt-cache hit rates are unaffected. Falls back to
+ * `dynamicSuffix` for prompts built before the stable/volatile split.
  */
 export function withPromptSuffix(
   prompt: SystemPromptParts | undefined,
   extra: string,
 ): SystemPromptParts {
   if (!prompt) {
-    return { staticPrefix: "", dynamicSuffix: extra, full: extra };
+    return { staticPrefix: "", dynamicSuffix: "", volatileSuffix: extra, full: extra };
   }
-  const dynamicSuffix = [prompt.dynamicSuffix, extra]
+  const base = prompt.volatileSuffix ?? prompt.dynamicSuffix;
+  const volatileSuffix = [base, extra]
     .filter((s) => s && s.trim().length > 0)
     .join("\n\n");
   return {
-    staticPrefix: prompt.staticPrefix,
-    dynamicSuffix,
+    ...prompt,
+    volatileSuffix,
     full: [prompt.full, extra].filter((s) => s && s.trim().length > 0).join("\n\n"),
   };
 }

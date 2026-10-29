@@ -86,10 +86,20 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
     const el = btnRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
+    // Constrain the menu to the composer's width so it never spills past the
+    // input box into a right-side panel. Fall back to the viewport.
+    const bounds = el.closest("[data-cp-composer]")?.getBoundingClientRect();
+    const leftEdge = bounds ? bounds.left : 8;
+    const rightEdge = bounds ? bounds.right : window.innerWidth - 8;
+    const avail = Math.max(200, rightEdge - leftEdge);
+    const width = Math.min(Math.max(r.width, 320), avail);
+    // Prefer aligning to the button's left, but keep the whole menu inside the
+    // composer's right edge.
+    const left = Math.min(Math.max(r.left, leftEdge), rightEdge - width);
     setPos({
-      left: Math.min(r.left, window.innerWidth - 360),
+      left,
       bottom: window.innerHeight - r.top + 6,
-      width: Math.max(r.width, 320),
+      width,
     });
   }, []);
 
@@ -101,9 +111,21 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
     updatePos();
     window.addEventListener("resize", updatePos);
     window.addEventListener("scroll", updatePos, true);
+    // Re-measure when the composer reflows for reasons other than a window
+    // resize — e.g. a right-side panel expanding/collapsing shrinks the
+    // composer without firing `resize`. A ResizeObserver on the composer (and
+    // the button) keeps the menu pinned inside the shrunken input box.
+    const composer = btnRef.current?.closest("[data-cp-composer]") ?? null;
+    const ro =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => updatePos()) : null;
+    if (ro) {
+      if (composer) ro.observe(composer);
+      if (btnRef.current) ro.observe(btnRef.current);
+    }
     return () => {
       window.removeEventListener("resize", updatePos);
       window.removeEventListener("scroll", updatePos, true);
+      ro?.disconnect();
     };
   }, [open, updatePos]);
 
@@ -277,7 +299,7 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
       <button
         ref={btnRef}
         type="button"
-        className="flex max-w-[300px] items-center gap-1 rounded-md px-1.5 py-0.5 text-left font-mono text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
+        className="flex min-w-0 max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-left font-mono text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
         onClick={() => setOpen((v) => !v)}
         title={t("Switch model")}
         aria-haspopup="listbox"

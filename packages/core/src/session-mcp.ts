@@ -26,6 +26,11 @@ export interface SessionMcpHost {
   readonly onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
  /** Called with the session's (private) tool registry. */
   withToolRegistry<T>(fn: (registry: ToolRegistry) => T): T;
+ /** Stash the unregister fn for the reverse-request handler so the session
+  * can detach it on dispose. Critical for the SHARED (pooled) manager: without
+  * unregistering, a disposed session's handler stays registered and a server
+  * reverse request would be routed to a dead session. */
+  setMcpRequestHandlerCleanup?(unregister: () => void): void;
 }
 
 /** Start configured MCP servers (shared process-wide) and register tools.
@@ -44,9 +49,10 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
     });
     if (!mcp) return null;
     if (host.onMcpServerRequest) {
-      mcp.setServerRequestHandler(
+      const unregister = mcp.setServerRequestHandler(
         async (server, method, params) => host.onMcpServerRequest!(server, method, params)
       );
+      host.setMcpRequestHandlerCleanup?.(unregister);
     }
     for (const t of mcp.listAllTools()) {
  // Normalize the tool name to fit provider limits (64 chars) and
@@ -60,6 +66,8 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
           description: `[mcp:${t.server}] ${t.description}`,
           inputSchema: jsonSchemaToZod(t.inputSchema),
           permission: "network",
+          source: "mcp",
+          mcpMeta: { server: t.server, toolName: t.name, jsonSchema: t.inputSchema },
           execute: async (input) => {
             const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
             const r = await mcp!.invoke(t.server, t.name, args);

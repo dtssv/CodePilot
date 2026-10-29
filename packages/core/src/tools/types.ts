@@ -2,6 +2,7 @@
 // async execute function. The agent loop invokes them with parsed input.
 
 import type { z } from "zod";
+import { zodToJsonSchema as zodToJsonSchemaLib } from "zod-to-json-schema";
 import type { ContentBlock, QuestionRequest, QuestionAnswers } from "../types.js";
 import type { ResolvedSandbox } from "../sandbox.js";
 
@@ -9,6 +10,11 @@ export type PermissionLevel = "read" | "write" | "execute" | "network";
 
 export interface ToolContext {
   cwd: string;
+ /** Identity of the running session / sub-agent. Used to stamp ownership on
+  * background jobs so `write_stdin` cannot write to a job started by a
+  * DIFFERENT session that happens to share this cwd (parallel sub-agents on a
+  * fallback shared cwd). Absent in minimal contexts → no ownership checks. */
+  sessionId?: string;
   signal?: AbortSignal;
  /** Stash helper to spill large tool outputs to disk. */
   artifact(blob: string | Uint8Array, hint?: string): Promise<string>;
@@ -82,6 +88,19 @@ export interface ToolContext {
     dir: string,
     opts: { persist: boolean },
   ) => Promise<void> | void;
+  /**
+   * File-observation store (read-before-write + staleness guard). When
+   * present: read tools call `observeFile` after a successful read; write/
+   * edit tools call `checkFileFresh` before mutating and `reobserveFile`
+   * after. Absent in minimal test contexts — tools MUST treat it as optional
+   * and fall back to their prior behaviour (no guard).
+   */
+  observeFile?: (absPath: string, stat: { mtimeMs: number; size: number }) => void;
+  checkFileFresh?: (
+    absPath: string,
+    currentStat: { mtimeMs: number; size: number } | null,
+  ) => import("../fsObservation.js").FreshnessResult;
+  reobserveFile?: (absPath: string, stat: { mtimeMs: number; size: number }) => void;
 }
 
 export interface ToolResult {
@@ -105,120 +124,89 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
   inputSchema: S;
   permission: PermissionLevel;
   execute(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
+  /**
+   * Origin of the tool. "mcp" marks tools surfaced by an external MCP server;
+   * when lazy MCP discovery is on, these are hidden from the provider tool list
+   * and reached via the `mcp` meta-tool instead (keeps the per-turn tool schema
+   * small when a server exposes dozens of tools). Undefined = built-in.
+   */
+  source?: "mcp";
+  /** For `source: "mcp"`: the server + original tool name + raw JSON schema,
+   * used by the `mcp` meta-tool to describe/call it on demand. */
+  mcpMeta?: { server: string; toolName: string; jsonSchema: unknown };
 }
 
 /**
- * Convert a Zod schema to a JSON Schema object that Anthropic / OpenAI accept.
- * Uses zod's built-in toJSONSchema if available, otherwise falls back to a
- * permissive schema built from field inspection (Zod v3 doesn't ship one).
+ * Convert a Zod schema to a JSON Schema object that Anthropic / OpenAI / Gemini
+ * accept as a tool's input schema.
+ *
+ * Backed by the `zod-to-json-schema` library rather than hand-walking Zod's
+ * internal `_def` (which was brittle and had already silently mis-converted
+ * nested-object arrays). We pin two options to keep the output shape identical
+ * to what the providers expect and what this codebase relied on:
+ *  - `target: "openApi3"` → objects carry `additionalProperties: false` and
+ *    nullable fields render as `{ ..., nullable: true }` (OpenAPI style), not a
+ *    JSON-Schema `anyOf: [T, {type:"null"}]`.
+ *  - `$refStrategy: "none"` → schemas are fully inlined, so no `$ref`/`$defs`
+ *    appear (Anthropic/OpenAI take inlined schemas directly; Gemini's
+ *    `sanitizeSchema` strips refs anyway, but inlining avoids relying on that).
+ * The leading `$schema` key is dropped so the object is a bare schema.
+ *
+ * Finally we normalize numeric exclusivity: `target: "openApi3"` emits the
+ * DRAFT-04 boolean form (`{ minimum: 0, exclusiveMinimum: true }`) for Zod's
+ * `.positive()` / `.gt()` / `.lt()`. OpenAI's own API — and strict gateways
+ * like GLM via jdcloud — speak draft 2020-12, where `exclusiveMinimum` /
+ * `exclusiveMaximum` are NUMBERS. The boolean form made those gateways reject
+ * the whole request with `400 invalid_argument` whenever a tool using
+ * `.positive()`/`.max()` was present (bash's `timeout`, web_fetch, grep, …),
+ * which looked like an intermittent, order-dependent 400 but was really this
+ * one schema-dialect mismatch. `normalizeExclusiveBounds` converts it to the
+ * numeric form every provider accepts.
  */
 export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
- // zod v3 has a `_def` describing the schema; we walk it for the common cases.
-  type Def = {
-    typeName?: string;
-    schema?: unknown;
-    shape?: () => Record<string, z.ZodTypeAny>;
-    description?: string;
-    innerType?: z.ZodTypeAny;
-    values?: Set<unknown>;
-    value?: unknown;
-    options?: z.ZodTypeAny[];
-  };
-  const def = (schema as unknown as { _def?: Def })._def;
-  if (!def) return { type: "object", additionalProperties: true };
-  const description = (schema as unknown as { description?: string }).description;
-  switch (def.typeName) {
-    case "ZodEffects": {
- // .refine/.transform wrappers — unwrap to the inner schema.
-      return def.schema ? zodToJsonSchema(def.schema as z.ZodTypeAny) : {};
-    }
-    case "ZodDefault": {
- // .default(v) — unwrap; the property is optional from the caller's view.
-      return def.innerType ? zodToJsonSchema(def.innerType) : {};
-    }
-    case "ZodObject": {
-      const shape = def.shape?.() ?? {};
-      const properties: Record<string, unknown> = {};
-      const required: string[] = [];
-      for (const [k, v] of Object.entries(shape)) {
-        const child = zodToJsonSchema(v);
-        const defK = (v as unknown as { _def?: { typeName?: string } })._def;
-        const defaulted = defK?.typeName === "ZodDefault";
-        if (defaulted || (v as unknown as { isOptional?: () => boolean }).isOptional?.()) {
- // leave off `required`
-        } else {
-          required.push(k);
-        }
-        properties[k] = child;
+  const out = zodToJsonSchemaLib(schema, {
+    target: "openApi3",
+    $refStrategy: "none",
+  }) as Record<string, unknown>;
+  delete out.$schema;
+  normalizeExclusiveBounds(out);
+  return out;
+}
+
+/**
+ * Recursively rewrite draft-04 boolean exclusive bounds to the numeric
+ * draft-2020-12 form that OpenAI and strict gateways require:
+ *   { minimum: X, exclusiveMinimum: true }  →  { exclusiveMinimum: X }
+ *   { maximum: X, exclusiveMaximum: true }  →  { exclusiveMaximum: X }
+ * A redundant `exclusive*: false` is simply dropped (the plain
+ * `minimum`/`maximum` already carries the inclusive bound).
+ */
+function normalizeExclusiveBounds(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) normalizeExclusiveBounds(item);
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  const o = node as Record<string, unknown>;
+
+  for (const [bound, excl] of [
+    ["minimum", "exclusiveMinimum"],
+    ["maximum", "exclusiveMaximum"],
+  ] as const) {
+    if (typeof o[excl] === "boolean") {
+      if (o[excl] === true && typeof o[bound] === "number") {
+        o[excl] = o[bound];
+        delete o[bound];
+      } else {
+        // `false` (or no paired numeric bound) → the boolean is noise; drop it.
+        delete o[excl];
       }
-      const out: Record<string, unknown> = {
-        type: "object",
-        properties,
-        additionalProperties: false,
-      };
-      if (required.length > 0) out.required = required;
-      if (description) out.description = description;
-      return out;
     }
-    case "ZodString": {
-      const o: Record<string, unknown> = { type: "string" };
-      if (description) o.description = description;
-      return o;
-    }
-    case "ZodNumber": {
-      const o: Record<string, unknown> = { type: "number" };
-      if (description) o.description = description;
-      return o;
-    }
-    case "ZodBoolean": {
-      const o: Record<string, unknown> = { type: "boolean" };
-      if (description) o.description = description;
-      return o;
-    }
-    case "ZodArray": {
- // zod stores the element schema under `_def.type` (not `innerType`).
- // The old innerType-only lookup silently degraded every array's items
- // to {type:"string"}, which broke nested-object arrays like
- // ask_user_question's `questions` (the model never saw the item shape,
- // so it omitted required fields like `id`).
-      const el =
-        (def as { type?: z.ZodTypeAny }).type ??
-        def.innerType;
-      const inner = el ? zodToJsonSchema(el) : { type: "string" };
-      const o: Record<string, unknown> = { type: "array", items: inner };
- // Surface min/max element constraints when present (.min/.max).
-      const minLength = (def as { minLength?: { value: number } | null }).minLength?.value;
-      const maxLength = (def as { maxLength?: { value: number } | null }).maxLength?.value;
-      if (typeof minLength === "number") o.minItems = minLength;
-      if (typeof maxLength === "number") o.maxItems = maxLength;
-      if (description) o.description = description;
-      return o;
-    }
-    case "ZodEnum": {
-      const values = def.values ? Array.from(def.values as Set<unknown>) : [];
-      const o: Record<string, unknown> = { type: "string", enum: values };
-      if (description) o.description = description;
-      return o;
-    }
-    case "ZodOptional": {
-      return def.innerType ? zodToJsonSchema(def.innerType) : { type: "string" };
-    }
-    case "ZodNullable": {
-      const inner = def.innerType ? zodToJsonSchema(def.innerType) : { type: "string" };
-      return { ...inner, nullable: true };
-    }
-    case "ZodUnion": {
-      const options = def.options ?? [];
-      return { anyOf: options.map((o) => zodToJsonSchema(o)) };
-    }
-    case "ZodLiteral": {
-      return { type: typeof def.value, enum: [def.value] };
-    }
-    default: {
-      const o: Record<string, unknown> = {};
-      if (description) o.description = description;
-      return o;
-    }
+  }
+
+  for (const key of Object.keys(o)) {
+    if (key === "exclusiveMinimum" || key === "exclusiveMaximum") continue;
+    normalizeExclusiveBounds(o[key]);
   }
 }
 

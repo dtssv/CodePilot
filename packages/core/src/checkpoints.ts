@@ -34,6 +34,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Event, PlanStep } from "./types.js";
 import { estimateTokens } from "./tokens.js";
+import { estimateEventTokens } from "./compaction.js";
 import type { ChatProvider } from "./providers/types.js";
 import { projectStatePath } from "./projectState.js";
 
@@ -83,7 +84,11 @@ export function shouldCheckpoint(
 ): CheckpointTrigger {
   const threshold = opts.tokenThreshold ?? 100_000;
   const turnsThreshold = opts.turnsThreshold ?? 6;
-  const tokens = estimateEventTokens(events);
+  // One canonical estimator (compaction.ts) across the session estimate, the
+  // compaction gate, and this checkpoint gate — the private shadow that used to
+  // live here ignored image tokens (and reasoning blocks), so the checkpoint
+  // gate disagreed with compaction whenever a turn carried images.
+  const tokens = estimateEventTokens([...events], estimateTokens);
  // A "turn" = one user message + the assistant turn(s) that follows.
   const turns = countTurns(events);
   const turnsSinceLast = lastCheckpointAt == null
@@ -111,55 +116,6 @@ export function shouldCheckpoint(
     estimatedTokens: tokens,
     turnsSinceLast,
   };
-}
-
-function estimateEventTokens(events: ReadonlyArray<Event>): number {
-  let total = 0;
-  for (const e of events) {
-    total += estimateTokens(serializeEvent(e));
-  }
-  return total;
-}
-
-function serializeEvent(e: Event): string {
-  switch (e.type) {
-    case "message":
-      return e.content
-        .map((b) => (b.type === "text" ? b.text : JSON.stringify(b)))
-        .join("\n");
-    case "message_delta":
-      if (e.delta.type === "text" || e.delta.type === "reasoning") return e.delta.text;
-      return e.delta.partialJson;
-    case "tool_call":
-      return JSON.stringify(e.input ?? {});
-    case "tool_result":
-      return e.content;
-    case "plan":
-      return JSON.stringify(e.steps);
-    case "usage":
-      return JSON.stringify(e.usage);
-    case "compaction":
-      return e.summary;
-    case "status":
-      return e.status;
-    case "error":
-      return e.message;
-    case "mode":
-      return `mode:${e.mode}`;
-    case "mode_request":
-      return `mode_request:${e.mode}`;
-    case "model":
-      return `model:${e.model}`;
-    case "team_message":
-    case "followup":
-    case "retry":
-    case "activity":
-    case "stop_continue":
-    case "subagent":
-    case "request":
- // Never reaches the provider (see compaction.ts) — zero context cost.
-      return "";
-  }
 }
 
 function countTurns(events: ReadonlyArray<Event>): number {
@@ -265,7 +221,7 @@ function renderTaskTree(plan: PlanStep[] | undefined): string {
 
 // A conservative file-path matcher: requires a real file extension (1–8
 // alnum chars) and allows an optional directory prefix. Crucially it does
-// NOT have a catch-all "any 3+ char word" branch — that branch used to match
+// NOT have a catch-all "any 3+ char word" branch — such a branch matches
 // code fragments like `b.classList.toggle` or `style.display`, flooding the
 // "Files touched" list with JS symbols instead of paths.
 const FILE_PATH_RE = /\b(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,8}\b/g;

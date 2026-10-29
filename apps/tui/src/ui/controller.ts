@@ -73,6 +73,41 @@ export interface PendingPermission {
 }
 
 /**
+ * Bridge for model-requested goal loops (the `start_goal` tool). core's
+ * `onGoalRequest` calls `bridge.request(...)` to record a pending goal; the UI
+ * subscribes via `onPending` to pick it up and drive rounds when the triggering
+ * turn settles. Mirrors the permission/question bridges so the session (created
+ * in cli.tsx before the React tree mounts) and the UI share one seam.
+ */
+export interface GoalBridge {
+  /** core calls this from onGoalRequest; returns true to accept the request. */
+  request(sessionId: string, req: { objective: string; maxRounds?: number }): boolean;
+  /** UI subscribes to learn when a goal loop was requested. */
+  onPending(
+    listener: (sessionId: string, req: { objective: string; maxRounds?: number }) => void,
+  ): () => void;
+}
+
+/** Minimal GoalBridge implementation: fan a request out to one listener. */
+export function createGoalBridge(): GoalBridge {
+  let listener:
+    | ((sessionId: string, req: { objective: string; maxRounds?: number }) => void)
+    | undefined;
+  return {
+    request(sessionId, req) {
+      listener?.(sessionId, req);
+      return true;
+    },
+    onPending(l) {
+      listener = l;
+      return () => {
+        if (listener === l) listener = undefined;
+      };
+    },
+  };
+}
+
+/**
  * Bridge between the React UI and the (async) onAskUser callback that core
  * sees. Implementation in cli.tsx wires
  * onAskUser = (req) => bridge.waitAnswers(req)

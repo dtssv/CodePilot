@@ -65,6 +65,9 @@ class FakeSession {
 const sessionsById = new Map<string, FakeSession>();
 
 vi.mock("@codepilot/core", () => ({
+  // The real core exports this runtime constant; defaultCapabilities() spreads
+  // it for the advertised providers list, so the mock must provide it too.
+  PROVIDER_NAMES: ["anthropic", "openai", "copilot", "gemini", "azure"],
   createSession: vi.fn(async (opts: { cwd: string; sessionId?: string }) => {
     const existing = opts.sessionId ? sessionsById.get(opts.sessionId) : undefined;
     if (existing) return existing;
@@ -88,8 +91,9 @@ vi.mock("@codepilot/core", () => ({
     expiresAt: Date.now() + 60_000,
   })),
   redeemRemotePairing: vi.fn(async () => ({
-    grant: { token: "t", createdAt: 0, expiresAt: Date.now() + 1, cwd: "/tmp", caps: ["prompt"] },
+    grant: { token: "t", createdAt: 0, expiresAt: Date.now() + 1, cwd: "/tmp", cwds: ["/tmp"], caps: ["prompt"] },
     cwd: "/tmp",
+    cwds: ["/tmp"],
     serveUrl: "http://x",
   })),
   resolveRemoteGrant: vi.fn(async () => null),
@@ -171,6 +175,7 @@ import {
   WebSocketTransport,
   checkUpgrade,
   originAllowed,
+  withHostConnectSrc,
   type WebSocketServerHandle,
 } from "../src/ws.js";
 import { Peer, RpcError } from "../src/rpc.js";
@@ -292,6 +297,43 @@ describe("originAllowed", () => {
   });
 });
 
+describe("withHostConnectSrc", () => {
+  const html = (csp: string): string =>
+    `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
+  const CSP = "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; img-src 'self'";
+
+  it("widens connect-src to the request host over ws and wss", () => {
+    const out = withHostConnectSrc(html(CSP), "192.168.1.10:18765");
+    // Appended at the end of the directive, leaving existing sources intact.
+    expect(out).toContain(
+      "connect-src 'self' ws://127.0.0.1:* ws://192.168.1.10:18765 wss://192.168.1.10:18765;",
+    );
+    // Other directives stay intact.
+    expect(out).toContain("img-src 'self'");
+  });
+
+  it("appends before the closing quote when connect-src is the last directive", () => {
+    const out = withHostConnectSrc(html("connect-src 'self' ws://127.0.0.1:*"), "10.1.2.3:9");
+    expect(out).toContain("connect-src 'self' ws://127.0.0.1:* ws://10.1.2.3:9 wss://10.1.2.3:9\"");
+  });
+
+  it("is a no-op without a Host header", () => {
+    const h = html(CSP);
+    expect(withHostConnectSrc(h, undefined)).toBe(h);
+  });
+
+  it("does not duplicate when already present", () => {
+    const first = withHostConnectSrc(html(CSP), "10.0.0.2:18765");
+    const second = withHostConnectSrc(first, "10.0.0.2:18765");
+    expect(second).toBe(first);
+  });
+
+  it("rejects a malformed host rather than injecting it", () => {
+    const h = html(CSP);
+    expect(withHostConnectSrc(h, 'evil" onload="x')).toBe(h);
+  });
+});
+
 describe("checkUpgrade", () => {
   const req = (headers: Record<string, string>, url = "/rpc"): IncomingMessage =>
     ({ headers, url }) as unknown as IncomingMessage;
@@ -393,6 +435,17 @@ describe("startWebSocketServer", () => {
     await peer.request("prompt/send", { sessionId, text: "hello" });
     await waitFor(() => events.length > 0);
     expect(JSON.stringify(events)).toContain("echo:hello");
+  });
+
+  it("advertises an override host while binding another (LAN access)", async () => {
+    // Mirrors daemon LAN mode: bind loopback but advertise a distinct host.
+    // The advertised host/url (what serve.json records) reflects the override,
+    // while the socket is actually bound to 127.0.0.1 and reachable there.
+    const handle = await serve({ host: "127.0.0.1", advertiseHost: "10.1.2.3" });
+    expect(handle.host).toBe("10.1.2.3");
+    expect(handle.url).toContain("ws://10.1.2.3:");
+    const peer = await connect(`ws://127.0.0.1:${handle.port}/rpc?token=${handle.token}`);
+    await expect(initialize(peer)).resolves.toBeTruthy();
   });
 
   it("accepts the token as an Authorization header", async () => {

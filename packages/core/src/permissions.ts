@@ -43,6 +43,7 @@ import {
   assertPathAllowed,
   detectSandboxBackend,
   isWriteOutsideSandbox,
+  sensitivePathHit,
   writableRootForTarget,
   type ResolvedSandbox,
 } from "./sandbox.js";
@@ -165,6 +166,41 @@ export class PermissionEngine {
       : firstMatch(this.rules().deny, tool.name, primary, input);
     if (deny) return { decision: "deny", reason: `matched deny rule "${deny}"` };
 
+ // Sensitive-path floor — applies EVEN when the sandbox is off or the mode is
+ // yolo, and above every allow rule. A write/delete onto a system, boot, or
+ // credential path (/etc, ~/.ssh, shell rc files, …) forces an interactive
+ // confirmation, mirroring the dangerous-command posture. This is the tool-
+ // layer counterpart of checkDangerousCommand for bash: file tools would
+ // otherwise have no floor at all when the sandbox is off. Not a hard deny —
+ // a user who means it can still confirm (or add an explicit allow/deny rule).
+    {
+      const cwd = this.sandbox?.cwd ?? process.cwd();
+      // write-tier file tools (write_file / edit_file / apply_patch / image_gen);
+      // apply_patch delete hunks surface as write paths too.
+      if (tool.permission === "write" && tool.name !== "bash") {
+        const writePaths = extractWritePaths(tool.name, input);
+        const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+        for (const p of candidates) {
+          if (sensitivePathHit(p, "write", cwd)) return "ask";
+        }
+      }
+      // bash: a command that writes/deletes under a sensitive root. The
+      // dangerous-command scan already covers `rm -rf /` and `~`; this adds the
+      // finer system/credential roots. We check the raw command for a sensitive
+      // absolute path token — conservative, and it only forces "ask".
+      if (bash && primary) {
+        for (const root of ["/etc", "/boot", "/System", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]) {
+          if (new RegExp(`(^|\\s|=|"|')${root}(/|\\s|$)`).test(primary)) {
+            const danger = checkDangerousCommand(primary);
+            // Only force ask for mutating commands; a plain read (cat /etc/hosts)
+            // is fine. Heuristic: the command mutates if it's not read-only.
+            if (!isReadOnlyCommand(primary) || danger.dangerous) return "ask";
+            break;
+          }
+        }
+      }
+    }
+
  // Out-of-sandbox writes always ask (even under yolo / allow rules / auto-edit)
  // so the user can grant the folder before the tool-layer path guard rejects it.
  // apply_patch may touch several paths — any one outside is enough to ask.
@@ -285,6 +321,19 @@ export class PermissionEngine {
     if (tool.name === "bash" && primary) {
       const danger = checkDangerousCommand(primary);
       if (danger.dangerous) reason += ` DANGEROUS: ${danger.why}.`;
+    }
+    // Flag a sensitive system/credential target so the approval card states the
+    // stakes — this is the ask forced by the sensitive-path floor in preflight.
+    {
+      const cwd = this.sandbox?.cwd ?? process.cwd();
+      const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+      for (const p of candidates) {
+        const hit = sensitivePathHit(p, "write", cwd);
+        if (hit) {
+          reason += ` SENSITIVE PATH: writing under ${hit} (system/credential location).`;
+          break;
+        }
+      }
     }
     if (tool.name === "apply_patch" && writePaths.length > 0) {
       reason = `Apply patch to ${writePaths.length} file(s):\n${writePaths.map((p) => `  ${p}`).join("\n")}`;

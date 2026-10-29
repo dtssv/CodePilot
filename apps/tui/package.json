@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/tui",
-  "version": "2.1.1",
+  "version": "1.0.0",
   "description": "CodePilot terminal UI (Ink/React) — interactive REPL over @codepilot/core.",
   "type": "module",
   "main": "./dist/cli.js",

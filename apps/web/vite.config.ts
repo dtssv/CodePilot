@@ -4,6 +4,10 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Relative base so the built SPA works both when served over http
+  // (`codepilot serve --web`) from `/` and when loaded via `file://` in the
+  // desktop app (assets resolve next to index.html either way).
+  base: "./",
   build: {
     outDir: "dist",
     sourcemap: true,

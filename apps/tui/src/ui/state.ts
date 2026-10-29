@@ -536,12 +536,17 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
         }
         case "subagent":
           if (ev.event?.type !== "tool_call") return state;
+          // Unique, stable label: the session-global runSeq (falls back to the
+          // per-fan-out index) plus a short slice of the sub-agent's id, so
+          // repeated single-task dispatches no longer all read as "#1".
+          const seq = ev.runSeq ?? ev.index + 1;
+          const idShort = ev.sessionId ? ` ${ev.sessionId.slice(-6)}` : "";
           return {
             ...state,
             activity: {
               phase: "tools",
               since: state.activity?.since ?? Date.now(),
-              tools: [`task #${ev.index + 1} → ${ev.event.name}`],
+              tools: [`task #${seq}${idShort} → ${ev.event.name}`],
             },
           };
         case "status":
@@ -611,6 +616,34 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             agentMode: ev.mode,
             notice: `Plan approved — switching to ${ev.mode} mode`,
           };
+        case "goal_progress": {
+ // Live per-round progress of an active goal loop. Show a compact
+ // status line; the authoritative record is the checkpoint file.
+          const cap = ev.maxRounds ? `/${ev.maxRounds}` : "";
+          const tail =
+            ev.status === "running"
+              ? "running…"
+              : ev.status === "completed"
+                ? `completed${ev.reason ? ` — ${ev.reason}` : ""}`
+                : ev.status === "blocked"
+                  ? `blocked${ev.blockedReason ? ` — ${ev.blockedReason}` : ""}`
+                  : `round limit${ev.reason ? ` — ${ev.reason}` : ""}`;
+          return {
+            ...state,
+            notice: `Goal · round ${ev.round}${cap} · ${tail}`,
+          };
+        }
+        case "edit_delta": {
+ // Live edit progress from edit_file (multi-edit / large file). The
+ // tool_result still carries the authoritative summary; this is a
+ // transient hint for batches.
+          if (ev.total <= 1) return state;
+          const name = ev.path.split("/").pop() ?? ev.path;
+          return {
+            ...state,
+            notice: `Editing ${name} · ${ev.index + 1}/${ev.total}`,
+          };
+        }
         default:
           return state;
       }

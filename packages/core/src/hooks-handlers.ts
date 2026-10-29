@@ -295,9 +295,26 @@ export async function dispatchHook(
   cwd: string,
   resolvers: HookResolvers,
   isTrusted: (hook: HookEntry) => boolean,
-  hashPrefix: (command: string) => string,
+  hashPrefix: (subject: string) => string,
   sandbox?: ResolvedSandbox,
 ): Promise<HookRawResult> {
+ // Trust gate FIRST, before any side effect. Covers both handler types that
+ // reach an arbitrary config-specified target: `command` (shell) and `http`
+ // (POST to a URL). `isTrusted` returns true for the exempt types
+ // (mcp_tool/prompt/agent), so this is a no-op for them. Keeping the gate here
+ // — ahead of the handler dispatch — ensures an untrusted http hook never
+ // exfiltrates the payload, which the old command-only gate allowed.
+  if (!isTrusted(hook)) {
+    const subject = hook.command ?? hook.http ?? "";
+    const kind = hook.command ? "command" : "http";
+    return {
+      code: 0,
+      stdout: "",
+      stderr: `hook ${kind} not trusted (hash ${hashPrefix(subject)} not approved). Approve via /hooks or .codepilot/hook_trust.json.`,
+      timedOut: false,
+      untrusted: true,
+    };
+  }
  // HTTP handler: POST the payload to the configured URL and interpret
  // the response body as the decision JSON.
   if (hook.http) {
@@ -324,16 +341,6 @@ export async function dispatchHook(
       stderr:
         "hook has no handler (command, http, mcp_tool, prompt, or agent)",
       timedOut: false,
-    };
-  }
- // Trust check: skip unapproved command hooks with a warning.
-  if (!isTrusted(hook)) {
-    return {
-      code: 0,
-      stdout: "",
-      stderr: `hook command not trusted (hash ${hashPrefix(command)} not approved). Approve via /hooks or .codepilot/hook_trust.json.`,
-      timedOut: false,
-      untrusted: true,
     };
   }
   return runCommandHook(command, payload, cwd, hook.timeout, sandbox);

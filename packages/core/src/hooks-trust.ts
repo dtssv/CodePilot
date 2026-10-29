@@ -1,21 +1,46 @@
-// Hook trust mechanism: hash-based review before running command hooks.
+// Hook trust mechanism: hash-based review before running side-effecting hooks.
 //
-// Arbitrary `command` hooks can execute any shell code. The trust mechanism
-// requires the user to approve each unique command string (identified by its
-// SHA-256 hash) before it runs. Approved hashes are persisted to
-// `.codepilot/hook_trust.json`. Unapproved hooks are skipped with a warning
-// (fail-safe: don't execute untrusted code).
+// Two hook handler types reach arbitrary, config-specified targets:
+//   - `command` runs any shell code;
+//   - `http`    POSTs the hook payload (tool inputs, prompts) to any URL and
+//               lets the response block/rewrite the action.
+// Both are as attacker-controllable as the config that declares them, so both
+// require the user to approve each unique *trust subject* (identified by its
+// SHA-256 hash) before running. Approved hashes persist to
+// `.codepilot/hook_trust.json`; unapproved hooks are skipped with a warning
+// (fail-safe: don't run untrusted side effects).
 //
-// `http`/`mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate to
-// already-vetted infrastructure, not arbitrary shell code) — see
-// `hooks-handlers.ts`.
+// `mcp_tool`/`prompt`/`agent` handlers are exempt: they delegate to
+// infrastructure already vetted elsewhere (MCP servers approved at connect
+// time, the session's own small model, the curated sub-agent registry) rather
+// than to an arbitrary command or URL — see `hooks-handlers.ts`.
 
 import { createHash } from "node:crypto";
 import type { HookEntry } from "./hooks.js";
 
-/** Compute the SHA-256 hash of a command string (for hook trust). */
+/** Compute the SHA-256 hash of a trust subject (command string or http target). */
 export function hashCommand(command: string): string {
   return createHash("sha256").update(command).digest("hex");
+}
+
+/**
+ * The canonical string a hook is trusted *as*. Command hooks are trusted by
+ * their exact command; http hooks by their method+URL+sorted headers (headers
+ * matter — they can carry an auth token or redirect intent). Returns null for
+ * handler types that don't require trust. Keeping this in one place means
+ * `isTrusted`, approval, and UI display all agree on what gets hashed.
+ */
+export function trustSubject(hook: HookEntry): string | null {
+  if (hook.command) return hook.command;
+  if (hook.http) {
+    const headers = hook.httpHeaders ?? {};
+    const headerPart = Object.keys(headers)
+      .sort()
+      .map((k) => `${k}:${headers[k]}`)
+      .join("\n");
+    return `http POST ${hook.http}${headerPart ? `\n${headerPart}` : ""}`;
+  }
+  return null;
 }
 
 /**
@@ -46,14 +71,15 @@ export class HookTrustStore {
     }
   }
 
- /** Check if a command hook is trusted (hash approved). Returns true when
- * trust is not configured (backwards-compatible default) or for
- * non-command hooks. */
+ /** Check if a side-effecting hook (command or http) is trusted (its subject
+ * hash is approved). Returns true when trust is not configured
+ * (backwards-compatible default) or for handler types that don't require
+ * trust (mcp_tool/prompt/agent). */
   isTrusted(hook: HookEntry): boolean {
- // Non-command hooks are always trusted.
-    if (!hook.command) return true;
+    const subject = trustSubject(hook);
+    if (subject === null) return true; // handler type requires no trust
     if (!this.hashes) return true; // trust not configured
-    return this.hashes.has(hashCommand(hook.command));
+    return this.hashes.has(hashCommand(subject));
   }
 
  /** Approve a command hook's hash and persist to the trust file. */

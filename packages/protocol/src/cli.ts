@@ -43,7 +43,7 @@ import {
 } from "@codepilot/core";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
 import { PrettyRenderer, prettyOutput } from "./cli-render.js";
@@ -136,6 +136,20 @@ Environment:
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
+  // Web-launcher binaries (packaged as `codepilot-web-<platform>`) default to
+  // hosting the SPA + opening the browser. Detect by executable name and
+  // rewrite argv to `serve --web --web-root` unless the user already passed a
+  // subcommand. `process.execPath` is the real binary under pkg's snapshot.
+  const invokedName = ((): string => {
+    try {
+      return process.execPath.split(/[\\/]/).pop() ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  if (/^codepilot-web\b/.test(invokedName) && !argv.includes("serve")) {
+    argv.unshift("serve", "--web", "--web-root");
+  }
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(helpText() + "\n");
     return 0;
@@ -525,6 +539,15 @@ async function cmdServeWeb(
     handle = await startWebSocketServer({
       port,
       host,
+      // In daemon mode, when bound beyond loopback (e.g. desktop LAN access
+      // via --host 0.0.0.0), still advertise 127.0.0.1 in serve.json so the
+      // loopback-only discovery guard (readLiveServeInfo) keeps working and
+      // local clients attach over loopback. The LAN bind remains reachable for
+      // phone remote control via the QR's LAN IP.
+      advertiseHost:
+        daemonMode && host !== undefined && host !== "127.0.0.1" && host !== "localhost"
+          ? "127.0.0.1"
+          : undefined,
       token,
       auth: noAuth ? "none" : "token",
       staticRoot: webRoot,
@@ -687,11 +710,26 @@ async function cmdServeWeb(
 
 /** The built web SPA next to this package (`<repo>/apps/web/dist`). */
 function detectWebRoot(what: string): string | undefined {
-  const here = fileURLToPath(new URL(".", import.meta.url));
-  const candidate = resolve(here, "..", "..", "..", "apps", "web", "dist");
-  if (existsSync(join(candidate, "index.html"))) return candidate;
+  const candidates: string[] = [];
+  // 1) Next to a packaged binary (pkg): `<dir-of-exe>/web`. This is where the
+  //    CLI / web-launcher package scripts stage the SPA.
+  try {
+    candidates.push(resolve(dirname(process.execPath), "web"));
+  } catch {
+    /* ignore */
+  }
+  // 2) Source-tree / npm layout relative to this module.
+  try {
+    const here = fileURLToPath(new URL(".", import.meta.url));
+    candidates.push(resolve(here, "..", "..", "..", "apps", "web", "dist"));
+  } catch {
+    /* ignore */
+  }
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, "index.html"))) return candidate;
+  }
   process.stderr.write(
-    `${what}: no web UI at ${candidate}\n` +
+    `${what}: no web UI found (looked in: ${candidates.join(", ")})\n` +
       `Build it first (pnpm --filter @codepilot/web build) or pass --web-root <dir>.\n`,
   );
   return undefined;

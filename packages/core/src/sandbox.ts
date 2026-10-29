@@ -49,11 +49,33 @@ export type SandboxMode = "off" | "workspace-write" | "read-only";
 
 export interface ResolvedSandbox {
   mode: SandboxMode;
+  /** True when the command may use the network at all ("full" or "proxy").
+   * False only for "off" — kept as the switch for `--unshare-net`. */
   network: boolean;
+  /** Normalized network policy. "proxy" carries the allowlist. */
+  networkPolicy: {
+    mode: "off" | "full" | "proxy";
+    allow: string[];
+    allowPorts: number[];
+    denyLog: boolean;
+  };
   writablePaths: string[];
   fallback: "deny" | "allow-unsandboxed";
  /** Absolute paths that file tools may write to (cwd + tmp + extras). */
   writableRoots: string[];
+ /** Loopback proxy URL (http://127.0.0.1:PORT) when a "proxy" network policy
+  * is active and the proxy has been started. Injected into bash as
+  * HTTP(S)_PROXY. Absent until the host starts the proxy and sets it. */
+  proxyUrl?: string;
+ /** How strongly the "proxy" network policy is enforced for the active
+  * backend:
+  *  - "enforced": the OS sandbox forces all egress through the proxy (Seatbelt
+  *    loopback-only). A child cannot bypass by ignoring HTTP(S)_PROXY.
+  *  - "best-effort": cooperative only — the proxy env vars are injected but a
+  *    process opening a raw socket can bypass them (bwrap/wsl without a
+  *    userspace net stack; or proxy not yet started).
+  * Undefined when the network policy is not "proxy". */
+  proxyEnforcement?: "enforced" | "best-effort";
 }
 
 /**
@@ -91,12 +113,33 @@ export function resolveSandbox(
     resolve(homedir(), ".codepilot"),
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];
+  const networkPolicy = normalizeNetworkPolicy(config?.network);
   return {
     mode,
-    network: config?.network ?? true,
+    network: networkPolicy.mode !== "off",
+    networkPolicy,
     writablePaths: (config?.writablePaths ?? []).map((p) => resolve(p)),
     fallback: config?.fallback ?? "deny",
     writableRoots,
+  };
+}
+
+/** Normalize the boolean/object network config into a single shape.
+ * Legacy booleans map: true → "full", false → "off"; undefined → "full". */
+function normalizeNetworkPolicy(
+  net: SandboxConfig["network"],
+): ResolvedSandbox["networkPolicy"] {
+  if (net === undefined || net === true) {
+    return { mode: "full", allow: [], allowPorts: [80, 443], denyLog: true };
+  }
+  if (net === false) {
+    return { mode: "off", allow: [], allowPorts: [80, 443], denyLog: true };
+  }
+  return {
+    mode: net.mode,
+    allow: net.allow ?? [],
+    allowPorts: net.allowPorts && net.allowPorts.length > 0 ? net.allowPorts : [80, 443],
+    denyLog: net.denyLog ?? true,
   };
 }
 
@@ -163,6 +206,16 @@ function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+/** Extract the port from a loopback proxy URL (http://127.0.0.1:PORT). */
+function proxyPort(url: string): number | null {
+  try {
+    const p = Number(new URL(url).port);
+    return Number.isInteger(p) && p > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Build the Seatbelt profile for the current policy.
  *
@@ -178,8 +231,22 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
   const lines: string[] = [];
   lines.push("(version 1)");
   lines.push("(allow default)");
+  // Network policy:
+  //  - "off"   → deny all network.
+  //  - "proxy" → when the loopback proxy is up (proxyUrl set), deny all network
+  //    then re-allow outbound only to the proxy's loopback port, so a child
+  //    process cannot bypass the allowlist by ignoring HTTP(S)_PROXY. If the
+  //    proxy isn't up yet we leave network open (cooperative/best-effort), same
+  //    posture as other backends.
+  //  - "full"  → unrestricted (no rule).
   if (!policy.network) {
     lines.push("(deny network*)");
+  } else if (policy.networkPolicy.mode === "proxy" && policy.proxyUrl) {
+    const port = proxyPort(policy.proxyUrl);
+    if (port) {
+      lines.push("(deny network*)");
+      lines.push(`(allow network-outbound (remote ip "localhost:${port}"))`);
+    }
   }
  // Sensitive reads are denied even though default allows reads.
   for (const p of SENSITIVE_READ_PATHS) {
@@ -212,6 +279,27 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
 }
 
 /** Wrap a command for the given policy. Never throws. */
+/** Prefix `export`s that route a sandboxed command's HTTP(S) traffic through
+ * the loopback allowlist proxy, when a "proxy" network policy is active and
+ * the host has started the proxy (policy.proxyUrl set). No-op otherwise. */
+function withProxyEnv(command: string, policy: ResolvedSandbox): string {
+  if (policy.networkPolicy.mode !== "proxy" || !policy.proxyUrl) return command;
+  const q = shellQuote(policy.proxyUrl);
+  // Set both upper/lowercase forms (tools vary) and clear NO_PROXY so nothing
+  // is exempted from the allowlist.
+  const exports = [
+    `HTTP_PROXY=${q}`,
+    `HTTPS_PROXY=${q}`,
+    `ALL_PROXY=${q}`,
+    `http_proxy=${q}`,
+    `https_proxy=${q}`,
+    `all_proxy=${q}`,
+    `NO_PROXY=''`,
+    `no_proxy=''`,
+  ].join(" ");
+  return `export ${exports}; ${command}`;
+}
+
 export function wrapCommand(
   command: string,
   policy: ResolvedSandbox
@@ -219,6 +307,10 @@ export function wrapCommand(
   if (policy.mode === "off") {
     return { command, sandboxed: false, backend: "none" };
   }
+  // In "proxy" network mode, force child tools through the loopback proxy by
+  // exporting the standard proxy env vars ahead of the command. Cooperative:
+  // tools that honor HTTP(S)_PROXY are restricted; see netProxy.ts.
+  command = withProxyEnv(command, policy);
   const backend = detectSandboxBackend();
   if (backend === "none") {
     if (policy.fallback === "allow-unsandboxed") {
@@ -305,8 +397,58 @@ export const SENSITIVE_READ_PATHS: string[] = [
   "/etc/sudoers",
 ];
 
+/**
+ * System / credential / boot paths where an accidental write or delete is
+ * catastrophic or a security risk. A write or delete targeting any of these
+ * forces an interactive confirmation EVEN when the sandbox is off or the mode
+ * is yolo — the same posture as a dangerous bash command. This is a safety
+ * floor, independent of the writable-root math (which only runs when a sandbox
+ * is active). It is NOT a hard deny: a user who truly means it can confirm.
+ */
+export const SENSITIVE_WRITE_PATHS: string[] = [
+  // Credentials / keys (clobbering authorized_keys or known_hosts is an attack).
+  join2(homedir(), ".ssh"),
+  join2(homedir(), ".aws"),
+  join2(homedir(), ".gnupg"),
+  join2(homedir(), ".kube"),
+  // Shell / login startup files (a classic persistence vector).
+  join2(homedir(), ".bashrc"),
+  join2(homedir(), ".bash_profile"),
+  join2(homedir(), ".zshrc"),
+  join2(homedir(), ".profile"),
+  // System configuration and binaries (POSIX).
+  "/etc",
+  "/boot",
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/System",
+  "/Library/LaunchDaemons",
+  "/Library/LaunchAgents",
+];
+
 function join2(...parts: string[]): string {
   return parts.join(sep);
+}
+
+/**
+ * Whether `inputPath` resolves onto a protected system/credential path for the
+ * given access kind. Mode-independent: this is the safety floor that applies
+ * even when the sandbox is off. Returns the matched root (for messaging) or
+ * null when the path is not sensitive.
+ */
+export function sensitivePathHit(
+  inputPath: string,
+  kind: "read" | "write",
+  cwd: string,
+): string | null {
+  const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
+  const list = kind === "read" ? SENSITIVE_READ_PATHS : SENSITIVE_WRITE_PATHS;
+  for (const s of list) {
+    if (isUnder(abs, s)) return s;
+  }
+  return null;
 }
 
 export interface PathCheckResult {
@@ -394,11 +536,11 @@ export function assertPathAllowed(
   policy: ResolvedSandbox,
   cwd: string
 ): PathCheckResult {
-  if (policy.mode === "off") return { ok: true };
   const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
 
- // Sensitive reads are always blocked (defence in depth — the process
- // sandbox also denies them for bash).
+ // Sensitive reads are always blocked — defence in depth, and crucially this
+ // applies EVEN when the sandbox is off (file tools would otherwise have no
+ // floor at all with mode="off"). The process sandbox also denies them for bash.
   if (kind === "read") {
     for (const s of SENSITIVE_READ_PATHS) {
       if (isUnder(abs, s)) {
@@ -412,6 +554,12 @@ export function assertPathAllowed(
     }
     return { ok: true };
   }
+
+ // Reads aside, mode "off" imposes no writable-root constraint. The sensitive
+ // WRITE floor is enforced upstream in PermissionEngine (forces an interactive
+ // confirmation regardless of mode), so a confirmed write still reaches here
+ // and is allowed through.
+  if (policy.mode === "off") return { ok: true };
 
  // Writes.
   if (policy.mode === "read-only") {
@@ -482,7 +630,8 @@ const DANGEROUS_PATTERNS: Array<{ re: RegExp; why: string }> = [
   { re: /\bmkfs\b/, why: "filesystem format" },
   { re: /\bdd\b[^|]*\bof=\/dev\//, why: "raw disk write" },
   { re: /:\(\)\s*\{\s*:\|:&\s*\}\s*;:/, why: "fork bomb" },
-  { re: /\bgit\s+push\b[^|]*--force/, why: "force push" },
+  { re: /\bgit\s+push\b[^|]*--force(?!-with-lease)/, why: "force push" },
+  { re: /\bgit\s+push\b[^|]*--force-with-lease/, why: "force push (with lease)" },
   { re: /\bgit\s+reset\s+--hard/, why: "hard reset" },
   { re: /\bgit\s+clean\s+-[a-zA-Z]*[fx]/, why: "git clean -fx" },
   { re: /\b(shutdown|reboot|halt|poweroff)\b/, why: "power state change" },
@@ -491,6 +640,11 @@ const DANGEROUS_PATTERNS: Array<{ re: RegExp; why: string }> = [
   { re: /\bcurl\b[^|]*\|\s*(sudo\s+)?(sh|bash)\b/, why: "curl pipe to shell" },
   { re: /\bwget\b[^|]*\|\s*(sudo\s+)?(sh|bash)\b/, why: "wget pipe to shell" },
   { re: /\bDROP\s+(TABLE|DATABASE)\b/i, why: "database drop" },
+  // Secure-delete / truncation of a system or root path.
+  { re: /\bshred\b[^|]*\s\/(?:etc|boot|bin|sbin|usr|System)\b/, why: "secure-delete of system path" },
+  { re: /\btruncate\b[^|]*-s\s*0[^|]*\s\/(?:etc|boot|bin|sbin|usr)\b/, why: "truncate of system path" },
+  // Recursive delete of a shell glob at root (`rm -rf /*`, `/home/*`).
+  { re: /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+\/\S*\*/, why: "recursive delete of a root glob" },
 ];
 
 export interface DangerCheck {

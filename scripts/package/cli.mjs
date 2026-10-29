@@ -106,8 +106,8 @@ async function main() {
   ensureDir(outDir);
   await buildWeb();
   await bundleCli();
-  packageBinaries;
-  packageNpm;
+  packageBinaries();
+  packageNpm();
   log(`CLI release → ${outDir}`);
 }
 

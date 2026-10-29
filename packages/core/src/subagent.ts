@@ -7,19 +7,50 @@
 // it returns a structured conclusion.
 
 import { randomUUID } from "node:crypto";
+import { detectDegenerateText, detectRunawayRepetition } from "./textDegeneration.js";
 import { runAgent, type AgentDeps, isTransientError } from "./agent.js";
-import type { CodepilotConfig, Event, UsageInfo } from "./types.js";
+import type { CodepilotConfig, Event, QuestionAnswers, UsageInfo } from "./types.js";
 import { ToolRegistry } from "./tools/types.js";
 import { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
-import { AnthropicProvider, OpenAIProvider, CopilotProvider, GeminiProvider } from "./providers/index.js";
+import { buildProvider } from "./session-utils.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { readMemory, summariseMemory } from "./memory.js";
 import { resolveSandbox } from "./sandbox.js";
 import type { SubagentRunner } from "./tools/task.js";
-import type { ChatProvider } from "./providers/types.js";
 import { createWorktree, removeWorktree, worktreeDiffStat } from "./worktree.js";
 import { projectStatePath } from "./projectState.js";
+import { SubagentStore } from "./subagentStore.js";
+
+/** Max times we re-ask the user to extend a capped sub-agent (cost guard). */
+const MAX_BUDGET_EXTENSIONS = 8;
+
+/**
+ * Decide the PermissionEngine a sub-agent runs under. A fresh, independent
+ * engine is used when:
+ *  - the custom agent declares its own permissionMode (always independent),
+ *  - there is no parent engine to inherit (tests / minimal harness), or
+ *  - config `subagentPermissions: "independent"` opts a built-in sub-agent
+ *    out of sharing the parent's live engine.
+ * Default ("inherit") shares the parent engine so session-approved allow
+ * rules carry in — today's behavior. "independent" closes the gap where a
+ * mid-session grant to the parent silently widened a built-in sub-agent.
+ */
+export function resolveSubagentPermissions(args: {
+  parent?: PermissionEngine;
+  customPermissionMode?: import("./types.js").PermissionMode;
+  policy?: "inherit" | "independent";
+  autoApprove?: string[];
+}): PermissionEngine {
+  const { parent, customPermissionMode, policy, autoApprove } = args;
+  if (customPermissionMode || !parent || policy === "independent") {
+    return new PermissionEngine({
+      permissionMode: customPermissionMode ?? "auto-edit",
+      autoApprove,
+    });
+  }
+  return parent;
+}
 
 /** Sum usage events from a sub-agent transcript (adopted attempt only). */
 function sumUsageFromEvents(events: Event[]): UsageInfo {
@@ -55,7 +86,7 @@ You are a sub-agent invoked by a parent CodePilot agent via the \`task\` tool. Y
 - **Scope.** The parent has delegated one bounded objective to you (in the user message of this turn). Do exactly that objective, no more, no less.
 - **Do not address the user.** The user cannot see you. Never greet them, never ask them questions, never narrate progress. If essential information is missing, investigate with the tools available; if still blocked, return a blocker in your conclusion.
 - **No nested sub-agents.** Do not call the \`task\` tool. You are already a sub-agent.
-- **Default tool surface is read-only** (agent type \`explore\`). You have \`read_file\`, \`grep\`, \`glob\`, \`ls\`, \`read_artifact\` (and any others the parent explicitly listed). If you are a \`worker\` sub-agent, you additionally have \`write_file\` / \`edit_file\` / \`bash\` — complete the delegated change, then **verify before reporting**: run the relevant test/build/lint (or other acceptance check) and include the command + exit outcome in Findings. Do not report success on unverified writes. \`plan_update\` and \`memory_write\` are never available. If the parent asks you to "fix" or "implement" something but you lack write tools, say so in your conclusion and stop.
+- **Default tool surface is read-only** (agent type \`explore\`). You have \`read_file\`, \`grep\`, \`glob\`, \`ls\`, \`read_artifact\`, plus the network research tools \`web_fetch\` and \`web_search\` (and any others the parent explicitly listed). If you are a \`worker\` sub-agent, you additionally have \`write_file\` / \`edit_file\` / \`bash\` — complete the delegated change, then **verify before reporting**: run the relevant test/build/lint (or other acceptance check) and include the command + exit outcome in Findings. Do not report success on unverified writes. \`plan_update\` and \`memory_write\` are never available. If the parent asks you to "fix" or "implement" something but you lack write tools, say so in your conclusion and stop.
 - **Conclusion format.** End your work with a final assistant message that contains a structured conclusion. Use this exact format:
 
  ### Findings
@@ -87,6 +118,9 @@ export interface SubagentFactoryOptions {
  * dispatching a sub-agent never widens what may run unattended. */
   permissions?: PermissionEngine;
   onPermissionRequest?: AgentDeps["onPermissionRequest"];
+ /** Parent's structured question channel — used to ask whether to extend a
+  * capped sub-agent after it hits `maxSteps` / custom `maxTurns`. */
+  onAskUser?: AgentDeps["onAskUser"];
  /** Live parent sandbox (so expand-dir grants apply to sub-agents too). */
   getSandbox?: () => import("./sandbox.js").ResolvedSandbox;
   expandSandboxWritable?: AgentDeps["expandSandboxWritable"];
@@ -118,7 +152,7 @@ export function createSubagentRunner(
   factoryOpts: SubagentFactoryOptions
 ): SubagentRunner {
   return {
-    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation }) {
+    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId }) {
       const live = factoryOpts.getEndpoint?.();
       const opts: SubagentFactoryOptions = live
         ? { ...factoryOpts, config: live.config, model: live.model }
@@ -137,7 +171,9 @@ export function createSubagentRunner(
         pickServedModel(opts, custom?.model) ??
         pickServedModel(opts, opts.config.smallModel) ??
         opts.model;
-      const effectiveMaxSteps = maxSteps ?? custom?.maxTurns ?? 15;
+      // Unset = unlimited (doom-loop / cancel / timeout still apply). Only cap
+      // when the parent `task` call or custom-agent frontmatter sets a value.
+      const effectiveMaxSteps = maxSteps ?? custom?.maxTurns;
 
  // Filesystem isolation: when `isolation === "worktree"`, create a
  // linked git worktree on a fresh branch and run the sub-agent there.
@@ -145,6 +181,17 @@ export function createSubagentRunner(
  // diff stat) in the finally block below. Falls back to the parent cwd
  // if git is unavailable or worktree creation fails — isolation is a
  // best-effort feature, never a hard requirement.
+      // Unique owner id for this sub-agent run. Stamped onto any background
+      // jobs it starts so `write_stdin` refuses cross-agent writes — critical
+      // when worktree isolation falls back to a shared parent cwd, where the
+      // bashJobs registry (keyed only by cwd) would otherwise let sibling
+      // sub-agents reach each other's job stdin.
+      //
+      // Prefer the id the `task` tool assigned (so the progress events, the
+      // persisted transcript, and the returned session_id all match); a resume
+      // reuses the prior id; otherwise mint a fresh one.
+      const subagentOwnerId = ownerId ?? resumeSessionId ?? `sub_${randomUUID()}`;
+      const isResume = Boolean(resumeSessionId);
       let worktreeHandle: import("./worktree.js").WorktreeHandle | null = null;
       let effectiveCwd = cwd;
       let isolationNote = "";
@@ -180,7 +227,15 @@ export function createSubagentRunner(
       }
 
       try {
-      const provider = buildProvider(opts.config, effectiveModel);
+      // Reuse the shared provider builder so sub-agents get the same fallback
+      // chain as the main session. Override model/smallModel to the sub-agent's
+      // chosen model; a fallback entry that sets its own model still wins (it is
+      // spread last in buildProvider), and one that doesn't inherits this model.
+      const provider = buildProvider({
+        ...opts.config,
+        model: effectiveModel ?? opts.config.model,
+        smallModel: effectiveModel ?? opts.config.smallModel ?? opts.config.model,
+      });
       let toolRegistry = opts.buildToolRegistry(effectiveType);
  // Custom agent tool allowlist / denylist.
       if (custom?.tools && custom.tools.length > 0) {
@@ -210,12 +265,12 @@ export function createSubagentRunner(
       }
       const artifacts = new ArtifactStore(joinCodepilot(effectiveCwd, "artifacts"));
       await artifacts.init();
-      const permissions = custom?.permissionMode || !opts.permissions
-        ? new PermissionEngine({
-            permissionMode: custom?.permissionMode ?? "auto-edit",
-            autoApprove: opts.config.autoApprove,
-          })
-        : opts.permissions;
+      const permissions = resolveSubagentPermissions({
+        parent: opts.permissions,
+        customPermissionMode: custom?.permissionMode,
+        policy: opts.config.subagentPermissions,
+        autoApprove: opts.config.autoApprove,
+      });
  // Memory is read from the parent cwd — a worktree sub-agent should
  // still see project/user memory, but it writes artifacts into its own
  // isolated checkout. Uses an isolated checkout for the sub-agent.
@@ -246,61 +301,97 @@ export function createSubagentRunner(
         mode: "agent",
       });
 
+      // Durable transcript store: persists this sub-agent's replayable events
+      // so it can be CONTINUED later (parent passes its id as
+      // continue_session_id) and so an interrupted in-flight run survives.
+      const stateDir = opts.projectStateDir?.();
+      const store = stateDir ? new SubagentStore(stateDir) : null;
+
+      // Load a prior transcript when continuing an existing sub-agent.
+      const priorEvents: Event[] = isResume && store ? await store.load(subagentOwnerId) : [];
+      const resuming = isResume && priorEvents.length > 0;
+
       const userMessageId = `msg_${randomUUID()}`;
       const footer = outputSchema
         ? STRUCTURED_OUTPUT_FOOTER
         : SUBAGENT_OBJECTIVE_FOOTER;
+      // A resumed sub-agent already knows its role and prior context: send the
+      // bare follow-up (no OBJECTIVE/role preamble). A fresh run gets the full
+      // objective + conclusion-format footer.
+      const initialText = resuming
+        ? (continueText ?? objective)
+        : `OBJECTIVE:\n${objective}\n\n${footer}`;
       const initial: Event = {
         type: "message",
         id: userMessageId,
         role: "user",
-        content: [
-          { type: "text", text: `OBJECTIVE:\n${objective}\n\n${footer}` },
-        ],
+        content: [{ type: "text", text: initialText }],
       };
 
- // Sub-agent retry: the parent agent loop regenerates a turn on a
- // transient stream failure, but a sub-agent used to get one shot — a
- // flaky provider (rate limit, dropped socket, gateway 5xx) turned into
- // a hard `ok:false` the parent had to notice and re-dispatch by hand.
- // We now retry the whole sub-agent run in place for transient failures
- // only, with exponential backoff. Deterministic failures (bad schema,
+ // Sub-agent retry: the whole sub-agent run is retried in place for
+ // transient failures only (rate limit, dropped socket, gateway 5xx),
+ // with exponential backoff. Deterministic failures (bad schema,
  // genuine blocker) are returned on the first attempt — retrying them
  // would just burn tokens.
       const maxSubAttempts = Math.max(1, opts.config.turnRetries ?? 2);
       let events: Event[] = [];
       let outcome = assessSubagentOutcome(events);
+      let reachedTurnBudget = false;
+      const makeDeps = (maxTurns: number): AgentDeps => ({
+        provider,
+        tools: restricted,
+        artifacts,
+        permissions,
+        config: { ...opts.config, model: effectiveModel ?? opts.config.smallModel },
+        cwd: effectiveCwd,
+        sessionId: subagentOwnerId,
+        systemPrompt: sys,
+        // 0 = unlimited; must set explicitly so parent config.maxTurns is not inherited.
+        maxTurns,
+        isSubagent: true,
+        // When a structured result is requested and the provider speaks the
+        // OpenAI dialect (incl. Azure, which reuses that provider), additionally
+        // constrain output with native json_schema. The prompt+parse path in
+        // structuredOutputBlock / extractStructuredJson still runs and validates,
+        // so this is a strict upgrade (native enforcement where available,
+        // prompt-only elsewhere).
+        responseFormat:
+          outputSchema && provider.name === "openai"
+            ? { name: "subagent_result", schema: outputSchema, strict: false }
+            : undefined,
+        sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
+        expandSandboxWritable: opts.expandSandboxWritable,
+        deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
+        addDeliveryRoot: opts.addDeliveryRoot,
+        scratchDir: opts.scratchDir?.(),
+        projectStateDir: opts.projectStateDir?.(),
+        subagentDepth: (depth ?? 0) + 1,
+        onEvent: async (e) => {
+          if (e.type !== "activity") events.push(e);
+          try { onLiveEvent?.(e); } catch { /* a UI listener must not break the run */ }
+        },
+        onPermissionRequest: opts.onPermissionRequest,
+        onAskUser: opts.onAskUser,
+      });
+
       for (let attempt = 0; attempt < maxSubAttempts; attempt++) {
  // Fresh transcript per attempt — a half-finished prior attempt must
  // not leak into the retry's context or its outcome assessment.
         events = [];
-        const deps: AgentDeps = {
-          provider,
-          tools: restricted,
-          artifacts,
-          permissions,
-          config: { ...opts.config, model: effectiveModel ?? opts.config.smallModel },
-          cwd: effectiveCwd,
-          systemPrompt: sys,
-          maxTurns: effectiveMaxSteps,
-          sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
-          expandSandboxWritable: opts.expandSandboxWritable,
-          deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
-          addDeliveryRoot: opts.addDeliveryRoot,
-          scratchDir: opts.scratchDir?.(),
-          projectStateDir: opts.projectStateDir?.(),
-          subagentDepth: (depth ?? 0) + 1,
-          onEvent: async (e) => {
-            if (e.type !== "activity") events.push(e);
-            try { onLiveEvent?.(e); } catch { /* a UI listener must not break the run */ }
-          },
-          onPermissionRequest: opts.onPermissionRequest,
-        };
-
+        reachedTurnBudget = false;
         let threw: Error | null = null;
         try {
  // Prepend the initial event as history so runAgent doesn't double-emit it.
-          await runAgent({ history: [initial], userText: objective }, deps);
+ // When continuing an existing sub-agent, seed the history with its prior
+ // transcript so it resumes its own conversation rather than starting over.
+          const run = await runAgent(
+            {
+              history: resuming ? [...priorEvents, initial] : [initial],
+              userText: resuming ? initialText : objective,
+            },
+            makeDeps(effectiveMaxSteps ?? 0),
+          );
+          reachedTurnBudget = run.reachedTurnBudget === true;
         } catch (err) {
           threw = err as Error;
         }
@@ -315,6 +406,54 @@ export function createSubagentRunner(
         const delayMs = Math.min(8000, 1500 * 2 ** attempt);
         await new Promise((r) => setTimeout(r, delayMs));
       }
+
+      // When a finite maxSteps/maxTurns was set and the run hit it, ask the
+      // user whether to append more turns instead of failing or stopping cold.
+      // Headless sessions (no onAskUser) keep the soft-landed conclusion.
+      if (
+        reachedTurnBudget &&
+        typeof effectiveMaxSteps === "number" &&
+        effectiveMaxSteps > 0 &&
+        opts.onAskUser
+      ) {
+        let extensions = 0;
+        while (extensions < MAX_BUDGET_EXTENSIONS) {
+          const decision = await askBudgetExtension(opts.onAskUser, {
+            objective,
+            stepsUsed: outcome.steps,
+            cap: effectiveMaxSteps,
+            hasConclusion: outcome.ok,
+          });
+          if (decision.kind === "stop") break;
+          extensions += 1;
+          const extraTurns = decision.kind === "unlimited" ? 0 : decision.turns;
+          const continueText =
+            `<subagent_budget_continue extension="${extensions}">\n` +
+            `The user approved continuing past the previous turn budget of ${effectiveMaxSteps}. ` +
+            (extraTurns === 0
+              ? `You have no new turn limit — finish the objective, then write your structured conclusion.`
+              : `You have up to ${extraTurns} additional turns. Prefer finishing within that; synthesize a conclusion before the new cap.`) +
+            `\nResume from what you already gathered; do not restart the whole exploration.\n` +
+            `</subagent_budget_continue>`;
+          try {
+            const run = await runAgent(
+              { history: events.slice(), userText: continueText },
+              makeDeps(extraTurns),
+            );
+            reachedTurnBudget = run.reachedTurnBudget === true;
+          } catch (err) {
+            outcome = {
+              ok: false,
+              steps: outcome.steps,
+              conclusion: `### Blocker\nSub-agent budget-continue threw: ${(err as Error).message}`,
+            };
+            break;
+          }
+          outcome = assessSubagentOutcome(events);
+          if (!reachedTurnBudget) break;
+        }
+      }
+
  // Replay the adopted attempt's events to the external listener so the
  // host sees exactly one clean run (failed attempts are not forwarded).
       if (onEvent) for (const e of events) onEvent(e);
@@ -393,31 +532,11 @@ export function createSubagentRunner(
           `Address this feedback and produce an updated conclusion.\n` +
           `</subagent_stop_continue>`;
 
-        const continueDeps: AgentDeps = {
-          provider,
-          tools: restricted,
-          artifacts,
-          permissions,
-          config: { ...opts.config, model: effectiveModel ?? opts.config.smallModel },
-          cwd: effectiveCwd,
-          systemPrompt: sys,
-          maxTurns: effectiveMaxSteps,
-          sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
-          expandSandboxWritable: opts.expandSandboxWritable,
-          deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
-          addDeliveryRoot: opts.addDeliveryRoot,
-          scratchDir: opts.scratchDir?.(),
-          projectStateDir: opts.projectStateDir?.(),
-          subagentDepth: (depth ?? 0) + 1,
-          onEvent: async (e) => {
-            if (e.type !== "activity") events.push(e);
-            try { onLiveEvent?.(e); } catch { /* ignore */ }
-          },
-          onPermissionRequest: opts.onPermissionRequest,
-        };
-
         try {
-          await runAgent({ history: events.slice(), userText: continueText }, continueDeps);
+          await runAgent(
+            { history: events.slice(), userText: continueText },
+            makeDeps(effectiveMaxSteps ?? 0),
+          );
         } catch (err) {
           outcome = {
             ok: false,
@@ -436,11 +555,21 @@ export function createSubagentRunner(
           }
         }
       }
+      // Persist this run's transcript so the sub-agent can be continued later
+      // (and so an interrupted in-flight run survives). A fresh run replaces the
+      // file with [initial follow-up, …adopted events]; a resume appends the new
+      // follow-up + events after the prior transcript. Best-effort.
+      if (store) {
+        const runEvents: Event[] = [initial, ...events];
+        if (resuming) await store.appendAll(subagentOwnerId, runEvents);
+        else await store.replace(subagentOwnerId, runEvents);
+      }
       return {
         conclusion: finalText,
         steps: outcome.steps,
         ok: outcome.ok,
         usage: sumUsageFromEvents(events),
+        sessionId: subagentOwnerId,
       };
       } finally {
  // Always clean up the worktree (forced removal). The diff stat was
@@ -522,6 +651,80 @@ function extractStructuredJson(text: string): { ok: true; value: unknown } | { o
 
 const NO_FINAL_TEXT = "(sub-agent produced no final text)";
 
+type BudgetExtensionDecision =
+  | { kind: "stop" }
+  | { kind: "unlimited" }
+  | { kind: "more"; turns: number };
+
+/**
+ * Ask the user whether to extend a capped sub-agent. Returns stop when the
+ * channel is missing, the user declines, or the answer is unparseable.
+ */
+export async function askBudgetExtension(
+  onAskUser: NonNullable<AgentDeps["onAskUser"]>,
+  ctx: {
+    objective: string;
+    stepsUsed: number;
+    cap: number;
+    hasConclusion: boolean;
+  },
+): Promise<BudgetExtensionDecision> {
+  const snippet =
+    ctx.objective.length > 240 ? `${ctx.objective.slice(0, 240)}…` : ctx.objective;
+  const answers: QuestionAnswers = await onAskUser({
+    requestId: `subagent_budget_${randomUUID().slice(0, 8)}`,
+    questions: [
+      {
+        id: "continue",
+        header: "Sub-agent turn budget",
+        question:
+          `A sub-agent reached its turn budget (${ctx.cap}` +
+          (ctx.stepsUsed > 0 ? `, ${ctx.stepsUsed} tool step(s) so far` : "") +
+          `). Objective:\n${snippet}\n\n` +
+          (ctx.hasConclusion
+            ? "It produced a partial conclusion. Continue so it can dig further?"
+            : "It has not finished synthesizing. Continue so it can complete the work?"),
+        options: [
+          {
+            label: `Continue (+${ctx.cap} turns)`,
+            description: `Grant another ${ctx.cap} turns, then ask again if still not done.`,
+          },
+          {
+            label: "Continue (no limit)",
+            description: "Let it run without a new turn cap until it finishes or you cancel.",
+          },
+          {
+            label: "Stop",
+            description: "Keep the current conclusion and return to the parent agent.",
+          },
+        ],
+      },
+    ],
+  });
+  return parseBudgetExtensionAnswer(answers.continue, ctx.cap);
+}
+
+/** Pure parser for tests / hosts that want to pre-resolve the choice. */
+export function parseBudgetExtensionAnswer(
+  raw: string | string[] | undefined,
+  cap: number,
+): BudgetExtensionDecision {
+  const text = (Array.isArray(raw) ? raw.join(" ") : raw ?? "").trim().toLowerCase();
+  if (!text) return { kind: "stop" };
+  // Match specific options before the bare "stop" label — "Continue (+N turns)"
+  // must not be classified as stop.
+  if (text.includes("no limit") || text.includes("unlimited") || /不限|无限制/.test(text)) {
+    return { kind: "unlimited" };
+  }
+  if (text.includes("continue") || /继续|追加/.test(text)) {
+    return { kind: "more", turns: Number.isFinite(cap) && cap > 0 ? cap : 15 };
+  }
+  if (/^stop\b/.test(text) || text === "stop" || /停止|结束|不要/.test(text)) {
+    return { kind: "stop" };
+  }
+  return { kind: "stop" };
+}
+
 function extractFinalText(events: Event[]): string {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
@@ -551,12 +754,18 @@ function countSteps(events: Event[]): number {
   return n;
 }
 
+// Output degeneration detectors live in a standalone module (no agent/session
+// deps) so the live streaming loop can use them too without a circular import.
+// Re-exported here to preserve the existing public import surface.
+export { detectDegenerateText, detectRunawayRepetition };
+
 /**
  * Decide whether a sub-agent run produced a usable conclusion.
  *
- * Soft failures (provider 404, empty stream, aborted mid-turn with no text)
- * used to look like successful `0 steps` / "no final text" results and the
- * parent kept exploring. Surface the error and mark `ok: false` instead.
+ * Soft failures (provider 404, empty stream, aborted mid-turn with no
+ * text) are surfaced as errors with `ok: false` rather than as successful
+ * `0 steps` / "no final text" results, so the parent does not keep
+ * exploring a failed sub-agent.
  */
 export function assessSubagentOutcome(events: Event[]): {
   conclusion: string;
@@ -567,6 +776,49 @@ export function assessSubagentOutcome(events: Event[]): {
   const errors = extractErrors(events);
   const text = extractFinalText(events);
   const hasText = text !== NO_FINAL_TEXT;
+
+  // Degenerate output (decoding collapse) is a failure, never a conclusion.
+  // Caught before the "has text → ok" path so the garbage is not adopted or
+  // fed back to the parent. Guards the "乱说 / incoherent garbage" form.
+  if (hasText) {
+    const degen = detectDegenerateText(text);
+    if (degen) {
+      return {
+        ok: false,
+        steps,
+        conclusion:
+          `### Blocker\n` +
+          `Sub-agent output degenerated into repeated noise ` +
+          `(the unit ${JSON.stringify(degen.unit)} covers ` +
+          `${Math.round(degen.ratio * 100)}% of ${text.length} chars) ` +
+          `after ${steps} tool step(s). The model collapsed into a decode loop ` +
+          `instead of producing a conclusion — treat this run as failed and ` +
+          `retry (optionally with a stronger model or a narrower objective).`,
+      };
+    }
+    // Zero tool steps is a failure for an agentic sub-agent, regardless of what
+    // text it emitted. A sub-agent's job is to DO work (read/search/run) and
+    // then report; text produced without any tool call is an announcement of
+    // intent ("I'll read the files…"), not a result. Adopting it credits the
+    // child with work it never did. Borrowed from dsh's hard guard
+    // (packages/goal activation.ts): "completed" with no captured work is
+    // forced to error. We key off the real signal (step count), not a fragile
+    // text-pattern match, so it is model- and language-agnostic. Guards the
+    // "提前结束 / premature termination" form.
+    if (steps === 0) {
+      const snippet = text.length > 160 ? `${text.slice(0, 160)}…` : text;
+      return {
+        ok: false,
+        steps,
+        conclusion:
+          `### Blocker\n` +
+          `Sub-agent produced text but took 0 tool steps — it never read, ` +
+          `searched, or ran anything, so it did no real work (the output is an ` +
+          `announcement of intent, not a finding). Treat this run as failed and ` +
+          `retry.\n\nWhat it said:\n${JSON.stringify(snippet)}`,
+      };
+    }
+  }
 
   if (errors.length > 0 && !hasText) {
     return {
@@ -623,37 +875,4 @@ function pickServedModel(opts: SubagentFactoryOptions, requested: string | undef
   const active = Object.values(presets).find((p) => p.baseURL && p.baseURL === opts.config.baseURL);
   if (active?.models && active.models.length > 0 && !active.models.includes(requested)) return undefined;
   return requested;
-}
-
-function buildProvider(config: CodepilotConfig, model: string | undefined): ChatProvider {
-  const provider = config.provider ?? "anthropic";
-  switch (provider) {
-    case "openai":
-      return new OpenAIProvider({
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        defaultModel: model,
-        smallModel: model,
-      });
-    case "copilot":
-      return new CopilotProvider({
-        defaultModel: model,
-        smallModel: model,
-      });
-    case "gemini":
-      return new GeminiProvider({
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        defaultModel: model,
-        smallModel: model,
-      });
-    case "anthropic":
-    default:
-      return new AnthropicProvider({
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        defaultModel: model,
-        smallModel: model,
-      });
-  }
 }

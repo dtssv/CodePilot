@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { PlanStep, UsageInfo } from "@codepilot/core";
 import type { Row, ToolRow } from "../state/rows.js";
-import { CATEGORY_VERB, toolCategory, toolTarget } from "../state/selectors.js";
+import { CATEGORY_VERB, toolCategory, toolTarget, touchedFiles, type TouchedFile } from "../state/selectors.js";
 import { t } from "../i18n.js";
-import { ListIcon, XIcon } from "./Icons.js";
+import { FileIcon, ListIcon, XIcon } from "./Icons.js";
 
 /**
  * Session execution trajectory: one chronological step per transcript row
@@ -15,24 +15,33 @@ export function TrajectoryPanel({
   sessionId,
   usage,
   onClose,
+  onOpenPath,
 }: {
   rows: Row[];
   sessionId: string;
   usage: UsageInfo;
   onClose(): void;
+  onOpenPath?(path: string): void;
 }): React.ReactElement {
   const steps = useMemo(() => buildSteps(rows), [rows]);
+  const deliverables = useMemo(() => touchedFiles(rows), [rows]);
   const scroller = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
+  // Two independent views in one panel: the chronological request trajectory
+  // and the changed-files list. They are tabs (not stacked) so a long list of
+  // deliverables never crowds out the steps — the previous layout stacked a
+  // fixed-height Deliverables block above the steps, which hid the trajectory
+  // whenever files were touched.
+  const [tab, setTab] = useState<"steps" | "files">("steps");
 
-  // Follow the live end of the trajectory when new steps arrive.
+  // Follow the live end of the trajectory when new steps arrive (steps tab only).
   useEffect(() => {
-    if (steps.length > prevLen.current) {
+    if (tab === "steps" && steps.length > prevLen.current) {
       const el = scroller.current;
       if (el) el.scrollTop = el.scrollHeight;
     }
     prevLen.current = steps.length;
-  }, [steps.length]);
+  }, [steps.length, tab]);
 
   return (
     <aside className="flex w-[22rem] shrink-0 flex-col border-l border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
@@ -41,9 +50,6 @@ export function TrajectoryPanel({
         <span className="text-[13px] font-semibold text-[var(--color-ink)]">{t("Trajectory")}</span>
         <span className="ml-1 truncate font-mono text-[10.5px] text-[var(--color-ink-faint)]">
           {sessionId.slice(0, 8)}
-        </span>
-        <span className="ml-1 font-mono text-[10.5px] text-[var(--color-ink-faint)]">
-          {steps.length}
         </span>
         <button type="button" className="cp-icon-btn ml-auto" title={t("Close")} onClick={onClose}>
           <XIcon className="h-4 w-4" />
@@ -55,22 +61,110 @@ export function TrajectoryPanel({
         <TokenGrid usage={usage} />
       </div>
 
-      <div ref={scroller} className="min-h-0 flex-1 overflow-auto px-3 py-3">
-        {steps.length === 0 ? (
-          <div className="text-[12px] leading-5 text-[var(--color-ink-faint)]">
-            {t("No steps yet — send a message to start this session’s trajectory.")}
-          </div>
-        ) : (
-          <ol className="space-y-2">
-            {steps.map((step, i) => (
-              <li key={step.id}>
-                <StepCard step={step} index={i + 1} />
-              </li>
-            ))}
-          </ol>
-        )}
+      {/* Tabs: request trajectory ↔ changed files. */}
+      <div className="flex shrink-0 border-b border-[var(--color-edge-subtle)] text-[12px]">
+        <TabButton
+          active={tab === "steps"}
+          onClick={() => setTab("steps")}
+          label={t("Trajectory")}
+          count={steps.length}
+        />
+        <TabButton
+          active={tab === "files"}
+          onClick={() => setTab("files")}
+          label={t("Changed files")}
+          count={deliverables.length}
+        />
       </div>
+
+      {tab === "files" ? (
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
+          {deliverables.length === 0 ? (
+            <div className="text-[12px] leading-5 text-[var(--color-ink-faint)]">
+              {t("No files changed yet this session.")}
+            </div>
+          ) : (
+            <ul className="-mx-1 space-y-0.5">
+              {deliverables.map((f) => (
+                <DeliverableRow key={f.path} file={f} onOpen={onOpenPath ? () => onOpenPath(f.path) : undefined} />
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <div ref={scroller} className="min-h-0 flex-1 overflow-auto px-3 py-3">
+          {steps.length === 0 ? (
+            <div className="text-[12px] leading-5 text-[var(--color-ink-faint)]">
+              {t("No steps yet — send a message to start this session’s trajectory.")}
+            </div>
+          ) : (
+            <ol className="space-y-2">
+              {steps.map((step, i) => (
+                <li key={step.id}>
+                  <StepCard step={step} index={i + 1} />
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
     </aside>
+  );
+}
+
+/** One tab header with a live count badge. */
+function TabButton({
+  active,
+  onClick,
+  label,
+  count,
+}: {
+  active: boolean;
+  onClick(): void;
+  label: string;
+  count: number;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 font-medium transition-colors ${
+        active
+          ? "border-b-2 border-[var(--color-accent)] text-[var(--color-ink)]"
+          : "border-b-2 border-transparent text-[var(--color-ink-faint)] hover:text-[var(--color-ink-dim)]"
+      }`}
+    >
+      <span>{label}</span>
+      <span className="font-mono text-[10.5px] text-[var(--color-ink-faint)]">{count}</span>
+    </button>
+  );
+}
+
+/** One deliverable file row (created/edited this session), with +/- line counts. */
+function DeliverableRow({ file, onOpen }: { file: TouchedFile; onOpen?(): void }): React.ReactElement {
+  const name = file.path.split("/").pop() ?? file.path;
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onOpen}
+        disabled={!onOpen}
+        title={file.path}
+        className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-default disabled:hover:bg-transparent"
+      >
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[var(--color-accent-dim)] text-[var(--color-accent)]">
+          <FileIcon className="h-3 w-3" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] text-[var(--color-ink)]">{name}</span>
+          <span className="block truncate font-mono text-[10px] text-[var(--color-ink-faint)]">{file.path}</span>
+        </span>
+        <span className="shrink-0 text-right font-mono text-[10px]">
+          {file.added > 0 && <span className="text-[var(--color-add)]">+{file.added}</span>}
+          {file.removed > 0 && <span className="ml-1 text-[var(--color-remove)]">−{file.removed}</span>}
+        </span>
+      </button>
+    </li>
   );
 }
 
@@ -254,7 +348,7 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
       return (
         <Block
           index={index}
-          label={step.recoverable ? t("Error") : t("Error")}
+          label={step.recoverable ? t("Error (recoverable)") : t("Error")}
           tone="error"
           right={formatClock(step.at)}
         >

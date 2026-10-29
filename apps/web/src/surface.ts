@@ -23,6 +23,9 @@ export interface Surface {
   remote: boolean;
  /** Connection given in the URL (`?ws=…&token=…&cwd=…`), stripped after read. */
   autoConnect?: { url: string; token?: string; cwd: string };
+ /** Workspaces authorized for a remote pairing (`?cwds=` JSON), for seeding the
+  * phone's workspace list. Empty on non-remote surfaces. */
+  remoteCwds?: string[];
 }
 
 export function detectSurface(): Surface {
@@ -34,10 +37,12 @@ export function detectSurface(): Surface {
   let layout: Layout;
   if (host) layout = "embedded";
   else if (asked === "agent" || asked === "web" || asked === "embedded") layout = asked;
-  else if (desktop || remote) layout = "agent";
+  else if (remote) layout = "agent";
+  else if (desktop) layout = "web";
   else layout = (readStore(LAYOUT_KEY) as Layout | null) === "agent" ? "agent" : "web";
 
   let autoConnect: Surface["autoConnect"];
+  let remoteCwds: string[] | undefined;
   const token = params.get("token") ?? undefined;
   const ws = params.get("ws");
   if (!host && (token || ws)) {
@@ -46,8 +51,10 @@ export function detectSurface(): Surface {
       token,
       cwd: params.get("cwd") ?? "",
     };
+    remoteCwds = parseCwds(params.get("cwds"));
  // The token grants command execution: keep it out of history/bookmarks.
     params.delete("token");
+    params.delete("cwds");
     const qs = params.toString();
     try {
       window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
@@ -55,7 +62,7 @@ export function detectSurface(): Surface {
  /* not fatal */
     }
   }
-  return { layout, host, desktop, remote, autoConnect };
+  return { layout, host, desktop, remote, autoConnect, remoteCwds };
 }
 
 export function saveLayout(layout: Layout): void {
@@ -89,6 +96,21 @@ export function applyTheme(theme: Theme, persist = false): void {
 
 export function applyLayout(layout: Layout): void {
   document.documentElement.dataset.layout = layout;
+}
+
+/** Parse the `?cwds=` JSON array of authorized workspaces; [] when absent/bad. */
+function parseCwds(raw: string | null): string[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    if (Array.isArray(arr)) {
+      const out = arr.filter((c): c is string => typeof c === "string" && c.trim().length > 0);
+      return out.length ? out : undefined;
+    }
+  } catch {
+    /* malformed — ignore */
+  }
+  return undefined;
 }
 
 function sameOriginSocket(): string {

@@ -212,6 +212,53 @@ describe("McpStdioClient framing", () => {
       mock2.cleanup();
     }
   });
+
+  it("transparently reconnects after the server process dies", async () => {
+    // A server that answers initialize/tools/list, replies to the first
+    // tools/call, then exits — simulating a crash. The client must respawn and
+    // the second tools/call must succeed without an explicit restart.
+    const dir = mkdtempSync(join(tmpdir(), "mcp-reconn-"));
+    const path = join(dir, "server.mjs");
+    writeFileSync(
+      path,
+      `
+import readline from 'node:readline';
+let calls = 0;
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  let msg; try { msg = JSON.parse(line); } catch { return; }
+  if (msg.id === undefined) return;
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { protocolVersion:'2024-11-05', serverInfo:{ name:'reconn' } } }) + '\\n');
+  } else if (msg.method === 'tools/list') {
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { tools: [] } }) + '\\n');
+  } else if (msg.method === 'tools/call') {
+    calls++;
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { content: [{ type:'text', text: 'call ' + calls }] } }) + '\\n');
+    if (calls === 1) { setTimeout(() => process.exit(0), 20); } // "crash" after first call
+  } else {
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, error: { code:-32601, message:'nf' } }) + '\\n');
+  }
+});
+`,
+      "utf-8",
+    );
+    try {
+      const c = new McpStdioClient("reconn", { command: process.execPath, args: [path] });
+      await c.start();
+      const r1 = await c.invokeTool({ name: "ping", arguments: {} });
+      expect(r1.content).toBe("call 1");
+      // Wait for the server to exit (the "crash").
+      await new Promise((res) => setTimeout(res, 120));
+      // Second call must transparently respawn + re-handshake and succeed.
+      const r2 = await c.invokeTool({ name: "ping", arguments: {} });
+      expect(r2.content).toBe("call 1"); // fresh process → its own counter restarts at 1
+      await c.stop();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("McpManager fail-soft behaviour", () => {

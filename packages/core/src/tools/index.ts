@@ -14,6 +14,7 @@ export { notebookEditTool } from "./notebook_edit.js";
 export type { Notebook, NotebookCell } from "./notebook_edit.js";
 export { webFetchTool, htmlToText } from "./web_fetch.js";
 export { webSearchTool, parseDuckDuckGoHtml } from "./web_search.js";
+export { imageGenTool, resolveImageEndpoint } from "./image_gen.js";
 export { readFileTool } from "./read_file.js";
 export { readImageTool } from "./read_image.js";
 export { writeFileTool } from "./write_file.js";
@@ -34,9 +35,16 @@ export type { SubagentRunner } from "./task.js";
 export { harnessBridgeTool, buildHarnessCommand, extractHarnessOutput } from "./harnessBridge.js";
 export type { HarnessKind } from "./harnessBridge.js";
 export { askUserQuestionTool, planDoneTool } from "./ask_user.js";
+export { startNewTaskTool } from "./start_new_task.js";
+export type { StartNewTaskTool, StartNewTaskHandle } from "./start_new_task.js";
+export { suggestModeTool } from "./suggest_mode.js";
+export type { SuggestModeTool } from "./suggest_mode.js";
+export { startGoalTool, DEFAULT_MODEL_GOAL_ROUNDS } from "./start_goal.js";
+export type { StartGoalTool, StartGoalHandle } from "./start_goal.js";
 export { codeModeTool } from "./code_mode.js";
 export { ArtifactStore } from "./artifacts.js";
 export { skillTool, createSkillTool, StaticSkillStore } from "./skill.js";
+export { makeMcpMetaTool } from "./mcp_tool.js";
 export type { SkillStore, SkillToolHandle } from "./skill.js";
 export {
   filterToolsByMode,

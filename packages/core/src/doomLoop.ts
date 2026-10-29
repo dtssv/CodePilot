@@ -14,11 +14,27 @@
 // a whole batch of calls it already made.
 //
 // 3. Path-level detection for `read_file`: re-reading the same path with
-// different `startLine`/`maxLines` windows (common after fold stubs
-// make the model think content is "gone") counts toward a path budget
-// even when no single signature repeats. Also powers path-keyed
-// result replay so a second windowed read of an already-fetched file
-// returns the cached body instead of another disk hit.
+// an OVERLAPPING `startLine`/`maxLines` window (the fold-induced spiral,
+// where the model thinks folded content is "gone" and re-fetches ground
+// it already read) counts toward a soft path budget and WARNS. A
+// non-overlapping, advancing window (legitimate paging through a large
+// file: lines 1-500, 500-1000, 1000-1500 …) is progress — it resets the
+// budget and is never penalised. This layer never refuses: every mainstream
+// harness either dedups re-reads (Claude Code) or asks, but none hard-denies
+// a read on path count — doing so false-positives on paging. Path-keyed
+// result replay still serves a second windowed read of an already-fetched
+// file from cache instead of another disk hit.
+//
+// DELIBERATELY REMOVED — "mutation burst": a former layer that warned then
+// refused after N consecutive edits to the same path(s) without an intervening
+// verify (test/build/lint) command. It was dropped on purpose and should not be
+// re-added: no mainstream harness (opencode, codex, Claude Code) does this; it
+// contradicted layer 3's own rule that a count must never hard-deny (legitimate
+// iteration — building a large file section by section — is indistinguishable
+// from a loop by edit count alone); and even as a warning it poisoned context,
+// since weaker models tend to believe the "you're looping" message and abandon
+// productive work. Exact-repetition (layer 1) and rotating batches (layer 2)
+// still catch genuine no-progress loops without this false-positive-prone brake.
 
 /** Signature of a single tool call: tool name + stable input hash. */
 function signature(toolName: string, input: unknown): string {
@@ -54,6 +70,41 @@ export function pathKey(toolName: string, input: unknown): string | null {
   if (typeof path !== "string" || path.trim() === "") return null;
   return `read_file::path:${normalizePathKey(path)}`;
 }
+
+/** The 1-based inclusive line window a `read_file` input requests, or null for
+ * a whole-file read (which we treat as covering everything). `startLine` is
+ * 0-based in the tool input; `maxLines` bounds the count. */
+export function readWindow(input: unknown): { from: number; to: number } | null {
+  if (!input || typeof input !== "object") return null;
+  const obj = input as Record<string, unknown>;
+  const startLine = typeof obj.startLine === "number" ? obj.startLine : 0;
+  const maxLines = typeof obj.maxLines === "number" ? obj.maxLines : undefined;
+  // Whole-file read: covers everything. Use a sentinel upper bound.
+  if (startLine === 0 && maxLines === undefined) return { from: 1, to: Number.MAX_SAFE_INTEGER };
+  const from = startLine + 1;
+  const to = maxLines === undefined ? Number.MAX_SAFE_INTEGER : startLine + maxLines;
+  return { from, to: Math.max(from, to) };
+}
+
+/** Fraction of the requested window `req` already covered by `prior`. 1 = fully
+ * re-reading ground already read (a spiral); 0 = a fresh, non-overlapping
+ * region (progress). A whole-file read overlapping a whole-file read = 1. */
+export function windowOverlapFraction(
+  req: { from: number; to: number },
+  prior: { from: number; to: number },
+): number {
+  const lo = Math.max(req.from, prior.from);
+  const hi = Math.min(req.to, prior.to);
+  const inter = Math.max(0, hi - lo + 1);
+  // Cap req length to a sane finite value so a MAX_SAFE_INTEGER window divides.
+  const reqLen = Math.max(1, Math.min(req.to, req.from + 1_000_000) - req.from + 1);
+  return Math.min(1, inter / reqLen);
+}
+
+/** A windowed read counts toward the path spiral budget only when it overlaps
+ * an already-read region by at least this fraction. Below it the read is
+ * advancing through the file (legitimate paging) and resets the budget. */
+export const PATH_OVERLAP_THRESHOLD = 0.6;
 
 /**
  * Normalize a question to its semantic core: lowercased, with digits,
@@ -168,11 +219,10 @@ export interface DoomLoopCheck {
 export const WARN_THRESHOLD = 3;
 export const REFUSE_THRESHOLD = 4;
 
-/** Path-level thresholds for `read_file` (any window args). Slightly looser
- * than exact-signature so a deliberate multi-window scan of a large file
- * still works, but tight enough to stop fold-induced re-read spirals. */
+/** Path-level threshold for `read_file`. Only OVERLAPPING re-reads of the same
+ * path count toward this; advancing/paging reads reset it. We WARN at this
+ * count and never refuse — a path read is never a hard loop (see header). */
 export const PATH_WARN_THRESHOLD = 3;
-export const PATH_REFUSE_THRESHOLD = 5;
 
 /** Sequence-loop detection window. We look at the last SEQ_WINDOW
  * signatures (including the one being checked) and compare against the
@@ -181,41 +231,6 @@ export const PATH_REFUSE_THRESHOLD = 5;
  * re-walking a batch of calls — a rotating loop. */
 export const SEQ_WINDOW = 6;
 export const SEQ_REPEAT = 4;
-
-/** Consecutive mutations on the same path cluster without a verify-like
- * command. Generic fruitless-iteration brake — not task-specific. */
-export const MUTATION_BURST_WARN = 5;
-export const MUTATION_BURST_REFUSE = 8;
-
-const MUTATION_TOOLS = new Set(["write_file", "edit_file", "apply_patch"]);
-
-/** Shell commands that count as verification / progress (reset mutation burst). */
-export function isVerifyLikeCommand(command: string): boolean {
-  return /\b(test|spec|lint|build|vitest|pytest|jest|mocha|tsc|typecheck|e2e|playwright|cypress|check|cargo\s+test|go\s+test|mvn\s+|gradle|npm\s+test|pnpm\s+test|yarn\s+test|make\s+test)\b/i.test(
-    command,
-  );
-}
-
-/** Paths touched by a mutation tool call (for burst aggregation). */
-export function mutationPaths(toolName: string, input: unknown): string[] {
-  if (!input || typeof input !== "object") return [];
-  const obj = input as Record<string, unknown>;
-  if (toolName === "write_file" || toolName === "edit_file") {
-    const p = obj.path;
-    return typeof p === "string" && p.trim() ? [normalizePathKey(p)] : [];
-  }
-  if (toolName === "apply_patch" && typeof obj.patch === "string") {
-    const paths: string[] = [];
-    const re = /^\*\*\* (?:Add|Update|Delete) File:\s*(.+)\s*$/gm;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(obj.patch)) !== null) {
-      const p = m[1]!.trim();
-      if (p) paths.push(normalizePathKey(p));
-    }
-    return paths;
-  }
-  return [];
-}
 
 /**
  * Idempotent-call result cache. Extracted from DoomLoopDetector so it can
@@ -289,16 +304,16 @@ export class DoomLoopDetector {
  /** Ordered list of call signatures across the whole run, for
  * sequence-level (rotating) loop detection. */
   private seq: string[] = [];
- /** Per-path read counts (read_file only). */
+ /** Per-path OVERLAPPING-read counts (read_file only). Only re-reads that
+ * cover ground already read bump this; advancing/paging reads reset it. */
   private pathCounts = new Map<string, number>();
+ /** Per-path list of line windows already read, to tell a spiral (overlapping
+ * re-read) apart from legitimate paging (advancing, non-overlapping). */
+  private pathWindows = new Map<string, Array<{ from: number; to: number }>>();
  /** Fingerprints of questions the user has ALREADY answered this run. A new
  * ask whose questions are all in here is a redundant re-ask (info already
  * in hand) and is refused — regardless of how many times it happened. */
   private answeredQuestions = new Set<string>();
- /** Consecutive mutations without an intervening verify-like command. */
-  private mutationBurst = 0;
- /** Paths involved in the current mutation burst (normalized). */
-  private mutationPathCluster = new Set<string>();
  /** Result cache. Injected by the session so it survives across prompts;
  * defaults to a run-local cache when none is supplied (tests, subagents). */
   private readonly cache: DedupCache;
@@ -312,11 +327,9 @@ export class DoomLoopDetector {
   static readonly WARN_THRESHOLD = WARN_THRESHOLD;
   static readonly REFUSE_THRESHOLD = REFUSE_THRESHOLD;
   static readonly PATH_WARN_THRESHOLD = PATH_WARN_THRESHOLD;
-  static readonly PATH_REFUSE_THRESHOLD = PATH_REFUSE_THRESHOLD;
+  static readonly PATH_OVERLAP_THRESHOLD = PATH_OVERLAP_THRESHOLD;
   static readonly SEQ_WINDOW = SEQ_WINDOW;
   static readonly SEQ_REPEAT = SEQ_REPEAT;
-  static readonly MUTATION_BURST_WARN = MUTATION_BURST_WARN;
-  static readonly MUTATION_BURST_REFUSE = MUTATION_BURST_REFUSE;
 
  /** Record a tool call and return whether it should be warned/refused.
  *
@@ -357,64 +370,31 @@ export class DoomLoopDetector {
       }
     }
 
- // Verify-like bash / diagnostics resets the fruitless-mutation burst.
-    if (toolName === "diagnostics") {
-      this.mutationBurst = 0;
-      this.mutationPathCluster.clear();
-    } else if (toolName === "bash" && input && typeof input === "object") {
-      const cmd = (input as { command?: unknown }).command;
-      if (typeof cmd === "string" && isVerifyLikeCommand(cmd)) {
-        this.mutationBurst = 0;
-        this.mutationPathCluster.clear();
-      }
-    }
-
- // Layer 4: consecutive mutations on the same path cluster without verify.
-    let mutationBurstHit: DoomLoopCheck | null = null;
-    if (MUTATION_TOOLS.has(toolName)) {
-      const paths = mutationPaths(toolName, input);
-      const overlaps =
-        paths.length === 0 ||
-        this.mutationPathCluster.size === 0 ||
-        paths.some((p) => this.mutationPathCluster.has(p));
-      if (overlaps) {
-        this.mutationBurst += 1;
-        for (const p of paths) this.mutationPathCluster.add(p);
-      } else {
-        this.mutationBurst = 1;
-        this.mutationPathCluster = new Set(paths);
-      }
-      if (this.mutationBurst >= MUTATION_BURST_REFUSE) {
-        mutationBurstHit = {
-          count: this.mutationBurst,
-          refuse: true,
-          warn: false,
-          message:
-            `doom_loop: ${this.mutationBurst} consecutive mutations on the same path(s) ` +
-            `without a verify step (test/build/lint/check). STOP iterating on the same ` +
-            `files — run a verification command, change approach, or ask the user. ` +
-            `Repeating edits without evidence of progress is a fruitless loop.`,
-        };
-      } else if (this.mutationBurst >= MUTATION_BURST_WARN) {
-        mutationBurstHit = {
-          count: this.mutationBurst,
-          refuse: false,
-          warn: true,
-          message:
-            `doom_loop warning: mutation #${this.mutationBurst} on the same path cluster ` +
-            `without verification. Prefer a test/build/lint (or read_image against a ` +
-            `reference) before more edits.`,
-        };
-      }
-    }
-
-    if (mutationBurstHit?.refuse) return mutationBurstHit;
-
     const pk = pathKey(toolName, input);
     let pathCount = 0;
     if (pk) {
-      pathCount = (this.pathCounts.get(pk) ?? 0) + 1;
-      this.pathCounts.set(pk, pathCount);
+      // Distinguish a fold-induced spiral (re-reading ground already read)
+      // from legitimate paging (advancing through a large file). Only a window
+      // that highly OVERLAPS a previously-read window counts toward the budget;
+      // a fresh region is progress and RESETS the count (plus records itself).
+      const req = readWindow(input);
+      const prior = this.pathWindows.get(pk) ?? [];
+      const overlapping =
+        req !== null &&
+        prior.some((w) => windowOverlapFraction(req, w) >= PATH_OVERLAP_THRESHOLD);
+      if (overlapping) {
+        pathCount = (this.pathCounts.get(pk) ?? 0) + 1;
+        this.pathCounts.set(pk, pathCount);
+      } else {
+        pathCount = 1;
+        this.pathCounts.set(pk, 1);
+        if (req) {
+          // Keep a bounded history of recent windows for this path.
+          prior.push(req);
+          if (prior.length > 12) prior.shift();
+          this.pathWindows.set(pk, prior);
+        }
+      }
     }
 
  // Layer 1: per-signature repetition.
@@ -428,23 +408,6 @@ export class DoomLoopDetector {
           `without making progress. This is almost certainly a loop — STOP and try a ` +
           `fundamentally different approach. Re-read the relevant files, check your ` +
           `assumptions, or ask the user for guidance.`,
-      };
-    }
-
- // Layer 3: path-level (same file, different windows). Checked before
- // sequence so a fold-induced re-read spiral fails fast with a clear
- // "use read_artifact / prior result" message.
-    if (pk && pathCount >= PATH_REFUSE_THRESHOLD) {
-      return {
-        count,
-        refuse: true,
-        warn: false,
-        message:
-          `doom_loop: you've called read_file on the same path ${pathCount} times in this ` +
-          `run (including different startLine/maxLines windows). The content is already in ` +
-          `your context — if a prior result was folded, call read_artifact with the ` +
-          `artifactRef from that stub. Do NOT re-read the file. Synthesize an answer from ` +
-          `what you already have.`,
       };
     }
 
@@ -482,13 +445,13 @@ export class DoomLoopDetector {
         refuse: false,
         warn: true,
         message:
-          `doom_loop warning: this is read_file call #${pathCount} on the same path in this ` +
-          `run. Prefer the earlier result (or read_artifact if it was folded) instead of ` +
-          `re-fetching the file with a different window.`,
+          `doom_loop warning: you've re-read an OVERLAPPING window of the same file ` +
+          `${pathCount} times — you keep re-fetching lines you already have. Reading a ` +
+          `NEW (non-overlapping) part of the file is fine; re-reading the same region is ` +
+          `not. Use the earlier result (or read_artifact if it was folded) for lines you ` +
+          `already saw, or read a different range.`,
       };
     }
-
-    if (mutationBurstHit?.warn) return mutationBurstHit;
 
     return { count, refuse: false, warn: false, message: "" };
   }
@@ -554,6 +517,7 @@ export class DoomLoopDetector {
   noteMutation(): void {
     this.cache.clear();
     this.pathCounts.clear();
+    this.pathWindows.clear();
     for (const sig of [...this.counts.keys()]) {
       const tool = sig.slice(0, sig.indexOf("::"));
       if (this.cache.isDedupable(tool)) this.counts.delete(sig);
@@ -566,8 +530,7 @@ export class DoomLoopDetector {
     this.counts.clear();
     this.seq.length = 0;
     this.pathCounts.clear();
+    this.pathWindows.clear();
     this.answeredQuestions.clear();
-    this.mutationBurst = 0;
-    this.mutationPathCluster.clear();
   }
 }

@@ -9,13 +9,13 @@
 // Lifecycle:
 // - Cancel / session dispose: jobs keep running (reconnect-friendly).
 // - Engine process exit (`killAllJobs` + exit hook): cascade-stop every
- //   running job (process-group SIGTERM → SIGKILL), matching Claude Code /
- //   Continue. Without this, `npm run dev` / `http.server` orphan on serve exit.
+ //   running job (process-group SIGTERM → SIGKILL). Without this,
+ //   `npm run dev` / `http.server` orphan on serve exit.
 //
 // Job state survives the command that started it, but NOT a process
 // restart of CodePilot itself: on disk, jobs whose metadata says
 // "running" at load time are reported as "unknown" (the pid may be dead
-// or reused). This implements BashOutput/KillShell model.
+// or reused).
 
 import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -33,6 +33,12 @@ export interface JobMeta {
  * any UI/steering text. Falls back to `command` when absent (old jobs). */
   displayCommand?: string;
   cwd: string;
+ /** Session (or sub-agent) that started this job. The registry is keyed only
+  * by cwd, so parallel sub-agents sharing a fallback cwd would otherwise be
+  * able to reach each other's jobs. `write_stdin` checks this to refuse
+  * cross-owner writes. Absent on jobs started before this field existed (and
+  * in minimal contexts); treated as "unowned" (no restriction) for back-compat. */
+  ownerSessionId?: string;
   pid?: number;
   startedAt: string;
   status: "running" | "exited" | "killed" | "failed" | "unknown";
@@ -133,6 +139,9 @@ export interface SpawnJobSpec {
  /** User-facing command before sandbox wrapping (for UI/steering text). */
   displayCommand?: string;
   cwd: string;
+ /** Owner session/sub-agent id, stamped onto the job for `write_stdin`
+  * ownership checks. Optional — absent → job is unowned (no restriction). */
+  ownerSessionId?: string;
  /** Shell executable and args prefix (from the sandbox wrapper). */
   shell: string;
   shellArgs: string[];
@@ -167,6 +176,7 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
     command: spec.command,
     displayCommand: spec.displayCommand ?? spec.command,
     cwd: spec.cwd,
+    ownerSessionId: spec.ownerSessionId,
     pid: proc.pid ?? undefined,
     startedAt: new Date().toISOString(),
     status: "running",

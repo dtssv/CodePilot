@@ -221,9 +221,23 @@ export interface ContextSummary {
   triggerFraction: number;
   autoCompactEnabled: boolean;
   byEventType: { type: string; tokens: number; count: number }[];
+  /** Semantic breakdown: system prompt, skills, tool/MCP schemas,
+   * conversation, sub-agent work. Schemas + system prompt live outside the
+   * event log but are sent every turn, so they are estimated separately. */
+  byCategory?: { category: string; tokens: number }[];
   topFileReads: { path: string; reads: number; tokens: number }[];
   duplicateReads: { path: string; reads: number }[];
 }
+
+/** Human labels for the semantic context categories. */
+const CATEGORY_LABELS: Record<string, string> = {
+  system: "system prompt",
+  skills: "skills",
+  tools: "tool definitions",
+  mcp: "MCP tools",
+  conversation: "conversation",
+  subagent: "sub-agents",
+};
 
 /** Human-readable rendering of a `ContextSummary` (from `Session.contextReport`). */
 export function formatContext(c: ContextSummary): string {
@@ -232,6 +246,17 @@ export function formatContext(c: ContextSummary): string {
     `Context: ${c.totalTokens.toLocaleString()} / ${c.window.toLocaleString()} tokens (${pct}%)`,
     `  auto-compact: ${c.autoCompactEnabled ? "on" : "off"} (trigger at ${c.triggerThreshold.toLocaleString()} = ${(c.triggerFraction * 100).toFixed(0)}%)`,
   ];
+  if (c.byCategory && c.byCategory.length > 0) {
+    // Total across categories (schemas + system prompt are outside the event
+    // log, so this exceeds the event-log total and is the real per-turn send).
+    const catTotal = c.byCategory.reduce((n, x) => n + x.tokens, 0);
+    lines.push(`  by category (≈${catTotal.toLocaleString()} tok sent per turn):`);
+    for (const e of c.byCategory) {
+      const share = catTotal > 0 ? ((e.tokens / catTotal) * 100).toFixed(1) : "0.0";
+      const label = CATEGORY_LABELS[e.category] ?? e.category;
+      lines.push(`    ${label}: ${e.tokens.toLocaleString()} tok (${share}%)`);
+    }
+  }
   if (c.byEventType.length > 0) {
     lines.push("  by event type:");
     for (const e of c.byEventType.slice(0, 8)) {

@@ -43,6 +43,38 @@ describe("splitThinking", () => {
   it("returns plain text unchanged", () => {
     expect(splitThinking("hello")).toEqual([{ kind: "text", text: "hello" }]);
   });
+
+  it("treats <think> inside inline code as text, not a reasoning stream", () => {
+    const raw = "See `stripThinking.ts` — it splits `<think>` / `<thinking>` bodies.";
+    expect(splitThinking(raw)).toEqual([{ kind: "text", text: raw }]);
+    expect(hasVisibleAssistantContent(raw)).toBe(true);
+    // Nothing folded away: stripThinking keeps the whole line.
+    expect(stripThinking(raw)).toBe(raw);
+  });
+
+  it("treats <think> inside a fenced code block as text", () => {
+    const raw = "Example:\n\n```ts\nconst x = `<think>${y}</think>`;\n```\n\ndone";
+    const segs = splitThinking(raw);
+    expect(segs.every((s) => s.kind === "text")).toBe(true);
+    expect(segs.map((s) => s.text).join("")).toContain("<think>${y}</think>");
+  });
+
+  it("still folds a real think block that precedes a code answer", () => {
+    const raw = "<think>\nplan it\n</think>\n\nHere:\n```ts\nconst a = 1;\n```";
+    const segs = splitThinking(raw);
+    expect(segs[0]).toEqual({ kind: "think", text: "plan it" });
+    expect(segs[1]?.kind).toBe("text");
+    expect(segs[1]?.text).toContain("const a = 1;");
+  });
+
+  it("preserves code inside a real think body", () => {
+    // A genuine reasoning block that itself contains a code fence must keep
+    // its body verbatim (masking is for detection only).
+    const raw = "<think>\ntry `const n = 1;`\n</think>\nanswer";
+    const segs = splitThinking(raw);
+    expect(segs[0]).toEqual({ kind: "think", text: "try `const n = 1;`" });
+    expect(segs[1]).toEqual({ kind: "text", text: "\nanswer" });
+  });
 });
 
 describe("hasVisibleAssistantContent", () => {

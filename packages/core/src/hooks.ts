@@ -36,7 +36,7 @@
 // control. See `hooks-handlers.ts` `interpretDecision` for the schema.
 
 import type { HooksConfig, HookEntryConfig } from "./types.js";
-import { HookTrustStore, hashCommand } from "./hooks-trust.js";
+import { HookTrustStore, hashCommand, trustSubject } from "./hooks-trust.js";
 import {
   dispatchHook,
   interpretDecision,
@@ -47,7 +47,7 @@ import {
 
 // Re-export the trust + handler helpers so existing `from "./hooks.js"`
 // imports keep resolving.
-export { hashCommand, HookTrustStore } from "./hooks-trust.js";
+export { hashCommand, trustSubject, HookTrustStore } from "./hooks-trust.js";
 export {
   interpretDecision,
   extractJson,
@@ -175,19 +175,19 @@ export class HookEngine {
     this.commandSandbox = policy && policy.mode !== "off" ? policy : undefined;
   }
 
- // ---- Hook trust (hash-based review, ) ----
+ // ---- Hook trust (hash-based review) ----
  //
- // Arbitrary `command` hooks can execute any shell code. The trust
- // mechanism requires the user to approve each unique command string
- // (identified by its SHA-256 hash) before it runs. Approved hashes are
- // persisted to `.codepilot/hook_trust.json`. Unapproved hooks are
- // skipped with a warning (fail-safe: don't execute untrusted code).
+ // Hooks that reach an arbitrary config-specified target — `command` (shell)
+ // and `http` (POST the payload to a URL) — require the user to approve each
+ // unique trust subject (its SHA-256 hash) before running. Approved hashes are
+ // persisted to `.codepilot/hook_trust.json`; unapproved hooks are skipped with
+ // a warning (fail-safe: don't run untrusted side effects).
  //
- // `http`/`mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate
- // to already-vetted infrastructure, not arbitrary shell code).
+ // `mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate to
+ // infrastructure vetted elsewhere, not an arbitrary command or URL).
 
  /** Set the trust file path (typically `<cwd>/.codepilot/hook_trust.json`).
- * When set, command hooks are gated on hash approval. Call
+ * When set, command and http hooks are gated on hash approval. Call
  * `loadTrustedHashes` after setting this. */
   setTrustFile(path: string): void {
     this.trust = new HookTrustStore(path);
@@ -198,18 +198,28 @@ export class HookEngine {
     await this.trust.load();
   }
 
- /** Check if a command hook is trusted (hash approved). Returns true when
- * trust is not configured (backwards-compatible default). */
+ /** Check if a hook is trusted (hash approved). Returns true when trust is not
+ * configured (backwards-compatible default) or for exempt handler types. */
   isTrusted(hook: HookEntry): boolean {
     return this.trust.isTrusted(hook);
   }
 
- /** Approve a command hook's hash and persist to the trust file. */
-  async approveHook(command: string): Promise<void> {
-    await this.trust.approve(command);
+ /** Approve a trust subject's hash and persist it. Pass a raw command string
+ * for command hooks; for http hooks derive the subject with
+ * `trustSubject(hook)` (or use `approveHookEntry`). */
+  async approveHook(subject: string): Promise<void> {
+    await this.trust.approve(subject);
   }
 
- /** Get the set of approved command hashes (for UI display). */
+ /** Approve a hook by its entry, computing the correct trust subject for the
+ * handler type (command string vs. http method+URL+headers). No-op for exempt
+ * handler types. */
+  async approveHookEntry(hook: HookEntry): Promise<void> {
+    const subject = trustSubject(hook);
+    if (subject !== null) await this.trust.approve(subject);
+  }
+
+ /** Get the set of approved trust-subject hashes (for UI display). */
   getTrustedHashes(): Set<string> {
     return this.trust.getApproved();
   }
@@ -559,9 +569,15 @@ export class HookEngine {
       (cmd) => hashCommand(cmd).slice(0, 8),
       this.commandSandbox,
     );
-    if (r.untrusted && hook.command && !this.warnedUntrusted.has(hook.command)) {
-      this.warnedUntrusted.add(hook.command);
-      this.onWarning?.(`${payload.event ?? "hook"} hook "${hook.command}" skipped: ${r.stderr}`);
+    if (r.untrusted) {
+      // Warn once per untrusted subject (command string or http URL) so a guard
+      // the user relies on doesn't go silently inactive.
+      const subject = trustSubject(hook);
+      if (subject && !this.warnedUntrusted.has(subject)) {
+        this.warnedUntrusted.add(subject);
+        const label = hook.command ?? hook.http ?? subject;
+        this.onWarning?.(`${payload.event ?? "hook"} hook "${label}" skipped: ${r.stderr}`);
+      }
     }
     return r;
   }

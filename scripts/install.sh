@@ -2,7 +2,7 @@
 # CodePilot installer (macOS / Linux / Windows Git Bash / WSL)
 #
 #   curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v2.1.1
+#   curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
 #
 # Installs @codepilot/core + protocol + tui into ~/.codepilot (npm prefix).
 # Requires Node.js >= 20 and npm.
@@ -28,7 +28,7 @@ Usage:
   curl -fsSL …/install.sh | bash -s -- [options]
 
 Options:
-  -v, --version <tag>   Install a specific release (e.g. v2.1.1). Default: latest
+  -v, --version <tag>   Install a specific release (e.g. v1.0.0). Default: latest
   --no-modify-path      Do not edit shell rc files
   -h, --help            Show this help
 
@@ -89,7 +89,7 @@ resolve_tag() {
   fi
 }
 
-# Strip leading v → 2.1.1 for asset filenames codepilot-*-2.1.1.tgz
+# Strip leading v → 1.0.0 for asset filenames codepilot-*-1.0.0.tgz
 version_number() {
   echo "${TAG#v}"
 }

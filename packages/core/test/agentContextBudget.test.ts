@@ -161,4 +161,50 @@ describe("runAgent context window enforcement", () => {
     expect(Math.ceil(chars / 4)).toBeLessThan(4_000);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("force-compacts and retries once on a context-overflow error", async () => {
+    // First stream errors with a context-overflow message; after compaction the
+    // second stream succeeds. The turn must recover, not surface the error.
+    const provider = new ScriptedProvider([
+      [{ kind: "error", message: "OpenAI 400: This model's maximum context length is 8192 tokens" }],
+      [
+        { kind: "text_delta", messageId: "m2", text: "recovered" },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ]);
+    const compactNow = vi.fn(async () => [
+      { type: "compaction" as const, kind: "summary" as const, summary: "summarised" },
+    ]);
+    const { deps, dir } = makeDeps(provider, { compactNow });
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(compactNow).toHaveBeenCalledTimes(1);
+    expect(provider.calls.length).toBe(2); // errored once, retried once
+    expect(r.finalText).toContain("recovered");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not loop forever if compaction fails to fix the overflow", async () => {
+    // Every stream overflows. The agent applies the bounded shrink steps
+    // (compact once + 3 proportional shrinks) then gives up — it must NOT
+    // compact→overflow→compact endlessly. More scripted errors than steps so
+    // the final attempt still overflows and surfaces the error.
+    const provider = new ScriptedProvider([
+      [{ kind: "error", message: "context_length_exceeded" }],
+      [{ kind: "error", message: "context_length_exceeded" }],
+      [{ kind: "error", message: "context_length_exceeded" }],
+      [{ kind: "error", message: "context_length_exceeded" }],
+      [{ kind: "error", message: "context_length_exceeded" }],
+    ]);
+    const compactNow = vi.fn(async () => [
+      { type: "compaction" as const, kind: "summary" as const, summary: "summarised" },
+    ]);
+    const { deps, dir } = makeDeps(provider, { compactNow });
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(compactNow).toHaveBeenCalledTimes(1); // only one forced compaction
+    // Bounded: compact+shrink attempts, not unbounded.
+    expect(provider.calls.length).toBeLessThanOrEqual(4);
+    expect(r.events.some((e) => e.type === "error")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

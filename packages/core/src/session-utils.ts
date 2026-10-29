@@ -1,7 +1,18 @@
-// Session utilities: standalone helpers extracted from the monolithic
-// session.ts. These functions are NOT part of the Session class — they
-// cover persistence paths, auto-titling, provider construction, session
-// listing/search/export, and small pure helpers used across the codebase.
+// Session factory + repository + provider construction.
+//
+// Despite the "-utils" filename (kept to avoid churning every import site),
+// this module is NOT a grab-bag of helpers: it is the three collaborators the
+// `Session` class delegates to —
+//   1. ProviderFactory  — buildProvider / buildSmallProvider / FallbackProvider,
+//   2. SessionRepository — persistence paths, listing, search, export, delete,
+//                          pin/archive, the SQLite metadata index,
+//   3. SessionFactory   — `createSession`, which resolves config/model/runtime
+//                          then constructs a `Session`.
+// Plus a few small pure helpers (titling, id generation) used across the codebase.
+//
+// It is a *leaf* of the module graph: it imports the `Session` TYPE only, and
+// pulls the concrete class in lazily inside `createSession`, so session.ts can
+// import these helpers without the old session.ts ⇄ session-utils.ts cycle.
 
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,11 +30,15 @@ import { tryLoadRealTokenizer } from "./tokens.js";
 import { AnthropicProvider, OpenAIProvider, CopilotProvider, GeminiProvider } from "./providers/index.js";
 import { FallbackProvider } from "./providers/fallback.js";
 import type { ChatProvider } from "./providers/types.js";
-import { Session } from "./session.js";
+// Type-only import: erased at runtime, so it does NOT create a module cycle
+// with session.ts (which imports this module's factory/repository helpers).
+// The concrete class is pulled in lazily inside `createSession` below.
+import type { Session } from "./session.js";
 import { initPluginRuntimes } from "./plugins.js";
 import { createLogger } from "./logger.js";
 import { resolveDefaultModel, resolveModelTarget, applyProviderAndModel } from "./providerCatalog.js";
 import { stripThinking } from "./stripThinking.js";
+import { openSessionIndex } from "./sessionIndex.js";
 
 export const SESSIONS_DIR = join(homedir(), ".codepilot", "sessions");
 
@@ -34,6 +49,18 @@ export interface RichSessionSummary extends SessionSummary {
   mode?: AgentMode;
   model?: string;
   messageCount: number;
+  /** Pinned within its workspace (at most one per cwd — see setSessionPinned). */
+  pinned?: boolean;
+  /** Archived: hidden from the main list, shown under an "Archived" section. */
+  archived?: boolean;
+}
+
+/** Per-session UI state persisted in a `<id>.state` sidecar (JSON). Separate
+ * from the JSONL event log so toggling pin/archive is a cheap single-file
+ * write and the SQLite index (which folds sidecar mtimes) picks it up. */
+export interface SessionState {
+  pinned?: boolean;
+  archived?: boolean;
 }
 
 /** Resolved at call time — useful for tests that change HOME. */
@@ -44,23 +71,39 @@ export function getSessionsDir(): string {
 /** Format for `exportSession`. */
 export type SessionExportFormat = "markdown" | "jsonl";
 
+/** Strip any XML/HTML-ish tags (and stray half-tags). Small models fed a
+ * prompt that contains tool-call markup sometimes echo fragments like
+ * `</arg_value>` or `<function_calls>` straight into the title. */
+function stripTags(s: string): string {
+  return s
+    .replace(/<\/?[a-z][\w-]*(?:\s[^>]*)?\/?>/gi, " ") // well-formed tags
+    .replace(/<\/?[a-z][\w-]*/gi, " ") // unterminated opening half-tags
+    .replace(/[a-z][\w-]*>/gi, " "); // unterminated closing half-tags
+}
+
 export function sanitizeTitle(raw: string): string | null {
   if (!raw) return null;
  // Small models (e.g. MiniMax) often stream chain-of-thought as
  // `<think>…</think>` text_delta. That must never become the sidebar title.
   let t = stripThinking(raw);
+ // Reject before stripping: a title that is *mostly* tags/markup is model
+ // noise (tool-call echo), not a real title.
+  if (/<\/?(?:think|thinking|redacted_reasoning)\b/i.test(t) || /^<think\b/i.test(t)) {
+    return null;
+  }
+  t = stripTags(t);
   t = t.replace(/^["'`]+|["'`]+$/g, "").trim();
  // Strip leading numbering like "1. " or "- ".
   t = t.replace(/^[\-\d.\)\s]+/, "");
  // Collapse whitespace.
   t = t.replace(/\s+/g, " ").trim();
   if (!t) return null;
- // Reject leftover meta-reasoning that never closed a think tag, e.g.
- // `<think>We need answer to user Chinese: …` or "We need answer title only…".
+ // Reject leftover meta-reasoning (English or Chinese) and echoed input that
+ // is really a filesystem path, not a title.
   if (
-    /^<think\b/i.test(t) ||
-    /<\/?(?:think|thinking|redacted_reasoning)\b/i.test(t) ||
-    /^(we need|let me|i need|the user|title only|according to)\b/i.test(t)
+    /^(we need|let me|i need|i'?ll|i will|the user|title only|according to|here is|here'?s|sure|okay|ok\b)/i.test(t) ||
+    /^(用户|我需要|我来|我们需要|我会|根据|让我|首先|好的|标题[:：])/.test(t) ||
+    /^(?:\/|~\/|[A-Za-z]:[\\/]|Users\/|home\/|\.{1,2}\/)/.test(t)
   ) {
     return null;
   }
@@ -76,11 +119,23 @@ export function sanitizeTitle(raw: string): string | null {
 }
 
 export function deriveTitleFromText(text: string): string {
-  const clean = text.replace(/\s+/g, " ").trim();
+ // Drop tool-call markup and tags before deriving a fallback, so the
+ // deterministic path can't leak `</arg_value>`-style fragments either.
+  const clean = stripTags(text).replace(/\s+/g, " ").trim();
   if (!clean) return "(untitled)";
  // Prefer the first sentence.
   const firstSentence = clean.split(/[.?!。？！\n]/)[0] ?? clean;
   return firstSentence.slice(0, 60);
+}
+
+/** Does the first user message look like a pasted handoff / tool-call dump
+ * rather than a natural request? Such inputs make small models echo markup
+ * (e.g. `</arg_value>`), so we skip the model and use a deterministic title. */
+function looksLikeMarkupDump(text: string): boolean {
+  return (
+    /<\/?(?:function_calls|invoke|parameter|arg_value|tool_call|antml:)/i.test(text) ||
+    (text.match(/<\/?[a-z][\w-]*[^>]*>/gi)?.length ?? 0) >= 4
+  );
 }
 
 export async function callTitleModel(
@@ -88,8 +143,16 @@ export async function callTitleModel(
   userText: string,
   model: string | undefined
 ): Promise<string | null> {
-  const sys = `You generate short, neutral session titles (≤10 Chinese chars or ≤60 ASCII chars). No punctuation, no quotes, no preamble.`;
-  const prompt = userText.slice(0, 2000);
+ // For markup-heavy / pasted-dump inputs, don't risk the model echoing
+ // tool-call tags — use the deterministic first-sentence title instead.
+  if (looksLikeMarkupDump(userText)) return null;
+  const sys =
+    `You generate a short, neutral session title (≤10 Chinese chars or ≤60 ASCII chars). ` +
+    `Output ONLY the title itself — no XML or HTML tags, no quotes, no punctuation, ` +
+    `no preamble, no explanation, and do not repeat or quote the user's input.`;
+ // Strip any tool-call markup from the input so it can't prime the model to
+ // echo tags back; cap length to keep the request cheap.
+  const prompt = stripTags(userText).replace(/\s+/g, " ").trim().slice(0, 2000);
   const collected: string[] = [];
   for await (const ev of provider.stream({
     model: model ?? provider.smallModel,
@@ -134,6 +197,22 @@ export function buildSingleProvider(config: CodepilotConfig): ChatProvider {
   switch (provider) {
     case "openai":
       return new OpenAIProvider({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        defaultModel: config.model,
+        smallModel: config.smallModel ?? config.model,
+        maxRetries: config.maxRetries,
+        baseDelayMs: config.baseRetryDelayMs,
+        maxDelayMs: config.maxRetryDelayMs,
+        abortOnDelayMs: config.retryAbortOnDelayMs,
+      });
+    case "azure":
+      // Azure OpenAI speaks the same wire protocol as OpenAI; it differs only
+      // in URL shape (deployment + api-version) and auth header. Reuse the
+      // OpenAI provider in "azure" dialect.
+      return new OpenAIProvider({
+        apiStyle: "azure",
+        azureApiVersion: config.azureApiVersion,
         apiKey: config.apiKey,
         baseURL: config.baseURL,
         defaultModel: config.model,
@@ -351,6 +430,67 @@ export function cwdSidecarPath(id: string): string {
   return join(SESSIONS_DIR, `${id}.cwd`);
 }
 
+export function stateSidecarPath(id: string): string {
+  return join(SESSIONS_DIR, `${id}.state`);
+}
+
+/** Read the pin/archive sidecar. Missing/corrupt → empty state. */
+export async function loadSessionState(id: string): Promise<SessionState> {
+  try {
+    const raw = JSON.parse(await readFile(stateSidecarPath(id), "utf-8")) as unknown;
+    if (raw && typeof raw === "object") {
+      const o = raw as Record<string, unknown>;
+      return {
+        pinned: o.pinned === true || undefined,
+        archived: o.archived === true || undefined,
+      };
+    }
+  } catch {
+    /* missing or corrupt */
+  }
+  return {};
+}
+
+async function writeSessionState(id: string, state: SessionState): Promise<void> {
+  await mkdir(SESSIONS_DIR, { recursive: true });
+  const clean: SessionState = {};
+  if (state.pinned) clean.pinned = true;
+  if (state.archived) clean.archived = true;
+  await writeFile(stateSidecarPath(id), JSON.stringify(clean), "utf-8");
+}
+
+/** Archive / unarchive a session. Archiving also clears its pin (a hidden
+ * session must not stay the workspace's pinned one). */
+export async function setSessionArchived(id: string, archived: boolean): Promise<void> {
+  const state = await loadSessionState(id);
+  state.archived = archived || undefined;
+  if (archived) state.pinned = undefined;
+  await writeSessionState(id, state);
+}
+
+/** Pin / unpin a session. Pin is **one-per-workspace**: pinning a session
+ * clears the pin on every other session sharing its cwd, so each workspace has
+ * at most one pinned conversation at a time. */
+export async function setSessionPinned(id: string, pinned: boolean): Promise<void> {
+  const state = await loadSessionState(id);
+  if (!pinned) {
+    state.pinned = undefined;
+    await writeSessionState(id, state);
+    return;
+  }
+  // Enforce one-per-workspace: find this session's cwd, clear other pins there.
+  const myCwd = (await loadCwdFromDisk(id)) ?? "(unknown)";
+  const all = await listSessionsFullScan();
+  await Promise.all(
+    all
+      .filter((s) => s.id !== id && s.pinned && sameCwd(s.cwd, myCwd))
+      .map((s) => setSessionPinned(s.id, false)),
+  );
+  state.pinned = true;
+  state.archived = undefined; // pinning un-archives
+  await writeSessionState(id, state);
+}
+
 export async function loadTitleFromDisk(id: string): Promise<string | null> {
   try {
     const t = await readFile(titleSidecarPath(id), "utf-8");
@@ -359,6 +499,8 @@ export async function loadTitleFromDisk(id: string): Promise<string | null> {
     return null;
   }
 }
+
+
 
 /** Persist the workspace cwd for a session (used by listSessions filtering). */
 export async function persistSessionCwd(id: string, cwd: string): Promise<void> {
@@ -390,7 +532,7 @@ export function sameCwd(a: string | undefined, b: string | undefined): boolean {
 
 /** Delete a session's persisted file + sidecar. Useful for test cleanup. */
 export async function deleteSession(id: string): Promise<void> {
-  for (const p of [sessionPath(id), titleSidecarPath(id), cwdSidecarPath(id), historyArchivePath(id)]) {
+  for (const p of [sessionPath(id), titleSidecarPath(id), cwdSidecarPath(id), stateSidecarPath(id), historyArchivePath(id)]) {
     try {
       await unlink(p);
     } catch {
@@ -478,6 +620,11 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
     resolvedConfig = applied.config;
     resolvedModel = applied.model;
   }
+  // Lazy value import of the Session class. Keeping it out of the module's
+  // static imports is what breaks the session.ts ⇄ session-utils.ts runtime
+  // cycle: this module stays a leaf that session.ts can import freely, and the
+  // concrete class is only resolved when a session is actually constructed.
+  const { Session } = await import("./session.js");
   const session = new Session(id, {
     ...opts,
     config: resolvedConfig,
@@ -490,6 +637,43 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
   return session;
 }
 
+// SQLite metadata index (Scheme B). Opened lazily and cached per process. The
+// daemon and standalone CLI each hold their own handle to the shared index.db;
+// cross-process safety comes from WAL + busy_timeout inside sessionIndex.ts.
+// `null` means "index unavailable" → callers use the full-scan path below.
+let cachedIndex: import("./sessionIndex.js").SessionIndex | null | undefined;
+function sessionIndexEnabled(): boolean {
+  // Opt-out escape hatch: CODEPILOT_SESSION_INDEX=off forces the full-scan path
+  // (useful if a platform can't load the native addon).
+  return process.env.CODEPILOT_SESSION_INDEX !== "off";
+}
+function getSessionIndex(): import("./sessionIndex.js").SessionIndex | null {
+  if (cachedIndex !== undefined) return cachedIndex;
+  if (!sessionIndexEnabled()) {
+    cachedIndex = null;
+    return null;
+  }
+  try {
+    // openSessionIndex loads better-sqlite3 behind its own createRequire and
+    // returns null on any engine failure, so importing this module is cheap and
+    // safe even when the native addon is missing.
+    cachedIndex = openSessionIndex(SESSIONS_DIR);
+  } catch {
+    cachedIndex = null;
+  }
+  return cachedIndex;
+}
+
+/** Test/shutdown hook: drop the cached index handle (closes the DB). */
+export function resetSessionIndex(): void {
+  try {
+    cachedIndex?.close();
+  } catch {
+    /* ignore */
+  }
+  cachedIndex = undefined;
+}
+
 /**
  * List session summaries. Each summary includes the auto-title (or a
  * truncated prefix of the first user message), the model, the current
@@ -497,6 +681,22 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
  * cwd or by a substring search via `searchSessions`.
  */
 export async function listSessions(
+  cwd?: string
+): Promise<RichSessionSummary[]> {
+  await mkdir(SESSIONS_DIR, { recursive: true });
+  // Fast path: SQLite metadata index (reconciles only changed sessions).
+  const index = getSessionIndex();
+  if (index) {
+    try {
+      return index.list(cwd);
+    } catch {
+      // Any index error → fall through to the authoritative full scan.
+    }
+  }
+  return listSessionsFullScan(cwd);
+}
+
+async function listSessionsFullScan(
   cwd?: string
 ): Promise<RichSessionSummary[]> {
   await mkdir(SESSIONS_DIR, { recursive: true });
@@ -514,6 +714,7 @@ export async function listSessions(
     try {
       const st = await stat(path);
       const derived = await extractTitleAndMeta(path, id);
+      const state = await loadSessionState(id);
       summaries.push({
         id,
         title: derived.title,
@@ -524,6 +725,8 @@ export async function listSessions(
         mode: derived.mode,
         model: derived.model,
         messageCount: derived.messageCount,
+        pinned: state.pinned,
+        archived: state.archived,
       });
     } catch {
  /* skip */
@@ -550,7 +753,18 @@ export async function searchSessions(
   query: string,
   opts: { cwd?: string; limit?: number } = {}
 ): Promise<SessionSummary[]> {
-  const all = await listSessions(opts.cwd);
+  // Fast path: metadata-only search via the index (title / cwd / first user
+  // message). Does not scan full message bodies — a deliberate scope choice
+  // (Scheme B). When the index is off, the full-corpus fallback below runs.
+  const index = getSessionIndex();
+  if (index) {
+    try {
+      return index.search(query, opts);
+    } catch {
+      /* fall through to full-scan search */
+    }
+  }
+  const all = await listSessionsFullScan(opts.cwd);
   if (!query.trim()) return all;
   const q = query.toLowerCase();
   const matches: Array<{ s: SessionSummary; score: number }> = [];

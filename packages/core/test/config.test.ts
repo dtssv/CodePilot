@@ -281,6 +281,21 @@ describe("useProvider", () => {
   it("throws on unknown preset", () => {
     expect(() => useProvider({} as any, "ghost")).toThrow(/Unknown provider preset/);
   });
+  it("carries over azureApiVersion (consumed by the Azure provider)", () => {
+    const cfg = {
+      providers: {
+        az: {
+          provider: "azure" as const,
+          baseURL: "https://x.openai.azure.com",
+          model: "gpt-4o",
+          azureApiVersion: "2024-10-21",
+        },
+      },
+    } as const;
+    const r = useProvider(cfg as any, "az");
+    expect(r.provider).toBe("azure");
+    expect(r.azureApiVersion).toBe("2024-10-21");
+  });
   it("drops a smallModel inherited from a different endpoint", () => {
     const cfg = {
       provider: "openai",

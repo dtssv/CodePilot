@@ -212,3 +212,23 @@ async function adoptDeliveryRoot(
   roots.length = 0;
   roots.push(...merged);
 }
+
+/**
+ * Read-before-write + staleness guard for a write/edit target. Returns null
+ * when the write may proceed (or when no observation store is wired), or an
+ * error ToolResult the tool should return to the model.
+ *
+ * `currentStat` is the pre-write stat of the file, or null if it does not
+ * exist yet (a create, which is always allowed). Pass the stat the tool
+ * already obtained to avoid an extra syscall.
+ */
+export function guardFreshWrite(
+  ctx: ToolContext,
+  absPath: string,
+  currentStat: { mtimeMs: number; size: number } | null,
+): ToolResult | null {
+  if (!ctx.checkFileFresh) return null;
+  const res = ctx.checkFileFresh(absPath, currentStat);
+  if (res.ok) return null;
+  return { content: res.message, isError: true };
+}

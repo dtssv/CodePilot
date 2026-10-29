@@ -55,6 +55,25 @@ describe("user message images", () => {
     const msgs = compactTranscriptToProviderMessages(events, "hi", [img], "u1");
     expect(msgs[0]!.content.filter((c) => c.type === "image")).toHaveLength(1);
   });
+
+  it("sends an identical image once and points later turns at it (round-level dedup)", () => {
+    // The same screenshot rides along two different user turns. The bytes
+    // should be sent once; the second occurrence becomes a tiny text pointer.
+    const img = { mediaType: "image/png", base64: "Zm9vYmFyYmF6cXV4".repeat(8) };
+    const events: Event[] = [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "look" }], images: [img] },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { type: "message", id: "u2", role: "user", content: [{ type: "text", text: "again" }], images: [img] },
+    ];
+    const msgs = compactTranscriptToProviderMessages(events, "");
+    const allImages = msgs.flatMap((m) => m.content.filter((c) => c.type === "image"));
+    expect(allImages).toHaveLength(1); // bytes sent exactly once
+    const u2 = msgs[2]!.content;
+    expect(u2.some((c) => c.type === "image")).toBe(false);
+    expect(
+      u2.some((c) => c.type === "text" && /same image as #1 above/.test((c as { text: string }).text)),
+    ).toBe(true);
+  });
 });
 
 describe("uploaded files in provider messages", () => {

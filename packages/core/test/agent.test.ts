@@ -153,6 +153,35 @@ describe("runAgent maxTurns (unset = unlimited)", () => {
     expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("soft-lands a sub-agent at its step budget (synthesis urge, no hard error)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 2 configured turns of tools, then the bonus synthesis turn returns text.
+    provider.responses = [
+      [
+        { kind: "tool_call", messageId: "m1", toolCall: { type: "tool_use", id: "t1", name: "echo", input: { x: "1" } } },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        { kind: "tool_call", messageId: "m2", toolCall: { type: "tool_use", id: "t2", name: "echo", input: { x: "2" } } },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        { kind: "text_delta", messageId: "m3", text: "### Findings\n- done\n\n### Key references\n- none\n\n### Recommendations\n- none" },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const deps = { ...f.deps(), maxTurns: 2, isSubagent: true };
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    // Soft landing: no error event, idle, and a synthesized conclusion.
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    expect(r.finalText).toMatch(/Findings/);
+    expect(r.reachedTurnBudget).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("runAgent (mock provider)", () => {

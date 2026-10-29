@@ -431,8 +431,24 @@ function inline(text: string, onOpenPath?: (path: string) => void): ReactNode {
 }
 
 function Link({ href, children }: { href: string; children: ReactNode }): React.ReactElement {
+  const openInApp = (e: React.MouseEvent): void => {
+    // In the desktop app, open http(s) links in the in-app browser panel
+    // instead of spawning an external browser. Other surfaces fall through to
+    // the default target="_blank".
+    const opener = typeof window !== "undefined" ? window.__codepilotOpenBrowser : undefined;
+    if (opener && /^https?:\/\//i.test(href)) {
+      e.preventDefault();
+      opener(href);
+    }
+  };
   return (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="text-[var(--color-accent)] underline decoration-[var(--color-accent)]/30 underline-offset-2 hover:decoration-[var(--color-accent)]">
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer noopener"
+      onClick={openInApp}
+      className="text-[var(--color-accent)] underline decoration-[var(--color-accent)]/30 underline-offset-2 hover:decoration-[var(--color-accent)]"
+    >
       {children}
     </a>
   );

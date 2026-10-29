@@ -24,11 +24,11 @@
 // then `-` lines must match verbatim and are replaced by `+` lines.
 
 import { z } from "zod";
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardDeliveryWrite, guardPath } from "./_shared.js";
+import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
 
 const schema = z.object({
   patch: z
@@ -279,7 +279,10 @@ export const applyPatchTool: ToolDef<typeof schema> = {
     for (const op of ops) {
       if (op.kind === "update") {
         const p = resolve(ctx.cwd, op.path);
+        let preStat: { mtimeMs: number; size: number } | null = null;
         try {
+          const s = await stat(p);
+          preStat = { mtimeMs: s.mtimeMs, size: s.size };
           originals.set(op.path, await readFile(p, "utf-8"));
         } catch (err) {
           return {
@@ -287,6 +290,10 @@ export const applyPatchTool: ToolDef<typeof schema> = {
             isError: true,
           };
         }
+        // Read-before-write + staleness: an update must target a file read
+        // this session that has not changed on disk since.
+        const fresh = guardFreshWrite(ctx, p, preStat);
+        if (fresh) return fresh;
       }
     }
 
@@ -331,6 +338,12 @@ export const applyPatchTool: ToolDef<typeof schema> = {
       for (const w of writes) {
         const p = resolve(ctx.cwd, w.path);
         await writeFile(p, w.content, "utf-8");
+        try {
+          const s = await stat(p);
+          ctx.reobserveFile?.(p, { mtimeMs: s.mtimeMs, size: s.size });
+        } catch {
+          /* best-effort */
+        }
         summary.push(`~ updated ${w.path}`);
       }
       for (const d of deletes) {

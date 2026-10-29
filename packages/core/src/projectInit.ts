@@ -1,7 +1,7 @@
 /**
  * `/init` — scaffold shareable project guidance (AGENTS.md / CODEPILOT.md).
- * Mirrors OpenCode / Codex cold-start: analyze layout lightly and write a
- * commit-ready markdown file the agent will load every session.
+ * Analyzes the repo layout lightly and writes a commit-ready markdown file
+ * the agent loads every session.
  */
 
 import { access, readdir, writeFile } from "node:fs/promises";

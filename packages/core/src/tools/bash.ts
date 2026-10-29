@@ -74,6 +74,7 @@ export const bashTool: ToolDef<typeof schema> = {
         command: wrapped.command,
         displayCommand: input.command,
         cwd,
+        ownerSessionId: ctx.sessionId,
         shell: wrapped.shell ?? defaultShell(),
         shellArgs: wrapped.shellArgs ?? defaultShellArgs(),
         sandboxed: wrapped.sandboxed,
@@ -234,7 +235,7 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
  // headless Chrome's renderer/GPU children) with `process.kill(-pid)`.
  // Without this, `child.kill` only hits the shell wrapper; grandchildren
  // like Chrome survive as orphans, keep the stdout/stderr pipe open, and
- // `close` never fires — so the tool used to hang forever on a stuck
+ // `close` never fires — so the tool hangs forever on a stuck
  // screenshot/dev-server command.
     const child = spawn(opts.shell, [...opts.shellArgs, cmd], {
       cwd: opts.cwd,

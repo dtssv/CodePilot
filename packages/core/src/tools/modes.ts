@@ -28,6 +28,13 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   "web_search",
   "bash_output",
   "ask_user_question",
+  // Mode suggestion + task boundary have no file side-effects and are useful
+  // in every mode (e.g. suggest `agent` from `plan`, or draw a task boundary).
+  "suggest_mode",
+  "start_new_task",
+  // start_goal only emits a request event; the host drives the loop (which
+  // itself runs in whatever mode applies). No file side-effects here.
+  "start_goal",
 ]);
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */
@@ -47,6 +54,9 @@ const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "write_file",
   "edit_file",
   "task",
+ // Executes arbitrary model-written JS that can write files / run bash — same
+ // (actually broader) risk profile as bash, so blocked in chat/plan.
+  "code_mode",
  // Spawns an external agent subprocess — same risk profile as `task`.
   "harness_bridge",
 ]);

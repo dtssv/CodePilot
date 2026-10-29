@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import type { CodepilotConfig, McpServerConfig, ProviderName } from "./types.js";
+import { PROVIDER_NAMES } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // zod schema
@@ -86,13 +87,15 @@ export const ModelCapabilitiesSchema = z
 /** A named provider preset — switching to it is just `useProvider("work")`. */
 const ProviderPresetSchema = z
   .object({
-    provider: z.enum(["anthropic", "openai", "copilot", "gemini"]),
+    provider: z.enum(PROVIDER_NAMES),
  /** Human label shown in pickers (falls back to the map key). */
     displayName: z.string().min(1).optional(),
     baseURL: z.string().min(1).optional(),
     apiKey: z.string().optional(),
     model: z.string().min(1).optional(),
     smallModel: z.string().min(1).optional(),
+ /** Azure OpenAI api-version (only used when provider is "azure"). */
+    azureApiVersion: z.string().min(1).optional(),
  /** Models offered in the picker for this preset. */
     models: z.array(z.string().min(1)).optional(),
  /** Per-model context ceiling + modalities (from `/models` fetch, user-editable). */
@@ -210,7 +213,19 @@ export const HooksConfigSchema = z
 export const SandboxConfigSchema = z
   .object({
     mode: z.enum(["off", "workspace-write", "read-only"]).optional(),
-    network: z.boolean().optional(),
+    network: z
+      .union([
+        z.boolean(),
+        z
+          .object({
+            mode: z.enum(["off", "full", "proxy"]),
+            allow: z.array(z.string().min(1)).optional(),
+            allowPorts: z.array(z.number().int().positive()).optional(),
+            denyLog: z.boolean().optional(),
+          })
+          .strict(),
+      ])
+      .optional(),
     writablePaths: z.array(z.string().min(1)).optional(),
     fallback: z.enum(["deny", "allow-unsandboxed"]).optional(),
   })
@@ -234,6 +249,15 @@ export const WebSearchConfigSchema = z
   })
   .strict();
 
+export const ImageGenConfigSchema = z
+  .object({
+    baseURL: z.string().optional(),
+    apiKey: z.string().optional(),
+    model: z.string().optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
 /**
  * Top-level config schema. Every field is optional because configs layer
  * from defaults up; strict-mode means unknown keys produce a readable
@@ -246,11 +270,12 @@ export const WebSearchConfigSchema = z
  */
 export const CodepilotConfigSchema: z.ZodType<unknown> = z
   .object({
-    provider: z.enum(["anthropic", "openai", "copilot", "gemini"]).optional(),
+    provider: z.enum(PROVIDER_NAMES).optional(),
     model: z.string().min(1).optional(),
     smallModel: z.string().min(1).optional(),
     apiKey: z.string().optional(),
     baseURL: z.string().url().optional(),
+    azureApiVersion: z.string().min(1).optional(),
     permissionMode: z.enum(["ask", "auto-edit", "yolo"]).optional(),
     agentMode: z.enum(["chat", "plan", "agent"]).optional(),
     maxTokens: z.number().int().positive().optional(),
@@ -264,6 +289,12 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     thinkingBudget: z.number().int().nonnegative().max(200_000).optional(),
     contextWindow: z.number().int().positive().optional(),
     maxContextTokens: z.number().int().positive().optional(),
+    // Rolling tool-output window: fold tool_results older than the keep
+    // window down to this many, early
+    // and independent of the token budget, so numerous small results can't
+    // quietly accumulate. Default 24; set 0 to fold all old results, omit/large
+    // to effectively disable the early trim (budget-based fold still applies).
+    maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
     // When true, createSession attempts to load the optional pure-JS
@@ -276,11 +307,31 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .union([z.boolean(), z.object({ dir: z.string().min(1).optional() }).strict()])
       .optional(),
     mcpServers: z.record(z.string().min(1), McpServerConfigSchema).optional(),
+    // Language-server configs for the `lsp_navigate` tool (go-to-definition /
+    // find-references / hover). Each entry maps language ids to a spawn command.
+    // Built-in TypeScript/JavaScript default applies when omitted.
+    lsp: z
+      .object({
+        servers: z
+          .array(
+            z.object({
+              command: z.string().min(1),
+              args: z.array(z.string()).optional(),
+              languages: z.array(z.string().min(1)).min(1),
+              initializationOptions: z.record(z.string(), z.unknown()).optional(),
+            }),
+          )
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
+    mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
     autoApprove: z.array(z.string().min(1)).optional(),
     permissions: PermissionRulesSchema.optional(),
     sandbox: SandboxConfigSchema.optional(),
-    // 0 = unlimited (Claude Code / Codex default posture). Positive caps
-    // the agent↔tool loop for CI / unattended runs.
+    // 0 = unlimited. Positive caps the agent↔tool loop for CI / unattended
+    // runs.
     maxTurns: z.number().int().min(0).max(10_000).optional(),
     turnRetries: z.number().int().min(0).max(10).optional(),
     // When true, command hooks run under the same OS sandbox as `bash`
@@ -288,10 +339,52 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     hookSandbox: z.boolean().optional(),
     // Max consecutive Stop-hook continues before forcing end (default 8).
     stopHookBlockCap: z.number().int().min(0).max(100).optional(),
+    // Sub-agent (`task` tool) scale knobs. Conservative defaults live in
+    // tools/task.ts; these let power users widen fan-out for very large tasks.
+    // subagentTimeoutMs: per-sub-agent wall-clock budget (ms); unset = none.
+    subagentTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+    // subagentMaxDepth: nesting depth (default 3). 1 disables grandchildren.
+    subagentMaxDepth: z.number().int().min(1).max(10).optional(),
+    // subagentMaxThreads: concurrent sub-agents (default 6) — the main brake.
+    subagentMaxThreads: z.number().int().min(1).max(64).optional(),
+    // subagentMaxTotal: cumulative spawn cap for the whole run (default 200).
+    subagentMaxTotal: z.number().int().min(1).max(100_000).optional(),
+    // subagentPermissions: whether a built-in sub-agent (explore/worker, no
+    // custom permissionMode) shares the parent's live PermissionEngine or runs
+    // under a fresh, independent one.
+    //   "inherit" (default) — share the parent engine: session-approved allow
+    //     rules carry into the sub-agent, matching today's behavior.
+    //   "independent" — give each sub-agent its own engine (mode "auto-edit",
+    //     config autoApprove only), so a permission the user granted the parent
+    //     mid-session does NOT silently widen the sub-agent's reach.
+    // Custom agents with their own permissionMode are always independent.
+    subagentPermissions: z.enum(["inherit", "independent"]).optional(),
+    // subagentCache: durable reuse of a completed sub-agent's conclusion for an
+    // identical spec within the TTL (makes an interrupted fan-out resumable).
+    // enabled defaults true; ttlHours defaults 24. See types.ts.
+    subagentCache: z
+      .object({
+        enabled: z.boolean().optional(),
+        ttlHours: z.number().positive().max(24 * 365).optional(),
+      })
+      .optional(),
     // Built-in Stop validity gate (default off). See types.ts.
     stopVerify: z
       .union([z.boolean(), z.enum(["off", "prompt", "tests"])])
       .optional(),
+    // Opt-in: expose the `harness_bridge` tool (invoke claude/codex/custom
+    // external agent CLIs as sandboxed subprocesses). Default off.
+    enableHarnessBridge: z.boolean().optional(),
+    // When true, suggest_mode switches apply without re-asking the user
+    // (the model proposes, the switch happens). Default off → user confirms.
+    autoAcceptModeSuggestions: z.boolean().optional(),
+    // Execution-reliability guards (anti-hallucination). See types.ts.
+    // consistencyCheck: "off" | "warn" (default) | "throw" — verify that the
+    // messages sent to the provider match the persisted event log.
+    consistencyCheck: z.enum(["off", "warn", "throw"]).optional(),
+    // citationGuard: "off" | "notice" (default) — flag `path:line` references
+    // in the final answer that were never backed by a read/grep this session.
+    citationGuard: z.enum(["off", "notice"]).optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
  // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous
@@ -314,6 +407,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     usage: UsageConfigSchema,
     webFetch: WebFetchConfigSchema.optional(),
     webSearch: WebSearchConfigSchema.optional(),
+    imageGen: ImageGenConfigSchema.optional(),
  // Agent runtime --------------------------------
  // Name of a registered AgentRuntime driving the prompt loop, plus a
  // free-form options bag keyed by runtime name. The values are opaque
@@ -400,7 +494,7 @@ export const DEFAULT_CONFIG: ResolvedCodepilotConfig = {
   agentMode: "agent",
   sandbox: { mode: "workspace-write", network: true, fallback: "deny" },
   maxTokens: undefined,
-  contextWindow: 200_000,
+  contextWindow: DEFAULT_MODEL_CONTEXT_WINDOW,
   mcpServers: undefined,
   autoApprove: undefined,
   models: undefined,
@@ -710,7 +804,8 @@ export function readEnvOverrides(): Partial<CodepilotConfig> {
     (provider === "anthropic" ||
       provider === "openai" ||
       provider === "copilot" ||
-      provider === "gemini")
+      provider === "gemini" ||
+      provider === "azure")
   ) {
     out.provider = provider as ProviderName;
   }
@@ -720,6 +815,8 @@ export function readEnvOverrides(): Partial<CodepilotConfig> {
   if (apiKey && apiKey.length > 0) out.apiKey = apiKey;
   const baseURL = process.env.CODEPILOT_BASE_URL;
   if (baseURL && baseURL.length > 0) out.baseURL = baseURL;
+  const azureApiVersion = process.env.CODEPILOT_AZURE_API_VERSION;
+  if (azureApiVersion && azureApiVersion.length > 0) out.azureApiVersion = azureApiVersion;
   const perm = process.env.CODEPILOT_PERMISSION_MODE;
   if (perm && (perm === "ask" || perm === "auto-edit" || perm === "yolo")) {
     out.permissionMode = perm;
@@ -917,6 +1014,13 @@ export function useProvider(
   if (preset.baseURL !== undefined) out.baseURL = preset.baseURL;
   if (preset.apiKey !== undefined) out.apiKey = preset.apiKey;
   if (preset.model !== undefined) out.model = preset.model;
+  // azureApiVersion is a runtime provider field (consumed by OpenAIProvider for
+  // Azure deployments). Carry it over too — otherwise switching to an Azure
+  // preset silently drops its api-version and falls back to the built-in
+  // default, hitting the wrong endpoint. The other preset fields (displayName /
+  // models / modelCapabilities) are picker-only metadata that the flat runtime
+  // config does not consume, so they intentionally do not flatten here.
+  if (preset.azureApiVersion !== undefined) out.azureApiVersion = preset.azureApiVersion;
   if (preset.smallModel !== undefined) {
     out.smallModel = preset.smallModel;
   } else if (config.smallModel) {

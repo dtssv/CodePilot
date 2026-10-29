@@ -1,78 +1,44 @@
 import { describe, expect, it } from "vitest";
-import {
-  DoomLoopDetector,
-  MUTATION_BURST_REFUSE,
-  MUTATION_BURST_WARN,
-  isVerifyLikeCommand,
-  mutationPaths,
-} from "../src/doomLoop.js";
+import { DoomLoopDetector } from "../src/doomLoop.js";
 
-describe("mutationPaths / isVerifyLikeCommand", () => {
-  it("extracts write/edit paths", () => {
-    expect(mutationPaths("write_file", { path: "src/a.ts" })).toEqual(["src/a.ts"]);
-    expect(mutationPaths("edit_file", { path: "./src/a.ts" })).toEqual(["src/a.ts"]);
-  });
-
-  it("extracts apply_patch paths", () => {
-    const patch =
-      "*** Begin Patch\n*** Update File: a.ts\n*** End File\n*** Add File: b.ts\nx\n*** End Patch\n";
-    expect(mutationPaths("apply_patch", { patch })).toEqual(["a.ts", "b.ts"]);
-  });
-
-  it("recognizes verify-like bash", () => {
-    expect(isVerifyLikeCommand("pnpm test")).toBe(true);
-    expect(isVerifyLikeCommand("npm run build")).toBe(true);
-    expect(isVerifyLikeCommand("ls -la")).toBe(false);
-  });
-});
-
-describe("DoomLoopDetector mutation burst", () => {
-  it("warns then refuses consecutive mutations on the same path without verify", () => {
+// The old "mutation burst" brake (N consecutive edits on the same path without
+// an intervening verify command => warn then refuse) was removed. It was a
+// CodePilot-only mechanism that no mainstream harness implements, it was
+// internally inconsistent with the path-read layer (which never refuses on a
+// count, precisely to avoid false-positives on legitimate iteration), and even
+// as a warning it polluted the model's context — weaker models would "believe"
+// the warning and abandon productive work (e.g. building up a large file section
+// by section). These tests pin the NEW guarantee: editing the same file many
+// times in a row is never penalised by the doom-loop detector.
+describe("no mutation-burst brake", () => {
+  it("never warns or refuses on many consecutive edits to the same file", () => {
     const d = new DoomLoopDetector();
-    for (let i = 0; i < MUTATION_BURST_WARN - 1; i++) {
+    // Far more than the old refuse threshold (8), each a DISTINCT edit.
+    for (let i = 0; i < 20; i++) {
       const r = d.check("edit_file", { path: "f.ts", search: `a${i}`, replace: `b${i}` });
       expect(r.refuse).toBe(false);
       expect(r.warn).toBe(false);
     }
-    const warn = d.check("edit_file", {
-      path: "f.ts",
-      search: "warn",
-      replace: "x",
-    });
-    expect(warn.warn).toBe(true);
-    expect(warn.refuse).toBe(false);
+  });
 
-    for (let i = MUTATION_BURST_WARN; i < MUTATION_BURST_REFUSE - 1; i++) {
-      const r = d.check("edit_file", { path: "f.ts", search: `c${i}`, replace: `d${i}` });
+  it("never warns or refuses on many consecutive write_file calls to the same path", () => {
+    const d = new DoomLoopDetector();
+    for (let i = 0; i < 20; i++) {
+      const r = d.check("write_file", { path: "big.ts", content: `section ${i}` });
       expect(r.refuse).toBe(false);
+      expect(r.warn).toBe(false);
     }
-    const refuse = d.check("edit_file", {
-      path: "f.ts",
-      search: "refuse",
-      replace: "x",
-    });
-    expect(refuse.refuse).toBe(true);
-    expect(refuse.message).toMatch(/verify/i);
   });
 
-  it("resets burst after a verify-like bash", () => {
+  it("still refuses the genuine loop: the EXACT same edit repeated verbatim", () => {
+    // Removing the burst brake must not weaken the exact-repetition layer, which
+    // catches a true no-progress loop (identical tool + identical input).
     const d = new DoomLoopDetector();
-    for (let i = 0; i < MUTATION_BURST_WARN; i++) {
-      d.check("write_file", { path: "f.ts", content: `v${i}` });
+    let sawRefuse = false;
+    for (let i = 0; i < 6; i++) {
+      const r = d.check("edit_file", { path: "f.ts", search: "same", replace: "same" });
+      if (r.refuse) sawRefuse = true;
     }
-    d.check("bash", { command: "pnpm test" });
-    const after = d.check("write_file", { path: "f.ts", content: "ok" });
-    expect(after.warn).toBe(false);
-    expect(after.refuse).toBe(false);
-  });
-
-  it("does not aggregate unrelated paths into the same burst refuse early", () => {
-    const d = new DoomLoopDetector();
-    for (let i = 0; i < 3; i++) {
-      d.check("edit_file", { path: "a.ts", search: `x${i}`, replace: "y" });
-    }
-    const other = d.check("edit_file", { path: "b.ts", search: "x", replace: "y" });
-    expect(other.refuse).toBe(false);
-    expect(other.warn).toBe(false);
+    expect(sawRefuse).toBe(true);
   });
 });

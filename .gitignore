@@ -48,6 +48,7 @@ packages/*/dist/
 .venv/
 *.egg-info/
 build/
+!apps/desktop/build/
 playground/.pytest_cache/
 
 # OS / editor cruft

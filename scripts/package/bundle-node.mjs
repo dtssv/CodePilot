@@ -16,6 +16,24 @@ export async function bundleNodeEntry(opts) {
   const esbuild = await import("esbuild");
   ensureDir(dirname(opts.outfile));
   log(`esbuild ${opts.entry} → ${opts.outfile}`);
+  // The core/protocol dist is ESM and uses `import.meta.url` (createRequire,
+  // fileURLToPath). Bundling to CJS for pkg turns that into `undefined`, so we
+  // shim it to the current file via __filename. `--define` rewrites every
+  // `import.meta.url` occurrence to our banner-provided constant.
+  const importMetaShim =
+    "var __cp_import_meta_url = require('url').pathToFileURL(__filename).href;";
+
+  // Read the real core version so version-probe requires can be inlined below.
+  let coreVersion = "0.0.0";
+  try {
+    coreVersion =
+      JSON.parse(readFileSync(require.resolve("@codepilot/core/package.json"), "utf8")).version ??
+      coreVersion;
+  } catch {
+    /* keep default */
+  }
+  const pkgShim = `var __cp_pkg = ${JSON.stringify({ name: "@codepilot/core", version: coreVersion })};`;
+
   await esbuild.build({
     entryPoints: [opts.entry],
     outfile: opts.outfile,
@@ -24,18 +42,30 @@ export async function bundleNodeEntry(opts) {
     target: "node20",
     format: "cjs",
     sourcemap: false,
+    define: {
+      "import.meta.url": "__cp_import_meta_url",
+    },
  // Keep native / electron-unrelated packages that pkg ships or that break when bundled.
     external: [
       "electron",
       "fsevents",
  // ink pulls optional native; leave resolved from node_modules inside pkg.
     ],
-    ...(opts.banner ? { banner: { js: opts.banner } } : {}),
+    banner: {
+      js: opts.banner ? `${importMetaShim}\n${pkgShim}\n${opts.banner}` : `${importMetaShim}\n${pkgShim}`,
+    },
     logLevel: "warning",
   });
  // Strip shebang(s) — pkg's babel parser rejects `#!` in the entry.
   let code = readFileSync(opts.outfile, "utf8");
   code = code.replace(/^(#!.*\r?\n)+/, "");
+  // `createRequire(...)("../package.json")` and `require("@codepilot/core/package.json")`
+  // are dynamic requires esbuild can't inline; under pkg's /snapshot FS they throw.
+  // Rewrite those version-probe calls to the banner-injected literal.
+  code = code.replace(
+    /\b(?:require\d*|req)\s*\(\s*["'](?:\.\.\/package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
+    "__cp_pkg",
+  );
   writeFileSync(opts.outfile, code);
 }
 

@@ -73,6 +73,9 @@ class FakeSession {
 const sessionsById = new Map<string, FakeSession>();
 
 vi.mock("@codepilot/core", () => ({
+  // The real core exports this runtime constant; defaultCapabilities() spreads
+  // it for the advertised providers list, so the mock must provide it too.
+  PROVIDER_NAMES: ["anthropic", "openai", "copilot", "gemini", "azure"],
   createSession: vi.fn(async (opts: any) => {
     const id = opts.sessionId;
     let s = id ? sessionsById.get(id) : undefined;

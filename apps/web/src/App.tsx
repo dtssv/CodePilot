@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { HostBridge } from "./protocol/bridge.js";
+import { describeError, type CodepilotClient } from "./protocol/client.js";
 import { useCodepilot, type Codepilot } from "./state/useCodepilot.js";
+import { interpretSlash } from "./state/slashCommands.js";
 import type { Row } from "./state/rows.js";
 import type { ImageAttachment, PromptFile } from "@codepilot/core";
 import { loadPrefs, savePrefs, sameCwd } from "./prefs.js";
@@ -19,7 +21,6 @@ import { applyHostLocale, t, useLocale } from "./i18n.js";
 import { Transcript } from "./components/Transcript.js";
 import {
   Composer,
-  ConnectionPill,
   ConnectScreen,
   SessionList,
   ThemeToggle,
@@ -37,6 +38,7 @@ import {
   ChatIcon,
   CodeIcon,
   FolderIcon,
+  GitIcon,
   ListIcon,
   LogoMark,
   PanelRightIcon,
@@ -49,6 +51,8 @@ import {
   XIcon,
 } from "./components/Icons.js";
 import { TrajectoryPanel } from "./components/TrajectoryPanel.js";
+import { BrowserPanel } from "./components/BrowserPanel.js";
+import { GitPanel } from "./components/GitPanel.js";
 
 declare global {
   interface Window {
@@ -57,7 +61,15 @@ declare global {
       platform: string;
       pickFolder(): Promise<string | null>;
       openPath(path: string): void;
+      /** Current LAN-access preference (daemon bound to 0.0.0.0 for phone QR). */
+      getLanAccess?(): Promise<boolean>;
+      /** Toggle LAN access; the host restarts the shared daemon so the change
+       * takes effect immediately. Resolves to the new value. */
+      setLanAccess?(enabled: boolean): Promise<boolean>;
+      onMenu?(handler: (cmd: "settings" | "check-updates") => void): () => void;
     };
+ /** Registered by the desktop in-app browser panel to open http(s) links. */
+    __codepilotOpenBrowser?: (url: string) => void;
   }
 }
 
@@ -141,7 +153,10 @@ export function App(): React.ReactElement {
     const prefs = loadPrefs();
     const afterConnect = async (p: Promise<void>): Promise<void> => {
       await p;
- // Restore last workspace after connect — never block the connect screen on cwd.
+ // Restore last workspace after connect — never block the connect screen on
+ // cwd. The desktop app intentionally opens with no workspace selected so the
+ // user picks one explicitly (sessions are scoped per workspace).
+      if (surface.desktop) return;
       const last = loadPrefs().cwd;
       if (last) await cpRef.current.openWorkspace(last);
     };
@@ -156,6 +171,9 @@ export function App(): React.ReactElement {
         cwd: prefs.cwd,
         workspaces: prefs.workspaces,
       });
+ // Remote phone: seed the workspace list with every authorized workspace so
+ // the sidebar shows them all, not just the active one.
+      if (surface.remoteCwds?.length) cp.seedWorkspaces(surface.remoteCwds);
       void afterConnect(cp.connect({ url, token, cwd: surface.autoConnect.cwd || undefined }));
     } else if (prefs.url && prefs.token) {
       void afterConnect(cp.connect({ url: prefs.url, token: prefs.token }));
@@ -166,7 +184,7 @@ export function App(): React.ReactElement {
   const openFile = useCallback(
     (path: string) => {
       if (bridgeRef.current) bridgeRef.current.post({ type: "openFile", path });
-      else window.codepilotDesktop?.openPath(joinPath(cp.state.cwd, path));
+      else void openResolvedPath(cp.client, cp.state.cwd, path);
     },
     [cp.state.cwd],
   );
@@ -213,12 +231,27 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
   return {
     value: draft,
     onChange: setDraft,
-    onSend: (
+    onSend: async (
       text: string,
       images?: ImageAttachment[],
       files?: PromptFile[],
       delivery?: "auto" | "queue" | "steer",
-    ) => cp.send(text, images, files, delivery),
+    ) => {
+      // Slash commands are LOCAL actions first (switch mode / compact / clear /
+      // pickers), not prompts — only trailing args (or unknown md commands)
+      // reach the model. Attachments bypass interpretation (they can't be a
+      // command). Mirrors codex's slash-dispatch semantics.
+      if (text.startsWith("/") && (!images || images.length === 0) && (!files || files.length === 0)) {
+        const outcome = await interpretSlash(text, cp);
+        if (outcome.handled) {
+          if (outcome.forward && outcome.forward.trim()) {
+            await cp.send(outcome.forward, images, files, delivery);
+          }
+          return;
+        }
+      }
+      await cp.send(text, images, files, delivery);
+    },
     onStop: () => void cp.cancel(),
     busy,
     disabled: state.connection !== "connected",
@@ -236,8 +269,26 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
       setDraft(fu.text);
     },
     onSendFollowUpNow: (id: string) => cp.sendFollowUpNow(id),
+    menuProvider: {
+      listCommands: async () => {
+        try {
+          const r = await cp.client.commandsList(state.cwd || undefined);
+          return r.commands;
+        } catch {
+          return [];
+        }
+      },
+      complete: async (query: string, kind: "file" | "dir" | "mcp" | "git" | "skill") => {
+        try {
+          const r = await cp.client.workspaceComplete(query, { kinds: [kind], cwd: state.cwd || undefined });
+          return r.candidates;
+        } catch {
+          return [];
+        }
+      },
+    },
     footer: (
-      <span className="flex flex-wrap items-center gap-2">
+      <span className="flex min-w-0 flex-wrap items-center gap-2">
         <ModelPicker cp={cp} />
         <UsageLine state={state} />
       </span>
@@ -281,11 +332,39 @@ function WebLayout({
   const { state } = cp;
   const prefs = useMemo(loadPrefs, []);
   const [showSidebar, setShowSidebar] = useState(true);
-  const [showWorkspace, setShowWorkspace] = useState(true);
+  const [showWorkspace, setShowWorkspace] = useState(false);
+  const [workspaceMax, setWorkspaceMax] = useState(false);
   const [showTrajectory, setShowTrajectory] = useState(false);
+  const [showGit, setShowGit] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
-  const scrollRef = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // Desktop in-app browser: links call window.__codepilotOpenBrowser.
+  useEffect(() => {
+    if (!surface.desktop) return;
+    window.__codepilotOpenBrowser = (u: string) => {
+      setBrowserUrl(u);
+      setShowTrajectory(false);
+      setShowWorkspace(false);
+      setShowGit(false);
+    };
+    return () => {
+      delete window.__codepilotOpenBrowser;
+    };
+  }, [surface.desktop]);
+  // Native menu commands: "settings" opens the panel; "check-updates" runs
+  // the update check directly (via a ref so we see the latest handler).
+  const checkUpdateRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const api = window.codepilotDesktop;
+    if (!api?.onMenu) return;
+    return api.onMenu((cmd) => {
+      if (cmd === "check-updates") checkUpdateRef.current();
+      else setShowSettings(true);
+    });
+  }, []);
+  const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const composer = useComposer(cp, draft, setDraft, t("Ask CodePilot…"));
   const connected = state.connection === "connected";
   const canBootstrap = !!(
@@ -320,11 +399,42 @@ function WebLayout({
     await cp.resumeSession(id);
   };
 
+  const checkForUpdate = async (): Promise<void> => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      const { engine } = await cp.client.checkEngineUpdate();
+      if (!engine.available) {
+        cp.notify(`${t("You’re up to date")} (${engine.current})`);
+      } else if (engine.canAutoApply) {
+        const to = engine.latest ?? engine.tag ?? "";
+        if (window.confirm(`${t("Update available")}: ${engine.current} → ${to}. ${t("Install now?")}`)) {
+          const res = await cp.client.applyEngineUpdate();
+          cp.notify(
+            res.applied
+              ? `${t("Updated to")} ${res.version}. ${t("Restart to use the new engine.")}`
+              : res.message || t("Update could not be applied"),
+          );
+        }
+      } else {
+        cp.notify(`${t("Update available")}: ${engine.latest ?? engine.tag ?? ""} — ${t("run `codepilot update`")}`);
+      }
+    } catch (err) {
+      cp.notify(describeError(err));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+  checkUpdateRef.current = () => void checkForUpdate();
+
   return (
-    <div className="flex h-full bg-[var(--color-bg)]">
+    <div className="flex h-full w-full overflow-hidden bg-[var(--color-bg)]">
       {showSidebar && (
         <aside className="flex w-64 shrink-0 flex-col border-r border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
-          <div className="flex h-12 shrink-0 items-center gap-2 px-3">
+          {surface.desktop && window.codepilotDesktop?.platform === "darwin" && (
+            <div className="h-10 shrink-0 [-webkit-app-region:drag]" />
+          )}
+          <div className={`flex h-12 shrink-0 items-center gap-2 px-3 ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
             <LogoMark size={24} />
             <span className="text-[13.5px] font-semibold tracking-tight text-[var(--color-ink)]">CodePilot</span>
           </div>
@@ -341,8 +451,16 @@ function WebLayout({
             onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
             onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
             onOpenNewWorkspace={() => void openNewWorkspace()}
-            onNewSession={() => void cp.newSession()}
+            onNewSession={() => {
+              if (!state.cwd) {
+                cp.notify(t("Select a workspace first, or open a new one."));
+                return;
+              }
+              void cp.newSession();
+            }}
             onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
+            onPinSession={(id, pinned) => void cp.pinSession(id, pinned)}
+            onArchiveSession={(id, archived) => void cp.archiveSession(id, archived)}
             canFork={!!state.sessionId}
             onFork={() => void cp.forkSession()}
             onRefresh={() => void cp.refreshSessions()}
@@ -359,7 +477,6 @@ function WebLayout({
               {t("Settings")}
             </button>
             <div className="ml-auto flex items-center">
-              <ConnectionPill state={state} />
               <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Agent view")}>
                 <RocketIcon className="h-4 w-4" />
               </button>
@@ -369,9 +486,12 @@ function WebLayout({
         </aside>
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col bg-[var(--color-bg)]">
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-[var(--color-edge-subtle)] px-3">
-          <button type="button" className="cp-icon-btn" onClick={() => setShowSidebar((v) => !v)} title={t("Sessions")}>
+      <main className={`min-w-0 flex-1 flex-col bg-[var(--color-bg)] ${workspaceMax && showWorkspace && state.cwd ? "hidden" : "flex"}`}>
+        {!showSidebar && surface.desktop && window.codepilotDesktop?.platform === "darwin" && (
+          <div className="h-10 shrink-0 [-webkit-app-region:drag]" />
+        )}
+        <header className={`flex h-12 shrink-0 items-center gap-2 border-b border-[var(--color-edge-subtle)] px-3 ${surface.desktop ? "[-webkit-app-region:drag]" : ""}`}>
+          <button type="button" className="cp-icon-btn [-webkit-app-region:no-drag]" onClick={() => setShowSidebar((v) => !v)} title={t("Sessions")}>
             <SidebarIcon className="h-4 w-4" />
           </button>
           <span className="min-w-0 truncate text-[13px] font-medium text-[var(--color-ink)]">
@@ -383,13 +503,26 @@ function WebLayout({
               {state.cwd}
             </span>
           )}
-          <div className="ml-auto flex items-center gap-1.5">
-            {!showSidebar && <ConnectionPill state={state} />}
+          <div className="ml-auto flex items-center gap-1.5 [-webkit-app-region:no-drag]">
+            <button
+              type="button"
+              className="cp-icon-btn"
+              onClick={() => void checkForUpdate()}
+              title={t("Check for updates")}
+              disabled={!connected || checkingUpdate}
+            >
+              {checkingUpdate ? <SpinnerIcon className="h-4 w-4" /> : <RefreshIcon className="h-4 w-4" />}
+            </button>
             <button
               type="button"
               className="cp-icon-btn"
               aria-pressed={showTrajectory}
-              onClick={() => setShowTrajectory((v) => !v)}
+              onClick={() => {
+                setShowTrajectory((v) => !v);
+                setShowWorkspace(false);
+                setShowGit(false);
+                setBrowserUrl(null);
+              }}
               title={t("Trajectory")}
               disabled={!state.sessionId}
             >
@@ -398,15 +531,42 @@ function WebLayout({
             <button
               type="button"
               className="cp-icon-btn"
+              aria-pressed={showGit}
+              onClick={() => {
+                setShowGit((v) => !v);
+                setShowWorkspace(false);
+                setShowTrajectory(false);
+                setBrowserUrl(null);
+              }}
+              title={t("Git")}
+              disabled={!state.cwd}
+            >
+              <GitIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className="cp-icon-btn"
               aria-pressed={showWorkspace}
-              onClick={() => setShowWorkspace((v) => !v)}
+              onClick={() => {
+                setShowWorkspace((v) => !v);
+                setWorkspaceMax(false);
+                setShowTrajectory(false);
+                setShowGit(false);
+                setBrowserUrl(null);
+              }}
               title={t("Files")}
               disabled={!state.cwd}
             >
               <PanelRightIcon className="h-4 w-4" />
             </button>
-            <button type="button" onClick={() => void cp.disconnect()} className="cp-btn-ghost py-1">
-              {t("Disconnect")}
+            <button
+              type="button"
+              className="cp-icon-btn"
+              onClick={() => setShowSettings(true)}
+              title={t("Settings")}
+              disabled={!connected}
+            >
+              <WrenchIcon className="h-4 w-4" />
             </button>
           </div>
         </header>
@@ -425,6 +585,7 @@ function WebLayout({
               <Transcript
                 rows={state.rows}
                 subagents={state.subagents}
+                scrollContainerRef={scrollElRef}
                 status={state.status}
                 activity={state.activity}
                 permission={state.permission}
@@ -439,7 +600,7 @@ function WebLayout({
         </div>
 
         <div className="shrink-0 px-5 pb-4">
-          <div className="mx-auto w-full max-w-3xl">
+          <div data-cp-composer className="mx-auto w-full max-w-3xl">
             <ReconnectBanner cp={cp} />
             <Composer {...composer} />
           </div>
@@ -452,19 +613,44 @@ function WebLayout({
           sessionId={state.sessionId}
           usage={state.usage}
           onClose={() => setShowTrajectory(false)}
+          onOpenPath={(p) => setPreview(p)}
         />
       )}
       {connected && showWorkspace && state.cwd && (
-        <WorkspacePanel client={cp.client} cwd={state.cwd} connected={connected} rows={state.rows} />
+        <WorkspacePanel
+          client={cp.client}
+          cwd={state.cwd}
+          connected={connected}
+          rows={state.rows}
+          maximized={workspaceMax}
+          onToggleMaximize={() => setWorkspaceMax((v) => !v)}
+          onClose={() => {
+            setShowWorkspace(false);
+            setWorkspaceMax(false);
+          }}
+        />
+      )}
+      {connected && showGit && state.cwd && (
+        <GitPanel client={cp.client} cwd={state.cwd} sessionId={state.sessionId} onClose={() => setShowGit(false)} />
+      )}
+      {browserUrl && (
+        <BrowserPanel
+          url={browserUrl}
+          onClose={() => setBrowserUrl(null)}
+          onOpenExternally={
+            window.codepilotDesktop ? (u) => window.open(u, "_blank", "noopener,noreferrer") : undefined
+          }
+        />
       )}
       {preview && (
         <FilePreview
           client={cp.client}
           path={preview}
+          cwd={state.cwd}
           onClose={() => setPreview(null)}
           onOpenExternally={
             window.codepilotDesktop
-              ? (p) => window.codepilotDesktop?.openPath(joinPath(state.cwd, p))
+              ? (p) => void openResolvedPath(cp.client, state.cwd, p)
               : undefined
           }
         />
@@ -583,7 +769,7 @@ function AgentLayout({
   const remote = surface.remote || cp.client.isRemoteControl();
   const canPickWorkspace = !remote && cp.client.canPickWorkspace();
   const [showNav, setShowNav] = useState(() => !remote);
-  const scrollRef = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
+  const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const connected = state.connection === "connected";
   const inTask = !!state.sessionId;
 
@@ -616,7 +802,6 @@ function AgentLayout({
   const resumeInWorkspace = async (id: string, cwd: string): Promise<void> => {
     if (!sameCwd(cwd, state.cwd)) await cp.openWorkspace(cwd);
     await cp.resumeSession(id);
-    if (remote) setShowNav(false);
   };
 
   const taskTitle =
@@ -650,17 +835,13 @@ function AgentLayout({
         emptyText={t("No tasks yet.")}
         sessionIcon={<RocketIcon className="h-3.5 w-3.5" />}
         canOpenNewWorkspace={canPickWorkspace}
-        onOpenWorkspace={(ws) => {
-          void cp.openWorkspace(ws);
-          if (remote) setShowNav(false);
-        }}
+        onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
         onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
         onOpenNewWorkspace={() => void openNewWorkspace()}
-        onNewSession={() => {
-          cp.closeSession();
-          if (remote) setShowNav(false);
-        }}
+        onNewSession={() => cp.closeSession()}
         onResumeSession={(id, cwd) => void resumeInWorkspace(id, cwd)}
+        onPinSession={(id, pinned) => void cp.pinSession(id, pinned)}
+        onArchiveSession={(id, archived) => void cp.archiveSession(id, archived)}
         canFork={!!state.sessionId}
         onFork={() => void cp.forkSession()}
         onRefresh={() => void cp.refreshSessions()}
@@ -679,7 +860,6 @@ function AgentLayout({
           </button>
         )}
         <div className="ml-auto flex items-center">
-          <ConnectionPill state={state} />
           {!remote && (
             <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Code view")}>
               <CodeIcon className="h-4 w-4" />
@@ -749,6 +929,7 @@ function AgentLayout({
                 <Transcript
                   rows={state.rows}
                   subagents={state.subagents}
+                  scrollContainerRef={scrollElRef}
                   status={state.status}
                   activity={state.activity}
                   permission={state.permission}
@@ -762,7 +943,7 @@ function AgentLayout({
               </div>
             </div>
             <div className="shrink-0 px-3 pb-4 sm:px-6 sm:pb-5">
-              <div className="mx-auto w-full max-w-3xl">
+              <div data-cp-composer className="mx-auto w-full max-w-3xl">
                 <ReconnectBanner cp={cp} />
                 <Composer {...taskComposer} />
               </div>
@@ -793,13 +974,21 @@ function AgentLayout({
         )}
       </main>
 
-      {inTask && !remote && <TaskPanel state={state} onOpenFile={(p) => setPreview(p)} />}
+      {inTask && !remote && (
+        <TaskPanel
+          state={state}
+          onOpenFile={(p) => setPreview(p)}
+          client={cp.client}
+          sessionId={state.sessionId}
+        />
+      )}
       {preview && (
         <FilePreview
           client={cp.client}
           path={preview}
+          cwd={state.cwd}
           onClose={() => setPreview(null)}
-          onOpenExternally={window.codepilotDesktop ? (p) => window.codepilotDesktop?.openPath(joinPath(state.cwd, p)) : undefined}
+          onOpenExternally={window.codepilotDesktop ? (p) => void openResolvedPath(cp.client, state.cwd, p) : undefined}
         />
       )}
       {!remote && (
@@ -857,7 +1046,7 @@ function EmbeddedLayout({
 }: LayoutProps & { bridge: HostBridge | null; onOpenFile(path: string): void }): React.ReactElement {
   const { state } = cp;
   const [showHistory, setShowHistory] = useState(false);
-  const scrollRef = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
+  const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const composer = useComposer(cp, draft, setDraft, t("Ask CodePilot…"));
   const connected = state.connection === "connected";
   const title = state.sessions.find((s) => s.id === state.sessionId)?.title;
@@ -875,7 +1064,6 @@ function EmbeddedLayout({
           <span className="truncate">{title || (state.sessionId ? t("Sessions") : "CodePilot")}</span>
         </button>
         <div className="ml-auto flex items-center">
-          <ConnectionPill state={state} />
           <button type="button" className="cp-icon-btn ml-1" onClick={() => setShowHistory((v) => !v)} title={t("History")}>
             <ChatIcon className="h-3.5 w-3.5" />
           </button>
@@ -944,6 +1132,7 @@ function EmbeddedLayout({
             <Transcript
               rows={state.rows}
               subagents={state.subagents}
+              scrollContainerRef={scrollElRef}
               status={state.status}
               activity={state.activity}
               permission={state.permission}
@@ -959,7 +1148,7 @@ function EmbeddedLayout({
         </div>
       </div>
 
-      <div className="shrink-0 px-2 pb-2">
+      <div data-cp-composer className="shrink-0 px-2 pb-2">
         <ReconnectBanner cp={cp} />
         <Composer {...composer} />
       </div>
@@ -995,4 +1184,24 @@ function EmbeddedFiles({ cp, onOpenFile }: { cp: Codepilot; onOpenFile(path: str
 function joinPath(cwd: string, path: string): string {
   if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return path;
   return `${cwd.replace(/[\\/]+$/, "")}/${path}`;
+}
+
+/** Open a (possibly bare/relative) referenced path in the host editor. Resolves
+ * it through the server's workspace fallback first so a bare name like
+ * "subagent.ts" opens the real file instead of joining to the wrong root and
+ * failing with "Failed to open path". Falls back to a plain join if the
+ * resolve RPC is unavailable. */
+async function openResolvedPath(
+  client: CodepilotClient,
+  cwd: string,
+  path: string,
+): Promise<void> {
+  let abs = joinPath(cwd, path);
+  try {
+    const r = await client.resolveWorkspace(path, cwd);
+    if (r.absolute) abs = r.absolute;
+  } catch {
+    /* resolve unavailable → use the join fallback */
+  }
+  window.codepilotDesktop?.openPath(abs);
 }

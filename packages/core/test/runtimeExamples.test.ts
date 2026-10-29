@@ -205,6 +205,37 @@ describe("RuntimeToolkit", () => {
     expect(executed).toEqual([]);
   });
 
+  it("runTool applies doom-loop detection across calls (the toolkit owns a persistent detector)", async () => {
+    // Regression: runTool used to call runOneTool WITHOUT a DoomLoopDetector,
+    // so a custom runtime driving tools through the toolkit silently lost the
+    // doom-loop refusal + idempotent-dedup the interface documents. A single
+    // detector must persist across runTool calls for repeat detection to work.
+    const toolkit = createRuntimeToolkit();
+    const deps = makeDeps(cwd, new MockProvider());
+
+    // First identical call runs for real.
+    const first = await toolkit.runTool(call("read_file", { path: "a.ts" }), deps, async () => undefined);
+    expect(first.isError).toBe(false);
+    expect(first.content).toBe("contents of a.ts");
+    expect(executed).toEqual(["read_file:a.ts"]);
+
+    // Second identical call is served from the dedup cache — NOT re-executed —
+    // which only happens when the detector persisted across the two calls.
+    const second = await toolkit.runTool(call("read_file", { path: "a.ts" }), deps, async () => undefined);
+    expect(second.isError).toBe(false);
+    expect(second.content).toMatch(/\[dedup: served from cache/);
+    expect(executed).toEqual(["read_file:a.ts"]); // still only one real execution
+
+    // A fresh toolkit has its own detector: no cross-contamination.
+    const other = await createRuntimeToolkit().runTool(
+      call("read_file", { path: "a.ts" }),
+      deps,
+      async () => undefined,
+    );
+    expect(other.content).toBe("contents of a.ts");
+    expect(executed).toEqual(["read_file:a.ts", "read_file:a.ts"]);
+  });
+
   it("gives tools an auxiliary event channel that bypasses the transcript", async () => {
  // The `task` tool's team mode narrates through ctx.emitEvent. Those
  // events must reach the host (UI + persistence) without landing in the
@@ -341,14 +372,13 @@ describe("AuditRuntime", () => {
     await runtime.prompt(
       { history: [], userText: "audit auth" },
       makeDeps(cwd, provider, {
-        systemPrompt: { staticPrefix: "STATIC", dynamicSuffix: "DYN", full: "STATIC\nDYN" },
+        systemPrompt: { staticPrefix: "STATIC", dynamicSuffix: "", full: "STATIC" },
       }),
     );
- // The contract rides in the dynamic suffix (appended to the last user
- // message), leaving the cacheable static prefix untouched.
-    expect(provider.calls[0]?.systemPrompt).toBe("STATIC");
-    const lastUser = provider.calls[0]?.messages.at(-1);
-    const text = JSON.stringify(lastUser?.content);
+ // The contract rides in the runtime context (its own system message),
+ // leaving the cacheable static+stable system block untouched by the user turn.
+    expect(provider.calls[0]?.systemPrompt).toContain("STATIC");
+    const text = JSON.stringify(provider.calls[0]?.messages.flatMap((m) => m.content));
     expect(text).toMatch(/audit_runtime/);
     expect(text).toMatch(/## Recommendations/);
   });

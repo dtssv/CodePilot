@@ -260,7 +260,7 @@ function engineEnv(): Record<string, string> {
   }
   env.CODEPILOT_CLIENT = "vscode";
   // Stamped from the extension package at build/runtime when available.
-  env.CODEPILOT_CLIENT_VERSION = process.env.CODEPILOT_CLIENT_VERSION ?? "2.1.1";
+  env.CODEPILOT_CLIENT_VERSION = process.env.CODEPILOT_CLIENT_VERSION ?? "1.0.0";
   env.CODEPILOT_SESSION_ID = randomUUID();
   return env;
 }

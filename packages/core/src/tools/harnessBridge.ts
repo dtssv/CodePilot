@@ -259,6 +259,22 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
+    // Recursion guard, shared in spirit with `task`: invoking an external
+    // harness is still delegation, and the harness may itself recurse (another
+    // CodePilot/claude/codex that fans out further). Without this, a sub-agent
+    // already at the max `task` nesting depth could sidestep the fork-bomb brake
+    // by shelling out to a harness instead. Refuse past the same `subagentMaxDepth`.
+    const currentDepth = ctx.subagentDepth ?? 0;
+    const maxDepth = ctx.config?.subagentMaxDepth ?? 3;
+    if (currentDepth >= maxDepth) {
+      return {
+        content:
+          `Refused: harness_bridge at sub-agent depth ${currentDepth} would exceed the ` +
+          `max delegation depth ${maxDepth}. A sub-agent this deep must do the work ` +
+          `itself rather than delegate to an external harness.`,
+        isError: true,
+      };
+    }
     const built = buildHarnessCommand(input);
     if (!built.ok) {
       return { content: built.error, isError: true };

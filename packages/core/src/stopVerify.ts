@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import type { Event } from "./types.js";
 import type { PreHookResult } from "./hooks.js";
 import type { HookResolvers } from "./hooks-handlers.js";
+import { isTransientError } from "./transientError.js";
 
 export type StopVerifyMode = "off" | "prompt" | "tests";
 
@@ -146,11 +147,12 @@ async function runPromptVerify(ctx: StopVerifyContext): Promise<PreHookResult> {
   }
 }
 
-/** 429 / TPM / gateway overload — not a real "task failed" signal. */
+/** 429 / TPM / gateway overload / network blip — not a real "task failed"
+ * signal. Delegates to the shared transient classifier so the judge path uses
+ * the same policy as the agent loop and task retries (it formerly carried its
+ * own regex that caught the TPM phrasings but missed network/timeout). */
 export function isTransientJudgeFailure(message: string): boolean {
-  return /\b429\b|rate.?limit|too many requests|tokens limit|访问限制|overloaded|\b529\b|sustaining heavy rate-limiting/i.test(
-    message,
-  );
+  return isTransientError(message);
 }
 
 function parseJudgeJson(raw: string): { action: "allow" | "block"; reason?: string } {

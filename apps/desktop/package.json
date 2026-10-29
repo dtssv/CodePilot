@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/desktop",
-  "version": "2.1.1",
+  "version": "1.0.0",
   "private": true,
   "description": "CodePilot Agent — desktop app for task-oriented work in a folder (the shared web UI in its agent layout).",
   "type": "module",
@@ -18,9 +18,73 @@
   "devDependencies": {
     "@codepilot/web": "workspace:*",
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "electron": "^38.0.0",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "ws": "^8.21.3"
+  },
+  "build": {
+    "appId": "com.codepilot.agent",
+    "productName": "CodePilot Agent",
+    "copyright": "CodePilot",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/web",
+        "to": "web"
+      }
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "../../dist/release/desktop"
+    },
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "category": "Development",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    }
   }
 }

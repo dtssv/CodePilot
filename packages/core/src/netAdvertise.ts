@@ -48,6 +48,16 @@ export function advertiseUrl(serveUrl: string, lanIp?: string): {
   } catch {
     return { url: serveUrl, rewritten: false, warning: "Invalid serve URL" };
   }
+  // Only http(s) can be reached by a phone. A file:// (desktop SPA origin) or
+  // ws:// slipping through here would produce an unusable QR — reject clearly
+  // rather than emit it.
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return {
+      url: serveUrl.replace(/\/+$/, ""),
+      rewritten: false,
+      warning: `Serve URL must be http(s) for remote pairing (got "${parsed.protocol}//").`,
+    };
+  }
   if (!isLoopbackHost(parsed.hostname)) {
     return { url: serveUrl.replace(/\/+$/, ""), rewritten: false };
   }

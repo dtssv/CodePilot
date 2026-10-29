@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/protocol",
-  "version": "2.1.1",
+  "version": "1.0.0",
   "description": "CodePilot headless JSON-RPC 2.0 protocol server + CLI entry.",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,13 +25,15 @@
     "./serve-info": {
       "types": "./dist/serve-info.d.ts",
       "import": "./dist/serve-info.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "codepilot": "./dist/cli.js"
   },
   "files": [
     "dist",
+    "scripts/fix-node-pty-spawn-helper.mjs",
     "README.md"
   ],
   "scripts": {
@@ -39,7 +41,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "postinstall": "node ./scripts/fix-node-pty-spawn-helper.mjs"
+    "postinstall": "node -e \"const f='./scripts/fix-node-pty-spawn-helper.mjs';require('fs').existsSync(f)&&import(f).catch(()=>{})\""
   },
   "dependencies": {
     "@codepilot/core": "workspace:*",

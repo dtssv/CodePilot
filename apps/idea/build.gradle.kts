@@ -1,12 +1,15 @@
 plugins {
     // IntelliJ Platform Gradle Plugin 2.x — see https://plugins.jetbrains.com/plugin/26102-intellij-platform-gradle-plugin
-    id("org.jetbrains.intellij.platform") version "2.1.0"
-    kotlin("jvm") version "2.1.0"
+    // 2.19.0 requires Gradle 9+ (JvmVendorSpec.IBM_SEMERU removed) and supports JDK 25.
+    id("org.jetbrains.intellij.platform") version "2.19.0"
+    // Kotlin 2.1.0's embedded IntelliJ JavaVersion.parse() throws on JDK 25
+    // ("25.0.3"); 2.2.x fixed the parser. Required to compile on JDK 25.
+    kotlin("jvm") version "2.2.0"
 }
 
 // ----- Project identity -----
 group = "com.codepilot"
-version = "0.1.0"
+version = "1.0.0"
 
 // ----- Repositories are declared in settings.gradle.kts (dependencyResolutionManagement). -----
 
@@ -34,10 +37,9 @@ dependencies {
         // (instead of the JetBrains-downloaded "idea:ideaIC" installer coordinate).
         // Note: we don't request specific bundled plugins — the IDEA distribution itself ships
         // the necessary JBR / Java / Terminal modules on the classpath when unpacked.
-        intellijIdeaCommunity("2024.1.7", useInstaller = false)
-
-        // Required by `instrumentCode` task in IntelliJ Platform Gradle Plugin 2.x.
-        instrumentationTools()
+        intellijIdeaCommunity("2024.1.7") {
+            useInstaller = false
+        }
     }
 
     // JSON-RPC payloads travel as NDJSON; use Gson (already on the IntelliJ Platform classpath via Android plugin

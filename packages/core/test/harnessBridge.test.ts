@@ -126,6 +126,34 @@ describe("harness_bridge execution", () => {
     expect(r.content).toContain("harness-says: hello world");
   });
 
+  it("refuses at max delegation depth so it can't sidestep the task fork-bomb guard", async () => {
+    const r = await harnessBridgeTool.execute(
+      {
+        harness: "custom",
+        custom_command: "echo should-not-run:",
+        prompt: "deep work",
+      },
+      // Depth 3 with the default subagentMaxDepth of 3 → at the ceiling.
+      { ...ctx(), subagentDepth: 3 },
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/would exceed the max delegation depth 3/);
+    expect(r.content).not.toContain("should-not-run");
+  });
+
+  it("honours a configured subagentMaxDepth for the harness depth guard", async () => {
+    const r = await harnessBridgeTool.execute(
+      {
+        harness: "custom",
+        custom_command: "echo nope:",
+        prompt: "x",
+      },
+      { ...ctx(), subagentDepth: 1, config: { subagentMaxDepth: 1 } as never },
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/exceed the max delegation depth 1/);
+  });
+
   it("captures stderr and non-zero exit codes as errors", async () => {
     const r = await harnessBridgeTool.execute(
       {

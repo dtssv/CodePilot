@@ -19,6 +19,40 @@ import { CustomMcpPanel } from "./CustomMcpModal.js";
 const PAGE_SIZE = 24;
 type ListTab = "all" | "installed";
 
+/**
+ * The HTTP(S) origin a phone should connect to for remote pairing.
+ *
+ * On the web-served surface this is just `window.location` origin. On the
+ * desktop app the SPA is loaded over `file://` (so `window.location` is
+ * `file://` with an empty host), but the daemon's real URL is passed in the
+ * `?ws=` query param — convert that ws(s):// URL to http(s)://. Without this
+ * the QR payload becomes `file://.../remote/pair?...`, which no phone can open.
+ */
+function resolveServeUrl(): string {
+  const origin = `${window.location.protocol}//${window.location.host}`;
+  if (window.location.protocol !== "file:" && window.location.host) {
+    return origin;
+  }
+  const ws = new URLSearchParams(window.location.search).get("ws");
+  if (ws) {
+    try {
+      const u = new URL(ws);
+      u.protocol = u.protocol === "wss:" ? "https:" : "http:";
+      // Drop the ws path (e.g. "/rpc") — the pairing/static routes live at the
+      // origin root. Keeping it made the phone load the SPA under /rpc/remote/,
+      // so its relative ./assets/ 404'd and the pair route never matched.
+      u.pathname = "/";
+      u.search = "";
+      u.hash = "";
+      return u.toString().replace(/\/+$/, "");
+    } catch {
+      /* fall through */
+    }
+  }
+  return origin;
+}
+
+
 export type SettingsExtraSection =
   | "connectors"
   | "custom-mcp"
@@ -72,7 +106,12 @@ type Task = {
   enabled: boolean;
   lastStatus?: string;
   lastRunAt?: number;
+  lastError?: string;
   idleAfterMs?: number;
+  at?: string;
+  runAt?: number;
+  everyMinutes?: number;
+  runCount?: number;
   model?: string;
   providerId?: string;
   agentMode?: "chat" | "plan" | "agent";
@@ -126,15 +165,35 @@ export function SettingsExtras({
   const [values, setValues] = useState<Record<string, string>>({});
   const [editCredentials, setEditCredentials] = useState(false);
   const [notice, setNotice] = useState<string | undefined>();
+  const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string | null; available: boolean; canAutoApply: boolean } | null>(null);
+  const [imgGen, setImgGen] = useState<{ baseURL: string; apiKey: string; model: string; enabled: boolean; hasApiKey: boolean }>({
+    baseURL: "",
+    apiKey: "",
+    model: "",
+    enabled: true,
+    hasApiKey: false,
+  });
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [qr, setQr] = useState<{
     url: string;
     code: string;
     expiresAt: number;
     qrDataUrl: string;
   } | null>(null);
+  // Desktop-only: whether the shared engine binds the LAN so a phone can reach
+  // it. `null` = unknown / not the desktop surface (hides the toggle).
+  const [lanAccess, setLanAccess] = useState<boolean | null>(null);
+  const [lanBusy, setLanBusy] = useState(false);
+  // Workspaces to authorize for the next QR (the phone lists exactly these).
+  // Defaults to the active workspace; the user can tick more before minting.
+  const [pairCwds, setPairCwds] = useState<string[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [idlePrompt, setIdlePrompt] = useState("");
   const [idleTitle, setIdleTitle] = useState("闲时任务");
+  const [taskKind, setTaskKind] = useState<"idle" | "once" | "daily" | "interval">("idle");
+  const [taskAt, setTaskAt] = useState("09:00");
+  const [taskOnceAt, setTaskOnceAt] = useState(""); // datetime-local value for one-time tasks
+  const [taskEvery, setTaskEvery] = useState(60);
   const [idleModelKey, setIdleModelKey] = useState(""); // "" = default; else providerId::model
   const [idleAgentMode, setIdleAgentMode] = useState<"chat" | "plan" | "agent">("agent");
   const [scheduleModels, setScheduleModels] = useState<ScheduleModelOpt[]>([]);
@@ -221,6 +280,23 @@ export function SettingsExtras({
     if (section === "connectors") void loadConnectors();
     else if (section === "skills") void loadSkills();
     else if (section === "schedule") void reload();
+    else if (section === "general" && state.connection === "connected") {
+      void client
+        .getConfig()
+        .then((cfg) => {
+          if (cfg.imageGen) {
+            setImgGen((prev) => ({
+              ...prev,
+              baseURL: cfg.imageGen?.baseURL ?? "",
+              model: cfg.imageGen?.model ?? "",
+              enabled: cfg.imageGen?.enabled !== false,
+              hasApiKey: !!cfg.imageGen?.hasApiKey,
+              apiKey: "",
+            }));
+          }
+        })
+        .catch(() => {});
+    }
   }, [section, connectorQuery, connectorTab, skillQuery, skillTab, state.connection]);
 
   // Notices are section-local; clear when switching tabs so QR tips don't leak.
@@ -231,6 +307,39 @@ export function SettingsExtras({
     setEditCredentials(false);
     setValues({});
   }, [section]);
+
+  // Load the current LAN-access preference from the desktop host (if any).
+  useEffect(() => {
+    if (section !== "general") return;
+    const getter = window.codepilotDesktop?.getLanAccess;
+    if (!getter) {
+      setLanAccess(null);
+      return;
+    }
+    void getter()
+      .then((v) => setLanAccess(v))
+      .catch(() => setLanAccess(null));
+  }, [section]);
+
+  const toggleLanAccess = async (next: boolean): Promise<void> => {
+    const setter = window.codepilotDesktop?.setLanAccess;
+    if (!setter) return;
+    setLanBusy(true);
+    setError(undefined);
+    try {
+      const applied = await setter(next);
+      setLanAccess(applied);
+      setNotice(
+        applied
+          ? t("LAN access on — the engine restarted. Generate a fresh QR to pair your phone.")
+          : t("LAN access off — the engine now accepts loopback connections only."),
+      );
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setLanBusy(false);
+    }
+  };
 
   const saveConnector = async (): Promise<void> => {
     if (!selected) return;
@@ -457,14 +566,30 @@ export function SettingsExtras({
     }
   };
 
+  // Entering the Remote tab: default the authorize list to the active cwd.
+  useEffect(() => {
+    if (section !== "remote") return;
+    setPairCwds(state.cwd ? [state.cwd] : []);
+  }, [section, state.cwd]);
+
+  const togglePairCwd = (cwd: string): void => {
+    setPairCwds((prev) =>
+      prev.includes(cwd) ? prev.filter((c) => c !== cwd) : [...prev, cwd],
+    );
+  };
+
   const mintQr = async (): Promise<void> => {
     setBusy(true);
     setError(undefined);
     try {
-      const serveUrl = `${window.location.protocol}//${window.location.host}`;
+      const serveUrl = resolveServeUrl();
+      // Active workspace is always authorized; the ticked extras ride along.
+      const active = state.cwd || undefined;
+      const extras = pairCwds.filter((c) => c && c !== state.cwd);
       const r = await client.mintRemotePairing({
         serveUrl,
-        cwd: state.cwd || undefined,
+        cwd: active,
+        cwds: extras.length ? [...(active ? [active] : []), ...extras] : undefined,
         sessionId: state.sessionId || undefined,
       });
       setQr({
@@ -495,11 +620,14 @@ export function SettingsExtras({
     try {
       const { model, providerId } = parseIdleModel();
       await client.addScheduledTask({
-        title: idleTitle.trim() || "闲时任务",
+        title: idleTitle.trim() || t("Scheduled task"),
         prompt: idlePrompt.trim(),
         cwd: state.cwd || undefined,
-        kind: "idle",
-        idleAfterMs: 10 * 60 * 1000,
+        kind: taskKind,
+        ...(taskKind === "idle" ? { idleAfterMs: 10 * 60 * 1000 } : {}),
+        ...(taskKind === "once" ? { runAt: taskOnceAt ? new Date(taskOnceAt).getTime() : Date.now() } : {}),
+        ...(taskKind === "daily" ? { at: taskAt } : {}),
+        ...(taskKind === "interval" ? { everyMinutes: Math.max(1, taskEvery) } : {}),
         model,
         providerId,
         agentMode: idleAgentMode,
@@ -507,7 +635,11 @@ export function SettingsExtras({
       setIdlePrompt("");
       setEditingTaskId(null);
       await reload();
-      setNotice(t("Idle task queued — runs when the engine is free."));
+      setNotice(
+        taskKind === "idle"
+          ? t("Idle task queued — runs when the engine is free.")
+          : t("Scheduled task saved."),
+      );
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -521,6 +653,19 @@ export function SettingsExtras({
     setIdleTitle(task.title);
     setIdlePrompt(task.prompt ?? "");
     setIdleAgentMode(task.agentMode ?? "agent");
+    if (task.kind === "idle" || task.kind === "once" || task.kind === "daily" || task.kind === "interval") {
+      setTaskKind(task.kind);
+    }
+    if (task.at) setTaskAt(task.at);
+    if (task.runAt) {
+      // Convert epoch ms → local datetime-local string (YYYY-MM-DDTHH:mm).
+      const d = new Date(task.runAt);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      setTaskOnceAt(
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`,
+      );
+    }
+    if (task.everyMinutes) setTaskEvery(task.everyMinutes);
     setIdleModelKey(
       task.model && task.providerId
         ? `${task.providerId}::${task.model}`
@@ -536,6 +681,8 @@ export function SettingsExtras({
     setIdlePrompt("");
     setIdleModelKey("");
     setIdleAgentMode("agent");
+    setTaskKind("idle");
+    setTaskOnceAt("");
   };
 
   const saveEditIdle = async (): Promise<void> => {
@@ -546,6 +693,10 @@ export function SettingsExtras({
       await client.updateScheduledTask(editingTaskId, {
         title: idleTitle.trim() || "闲时任务",
         prompt: idlePrompt.trim(),
+        ...(taskKind === "idle" ? { idleAfterMs: 10 * 60 * 1000 } : {}),
+        ...(taskKind === "once" ? { runAt: taskOnceAt ? new Date(taskOnceAt).getTime() : Date.now() } : {}),
+        ...(taskKind === "daily" ? { at: taskAt } : {}),
+        ...(taskKind === "interval" ? { everyMinutes: Math.max(1, taskEvery) } : {}),
         model,
         providerId,
         agentMode: idleAgentMode,
@@ -580,6 +731,69 @@ export function SettingsExtras({
       await client.removeScheduledTask(id);
       if (editingTaskId === id) cancelEditIdle();
       await reload();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkUpdate = async (): Promise<void> => {
+    setUpdateBusy(true);
+    setError(undefined);
+    try {
+      const { engine } = await client.checkEngineUpdate();
+      setUpdateInfo({
+        current: engine.current,
+        latest: engine.latest,
+        available: engine.available,
+        canAutoApply: engine.canAutoApply,
+      });
+      if (!engine.available) setNotice(`${t("You’re up to date")} (${engine.current})`);
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const applyUpdate = async (): Promise<void> => {
+    setUpdateBusy(true);
+    setError(undefined);
+    try {
+      const r = await client.applyEngineUpdate();
+      setNotice(
+        r.applied
+          ? `${t("Updated to")} ${r.version}. ${t("Restart to use the new engine.")}`
+          : r.message || t("Update could not be applied"),
+      );
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const saveImageGen = async (): Promise<void> => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const r = await client.setImageGen({
+        baseURL: imgGen.baseURL.trim(),
+        // Empty string = keep existing key (server preserves it).
+        apiKey: imgGen.apiKey,
+        model: imgGen.model.trim(),
+        enabled: imgGen.enabled,
+      });
+      setImgGen((prev) => ({
+        ...prev,
+        apiKey: "",
+        hasApiKey: r.imageGen.hasApiKey,
+        baseURL: r.imageGen.baseURL ?? prev.baseURL,
+        model: r.imageGen.model ?? prev.model,
+        enabled: r.imageGen.enabled,
+      }));
+      setNotice(t("Image generation settings saved — applies on next session."));
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -1164,12 +1378,136 @@ export function SettingsExtras({
                 <option value="agent">{t("Agent")}</option>
               </select>
             </GeneralRow>
+            {lanAccess !== null && (
+              <GeneralRow
+                title={t("Allow phone access (same Wi‑Fi)")}
+                hint={t("Lets a phone on your network reach the engine via the QR code. Access still requires the one-time pairing. Toggling restarts the engine.")}
+              >
+                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12.5px] text-[var(--color-ink-dim)]">
+                  <input
+                    type="checkbox"
+                    checked={lanAccess}
+                    disabled={lanBusy}
+                    onChange={(e) => void toggleLanAccess(e.target.checked)}
+                  />
+                  {lanBusy ? `${t("Applying")}…` : lanAccess ? t("On") : t("Off")}
+                </label>
+              </GeneralRow>
+            )}
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)]">
+            <GeneralRow title={t("Engine updates")} hint={updateInfo ? `${t("Current")}: ${updateInfo.current}${updateInfo.available ? ` → ${updateInfo.latest ?? ""}` : ` · ${t("up to date")}`}` : t("Check for a newer engine")}>
+              <div className="flex shrink-0 items-center gap-2">
+                {updateInfo?.available && updateInfo.canAutoApply && (
+                  <button type="button" className="cp-btn py-1.5 text-[12px]" disabled={updateBusy} onClick={() => void applyUpdate()}>
+                    {t("Install update")}
+                  </button>
+                )}
+                <button type="button" className="cp-btn-ghost py-1.5 text-[12px]" disabled={updateBusy || state.connection !== "connected"} onClick={() => void checkUpdate()}>
+                  {updateBusy ? `${t("Checking")}…` : t("Check for updates")}
+                </button>
+              </div>
+            </GeneralRow>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Image generation")}</div>
+                <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
+                  {t("Configure an image model endpoint. The image tool is only available when this is set.")}
+                </div>
+              </div>
+              <label className="flex shrink-0 items-center gap-1.5 text-[12px] text-[var(--color-ink-dim)]">
+                <input
+                  type="checkbox"
+                  checked={imgGen.enabled}
+                  onChange={(e) => setImgGen((p) => ({ ...p, enabled: e.target.checked }))}
+                />
+                {t("Enabled")}
+              </label>
+            </div>
+            <div className="mt-2 space-y-2">
+              <label className="block">
+                <span className="cp-eyebrow">{t("Base URL")}</span>
+                <input
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  placeholder="https://api.openai.com/v1"
+                  value={imgGen.baseURL}
+                  onChange={(e) => setImgGen((p) => ({ ...p, baseURL: e.target.value }))}
+                />
+              </label>
+              <label className="block">
+                <span className="cp-eyebrow">{t("API key")}</span>
+                <input
+                  type="password"
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  placeholder={imgGen.hasApiKey ? "••••••• (" + t("saved") + ")" : ""}
+                  value={imgGen.apiKey}
+                  onChange={(e) => setImgGen((p) => ({ ...p, apiKey: e.target.value }))}
+                />
+              </label>
+              <label className="block">
+                <span className="cp-eyebrow">{t("Model")}</span>
+                <input
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  placeholder="gpt-image-1"
+                  value={imgGen.model}
+                  onChange={(e) => setImgGen((p) => ({ ...p, model: e.target.value }))}
+                />
+              </label>
+              <button
+                type="button"
+                className="cp-btn py-1.5 text-[12px]"
+                disabled={busy || state.connection !== "connected"}
+                onClick={() => void saveImageGen()}
+              >
+                {t("Save changes")}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {section === "remote" && (
         <div className="space-y-3">
+          {cp.workspaces.length > 1 && (
+            <div className="rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] p-3">
+              <div className="text-[13px] font-medium text-[var(--color-ink)]">
+                {t("Workspaces to authorize")}
+              </div>
+              <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
+                {t("The phone sees exactly the workspaces you tick. The active one is always included.")}
+              </div>
+              <div className="mt-2 max-h-40 space-y-1 overflow-auto">
+                {cp.workspaces.map((ws) => {
+                  const isActive = ws === state.cwd;
+                  const label = ws.split("/").filter(Boolean).pop() || ws;
+                  return (
+                    <label
+                      key={ws}
+                      className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-[var(--color-surface-hover)]"
+                      title={ws}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={pairCwds.includes(ws)}
+                        disabled={isActive}
+                        onChange={() => togglePairCwd(ws)}
+                      />
+                      <span className="min-w-0 flex-1 truncate text-[var(--color-ink)]">{label}</span>
+                      {isActive && (
+                        <span className="shrink-0 text-[10px] text-[var(--color-ink-faint)]">
+                          {t("active")}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <button
             type="button"
             className="cp-btn"
@@ -1223,6 +1561,55 @@ export function SettingsExtras({
           </label>
           <div className="grid gap-2 sm:grid-cols-2">
             <label className="block">
+              <span className="cp-eyebrow">{t("Task type")}</span>
+              <select
+                className="cp-input mt-0.5 w-full text-[12.5px]"
+                value={taskKind}
+                onChange={(e) => setTaskKind(e.target.value as "idle" | "once" | "daily" | "interval")}
+              >
+                <option value="idle">{t("When idle")}</option>
+                <option value="once">{t("Once")}</option>
+                <option value="daily">{t("Daily")}</option>
+                <option value="interval">{t("Every N minutes")}</option>
+              </select>
+            </label>
+            {taskKind === "once" && (
+              <label className="block">
+                <span className="cp-eyebrow">{t("Run at")}</span>
+                <input
+                  type="datetime-local"
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  value={taskOnceAt}
+                  onChange={(e) => setTaskOnceAt(e.target.value)}
+                />
+              </label>
+            )}
+            {taskKind === "daily" && (
+              <label className="block">
+                <span className="cp-eyebrow">{t("Run at")}</span>
+                <input
+                  type="time"
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  value={taskAt}
+                  onChange={(e) => setTaskAt(e.target.value)}
+                />
+              </label>
+            )}
+            {taskKind === "interval" && (
+              <label className="block">
+                <span className="cp-eyebrow">{t("Every (minutes)")}</span>
+                <input
+                  type="number"
+                  min={1}
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  value={taskEvery}
+                  onChange={(e) => setTaskEvery(Math.max(1, Number(e.target.value) || 1))}
+                />
+              </label>
+            )}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label className="block">
               <span className="cp-eyebrow">{t("Model")}</span>
               <select
                 className="cp-input mt-0.5 w-full text-[12.5px]"
@@ -1272,13 +1659,23 @@ export function SettingsExtras({
                 disabled={busy || !idlePrompt.trim()}
                 onClick={() => void addIdle()}
               >
-                {t("Add idle task")}
+                {taskKind === "idle" ? t("Add idle task") : t("Add scheduled task")}
               </button>
             )}
           </div>
           <div className="space-y-1.5">
             {tasks.map((task) => {
               const neverRun = !task.lastRunAt;
+              const schedule =
+                task.kind === "once"
+                  ? task.runAt
+                    ? new Date(task.runAt).toLocaleString()
+                    : t("Once")
+                  : task.kind === "daily"
+                    ? `${t("Daily")} ${task.at ?? ""}`.trim()
+                    : task.kind === "interval"
+                      ? `${t("Every N minutes")} (${task.everyMinutes ?? "?"})`
+                      : t("When idle");
               return (
                 <div
                   key={task.id}
@@ -1287,18 +1684,33 @@ export function SettingsExtras({
                   <span className={task.enabled ? "text-[var(--color-add)]" : "text-[var(--color-ink-faint)]"}>
                     {task.enabled ? "●" : "○"}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[var(--color-ink)]">
-                    {task.title}{" "}
-                    <span className="text-[var(--color-ink-faint)]">
-                      [{task.kind}
-                      {task.model ? ` · ${task.model}` : ""}
-                      {task.agentMode && task.agentMode !== "agent" ? ` · ${task.agentMode}` : ""}]
+                  <span className="min-w-0 flex-1 text-[var(--color-ink)]">
+                    <span className="block truncate">
+                      {task.title}{" "}
+                      <span className="text-[var(--color-ink-faint)]">
+                        [{schedule}
+                        {task.model ? ` · ${task.model}` : ""}
+                        {task.agentMode && task.agentMode !== "agent" ? ` · ${task.agentMode}` : ""}]
+                      </span>
+                      {neverRun ? (
+                        <span className="ml-1 text-[10px] text-[var(--color-accent)]">{t("pending")}</span>
+                      ) : (
+                        <span
+                          className={`ml-1 text-[10px] ${
+                            task.lastStatus === "error"
+                              ? "text-[var(--color-remove)]"
+                              : "text-[var(--color-ink-faint)]"
+                          }`}
+                        >
+                          {task.lastStatus ?? "ran"}
+                        </span>
+                      )}
                     </span>
-                    {neverRun ? (
-                      <span className="ml-1 text-[10px] text-[var(--color-accent)]">{t("pending")}</span>
-                    ) : (
-                      <span className="ml-1 text-[10px] text-[var(--color-ink-faint)]">
-                        {task.lastStatus ?? "ran"}
+                    {!neverRun && (
+                      <span className="mt-0.5 block truncate text-[10px] text-[var(--color-ink-faint)]">
+                        {t("Last run")}: {new Date(task.lastRunAt as number).toLocaleString()}
+                        {typeof task.runCount === "number" ? ` · ${t("Runs")}: ${task.runCount}` : ""}
+                        {task.lastStatus === "error" && task.lastError ? ` · ${task.lastError}` : ""}
                       </span>
                     )}
                   </span>

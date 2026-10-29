@@ -16,6 +16,17 @@
  * - Pending request promises reject on transport end or peer-initiated cancel.
  */
 
+/**
+ * The CodePilot headless-protocol version advertised in `initialize`.
+ *
+ * Defined HERE (in the dependency-free rpc module) rather than in server.ts so
+ * both sides share ONE value: the Node server imports it, and browser clients
+ * (which can only import `@codepilot/protocol/rpc` — importing the full barrel
+ * would pull Node server code into the bundle) import the same constant instead
+ * of redeclaring their own `1` that could silently drift on a version bump.
+ */
+export const PROTOCOL_VERSION = 1;
+
 export type JsonRpcId = number | string;
 
 export interface JsonRpcRequest<P = unknown> {

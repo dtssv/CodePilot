@@ -105,6 +105,30 @@ describe("provider transcript", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("aborts a turn whose text degenerates into a repetition loop", async () => {
+    // Stream a clause over and over (the "I call X, I execute X …" collapse).
+    // Emits many deltas then a final text so we can tell the loop STOPPED early.
+    let emitted = 0;
+    const provider = new ScriptedProvider([
+      async function* () {
+        for (let i = 0; i < 2000; i++) {
+          emitted++;
+          yield { kind: "text_delta", messageId: "m", text: "I call read_file. I execute read_file. " } as StreamEvent;
+        }
+        yield { kind: "done", finishReason: "stop" } as StreamEvent;
+      },
+    ]);
+    const { deps: d, events, dir } = deps(provider);
+    await runAgent({ history: [], userText: "go" }, d);
+    // The guard fired and surfaced an error event about the repetition loop.
+    const err = events.find((e) => e.type === "error") as Extract<Event, { type: "error" }> | undefined;
+    expect(err).toBeTruthy();
+    expect(err!.message).toMatch(/repeating loop|degenerated/);
+    // And it stopped well before draining all 2000 deltas.
+    expect(emitted).toBeLessThan(2000);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("answers calls that never ran so the next request stays valid", () => {
     const events: Event[] = [
       { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
@@ -147,24 +171,99 @@ describe("provider transcript", () => {
 });
 
 describe("turn retry", () => {
-  it("regenerates a turn whose stream failed transiently", async () => {
+  it("continues from the partial text when a stream drops mid-answer", async () => {
+    // The stream produces visible text and then the connection dies. We must
+    // NOT regenerate the whole turn (re-running the task); instead we keep the
+    // partial text and ask the model to continue where it stopped.
     const provider = new ScriptedProvider([
       async function* () {
         yield { kind: "text_delta", messageId: "m", text: "half an ans" };
         yield { kind: "error", message: "fetch failed: ECONNRESET" };
       },
-      [{ kind: "text_delta", messageId: "m", text: "full answer" }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "text_delta", messageId: "m2", text: "wer" }, { kind: "done", finishReason: "stop" }],
     ]);
-    const { deps: d, events, dir } = deps(provider, { config: { provider: "anthropic", turnRetries: 2 } });
+    const { deps: d, events, dir } = deps(provider, {
+      // Force the consistency check on: the resume path appends a provider-only
+      // `user` nudge that is NOT in the event log, and the check must skip it
+      // instead of reporting a spurious "Role mismatch".
+      config: { provider: "anthropic", turnRetries: 2, consistencyCheck: "warn" },
+    });
     const t0 = Date.now();
     const r = await runAgent({ history: [], userText: "q" }, d);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(1400);
-    expect(r.finalText).toBe("full answer");
-    const retry = events.find((e) => e.type === "retry");
+    // Bug guard: the provider-only resume nudge must not trip the consistency
+    // check. No "diverge from the event log" error in the LIVE event stream.
+    expect(
+      events.some(
+        (e) => e.type === "error" && /diverge from the event log/.test((e as { message?: string }).message ?? ""),
+      ),
+    ).toBe(false);
+    // Final answer = preserved partial + continuation, not a fresh regeneration.
+    expect(r.finalText).toBe("half an answer");
+    const retry = events.find((e) => e.type === "retry") as Extract<Event, { type: "retry" }> | undefined;
     expect(retry).toMatchObject({ type: "retry", attempt: 1, maxAttempts: 2 });
- // The discarded half answer is not part of the run's transcript.
-    expect(r.events.some((e) => e.type === "message_delta" && e.delta.type === "text" && e.delta.text === "half an ans")).toBe(false);
+    expect(retry!.reason).toMatch(/continuing from the interrupted point/);
+    // The partial text is preserved as a persisted assistant message.
+    expect(
+      r.events.some(
+        (e) => e.type === "message" && e.role === "assistant" && e.content.some((b) => b.type === "text" && b.text === "half an ans"),
+      ),
+    ).toBe(true);
+    // No error surfaced to the user — the interrupt was transparently resumed.
     expect(r.events.some((e) => e.type === "error")).toBe(false);
+    // The continuation request carried the preserved text + a resume instruction.
+    const resumeCall = provider.calls[1]!;
+    const roles = resumeCall.messages.map((m) => m.role);
+    expect(roles).toContain("assistant"); // the partial assistant turn
+    const lastUser = [...resumeCall.messages].reverse().find((m) => m.role === "user");
+    expect(
+      lastUser!.content.some((b) => b.type === "text" && /connection dropped mid-response/i.test(b.text)),
+    ).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("regenerates (not continues) when the stream drops before any text", async () => {
+    // No visible text was produced before the drop — there is nothing to
+    // continue, so we fall back to regenerating the turn.
+    const provider = new ScriptedProvider([
+      async function* () {
+        yield { kind: "error", message: "fetch failed: ECONNRESET" };
+      },
+      [{ kind: "text_delta", messageId: "m", text: "full answer" }, { kind: "done", finishReason: "stop" }],
+    ]);
+    const { deps: d, events, dir } = deps(provider, { config: { provider: "anthropic", turnRetries: 2 } });
+    const r = await runAgent({ history: [], userText: "q" }, d);
+    expect(r.finalText).toBe("full answer");
+    const retry = events.find((e) => e.type === "retry") as Extract<Event, { type: "retry" }> | undefined;
+    expect(retry).toMatchObject({ type: "retry", attempt: 1, maxAttempts: 2 });
+    // Regeneration path: reason is the raw error, not the continuation note.
+    expect(retry!.reason).not.toMatch(/continuing from the interrupted point/);
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("regenerates when a tool_call was already streaming at the drop", async () => {
+    // A half-streamed tool_call is ambiguous (did args finish? did it run?), so
+    // we discard and regenerate rather than continue.
+    const provider = new ScriptedProvider([
+      async function* () {
+        yield { kind: "text_delta", messageId: "m", text: "let me check" };
+        yield call("t1", "a");
+        yield { kind: "error", message: "fetch failed: ECONNRESET" };
+      },
+      [{ kind: "text_delta", messageId: "m", text: "done" }, { kind: "done", finishReason: "stop" }],
+    ]);
+    const { deps: d, events, dir } = deps(provider, { config: { provider: "anthropic", turnRetries: 2 } });
+    const r = await runAgent({ history: [], userText: "q" }, d);
+    expect(r.finalText).toBe("done");
+    const retry = events.find((e) => e.type === "retry") as Extract<Event, { type: "retry" }> | undefined;
+    expect(retry!.reason).not.toMatch(/continuing from the interrupted point/);
+    // The discarded partial text is not part of the final transcript.
+    expect(
+      r.events.some(
+        (e) => e.type === "message" && e.role === "assistant" && e.content.some((b) => b.type === "text" && b.text === "let me check"),
+      ),
+    ).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -204,12 +303,20 @@ describe("live context", () => {
       [call("t1", "a"), { kind: "done", finishReason: "tool_use" }],
     ]);
     const { deps: d, dir } = deps(provider, {
-      systemPrompt: { staticPrefix: "S", dynamicSuffix: "<env/>\n\n<plan>\n(stale)\n</plan>", full: "" },
+      systemPrompt: {
+        staticPrefix: "S",
+        dynamicSuffix: "<env/>",
+        stableContext: "<env/>",
+        volatileSuffix: "<plan>\n(stale)\n</plan>",
+        full: "",
+      },
     });
     const history: Event[] = [{ type: "plan", steps: [{ id: "s1", title: "read code", status: "completed" }] }];
     await runAgent({ history, userText: "go" }, d);
-    const last = provider.calls[1]!.messages.at(-1)!;
-    const note = last.content
+    // Runtime context is its own system message (placed before the user turn).
+    const sent = provider.calls[1]!.messages;
+    const note = sent
+      .flatMap((m) => m.content)
       .map((b) => (b.type === "text" ? b.text : b.type === "tool_result" ? b.content : ""))
       .join("");
     expect(note).not.toContain("(stale)");

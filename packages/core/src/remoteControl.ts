@@ -31,7 +31,11 @@ export interface RemotePairing {
   secretHash: string;
   createdAt: number;
   expiresAt: number;
+  /** Primary (active) workspace the phone opens into. */
   cwd: string;
+  /** All workspaces authorized for this pairing (includes `cwd`). The phone
+   * lists exactly these; defaults to `[cwd]` for older single-workspace links. */
+  cwds?: string[];
   sessionId?: string;
   /** Serve URL the phone should connect to (ws/http). */
   serveUrl: string;
@@ -43,7 +47,10 @@ export interface RemoteGrant {
   token: string;
   createdAt: number;
   expiresAt: number;
+  /** Primary (active) workspace. */
   cwd: string;
+  /** All workspaces this grant may use (includes `cwd`). */
+  cwds?: string[];
   sessionId?: string;
   /** Capabilities allowed for this grant. */
   caps: ("prompt" | "cancel" | "follow" | "answer")[];
@@ -93,6 +100,9 @@ function prune(s: StoreFile, now = Date.now()): StoreFile {
 export interface MintRemotePairingOpts {
   serveUrl: string;
   cwd: string;
+  /** Additional workspaces to authorize alongside `cwd`. The phone lists the
+   * union of `cwd` + these; omitted means the single bound workspace. */
+  cwds?: string[];
   sessionId?: string;
   ttlMs?: number;
   /** Grant lifetime after redeem (default 8h). */
@@ -136,12 +146,17 @@ export async function mintRemotePairing(
   const code = randomBytes(3).toString("hex"); // 6 hex chars
   const secret = randomBytes(24).toString("base64url");
   const ttl = opts.ttlMs ?? DEFAULT_TTL_MS;
+  // Authorized set: the active cwd first, then any extras, deduped.
+  const cwds = [opts.cwd, ...(opts.cwds ?? [])].filter(
+    (c, i, arr) => c && arr.indexOf(c) === i,
+  );
   const pairing: RemotePairing = {
     code,
     secretHash: hashSecret(secret),
     createdAt: now,
     expiresAt: now + ttl,
     cwd: opts.cwd,
+    cwds,
     sessionId: opts.sessionId,
     serveUrl,
     consumed: false,
@@ -166,6 +181,7 @@ export async function mintRemotePairing(
 export interface RedeemRemotePairingResult {
   grant: RemoteGrant;
   cwd: string;
+  cwds: string[];
   sessionId?: string;
   serveUrl: string;
 }
@@ -198,11 +214,13 @@ export async function redeemRemotePairing(
   store.pairings.splice(idx, 1);
 
   const grantTtl = opts?.grantTtlMs ?? 8 * 60 * 60 * 1000;
+  const cwds = pairing.cwds?.length ? pairing.cwds : [pairing.cwd];
   const grant: RemoteGrant = {
     token: randomBytes(32).toString("base64url"),
     createdAt: now,
     expiresAt: now + grantTtl,
     cwd: pairing.cwd,
+    cwds,
     sessionId: pairing.sessionId,
     caps: ["prompt", "cancel", "follow", "answer"],
   };
@@ -212,6 +230,7 @@ export async function redeemRemotePairing(
   return {
     grant,
     cwd: pairing.cwd,
+    cwds,
     sessionId: pairing.sessionId,
     serveUrl: pairing.serveUrl,
   };

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   DoomLoopDetector,
   DedupCache,
-  PATH_REFUSE_THRESHOLD,
   PATH_WARN_THRESHOLD,
+  PATH_OVERLAP_THRESHOLD,
+  readWindow,
+  windowOverlapFraction,
   pathKey,
 } from "../src/doomLoop.js";
 
@@ -17,33 +19,78 @@ describe("pathKey", () => {
   });
 });
 
+describe("readWindow / windowOverlapFraction", () => {
+  it("treats a whole-file read as covering everything", () => {
+    const w = readWindow({ path: "f.ts" });
+    expect(w).toEqual({ from: 1, to: Number.MAX_SAFE_INTEGER });
+  });
+  it("maps 0-based startLine to a 1-based window", () => {
+    expect(readWindow({ path: "f.ts", startLine: 100, maxLines: 50 })).toEqual({ from: 101, to: 150 });
+  });
+  it("scores non-overlapping windows as 0 and identical as 1", () => {
+    expect(windowOverlapFraction({ from: 1, to: 100 }, { from: 101, to: 200 })).toBe(0);
+    expect(windowOverlapFraction({ from: 1, to: 100 }, { from: 1, to: 100 })).toBe(1);
+  });
+  it("scores a half-overlap near 0.5", () => {
+    const f = windowOverlapFraction({ from: 50, to: 149 }, { from: 1, to: 100 });
+    expect(f).toBeGreaterThan(0.4);
+    expect(f).toBeLessThan(0.6);
+  });
+});
+
 describe("DoomLoopDetector path aggregation", () => {
-  it("warns then refuses repeated windowed reads of the same path", () => {
+  it("never warns or refuses ADVANCING (paging) reads of the same file", () => {
+    // The real-world false positive: reading lines 1-500, 500-1000, 1000-1500…
+    // of a large file. Each window is a fresh region (progress), so the path
+    // budget resets every time — no warning, and crucially never a refusal.
     const d = new DoomLoopDetector();
-    for (let i = 0; i < PATH_WARN_THRESHOLD - 1; i++) {
-      const r = d.check("read_file", { path: "f.ts", startLine: i * 100, maxLines: 100 });
+    for (let i = 0; i < 10; i++) {
+      const r = d.check("read_file", { path: "big.ts", startLine: i * 500, maxLines: 500 });
       expect(r.refuse).toBe(false);
       expect(r.warn).toBe(false);
     }
-    const warn = d.check("read_file", {
-      path: "f.ts",
-      startLine: (PATH_WARN_THRESHOLD - 1) * 100,
-      maxLines: 100,
-    });
-    expect(warn.warn).toBe(true);
-    expect(warn.refuse).toBe(false);
+  });
 
-    for (let i = PATH_WARN_THRESHOLD; i < PATH_REFUSE_THRESHOLD - 1; i++) {
-      const r = d.check("read_file", { path: "f.ts", startLine: i * 100, maxLines: 100 });
-      expect(r.refuse).toBe(false);
+  it("warns (but never refuses) repeated OVERLAPPING re-reads of the same region", () => {
+    const d = new DoomLoopDetector();
+    // Overlapping-but-not-identical windows (the real spiral: the model nudges
+    // the window but keeps re-reading ground it already has). Distinct inputs
+    // so layer-1 exact-signature detection doesn't fire — this exercises the
+    // path-overlap layer specifically.
+    let lastWarn = false;
+    let everRefused = false;
+    for (let i = 0; i < PATH_WARN_THRESHOLD + 2; i++) {
+      const r = d.check("read_file", { path: "f.ts", startLine: i, maxLines: 100 });
+      lastWarn = r.warn;
+      everRefused = everRefused || r.refuse;
     }
-    const refuse = d.check("read_file", {
-      path: "f.ts",
-      startLine: (PATH_REFUSE_THRESHOLD - 1) * 100,
-      maxLines: 100,
-    });
-    expect(refuse.refuse).toBe(true);
-    expect(refuse.message).toMatch(/read_artifact/);
+    expect(lastWarn).toBe(true); // eventually warns
+    expect(everRefused).toBe(false); // but NEVER hard-denies a read
+    const last = d.check("read_file", { path: "f.ts", startLine: 20, maxLines: 100 });
+    expect(last.message).toMatch(/OVERLAPPING|already have|different range/i);
+  });
+
+  it("a fresh region resets the overlap budget mid-stream", () => {
+    const d = new DoomLoopDetector();
+    // Overlapping-but-distinct windows build up the overlap budget…
+    for (let i = 0; i < PATH_WARN_THRESHOLD + 1; i++) d.check("read_file", { path: "f.ts", startLine: i, maxLines: 100 });
+    // …then read a totally different region → budget resets, no warning.
+    const fresh = d.check("read_file", { path: "f.ts", startLine: 5000, maxLines: 100 });
+    expect(fresh.warn).toBe(false);
+    expect(fresh.refuse).toBe(false);
+  });
+
+  it("re-reading a region after mutating the file is not a loop", () => {
+    const d = new DoomLoopDetector();
+    for (let i = 0; i < PATH_WARN_THRESHOLD + 1; i++) d.check("read_file", { path: "f.ts", startLine: i, maxLines: 100 });
+    d.noteMutation(); // file changed → read-window history cleared
+    const after = d.check("read_file", { path: "f.ts", startLine: 0, maxLines: 100 });
+    expect(after.warn).toBe(false);
+    expect(after.refuse).toBe(false);
+  });
+
+  it("exposes the overlap threshold constant", () => {
+    expect(DoomLoopDetector.PATH_OVERLAP_THRESHOLD).toBe(PATH_OVERLAP_THRESHOLD);
   });
 
   it("replays path-cached read_file across different windows", () => {

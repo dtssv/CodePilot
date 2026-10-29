@@ -185,7 +185,14 @@ type EventBody =
   | { type: "stop_continue"; count: number; cap: number; reason: string }
  /** Live progress of one sub-agent spawned by a `task` call, so UIs can
  * follow it. Never sent to the model. `event` is the sub-agent's own
- * event; `state` marks start / finish. */
+ * event; `state` marks start / finish.
+ *
+ * `sessionId` is the sub-agent's stable, unique run id (`sub_…`): it is the
+ * handle the parent can pass back as `continue_session_id` to continue the
+ * SAME sub-agent instead of dispatching a fresh one. `runSeq` is a
+ * session-global monotonic counter so UIs can label each dispatch uniquely
+ * (`#3`) rather than the per-fan-out `index` which resets to 0 every call
+ * (so a repeated single-task dispatch always looked like `#1`). */
   | {
       type: "subagent";
       parentToolCallId: string;
@@ -193,9 +200,40 @@ type EventBody =
       objective: string;
       state?: "running" | "ok" | "failed";
       event?: Event;
+      sessionId?: string;
+      runSeq?: number;
     }
   | { type: "mode"; mode: AgentMode }
-  | { type: "mode_request"; mode: AgentMode; reason?: string }
+  | { type: "mode_request"; mode: AgentMode; reason?: string; rememberAuto?: boolean }
+ /** The model asked (via `start_goal`) to escalate the current task into a
+  * long-horizon goal loop. The host picks this up and drives rounds via
+  * `runGoal` on this session. Nothing auto-fires in core. */
+  | { type: "goal_request"; objective: string; maxRounds?: number; reason?: string }
+ /** Per-round progress of an active goal loop, surfaced for UIs. Mirrors the
+  * data in `GoalCheckpointInfo`: round index, status, optional reason/blocker.
+  * Emitted by the host while driving `driveGoalRounds` (via its onRound /
+  * onCheckpoint callbacks). Purely informational — never sent to the model. */
+  | {
+      type: "goal_progress";
+      round: number;
+      status: "running" | "completed" | "blocked" | "round_limit";
+      maxRounds?: number;
+      reason?: string;
+      blockedReason?: string;
+    }
+ /** A single edit applied by `edit_file`, streamed live for UIs so a
+  * multi-edit (or large-file) edit shows progress as each hunk lands rather
+  * than only at the final tool_result. `index`/`total` track position within a
+  * multi-edit batch. Informational only — never sent to the model (the
+  * tool_result already carries the authoritative outcome). */
+  | {
+      type: "edit_delta";
+      path: string;
+      index: number;
+      total: number;
+      strategy: string;
+      occurrences: number;
+    }
  /** Session endpoint changed via setModel / setProvider. */
   | { type: "model"; model: string; providerId?: string }
   | TeamMessageEvent
@@ -281,7 +319,24 @@ export type PermissionMode = "ask" | "auto-edit" | "yolo";
  */
 export interface SandboxConfig {
   mode?: "off" | "workspace-write" | "read-only";
-  network?: boolean;
+  /**
+   * Network policy. Boolean is the legacy form: `true` → full access,
+   * `false` → no network. Object form enables an allowlist egress proxy:
+   *   { "mode": "proxy", "allow": ["*.github.com"], "allowPorts": [443] }
+   * Modes: "off" (no network), "full" (unrestricted), "proxy" (only `allow`
+   * hosts, via a cooperative local proxy).
+   */
+  network?:
+    | boolean
+    | {
+        mode: "off" | "full" | "proxy";
+        /** Host globs reachable in "proxy" mode (e.g. "*.npmjs.org"). */
+        allow?: string[];
+        /** Allowed destination ports in "proxy" mode. Default [80, 443]. */
+        allowPorts?: number[];
+        /** Log refused hosts to the bash output tail. Default true. */
+        denyLog?: boolean;
+      };
  /** Extra absolute paths that are writable in workspace-write mode. */
   writablePaths?: string[];
   fallback?: "deny" | "allow-unsandboxed";
@@ -342,7 +397,13 @@ export interface QuestionRequest {
 /** Answers keyed by question id: option label(s) or free text. */
 export type QuestionAnswers = Record<string, string | string[]>;
 
-export type ProviderName = "anthropic" | "openai" | "copilot" | "gemini";
+/** The single source of truth for supported provider names. The type below is
+ * derived from it, and both the config zod enum (`config.ts`) and the
+ * protocol's advertised `capabilities.providers` (`server.ts`) consume this
+ * same array so the three can never drift apart. */
+export const PROVIDER_NAMES = ["anthropic", "openai", "copilot", "gemini", "azure"] as const;
+
+export type ProviderName = (typeof PROVIDER_NAMES)[number];
 
 /** A backup provider tried when the primary fails transiently. */
 export interface ProviderFallbackConfig {
@@ -464,8 +525,13 @@ export interface CodepilotConfig {
   smallModel?: string;
  /** API key; otherwise read from env: ANTHROPIC_API_KEY / OPENAI_API_KEY / GITHUB_TOKEN. */
   apiKey?: string;
- /** OpenAI-compatible base URL (e.g. DeepSeek / vLLM / Ollama). */
+ /** OpenAI-compatible base URL (e.g. DeepSeek / vLLM / Ollama). For the
+ * `azure` provider this is the Azure OpenAI resource endpoint, e.g.
+ * `https://<resource>.openai.azure.com`. */
   baseURL?: string;
+ /** Azure OpenAI `api-version` query param. Only used when `provider` is
+ * `azure`; defaults to a recent GA version when omitted. */
+  azureApiVersion?: string;
   permissionMode?: PermissionMode;
   maxTokens?: number;
  /** Token threshold to trigger compaction. */
@@ -477,10 +543,16 @@ export interface CodepilotConfig {
  * Independent of `contextWindow`: keeps routine turns small/fast. The hard
  * window cap still applies — raising this cannot exceed `contextWindow`. */
   maxContextTokens?: number;
+ /** Rolling tool-output window: fold tool_results older than the keep
+ * window down to this many, early and
+ * independent of the token budget, so numerous small results can't quietly
+ * accumulate. Default 24; set 0 to fold all old results. The budget-based
+ * fold still applies regardless. */
+  maxToolResultsInContext?: number;
  /** Auto-compaction trigger as a fraction of the context window (0–1).
- * Default 0.92 (Codex-style). Checked before each model turn during a
- * long tool loop, not only after the prompt ends. Set `autoCompact: false`
- * to disable (manual `/compact` still works). */
+ * Default 0.92. Checked before each model turn during a long tool loop,
+ * not only after the prompt ends. Set `autoCompact: false` to disable
+ * (manual `/compact` still works). */
   compactionThreshold?: number;
  /** Master toggle for auto-compaction. When false, the session never
  * auto-compacts regardless of token pressure; the user must invoke
@@ -494,6 +566,18 @@ export interface CodepilotConfig {
   * `~/.codepilot/audit/`; an object may set a custom `dir`. Default off. */
   audit?: boolean | { dir?: string };
   mcpServers?: Record<string, McpServerConfig>;
+ /** Language-server configs for the `lsp_navigate` tool. Omit to use the
+ * built-in TypeScript/JavaScript default. */
+  lsp?: { servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }> };
+ /** How external MCP tools are surfaced to the model:
+ * - "lazy" (default when > `mcpLazyThreshold` tools): hide individual MCP
+ *   tool schemas from the per-turn tool list and expose a single `mcp`
+ *   meta-tool (list/describe/call) — keeps the prompt small.
+ * - "eager": advertise every MCP tool directly (full schema each turn).
+ * - "auto" (default): eager when few MCP tools, lazy once many. */
+  mcpToolDiscovery?: "auto" | "lazy" | "eager";
+ /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
+  mcpLazyThreshold?: number;
  /** Tool names or bash command regexes that auto-approve.
  * @deprecated prefer `permissions.allow` (same rule syntax). */
   autoApprove?: string[];
@@ -502,11 +586,10 @@ export interface CodepilotConfig {
  /** OS-level sandbox policy. Default: workspace-write, fail-closed. */
   sandbox?: SandboxConfig;
  /**
-   * Cap on assistant↔tool round trips for one user prompt.
-   * Unset or `0` = no limit (same default posture as Claude Code / Codex:
-   * the run ends when the model replies without tool calls, or when a
-   * doom-loop / cancel / budget guard fires). Set a positive number for
-   * headless/CI cost bounds.
+  * Cap on assistant↔tool round trips for one user prompt.
+  * Unset or `0` = no limit: the run ends when the model replies without
+  * tool calls, or when a doom-loop / cancel / budget guard fires. Set a
+  * positive number for headless/CI cost bounds.
    */
   maxTurns?: number;
  /** How many times a turn whose stream failed transiently (dropped
@@ -517,6 +600,32 @@ export interface CodepilotConfig {
  * (via the `task` tool) running longer is abandoned so a stuck worker
  * can't starve a parallel fan-out. Unset (default) means no timeout. */
   subagentTimeoutMs?: number;
+ /** Max sub-agent nesting depth (default 3). Depth 0 is the top-level agent;
+ * a sub-agent calling `task` is depth 1, etc. Enforced by withholding the
+ * `task` tool once the cap is reached. */
+  subagentMaxDepth?: number;
+ /** Max sub-agents running concurrently across the whole session (default 6).
+ * A shared semaphore enforces this; the main brake on fan-out speed/cost. */
+  subagentMaxThreads?: number;
+ /** Max total sub-agents a session may spawn across the whole run (default
+ * 200). Bounds cumulative fan-out regardless of tree shape, so a deep/wide
+ * tree can't fork-bomb the token budget. */
+  subagentMaxTotal?: number;
+ /** Whether a built-in sub-agent (explore/worker, no custom permissionMode)
+  * shares the parent's live PermissionEngine or runs under a fresh one.
+  * "inherit" (default) keeps today's behavior — the parent engine, including
+  * any session-approved allow rules, carries in. "independent" gives each
+  * built-in sub-agent its own engine (mode "auto-edit", config autoApprove
+  * only) so a mid-session grant to the parent does not widen the sub-agent.
+  * Custom agents with their own permissionMode are always independent. */
+  subagentPermissions?: "inherit" | "independent";
+ /** Durable reuse of a completed sub-agent's conclusion. When a `task` spec
+  * (same objective + agent type + cwd + model) already succeeded within the
+  * TTL, the stored conclusion is returned instead of re-running — which makes
+  * an interrupted fan-out resumable for the children that already finished.
+  * `enabled` defaults to true; `ttlHours` defaults to 24. Set `enabled:false`
+  * to always re-run. */
+  subagentCache?: { enabled?: boolean; ttlHours?: number };
  /** Lifecycle hooks (PreToolUse/PostToolUse/Notification/Stop). */
   hooks?: HooksConfig;
  /**
@@ -532,6 +641,25 @@ export interface CodepilotConfig {
    * - `"off"` / `false` / omit — disabled (user Stop hooks still run)
    */
   stopVerify?: boolean | "off" | "prompt" | "tests";
+  /** Expose the `harness_bridge` tool (external agent CLI subprocess). Default off. */
+  enableHarnessBridge?: boolean;
+  /** Auto-apply model `suggest_mode` switches without re-asking. Default off. */
+  autoAcceptModeSuggestions?: boolean;
+  /**
+   * Execution-reliability guard: verify the provider-facing messages match
+   * the persisted event log before each request.
+   * - `"off"` — disabled
+   * - `"warn"` — emit a diagnostic on divergence, do not interrupt (default)
+   * - `"throw"` — fail the turn loudly (CI/tests)
+   */
+  consistencyCheck?: "off" | "warn" | "throw";
+  /**
+   * Execution-reliability guard: scan the final answer for `path:line`
+   * citations that were never backed by a read/grep this session.
+   * - `"notice"` — inject a system notice listing unverified citations (default)
+   * - `"off"` — disabled
+   */
+  citationGuard?: "off" | "notice";
  /** When true, command hooks run under the same OS sandbox as `bash`
   * (Seatbelt / bwrap) instead of at full host trust. Opt-in; default off. */
   hookSandbox?: boolean;
@@ -559,6 +687,10 @@ export interface CodepilotConfig {
   webFetch?: WebFetchConfig;
  /** web_search backend selection (duckduckgo | brave | serper | google). */
   webSearch?: WebSearchConfig;
+ /** image_gen configuration. The `image_gen` tool is only registered when
+ * this is present with a baseURL + apiKey (and not explicitly disabled) —
+ * not every model/provider can generate images, so it's opt-in. */
+  imageGen?: ImageGenConfig;
  /** Model reasoning effort. Controls how much the model
  * "thinks" before responding. Providers that support it (OpenAI o-series,
  * DeepSeek) pass this through; others ignore it. Default undefined
@@ -613,6 +745,24 @@ export interface WebFetchConfig {
   blockedDomains?: string[];
  /** Cache TTL in minutes (default 15; set 0 to disable caching). */
   cacheTtlMinutes?: number;
+}
+
+/** image_gen configuration. Points at any OpenAI-images-compatible endpoint
+ * (OpenAI `gpt-image-1`, or a compatible gateway) with its own key, kept
+ * separate from the chat provider since image generation uses a different
+ * model and often a different account. */
+export interface ImageGenConfig {
+ /** Base URL of the images API, e.g. `https://api.openai.com/v1`. Required
+ * to enable the tool. The tool POSTs to `${baseURL}/images/generations`
+ * (and `/images/edits` for image-to-image). */
+  baseURL?: string;
+ /** API key for the images endpoint. Supports `${ENV}` interpolation.
+ * Required to enable the tool. */
+  apiKey?: string;
+ /** Image model id (default `gpt-image-1`). */
+  model?: string;
+ /** Explicit off switch even when baseURL/apiKey are present (default on). */
+  enabled?: boolean;
 }
 
 /** Which search backend `web_search` uses. */
@@ -689,6 +839,12 @@ export interface SessionOptions {
  * remote servers requiring OAuth will fail with a 401 instead of
  * launching a browser flow. */
   onMcpOpenAuthUrl?: (serverName: string, authorizationUrl: string) => void | Promise<void>;
+ /** Host handler for `start_goal`: the model asked to escalate the current
+  * task into a long-horizon goal loop. The host should drive rounds (e.g. via
+  * `runGoal` on this session) and return true if it accepted. When unset, the
+  * `goal_request` event still emits for stream consumers, but the tool tells
+  * the model no loop was started so it continues in the current turn. */
+  onGoalRequest?: (req: { objective: string; maxRounds?: number; reason?: string }) => boolean | Promise<boolean>;
  /** Host-supplied LSP diagnostics provider. When set, the `diagnostics`
  * tool reads from it; otherwise the tool reports unavailability. */
   diagnosticsProvider?: import("./tools/diagnostics.js").DiagnosticsProvider;
@@ -722,4 +878,8 @@ export interface SessionSummary {
   title: string;
   updatedAt: number;
   cwd: string;
+  /** Pinned within its workspace (at most one per cwd). */
+  pinned?: boolean;
+  /** Archived: hidden from the main list, shown under an "Archived" section. */
+  archived?: boolean;
 }

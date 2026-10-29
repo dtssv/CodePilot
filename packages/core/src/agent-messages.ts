@@ -33,12 +33,18 @@ import { estimateTokens } from "./tokens.js";
 // ---------------------------------------------------------------------------
 
 /** Build the provider-facing tool definitions for a turn, filtered by the
- * active collaboration mode. */
+ * active collaboration mode. When `lazyMcp` is true, individual MCP tools are
+ * dropped from the list (they're reached via the `mcp` meta-tool instead),
+ * keeping the per-turn tool schema small when a server exposes many tools. */
 export function buildProviderToolDefs(
   tools: ToolRegistry,
   mode: AgentMode,
+  opts: { lazyMcp?: boolean } = {},
 ): ProviderToolDef[] {
-  const visible = filterToolsByMode(tools.all(), mode);
+  let visible = filterToolsByMode(tools.all(), mode);
+  if (opts.lazyMcp) {
+    visible = visible.filter((t) => t.source !== "mcp");
+  }
   return visible.map((t) => ({
     name: t.name,
     description: t.description,
@@ -58,7 +64,7 @@ export function buildProviderToolDefs(
  * `userText` here). The agent loop is responsible for sending the user
  * message once at the start of the run.
  *
- * Context management (Codex / OpenCode / Pi):
+ * Context management:
  * 1. Soft fold — stub old tool_results toward `contextBudget` (speed).
  * 2. Hard trim — if still over `hardBudget` (model window minus reserves),
  *    drop oldest turns / images so the request cannot exceed the configured
@@ -74,6 +80,9 @@ export function buildProviderMessages(
     contextBudget?: number;
     /** Hard ceiling — must not send more than this many event tokens. */
     hardBudget?: number;
+ /** Rolling tool-output window: fold old tool_results down to this many
+ * before any budget pressure. */
+    maxUnfoldedToolResults?: number;
  /** Invoked when micro-compaction folds ≥1 tool_result (observability). */
     onFolded?: (foldedCount: number) => void;
   } = {},
@@ -83,6 +92,7 @@ export function buildProviderMessages(
     all,
     opts.contextBudget,
     opts.hardBudget,
+    opts.maxUnfoldedToolResults,
   );
   if (foldedCount > 0) {
     try {
@@ -108,8 +118,16 @@ function foldForBudget(
   events: Event[],
   softBudget: number | undefined,
   hardBudget?: number,
+  maxUnfoldedToolResults?: number,
 ): { events: Event[]; foldedCount: number } {
-  const first = foldToolResults(events, { keepRecentMessages: 8 });
+  // The first pass folds oversized old results (size-based) AND enforces the
+  // rolling tool-output window (count-based, token-independent) so the live
+  // transcript's backlog of small-but-numerous results stays bounded from the
+  // start — not only once a budget threshold is crossed.
+  const first = foldToolResults(events, {
+    keepRecentMessages: 8,
+    maxUnfoldedToolResults,
+  });
   let out = first.events;
   let totalFolded = first.foldedCount;
   const soft = softBudget && softBudget > 0 ? softBudget : undefined;
@@ -166,6 +184,33 @@ export function compactTranscriptToProviderMessages(
   const answered = new Set<string>();
   let open: string[] = [];
   let attachedImages = false;
+  // Round-level image dedup: the exact same image often rides along multiple
+  // turns (a user keeps a screenshot pinned,
+  // or a tool re-attaches the same picture). Re-sending the bytes costs
+  // ~1.5K tokens each time for zero new information. We send each distinct
+  // payload once and replace later identical ones with a tiny text pointer so
+  // the model still knows the image is "there" without paying for it again.
+  const seenImages = new Map<string, number>();
+  const imageBlocksFor = (
+    imgs: readonly ImageAttachment[] | undefined,
+  ): ProviderMessageContent[] => {
+    const blocks: ProviderMessageContent[] = [];
+    for (const img of imgs ?? []) {
+      if (!img.base64) continue;
+      const key = `${img.mediaType}:${img.base64.length}:${img.base64.slice(0, 64)}:${img.base64.slice(-64)}`;
+      const prior = seenImages.get(key);
+      if (prior === undefined) {
+        seenImages.set(key, seenImages.size + 1);
+        blocks.push({ type: "image", mediaType: img.mediaType, base64: img.base64 });
+      } else {
+        blocks.push({
+          type: "text",
+          text: `[same image as #${prior} above — omitted to save context]`,
+        });
+      }
+    }
+    return blocks;
+  };
 
   const push = (role: "user" | "assistant", blocks: ProviderMessageContent[]): void => {
     if (blocks.length === 0) return;
@@ -252,9 +297,7 @@ export function compactTranscriptToProviderMessages(
         attachedImages = true;
         msgImages ??= images;
       }
-      for (const img of msgImages ?? []) {
-        blocks.push({ type: "image", mediaType: img.mediaType, base64: img.base64 });
-      }
+      blocks.push(...imageBlocksFor(msgImages));
       closeOpenCalls();
       push("user", blocks);
       continue;
@@ -269,11 +312,8 @@ export function compactTranscriptToProviderMessages(
  // Image-capable tools (read_image) attach images to the tool_result.
  // They ride as sibling image blocks in the same user turn so a
  // multimodal model sees the picture alongside the tool's text result.
-      const imgs: ProviderMessageContent[] = (e.images ?? []).map((img) => ({
-        type: "image",
-        mediaType: img.mediaType,
-        base64: img.base64,
-      }));
+ // Deduped round-level so a re-attached picture isn't paid for twice.
+      const imgs = imageBlocksFor(e.images);
       pushResult({ type: "tool_result", toolCallId: e.toolCallId, content: e.content, isError: e.isError }, imgs);
       continue;
     }
@@ -306,14 +346,9 @@ export function compactTranscriptToProviderMessages(
 // Provider streaming
 // ---------------------------------------------------------------------------
 
-function findLastIndex<T>(items: readonly T[], pred: (item: T) => boolean): number {
-  for (let i = items.length - 1; i >= 0; i--) if (pred(items[i]!)) return i;
-  return -1;
-}
-
-/** Stream one provider turn, injecting the dynamic system-prompt suffix into
- * the final user message as a `<runtime_context>` note (keeps the static
- * prefix cache-friendly). */
+/** Stream one provider turn. The session-stable context rides the cached system
+ * block; the volatile per-turn context (now / git / plan) is appended as its own
+ * separate `system`-role message after the user turn. */
 export async function* streamOnce(
   provider: ChatProvider,
   deps: AgentDeps,
@@ -328,61 +363,75 @@ export async function* streamOnce(
   } = {},
 ): AsyncIterable<StreamEvent> {
   const sys = deps.systemPrompt;
-  const staticPrefix = sys?.staticPrefix;
-  let dynamicSuffix = sys?.dynamicSuffix;
+  // Cached system block = static harness prefix + session-stable context
+  // (environment identity + memory index + tools). Byte-stable across turns →
+  // served from the provider's prompt cache after the first turn.
+  const systemBlock = sys
+    ? sys.staticPrefix +
+      (sys.stableContext ? `${sys.staticPrefix.endsWith("\n") ? "" : "\n"}\n${sys.stableContext}` : "")
+    : undefined;
+  // Per-turn tail = only the volatile context (now / git working-tree / plan).
+  // Fall back to `dynamicSuffix` for older callers that don't set volatileSuffix.
+  let perTurn = sys?.volatileSuffix ?? sys?.dynamicSuffix;
   if (sys && extra.liveContext) {
     const live = extra.liveContext;
-    dynamicSuffix = dynamicSuffix?.includes("<plan>")
-      ? dynamicSuffix.replace(/<plan>[\s\S]*?<\/plan>/, () => live)
-      : `${dynamicSuffix ? `${dynamicSuffix}\n\n` : ""}${live}`;
+    perTurn = perTurn?.includes("<plan>")
+      ? perTurn.replace(/<plan>[\s\S]*?<\/plan>/, () => live)
+      : `${perTurn ? `${perTurn}\n\n` : ""}${live}`;
   }
- // Static prefix goes to the system prompt (cache-friendly). The dynamic
- // suffix (env, git, memory, plan) is appended to the final user message as
- // a <runtime_context> note so it stays fresh per turn without busting the
- // cached prefix. Messages here are provider-bound copies, safe to derive.
+  // Runtime context is NOT a user message: it's harness-injected per-turn state
+  // (now / git working-tree / plan). Emit it as its own separate `system`-role
+  // message placed JUST BEFORE the current turn (the last user / tool-result
+  // message), so background is stated first and the user's actual request stays
+  // last — the strongest-attention, closest-to-generation position, and the
+  // instruction the model should act on. Providers that honor mid-conversation
+  // system messages (OpenAI-compatible) treat it as harness context; on
+  // Anthropic (no mid-stream system role) it degrades to user and is merged
+  // with an adjacent user message to satisfy role alternation.
   let effectiveMessages = messages;
-  if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
-    effectiveMessages = [...messages];
+  const dynamicSuffix = perTurn;
+  if (dynamicSuffix && dynamicSuffix.trim().length > 0 && messages.length > 0) {
     const note = `<runtime_context>\n${dynamicSuffix}\n</runtime_context>`;
-    const last = effectiveMessages[effectiveMessages.length - 1];
-    const lastResultIdx = last ? findLastIndex(last.content, (c) => c.type === "tool_result") : -1;
-    if (last && last.role === "user" && lastResultIdx >= 0) {
- // Mid-run turn: the "user" message is really tool results. A sibling
- // text block becomes a separate user turn on OpenAI-style APIs, which
- // weaker models read as a fresh request and re-run the last real
- // instruction (e.g. asking the same question again). Ride inside the
- // tool result instead, labelled as system context.
-      const content = [...last.content];
-      const block = content[lastResultIdx] as Extract<ProviderMessage["content"][number], { type: "tool_result" }>;
-      content[lastResultIdx] = {
-        ...block,
-        content:
-          `${block.content}\n\n<system-reminder>\nRuntime context refreshed by the harness — not a new user message. ` +
-          `Continue from the tool results above.\n${note}\n</system-reminder>`,
-      };
-      effectiveMessages[effectiveMessages.length - 1] = { ...last, content };
-    } else if (last && last.role === "user") {
-      effectiveMessages[effectiveMessages.length - 1] = {
-        ...last,
-        content: [...last.content, { type: "text", text: "\n\n" + note }],
-      };
-    } else {
-      effectiveMessages.push({
-        role: "user",
-        content: [{ type: "text", text: note }],
-      });
-    }
+    const contextMsg: ProviderMessage = { role: "system", content: [{ type: "text", text: note }] };
+    // Normally insert just before the current turn (last message). But the
+    // runtime_context is a `system`-role message, and OpenAI-compatible
+    // backends require a `tool`-role result to IMMEDIATELY follow the
+    // assistant message that issued the tool_calls — nothing (not even a
+    // system message) may sit between them. On a continuation turn the tail is
+    // `assistant(tool_calls) → user(tool_result…)`, so inserting at length-1
+    // would split that pair and the upstream rejects it with
+    // `invalid_argument` (observed on GLM-5.2). Back the insert point up past
+    // any trailing tool_result-bearing messages AND the assistant tool_calls
+    // turn they answer, so the context lands on a clean role boundary.
+    let insertAt = messages.length - 1;
+    const carriesToolResult = (m: ProviderMessage): boolean =>
+      Array.isArray(m.content) &&
+      m.content.some((c) => (c as { type?: string }).type === "tool_result");
+    const hasToolUse = (m: ProviderMessage): boolean =>
+      Array.isArray(m.content) &&
+      m.content.some((c) => (c as { type?: string }).type === "tool_use");
+    // Skip back over the trailing run of tool_result messages…
+    while (insertAt > 0 && carriesToolResult(messages[insertAt]!)) insertAt--;
+    // …and if that run is answering an assistant tool_calls turn, place the
+    // context before that assistant turn too (never between the pair).
+    while (insertAt > 0 && hasToolUse(messages[insertAt - 1]!)) insertAt--;
+    effectiveMessages = [...messages.slice(0, insertAt), contextMsg, ...messages.slice(insertAt)];
+  } else if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
+    // No prior messages (degenerate): context goes first.
+    effectiveMessages = [{ role: "system", content: [{ type: "text", text: `<runtime_context>\n${dynamicSuffix}\n</runtime_context>` }] }];
   }
   void messageId;
   yield* provider.stream({
     model: deps.config.model ?? provider.defaultModel,
     messages: effectiveMessages,
     tools,
-    systemPrompt: staticPrefix,
+    systemPrompt: systemBlock,
     signal: deps.signal,
     maxTokens: deps.config.maxTokens,
     reasoningEffort: deps.config.reasoningEffort,
     thinkingBudget: deps.config.thinkingBudget,
+    promptCacheKey: deps.promptCacheKey,
+    responseFormat: deps.responseFormat,
     onRetry: extra.onRetry,
   });
 }

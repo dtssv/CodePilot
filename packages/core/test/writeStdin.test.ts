@@ -39,6 +39,42 @@ describe("write_stdin tool", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it("refuses to write to a job owned by a different session (cross-agent injection guard)", async () => {
+    // A background job started by session "A" must not accept stdin from a
+    // tool call whose context identifies as session "B" — the scenario where
+    // parallel sub-agents share a fallback cwd and the job registry (keyed only
+    // by cwd) would otherwise let them reach each other's processes.
+    const ctxA: ToolContext = { ...sandboxOffCtx(), sessionId: "session-A" };
+    const ctxB: ToolContext = { ...sandboxOffCtx(), sessionId: "session-B" };
+    const start = await bashTool.execute({ command: "cat", run_in_background: true }, ctxA);
+    const id = start.content.match(/job_[a-f0-9]{8}/)![0];
+    try {
+      // B is denied.
+      const denied = await writeStdinTool.execute({ job_id: id, input: "intrude" }, ctxB);
+      expect(denied.isError).toBe(true);
+      expect(denied.content).toContain("different agent");
+      // A (the owner) is still allowed.
+      const allowed = await writeStdinTool.execute({ job_id: id, input: "hi" }, ctxA);
+      expect(allowed.isError).toBeFalsy();
+      expect(allowed.content).toContain("wrote");
+    } finally {
+      await bashKillTool.execute({ job_id: id }, ctxA);
+    }
+  });
+
+  it("allows writes when no session identity is present (back-compat / minimal contexts)", async () => {
+    // Older jobs (no ownerSessionId) and minimal contexts (no ctx.sessionId)
+    // stay unrestricted — the guard only fires when BOTH identities exist.
+    const id = await startJob("cat");
+    try {
+      const res = await writeStdinTool.execute({ job_id: id, input: "ok" }, sandboxOffCtx());
+      expect(res.isError).toBeFalsy();
+      expect(res.content).toContain("wrote");
+    } finally {
+      await bashKillTool.execute({ job_id: id }, sandboxOffCtx());
+    }
+  });
+
   it("returns an error for an unknown job id", async () => {
     const res = await writeStdinTool.execute(
       { job_id: "job_00000000", input: "hello" },

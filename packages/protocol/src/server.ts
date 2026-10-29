@@ -27,6 +27,7 @@ import type {
   AgentMode,
   CodepilotConfig,
   Event,
+  ImageGenConfig,
   PermissionDecision,
   PermissionMode,
   PermissionRequest as CorePermissionRequest,
@@ -38,7 +39,13 @@ import type {
 } from "@codepilot/core";
 import {
   createSession,
+  driveGoalRounds,
   listSessions as coreListSessions,
+  setSessionPinned as coreSetSessionPinned,
+  setSessionArchived as coreSetSessionArchived,
+  loadCwdFromDisk,
+  normalizeCwd,
+  type RichSessionSummary,
   loadConfig as coreLoadConfig,
   loadConfigWithSources,
   listProviderTemplates,
@@ -49,6 +56,8 @@ import {
   upsertUserProvider,
   deleteUserProvider,
   setUserActiveEndpoint,
+  readUserConfigFile,
+  writeUserConfigFile,
   templateToPreset,
   findProviderIdForFlat,
   applyUpdate,
@@ -82,6 +91,12 @@ import {
   inspectMcpServer,
   authorizeMcpServer,
   listLanIPv4,
+  buildSingleProvider,
+  PROVIDER_NAMES,
+  userMessage,
+  discoverSlashCommands,
+  discoverSkills,
+  sharedBuiltinCommands,
   type EngineUpdateInfo,
   type ProviderPreset,
   type ProviderName,
@@ -91,7 +106,7 @@ import {
   type SkillListTab,
 } from "@codepilot/core";
 import QRCode from "qrcode";
-import { ErrorCode, Peer, RpcError, StdioTransport } from "./rpc.js";
+import { ErrorCode, Peer, RpcError, StdioTransport, PROTOCOL_VERSION } from "./rpc.js";
 import { listTerminalShells, TerminalHost } from "./terminalHost.js";
 
 /** Mirrors the headless protocol's `event` notification params. */
@@ -126,6 +141,8 @@ export interface InitializeResult {
     workspacePick?: boolean;
     /** Scoped phone QR remote-control session (limited RPCs). */
     remoteControl?: boolean;
+    /** Extended git operations (git/branches, git/commit, git/push, …). */
+    git?: boolean;
   };
   /** Running engine (CLI/daemon) version — distinct from IDE plugin / VSIX. */
   serverInfo?: { name: string; version: string; channel: "engine" };
@@ -192,23 +209,23 @@ export interface SessionResumeResult {
 }
 
 export interface SessionListResult {
-  sessions: SessionSummary[];
+  sessions: RichSessionSummary[];
 }
 
-export interface WorkspaceListParams { path?: string; }
+export interface WorkspaceListParams { path?: string; cwd?: string; }
 export interface WorkspaceEntry { name: string; path: string; kind: "file" | "directory"; size?: number; }
 export interface WorkspaceListResult { path: string; entries: WorkspaceEntry[]; }
 /** Native OS folder dialog (server-side). Cancel → path null. */
 export interface WorkspacePickFolderResult { path: string | null; supported: boolean; }
 /** Browse an absolute directory on the serve host (folder picker UI). */
-export interface WorkspaceBrowseParams { path?: string; }
+export interface WorkspaceBrowseParams { path?: string; cwd?: string; }
 export interface WorkspaceBrowseResult {
   path: string;
   parent?: string;
   entries: Array<{ name: string; path: string; kind: "file" | "directory" }>;
   roots: Array<{ label: string; path: string }>;
 }
-export interface WorkspaceReadParams { path: string; }
+export interface WorkspaceReadParams { path: string; cwd?: string; }
 export interface WorkspaceReadResult {
   path: string;
   content: string;
@@ -220,16 +237,66 @@ export interface WorkspaceReadResult {
   /** MIME hint when encoding is base64 (e.g. image/png). */
   mediaType?: string;
 }
-export interface WorkspaceSearchParams { query: string; path?: string; maxResults?: number; }
+export interface WorkspaceSearchParams { query: string; path?: string; maxResults?: number; cwd?: string; }
 export interface WorkspaceSearchResult { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean; }
-export interface WorkspaceWriteParams { path: string; content: string; expectedSize?: number; expectedHash?: string; }
+
+/** Slash-command discovery for the `/` menu (shared by every client surface). */
+export interface CommandsListParams { cwd?: string; }
+export interface CommandInfoRpc {
+  name: string;
+  description: string;
+  argumentHint?: string;
+  /** "builtin" = shipped shared command; "project"/"user" = markdown command. */
+  source: "builtin" | "project" | "user";
+}
+export interface CommandsListResult { commands: CommandInfoRpc[]; warnings: string[]; }
+
+/** `@`-mention completion for the composer. One endpoint, many candidate kinds. */
+export type CompletionKind = "file" | "dir" | "mcp" | "git" | "skill";
+export interface WorkspaceCompleteParams {
+  /** Text typed after `@` (may be empty to list top candidates). */
+  query: string;
+  /** Restrict to specific kinds; default = all available. */
+  kinds?: CompletionKind[];
+  maxResults?: number;
+  cwd?: string;
+}
+export interface CompletionCandidate {
+  kind: CompletionKind;
+  /** The token inserted into the prompt (what the agent resolves), e.g. the
+   * path, or `@mcp:server/uri`. */
+  value: string;
+  /** Human label for the menu. */
+  label: string;
+  /** Secondary detail (relative dir, server name, symbol kind…). */
+  detail?: string;
+}
+export interface WorkspaceCompleteResult { candidates: CompletionCandidate[]; }
+/** Resolve a (possibly bare / relative) path to an absolute one the host can
+ * open, using the same workspace basename fallback as workspace/read. */
+export interface WorkspaceResolveParams { path: string; cwd?: string; }
+export interface WorkspaceResolveResult { path: string; absolute: string; exists: boolean; }
+export interface WorkspaceWriteParams { path: string; content: string; expectedSize?: number; expectedHash?: string; cwd?: string; }
 export interface WorkspaceWriteResult { path: string; size: number; hash: string; }
 export interface WorkspaceGitStatusResult { branch: string; files: Array<{ path: string; index: string; worktree: string; status: string }>; }
-export interface WorkspaceGitDiffParams { path?: string; staged?: boolean; }
+export interface WorkspaceGitDiffParams { path?: string; staged?: boolean; cwd?: string; }
 export interface WorkspaceGitDiffResult { path?: string; diff: string; truncated: boolean; }
-export interface WorkspaceStatParams { path: string; }
+
+// ---- Extended Git operations (workspace panel actions) ----
+export interface GitBranchesResult { current: string; branches: Array<{ name: string; current: boolean; upstream?: string; ahead?: number; behind?: number }>; tags: string[]; detached: boolean; }
+export interface GitActionParams {
+  cwd?: string;
+  /** For stage/unstage/commit-scope: specific paths; omit = all. */
+  paths?: string[];
+}
+export interface GitCommitParams { cwd?: string; message: string; all?: boolean; }
+export interface GitPushPullParams { cwd?: string; remote?: string; branch?: string; setUpstream?: boolean; }
+export interface GitCheckoutParams { cwd?: string; branch: string; create?: boolean; }
+export interface GitGenericResult { ok: boolean; output: string; }
+export interface GitCommitMessageResult { message: string; }
+export interface WorkspaceStatParams { path: string; cwd?: string; }
 export interface WorkspaceStatResult { path: string; exists: boolean; size: number; hash: string; modifiedAt?: number; }
-export interface WorkspaceWatchParams { path?: string; }
+export interface WorkspaceWatchParams { path?: string; cwd?: string; }
 export interface WorkspaceWatchResult { watching: boolean; path: string; }
 export interface WorkspaceChangedParams {
   path: string;
@@ -328,7 +395,10 @@ export interface PromptResolvedParams {
   requestId: string;
 }
 
-export const PROTOCOL_VERSION = 1;
+// PROTOCOL_VERSION is defined in the dependency-free rpc module (so browser
+// clients can import the same value); re-exported here (imported above) for
+// existing `from "./server.js"` / barrel callers.
+export { PROTOCOL_VERSION };
 /** All collaboration modes advertised by the server. */
 export const SUPPORTED_MODES: AgentMode[] = ["chat", "plan", "agent"];
 
@@ -356,6 +426,8 @@ export function registerServer(
       : baseCaps,
     initialized: false,
     sessionSubs: new Map(),
+    pendingGoals: new Map(),
+    activeGoalLoops: new Set(),
     remoteGrant: opts.remoteGrant,
     terminals: new TerminalHost(),
   };
@@ -406,6 +478,10 @@ export function registerServer(
     (p) => handleConfigSetActive(ctx, p),
   );
   peer.onRequest<
+    { baseURL?: string; apiKey?: string; model?: string; enabled?: boolean },
+    { imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }
+  >("config/setImageGen", (p) => handleConfigSetImageGen(ctx, p));
+  peer.onRequest<
     {
       providerId?: string;
       provider?: ProviderName;
@@ -428,6 +504,32 @@ export function registerServer(
   peer.onRequest<{ cwd?: string }, SessionListResult>("session/list", (p) =>
     handleSessionList(ctx, p),
   );
+  peer.onRequest<{ sessionId: string; pinned: boolean }, { ok: true }>("session/pin", (p) =>
+    handleSessionPin(ctx, p),
+  );
+  peer.onRequest<{ sessionId: string; archived: boolean }, { ok: true }>("session/archive", (p) =>
+    handleSessionArchive(ctx, p),
+  );
+  peer.onRequest<{ sessionId: string }, { ok: true }>("session/compact", async (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    await requireSession(ctx, p.sessionId).compact();
+    return { ok: true };
+  });
+  peer.onRequest<{ sessionId: string; reason?: string }, { cleared: boolean }>("session/clear-context", async (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    const cleared = await requireSession(ctx, p.sessionId).clearWorkingContext(p.reason);
+    return { cleared };
+  });
+  peer.onRequest<
+    { sessionId: string },
+    ReturnType<Session["contextReport"]>
+  >("session/contextReport", (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    return requireSession(ctx, p.sessionId).contextReport();
+  });
   peer.onRequest<WorkspaceListParams, WorkspaceListResult>("workspace/list", (p) =>
     handleWorkspaceList(ctx, p),
   );
@@ -440,14 +542,33 @@ export function registerServer(
   peer.onRequest<WorkspaceReadParams, WorkspaceReadResult>("workspace/read", (p) =>
     handleWorkspaceRead(ctx, p),
   );
+  peer.onRequest<WorkspaceResolveParams, WorkspaceResolveResult>("workspace/resolve", (p) =>
+    handleWorkspaceResolve(ctx, p),
+  );
   peer.onRequest<WorkspaceSearchParams, WorkspaceSearchResult>("workspace/search", (p) =>
     handleWorkspaceSearch(ctx, p),
+  );
+  peer.onRequest<CommandsListParams, CommandsListResult>("commands/list", (p) =>
+    handleCommandsList(ctx, p),
+  );
+  peer.onRequest<WorkspaceCompleteParams, WorkspaceCompleteResult>("workspace/complete", (p) =>
+    handleWorkspaceComplete(ctx, p),
   );
   peer.onRequest<WorkspaceWriteParams, WorkspaceWriteResult>("workspace/write", (p) =>
     handleWorkspaceWrite(ctx, p),
   );
-  peer.onRequest<{}, WorkspaceGitStatusResult>("workspace/git-status", () => handleWorkspaceGitStatus(ctx));
+  peer.onRequest<{ cwd?: string }, WorkspaceGitStatusResult>("workspace/git-status", (p) => handleWorkspaceGitStatus(ctx, p));
   peer.onRequest<WorkspaceGitDiffParams, WorkspaceGitDiffResult>("workspace/git-diff", (p) => handleWorkspaceGitDiff(ctx, p));
+  peer.onRequest<{ cwd?: string }, GitBranchesResult>("git/branches", (p) => handleGitBranches(ctx, p));
+  peer.onRequest<{ cwd?: string }, GitGenericResult>("git/init", (p) => handleGitInit(ctx, p));
+  peer.onRequest<GitActionParams, GitGenericResult>("git/stage", (p) => handleGitStage(ctx, p));
+  peer.onRequest<GitActionParams, GitGenericResult>("git/unstage", (p) => handleGitUnstage(ctx, p));
+  peer.onRequest<GitCommitParams, GitGenericResult>("git/commit", (p) => handleGitCommit(ctx, p));
+  peer.onRequest<GitPushPullParams, GitGenericResult>("git/push", (p) => handleGitPush(ctx, p));
+  peer.onRequest<GitPushPullParams, GitGenericResult>("git/pull", (p) => handleGitPull(ctx, p));
+  peer.onRequest<GitPushPullParams, GitGenericResult>("git/fetch", (p) => handleGitFetch(ctx, p));
+  peer.onRequest<GitCheckoutParams, GitGenericResult>("git/checkout", (p) => handleGitCheckout(ctx, p));
+  peer.onRequest<{ cwd?: string; sessionId?: string }, GitCommitMessageResult>("git/commit-message", (p) => handleGitCommitMessage(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
   peer.onRequest<Record<string, never>, SystemUpdateCheckResult>("system/update-check", () =>
@@ -457,7 +578,7 @@ export function registerServer(
     handleSystemUpdateApply(),
   );
   peer.onRequest<
-    { serveUrl: string; cwd?: string; sessionId?: string },
+    { serveUrl: string; cwd?: string; cwds?: string[]; sessionId?: string },
     {
       code: string;
       url: string;
@@ -638,8 +759,9 @@ export function registerServer(
       title: string;
       prompt: string;
       cwd?: string;
-      kind: "idle" | "daily" | "interval";
+      kind: "idle" | "once" | "daily" | "interval";
       at?: string;
+      runAt?: number;
       everyMinutes?: number;
       idleAfterMs?: number;
       model?: string;
@@ -654,6 +776,7 @@ export function registerServer(
       cwd: p.cwd || ctx.defaultCwd,
       kind: p.kind,
       at: p.at,
+      runAt: p.runAt,
       everyMinutes: p.everyMinutes,
       idleAfterMs: p.idleAfterMs,
       model: p.model,
@@ -668,6 +791,7 @@ export function registerServer(
       prompt?: string;
       cwd?: string;
       at?: string;
+      runAt?: number;
       everyMinutes?: number;
       idleAfterMs?: number;
       model?: string;
@@ -810,6 +934,9 @@ const REMOTE_METHOD_CAPS: Record<string, RemoteGrant["caps"][number] | "any"> = 
   initialize: "any",
   shutdown: "any",
   "session/list": "follow",
+  "session/contextReport": "follow",
+  "session/pin": "follow",
+  "session/archive": "follow",
   "session/resume": "follow",
   "session/new": "follow",
   "session/setMode": "follow",
@@ -819,9 +946,11 @@ const REMOTE_METHOD_CAPS: Record<string, RemoteGrant["caps"][number] | "any"> = 
   "config/get": "follow",
   "workspace/list": "follow",
   "workspace/read": "follow",
+  "workspace/resolve": "follow",
   "workspace/stat": "follow",
   "workspace/git-status": "follow",
   "workspace/git-diff": "follow",
+  "git/branches": "follow",
   "workspace/browse": "follow",
   "workspace/search": "follow",
   "workspace/watch": "follow",
@@ -964,6 +1093,13 @@ interface ServerContext {
  * connection subscribes independently so several clients can follow the
  * same live session at once (and a reconnect re-subscribes cleanly). */
   sessionSubs: Map<string, () => void>;
+  /** Goal loops requested by the model (via `start_goal`) but not yet started,
+   * keyed by session id. A pending entry is consumed when the triggering turn
+   * settles (`status: idle`), at which point `driveGoalRounds` takes over. */
+  pendingGoals: Map<string, { objective: string; maxRounds?: number }>;
+  /** Session ids with a goal loop currently driving, so the idle-watcher does
+   * not re-trigger on the per-round idle events the loop itself produces. */
+  activeGoalLoops: Set<string>;
   /** Present when this connection authenticated via QR remote grant. */
   remoteGrant?: RemoteGrant;
   /** Interactive PTYs owned by this connection. */
@@ -1026,6 +1162,8 @@ async function releaseSession(
   if (!ctx.sessions.delete(sessionId)) return; // this connection didn't hold it
   const unsub = ctx.sessionSubs.get(sessionId);
   if (unsub) { try { unsub(); } catch { /* ignore */ } ctx.sessionSubs.delete(sessionId); }
+  ctx.pendingGoals.delete(sessionId);
+  ctx.activeGoalLoops.delete(sessionId);
   const live = liveSessions.get(sessionId);
   if (!live) return;
   live.holders.delete(ctx);
@@ -1117,12 +1255,13 @@ function defaultCapabilities(): InitializeResult["capabilities"] {
       "read_artifact",
       "web_fetch",
     ],
-    providers: ["anthropic", "openai", "copilot"],
+    providers: [...PROVIDER_NAMES],
     modes: [...SUPPORTED_MODES],
     config: true,
     setModel: true,
     workspacePick: true,
     remoteControl: false,
+    git: true,
   };
 }
 
@@ -1151,10 +1290,78 @@ function attachSessionEvents(ctx: ServerContext, session: Session): SessionExtra
         })
         .catch(() => {});
     }
+  // When a turn settles (idle) and the model requested a goal loop this
+  // session (via `start_goal`), take over driving rounds now. We wait for the
+  // triggering turn to finish because `session.prompt()` enqueues rather than
+  // reenters while busy; driving here lets the loop's own prompts run cleanly.
+    if (e.type === "status" && e.status === "idle") {
+      maybeStartGoalLoop(ctx, session);
+    }
   });
   replaying = false;
   ctx.sessionSubs.set(session.id, unsubscribe);
   return { unsubscribe };
+}
+
+/**
+ * Record a model-requested goal loop (from the `start_goal` tool) as pending.
+ * It is NOT started here: `session.prompt()` enqueues while busy, so we wait
+ * for the triggering turn to settle (idle) and let `maybeStartGoalLoop` take
+ * over. Returning true tells the tool the host accepted.
+ */
+function recordPendingGoal(
+  ctx: ServerContext,
+  sessionId: string,
+  req: { objective: string; maxRounds?: number },
+): boolean {
+  ctx.pendingGoals.set(sessionId, {
+    objective: req.objective,
+    ...(req.maxRounds ? { maxRounds: req.maxRounds } : {}),
+  });
+  return true;
+}
+
+/**
+ * On a turn settling idle: if this session has a pending goal and no loop is
+ * already driving, consume it and start `driveGoalRounds`. The loop's own
+ * per-round prompts produce more idle events, but `activeGoalLoops` guards
+ * against re-entry so we drive exactly one loop at a time. When the loop ends
+ * (completed / blocked / round-limit), the guard is cleared.
+ */
+function maybeStartGoalLoop(ctx: ServerContext, session: Session): void {
+  const sessionId = session.id;
+  if (ctx.activeGoalLoops.has(sessionId)) return;
+  const pending = ctx.pendingGoals.get(sessionId);
+  if (!pending) return;
+  ctx.pendingGoals.delete(sessionId);
+  ctx.activeGoalLoops.add(sessionId);
+  void driveGoalRounds(session, {
+    objective: pending.objective,
+    maxRounds: pending.maxRounds,
+    // Surface per-round progress to UIs via the session's event stream (which
+    // `attachSessionEvents` already relays to this connection as `event`
+    // notifications). The checkpoint file remains the authoritative record.
+    onCheckpoint: (info) =>
+      session.emitGoalProgress({
+        round: info.round,
+        status: info.status,
+        maxRounds: pending.maxRounds,
+        reason: info.reason,
+        blockedReason: info.blockedReason,
+      }),
+  })
+    .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      void ctx.peer
+        .notify<EventParams>("event", {
+          sessionId,
+          event: { type: "error", message, recoverable: false },
+        })
+        .catch(() => {});
+    })
+    .finally(() => {
+      ctx.activeGoalLoops.delete(sessionId);
+    });
 }
 
 async function handleInitialize(
@@ -1208,7 +1415,7 @@ async function handleSystemUpdateCheck(): Promise<SystemUpdateCheckResult> {
 
 async function handleRemotePairMint(
   ctx: ServerContext,
-  params: { serveUrl: string; cwd?: string; sessionId?: string },
+  params: { serveUrl: string; cwd?: string; cwds?: string[]; sessionId?: string },
 ): Promise<{
   code: string;
   url: string;
@@ -1226,6 +1433,7 @@ async function handleRemotePairMint(
   const minted = await mintRemotePairing({
     serveUrl: params.serveUrl,
     cwd: params.cwd || ctx.defaultCwd,
+    cwds: Array.isArray(params.cwds) ? params.cwds.filter((c) => typeof c === "string" && c.trim()) : undefined,
     sessionId: params.sessionId,
   });
   const qrDataUrl = await QRCode.toDataURL(minted.qrPayload, {
@@ -1366,6 +1574,7 @@ async function handleSessionNew(
     agentMode: params?.agentMode ?? effectiveConfig.agentMode,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
+    onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
     onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
   });
   return registerSession(ctx, session);
@@ -1460,6 +1669,7 @@ async function handleConfigGet(
   providers: Record<string, ReturnType<typeof redactProviderPreset>>;
   selectableModels: ReturnType<typeof listSelectableModels>;
   templates: Awaited<ReturnType<typeof listProviderTemplates>>;
+  imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
 }> {
   assertInitialized(ctx);
   const cwd = params?.cwd ?? ctx.defaultCwd;
@@ -1496,6 +1706,12 @@ async function handleConfigGet(
     providers,
     selectableModels: listSelectableModels(config),
     templates,
+    imageGen: {
+      baseURL: config.imageGen?.baseURL,
+      model: config.imageGen?.model,
+      enabled: config.imageGen?.enabled !== false,
+      hasApiKey: !!config.imageGen?.apiKey,
+    },
   };
 }
 
@@ -1623,6 +1839,34 @@ async function handleConfigListRemoteModels(
   }
 }
 
+async function handleConfigSetImageGen(
+  ctx: ServerContext,
+  params: { baseURL?: string; apiKey?: string; model?: string; enabled?: boolean },
+): Promise<{ imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }> {
+  assertInitialized(ctx);
+  const { raw } = await readUserConfigFile();
+  const prev = (raw.imageGen as ImageGenConfig | undefined) ?? {};
+  // Preserve the stored key when the client sends an empty placeholder.
+  const apiKey =
+    params.apiKey === undefined || params.apiKey === "" ? prev.apiKey : params.apiKey.trim();
+  const next: ImageGenConfig = {
+    baseURL: params.baseURL?.trim() || prev.baseURL,
+    apiKey,
+    model: params.model?.trim() || prev.model,
+    enabled: params.enabled ?? prev.enabled ?? true,
+  };
+  raw.imageGen = next;
+  await writeUserConfigFile(raw);
+  return {
+    imageGen: {
+      baseURL: next.baseURL,
+      model: next.model,
+      enabled: next.enabled !== false,
+      hasApiKey: !!next.apiKey,
+    },
+  };
+}
+
 async function handleConfigSetActive(
   ctx: ServerContext,
   params: ConfigSetActiveParams,
@@ -1735,6 +1979,12 @@ async function handleSessionResume(
   if (!params?.sessionId) {
     throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
   }
+  // A scoped QR remote grant may only resume sessions in its granted
+  // workspaces — otherwise hiding a session from session/list is cosmetic: a
+  // phone could still resume any id and read its full history. Resolve the
+  // session's cwd from disk and reject out-of-scope ids. The local connection
+  // (no grant) is unaffected.
+  await assertSessionInGrantScope(ctx, params.sessionId);
  // If this session is ALREADY live in memory (running in the background, or
  // open on another connection), reuse that instance. Creating a fresh one
  // from the on-disk JSONL would hand back a frozen snapshot and subscribe the
@@ -1758,6 +2008,7 @@ async function handleSessionResume(
     sessionId: params.sessionId,
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
+    onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
     onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
   });
   registerSession(ctx, session);
@@ -1801,13 +2052,79 @@ async function handleSessionList(
       ? params.cwd
       : undefined,
   );
+  // A scoped QR remote grant authorizes only a specific set of workspaces
+  // (grant.cwds). Without this filter, a phone that paired for 2 workspaces
+  // would see EVERY session on the daemon (the client never passes a cwd), a
+  // cross-workspace leak. Restrict the list to the granted cwds. The local
+  // (ungranted) connection is unaffected.
+  const grant = ctx.remoteGrant;
+  if (grant) {
+    const allowed = grantAllowedCwds(grant);
+    return {
+      sessions: sessions.filter((s) => s.cwd && allowed.has(normalizeCwd(s.cwd))),
+    };
+  }
   return { sessions };
 }
 
+/** Normalized set of workspaces a remote grant authorizes. */
+function grantAllowedCwds(grant: RemoteGrant): Set<string> {
+  const list = grant.cwds && grant.cwds.length > 0 ? grant.cwds : [grant.cwd];
+  return new Set(list.filter((c): c is string => !!c).map((c) => normalizeCwd(c)));
+}
+
+/**
+ * Enforce that a remote grant may only touch sessions in its granted
+ * workspaces. No-op for the local (ungranted) connection. Throws if the
+ * session's on-disk cwd is outside the grant's cwds.
+ */
+async function assertSessionInGrantScope(
+  ctx: ServerContext,
+  sessionId: string,
+): Promise<void> {
+  const grant = ctx.remoteGrant;
+  if (!grant) return;
+  // A live session we already hold is in scope by construction (it was created
+  // or resumed through a scoped path). Only disk-backed ids need checking.
+  const live = liveSessions.get(sessionId)?.session ?? ctx.sessions.get(sessionId);
+  const cwd = live?.cwd ?? (await loadCwdFromDisk(sessionId));
+  const allowed = grantAllowedCwds(grant);
+  if (!cwd || !allowed.has(normalizeCwd(cwd))) {
+    throw new RpcError(
+      ErrorCode.InvalidRequest,
+      "Remote grant does not authorize this workspace",
+    );
+  }
+}
+
+async function handleSessionPin(
+  ctx: ServerContext,
+  params: { sessionId: string; pinned: boolean },
+): Promise<{ ok: true }> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  // Pin is one-per-workspace; core clears other pins sharing the cwd.
+  await coreSetSessionPinned(params.sessionId, params.pinned === true);
+  return { ok: true };
+}
+
+async function handleSessionArchive(
+  ctx: ServerContext,
+  params: { sessionId: string; archived: boolean },
+): Promise<{ ok: true }> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  await coreSetSessionArchived(params.sessionId, params.archived === true);
+  return { ok: true };
+}
+
 const WORKSPACE_MAX_BYTES = 512 * 1024;
-function workspacePath(ctx: ServerContext, input: string | undefined): { abs: string; rel: string } {
+function workspacePath(ctx: ServerContext, input: string | undefined, cwd?: string): { abs: string; rel: string } {
   const rel = input ?? ".";
-  const root = resolve(ctx.defaultCwd);
+  // Prefer an explicit workspace root (the folder the client has open) over
+  // the daemon's process cwd, so file/folder paths resolve against the active
+  // workspace in multi-workspace setups.
+  const root = cwd && cwd.trim() ? resolve(cwd) : resolve(ctx.defaultCwd);
   const abs = resolve(root, rel);
   if (abs !== root && !abs.startsWith(root + "/")) throw new RpcError(ErrorCode.InvalidRequest, "workspace path escapes cwd");
   return { abs, rel: relative(root, abs) || "." };
@@ -1815,7 +2132,7 @@ function workspacePath(ctx: ServerContext, input: string | undefined): { abs: st
 
 async function handleWorkspaceList(ctx: ServerContext, params: WorkspaceListParams): Promise<WorkspaceListResult> {
   assertInitialized(ctx);
-  const target = workspacePath(ctx, params.path);
+  const target = workspacePath(ctx, params.path, params.cwd);
   const entries: WorkspaceEntry[] = [];
   for (const name of await readdir(target.abs)) {
     const abs = join(target.abs, name);
@@ -1926,16 +2243,36 @@ const IMAGE_EXT_MIME: Record<string, string> = {
 
 async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadParams): Promise<WorkspaceReadResult> {
   assertInitialized(ctx);
-  const target = workspacePath(ctx, params.path);
-  const data = await readFile(target.abs);
+  const target = workspacePath(ctx, params.path, params.cwd);
+  let abs = target.abs;
+  let rel = target.rel;
+  let data: Buffer;
+  try {
+    data = await readFile(abs);
+  } catch (err) {
+    // The path didn't resolve at the joined location. A very common case: the
+    // model referenced a file by a bare name or a repo-relative path that isn't
+    // rooted at the open workspace (e.g. "subagent.ts" for
+    // "packages/core/src/subagent.ts"). Rather than ENOENT, search the
+    // workspace for a file whose path ends with the requested suffix and open
+    // the single best (shallowest) match. Only for not-found; other errors
+    // (permissions etc.) propagate.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    const root = resolve(params.cwd && params.cwd.trim() ? params.cwd : ctx.defaultCwd);
+    const found = await resolveByBasename(root, params.path);
+    if (!found) throw err;
+    abs = found;
+    rel = relative(root, abs) || abs;
+    data = await readFile(abs);
+  }
   const truncated = data.byteLength > WORKSPACE_MAX_BYTES;
   const slice = data.subarray(0, WORKSPACE_MAX_BYTES);
   const hash = createHash("sha256").update(data).digest("hex");
-  const ext = target.rel.includes(".") ? target.rel.slice(target.rel.lastIndexOf(".")).toLowerCase() : "";
+  const ext = rel.includes(".") ? rel.slice(rel.lastIndexOf(".")).toLowerCase() : "";
   const mediaType = IMAGE_EXT_MIME[ext];
   if (mediaType) {
     return {
-      path: target.rel,
+      path: rel,
       content: slice.toString("base64"),
       size: data.byteLength,
       hash,
@@ -1945,7 +2282,7 @@ async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadPara
     };
   }
   return {
-    path: target.rel,
+    path: rel,
     content: slice.toString("utf8"),
     size: data.byteLength,
     hash,
@@ -1954,9 +2291,81 @@ async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadPara
   };
 }
 
+/** Resolve a (possibly bare / relative / repo-relative) path to the absolute
+ * path the host should open. Tries the direct join first; on miss falls back to
+ * the same workspace basename search as workspace/read. This is the single
+ * source of truth for "turn a referenced path into something openable", so the
+ * desktop/web "Open in editor" button never joins a bare name to the wrong
+ * root and reports "Failed to open path". */
+async function handleWorkspaceResolve(ctx: ServerContext, params: WorkspaceResolveParams): Promise<WorkspaceResolveResult> {
+  assertInitialized(ctx);
+  const root = resolve(params.cwd && params.cwd.trim() ? params.cwd : ctx.defaultCwd);
+  const target = workspacePath(ctx, params.path, params.cwd);
+  const direct = await stat(target.abs).then(() => true).catch(() => false);
+  if (direct) {
+    return { path: target.rel, absolute: target.abs, exists: true };
+  }
+  const found = await resolveByBasename(root, params.path);
+  if (found) {
+    return { path: relative(root, found) || found, absolute: found, exists: true };
+  }
+  // Nothing matched: hand back the best-effort join so the caller can still
+  // decide what to do (and show a sensible path), but mark it non-existent.
+  return { path: target.rel, absolute: target.abs, exists: false };
+}
+
+/** Best-effort fallback for a read whose path didn't resolve: search the
+ * workspace for a file whose path ends with the requested suffix (full
+ * relative path or bare basename) and return the shallowest unique match.
+ * Returns null when there is no match or the match is ambiguous (several files
+ * at the same shallowest depth), so we never silently open the wrong file.
+ * Skips the usual noise dirs and stays inside `root`. */
+async function resolveByBasename(root: string, requested: string | undefined): Promise<string | null> {
+  if (!requested) return null;
+  const want = requested.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/\/+$/, "");
+  if (!want || want.includes("..")) return null;
+  const base = want.split("/").pop() ?? want;
+  if (!base) return null;
+  // Candidates ranked by: exact relative-suffix match first, then basename;
+  // within a rank, shallowest path. Bounded walk so a huge tree can't hang.
+  const suffixMatches: string[] = [];
+  const baseMatches: string[] = [];
+  let visited = 0;
+  const MAX_VISIT = 20_000;
+  async function walk(dir: string): Promise<void> {
+    if (visited > MAX_VISIT) return;
+    let names: string[];
+    try { names = await readdir(dir); } catch { return; }
+    for (const name of names) {
+      if (name === ".git" || name === "node_modules" || name === ".codepilot" || name === "dist") continue;
+      const abs = join(dir, name);
+      let info;
+      try { info = await stat(abs); } catch { continue; }
+      visited++;
+      if (info.isDirectory()) {
+        await walk(abs);
+      } else if (info.isFile()) {
+        const relPath = relative(root, abs).replace(/\\/g, "/");
+        if (relPath === want || relPath.endsWith("/" + want)) suffixMatches.push(abs);
+        else if (name === base) baseMatches.push(abs);
+      }
+    }
+  }
+  await walk(root);
+  const pick = (list: string[]): string | null => {
+    if (list.length === 0) return null;
+    // Shallowest path wins (closest to the workspace root is the likeliest
+    // intended file); ties broken by locale order for determinism.
+    return [...list].sort(
+      (a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b),
+    )[0]!;
+  };
+  return pick(suffixMatches) ?? pick(baseMatches);
+}
+
 async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearchParams): Promise<WorkspaceSearchResult> {
   assertInitialized(ctx);
-  const target = workspacePath(ctx, params.path);
+  const target = workspacePath(ctx, params.path, params.cwd);
   const root = target.abs;
   const rootInfo = await stat(root).catch(() => null);
   if (!rootInfo?.isDirectory()) throw new RpcError(ErrorCode.InvalidRequest, `workspace search path is not a directory: ${target.rel}`);
@@ -1994,10 +2403,157 @@ async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearch
   return { matches, truncated: stopped };
 }
 
-async function handleWorkspaceGitStatus(ctx: ServerContext): Promise<WorkspaceGitStatusResult> {
+/** List slash commands for the `/` menu: shared built-ins + project/user
+ * markdown commands. Shared across every client surface — the TUI, web, and
+ * IDE clients all render the same set. Client-only built-ins (exit, remote,
+ * connect) are intentionally omitted (they live in the client). */
+async function handleCommandsList(ctx: ServerContext, params?: CommandsListParams): Promise<CommandsListResult> {
+  assertInitialized(ctx);
+  const cwd = params?.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
+  const commands: CommandInfoRpc[] = sharedBuiltinCommands().map((c) => ({
+    name: c.name,
+    description: c.description,
+    argumentHint: c.argumentHint,
+    source: "builtin" as const,
+  }));
+  const warnings: string[] = [];
+  try {
+    const reserved = new Set(commands.map((c) => c.name));
+    const discovered = await discoverSlashCommands(cwd, { reservedNames: reserved });
+    for (const c of discovered.commands) {
+      commands.push({
+        name: c.name,
+        description: c.description,
+        argumentHint: c.argumentHint,
+        source: c.source === "builtin" ? "builtin" : c.source,
+      });
+    }
+    warnings.push(...discovered.warnings);
+  } catch (err) {
+    warnings.push(`slash-command discovery failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { commands, warnings };
+}
+
+/** First live session whose cwd matches (for MCP resource listing). Falls back
+ * to any live session, or null. */
+function liveSessionForCwd(ctx: ServerContext, cwd: string): Session | null {
+  const want = resolve(cwd);
+  let any: Session | null = null;
+  for (const s of ctx.sessions.values()) {
+    any = s;
+    try { if (resolve(s.getCwd?.() ?? ctx.defaultCwd) === want) return s; } catch { /* ignore */ }
+  }
+  return any;
+}
+
+const COMPLETION_IGNORE_DIRS = new Set([".git", "node_modules", ".codepilot", "dist", "build", "out", "target", ".next", ".venv", "venv", "__pycache__", "coverage", ".idea", ".gradle"]);
+
+/** Unified `@`-mention completion. Server computes ranked candidates across
+ * kinds (file/dir/mcp/git/skill), mirroring codex/opencode/dsh which all
+ * compute completions server-side. The inserted `value` is a plain token the
+ * agent resolves at prompt time (CodePilot already resolves `@path` images and
+ * `@mcp:` refs) — the server does not inline content here. */
+async function handleWorkspaceComplete(ctx: ServerContext, params: WorkspaceCompleteParams): Promise<WorkspaceCompleteResult> {
+  assertInitialized(ctx);
+  const cwd = params.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
+  const query = (params.query ?? "").trim();
+  const ql = query.toLowerCase();
+  const max = Math.min(Math.max(params.maxResults ?? 20, 1), 100);
+  const kinds = new Set<CompletionKind>(params.kinds ?? ["file", "dir", "mcp", "git", "skill"]);
+  const out: CompletionCandidate[] = [];
+
+  // --- files + dirs: shallow ranked walk, honouring the query as a fuzzy-ish
+  // substring on the relative path. Bounded so a huge repo can't stall.
+  if (kinds.has("file") || kinds.has("dir")) {
+    const hits: Array<{ rel: string; dir: boolean; score: number }> = [];
+    let visited = 0;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (visited > 4000 || depth > 8) return;
+      let names: string[];
+      try { names = await readdir(dir); } catch { return; }
+      for (const name of names) {
+        if (COMPLETION_IGNORE_DIRS.has(name)) continue;
+        if (name.startsWith(".") && !ql.startsWith(".")) continue;
+        visited++;
+        const abs = join(dir, name);
+        let info: Awaited<ReturnType<typeof stat>>;
+        try { info = await stat(abs); } catch { continue; }
+        const rel = relative(cwd, abs);
+        const rell = rel.toLowerCase();
+        const isDir = info.isDirectory();
+        if ((isDir && kinds.has("dir")) || (!isDir && kinds.has("file"))) {
+          if (!ql || rell.includes(ql) || name.toLowerCase().includes(ql)) {
+            // Prefer basename matches and shallower paths.
+            const base = name.toLowerCase();
+            const score = (base === ql ? 0 : base.startsWith(ql) ? 1 : base.includes(ql) ? 2 : 3) * 100 + rel.split(/[/\\]/).length;
+            hits.push({ rel, dir: isDir, score });
+          }
+        }
+        if (isDir) await walk(abs, depth + 1);
+        if (hits.length > max * 8) break;
+      }
+    };
+    await walk(cwd, 0);
+    hits.sort((a, b) => a.score - b.score || a.rel.length - b.rel.length);
+    for (const h of hits.slice(0, max)) {
+      out.push({ kind: h.dir ? "dir" : "file", value: h.rel, label: h.rel, detail: h.dir ? "directory" : undefined });
+    }
+  }
+
+  // --- MCP resources from a live session's manager (if any).
+  if (kinds.has("mcp")) {
+    try {
+      const session = liveSessionForCwd(ctx, cwd);
+      const mcp = session?.getMcpManager?.() ?? null;
+      const resources = mcp ? mcp.listAllResources() : [];
+      for (const r of resources) {
+        const ref = `@mcp:${r.server}/${r.uri.replace(/^[a-z]+:\/\//i, "")}`;
+        const label = r.name ?? r.uri;
+        if (!ql || ref.toLowerCase().includes(ql) || label.toLowerCase().includes(ql)) {
+          out.push({ kind: "mcp", value: ref, label, detail: `[mcp:${r.server}]` });
+        }
+      }
+    } catch { /* MCP optional */ }
+  }
+
+  // --- git: changed files (so `@git:path` or `@path` of a dirty file is easy).
+  if (kinds.has("git")) {
+    try {
+      const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain=v1", "-uall"]);
+      for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+        const p = line.slice(3);
+        if (!ql || p.toLowerCase().includes(ql)) {
+          out.push({ kind: "git", value: p, label: p, detail: `git ${line.slice(0, 2).trim() || "·"}` });
+        }
+      }
+    } catch { /* not a repo */ }
+  }
+
+  // --- skills (so a user can reference a skill by name).
+  if (kinds.has("skill")) {
+    try {
+      const skills = await discoverSkills(cwd);
+      for (const s of skills) {
+        if (!ql || s.name.toLowerCase().includes(ql)) {
+          out.push({ kind: "skill", value: s.name, label: s.name, detail: s.description?.slice(0, 80) });
+        }
+      }
+    } catch { /* skills optional */ }
+  }
+
+  return { candidates: out.slice(0, max) };
+}
+
+/** Resolve the git working directory: explicit workspace cwd over daemon cwd. */
+function gitCwd(ctx: ServerContext, cwd?: string): string {
+  return cwd && cwd.trim() ? resolve(cwd) : resolve(ctx.defaultCwd);
+}
+
+async function handleWorkspaceGitStatus(ctx: ServerContext, params?: { cwd?: string }): Promise<WorkspaceGitStatusResult> {
   assertInitialized(ctx);
   try {
-    const { stdout } = await execFileAsync("git", ["-C", ctx.defaultCwd, "status", "--short", "--branch", "--porcelain=v1"]);
+    const { stdout } = await execFileAsync("git", ["-C", gitCwd(ctx, params?.cwd), "status", "--short", "--branch", "--porcelain=v1", "-uall"]);
     const lines = stdout.split(/\r?\n/).filter(Boolean);
     const branch = lines.find(l => l.startsWith("## "))?.slice(3) ?? "(detached/unknown)";
     const files = lines.filter(l => !l.startsWith("## ")).map(l => ({ index: l[0] ?? " ", worktree: l[1] ?? " ", status: l.slice(0, 2), path: l.slice(3) }));
@@ -2009,7 +2565,7 @@ async function handleWorkspaceGitStatus(ctx: ServerContext): Promise<WorkspaceGi
 
 async function handleWorkspaceStat(ctx: ServerContext, params: WorkspaceStatParams): Promise<WorkspaceStatResult> {
   assertInitialized(ctx);
-  const target = workspacePath(ctx, params.path);
+  const target = workspacePath(ctx, params.path, params.cwd);
   try {
     const info = await stat(target.abs);
     if (!info.isFile()) return { path: target.rel, exists: false, size: 0, hash: "" };
@@ -2020,15 +2576,209 @@ async function handleWorkspaceStat(ctx: ServerContext, params: WorkspaceStatPara
 
 async function handleWorkspaceGitDiff(ctx: ServerContext, params: WorkspaceGitDiffParams): Promise<WorkspaceGitDiffResult> {
   assertInitialized(ctx);
-  const args = ["-C", ctx.defaultCwd, "diff", "--no-ext-diff", "--no-color", "--no-renames"];
+  const root = gitCwd(ctx, params.cwd);
+  const args = ["-C", root, "diff", "--no-ext-diff", "--no-color", "--no-renames"];
   if (params.staged) args.push("--cached");
-  if (params.path) args.push("--", workspacePath(ctx, params.path).rel);
+  if (params.path) args.push("--", workspacePath(ctx, params.path, params.cwd).rel);
   try {
     const { stdout } = await execFileAsync("git", args, { maxBuffer: 1024 * 1024 });
     const bytes = Buffer.from(stdout, "utf8");
     const truncated = bytes.byteLength > WORKSPACE_MAX_BYTES;
     return { path: params.path, diff: bytes.subarray(0, WORKSPACE_MAX_BYTES).toString("utf8"), truncated };
   } catch (err) { throw new RpcError(ErrorCode.InvalidRequest, `git diff unavailable: ${err instanceof Error ? err.message : String(err)}`); }
+}
+
+/** Run a git subcommand in the workspace, returning combined output. */
+async function runGit(root: string, args: string[]): Promise<string> {
+  try {
+    const { stdout, stderr } = await execFileAsync("git", ["-C", root, ...args], { maxBuffer: 4 * 1024 * 1024 });
+    return (stdout + (stderr ? `\n${stderr}` : "")).trim();
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message?: string };
+    const msg = (e.stderr || e.stdout || e.message || String(err)).trim();
+    throw new RpcError(ErrorCode.InvalidRequest, msg);
+  }
+}
+
+async function handleGitBranches(ctx: ServerContext, params?: { cwd?: string }): Promise<GitBranchesResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params?.cwd);
+  const out = await runGit(root, ["branch", "--list", "-vv", "--no-color", "--sort=-committerdate"]);
+  const branches: GitBranchesResult["branches"] = [];
+  let current = "";
+  let detached = false;
+  for (const raw of out.split(/\r?\n/).filter(Boolean)) {
+    const isCurrent = raw.startsWith("*");
+    const line = raw.replace(/^\*?\s+/, "");
+    // Detached HEAD shows as "(HEAD detached at abc123)".
+    if (line.startsWith("(HEAD")) {
+      if (isCurrent) { detached = true; current = line.replace(/[()]/g, ""); }
+      continue;
+    }
+    const name = line.split(/\s+/)[0] ?? "";
+    if (!name) continue;
+    const upstreamMatch = line.match(/\[([^\]:]+)(?::\s*(ahead \d+)?,?\s*(behind \d+)?)?\]/);
+    const upstream = upstreamMatch?.[1];
+    const ahead = upstreamMatch?.[2] ? Number(upstreamMatch[2].replace("ahead ", "")) : undefined;
+    const behind = upstreamMatch?.[3] ? Number(upstreamMatch[3].replace("behind ", "")) : undefined;
+    branches.push({ name, current: isCurrent, upstream, ahead, behind });
+    if (isCurrent) current = name;
+  }
+  // Recent tags (newest first). Best-effort — empty on repos without tags.
+  let tags: string[] = [];
+  try {
+    const tagOut = await runGit(root, ["tag", "--sort=-creatordate", "--list"]);
+    tags = tagOut.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    tags = [];
+  }
+  return { current, branches, tags, detached };
+}
+
+async function handleGitInit(ctx: ServerContext, params?: { cwd?: string }): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const output = await runGit(gitCwd(ctx, params?.cwd), ["init"]);
+  return { ok: true, output };
+}
+
+async function handleGitStage(ctx: ServerContext, params: GitActionParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params.cwd);
+  const args = params.paths && params.paths.length > 0 ? ["add", "--", ...params.paths] : ["add", "-A"];
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+async function handleGitUnstage(ctx: ServerContext, params: GitActionParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params.cwd);
+  const args = params.paths && params.paths.length > 0 ? ["restore", "--staged", "--", ...params.paths] : ["reset", "-q"];
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+async function handleGitCommit(ctx: ServerContext, params: GitCommitParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  if (!params.message || !params.message.trim()) throw new RpcError(ErrorCode.InvalidParams, "commit message required");
+  const root = gitCwd(ctx, params.cwd);
+  const args = ["commit", "-m", params.message];
+  if (params.all) args.splice(1, 0, "-a");
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+async function handleGitPush(ctx: ServerContext, params: GitPushPullParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params.cwd);
+  const args = ["push"];
+  if (params.setUpstream && params.remote && params.branch) args.push("-u", params.remote, params.branch);
+  else { if (params.remote) args.push(params.remote); if (params.branch) args.push(params.branch); }
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+async function handleGitPull(ctx: ServerContext, params: GitPushPullParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params.cwd);
+  const args = ["pull", "--no-rebase"];
+  if (params.remote) args.push(params.remote);
+  if (params.branch) args.push(params.branch);
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+async function handleGitFetch(ctx: ServerContext, params: GitPushPullParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  const output = await runGit(gitCwd(ctx, params.cwd), ["fetch", "--all", "--prune"]);
+  return { ok: true, output };
+}
+
+async function handleGitCheckout(ctx: ServerContext, params: GitCheckoutParams): Promise<GitGenericResult> {
+  assertInitialized(ctx);
+  if (!params.branch || !params.branch.trim()) throw new RpcError(ErrorCode.InvalidParams, "branch required");
+  const root = gitCwd(ctx, params.cwd);
+  const args = params.create ? ["checkout", "-b", params.branch] : ["checkout", params.branch];
+  const output = await runGit(root, args);
+  return { ok: true, output };
+}
+
+/** Generate a commit message from the staged diff using the active model. */
+async function handleGitCommitMessage(ctx: ServerContext, params?: { cwd?: string; sessionId?: string }): Promise<GitCommitMessageResult> {
+  assertInitialized(ctx);
+  const root = gitCwd(ctx, params?.cwd);
+  let diff = await runGit(root, ["diff", "--cached", "--no-ext-diff", "--no-color", "--stat", "-p"]);
+  if (!diff.trim()) {
+    // Nothing staged — fall back to the full working-tree diff.
+    diff = await runGit(root, ["diff", "--no-ext-diff", "--no-color", "--stat", "-p"]);
+  }
+  if (!diff.trim()) throw new RpcError(ErrorCode.InvalidRequest, "no changes to describe");
+  // Cap the diff we send to the model.
+  const capped = diff.length > 12000 ? `${diff.slice(0, 12000)}\n…(diff truncated)` : diff;
+
+  // Use the model the workspace's conversation is using: prefer the active
+  // session passed by the client, else any live session in this workspace.
+  // Fall back to on-disk config when no session is live.
+  let live = params?.sessionId ? liveSessions.get(params.sessionId) : undefined;
+  if (!live) {
+    for (const s of liveSessions.values()) {
+      if (resolve(s.session.cwd) === root) {
+        live = s;
+        break;
+      }
+    }
+  }
+  let provider: ReturnType<typeof buildSingleProvider>;
+  let model: string;
+  // Commit messages are a lightweight one-shot: prefer the workspace
+  // conversation's PROVIDER (reachable, user's account) but use its small
+  // model when available so we don't hammer the rate-limited chat model.
+  // Also relax the retry policy so a transient 429 doesn't abort after a few
+  // tries the way the chat loop's fast-fail does.
+  const patientRetry = { retryAbortOnDelayMs: 0, maxRetries: 3, baseRetryDelayMs: 1000 };
+  if (live) {
+    try {
+      const cfg = { ...live.session.getConfig(), ...patientRetry };
+      provider = buildSingleProvider(cfg);
+      model = provider.smallModel || live.session.getModel() || provider.defaultModel;
+    } catch (err) {
+      throw new RpcError(ErrorCode.InternalError, `no model configured for commit messages: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    const config = { ...((await loadConfigSafe(root)) ?? {}), ...patientRetry };
+    try {
+      provider = buildSingleProvider(config);
+    } catch (err) {
+      throw new RpcError(ErrorCode.InternalError, `no model configured for commit messages: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    model = provider.smallModel || provider.defaultModel;
+  }
+  const systemPrompt =
+    "You write concise git commit messages in the Conventional Commits style. " +
+    "Return ONLY the commit message — a short imperative subject line (≤ 72 chars), " +
+    "optionally followed by a blank line and a brief body. No code fences, no preamble.";
+  const prompt = `Write a commit message for this diff:\n\n${capped}`;
+  let text = "";
+  try {
+    for await (const ev of provider.stream({
+      model,
+      systemPrompt,
+      messages: [userMessage(prompt)],
+      maxTokens: 400,
+    })) {
+      if (ev.kind === "text_delta") text += ev.text;
+      else if (ev.kind === "error") throw new Error(ev.message);
+    }
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const rateLimited = /rate.?limit|429|backoff|fast-fail|too many requests/i.test(raw);
+    const hint = rateLimited
+      ? " The model is being rate-limited — set a lighter `smallModel` in settings, or try again shortly."
+      : "";
+    throw new RpcError(ErrorCode.InternalError, `commit message generation failed: ${raw}${hint}`);
+  }
+  const message = text.trim().replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
+  if (!message) throw new RpcError(ErrorCode.InternalError, "model returned an empty commit message");
+  return { message };
 }
 
 const WATCH_DEBOUNCE_MS = 150;
@@ -2043,7 +2793,7 @@ function stopWatcher(ctx: ServerContext): void {
 async function handleWorkspaceWatch(ctx: ServerContext, params: WorkspaceWatchParams): Promise<WorkspaceWatchResult> {
   assertInitialized(ctx);
   stopWatcher(ctx);
-  const target = workspacePath(ctx, params.path);
+  const target = workspacePath(ctx, params.path, params.cwd);
   const info = await stat(target.abs).catch(() => null);
   if (!info?.isDirectory()) throw new RpcError(ErrorCode.InvalidRequest, `workspace watch path is not a directory: ${target.rel}`);
   const root = resolve(ctx.defaultCwd);
@@ -2084,7 +2834,7 @@ async function handleWorkspaceWatch(ctx: ServerContext, params: WorkspaceWatchPa
 
 async function handleWorkspaceWrite(ctx: ServerContext, params: WorkspaceWriteParams): Promise<WorkspaceWriteResult> {
   assertInitialized(ctx);
-  const target = workspacePath(ctx, params.path);
+  const target = workspacePath(ctx, params.path, params.cwd);
   if (Buffer.byteLength(params.content, "utf8") > WORKSPACE_MAX_BYTES) throw new RpcError(ErrorCode.InvalidRequest, "workspace file exceeds 512 KiB");
   const current = await readFile(target.abs).catch(() => Buffer.alloc(0));
   const currentHash = createHash("sha256").update(current).digest("hex");

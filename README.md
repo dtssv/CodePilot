@@ -8,7 +8,9 @@
 
 ### 一键安装（推荐）
 
-macOS / Linux / Windows（Git Bash 或 WSL）。需要 **Node.js ≥ 20** 与 npm：
+需要 **Node.js ≥ 20** 与 npm。
+
+**macOS / Linux / Windows（Git Bash 或 WSL）：**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash
@@ -17,17 +19,36 @@ curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/instal
 指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v2.1.1
+curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
 ```
 
-会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取各端共用的 npm 包，装到 `~/.codepilot`：
+**Windows（PowerShell，原生）：**
+
+```powershell
+irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1 | iex
+```
+
+指定版本：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1))) -Version v1.0.0
+```
+
+**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号）：
+
+```bat
+install.cmd
+install.cmd v1.0.0
+```
+
+会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取各端共用的 npm 包，装到 `~/.codepilot`（Windows 为 `%USERPROFILE%\.codepilot`）：
 
 | 资源 | 说明 |
 |---|---|
 | `codepilot-core-*.tgz` | 引擎 |
 | `codepilot-protocol-*.tgz` | `codepilot` CLI |
 | `codepilot-tui-*.tgz` | `codepilot-tui` 终端 UI |
-| `install.sh` | 本安装脚本（Release 也附带） |
+| `install.sh` / `install.ps1` / `install.cmd` | 安装脚本（Release 也附带，分别对应 shell / PowerShell / 旧版 Windows） |
 
 装好后：
 
@@ -55,12 +76,21 @@ corepack pnpm --filter @codepilot/protocol --filter @codepilot/tui link --global
 
 IDE 插件从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载：`codepilot-vscode-*.vsix`、`codepilot-idea-*.zip`。
 
-本地打多端 TUI 二进制（可选，输出在 `dist/release/tui/`）：
+本地打多端产物（输出在 `dist/release/`）：
 
 ```bash
-corepack pnpm package:tui -- --all
-# → codepilot-tui-darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64 / win-x64.exe
+corepack pnpm package:tui -- --all      # TUI 二进制
+corepack pnpm package:cli -- --all      # codepilot CLI 二进制 + npm 包
+corepack pnpm package:web -- --all      # codepilot-web 启动器（开箱即起 serve --web）
+corepack pnpm package:desktop           # Electron 桌面安装包（.dmg/.exe/.AppImage）
+corepack pnpm package:all -- --all      # 全部端
+# 二进制命名：*-darwin-arm64 / *-darwin-x64 / *-linux-x64 / *-linux-arm64 / *-win-x64.exe / *-win-arm64.exe
 ```
+
+跨平台说明：
+- CLI/Web/TUI 用 `@yao-pkg/pkg`，可从任意宿主交叉编译到 **Windows (x64/arm64)、macOS (Intel/Apple 芯片)、Linux (x64/arm64)**。
+- Linux 二进制动态链接宿主 glibc：请在**尽量旧的 glibc 环境**（如 CentOS 7 / manylinux 容器）里构建以最大化兼容；**不支持 musl (Alpine)**。
+- Desktop (`package:desktop`) 用 electron-builder，产 mac dmg / win nsis / linux AppImage；macOS/Windows 的签名需在对应宿主并配好证书。
 
 ---
 

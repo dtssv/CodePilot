@@ -11,6 +11,12 @@
       content="default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     />
     <title>CodePilot</title>
+    <!-- Brand icons. Relative paths (base is "./") so they resolve as 'self'
+         under the CSP whether served at / or via file://. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#1a1a1d" />
   </head>
   <body>
     <div id="root"></div>

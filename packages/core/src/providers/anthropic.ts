@@ -3,6 +3,7 @@
 
 import { parseSse } from "./sse.js";
 import { fetchWithRetry } from "./retry.js";
+import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
   ProviderMessage,
@@ -93,7 +94,10 @@ export class AnthropicProvider implements ChatProvider {
 
     const body: Record<string, unknown> = {
       model: opts.model,
-      messages: opts.messages.map(toAnthropicMessage),
+      messages: markConversationCache(
+        mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage)),
+        this.enableCaching,
+      ),
       max_tokens: maxTokens,
       stream: true,
     };
@@ -330,4 +334,62 @@ function toAnthropicMessage(m: ProviderMessage): Record<string, unknown> {
     }
   }
   return { role: m.role, content };
+}
+
+/**
+ * Add a 3rd prompt-cache breakpoint on the conversation-history prefix so
+ * multi-turn chats reuse the cached message history — not just system + tools.
+ * Anthropic allows 4 breakpoints; CodePilot already caches the last tool and
+ * the system block, leaving room here.
+ *
+ * The breakpoint goes on the last content block of the newest STABLE message —
+ * i.e. before the per-turn volatile tail (the `<runtime_context>` message and
+ * the current user turn), which change every turn and must stay outside the
+ * cached prefix. We skip the trailing run of volatile/current messages and mark
+ * the block just before them.
+ */
+function markConversationCache(
+  messages: Array<Record<string, unknown>>,
+  enabled: boolean,
+): Array<Record<string, unknown>> {
+  if (!enabled || messages.length < 2) return messages;
+  const isVolatile = (m: Record<string, unknown>): boolean => {
+    const content = m.content as Array<{ type?: string; text?: string }> | undefined;
+    return Array.isArray(content) && content.some((c) => c.type === "text" && c.text?.includes("<runtime_context>"));
+  };
+  // Find the last message that is neither the current turn (the final message)
+  // nor the volatile runtime_context. Everything up to and including it is the
+  // stable history prefix we want cached.
+  let idx = messages.length - 1; // skip the current turn
+  while (idx >= 0 && (idx === messages.length - 1 || isVolatile(messages[idx]!))) idx--;
+  if (idx < 0) return messages;
+  const target = messages[idx]!;
+  const content = target.content as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(content) || content.length === 0) return messages;
+  const last = content[content.length - 1]!;
+  // Only text/tool_result/tool_use blocks accept cache_control.
+  if (last.type === "text" || last.type === "tool_result" || last.type === "tool_use") {
+    content[content.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+  }
+  return messages;
+}
+
+/**
+ * Anthropic requires message roles to alternate user/assistant and forbids two
+ * consecutive messages with the same role. Harness-injected `system`-role
+ * messages are promoted to `user` above, which can place two user messages in a
+ * row (e.g. the real user turn followed by the runtime-context message). Merge
+ * adjacent same-role messages by concatenating their content blocks so the
+ * sequence stays valid without losing the separate-message intent upstream.
+ */
+function mergeConsecutiveRoles(
+  messages: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return mergeAdjacentRoles(messages, (prev, cur) => {
+    if (prev.role !== cur.role || !Array.isArray(prev.content) || !Array.isArray(cur.content)) {
+      return false;
+    }
+    prev.content = [...(prev.content as unknown[]), ...(cur.content as unknown[])];
+    return true;
+  });
 }

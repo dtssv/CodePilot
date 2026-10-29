@@ -17,8 +17,7 @@
 // - `serverName`, `cwd`, `oauthCfg`: identity + config.
 // and the helper handles everything else.
 
-import { request as httpRequest, type RequestOptions } from "node:http";
-import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
+
 import { URL } from "node:url";
 import type { McpServerConfig } from "./types.js";
 import {
@@ -199,38 +198,4 @@ export function headerString(
   return null;
 }
 
-/** Perform a raw HTTP request. Exported so transports can share the
- * implementation. */
-export function rawRequest(
-  method: string,
-  target: URL,
-  headers: Record<string, string>,
-  body: Buffer | string | null,
-): Promise<RawHttpResponse> {
-  const isHttps = target.protocol === "https:";
-  const opts: RequestOptions | HttpsRequestOptions = {
-    method,
-    hostname: target.hostname,
-    port: target.port || (isHttps ? 443 : 80),
-    path: target.pathname + target.search,
-    headers,
-  };
-  return new Promise((resolve, reject) => {
-    const reqFn = isHttps ? httpsRequest : httpRequest;
-    const req = reqFn(opts, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => {
-        resolve({
-          status: res.statusCode ?? 0,
-          headers: res.headers as Record<string, string | string[] | undefined>,
-          body: Buffer.concat(chunks).toString("utf-8"),
-        });
-      });
-      res.on("error", reject);
-    });
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
+

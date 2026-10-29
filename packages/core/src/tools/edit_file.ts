@@ -11,10 +11,17 @@
 // error names the failing edit index and strategy.
 
 import { z } from "zod";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardDeliveryWrite, guardPath } from "./_shared.js";
+import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+
+/** Detect the dominant line ending so we can restore it after editing. */
+export function detectLineEnding(text: string): "\r\n" | "\n" {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  return crlf > lf ? "\r\n" : "\n";
+}
 
 const singleEdit = z.object({
   search: z.string().describe("Exact text to find."),
@@ -253,7 +260,10 @@ export const editFileTool: ToolDef<typeof schema> = {
     if (delivery) return delivery;
     const p = resolve(ctx.cwd, input.path);
     let original: string;
+    let preStat: { mtimeMs: number; size: number } | null = null;
     try {
+      const st = await stat(p);
+      preStat = { mtimeMs: st.mtimeMs, size: st.size };
       original = await readFile(p, "utf-8");
     } catch (err) {
       return {
@@ -261,6 +271,16 @@ export const editFileTool: ToolDef<typeof schema> = {
         isError: true,
       };
     }
+
+    // Read-before-write + staleness guard: edit_file always targets an
+    // existing file, so an unobserved or externally-changed file is blocked.
+    const fresh = guardFreshWrite(ctx, p, preStat);
+    if (fresh) return fresh;
+
+    // Preserve the file's dominant line ending — the edit strategies are a
+    // mix (some keep original \r\n, some normalise to \n), so normalise the
+    // result to LF first, then restore the detected ending uniformly.
+    const eol = detectLineEnding(original);
 
     const edits =
       input.edits && input.edits.length > 0
@@ -271,6 +291,10 @@ export const editFileTool: ToolDef<typeof schema> = {
  // aborts without touching disk.
     let working = original;
     const applied: string[] = [];
+    // Per-edit outcomes to stream as `edit_delta` AFTER a successful write (not
+    // during the loop — the batch is transactional, so emitting mid-loop would
+    // narrate edits that a later failure rolls back).
+    const deltas: { strategy: string; occurrences: number }[] = [];
     for (let i = 0; i < edits.length; i++) {
       const e = edits[i]!;
       const outcome = applyEdit(working, {
@@ -289,12 +313,40 @@ export const editFileTool: ToolDef<typeof schema> = {
         };
       }
       working = outcome.message;
+      deltas.push({ strategy: outcome.strategy, occurrences: outcome.occurrences });
       applied.push(
         `#${i + 1} ${outcome.strategy} (${outcome.occurrences} occurrence${outcome.occurrences === 1 ? "" : "s"})`
       );
     }
 
-    await writeFile(p, working, "utf-8");
+    const normalized = working.replace(/\r\n/g, "\n");
+    await writeFile(p, eol === "\r\n" ? normalized.replace(/\n/g, "\r\n") : normalized, "utf-8");
+    // Re-observe so a follow-up edit this session isn't flagged stale against
+    // our own write.
+    try {
+      const st = await stat(p);
+      ctx.reobserveFile?.(p, { mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      /* best-effort */
+    }
+    // Stream each applied edit now that the write succeeded. Informational,
+    // UI-only (ctx.emitEvent bypasses the provider transcript). Best-effort.
+    if (ctx.emitEvent) {
+      for (let i = 0; i < deltas.length; i++) {
+        try {
+          await ctx.emitEvent({
+            type: "edit_delta",
+            path: p,
+            index: i,
+            total: deltas.length,
+            strategy: deltas[i]!.strategy,
+            occurrences: deltas[i]!.occurrences,
+          });
+        } catch {
+          /* best-effort; never fail the edit on a UI event */
+        }
+      }
+    }
     const delta = lineDelta(original, working);
     const deltaStr =
       delta.added > 0 ? `+${delta.added} lines` : delta.removed > 0 ? `-${delta.removed} lines` : "same line count";

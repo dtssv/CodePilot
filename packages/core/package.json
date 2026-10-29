@@ -1,6 +1,6 @@
 {
   "name": "@codepilot/core",
-  "version": "2.1.1",
+  "version": "1.0.0",
   "description": "CodePilot core engine: providers, tools, agent loop, compaction, sessions, memory, permissions, MCP.",
   "type": "module",
   "main": "./dist/index.js",
@@ -9,7 +9,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -25,9 +26,12 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "better-sqlite3": "^13.0.3",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^2.1.8",
     "typescript": "^5.6.3",

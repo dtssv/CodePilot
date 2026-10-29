@@ -20,15 +20,26 @@ describe("settings", () => {
     writeFileSync(file, JSON.stringify({ lastFolder: 3 }));
     expect(loadSettings(file)).toEqual({});
   });
+
+  it("round-trips the lanAccess flag and ignores bad types", () => {
+    const dir = tmp();
+    const file = join(dir, "settings.json");
+    saveSettings(file, { lastFolder: "/x", lanAccess: true });
+    expect(loadSettings(file)).toEqual({ lastFolder: "/x", lanAccess: true });
+    writeFileSync(file, JSON.stringify({ lanAccess: "yes" }));
+    expect(loadSettings(file)).toEqual({});
+    writeFileSync(file, JSON.stringify({ lastFolder: "/x", lanAccess: false }));
+    expect(loadSettings(file)).toEqual({ lastFolder: "/x", lanAccess: false });
+  });
 });
 
 describe("initialFolder", () => {
-  it("prefers a folder argument, then the last folder, then home", () => {
+  it("prefers a folder argument, then the last folder, else null", () => {
     const a = tmp();
     const b = tmp();
-    expect(initialFolder(["--inspect", a], { lastFolder: b }, "/home", "/")).toBe(a);
-    expect(initialFolder(["/does/not/exist"], { lastFolder: b }, "/home", "/")).toBe(b);
-    expect(initialFolder([], { lastFolder: "/gone" }, "/home", "/")).toBe("/home");
+    expect(initialFolder(["--inspect", a], { lastFolder: b }, "/")).toBe(a);
+    expect(initialFolder(["/does/not/exist"], { lastFolder: b }, "/")).toBe(b);
+    expect(initialFolder([], { lastFolder: "/gone" }, "/")).toBeNull();
   });
 });
 

@@ -52,8 +52,7 @@ export const readFileTool: ToolDef<typeof schema> = {
       return { content: `EISDIR: ${p} is a directory`, isError: true };
     }
     const buf = await readFile(p);
-    if (isBinary(buf)) {
-      return {
+    if (isBinary(buf)) {      return {
         content:
           `binary file: ${p} (${buf.length} bytes). Not displayed. ` +
           `Use bash (\`file\`, \`xxd\`, \`strings\`) if you need to inspect it.`,
@@ -87,6 +86,9 @@ export const readFileTool: ToolDef<typeof schema> = {
         `(${lines.length} lines, ${text.length} bytes; full content saved to artifact ${artifactRef})\n\n` +
         numbered;
     }
+    // Record the observation so a later edit_file/write_file/apply_patch can
+    // assert read-before-write and detect a stale (externally changed) file.
+    ctx.observeFile?.(p, { mtimeMs: st.mtimeMs, size: st.size });
     return { content, artifactRef };
   },
 };

@@ -160,4 +160,76 @@ describe("AnthropicProvider extended thinking", () => {
 
     expect(body?.thinking).toEqual({ type: "enabled", budget_tokens: 24_000 });
   });
+
+  it("merges a trailing system message into the preceding user turn (no consecutive user roles)", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([
+        frame("message_start", { type: "message_start", message: { usage: {} } }),
+        frame("message_stop", { type: "message_stop" }),
+      ]);
+    });
+
+    const p = new AnthropicProvider({ apiKey: "test-key" });
+    await collect(
+      p.stream({
+        model: "claude-sonnet-4-5",
+        messages: [
+          // Harness runtime-context emitted as its own system message, placed
+          // before the user turn.
+          { role: "system", content: [{ type: "text", text: "<runtime_context>now</runtime_context>" }] },
+          { role: "user", content: [{ type: "text", text: "ping" }] },
+        ],
+      }),
+    );
+
+    const msgs = body?.messages as Array<{ role: string; content: Array<{ text?: string }> }>;
+    // Anthropic forbids two consecutive user messages; the system→user promotion
+    // must be merged into one user message with both text blocks, context first.
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.role).toBe("user");
+    expect(msgs[0]!.content).toHaveLength(2);
+    expect(msgs[0]!.content[0]!.text).toContain("<runtime_context>");
+    expect(msgs[0]!.content[1]!.text).toBe("ping");
+    // No two adjacent messages share a role.
+    for (let i = 1; i < msgs.length; i++) {
+      expect(msgs[i]!.role).not.toBe(msgs[i - 1]!.role);
+    }
+  });
+
+  it("caches the stable conversation-history prefix (3rd breakpoint), not the volatile tail", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([
+        frame("message_start", { type: "message_start", message: { usage: {} } }),
+        frame("message_stop", { type: "message_stop" }),
+      ]);
+    });
+
+    const p = new AnthropicProvider({ apiKey: "test-key" });
+    await collect(
+      p.stream({
+        model: "claude-sonnet-4-5",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "earlier question" }] },
+          { role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+          // Volatile per-turn context — must stay OUTSIDE the cached prefix.
+          { role: "system", content: [{ type: "text", text: "<runtime_context>now: T</runtime_context>" }] },
+          { role: "user", content: [{ type: "text", text: "new question" }] },
+        ],
+      }),
+    );
+    const msgs = body?.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    // The stable history (the assistant "earlier answer") carries the cache
+    // breakpoint; the runtime_context/current turn do not.
+    const hasCache = (m: { content: Array<Record<string, unknown>> }) =>
+      m.content.some((c) => c.cache_control);
+    const cached = msgs.filter(hasCache);
+    expect(cached).toHaveLength(1);
+    expect(JSON.stringify(cached[0]!.content)).toContain("earlier answer");
+    expect(JSON.stringify(cached[0]!.content)).not.toContain("<runtime_context>");
+    expect(JSON.stringify(cached[0]!.content)).not.toContain("new question");
+  });
 });

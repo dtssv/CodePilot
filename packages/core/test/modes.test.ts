@@ -18,6 +18,7 @@ import {
   memoryWriteTool,
   readArtifactTool,
   taskTool,
+  codeModeTool,
 } from "../src/tools/index.js";
 import type { ToolDef } from "../src/tools/types.js";
 
@@ -65,6 +66,13 @@ describe("filterToolsByMode", () => {
   it("chat mode never includes bash/write_file/edit_file/task/plan_update/memory_write", () => {
     const tools = [bashTool, writeFileTool, editFileTool, taskTool, planUpdateTool, memoryWriteTool];
     expect(filterToolNames(tools, "chat")).toEqual([]);
+  });
+
+  it("code_mode is allowed in agent but denied in chat and plan (runs bash/writes)", () => {
+    const tools = [readFileTool, codeModeTool];
+    expect(filterToolNames(tools, "agent")).toContain("code_mode");
+    expect(filterToolNames(tools, "chat")).not.toContain("code_mode");
+    expect(filterToolNames(tools, "plan")).not.toContain("code_mode");
   });
 
   it("plan mode keeps read-only + plan_update + memory_write", () => {

@@ -20,4 +20,18 @@ describe("advertiseUrl", () => {
     expect(r.rewritten).toBe(false);
     expect(r.url).toBe("http://192.168.1.5:18765");
   });
+
+  it("rejects a file:// serve URL (desktop SPA origin) with a clear warning", () => {
+    // Regression: the desktop app's page origin is file://; it must never
+    // become the QR payload. advertiseUrl refuses non-http(s) schemes.
+    const r = advertiseUrl("file:///Applications/CodePilot%20Agent.app/index.html");
+    expect(r.rewritten).toBe(false);
+    expect(r.warning).toMatch(/http\(s\)/i);
+  });
+
+  it("rejects a ws:// serve URL too", () => {
+    const r = advertiseUrl("ws://127.0.0.1:18765");
+    expect(r.rewritten).toBe(false);
+    expect(r.warning).toMatch(/http\(s\)/i);
+  });
 });

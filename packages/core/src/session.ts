@@ -39,15 +39,28 @@ import type {
   SessionOptions,
   SessionSummary,
 } from "./types.js";
-import { ToolRegistry } from "./tools/types.js";
+import { ToolRegistry, zodToJsonSchema } from "./tools/types.js";
+import { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 import { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
 import { readMemory, readLayeredProjectMemory, FileMemorySink, summariseMemory } from "./memory.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { compact, liveTranscript, renderTranscriptArchive, shouldCompact, type CompactionOptions } from "./compaction.js";
-import { extractPlan, estimateEventTokens } from "./compaction.js";
+import { compact, liveTranscript, renderTranscriptArchive, shouldCompact, type CompactionOptions, type CompactionResult } from "./compaction.js";
+import {
+  extractPlan,
+  estimateEventTokens,
+  compactionGeometry,
+  DEFAULT_COMPACTION_FRACTION,
+  PROVIDER_INPUT_COMPACTION_RATIO,
+  HARD_TRIM_RATIO,
+  FORCED_SHRINK_RATIO,
+} from "./compaction.js";
 import { createSubagentRunner } from "./subagent.js";
 import { discoverCustomAgents, renderCustomAgentsBlock, type CustomAgent } from "./customAgents.js";
+import { discoverSkills, type Skill } from "./skills.js";
+import { createSkillTool, StaticSkillStore, type SkillToolHandle } from "./tools/skill.js";
+import { LspManager } from "./lsp.js";
+import { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
 import { AuditLogger } from "./audit.js";
 import { writePlanFile, setPlanFileStatus } from "./plans.js";
@@ -80,11 +93,15 @@ import {
   notebookEditTool,
   webFetchTool,
   webSearchTool,
+  imageGenTool,
+  resolveImageEndpoint,
   readFileTool,
   readImageTool,
   writeFileTool,
   editFileTool,
   applyPatchTool,
+  codeModeTool,
+  harnessBridgeTool,
   diagnosticsTool,
   globTool,
   grepTool,
@@ -95,6 +112,10 @@ import {
   taskTool,
   askUserQuestionTool,
   planDoneTool,
+  startNewTaskTool,
+  suggestModeTool,
+  startGoalTool,
+  makeMcpMetaTool,
   filterToolsByModeFromRegistry,
 } from "./tools/index.js";
 import { onJobCompletion, readJobLog } from "./tools/bashJobs.js";
@@ -104,10 +125,12 @@ import {
   detectSandboxBackend,
   wrapCommand,
   addWritableRoot,
+  isWriteOutsideSandbox,
   type ResolvedSandbox,
 } from "./sandbox.js";
 import { readUserConfigFile, writeUserConfigFile } from "./providerCatalog.js";
 import { DedupCache } from "./doomLoop.js";
+import { FileObservationStore } from "./fsObservation.js";
 import { resolveImageMentions } from "./imageMentions.js";
 import { materializeUploads } from "./promptFiles.js";
 import { ensureProjectState, projectStatePath, scratchDir } from "./projectState.js";
@@ -149,8 +172,8 @@ import {
   type RichSessionSummary,
 } from "./session-utils.js";
 
-/** Max consecutive Stop-hook continues before the session forces an end
- * (Claude Code default posture). `0` disables continues entirely. */
+ /** Max consecutive Stop-hook continues before the session forces an end.
+ * `0` disables continues entirely. */
 const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
 
 export class Session {
@@ -167,8 +190,13 @@ export class Session {
     req: PermissionRequest
   ) => Promise<PermissionDecision>;
   private readonly onAskUser?: SessionOptions["onAskUser"];
+  private readonly onGoalRequest?: SessionOptions["onGoalRequest"];
   private readonly onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
   private readonly onMcpOpenAuthUrl?: SessionOptions["onMcpOpenAuthUrl"];
+ /** Detaches this session's MCP reverse-request handler from the (possibly
+  * shared) manager. Set once MCP starts; called on dispose so a shared manager
+  * never routes a server reverse request to this disposed session. */
+  private mcpUnregisterRequestHandler: (() => void) | null = null;
   private readonly diagnosticsProvider?: SessionOptions["diagnosticsProvider"];
  /** Provider override (from Agent SDK / replay mode). When set, skips buildProvider. */
   private readonly providerOverride?: import("./providers/types.js").ChatProvider;
@@ -197,6 +225,8 @@ export class Session {
  /** Session-scoped idempotent-result cache. Persists across prompts so a
  * file read in one turn is replayed (not re-read) in the next. */
   private readonly dedupCache = new DedupCache();
+  /** Read-before-write + staleness guard store (session-scoped). */
+  private readonly fileObservations = new FileObservationStore();
  /** Mid-run steering messages queued via steer; drained each agent turn.
   * `user` items are genuine human input and enter the transcript as user
   * messages. `system` items are engine-generated notices (e.g. background
@@ -219,10 +249,13 @@ export class Session {
   private mcp: McpManager | null = null;
  /** Background MCP bring-up; session resume must not await this (npx is slow). */
   private mcpReady: Promise<McpManager | null> = Promise.resolve(null);
-  private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string } | null = null;
+  private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string; stableContext?: string; volatileSuffix?: string } | null = null;
   private disposed = false;
  /** Current Collaboration mode (default "agent"). */
   private mode: AgentMode = "agent";
+  /** When true, suggest_mode switches are applied without re-asking the user
+   * (set via config, or the "Always switch" choice in the confirmation). */
+  private autoAcceptModeSuggestions = false;
  /** Output style (default "concise"). Controls verbosity/teaching posture. */
   private outputStyle: OutputStyle = "concise";
  /** Auto-title, generated after the first prompt. */
@@ -239,11 +272,33 @@ export class Session {
  * checkpoint instead of redoing work or drifting out of scope. Cleared
  * after the first prompt completes. */
   private resumedFromInterrupt = false;
+ /** Turn-boundary pre-compaction cache. After a turn ends with tokens over a
+ * soft threshold (but below the hard trigger), we compact in the background
+ * while the user reads / thinks, and stash the result here keyed by a
+ * fingerprint of the exact history it summarised. The next turn's
+ * `maybeCompact` reuses it IFF the history is unchanged — turning an
+ * otherwise blocking small-model summary into a free, already-done step.
+ * A stale fingerprint (history moved on) discards it and falls back to the
+ * normal synchronous path, so it can never apply an outdated summary. */
+  private precompact: { fingerprint: string; result: CompactionResult } | null = null;
+ /** Guards against two overlapping background pre-compactions. */
+  private precompactInFlight = false;
  /** Aggregate request timing across this session (persisted via `request`
  * events; this is the in-memory rollup for getStats/summaries). */
   private requestStats = { count: 0, totalMs: 0, lastMs: 0, lastTtftMs: 0, slowestMs: 0 };
  /** Custom sub-agents discovered from .codepilot/agents/ + ~/.codepilot/agents/. */
   private customAgents: Map<string, CustomAgent> = new Map();
+  /** Skills discovered for this session (advertised in the prompt + loadable
+   * via the `skill` tool). Populated in init(); re-discovered is cheap. */
+  private discoveredSkills: Skill[] = [];
+  /** Handle on the registered `skill` tool so init() can inject the store. */
+  private skillToolHandle: SkillToolHandle | null = null;
+  /** Language-server manager backing the `lsp_navigate` tool. Lazily spawns
+   * servers per language; stopped on dispose. */
+  private lspManager: LspManager | null = null;
+ /** Loopback egress proxy backing a "proxy" network policy. Started in
+  * init() when configured; stopped on dispose. */
+  private netProxy: import("./netProxy.js").RunningNetProxy | null = null;
  /** The host surface this session is running in: "cli" | "tui" | "vscode" | "idea".
  * Set by the host (TUI/IDE) so the prompt can tailor advice. Defaults to "cli". */
   private hostSurface: "cli" | "tui" | "vscode" | "idea" = "cli";
@@ -296,12 +351,14 @@ export class Session {
     this.systemPromptExtra = opts.systemPromptExtra;
     this.onPermissionRequest = opts.onPermissionRequest;
     this.onAskUser = opts.onAskUser;
+    this.onGoalRequest = opts.onGoalRequest;
     this.onMcpServerRequest = opts.onMcpServerRequest;
     this.onMcpOpenAuthUrl = opts.onMcpOpenAuthUrl;
     this.diagnosticsProvider = opts.diagnosticsProvider;
     this.providerOverride = opts.provider;
     this.runtimeName = opts.runtime ?? opts.config?.runtime;
     this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
+    this.autoAcceptModeSuggestions = opts.config.autoAcceptModeSuggestions === true;
     this.hostSurface = opts.hostSurface ?? "cli";
     this.toolRegistry = new ToolRegistry();
     this.artifacts = new ArtifactStore(projectStatePath(opts.cwd, "artifacts"));
@@ -347,6 +404,7 @@ export class Session {
   async init(): Promise<void> {
     await ensureProjectState(this.cwd, { sessionId: this.id });
     await this.artifacts.init();
+    await this.startNetProxyIfConfigured();
     this.registerBuiltins();
     await this.loadFromDisk();
  // Reconcile a stale "running" state: if the last persisted status is
@@ -364,6 +422,8 @@ export class Session {
     this.mcpReady = this.startMcp()
       .then(async (mcp) => {
         if (this.disposed) {
+          this.mcpUnregisterRequestHandler?.();
+          this.mcpUnregisterRequestHandler = null;
           const { releaseSharedMcp } = await import("./mcp-pool.js");
           await releaseSharedMcp(mcp);
           return null;
@@ -382,6 +442,12 @@ export class Session {
     await this.hooks.loadTrustedHashes();
  // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/.
     this.customAgents = await discoverCustomAgents(this.cwd);
+    // Discover skills and wire them: advertise in the prompt (via
+    // rebuildSystemPrompt below) AND back the `skill` tool store, so an
+    // installed skill can actually be loaded on demand (previously the tool
+    // was never registered — skills were dead).
+    this.discoveredSkills = await discoverSkills(this.cwd).catch(() => []);
+    this.skillToolHandle?.setStore(new StaticSkillStore(this.discoveredSkills));
     await this.rebuildSystemPrompt();
     this.checkpointHook = makeCheckpointHook(this.cwd, this.id);
  // If we loaded events, the hook shouldn't immediately re-fire — mark
@@ -514,6 +580,13 @@ export class Session {
       const merged = mergeDeliveryRoots(this.deliveryRoots, mentionedRoots);
       this.deliveryRoots.length = 0;
       this.deliveryRoots.push(...merged);
+      // Delivery roots are not the OS jail. When the user EXPLICITLY names a
+      // target directory, the sandbox must grant it up-front — otherwise the
+      // write is silently blocked by the jail, or the model is forced to ask.
+      // The sandbox itself requests the directory's permission here (host
+      // prompt in ask-mode; auto-granted in auto-edit/yolo), so a user-named
+      // path "just works" without the LLM negotiating for it.
+      await this.grantSandboxForMentionedRoots(mentionedRoots).catch(() => undefined);
       await this.rebuildSystemPrompt().catch(() => undefined);
     }
 
@@ -571,6 +644,11 @@ export class Session {
       const effectiveModel = this.turnOverrideModel ?? this.model;
       // Shrink an already-oversize resumed transcript before the first send.
       await this.ensureContextUnderWindow();
+      // Lazily ensure the system prompt exists. Resume defers the init-time
+      // build (to return history faster), so build on first use if needed.
+      if (!this.systemPromptCache) {
+        await this.rebuildSystemPrompt().catch(() => undefined);
+      }
       const deps: AgentDeps = {
         provider:
           this.providerOverride ??
@@ -580,7 +658,9 @@ export class Session {
         permissions: this.permissions,
         config: { ...this.config, model: effectiveModel },
         cwd: this.cwd,
+        sessionId: this.id,
         systemPrompt: this.systemPromptCache ?? undefined,
+        promptCacheKey: this.id,
         signal: this.cancelController.signal,
         agentMode: this.mode,
         sandbox: this.sandbox,
@@ -597,14 +677,16 @@ export class Session {
         diagnosticsProvider: this.diagnosticsProvider,
         parentSpan: promptSpan,
         dedupCache: this.dedupCache,
+        fileObservations: this.fileObservations,
         drainSteering: () => {
           const q = this.steeringQueue;
           this.steeringQueue = [];
           return q;
         },
         onEvent: async (e) => {
-          if (e.type === "retry" || e.type === "activity") {
- // Transient UI notice — never part of the transcript.
+          if (e.type === "retry" || e.type === "activity" || e.type === "edit_delta") {
+ // Transient UI notice — never part of the transcript. `edit_delta`
+ // is live edit progress; the tool_result holds the final outcome.
             this.notify(e);
             return;
           }
@@ -644,6 +726,9 @@ export class Session {
  // from `chat` (they wanted answers + a plan, not autonomous edits),
  // in which case restore `chat` and let them opt into agent mode.
           if (e.type === "mode_request") {
+            // A suggest_mode acceptance may carry "remember" → auto-accept
+            // future suggestions this session (the "Always switch" choice).
+            if (e.rememberAuto) this.autoAcceptModeSuggestions = true;
             const target = e.mode === "agent" && this.prePlanMode === "chat"
               ? "chat"
               : e.mode;
@@ -681,8 +766,8 @@ export class Session {
         },
         // Mid-run compaction: agent already detected pressure (local estimate
         // OR last provider inputTokens). Force — do not re-gate on the local
-        // estimator, which under-counts vs gateway usage and previously let
-        // requests climb past the configured contextWindow (e.g. 220k > 200k).
+        // estimator, which under-counts vs gateway usage and can let requests
+        // climb past the configured contextWindow.
         compactNow: async () => {
           const before = this.events;
           await this.maybeCompact({ force: true });
@@ -741,7 +826,16 @@ export class Session {
         // User cancel: do not let Stop hooks force a continue.
         if (this.cancelController?.signal.aborted) break;
 
-        const stopMode = resolveStopVerifyMode(this.config.stopVerify);
+        const configuredStopMode = resolveStopVerifyMode(this.config.stopVerify);
+        // Conditional upgrade: when stopVerify is off but this prompt modified
+        // code files, run the project's test command once as a completion gate
+        // (fails open if no test command exists). A pure Q&A / analysis turn
+        // with no code changes stays off, avoiding needless 429-prone judge
+        // calls. Explicit "prompt"/"tests" settings are respected as-is.
+        const stopMode: ReturnType<typeof resolveStopVerifyMode> =
+          configuredStopMode === "off" && this.promptModifiedCode()
+            ? "tests"
+            : configuredStopMode;
         const hasUserStop = this.hooks.hasHooks("Stop");
         if (stopMode === "off" && !hasUserStop) break;
 
@@ -843,6 +937,7 @@ export class Session {
       }
       this.turnBaselineId = null;
       this.turnTouchedFiles = new Set();
+      const turnAborted = this.cancelController?.signal.aborted === true;
       this.cancelController = null;
  // Clear turn-scoped overrides so the session model + permission
  // grants resume on the user's next message.
@@ -851,6 +946,12 @@ export class Session {
       endPromptSpan(promptSpan);
  // Kick the next queued follow-up (if any) once we are no longer busy.
       void this.drainFollowUps();
+ // Turn-boundary pre-compaction: if tokens are in the soft band (approaching
+ // the hard trigger but not there yet), compact in the background now — while
+ // the history is frozen and the user is reading — so the next turn reuses it
+ // for free instead of blocking on the small model. Fire-and-forget; the
+ // fingerprint guard discards it if the next prompt changes the transcript.
+      if (!turnAborted) void this.precomputeCompaction();
     }
     return "started";
   }
@@ -1138,12 +1239,13 @@ export class Session {
     usagePercent: number;
     autoCompactEnabled: boolean;
     byEventType: { type: string; tokens: number; count: number }[];
+    byCategory: { category: string; tokens: number }[];
     topFileReads: { path: string; reads: number; tokens: number }[];
     duplicateReads: { path: string; reads: number }[];
   } {
     const window = this.config.contextWindow ??
       lookupContextWindow(this.model).contextWindow;
-    const fraction = this.config.compactionThreshold ?? 0.92;
+    const fraction = this.config.compactionThreshold ?? DEFAULT_COMPACTION_FRACTION;
     const trigger = Math.floor(window * fraction);
     const byType = new Map<string, { tokens: number; count: number }>();
     let total = 0;
@@ -1172,6 +1274,53 @@ export class Session {
     const byEventType = [...byType.entries()]
       .map(([type, v]) => ({ type, tokens: v.tokens, count: v.count }))
       .sort((a, b) => b.tokens - a.tokens);
+
+    // Semantic breakdown: what KIND of content fills the window, not just the
+    // event type. The system prompt + tool/MCP schemas are sent every turn but
+    // live outside the event log, so they must be estimated separately. The
+    // event-log total above is the "conversation/subagent" side.
+    const sp = this.systemPromptCache;
+    // The <skills> catalogue sits inside the stable system-prompt section; when
+    // present, count it under its own category and subtract it from `system`.
+    const skillsSection = sp ? extractSkillsSection(sp.full) : "";
+    const skillsTokens = skillsSection ? estimateTokens(skillsSection) : 0;
+    const systemTokens = sp
+      ? Math.max(0, estimateTokens(sp.full) - skillsTokens)
+      : 0;
+    // Tool definitions sent to the provider this mode. Split MCP out — its
+    // schemas are often the biggest and most surprising contributor.
+    let toolTokens = 0;
+    let mcpTokens = 0;
+    const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
+    for (const t of visibleTools) {
+      const def = {
+        name: t.name,
+        description: t.description,
+        inputSchema: zodToJsonSchema(t.inputSchema),
+      };
+      const tok = estimateTokens(JSON.stringify(def));
+      if (t.source === "mcp") mcpTokens += tok;
+      else toolTokens += tok;
+    }
+    // Event-log tokens split into conversation vs sub-agent work.
+    let subagentTokens = 0;
+    let conversationTokens = 0;
+    for (const e of this.events) {
+      const tok = estimateEventTokens([e], estimateTokens);
+      if (e.type === "subagent") subagentTokens += tok;
+      else conversationTokens += tok;
+    }
+    const byCategory = [
+      { category: "system", tokens: systemTokens },
+      { category: "skills", tokens: skillsTokens },
+      { category: "tools", tokens: toolTokens },
+      { category: "mcp", tokens: mcpTokens },
+      { category: "conversation", tokens: conversationTokens },
+      { category: "subagent", tokens: subagentTokens },
+    ]
+      .filter((c) => c.tokens > 0)
+      .sort((a, b) => b.tokens - a.tokens);
+
     const topFileReads = [...fileReads.entries()]
       .map(([path, v]) => ({ path, reads: v.reads, tokens: v.tokens }))
       .sort((a, b) => b.tokens - a.tokens)
@@ -1187,6 +1336,7 @@ export class Session {
       usagePercent: Math.round((total / window) * 100),
       autoCompactEnabled: this.config.autoCompact !== false,
       byEventType,
+      byCategory,
       topFileReads,
       duplicateReads,
     };
@@ -1221,7 +1371,7 @@ export class Session {
     return listSnapshots(this.cwd);
   }
 
-  /** Undo the last agent turn's file edits (OpenCode-style `/undo`). */
+  /** Undo the last agent turn's file edits. */
   async undo(): Promise<{ restored: string[]; deleted: string[]; label: string }> {
     const entry = this.undoStack.pop();
     if (!entry) throw new Error("Nothing to undo.");
@@ -1261,6 +1411,36 @@ export class Session {
       /* best-effort */
     }
     this.redoStack.push(entry);
+    // The file system has been rolled back to the turn baseline, but the
+    // transcript still carries this turn's tool_results claiming those writes
+    // happened. Left unreconciled, the model's next turn rebuilds provider
+    // messages from that stale transcript and works from a false premise
+    // ("foo.ts was written") against files that are actually reverted. Append
+    // a model-visible notice so the next turn sees the real state. Append-only
+    // (no event truncation) keeps the event-sourced log intact.
+    const changed = [...new Set([...result.restored, ...result.deleted])].sort();
+    const fileList = changed.length > 0 ? changed.join(", ") : "(no tracked files)";
+    const notice: Event = {
+      type: "message",
+      id: `msg_${randomUUID()}`,
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text:
+            `<undo_notice>\n` +
+            `The previous turn's file edits were reverted by the user (/undo: ${entry.label}). ` +
+            `The working tree is back to its pre-turn state. Affected paths: ${fileList}. ` +
+            `Any earlier tool_result in this conversation that reported writing or editing ` +
+            `these files is now STALE — the changes no longer exist on disk. Re-read any file ` +
+            `before assuming its contents.\n` +
+            `</undo_notice>`,
+        },
+      ],
+    };
+    this.events.push(notice);
+    await this.persistEvent(notice).catch(() => undefined);
+    this.notify(notice);
     return { ...result, label: entry.label };
   }
 
@@ -1270,6 +1450,31 @@ export class Session {
     if (!entry) throw new Error("Nothing to redo.");
     const result = await rewindToSnapshot(this.cwd, entry.afterId);
     this.undoStack.push(entry);
+    // Symmetric to undo: the edits are back on disk, so a prior undo_notice in
+    // the transcript (which told the model the changes were gone) is now itself
+    // stale. Append a reconciling notice so the next turn sees current state.
+    const changed = [...new Set([...result.restored, ...result.deleted])].sort();
+    const fileList = changed.length > 0 ? changed.join(", ") : "(no tracked files)";
+    const notice: Event = {
+      type: "message",
+      id: `msg_${randomUUID()}`,
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text:
+            `<redo_notice>\n` +
+            `The previously undone turn's file edits were re-applied by the user (/redo: ${entry.label}). ` +
+            `Those changes are back on disk. Affected paths: ${fileList}. If an earlier undo_notice ` +
+            `said these files were reverted, that is no longer true. Re-read any file before ` +
+            `assuming its contents.\n` +
+            `</redo_notice>`,
+        },
+      ],
+    };
+    this.events.push(notice);
+    await this.persistEvent(notice).catch(() => undefined);
+    this.notify(notice);
     return { ...result, label: entry.label };
   }
 
@@ -1534,6 +1739,51 @@ export class Session {
     return [...this.deliveryRoots];
   }
 
+  /**
+   * When the user explicitly names target directories in a prompt, open the OS
+   * sandbox for them proactively. For each named dir the sandbox would block:
+   *  - `yolo` / `auto-edit` → grant silently (these modes already allow writes);
+   *  - otherwise → ask the host once (the same sandbox-expand prompt a blocked
+   *    write would raise), and grant on allow/always (persist on "always"). On
+   *    deny we leave it blocked — an explicit user decision.
+   * The point: the SANDBOX requests the directory's permission, instead of
+   * silently blocking the write or forcing the model to negotiate for it.
+   */
+  private async grantSandboxForMentionedRoots(dirs: string[]): Promise<void> {
+    if (this.sandbox.mode === "off" || this.sandbox.mode === "read-only") return;
+    const mode = this.permissions.getMode();
+    for (const raw of dirs) {
+      const dir = resolve(this.cwd, raw);
+      // Already writable in the jail → nothing to request.
+      if (!isWriteOutsideSandbox(dir, this.sandbox, this.cwd)) continue;
+      if (mode === "yolo" || mode === "auto-edit") {
+        await this.expandWritablePath(dir, { persist: false });
+        continue;
+      }
+      // ask-mode (and plan): let the sandbox request the directory's permission
+      // through the host. No handler → leave blocked (a blocked write will
+      // still raise the per-write prompt later), never silently widen the jail.
+      if (!this.onPermissionRequest) continue;
+      let decision: PermissionDecision;
+      try {
+        decision = await this.onPermissionRequest({
+          requestId: `sandbox_grant_${Math.random().toString(36).slice(2, 10)}`,
+          toolName: "sandbox",
+          input: { path: dir },
+          reason:
+            `You asked to work in “${dir}”, which is outside the sandbox's writable roots. ` +
+            `Allow once grants it for this session; Always also saves it to sandbox.writablePaths.`,
+          sandboxExpand: { path: dir },
+        });
+      } catch {
+        continue; // host error → leave blocked; per-write prompt still guards
+      }
+      if (decision === "allow" || decision === "always") {
+        await this.expandWritablePath(dir, { persist: decision === "always" });
+      }
+    }
+  }
+
   async expandWritablePath(
     dir: string,
     opts: { persist?: boolean } = {},
@@ -1684,7 +1934,25 @@ export class Session {
     };
   }
 
-  async fork(atEventIndex?: number): Promise<Session> {
+  /**
+   * Create a new session seeded with this session's history.
+   *
+   * By default the fork copies `this.events` — the MODEL-FACING view, which
+   * after a compaction starts at the latest summary and omits the archived
+   * pre-compaction turns. That is the right default: the fork continues from
+   * the same context the parent currently has, not re-inflated history the
+   * parent itself already dropped.
+   *
+   * Pass `{ fullHistory: true }` to instead copy `this.persisted` — the
+   * complete append-only log, including everything before the last compaction.
+   * Use this when the fork must be able to replay the full original trajectory
+   * (e.g. audit / branch-from-arbitrary-point). `atEventIndex` slices whichever
+   * source is selected.
+   */
+  async fork(
+    atEventIndex?: number,
+    opts?: { fullHistory?: boolean },
+  ): Promise<Session> {
     const newId = generateSessionId();
     const forked = new Session(newId, {
       cwd: this.cwd,
@@ -1696,9 +1964,10 @@ export class Session {
     });
     await forked.init();
     forked.deliveryRoots = [...this.deliveryRoots];
+    const source = opts?.fullHistory ? this.persisted : this.events;
     const slice = atEventIndex === undefined
-      ? this.events
-      : this.events.slice(0, atEventIndex);
+      ? source
+      : source.slice(0, atEventIndex);
     for (const e of slice) {
       forked.events.push(e);
       await forked.persistEvent(e);
@@ -1720,6 +1989,16 @@ export class Session {
       try { off(); } catch { /* ignore */ }
     }
     this.jobListeners = [];
+    if (this.lspManager) {
+      const mgr = this.lspManager;
+      this.lspManager = null;
+      void mgr.stopAll().catch(() => undefined);
+    }
+    if (this.netProxy) {
+      const proxy = this.netProxy;
+      this.netProxy = null;
+      void proxy.close().catch(() => undefined);
+    }
     if (this.persistentShell) {
       this.persistentShell.close();
       this.persistentShell = null;
@@ -1727,6 +2006,11 @@ export class Session {
     const mcp = this.mcp;
     this.mcp = null;
     this.mcpReady = Promise.resolve(null);
+    // Detach our reverse-request handler BEFORE releasing: on a shared manager
+    // the handler set outlives this session's ref, so leaving it registered
+    // would route a later server reverse request to this disposed session.
+    this.mcpUnregisterRequestHandler?.();
+    this.mcpUnregisterRequestHandler = null;
     if (mcp) {
       const { releaseSharedMcp } = await import("./mcp-pool.js");
       await releaseSharedMcp(mcp);
@@ -1745,6 +2029,29 @@ export class Session {
     }
   }
 
+  /**
+   * Surface a `goal_progress` event to subscribers (UIs) without persisting it.
+   * The authoritative per-round record lives in the goal checkpoint file; this
+   * is purely a live notification so a host driving `driveGoalRounds` can show
+   * round/status progress. Informational only — never part of model context.
+   */
+  emitGoalProgress(info: {
+    round: number;
+    status: "running" | "completed" | "blocked" | "round_limit";
+    maxRounds?: number;
+    reason?: string;
+    blockedReason?: string;
+  }): void {
+    this.notify({
+      type: "goal_progress",
+      round: info.round,
+      status: info.status,
+      ...(info.maxRounds !== undefined ? { maxRounds: info.maxRounds } : {}),
+      ...(info.reason !== undefined ? { reason: info.reason } : {}),
+      ...(info.blockedReason !== undefined ? { blockedReason: info.blockedReason } : {}),
+    });
+  }
+
   private registerBuiltins(): void {
     this.toolRegistry.register(bashTool);
     this.toolRegistry.register(bashOutputTool);
@@ -1753,11 +2060,24 @@ export class Session {
     this.toolRegistry.register(notebookEditTool);
     this.toolRegistry.register(webFetchTool);
     this.toolRegistry.register(webSearchTool);
+    // image_gen is opt-in: only register when an image endpoint is configured
+    // (baseURL + apiKey), since not every provider can generate images.
+    if (resolveImageEndpoint(this.config.imageGen)) {
+      imageGenTool.config = this.config.imageGen;
+      this.toolRegistry.register(imageGenTool);
+    }
     this.toolRegistry.register(readFileTool);
     this.toolRegistry.register(readImageTool);
     this.toolRegistry.register(writeFileTool);
     this.toolRegistry.register(editFileTool);
     this.toolRegistry.register(applyPatchTool);
+    this.toolRegistry.register(codeModeTool);
+    // harness_bridge invokes an external agent CLI (claude/codex/custom) as a
+    // sandboxed subprocess. Opt-in: only register when explicitly enabled, so
+    // the tool table isn't polluted on hosts without those CLIs installed.
+    if (this.config.enableHarnessBridge === true) {
+      this.toolRegistry.register(harnessBridgeTool);
+    }
     this.toolRegistry.register(diagnosticsTool);
     this.toolRegistry.register(globTool);
     this.toolRegistry.register(grepTool);
@@ -1774,9 +2094,48 @@ export class Session {
     const memoryWrite = { ...memoryWriteTool };
     const planDone = { ...planDoneTool };
     const task = { ...taskTool };
+    // start_new_task: model-triggered task boundary → clearWorkingContext.
+    const startNewTask = { ...startNewTaskTool };
+    startNewTask.onStartNewTask = (reason) => this.clearWorkingContext(reason);
+    this.toolRegistry.register(startNewTask);
+    // suggest_mode: model proposes a collaboration-mode switch; the user
+    // confirms (or auto-accepts). Per-session copy so the wiring is isolated.
+    const suggestMode = { ...suggestModeTool };
+    suggestMode.currentMode = () => this.mode;
+    suggestMode.autoAccept = () => this.autoAcceptModeSuggestions;
+    this.toolRegistry.register(suggestMode);
+    // start_goal: model escalates the current task into a long-horizon goal
+    // loop. The tool emits a `goal_request` event (parsed in the agent loop);
+    // the handle reports whether a host goal-driver accepted it. Without a
+    // host handler it degrades to a no-op ack so the model just continues.
+    const startGoal = { ...startGoalTool };
+    startGoal.onStartGoal = async (objective, maxRounds, reason) => {
+      if (!this.onGoalRequest) return false;
+      return await this.onGoalRequest({
+        objective,
+        ...(maxRounds ? { maxRounds } : {}),
+        ...(reason ? { reason } : {}),
+      });
+    };
+    this.toolRegistry.register(startGoal);
     this.toolRegistry.register(memoryWrite);
+    const skillHandle = createSkillTool();
+    this.skillToolHandle = skillHandle;
+    this.toolRegistry.register(skillHandle.tool);
+    this.lspManager = new LspManager(this.config.lsp?.servers);
+    this.toolRegistry.register(
+      makeLspNavigateTool(() => this.lspManager, () => this.cwd),
+    );
     this.toolRegistry.register(task);
     this.toolRegistry.register(planDone);
+    // `mcp` meta-tool for on-demand MCP tool discovery (list/describe/call).
+    // Only registered when MCP servers are configured; it becomes the primary
+    // access path when lazy discovery hides individual MCP tool schemas. Reads
+    // the registry lazily so MCP tools that register after boot are visible.
+    const hasMcp = Object.values(this.config.mcpServers ?? {}).some((c) => c && !c.disabled);
+    if (hasMcp) {
+      this.toolRegistry.register(makeMcpMetaTool(() => this.toolRegistry));
+    }
 
  // Wire the memory sink (MEMORY.md + progressive index/topic mirror).
     memoryWrite.sink = new FileMemorySink(this.cwd, {
@@ -1806,6 +2165,7 @@ export class Session {
       getEndpoint: () => ({ config: this.config, model: this.model }),
       permissions: this.permissions,
       onPermissionRequest: this.onPermissionRequest,
+      onAskUser: this.onAskUser,
       getSandbox: () => this.sandbox,
       expandSandboxWritable: (dir, opts) =>
         this.expandWritablePath(dir, opts).then(() => undefined),
@@ -1813,30 +2173,50 @@ export class Session {
       addDeliveryRoot: (dir) => this.addDeliveryRoot(dir),
       scratchDir: () => scratchDir(this.cwd, this.id),
       projectStateDir: () => projectStatePath(this.cwd),
-      buildToolRegistry: (agentType) => {
-        const r = new ToolRegistry();
-        r.register(readFileTool);
-        r.register(readImageTool);
-        r.register(globTool);
-        r.register(grepTool);
-        r.register(lsTool);
-        r.register(readArtifactTool);
-        if (agentType === "worker") {
-          r.register(writeFileTool);
-          r.register(editFileTool);
-          r.register(applyPatchTool);
-          r.register(bashTool);
-        }
-        return r;
-      },
+      buildToolRegistry: (agentType) => buildSubagentToolRegistry(agentType),
       hooks: this.hooks,
       resolveCustomAgent: async (name) => this.customAgents.get(name),
     });
  // Per-sub-agent wall-clock budget (optional). Enforced by the task tool's
  // shared semaphore so a stuck worker can't starve a parallel fan-out.
     task.subagentTimeoutMs = this.config.subagentTimeoutMs;
+ // Scale knobs for large fan-out (config-overridable, conservative defaults):
+ // nesting depth, concurrent threads, and a total-spawn cap that bounds the
+ // whole run regardless of tree shape. See tools/task.ts for the guards.
+    if (typeof this.config.subagentMaxDepth === "number") task.maxDepth = this.config.subagentMaxDepth;
+    if (typeof this.config.subagentMaxThreads === "number") task.maxThreads = this.config.subagentMaxThreads;
+    if (typeof this.config.subagentMaxTotal === "number") task.maxTotal = this.config.subagentMaxTotal;
+ // Durable conclusion-reuse cache policy (default on, 24h TTL). See types.ts.
+    task.cacheEnabled = this.config.subagentCache?.enabled;
+    if (typeof this.config.subagentCache?.ttlHours === "number") {
+      task.cacheTtlMs = this.config.subagentCache.ttlHours * 60 * 60 * 1000;
+    }
 
     this.wireHookResolvers(task.runner);
+  }
+
+  /** True when the current prompt's events include a write/edit/apply_patch
+   * to a code-like file — used to conditionally enable the stopVerify tests
+   * gate. Scans back to the last user message so it reflects *this* prompt. */
+  private promptModifiedCode(): boolean {
+    const CODE_EXT =
+      /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|rb|php|c|h|cc|cpp|hpp|cs|swift|scala|sh|bash|sql|vue|svelte)$/i;
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      const e = this.events[i]!;
+      if (e.type === "message" && e.role === "user") break;
+      if (e.type !== "tool_call") continue;
+      const input = (e.input ?? {}) as Record<string, unknown>;
+      if (e.name === "write_file" || e.name === "edit_file") {
+        const p = input.path;
+        if (typeof p === "string" && CODE_EXT.test(p)) return true;
+      } else if (e.name === "apply_patch" && typeof input.patch === "string") {
+        for (const line of input.patch.split(/\r?\n/)) {
+          const m = line.match(/^\*\*\* (?:Add|Update) File: (.+)$/);
+          if (m && CODE_EXT.test(m[1]!.trim())) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -1906,6 +2286,9 @@ export class Session {
       onMcpOpenAuthUrl: this.onMcpOpenAuthUrl,
       onMcpServerRequest: this.onMcpServerRequest,
       withToolRegistry: (fn) => fn(this.toolRegistry),
+      setMcpRequestHandlerCleanup: (unregister) => {
+        this.mcpUnregisterRequestHandler = unregister;
+      },
     });
   }
 
@@ -1916,7 +2299,10 @@ export class Session {
       const lines = text.split("\n").filter((l) => l.trim().length > 0);
       for (const line of lines) {
         try {
-          this.persisted.push(JSON.parse(line) as Event);
+          const parsed = JSON.parse(line) as Event;
+          // Rehydrate offloaded images (base64 stored as an artifact ref) so the
+          // in-memory transcript is complete.
+          this.persisted.push(await this.rehydrateEventImages(parsed));
         } catch {
  /* skip malformed */
         }
@@ -1978,7 +2364,63 @@ export class Session {
     this.persisted.push(stamped);
     const path = sessionPath(this.id);
     await mkdir(SESSIONS_DIR, { recursive: true });
-    await appendFile(path, JSON.stringify(stamped) + "\n", "utf-8");
+    // Offload large inline image base64 to the content-addressed artifact store
+    // before writing the JSONL line. Identical images dedup by hash, and a
+    // 5 MB screenshot no longer bloats the session log (or gets re-read on every
+    // resume). The in-memory `stamped`/`this.persisted` copies keep their base64;
+    // only the on-disk line is slimmed. Rehydrated in `loadFromDisk`.
+    const forDisk = await this.offloadEventImages(stamped);
+    await appendFile(path, JSON.stringify(forDisk) + "\n", "utf-8");
+  }
+
+  /** Threshold above which an inline image is offloaded to an artifact. */
+  private static readonly IMAGE_OFFLOAD_BYTES = 8 * 1024;
+
+  /** Return a disk-serialisable copy of `e` with large `images[].base64`
+   * replaced by `{ mediaType, ref }`. Small images stay inline. Non-image
+   * events pass through unchanged (by reference — no copy cost). */
+  private async offloadEventImages(e: Event): Promise<Event> {
+    const imgs = (e as { images?: ImageAttachment[] }).images;
+    if (!Array.isArray(imgs) || imgs.length === 0) return e;
+    let changed = false;
+    const mapped = await Promise.all(
+      imgs.map(async (img) => {
+        if (!img.base64 || img.base64.length < Session.IMAGE_OFFLOAD_BYTES) return img;
+        try {
+          const ref = await this.artifacts.write(img.base64, `image/${img.mediaType}`);
+          changed = true;
+          return { mediaType: img.mediaType, ref } as unknown as ImageAttachment;
+        } catch {
+          return img; // best-effort: keep inline if the store write fails
+        }
+      }),
+    );
+    if (!changed) return e;
+    return { ...e, images: mapped } as Event;
+  }
+
+  /** Rehydrate any offloaded `{ mediaType, ref }` images back to base64 after
+   * loading from disk, so the in-memory transcript is complete. Best-effort:
+   * a missing artifact leaves a placeholder note rather than crashing resume. */
+  private async rehydrateEventImages(e: Event): Promise<Event> {
+    const imgs = (e as { images?: Array<{ mediaType: string; base64?: string; ref?: string }> }).images;
+    if (!Array.isArray(imgs) || imgs.length === 0) return e;
+    let changed = false;
+    const mapped = await Promise.all(
+      imgs.map(async (img) => {
+        if (img.base64 || !img.ref) return img;
+        try {
+          const base64 = await this.artifacts.read(img.ref);
+          changed = true;
+          return { mediaType: img.mediaType, base64 };
+        } catch {
+          changed = true;
+          return { mediaType: img.mediaType, base64: "" }; // artifact gone
+        }
+      }),
+    );
+    if (!changed) return e;
+    return { ...e, images: mapped } as Event;
   }
 
   private async rebuildSystemPrompt(): Promise<void> {
@@ -2005,13 +2447,21 @@ export class Session {
     const toolNames = visibleTools.map((t) => t.name);
  // Sandbox posture is part of the prompt so the model knows its boundaries.
     const sb = this.sandbox;
-    const sandboxNote =
-      `Sandbox: mode=${sb.mode}, network=${sb.network ? "allowed" : "blocked"}` +
-      (sb.mode !== "off" ? `, writes limited to ${sb.writableRoots.join(", ")}` : "") +
-      "." +
-      (this._sandboxUnavailable
-        ? " WARNING: no OS sandbox backend (sandbox-exec/bwrap) is available on this host; `bash` commands will be REFUSED. Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
-        : "");
+    // Structured sandbox posture: a clear header line plus one writable root
+    // per line, so the model can parse each allowed path unambiguously.
+    // Lives in the cached static section — it's session-stable.
+    const sandboxNote = (() => {
+      const header = `Sandbox: mode=${sb.mode}, network=${sb.network ? "allowed" : "blocked"}.`;
+      const roots =
+        sb.mode !== "off" && sb.writableRoots.length > 0
+          ? `\nWritable roots (OS sandbox — bash/write are refused outside these):\n` +
+            sb.writableRoots.map((r) => `  - ${r}`).join("\n")
+          : "";
+      const warn = this._sandboxUnavailable
+        ? "\nWARNING: no OS sandbox backend (sandbox-exec/bwrap) is available on this host; `bash` commands will be REFUSED. Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
+        : "";
+      return header + roots + warn;
+    })();
  // Advertise custom sub-agents.
     const customAgentsBlock = renderCustomAgentsBlock(this.customAgents);
  // If a checkpoint exists for this session, append a short summary of
@@ -2048,6 +2498,7 @@ export class Session {
       memory,
       plan,
       toolNames,
+      skills: this.discoveredSkills,
       scratchDir: scratchDir(this.cwd, this.id),
       projectStateDir: projectStatePath(this.cwd),
       deliveryRoots: this.deliveryRoots,
@@ -2085,8 +2536,90 @@ export class Session {
         }
       }
     }
-    if (this.lastProviderInputTokens >= Math.floor(window * 0.9)) {
+    if (this.lastProviderInputTokens >= Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO)) {
       await this.maybeCompact({ force: true });
+    }
+  }
+
+  /** Cheap content fingerprint of the live transcript. Pre-compaction results
+   * are keyed by this so a cached summary is only reused when the exact
+   * history it summarised is still current — a changed fingerprint discards
+   * the cache and falls back to synchronous compaction. */
+  private historyFingerprint(): string {
+    return `${this.events.length}:${this.lastPersistedLinkId ?? ""}`;
+  }
+
+  /** Run `compact()` for the given trigger, reusing a valid turn-boundary
+   * pre-computation when its fingerprint still matches the current history.
+   * This is what turns the otherwise-blocking small-model summary into a
+   * free, already-done step on the turn that crosses the hard trigger. */
+  private async runCompaction(trigger: number, force: boolean): Promise<CompactionResult> {
+    const cached = this.precompact;
+    this.precompact = null;
+    if (cached && cached.fingerprint === this.historyFingerprint()) {
+      // The pre-computed summary was built from exactly this history — reuse
+      // it verbatim (including droppedRange, so the archive write still runs),
+      // skipping the small-model round-trip on the hot path.
+      return cached.result;
+    }
+    return compact(this.events, {
+      contextWindow: trigger,
+      force,
+      // Use the small provider for summarisation (best-effort).
+      summariser: buildSmallProvider(this.config),
+      summaryModel: this.config.smallModel,
+    } as CompactionOptions);
+  }
+
+  /** Turn-boundary pre-compaction (best practice: compact at the natural pause
+   * between turns, not mid-turn). After a turn ends with tokens over a soft
+   * threshold — below the hard trigger, so `maybeCompact` did NOT fire — this
+   * compacts in the background while the user reads the answer, and caches the
+   * result keyed by the current history fingerprint. The next turn's
+   * `maybeCompact` then reuses it for free instead of blocking on the small
+   * model. Safe by construction: the turn has ended, so the history is frozen
+   * when we compute the summary, and the fingerprint guard rejects it if the
+   * next user message has already changed the transcript. */
+  private async precomputeCompaction(): Promise<void> {
+    if (this.config.autoCompact === false) return;
+    if (this.precompactInFlight || this.precompact) return;
+    const modelWindow = lookupContextWindow(this.model);
+    const window = this.config.contextWindow ?? modelWindow.contextWindow;
+    // Shared geometry: `softTrigger` starts a bit below `hardTrigger` so we
+    // pre-compact one turn early, based on `hardTrigger` (not the raw window) so
+    // a small window with a large output reserve can't invert the band. Never
+    // pre-compute once at or past the hard trigger — maybeCompact handles that
+    // synchronously.
+    const { hardTrigger, softTrigger } = compactionGeometry({
+      window,
+      thresholdFraction: this.config.compactionThreshold,
+      maxTokens: this.config.maxTokens,
+      maxOutputTokens: modelWindow.maxOutputTokens,
+    });
+    const tokens = estimateEventTokens(this.events, estimateTokens);
+    if (tokens < softTrigger || tokens >= hardTrigger) return;
+    // Don't pre-compact through a PreCompact hook that would block it anyway.
+    const pre = await this.hooks
+      .runPreCompact("auto")
+      .catch(() => ({ action: "allow" as const, warnings: [] }));
+    if (pre.action === "block") return;
+    this.precompactInFlight = true;
+    const fingerprint = this.historyFingerprint();
+    try {
+      const result = await compact(this.events, {
+        contextWindow: hardTrigger,
+        force: true, // soft band is below the local gate; force the shrink
+        summariser: buildSmallProvider(this.config),
+        summaryModel: this.config.smallModel,
+      } as CompactionOptions);
+      // Only keep it if the history hasn't moved under us while summarising.
+      if (result.events !== this.events && this.historyFingerprint() === fingerprint) {
+        this.precompact = { fingerprint, result };
+      }
+    } catch {
+      /* best-effort: a failed pre-compaction just means the next turn blocks */
+    } finally {
+      this.precompactInFlight = false;
     }
   }
 
@@ -2096,18 +2629,17 @@ export class Session {
     if (this.config.autoCompact === false) return;
     const modelWindow = lookupContextWindow(this.model);
     const window = this.config.contextWindow ?? modelWindow.contextWindow;
- // Effective trigger point. Config may request a fraction of the window
- // (default 0.92). The compaction engine's `contextWindow` option IS the
- // trigger threshold (it compacts when tokens >= that value). Cap by a
- // hard usable window (reserve output tokens) so we never wait until the
+ // Effective trigger point via the shared geometry (single source of truth
+ // for every compaction coefficient). The compaction engine's `contextWindow`
+ // option IS the trigger threshold (it compacts when tokens >= that value).
+ // `hardTrigger` already reserves output tokens so we never wait until the
  // provider rejects the request.
-    const fraction = this.config.compactionThreshold ?? 0.92;
-    const outputReserve = Math.max(
-      1_024,
-      this.config.maxTokens ?? modelWindow.maxOutputTokens ?? 8_192,
-    );
-    const hardUsable = Math.max(4_000, window - outputReserve);
-    const trigger = Math.min(hardUsable, Math.floor(window * fraction));
+    const trigger = compactionGeometry({
+      window,
+      thresholdFraction: this.config.compactionThreshold,
+      maxTokens: this.config.maxTokens,
+      maxOutputTokens: modelWindow.maxOutputTokens,
+    }).hardTrigger;
     if (!opts.force) {
       const decision = shouldCompact(this.events, { contextWindow: trigger });
       if (!decision.shouldCompact) return;
@@ -2125,13 +2657,7 @@ export class Session {
       );
       return;
     }
-    const result = await compact(this.events, {
-      contextWindow: trigger,
-      force: opts.force === true,
- // Use the small provider for summarisation (best-effort).
-      summariser: buildSmallProvider(this.config),
-      summaryModel: this.config.smallModel,
-    } as CompactionOptions);
+    const result = await this.runCompaction(trigger, opts.force === true);
     if (result.events === this.events) return; // no change
     // Local estimate no longer reflects the last oversize API call.
     if (opts.force) this.lastProviderInputTokens = 0;
@@ -2190,9 +2716,10 @@ export class Session {
 
   private async maybeCheckpoint(): Promise<void> {
     if (!this.checkpointHook) return;
-    const threshold = this.config.contextWindow
-      ? Math.floor(this.config.contextWindow * 0.8)
-      : resolveCompactionThreshold(this.model, undefined);
+    // `resolveCompactionThreshold` already applies the config-window formula
+    // (config override → window * 0.8; else the model's own threshold), so this
+    // is one call rather than a duplicated inline `* 0.8` branch.
+    const threshold = resolveCompactionThreshold(this.model, this.config.contextWindow);
     const trigger = this.checkpointHook.check(this.events, {
       tokenThreshold: threshold,
       turnsThreshold: 6,
@@ -2223,6 +2750,39 @@ export class Session {
     }
   }
 
+  /** Start the loopback egress proxy when the sandbox network policy is
+   * "proxy", and point `this.sandbox.proxyUrl` at it so wrapCommand injects
+   * HTTP(S)_PROXY. Fail-soft: if the proxy can't start, log and leave the
+   * policy without a proxyUrl (commands then run without proxy env — the
+   * allowlist is simply not enforced, matching the cooperative best-effort
+   * contract). */
+  private async startNetProxyIfConfigured(): Promise<void> {
+    const pol = this.sandbox.networkPolicy;
+    if (pol.mode !== "proxy") return;
+    try {
+      const { startNetProxy } = await import("./netProxy.js");
+      this.netProxy = await startNetProxy({
+        allow: pol.allow,
+        allowPorts: pol.allowPorts,
+        denyLog: pol.denyLog,
+      });
+      // Seatbelt can scope network-outbound to the proxy's loopback port, so
+      // egress is truly forced through the proxy. Other backends (bwrap/wsl
+      // without a userspace net stack) only get the cooperative env vars.
+      const { detectSandboxBackend } = await import("./sandbox.js");
+      const enforced = detectSandboxBackend() === "seatbelt";
+      this.sandbox = {
+        ...this.sandbox,
+        proxyUrl: `http://127.0.0.1:${this.netProxy.port}`,
+        proxyEnforcement: enforced ? "enforced" : "best-effort",
+      };
+    } catch (err) {
+      process.stderr.write(
+        `[session] network proxy failed to start: ${(err as Error).message}\n`,
+      );
+    }
+  }
+
  /** Produce a short title for the session. Tries the small model first,
  * then falls back to a deterministic prefix of the first user text. */
   private async refreshTitle(firstUserText: string): Promise<void> {
@@ -2237,7 +2797,81 @@ export class Session {
     const title = sanitizeTitle(candidate ?? "") ?? sanitizeTitle(fallback) ?? fallback;
     if (title) await this.setTitle(title);
   }
+
+  /**
+   * Task boundary: archive the current working context and continue the SAME
+   * session with a clean slate. Generic and task-agnostic — it does NOT guess
+   * when a task ends; it runs only when the user (/clear) or the model
+   * (start_new_task tool) explicitly asks for it.
+   *
+   * Mechanism (reuses the compaction + archive machinery):
+   *  - Force a full handoff summary of everything so far, so nothing is lost:
+   *    the full transcript stays on disk (JSONL + Markdown archive) and the
+   *    summary points the model back to it.
+   *  - Replace the live `events` with [summary, boundary] so the next turn
+   *    starts from a short reference instead of the whole prior task's
+   *    transcript. This is what actually stops cross-task context from leaking.
+   *  - The boundary marker tells the model the summarised history is
+   *    reference-only, not an active task to resume.
+   *
+   * Returns true when a boundary was drawn (there was live context to clear).
+   */
+  /** Public manual compaction (the `/compact` command). Forces a summary pass
+   * now regardless of token pressure, keeping the session going on the same
+   * task (unlike clearWorkingContext, which draws a task boundary). */
+  async compact(): Promise<void> {
+    await this.maybeCompact({ force: true });
+  }
+
+  async clearWorkingContext(reason?: string): Promise<boolean> {
+    const hasWork = this.events.some(
+      (e) =>
+        (e.type === "message" && e.role === "assistant") ||
+        e.type === "tool_result",
+    );
+    if (!hasWork) return false;
+
+    const modelWindow = lookupContextWindow(this.model);
+    const window = this.config.contextWindow ?? modelWindow.contextWindow;
+    const trigger = Math.max(4_000, Math.floor(window * FORCED_SHRINK_RATIO));
+    const result = await this.runCompaction(trigger, true).catch(() => null);
+
+    const summaryEvent =
+      result?.events.find((e) => e.type === "compaction") ??
+      this.events.find((e) => e.type === "compaction");
+    const boundary: Event = {
+      type: "message",
+      id: `msg_${randomUUID()}`,
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: TASK_BOUNDARY_MARKER + (reason ? `\n\nReason: ${reason}` : ""),
+        },
+      ],
+    };
+    const next: Event[] = summaryEvent ? [summaryEvent, boundary] : [boundary];
+
+    this.events = next;
+    this.lastProviderInputTokens = 0;
+    for (const e of next) {
+      if (this.persisted.includes(e)) continue;
+      await this.persistEvent(e).catch(() => undefined);
+    }
+    this.notify(boundary);
+    await this.rebuildSystemPrompt().catch(() => undefined);
+    await this.hooks.runSessionStart("clear").catch(() => undefined);
+    return true;
+  }
 }
+
+/** Generic, task-agnostic boundary marker injected by clearWorkingContext. */
+const TASK_BOUNDARY_MARKER =
+  "[task boundary] The conversation above this line was a previous, now-archived task. " +
+  "Its summary is retained only as reference; the full transcript is on disk if you need it. " +
+  "Do NOT resume, continue, or re-execute any plan, instruction, or tool call from before this " +
+  "boundary unless the next message explicitly asks you to. Treat the next user message as the " +
+  "start of a fresh task.";
 
 /** Append a path to user-level `sandbox.writablePaths` (idempotent). */
 async function persistSandboxWritablePath(dir: string): Promise<void> {
@@ -2259,6 +2893,17 @@ async function persistSandboxWritablePath(dir: string): Promise<void> {
 /** Sub-agent tool outputs are only for display; cap them so a fan-out that
  * reads big files doesn't balloon the parent's JSONL. */
 const SUBAGENT_RESULT_CAP = 4_000;
+/** Extract the `<skills>…</skills>` catalogue from a built system prompt, or
+ * "" when absent. Used to split the skills catalogue out of the `system`
+ * category in contextReport(). */
+function extractSkillsSection(fullPrompt: string): string {
+  const start = fullPrompt.indexOf("<skills>");
+  if (start < 0) return "";
+  const end = fullPrompt.indexOf("</skills>", start);
+  if (end < 0) return "";
+  return fullPrompt.slice(start, end + "</skills>".length);
+}
+
 function slimSubagentEvent(e: Extract<Event, { type: "subagent" }>): Event {
   const inner = e.event;
   if (inner?.type !== "tool_result" || inner.content.length <= SUBAGENT_RESULT_CAP) return e;
@@ -2273,9 +2918,8 @@ function slimSubagentEvent(e: Extract<Event, { type: "subagent" }>): Event {
 }
 
 // ---------------------------------------------------------------------------
-// Re-exports: standalone helpers that used to live in this file. Kept so
-// existing `import { ... } from "./session.js"` callers keep working; new
-// code should import from "./session-utils.js" (or the barrel) directly.
+// Re-exports for `import { ... } from "./session.js"` callers. New code
+// should import from "./session-utils.js" (or the barrel) directly.
 // ---------------------------------------------------------------------------
 export {
   SESSIONS_DIR,
@@ -2285,8 +2929,14 @@ export {
   searchSessions,
   exportSession,
   deleteSession,
+  persistSessionCwd,
+  loadSessionState,
+  setSessionPinned,
+  setSessionArchived,
+  resetSessionIndex,
 } from "./session-utils.js";
 export type {
   RichSessionSummary,
   SessionExportFormat,
+  SessionState,
 } from "./session-utils.js";

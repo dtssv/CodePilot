@@ -25,6 +25,7 @@ export type {
   WebFetchConfig,
   WebSearchConfig,
   WebSearchProvider,
+  ImageGenConfig,
   QuestionSpec,
   QuestionRequest,
   QuestionAnswers,
@@ -42,6 +43,8 @@ export type {
   GoalRunResult,
   ProviderName,
 } from "./types.js";
+// Runtime value: the single source of truth for supported provider names.
+export { PROVIDER_NAMES } from "./types.js";
 
 // ---- Config ----
 export { loadConfig, mergeConfig } from "./config.js";
@@ -133,6 +136,8 @@ export type {
   SandboxBackend,
   PathCheckResult,
 } from "./sandbox.js";
+export { startNetProxy, parseAuthority } from "./netProxy.js";
+export type { NetProxyPolicy, RunningNetProxy } from "./netProxy.js";
 
 // ---- Hooks ----
 export { HookEngine, hashCommand } from "./hooks.js";
@@ -199,7 +204,6 @@ export {
   trimEventsToBudget,
   buildLocalHandoffSummary,
   estimateEventTokens,
-  eventsToMessages,
   extractPlan,
 } from "./compaction.js";
 export type {
@@ -292,17 +296,25 @@ export type {
 // session-utils.ts (standalone helpers). Both are re-exported here so the
 // public API is unchanged.
 export { Session } from "./session.js";
+export { openSessionIndex } from "./sessionIndex.js";
+export type { SessionIndex } from "./sessionIndex.js";
 export {
   createSession,
   listSessions,
+  resetSessionIndex,
+  setSessionPinned,
+  setSessionArchived,
+  loadSessionState,
   SESSIONS_DIR,
   normalizeCwd,
   sameCwd,
+  loadCwdFromDisk,
   persistSessionCwd,
+  buildSingleProvider,
 } from "./session-utils.js";
 
 // ---- Goal ----
-export { runGoal } from "./goal.js";
+export { runGoal, driveGoalRounds } from "./goal.js";
 
 // ---- Config (v2 layered loader) ----
 // NOTE: `loadConfig` and `mergeConfig` are already exported above in the
@@ -433,6 +445,9 @@ export type { Skill, SkillSource, DiscoverOptions } from "./skills.js";
 
 export { skillTool, createSkillTool, StaticSkillStore, setDefaultSkillStore } from "./tools/skill.js";
 export type { SkillStore, SkillToolHandle } from "./tools/skill.js";
+export { LspManager, languageIdForPath, parseLocations, DEFAULT_LSP_SERVERS } from "./lsp.js";
+export type { LspServerConfig, LspLocation, LspPosition } from "./lsp.js";
+export { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 
 // ---- Slash commands (custom /name commands from .codepilot/commands/*.md) ----
 export {
@@ -533,6 +548,9 @@ export type {
   CheckpointHook,
   WriteCheckpointResult,
 } from "./checkpoints.js";
+
+export { SubagentCache, SUBAGENT_CACHE_TTL_MS } from "./subagentCache.js";
+export type { CachedConclusion, SubagentCacheKey } from "./subagentCache.js";
 
 // ---- Snapshots (checkpoint rewind) ----
 export {
@@ -693,6 +711,7 @@ export {
 export type {
   RichSessionSummary,
   SessionExportFormat,
+  SessionState,
 } from "./session-utils.js";
 export { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
 export {
@@ -749,6 +768,7 @@ export type {
 export { ISOLATION_MODES } from "./tools/task.js";
 export type { Isolation } from "./tools/task.js";
 export { parseCsv } from "./tools/task.js";
+export { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 
 // ---- Runtime management & introspection (/mcp /hooks /agents /skills /context) ----
 export {
@@ -775,6 +795,12 @@ export { normalizeMcpToolName, buildMcpToolNameMap, MCP_TOOL_NAME_MAX_LENGTH } f
 
 // ---- Consistency assertion (model-visible equals logged, debug/test only) ----
 export { consistencyAssertEnabled, assertConsistency, ConsistencyError } from "./consistency.js";
+export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
+export type { BuiltinCommand, BuiltinCommandScope } from "./builtinCommands.js";
+export { FileObservationStore } from "./fsObservation.js";
+export type { FileObservation, FreshnessResult } from "./fsObservation.js";
+export { checkCitations, buildCitationNotice, extractCitations, observedPaths } from "./citationGuard.js";
+export type { Citation, CitationCheck } from "./citationGuard.js";
 
 // ---- Keyless transcript replay (test mode, no API key needed) ----
 export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";

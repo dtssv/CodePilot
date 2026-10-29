@@ -21,6 +21,7 @@
 import { runAgent } from "./agent.js";
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
 import { runOneTool, type ToolExecResult } from "./agent-tools.js";
+import { DoomLoopDetector } from "./doomLoop.js";
 import { filterToolNames } from "./tools/modes.js";
 import { redactSecrets } from "./redact.js";
 import type { AgentMode, Event, ToolUseBlock } from "./types.js";
@@ -88,11 +89,19 @@ export interface RuntimeToolkit {
 
 /** Build a {@link RuntimeToolkit} bound to the core implementation. */
 export function createRuntimeToolkit(): RuntimeToolkit {
+  // A toolkit instance is long-lived (one per runtime), so give it a single
+  // DoomLoopDetector that persists across `runTool` calls. Without this, a
+  // custom runtime driving tools through the toolkit would get NONE of the
+  // doom-loop refusal / idempotent-dedup the interface promises — the default
+  // loop builds its own detector (agent.ts) and passes it to runOneTool, but a
+  // toolkit caller has no detector of its own. Sharing one across calls is what
+  // makes repeat-call detection meaningful (a per-call detector never trips).
+  const doomLoop = new DoomLoopDetector();
   return {
     version: 1,
     runDefault: (input, deps) => runAgent(input, deps),
     runTool: (call, deps, emit, mode = "agent") =>
-      runOneTool(call, deps, emit, mode),
+      runOneTool(call, deps, emit, mode, doomLoop),
     visibleTools: (deps, mode) => filterToolNames(deps.tools.all(), mode),
     redactToolOutput: (text) => redactSecrets(text),
   };

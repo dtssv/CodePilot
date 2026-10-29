@@ -1,10 +1,8 @@
 /**
  * Process-wide shared MCP managers.
  *
- * Session init used to `await npx …` on every resume — that made sidebar
- * clicks feel stuck for several seconds. Sessions now share one manager per
- * identical `mcpServers` config (ref-counted) and can start it in the
- * background without blocking resume.
+ * Sessions share one manager per identical `mcpServers` config (ref-counted)
+ * and can start it in the background without blocking resume.
  */
 
 import { McpManager } from "./mcp.js";
