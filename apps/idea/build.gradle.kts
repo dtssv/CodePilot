@@ -55,10 +55,27 @@ dependencies {
     // ----- Test dependencies -----
     // JUnit 5 (Jupiter) — test engine + assertions.
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.3")
+    // JUnit Platform launcher must be declared explicitly: Gradle 9 no longer
+    // adds it automatically, and we exclude the IntelliJ test-runtime fix
+    // classpath (above) that used to pull it in transitively. Without it the
+    // test task fails with "Failed to load JUnit Platform ... launcher".
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.3")
     // MockK — mocking framework for Kotlin (used for spying the client's NDJSON sink).
     testImplementation("io.mockk:mockk-jvm:1.13.12")
     // Coroutines test utilities (runTest, TestDispatcher) — available for future async tests.
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+}
+
+// IntelliJ Platform Gradle Plugin 2.19 auto-wires an `intellijPlatformTestRuntimeFixClasspath`
+// configuration that pulls `bundledModule:intellij-platform-test-runtime:<IDE build>`. That
+// bundled module is only published for newer platforms — for the 2024.1 (IC-241) target we pin,
+// it does not exist in the JetBrains repositories, so the `test` task fails to resolve it with:
+//   Could not find bundledModule:intellij-platform-test-runtime:IC-241.19416.15
+// Our tests are pure JUnit 5 unit tests (protocol / serialization / settings / process) that never
+// boot the IntelliJ Platform test fixture, so this runtime is genuinely unnecessary. Drop the
+// unresolvable bundled module from the fix classpath instead of failing the build on it.
+configurations.matching { it.name == "intellijPlatformTestRuntimeFixClasspath" }.configureEach {
+    exclude(group = "bundledModule", module = "intellij-platform-test-runtime")
 }
 
 intellijPlatform {
