@@ -45,11 +45,17 @@ describe("wrapCommand proxy env injection", () => {
   const cwd = process.cwd();
 
   it("injects HTTP(S)_PROXY exports when a proxyUrl is set", () => {
-    const base = resolveSandbox({ mode: "off", network: { mode: "proxy", allow: ["x"] } }, cwd);
-    // mode "off" short-circuits; use workspace-write so wrapping runs. But we
+    // Use workspace-write so wrapping runs (mode "off" short-circuits before
+    // proxy injection), and fallback "allow-unsandboxed" so the result is the
+    // proxy-injected command on *every* host — including CI runners that have
+    // no OS sandbox (sandbox-exec / bwrap), where the default "deny" fallback
+    // would otherwise replace it with a "[sandbox] denied" error command. We
     // only assert the env prefix, which is independent of the OS backend.
     const policy = {
-      ...resolveSandbox({ network: { mode: "proxy", allow: ["x"] } }, cwd),
+      ...resolveSandbox(
+        { network: { mode: "proxy", allow: ["x"] }, fallback: "allow-unsandboxed" },
+        cwd,
+      ),
       proxyUrl: "http://127.0.0.1:12345",
     };
     const w = wrapCommand("curl https://x/", policy);
@@ -59,7 +65,6 @@ describe("wrapCommand proxy env injection", () => {
     expect(w.command).toContain("HTTPS_PROXY=");
     expect(w.command).toContain("127.0.0.1:12345");
     expect(w.command).toContain("NO_PROXY=");
-    void base;
   });
 
   it("does not inject proxy env when policy is not proxy mode", () => {
