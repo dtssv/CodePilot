@@ -48,7 +48,15 @@ end-to-end check.
 - Persistence is append-only JSONL event sourcing (one file per session), not a
   database. This is intentional: single-writer-per-session sequential access
   makes append+replay optimal, and gives free crash recovery. Do not "upgrade"
-  it to SQLite without a concrete cross-session query/concurrency need.
+  the source of truth to SQLite. A *derived, fail-soft* SQLite index is allowed
+  and exists (`sessionIndex.ts`, `docs/design/B-sqlite-session-index.md`): the
+  hot `session/list`/`searchSessions` RPCs would otherwise re-scan and JSON-parse
+  every session's JSONL on each UI event in the shared daemon. Invariants: JSONL
+  stays the source of truth, the index is rebuildable and may be deleted at any
+  time, and `openSessionIndex` returns null on any failure so callers fall back
+  to the full-scan path. Native deps (`better-sqlite3`) must track the repo's
+  Node floor (`engines.node` `>=20`) — a native addon above that floor aborts the
+  process on older runtimes, which the fail-soft try/catch cannot recover from.
 - Context management is client-side: layered fold + small-model compaction +
   turn-boundary pre-compaction. Providers with implicit prompt caching
   (OpenAI/Gemini) are handled by keeping a stable prefix; Anthropic gets explicit
