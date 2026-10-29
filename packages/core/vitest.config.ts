@@ -6,6 +6,24 @@ export default defineConfig({
     environment: "node",
     testTimeout: 20_000,
     setupFiles: ["./test/setup.ts"],
+    // Run each test file in a forked child process and bound the pool. Several
+    // suites spawn real subprocesses/servers (MCP stdio children, the loopback
+    // net proxy, bash jobs), so forks isolate those better than worker threads.
+    // The CI runners were OOM-killing workers — "Worker exited unexpectedly" from
+    // tinypool — because vitest's default fork count = CPU count, and the combined
+    // V8 heaps plus the spawned children exceeded the runner's memory ceiling
+    // (it surfaced on Node 20 everywhere and Node 22 on ubuntu; Node 22/macOS had
+    // just enough headroom). Cap concurrency to 2 and bound each fork's old-space
+    // so the peak stays well under the ceiling. The suite runs in ~15s either way.
+    // Override with CODEPILOT_TEST_FORKS when a beefier host wants more parallelism.
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        minForks: 1,
+        maxForks: Number(process.env.CODEPILOT_TEST_FORKS) || 2,
+        execArgv: ["--max-old-space-size=1024"],
+      },
+    },
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov", "html"],
