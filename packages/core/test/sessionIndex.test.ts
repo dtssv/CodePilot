@@ -97,7 +97,13 @@ describe("sessionIndex (SQLite metadata index)", () => {
 
   it("title matches rank above body/cwd matches", () => {
     const i = open();
+    // `body` must match ONLY in the body: give it a title sidecar with no
+    // "alpha", so its title does not also score 100 (without a .title the title
+    // falls back to the first user message, which would then match the query
+    // too and leave the order decided by a filesystem-mtime tie-break — that is
+    // exactly what used to flake on Linux's coarser mtime granularity).
     writeSession(dir!, "body", { user: "mentions alpha deep in text" });
+    writeFileSync(join(dir!, "body.title"), "some unrelated heading", "utf-8");
     writeSession(dir!, "titled", { user: "whatever" });
     writeFileSync(join(dir!, "titled.title"), "alpha release", "utf-8");
     const out = i.search("alpha");

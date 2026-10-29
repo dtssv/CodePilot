@@ -275,7 +275,16 @@ class SqliteSessionIndex implements SessionIndex {
         scored.push({ r, score: 1 });
       }
     }
-    scored.sort((a, b) => b.score - a.score || b.r.updated_at - a.r.updated_at);
+    // Stable order across platforms: score, then recency, then id as a final
+    // deterministic tie-break. Without the id key, two rows with the same score
+    // and the same mtime (common on filesystems with coarse mtime granularity,
+    // e.g. some Linux CI runners) would sort nondeterministically.
+    scored.sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.r.updated_at - a.r.updated_at ||
+        (a.r.id < b.r.id ? -1 : a.r.id > b.r.id ? 1 : 0),
+    );
     const out = scored.map((s) => rowToSummary(s.r));
     return opts.limit ? out.slice(0, opts.limit) : out;
   }
