@@ -1,11 +1,16 @@
 // code_mode: execute model-generated TypeScript/JavaScript in a sandboxed vm
 // context with access to a curated set of tool APIs (readFile, writeFile,
-// editFile, bash, grep, glob, ls). Every call is routed through the normal
-// tool permission/sandbox pipeline — nothing bypasses the sandbox.
+// editFile, bash, grep, glob, ls). The delegated tools still enforce the OS
+// sandbox + path guard (the real security boundary) — nothing bypasses the
+// sandbox. (In-code calls go straight to each tool's execute(), so they do NOT
+// re-run the permission-engine ask/deny or hooks; code_mode is execute-tier and
+// only available in `agent` mode, where broad execute is already granted.)
+// Large output is spilled to an artifact (head+tail), matching bash/grep/etc.
 
 import { z } from "zod";
 import vm from "node:vm";
 import type { ToolDef, ToolContext } from "./types.js";
+import { spillHeadTail } from "./_shared.js";
 import { readFileTool } from "./read_file.js";
 import { writeFileTool } from "./write_file.js";
 import { editFileTool } from "./edit_file.js";
@@ -215,6 +220,17 @@ export const codeModeTool: ToolDef<typeof schema> = {
     }
 
     const content = parts.join("") || "(no output)";
-    return { content, isError: error !== undefined };
+
+    // code_mode exists for multi-step work (loops over files, transforms) —
+    // exactly the pattern that produces large output. Without a spill it would
+    // dump an unbounded concatenation straight into context, unlike every other
+    // output-producing tool (bash/grep/web_fetch/read_file). Keep head+tail so
+    // both the loop's early output AND the final return value survive.
+    const spilled = await spillHeadTail(ctx, content, `code_mode:${input.code.slice(0, 80)}`);
+    return {
+      content: spilled.content,
+      isError: error !== undefined,
+      artifactRef: spilled.artifactRef,
+    };
   },
 };

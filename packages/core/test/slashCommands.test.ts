@@ -292,6 +292,36 @@ describe("discoverSlashCommands", () => {
     expect(sc!.source).toBe("builtin");
     expect(sc!.body).toMatch(/skill-creator/);
   });
+
+  it("discovers commands from extraDirs (plugin source, lowest priority)", async () => {
+    // A plugin command dir contributes `deploy`; a project command with the
+    // SAME name must win (first-definition-wins across sources).
+    const pluginDir = join(tmp, "plugin-a", "commands");
+    writeCommand(pluginDir, "deploy", "plugin deploy body");
+    writeCommand(pluginDir, "plugin-only", "only from the plugin");
+    writeCommand(commandsDirFor(projectDir), "deploy", "project deploy body");
+    const { commands } = await discoverSlashCommands(projectDir, {
+      userDir: join(tmp, "none"),
+      includeBuiltins: false,
+      extraDirs: [pluginDir],
+    });
+    const deploy = commands.find((c) => c.name === "deploy")!;
+    expect(deploy.source).toBe("project");
+    expect(deploy.body).toContain("project deploy body");
+    const only = commands.find((c) => c.name === "plugin-only")!;
+    expect(only.source).toBe("plugin");
+  });
+
+  it("a missing/unreadable extraDir never aborts discovery (fail-soft)", async () => {
+    writeCommand(commandsDirFor(projectDir), "keep", "survives");
+    const { commands, warnings } = await discoverSlashCommands(projectDir, {
+      userDir: join(tmp, "none"),
+      includeBuiltins: false,
+      extraDirs: [join(tmp, "does-not-exist")],
+    });
+    expect(commands.map((c) => c.name)).toContain("keep");
+    expect(warnings).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

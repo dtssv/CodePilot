@@ -11,8 +11,27 @@ import { detectHostKind, type HostKind } from "./protocol/bridge.js";
 export type Layout = "web" | "agent" | "embedded";
 export type Theme = "light" | "dark";
 
+/**
+ * A named colour palette, layered on top of the light/dark axis. `default` is
+ * the built-in CodePilot palette (the existing look). Each other name swaps
+ * the `--color-*` token set via `[data-theme-name]` in index.css, and still
+ * has a light and a dark variant so it composes with the Theme toggle — the
+ * codex model ("a named palette selected by config/picker"), adapted to the
+ * web's existing light/dark infrastructure instead of replacing it.
+ */
+export type ThemeName = "default" | "nord" | "solarized" | "high-contrast";
+
+/** All selectable palettes, in display order. */
+export const THEME_NAMES: readonly ThemeName[] = [
+  "default",
+  "nord",
+  "solarized",
+  "high-contrast",
+] as const;
+
 const LAYOUT_KEY = "codepilot.layout";
 const THEME_KEY = "codepilot.theme";
+const THEME_NAME_KEY = "codepilot.themeName";
 
 export interface Surface {
   layout: Layout;
@@ -92,6 +111,23 @@ export function applyTheme(theme: Theme, persist = false): void {
   document.documentElement.dataset.theme = theme;
   document.documentElement.classList.toggle("dark", theme === "dark");
   if (persist) writeStore(THEME_KEY, theme);
+}
+
+/** The saved named palette, or "default" when none/unknown. Named palettes are
+ * a pure client pref — never host-driven (a host only controls light/dark). */
+export function initialThemeName(): ThemeName {
+  const saved = readStore(THEME_NAME_KEY);
+  return (THEME_NAMES as readonly string[]).includes(saved ?? "")
+    ? (saved as ThemeName)
+    : "default";
+}
+
+/** Apply a named palette by setting `data-theme-name` on <html>. "default"
+ * removes the attribute so the base `--color-*` tokens apply. */
+export function applyThemeName(name: ThemeName, persist = false): void {
+  if (name === "default") delete document.documentElement.dataset.themeName;
+  else document.documentElement.dataset.themeName = name;
+  if (persist) writeStore(THEME_NAME_KEY, name);
 }
 
 export function applyLayout(layout: Layout): void {

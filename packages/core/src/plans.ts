@@ -196,24 +196,23 @@ export async function setPlanFileStatus(
   const path = join(dir, `${slug}.md`);
   try {
     const text = await readFile(path, "utf-8");
-    const updated = text.replace(
-      /_Session: [^·]+ · Created: [^·]+ · Status: (pending|approved|rejected)_/,
-      `_Session: $1 · Created: $2 · Status: ${status}`
-    );
- // The regex above is fragile on the capture groups; fall back to a
- // simpler line-based rewrite if it didn't match.
-    if (updated === text) {
-      const lines = text.split(/\r?\n/);
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i]!.startsWith("_Session:")) {
-          lines[i] = lines[i]!.replace(/· Status: \w+/, `· Status: ${status}`);
-          break;
-        }
+ // Rewrite the Status token in place on the `_Session: … · Status: …_`
+ // line, touching ONLY that token — the session id, created date and the
+ // closing `_` (markdown italic) are preserved. A capture-group `replace`
+ // on the whole line is error-prone (it previously clobbered the session id
+ // and dropped the trailing `_`), so this line-scoped rewrite is the single
+ // source of truth.
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i]!.startsWith("_Session:")) {
+        // Match only the status WORD, not the trailing `_` that closes the
+        // markdown italic — `_` is a `\w` char, so a naive `\w+` would eat it
+        // and corrupt the line. `[a-z]+` stops before the underscore.
+        lines[i] = lines[i]!.replace(/· Status: [a-z]+/i, `· Status: ${status}`);
+        break;
       }
-      await writeFile(path, lines.join("\n"), "utf-8");
-      return;
     }
-    await writeFile(path, updated, "utf-8");
+    await writeFile(path, lines.join("\n"), "utf-8");
   } catch {
  /* ignore — best-effort */
   }

@@ -10,9 +10,12 @@ import {
   estimateMessagesTokens,
   estimateObjectTokens,
   estimateEventsTokens,
+  IMAGE_TOKEN_ESTIMATE,
   lookupContextWindow,
   resolveCompactionThreshold,
 } from "../src/tokens.js";
+import { estimateEventTokens } from "../src/compaction.js";
+import type { Event } from "../src/types.js";
 
 describe("estimateTokens", () => {
   it("returns 0 for empty input", () => {
@@ -124,6 +127,49 @@ describe("estimateMessagesTokens", () => {
       },
     ]);
     expect(t).toBeGreaterThan(0);
+  });
+
+  it("prices an image through the single IMAGE_TOKEN_ESTIMATE source of truth", () => {
+    const textOnly = estimateMessagesTokens([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ]);
+    const withImage = estimateMessagesTokens([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hi" },
+          { type: "image", mediaType: "image/png", base64: "x" },
+        ],
+      },
+    ]);
+    // The image adds exactly the shared constant, nothing more.
+    expect(withImage - textOnly).toBe(IMAGE_TOKEN_ESTIMATE);
+  });
+});
+
+describe("image token single source of truth", () => {
+  it("prices an image identically on the message and event estimation paths", () => {
+    // Both the provider-message estimator (estimateMessagesTokens) and the
+    // event/compaction estimator (estimateEventTokens) must charge the SAME
+    // per-image cost, or the self-calibration ratio would compare mismatched
+    // numbers. This pins them to the one exported constant.
+    const event: Event = {
+      type: "message",
+      id: "m1",
+      role: "user",
+      content: [{ type: "text", text: "hi" }],
+      images: [{ mediaType: "image/png", base64: "x" }],
+    };
+    const base: Event = {
+      type: "message",
+      id: "m2",
+      role: "user",
+      content: [{ type: "text", text: "hi" }],
+    };
+    const delta =
+      estimateEventTokens([event], estimateTokens) -
+      estimateEventTokens([base], estimateTokens);
+    expect(delta).toBe(IMAGE_TOKEN_ESTIMATE);
   });
 });
 

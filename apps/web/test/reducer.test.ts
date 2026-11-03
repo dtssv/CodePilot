@@ -371,6 +371,60 @@ describe("connection and sessions", () => {
     expect(state.usage).toMatchObject({ input: 5, output: 2 });
   });
 
+  it("batched replay yields the same rows as driving events one-by-one (O(N) fold stays equivalent)", () => {
+    // The resume fast path mutates one accumulator in place with replay=true.
+    // It MUST produce byte-identical transcript rows to the pure live path, or
+    // a resumed session would render differently from the one you just lived.
+    const history: Event[] = [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }] },
+      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "wor" } },
+      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "king" } },
+      { type: "tool_call", id: "t1", name: "read_file", input: { path: "a.ts" } },
+      { type: "tool_result", toolCallId: "t1", name: "read_file", content: "contents" },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "working" }] },
+      { type: "plan", steps: [{ id: "s1", title: "step", status: "completed" }] },
+      { type: "usage", usage: { input: 10, output: 4 } },
+    ];
+
+    // Live path: each event through the reducer onto a fresh session.
+    const live = history.reduce(
+      (acc, event) => reducer(acc, { type: "event", event }),
+      apply(initialState("/repo"), { type: "session-opened", sessionId: "s1", agentMode: "agent", history: [] }),
+    );
+
+    // Replay path: all history folded in one session-opened.
+    const replayed = apply(initialState("/repo"), {
+      type: "session-opened",
+      sessionId: "s1",
+      agentMode: "agent",
+      history,
+    });
+
+    expect(replayed.rows).toEqual(live.rows);
+    expect(replayed.plan).toEqual(live.plan);
+    expect(replayed.usage).toEqual(live.usage);
+  });
+
+  it("replay strips transient retry/429 banners once at the end of the fold", () => {
+    const history: Event[] = [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
+      // A recoverable rate-limit error mid-turn (transient banner)…
+      { type: "error", message: "HTTP 429 rate limit", recoverable: true },
+      // …then the turn resumes and completes.
+      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "done" } },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "done" }] },
+    ];
+    const state = apply(initialState("/repo"), {
+      type: "session-opened",
+      sessionId: "s1",
+      agentMode: "agent",
+      history,
+    });
+    // The transient 429 banner must not linger after the resumed turn.
+    expect(state.rows.some((r) => r.kind === "error")).toBe(false);
+    expect(messages(state)).toHaveLength(2);
+  });
+
   it("clears prior state when a new session opens", () => {
     let state = drive([{ type: "plan", steps: [{ id: "s", title: "old", status: "pending" }] }]);
     state = apply(state, {
@@ -515,5 +569,28 @@ describe("follow-up queue events", () => {
     expect(s.followUps?.map((f) => f.text)).toEqual(["next", "after"]);
     s = drive([{ type: "followup", action: "removed", items: [{ id: "fu_2", text: "after", queuedAt: 2 }] }], s);
     expect(s.followUps?.map((f) => f.id)).toEqual(["fu_2"]);
+  });
+
+  it("clears queued follow-ups when switching into another session (no cross-session leak)", () => {
+    // Session A queues a follow-up.
+    let s = initialState("/repo");
+    s = reducer(s, { type: "session-opened", sessionId: "A", agentMode: "agent" });
+    s = drive(
+      [
+        {
+          type: "followup",
+          action: "queued",
+          items: [{ id: "fu_a", text: "A's queued message", queuedAt: 1 }],
+        },
+      ],
+      s,
+    );
+    expect(s.followUps?.map((f) => f.text)).toEqual(["A's queued message"]);
+
+    // Switch to session B: A's queued follow-up must NOT survive into B.
+    s = reducer(s, { type: "session-opened", sessionId: "B", agentMode: "agent" });
+    expect(s.sessionId).toBe("B");
+    expect(s.followUps).toBeUndefined();
+    expect(s.lastRequest).toBeUndefined();
   });
 });

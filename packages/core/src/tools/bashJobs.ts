@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { projectStatePath } from "../projectState.js";
+import { modelShellEnv } from "../sandbox.js";
 
 export interface JobMeta {
   id: string;
@@ -164,7 +165,7 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
   // and the engine can cascade-kill on shutdown.
   const proc = spawn(spec.shell, [...spec.shellArgs, spec.command], {
     cwd: spec.cwd,
-    env: process.env,
+    env: modelShellEnv(),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });

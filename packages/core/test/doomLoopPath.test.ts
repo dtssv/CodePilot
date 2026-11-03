@@ -4,10 +4,86 @@ import {
   DedupCache,
   PATH_WARN_THRESHOLD,
   PATH_OVERLAP_THRESHOLD,
+  WARN_THRESHOLD,
+  REFUSE_THRESHOLD,
+  SEQ_WINDOW,
+  SEQ_REPEAT,
   readWindow,
   windowOverlapFraction,
   pathKey,
 } from "../src/doomLoop.js";
+
+// Layer 1 — exact (tool, input) repetition. This is the ONLY layer that
+// hard-denies (refuse) on a count, and the only harness among codex/opencode/
+// dsh/pi that does so at all (dsh warns but never vetoes). Because a refusal
+// stops real work, the threshold boundary and the "exact input only" scope
+// are worth pinning precisely.
+describe("DoomLoopDetector layer 1 (exact repetition)", () => {
+  it(`warns at WARN_THRESHOLD (${WARN_THRESHOLD}) and refuses at REFUSE_THRESHOLD (${REFUSE_THRESHOLD})`, () => {
+    const d = new DoomLoopDetector();
+    const call = () => d.check("bash", { command: "ls" });
+    const seen: Array<{ warn: boolean; refuse: boolean }> = [];
+    for (let i = 1; i <= REFUSE_THRESHOLD; i++) {
+      const r = call();
+      seen.push({ warn: r.warn, refuse: r.refuse });
+    }
+    // Calls 1..WARN_THRESHOLD-1: clean. Call WARN_THRESHOLD: warn (still runs).
+    // Call REFUSE_THRESHOLD: refuse (do not run).
+    expect(seen[WARN_THRESHOLD - 2]).toMatchObject({ warn: false, refuse: false });
+    expect(seen[WARN_THRESHOLD - 1]).toMatchObject({ warn: true, refuse: false });
+    expect(seen[REFUSE_THRESHOLD - 1]).toMatchObject({ refuse: true });
+  });
+
+  it("counts only EXACT input: a different argument resets the signature", () => {
+    const d = new DoomLoopDetector();
+    // Four bash calls, each a distinct command — never a loop.
+    for (let i = 0; i < REFUSE_THRESHOLD + 2; i++) {
+      const r = d.check("bash", { command: `echo ${i}` });
+      expect(r.refuse).toBe(false);
+      expect(r.warn).toBe(false);
+    }
+  });
+
+  it("the refuse message tells the model to change approach (has reverse feedback)", () => {
+    const d = new DoomLoopDetector();
+    let msg = "";
+    for (let i = 0; i < REFUSE_THRESHOLD; i++) msg = d.check("grep", { pattern: "x" }).message;
+    // Unlike the text-degeneration hard stop (no feedback), a doom-loop refusal
+    // is surfaced to the model with guidance so it can recover, not just halt.
+    expect(msg).toMatch(/different approach|STOP|ask the user/i);
+  });
+});
+
+// Layer 2 — rotating-batch (sequence) loop: the model re-issues a whole batch
+// of distinct calls it already made. Each call's input differs (so layer 1
+// never fires), but the SEQUENCE repeats.
+describe("DoomLoopDetector layer 2 (rotating sequence)", () => {
+  it("refuses when a batch of recent signatures repeats an earlier batch", () => {
+    const d = new DoomLoopDetector();
+    // A batch of SEQ_WINDOW distinct calls, issued twice back-to-back. The
+    // second pass re-walks the same signatures → rotating loop.
+    const batch = Array.from({ length: SEQ_WINDOW }, (_, i) => ({ command: `step-${i}` }));
+    let everRefused = false;
+    for (let pass = 0; pass < 2; pass++) {
+      for (const input of batch) {
+        const r = d.check("bash", input);
+        everRefused = everRefused || r.refuse;
+      }
+    }
+    expect(everRefused).toBe(true);
+    expect(SEQ_REPEAT).toBeLessThanOrEqual(SEQ_WINDOW);
+  });
+
+  it("does not fire on a non-repeating stream of distinct calls", () => {
+    const d = new DoomLoopDetector();
+    let everRefused = false;
+    for (let i = 0; i < SEQ_WINDOW * 3; i++) {
+      const r = d.check("bash", { command: `unique-${i}` });
+      everRefused = everRefused || r.refuse;
+    }
+    expect(everRefused).toBe(false);
+  });
+});
 
 describe("pathKey", () => {
   it("keys read_file by path, ignoring windows", () => {

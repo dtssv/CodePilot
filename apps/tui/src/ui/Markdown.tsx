@@ -16,7 +16,30 @@
 import React from "react";
 import { Text, Box } from "ink";
 import { splitThinking, type ThinkingSegment } from "@codepilot/core";
-import { color as palette } from "./theme.js";
+import { color as palette, syntax } from "./theme.js";
+import { isHighlightable, tokenizeLine, type TokenKind } from "./highlight.js";
+
+const SYNTAX_COLOR: Record<TokenKind, string | undefined> = {
+  plain: undefined,
+  comment: syntax.comment,
+  string: syntax.string,
+  number: syntax.number,
+  keyword: syntax.keyword,
+};
+
+/** Render one code line with syntax coloring. */
+function CodeLine({ line, lang, keyPrefix }: { line: string; lang?: string; keyPrefix: string }): React.ReactElement {
+  const tokens = tokenizeLine(line, lang);
+  return (
+    <Text>
+      {tokens.map((tok, i) => (
+        <Text key={`${keyPrefix}-${i}`} color={SYNTAX_COLOR[tok.kind]} dimColor={tok.kind === "comment"}>
+          {tok.text}
+        </Text>
+      ))}
+    </Text>
+  );
+}
 
 interface InlineToken {
   kind: "text" | "code" | "bold" | "italic" | "link";
@@ -327,7 +350,13 @@ function MarkdownBlocks({ text, dimColor }: { text: string; dimColor?: boolean }
                     {b.lang}
                   </Text>
                 ) : null}
-                <Text>{b.text ?? ""}</Text>
+                {isHighlightable(b.lang) ? (
+                  (b.text ?? "").split("\n").map((line, li) => (
+                    <CodeLine key={`${key}-cl-${li}`} line={line} lang={b.lang} keyPrefix={`${key}-cl-${li}`} />
+                  ))
+                ) : (
+                  <Text>{b.text ?? ""}</Text>
+                )}
               </Box>
             );
           case "ul":

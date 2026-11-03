@@ -128,9 +128,11 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
    * Origin of the tool. "mcp" marks tools surfaced by an external MCP server;
    * when lazy MCP discovery is on, these are hidden from the provider tool list
    * and reached via the `mcp` meta-tool instead (keeps the per-turn tool schema
-   * small when a server exposes dozens of tools). Undefined = built-in.
+   * small when a server exposes dozens of tools). "plugin" marks a tool a
+   * plugin runtime contributed through the `RuntimeToolkit` ABI. Undefined =
+   * built-in.
    */
-  source?: "mcp";
+  source?: "mcp" | "plugin";
   /** For `source: "mcp"`: the server + original tool name + raw JSON schema,
    * used by the `mcp` meta-tool to describe/call it on demand. */
   mcpMeta?: { server: string; toolName: string; jsonSchema: unknown };
@@ -215,6 +217,13 @@ export class ToolRegistry {
 
   register<S extends z.ZodTypeAny>(tool: ToolDef<S>): void {
     this.tools.set(tool.name, tool as unknown as ToolDef);
+  }
+
+ /** Remove a tool by name. Returns true if it was present. Used when an MCP
+  * server announces a tool-list change and its old tools must be dropped
+  * before the new set is re-registered. */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
   }
 
   get(name: string): ToolDef | undefined {

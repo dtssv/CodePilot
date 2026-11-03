@@ -4,17 +4,45 @@
  * Colors mirror the web/desktop/IDE design tokens (apps/web/src/index.css)
  * so the CLI reads as the same product. Body text keeps the terminal's own
  * foreground: a fixed light ink would vanish on light terminal themes.
+ *
+ * `color` is a MUTABLE palette object: `setTheme(name)` reassigns its fields
+ * in place, so every component that reads `color.accent` (etc.) inside render
+ * repaints with the new palette on the next Ink render. Two module-scope
+ * colour maps (StatusBar's PERM/AGENT maps) were made render-time reads for
+ * the same reason. `syntax` stays fixed — syntax highlighting is a separate
+ * concern from the UI palette (codex keeps base chrome on terminal colours).
  */
 
-export const color = {
-  accent: "#8b7cff",
-  accentStrong: "#6d5bf6",
-  info: "#4ba3ff",
-  add: "#3fb97f",
-  remove: "#f0616d",
-  warn: "#e8b04a",
-  faint: "#6b7386",
-  edge: "#2a3142",
+import { THEMES, type ThemeName, type TuiPalette } from "./themes.js";
+
+export { THEME_NAMES, THEME_LABELS, type ThemeName, type TuiPalette } from "./themes.js";
+
+/** The active palette. Mutated in place by {@link setTheme} so live component
+ * reads of `color.*` pick up the new values on the next render. */
+export const color: TuiPalette = { ...THEMES.default };
+
+/** Name of the active palette (for a picker's "current" marker). */
+export let activeTheme: ThemeName = "default";
+
+/**
+ * Switch the active palette. Reassigns `color`'s fields in place (keeping the
+ * same object reference every component imported) so the next Ink render uses
+ * the new colours. Unknown names are ignored. Returns the applied name.
+ */
+export function setTheme(name: ThemeName): ThemeName {
+  const next = THEMES[name];
+  if (!next) return activeTheme;
+  Object.assign(color, next);
+  activeTheme = name;
+  return name;
+}
+
+/** Syntax-highlight colors for code blocks (see highlight.ts). */
+export const syntax = {
+  keyword: "#c792ea",
+  string: "#89ca78",
+  number: "#f78c6c",
+  comment: "#6b7386",
 } as const;
 
 /** Brand gradient stops (logo mark, header). */

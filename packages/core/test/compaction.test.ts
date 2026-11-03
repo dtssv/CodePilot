@@ -12,6 +12,7 @@ import {
   SOFT_COMPACTION_RATIO,
 } from "../src/compaction.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
+import type { ChatProvider } from "../src/providers/types.js";
 import { buildProviderMessages } from "../src/agent-messages.js";
 
 function makeEvents(): Event[] {
@@ -206,6 +207,57 @@ describe("foldToolResults", () => {
     const { foldedCount } = foldToolResults(events, { keepRecentMessages: 1 });
     expect(foldedCount).toBeGreaterThan(0);
   });
+
+  // Provenance tagging (anti-hallucination): a folded tool_result stub carries
+  // a credibility tag so a later summary (or the model) can tell a tool-verified
+  // fact from an external/action/error result. No peer harness tags fold stubs
+  // this way — opencode/dsh/pi only mark role/error/truncation, codex not at
+  // all — so this is a CodePilot-specific guard and worth pinning.
+  function foldTagFor(toolName: string, isError = false): string {
+    const events: Event[] = [];
+    for (let i = 0; i < 4; i++) {
+      events.push({ type: "message", id: `m${toolName}${i}`, role: "user", content: [{ type: "text", text: "prompt " + i }] });
+      events.push({
+        type: "tool_result",
+        toolCallId: `r${toolName}${i}`,
+        name: toolName,
+        content: "output body\n".repeat(300),
+        ...(isError ? { isError: true } : {}),
+      });
+    }
+    const { events: folded } = foldToolResults(events, { keepRecentMessages: 1 });
+    const stub = folded.find(
+      (e) => e.type === "tool_result" && e.content.startsWith("[folded tool_result"),
+    ) as Extract<Event, { type: "tool_result" }> | undefined;
+    expect(stub, `expected a fold stub for ${toolName}`).toBeTruthy();
+    return stub!.content;
+  }
+
+  it("tags a folded read/search result as VERIFIED", () => {
+    for (const t of ["read_file", "grep", "glob", "ls", "diagnostics", "lsp_navigate"]) {
+      expect(foldTagFor(t)).toContain("[VERIFIED via tool output]");
+    }
+  });
+
+  it("tags a folded web result as EXTERNAL (verify before citing)", () => {
+    for (const t of ["web_fetch", "web_search"]) {
+      expect(foldTagFor(t)).toContain("[EXTERNAL — verify before citing]");
+    }
+  });
+
+  it("tags a folded mutating/exec result as ACTION, not a fact", () => {
+    for (const t of ["bash", "write_file", "edit_file"]) {
+      expect(foldTagFor(t)).toContain("[ACTION]");
+    }
+  });
+
+  it("tags a folded error result as ERROR regardless of tool", () => {
+    // An errored read_file must NOT be tagged VERIFIED — a failed observation
+    // is not ground truth.
+    const tag = foldTagFor("read_file", true);
+    expect(tag).toContain("[ERROR]");
+    expect(tag).not.toContain("[VERIFIED via tool output]");
+  });
 });
 
 describe("compact (without summariser)", () => {
@@ -246,6 +298,73 @@ describe("compact (without summariser)", () => {
     const after = estimateEventTokens(r.events, est);
     expect(after).toBeLessThan(before);
     expect(r.events).not.toBe(events);
+  });
+});
+
+describe("compact (summariser forward-progress gate)", () => {
+  // A fake summariser that returns a fixed text, regardless of input.
+  function fakeSummariser(text: string): ChatProvider {
+    return {
+      name: "fake",
+      defaultModel: "m",
+      smallModel: "s",
+      async *stream() {
+        yield { kind: "text_delta", messageId: "m", text };
+        yield { kind: "done", finishReason: "stop" };
+      },
+    } as ChatProvider;
+  }
+
+  it("adopts a summary that genuinely shrinks the dropped history", async () => {
+    const events = makeEvents();
+    const est = (s: string) => Math.ceil(s.length / 4);
+    const before = estimateEventTokens(events, est);
+    // Tight budget forces Pass 2 (model summary). The tiny summary genuinely
+    // shrinks the dropped range, so the gate adopts it.
+    const r = await compact(events, {
+      contextWindow: 2_000,
+      keepRecentMessages: 2,
+      estimateTokens: est,
+      summariser: fakeSummariser("tiny handoff summary"),
+      summaryModel: "s",
+    });
+    // The summary was adopted: the compaction event begins with our text.
+    // (Pass 3 may append its own handoff on top of an already-shrunk range;
+    // the adopted Pass-2 summary is always the prefix.)
+    const handoff = r.events.find((e) => e.type === "compaction");
+    const adopted =
+      handoff && handoff.type === "compaction" ? handoff.summary : "";
+    expect(adopted.startsWith("tiny handoff summary")).toBe(true);
+    expect(r.summary).toBe("tiny handoff summary");
+    const after = estimateEventTokens(r.events, est);
+    expect(after).toBeLessThan(before);
+  });
+
+  it("discards a degenerate non-shrinking summary and lets Pass 3 hard-trim fit", async () => {
+    const events = makeEvents();
+    const est = (s: string) => Math.ceil(s.length / 4);
+    const before = estimateEventTokens(events, est);
+    // The summary is larger than the dropped history it would replace — a
+    // degenerate small model restating/echoing its input. The gate must reject
+    // it so compaction is never a no-op or regression.
+    const bloated = "bloat ".repeat(5000);
+    const r = await compact(events, {
+      contextWindow: 2_000,
+      keepRecentMessages: 2,
+      estimateTokens: est,
+      summariser: fakeSummariser(bloated),
+      summaryModel: "s",
+    });
+    // The bloated summary was NOT adopted.
+    const handoff = r.events.find((e) => e.type === "compaction");
+    const adoptedSummary =
+      handoff && handoff.type === "compaction" ? handoff.summary : "";
+    expect(adoptedSummary).not.toBe(bloated);
+    expect(r.summary).not.toBe(bloated);
+    // Pass 3 still guarantees we fit under budget (large reduction).
+    const after = estimateEventTokens(r.events, est);
+    expect(after).toBeLessThanOrEqual(2_000);
+    expect(after).toBeLessThan(before * 0.4);
   });
 });
 
@@ -361,6 +480,65 @@ describe("trimEventsToBudget", () => {
         ? user.content[0].text
         : "";
     expect(text).toContain("MUST_KEEP_THIS_REQUIREMENT");
+  });
+
+  it("keeps a PINNED old message verbatim even when its turn is dropped", () => {
+    // An old user message, far outside the recent window, carries the anchor.
+    // Normal trimming would drop it into the summary; the pin must carry it
+    // forward verbatim instead.
+    const anchor = "ANCHORED_CONSTRAINT: never use the network";
+    const events: Event[] = [
+      {
+        type: "message",
+        id: "pinned_u",
+        role: "user",
+        pinned: true,
+        content: [{ type: "text", text: anchor }],
+      },
+    ];
+    // Pile on many later turns so the pinned one is well outside keepRecent.
+    for (let i = 0; i < 10; i++) {
+      events.push({
+        type: "message",
+        id: `u${i}`,
+        role: "user",
+        content: [{ type: "text", text: `later note ${i} ` + "pad ".repeat(60) }],
+      });
+      events.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "text", text: `work ${i} ` + "pad ".repeat(60) }],
+      });
+      events.push({
+        type: "tool_result",
+        toolCallId: `t${i}`,
+        name: "bash",
+        content: "log\n".repeat(400),
+      });
+    }
+    events.push({
+      type: "message",
+      id: "u_final",
+      role: "user",
+      content: [{ type: "text", text: "continue" }],
+    });
+
+    const { events: trimmed } = trimEventsToBudget(events, 600, {
+      keepRecentMessages: 2,
+      estimateTokens: (s) => Math.ceil(s.length / 4),
+    });
+
+    // The pinned message survives as a real message event with its exact text —
+    // not just paraphrased inside the handoff summary.
+    const survived = trimmed.find(
+      (e) => e.type === "message" && e.id === "pinned_u",
+    );
+    expect(survived && survived.type === "message" ? survived.content[0] : null).toMatchObject({
+      type: "text",
+      text: anchor,
+    });
+    expect(survived && survived.type === "message" ? survived.pinned : false).toBe(true);
   });
 });
 

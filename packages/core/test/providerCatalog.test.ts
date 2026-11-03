@@ -12,6 +12,7 @@ import {
   PROVIDER_TEMPLATES,
   templateToPreset,
   nextProviderId,
+  listProviderTemplates,
 } from "../src/providerCatalog.js";
 import type { ResolvedCodepilotConfig } from "../src/config.js";
 
@@ -40,6 +41,36 @@ describe("listSelectableModels", () => {
     expect(rows.some((r) => r.id === "deepseek/deepseek-reasoner")).toBe(true);
     expect(rows.some((r) => r.id === "tongyi/qwen-plus")).toBe(true);
     expect(findProviderIdForFlat(cfg)).toBe("deepseek");
+  });
+});
+
+describe("listProviderTemplates overlay (plugin templates)", () => {
+  it("merges overlay templates on top of the bundled set", async () => {
+    const overlay = [
+      {
+        id: "acme/gw",
+        displayName: "Acme Gateway",
+        provider: "openai" as const,
+        baseURL: "https://acme.example/v1",
+        models: ["acme-large"],
+      },
+    ];
+    const templates = await listProviderTemplates({ overlay });
+    // The overlay template is present alongside the built-ins.
+    expect(templates.some((t) => t.id === "acme/gw")).toBe(true);
+    for (const base of PROVIDER_TEMPLATES) {
+      expect(templates.some((t) => t.id === base.id)).toBe(true);
+    }
+  });
+
+  it("an overlay id wins on clash with a built-in", async () => {
+    const first = PROVIDER_TEMPLATES[0];
+    if (!first) return; // no bundled templates → nothing to clash with
+    const templates = await listProviderTemplates({
+      overlay: [{ ...first, displayName: "OVERRIDDEN" }],
+    });
+    const row = templates.find((t) => t.id === first.id);
+    expect(row?.displayName).toBe("OVERRIDDEN");
   });
 });
 

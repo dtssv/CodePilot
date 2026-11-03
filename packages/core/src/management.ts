@@ -214,7 +214,15 @@ export function formatSkills(s: SkillsSummary): string {
 // ---------------------------------------------------------------------------
 
 export interface ContextSummary {
+  /** Event-log-only token total (back-compat). */
   totalTokens: number;
+  /** Full per-turn send estimate: event log + system prompt + skills + tool/MCP
+   * schemas. The schemas + system prompt ride every request but live outside
+   * the event log, so this exceeds `totalTokens` and is what the gauge uses. */
+  sentTokens?: number;
+  /** Provider-reported prompt size from the last request (0 until the first
+   * response). The most accurate numerator when > 0. */
+  providerInputTokens?: number;
   window: number;
   usagePercent: number;
   triggerThreshold: number;
@@ -222,8 +230,9 @@ export interface ContextSummary {
   autoCompactEnabled: boolean;
   byEventType: { type: string; tokens: number; count: number }[];
   /** Semantic breakdown: system prompt, skills, tool/MCP schemas,
-   * conversation, sub-agent work. Schemas + system prompt live outside the
-   * event log but are sent every turn, so they are estimated separately. */
+   * conversation, current message, sub-agent work. Schemas + system prompt live
+   * outside the event log but are sent every turn, so they are estimated
+   * separately. */
   byCategory?: { category: string; tokens: number }[];
   topFileReads: { path: string; reads: number; tokens: number }[];
   duplicateReads: { path: string; reads: number }[];
@@ -236,14 +245,23 @@ const CATEGORY_LABELS: Record<string, string> = {
   tools: "tool definitions",
   mcp: "MCP tools",
   conversation: "conversation",
+  lastMessage: "current message",
   subagent: "sub-agents",
 };
 
 /** Human-readable rendering of a `ContextSummary` (from `Session.contextReport`). */
 export function formatContext(c: ContextSummary): string {
   const pct = c.usagePercent.toFixed(1);
+  // Prefer the provider-reported prompt size, then the full send estimate, then
+  // the event-log total — matching how `usagePercent` is computed in core.
+  const shown =
+    c.providerInputTokens && c.providerInputTokens > 0
+      ? c.providerInputTokens
+      : c.sentTokens && c.sentTokens > 0
+        ? c.sentTokens
+        : c.totalTokens;
   const lines: string[] = [
-    `Context: ${c.totalTokens.toLocaleString()} / ${c.window.toLocaleString()} tokens (${pct}%)`,
+    `Context: ${shown.toLocaleString()} / ${c.window.toLocaleString()} tokens (${pct}%)`,
     `  auto-compact: ${c.autoCompactEnabled ? "on" : "off"} (trigger at ${c.triggerThreshold.toLocaleString()} = ${(c.triggerFraction * 100).toFixed(0)}%)`,
   ];
   if (c.byCategory && c.byCategory.length > 0) {

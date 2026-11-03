@@ -1,6 +1,6 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import type { ImageAttachment, PermissionDecision, PlanStep, QuestionAnswers, SavedUpload } from "@codepilot/core";
+import type { ImageAttachment, PermissionResolution, PlanStep, QuestionAnswers, SavedUpload } from "@codepilot/core";
 import type { PendingPermission, PendingQuestion } from "../protocol/client.js";
 import type { Activity, SubagentRun, UiStatus } from "../state/reducer.js";
 import type { MessageRow, Row, TeamRow, ToolRow } from "../state/rows.js";
@@ -59,9 +59,12 @@ export interface TranscriptProps {
   question?: PendingQuestion;
   activity?: Activity;
   density?: Density;
+ /** Current plan steps, used to show "step N/M: <title>" live while tools run
+  * so the user sees progress even between the model's plan_update calls. */
+  plan?: PlanStep[];
  /** Render the latest plan as a full card (off when a side panel shows it). */
   planInline?: boolean;
-  onDecide(decision: PermissionDecision): void;
+  onDecide(resolution: PermissionResolution): void;
   onAnswer(answers: QuestionAnswers): void;
   onRetry(): void;
  /** Sub-agents spawned by `task` calls, keyed by the parent tool call id. */
@@ -168,13 +171,16 @@ function MainTranscript({
   permission,
   question,
   activity,
+  plan,
   density = "comfortable",
   planInline = true,
   onDecide,
   onAnswer,
   onRetry,
 }: TranscriptProps): React.ReactElement {
-  const blocks = groupRows(rows);
+  // Grouping is O(rows); memoize so it only recomputes when the rows array
+  // identity changes, not on every status/activity re-render during streaming.
+  const blocks = useMemo(() => groupRows(rows), [rows]);
   const busy = status !== "idle";
   const last = blocks[blocks.length - 1];
   const lastTurn = last?.kind === "assistant_turn" ? last : undefined;
@@ -205,7 +211,7 @@ function MainTranscript({
           onRetry={onRetry}
         />
       ))}
-      {showThinking && <ActivityRow activity={activity} />}
+      {showThinking && <ActivityRow activity={activity} plan={plan} />}
       {status === "compacting" && <ThinkingRow label={t("Compacting context")} />}
       {permission && <PermissionCard req={permission} onDecide={onDecide} />}
       {question && <QuestionCard req={question} onAnswer={onAnswer} />}
@@ -444,28 +450,50 @@ function CopyButton({ text }: { text: string }): React.ReactElement {
 
 /** "Waiting for model · 12s" / "Running bash, grep · 34s" — tells the user
  * whether a slow turn is stuck on the provider or on a tool. */
-function ActivityRow({ activity }: { activity?: Activity }): React.ReactElement {
+function ActivityRow({
+  activity,
+  plan,
+}: {
+  activity?: Activity;
+  plan?: PlanStep[];
+}): React.ReactElement {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  if (!activity) return <ThinkingRow label={t("Thinking")} />;
+  // Tie the live indicator to the current plan step so the user sees progress
+  // mid-task even between the model's plan_update calls (which it tends to
+  // batch to the end). Shows "Step N/M: <title>" above the tool/model line.
+  const progress = plan && plan.length > 0 ? planProgress(plan) : undefined;
+  const stepLabel =
+    progress?.current && progress.total > 0
+      ? `${t("Step")} ${Math.min(progress.done + 1, progress.total)}/${progress.total}: ${progress.current.title}`
+      : undefined;
+  if (!activity) return <ThinkingRow label={stepLabel ?? t("Thinking")} sub={stepLabel ? t("Thinking") : undefined} />;
   const secs = Math.max(0, Math.round((now - activity.since) / 1000));
-  const label =
+  const detail =
     activity.phase === "model"
       ? t("Waiting for model response")
       : `${t("Running tools")}: ${(activity.tools ?? []).join(", ")}`;
-  return <ThinkingRow label={`${label} · ${secs}s`} />;
+  // When a plan step is active, lead with it and demote the tool/model line to
+  // a dim sub-label; otherwise keep the original single line.
+  if (stepLabel) return <ThinkingRow label={stepLabel} sub={`${detail} · ${secs}s`} />;
+  return <ThinkingRow label={`${detail} · ${secs}s`} />;
 }
 
-function ThinkingRow({ label }: { label: string }): React.ReactElement {
+function ThinkingRow({ label, sub }: { label: string; sub?: string }): React.ReactElement {
   return (
-    <div className="flex animate-fade-in items-center gap-2.5 pl-0.5 text-[12.5px]">
+    <div className="flex animate-fade-in items-start gap-2.5 pl-0.5 text-[12.5px]">
       <span className="flex h-5 w-5 items-center justify-center">
         <SparkIcon className="h-4 w-4 animate-breathe text-[var(--color-accent)]" />
       </span>
-      <span className="cp-shimmer font-medium">{label}…</span>
+      <span className="flex min-w-0 flex-col">
+        <span className="cp-shimmer font-medium">{label}…</span>
+        {sub && (
+          <span className="mt-0.5 truncate text-[11px] text-[var(--color-ink-faint)]">{sub}</span>
+        )}
+      </span>
     </div>
   );
 }
@@ -989,10 +1017,18 @@ export function PermissionCard({
   onDecide,
 }: {
   req: PendingPermission;
-  onDecide(decision: PermissionDecision): void;
+  onDecide(resolution: PermissionResolution): void;
 }): React.ReactElement {
   const allowRef = useRef<HTMLButtonElement>(null);
+  // Decline-with-feedback: when the user clicks "Deny with feedback", reveal a
+  // textarea whose contents ride back as the tool result the model sees.
+  const [feedbackMode, setFeedbackMode] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const feedbackRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => allowRef.current?.focus(), [req.requestId]);
+  useEffect(() => {
+    if (feedbackMode) feedbackRef.current?.focus();
+  }, [feedbackMode]);
   return (
     <div className="animate-fade-in overflow-hidden rounded-xl border border-[var(--color-warn)]/40 bg-[var(--color-surface-raised)] shadow-lg shadow-black/10">
       <div className="flex items-center gap-2 border-b border-[var(--color-edge-subtle)] bg-[var(--color-warn-dim)] px-3 py-2 text-[12px] text-[var(--color-warn)]">
@@ -1009,27 +1045,81 @@ export function PermissionCard({
         <pre className="max-h-64 overflow-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-2.5 text-[11.5px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">
           {formatInput(req.input)}
         </pre>
-        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-          <button type="button" onClick={() => onDecide("deny")} className="cp-btn-danger">
-            {t("Deny")}
-          </button>
-          <button
-            type="button"
-            onClick={() => onDecide("always")}
-            title={
-              req.sandboxExpand
-                ? t("Save this folder to sandbox.writablePaths for future sessions")
-                : "Remember this command pattern for this session — other commands still ask"
-            }
-            className="cp-btn-ghost"
-          >
-            {req.sandboxExpand ? t("Always allow folder") : t("Always allow")}
-          </button>
-          <button ref={allowRef} type="button" onClick={() => onDecide("allow")} className="cp-btn-primary">
-            <CheckIcon className="h-3 w-3" />
-            {req.sandboxExpand ? t("Allow folder once") : t("Allow once")}
-          </button>
-        </div>
+        {feedbackMode ? (
+          <div className="mt-3">
+            <label className="mb-1 block text-[11px] text-[var(--color-ink-dim)]">
+              {t("Deny and tell the model what to do instead")}
+            </label>
+            <textarea
+              ref={feedbackRef}
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  onDecide(
+                    feedback.trim().length > 0 ? { decision: "deny", feedback: feedback.trim() } : "deny",
+                  );
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setFeedbackMode(false);
+                  setFeedback("");
+                }
+              }}
+              rows={3}
+              placeholder={t("e.g. don't edit that file, edit src/app.ts instead")}
+              className="w-full rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-2 text-[12px] text-[var(--color-ink)] outline-none focus:border-[var(--color-warn)]"
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackMode(false);
+                  setFeedback("");
+                }}
+                className="cp-btn-ghost"
+              >
+                {t("Cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  onDecide(
+                    feedback.trim().length > 0 ? { decision: "deny", feedback: feedback.trim() } : "deny",
+                  )
+                }
+                className="cp-btn-danger"
+              >
+                {t("Send feedback")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+            <button type="button" onClick={() => setFeedbackMode(true)} className="cp-btn-ghost">
+              {t("Deny with feedback")}
+            </button>
+            <button type="button" onClick={() => onDecide("deny")} className="cp-btn-danger">
+              {t("Deny")}
+            </button>
+            <button
+              type="button"
+              onClick={() => onDecide("always")}
+              title={
+                req.sandboxExpand
+                  ? t("Save this folder to sandbox.writablePaths for future sessions")
+                  : "Remember this command pattern for this session — other commands still ask"
+              }
+              className="cp-btn-ghost"
+            >
+              {req.sandboxExpand ? t("Always allow folder") : t("Always allow")}
+            </button>
+            <button ref={allowRef} type="button" onClick={() => onDecide("allow")} className="cp-btn-primary">
+              <CheckIcon className="h-3 w-3" />
+              {req.sandboxExpand ? t("Allow folder once") : t("Allow once")}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

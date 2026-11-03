@@ -74,15 +74,18 @@ extension side stateless with respect to messages.
 
 ## Permission prompts
 
-The `permission/request` JSON-RPC request from the core is routed to a
-`vscode.window.showWarningMessage` dialog with three buttons:
+The `permission/request` JSON-RPC request from the core is handled by the
+embedded web UI (`apps/web`) that the extension hosts in its webview — the same
+`PermissionCard` the standalone web client uses. The card offers:
 
-- **Allow** → `permission/respond { decision: "allow" }`
-- **Always** → `permission/respond { decision: "always" }`
+- **Allow once** → `permission/respond { decision: "allow" }`
+- **Always allow** → `permission/respond { decision: "always" }`
 - **Deny** → `permission/respond { decision: "deny" }`
+- **Deny with feedback** → `permission/respond { decision: "deny", feedback }` —
+  the typed correction becomes the tool result the model sees, turning a
+  dead-end denial into steering.
 
-The dialog shows the tool name and a small summary (e.g. `$ command` for
-`bash`, `path: <relpath>` for file tools, otherwise a JSON snippet).
+The card shows the tool name and a formatted summary of the input.
 
 ## Status bar
 

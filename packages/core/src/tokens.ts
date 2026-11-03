@@ -170,6 +170,17 @@ function isCodeChar(code: number): boolean {
   return "{}[]()<>:=;,.+-/*&|^!~?`'\"@#$\\".includes(String.fromCharCode(code));
 }
 
+/**
+ * Flat per-image token estimate. Provider image tokenisation is model-specific
+ * (OpenAI 512px tiles / Anthropic ~(w·h)/750 / Gemini fixed per tile), so a
+ * general harness cannot compute an exact count without a per-provider algebra;
+ * a single conservative mid-range constant keeps the budget safe across all of
+ * them. This is the ONE source of truth — both `estimateMessagesTokens` (here)
+ * and `estimateEventTokens` (compaction) price images through it so the local
+ * estimate and the compaction/self-calibration path can never disagree.
+ */
+export const IMAGE_TOKEN_ESTIMATE = 1_600;
+
 /** Estimate tokens for an array of provider-shaped messages. */
 export function estimateMessagesTokens(
   messages: ReadonlyArray<{ role: string; content: string | ReadonlyArray<Record<string, unknown>> }>
@@ -185,7 +196,7 @@ export function estimateMessagesTokens(
         if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string") {
           total += estimateTokens(b.text);
         } else if (b && typeof b === "object" && b.type === "image") {
-          total += 1_600;
+          total += IMAGE_TOKEN_ESTIMATE;
         } else {
           total += estimateTokens(JSON.stringify(b));
         }

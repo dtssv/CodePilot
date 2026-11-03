@@ -223,6 +223,30 @@ describe("detectRunawayRepetition", () => {
     const r = detectRunawayRepetition(code);
     if (r) expect(r.unit.trim().length).toBeGreaterThan(0);
   });
+
+  // False-positive guard: legitimate structurally-repetitive output (a long
+  // list or table where every row has the same shape but DIFFERENT content)
+  // must NOT be flagged. The detector keys off per-character periodicity, and
+  // differing content breaks the period well below the 0.9 threshold — this
+  // pins that so a future tweak to the threshold can't silently start eating
+  // real list/table answers.
+  it("does not flag a structured list whose rows differ in content", () => {
+    const fruits = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew"];
+    let list = "";
+    for (let i = 0; i < 120; i++) {
+      const f = fruits[i % fruits.length]!;
+      list += `- item ${i}: ${f} has ${i * 3 + 7} calories and grows in region ${f.length}.\n`;
+    }
+    expect(detectRunawayRepetition(list)).toBeNull();
+  });
+
+  it("does not flag a markdown table with varied cell content", () => {
+    let table = "| id | name | status | notes |\n|----|------|--------|-------|\n";
+    for (let i = 0; i < 120; i++) {
+      table += `| ${i} | row-${i} | ${i % 2 === 0 ? "ok" : "pending"} | note number ${i * 2 + 1} here |\n`;
+    }
+    expect(detectRunawayRepetition(table)).toBeNull();
+  });
 });
 
 describe("task tool soft-failure reporting", () => {

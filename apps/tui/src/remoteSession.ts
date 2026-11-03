@@ -10,7 +10,7 @@
 // routed into the same bridges the in-process session would use, so the UI is
 // identical whether local or remote.
 
-import type { AgentMode, Event, PermissionDecision, QuestionAnswers } from "@codepilot/core";
+import type { AgentMode, Event, PermissionResolution, QuestionAnswers } from "@codepilot/core";
 import { Peer } from "@codepilot/protocol/rpc";
 import { WebSocketTransport } from "@codepilot/protocol/ws";
 
@@ -30,7 +30,7 @@ export interface RemoteSessionOptions {
     toolName: string;
     input: unknown;
     reason: string;
-  }) => Promise<PermissionDecision>;
+  }) => Promise<PermissionResolution>;
   onAskUser: (req: {
     requestId: string;
     questions: { id: string; header?: string; question: string; options?: { label: string; description?: string }[]; multiSelect?: boolean }[];
@@ -89,8 +89,11 @@ export class RemoteSession {
  // Reverse requests from the server → the TUI's bridges.
     peer.onRequest("permission/request", async (p: unknown) => {
       const req = p as { requestId: string; toolName: string; input: unknown; reason: string };
-      const decision = await opts.onPermissionRequest(req);
-      return { decision };
+      const resolution = await opts.onPermissionRequest(req);
+      // Flatten a decline-with-feedback object onto the wire shape the server's
+      // `permission/respond` understands ({ decision, feedback }).
+      if (typeof resolution === "string") return { decision: resolution };
+      return { decision: resolution.decision, feedback: resolution.feedback };
     });
     peer.onRequest("question/request", async (p: unknown) => {
       const req = p as RemoteSessionOptions["onAskUser"] extends (r: infer R) => unknown ? R : never;
@@ -233,6 +236,19 @@ export class RemoteSession {
     void this.peer
       .request("prompt/send", { sessionId: this.id, text, delivery: "steer" })
       .catch(() => {});
+  }
+
+  /**
+   * Resume the last turn from the breakpoint (no new user message). The server
+   * decides whether there is anything to resume and returns `noop` if not, so
+   * the TUI can fall back to re-sending the last prompt.
+   */
+  async resumeLastTurn(): Promise<"started" | "queued" | "noop"> {
+    const res = await this.peer.request<
+      unknown,
+      { delivery?: "started" | "queued" | "noop" }
+    >("prompt/resume", { sessionId: this.id });
+    return res?.delivery ?? "noop";
   }
 
   isBusy(): boolean {

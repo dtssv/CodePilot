@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { ToolDef } from "./types.js";
 import type { WebFetchConfig } from "../types.js";
 import { projectStatePath } from "../projectState.js";
+import { ARTIFACT_THRESHOLD } from "./_shared.js";
 
 const schema = z.object({
   url: z.string().url().describe("http(s) URL to fetch."),
@@ -38,7 +39,6 @@ const schema = z.object({
   no_cache: z.boolean().optional().describe("Bypass the cache for this call (default false)."),
 });
 
-const ARTIFACT_THRESHOLD = 8_000;
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_CACHE_TTL_MIN = 15;

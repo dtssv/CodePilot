@@ -21,6 +21,16 @@ export interface AnthropicProviderOptions {
   smallModel?: string;
  /** Auto-attach cache_control to the last tool / system block. Default true. */
   enableCaching?: boolean;
+ /**
+  * Whether the endpoint honours `cache_control` on *tool definitions*. The
+  * real Anthropic API does (default true). Some Anthropic-compatible gateways
+  * reject a `cache_control` field inside a tool definition even though they
+  * accept it on system/message blocks. Set false for such an endpoint to drop
+  * ONLY the tool breakpoint — system and conversation-history caching stay on.
+  * This is a capability dimension of `enableCaching`, not a separate toggle:
+  * it has no effect when caching is disabled.
+  */
+  cacheControlOnTools?: boolean;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -67,6 +77,7 @@ export class AnthropicProvider implements ChatProvider {
   readonly defaultModel: string;
   readonly smallModel: string;
   private readonly enableCaching: boolean;
+  private readonly cacheControlOnTools: boolean;
 
   constructor(opts: AnthropicProviderOptions = {}) {
     const key = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -80,6 +91,7 @@ export class AnthropicProvider implements ChatProvider {
     this.defaultModel = opts.defaultModel ?? "claude-sonnet-4-5";
     this.smallModel = opts.smallModel ?? "claude-haiku-4-5";
     this.enableCaching = opts.enableCaching ?? true;
+    this.cacheControlOnTools = opts.cacheControlOnTools ?? true;
   }
 
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
@@ -119,8 +131,15 @@ export class AnthropicProvider implements ChatProvider {
     }
     if (opts.tools && opts.tools.length > 0) {
       body.tools = opts.tools.map((t, i, arr) =>
-        toAnthropicTool(t, this.enableCaching && i === arr.length - 1)
+        toAnthropicTool(
+          t,
+          this.enableCaching && this.cacheControlOnTools && i === arr.length - 1,
+        )
       );
+      // Keep tool defs in the request (cache-prefix stable) but forbid calling
+      // them when the turn budget says "answer now". Anthropic spells this
+      // `tool_choice: { type: "none" }`.
+      if (opts.toolChoice === "none") body.tool_choice = { type: "none" };
     }
 
     const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/messages`;

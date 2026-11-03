@@ -143,6 +143,31 @@ describe("provider transcript", () => {
     expect(r.type === "tool_result" && r.isError).toBe(true);
   });
 
+  it("the synthetic result for an interrupted tool is side-effect-safe (outcome unknown, not 'just re-issue')", () => {
+    // Borrowed from dsh's repair-closer: a crash can land AFTER a mutating tool
+    // took effect, so the synthetic result must mark the outcome UNKNOWN and
+    // warn against blindly re-running side-effecting calls — not tell the model
+    // it simply "never ran, re-issue it". This pins that safer contract.
+    const events: Event[] = [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "delete the temp files" }] },
+      { type: "tool_call", id: "t1", name: "bash", input: { command: "rm -rf build" } },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "rm -rf build" } }] },
+      // Process crashed here: no tool_result was ever recorded.
+    ];
+    const msgs = compactTranscriptToProviderMessages(events, "");
+    const result = msgs
+      .flatMap((m) => m.content)
+      .find((b): b is Extract<typeof b, { type: "tool_result" }> => b.type === "tool_result" && b.toolCallId === "t1");
+    expect(result).toBeTruthy();
+    expect(result!.isError).toBe(true);
+    const text = String(result!.content);
+    // Outcome is framed as unknown, with an explicit side-effect caution —
+    // never an unconditional "re-issue".
+    expect(text).toMatch(/UNKNOWN|unknown/);
+    expect(text).toMatch(/side effect|verify|re-read|ask the user/i);
+    expect(text).not.toMatch(/Re-issue the call only if you still need it/);
+  });
+
   it("drops results whose call is gone (compacted away)", () => {
     const events: Event[] = [
       { type: "compaction", summary: "earlier work" },

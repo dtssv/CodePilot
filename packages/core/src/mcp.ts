@@ -153,6 +153,21 @@ export class McpManager {
       : new Error(`MCP reverse request ${method} from ${server} was not handled`);
   };
 
+ /** Tool-list-change handlers (same shared-manager multiplicity as reverse
+  * requests: a tool-list change is broadcast to every live session so each can
+  * re-register the server's tools into its own registry). */
+  private readonly toolsChangedHandlers = new Set<(server: string) => void>();
+ /** Stable fan-out installed on every client; calls each live handler. */
+  private readonly toolsChangedDispatch = (server: string): void => {
+    for (const h of this.toolsChangedHandlers) {
+      try {
+        h(server);
+      } catch {
+ /* a broken listener must not break the others */
+      }
+    }
+  };
+
  /**
  * @param configs Either the legacy `Record<string, McpServerConfig>` map
  * (all entries treated as stdio) or the richer
@@ -302,12 +317,48 @@ export class McpManager {
     };
   }
 
+ /** Register a handler fired when ANY server announces a tool-list change
+  * (`notifications/tools/list_changed`). The client refreshes its cached list
+  * first, so the handler can read the new `listAllTools()`. Returns an
+  * unregister fn (symmetry with {@link setServerRequestHandler}); the
+  * consumer MUST call it on dispose for a shared manager. */
+  setToolsChangedHandler(h: ((server: string) => void) | null): () => void {
+    if (!h) return () => {};
+    this.toolsChangedHandlers.add(h);
+    for (const c of this.clients.values()) this.wireToolsChanged(c);
+    return () => {
+      this.toolsChangedHandlers.delete(h);
+      if (this.toolsChangedHandlers.size === 0) {
+        for (const c of this.clients.values()) {
+          try {
+            c.setToolsChangedHandler?.(null);
+          } catch {
+ /* ignore */
+          }
+        }
+      }
+    };
+  }
+
  /** Internal: ensure newly-built clients inherit the fan-out dispatcher when
   * at least one handler is registered. */
   private wireHandler(c: McpClient): void {
     if (this.requestHandlers.size > 0) {
       try {
         c.setServerRequestHandler(this.dispatch);
+      } catch {
+ /* ignore */
+      }
+    }
+    this.wireToolsChanged(c);
+  }
+
+ /** Internal: route a client's tool-list-change notifications through our
+  * fan-out when at least one handler is registered. Idempotent. */
+  private wireToolsChanged(c: McpClient): void {
+    if (this.toolsChangedHandlers.size > 0) {
+      try {
+        c.setToolsChangedHandler?.(this.toolsChangedDispatch);
       } catch {
  /* ignore */
       }

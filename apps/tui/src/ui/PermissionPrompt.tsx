@@ -8,39 +8,73 @@
  * - anything: the formatted target line
  *
  * Keys: 1 / y → allow once · 2 / a → always allow (this session) ·
- * 3 / n / Esc → deny · ↑↓ + ↵ for mouse-free selection.
+ * 3 / n / Esc → deny · 4 / f → deny with feedback (type a correction the
+ * model sees instead of a bare "denied") · ↑↓ + ↵ for mouse-free selection.
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";
-import type { PermissionDecision } from "@codepilot/core";
+import type { PermissionResolution } from "@codepilot/core";
 import { CATEGORY_VERB, changeCounts, color, glyph, oneLine, toolCategory, toolTarget } from "./theme.js";
 
 export interface PermissionPromptProps {
   toolName: string;
   input: unknown;
   reason: string;
-  onDecide: (decision: PermissionDecision) => void;
+  onDecide: (resolution: PermissionResolution) => void;
 }
 
-const OPTIONS: { label: string; keyHint: string; decision: PermissionDecision; hint: string }[] = [
-  { label: "Allow once", keyHint: "1/y", decision: "allow", hint: "Approve this invocation only." },
-  { label: "Always allow", keyHint: "2/a", decision: "always", hint: "Approve matching calls (e.g. same command prefix) for this session." },
-  { label: "Deny", keyHint: "3/n", decision: "deny", hint: "Reject this invocation." },
+type OptionAction = "allow" | "always" | "deny" | "deny-feedback";
+const OPTIONS: { label: string; keyHint: string; action: OptionAction; hint: string }[] = [
+  { label: "Allow once", keyHint: "1/y", action: "allow", hint: "Approve this invocation only." },
+  { label: "Always allow", keyHint: "2/a", action: "always", hint: "Approve matching calls (e.g. same command prefix) for this session." },
+  { label: "Deny", keyHint: "3/n", action: "deny", hint: "Reject this invocation." },
+  { label: "Deny w/ feedback", keyHint: "4/f", action: "deny-feedback", hint: "Reject and tell the model what to do instead." },
 ];
 
 export function PermissionPrompt(props: PermissionPromptProps): React.ReactElement {
   const { toolName, input, reason, onDecide } = props;
   const [idx, setIdx] = React.useState(0);
+  // When true, the prompt switches to a one-line feedback editor; Enter submits
+  // the typed correction as a decline-with-feedback, Esc cancels back to the
+  // option list.
+  const [feedbackMode, setFeedbackMode] = React.useState(false);
+  const [feedback, setFeedback] = React.useState("");
+
+  const act = React.useCallback(
+    (action: OptionAction) => {
+      if (action === "deny-feedback") {
+        setFeedbackMode(true);
+        return;
+      }
+      onDecide(action);
+    },
+    [onDecide],
+  );
 
   useInput(
-    (_input, key) => {
+    (ch, key) => {
+      if (feedbackMode) {
+        if (key.return) {
+          const text = feedback.trim();
+          onDecide(text.length > 0 ? { decision: "deny", feedback: text } : "deny");
+        } else if (key.escape) {
+          setFeedbackMode(false);
+          setFeedback("");
+        } else if (key.backspace || key.delete) {
+          setFeedback((s) => s.slice(0, -1));
+        } else if (ch && !key.ctrl && !key.meta) {
+          setFeedback((s) => s + ch);
+        }
+        return;
+      }
       if (key.upArrow) setIdx((i) => (i - 1 + OPTIONS.length) % OPTIONS.length);
       else if (key.downArrow) setIdx((i) => (i + 1) % OPTIONS.length);
-      else if (key.return) onDecide(OPTIONS[idx]!.decision);
+      else if (key.return) act(OPTIONS[idx]!.action);
       else if (key.escape) onDecide("deny");
-      else if (_input === "1" || _input === "y" || _input === "Y") onDecide("allow");
-      else if (_input === "2" || _input === "a" || _input === "A") onDecide("always");
-      else if (_input === "3" || _input === "n" || _input === "N") onDecide("deny");
+      else if (ch === "1" || ch === "y" || ch === "Y") onDecide("allow");
+      else if (ch === "2" || ch === "a" || ch === "A") onDecide("always");
+      else if (ch === "3" || ch === "n" || ch === "N") onDecide("deny");
+      else if (ch === "4" || ch === "f" || ch === "F") act("deny-feedback");
     },
     { isActive: true },
   );
@@ -65,26 +99,43 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
 
       <DetailPreview toolName={toolName} input={input} />
 
-      <Box flexDirection="column" marginTop={1}>
-        {OPTIONS.map((opt, i) => {
-          const selected = i === idx;
-          return (
-            <Text key={opt.decision}>
-              <Text color={selected ? color.accent : color.faint}>{selected ? "▸ " : "  "}</Text>
-              <Text bold={selected} color={selected ? color.accent : undefined}>
-                {opt.label.padEnd(14)}
-              </Text>
-              <Text color={color.info}> {opt.keyHint.padEnd(4)}</Text>
-              <Text color={color.faint}>{opt.hint}</Text>
+      {feedbackMode ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={color.warn}>Deny and tell the model what to do instead:</Text>
+          <Box borderStyle="single" borderColor={color.edge} paddingX={1} marginTop={1}>
+            <Text>
+              {feedback.length > 0 ? feedback : <Text color={color.faint}>type a correction…</Text>}
+              <Text color={color.accent}>▌</Text>
             </Text>
-          );
-        })}
-      </Box>
-      <Box marginTop={1}>
-        <Text color={color.faint}>
-          ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} 1/y once {glyph.dot} 2/a always {glyph.dot} 3/n/esc deny
-        </Text>
-      </Box>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={color.faint}>↵ send feedback {glyph.dot} esc cancel</Text>
+          </Box>
+        </Box>
+      ) : (
+        <>
+          <Box flexDirection="column" marginTop={1}>
+            {OPTIONS.map((opt, i) => {
+              const selected = i === idx;
+              return (
+                <Text key={opt.action}>
+                  <Text color={selected ? color.accent : color.faint}>{selected ? "▸ " : "  "}</Text>
+                  <Text bold={selected} color={selected ? color.accent : undefined}>
+                    {opt.label.padEnd(16)}
+                  </Text>
+                  <Text color={color.info}> {opt.keyHint.padEnd(4)}</Text>
+                  <Text color={color.faint}>{opt.hint}</Text>
+                </Text>
+              );
+            })}
+          </Box>
+          <Box marginTop={1}>
+            <Text color={color.faint}>
+              ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} 1/y once {glyph.dot} 2/a always {glyph.dot} 3/n deny {glyph.dot} 4/f deny+feedback
+            </Text>
+          </Box>
+        </>
+      )}
     </Box>
   );
 }

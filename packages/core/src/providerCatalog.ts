@@ -108,19 +108,29 @@ function mergeTemplates(
   return [...map.values()];
 }
 
-/** GitHub catalog (update once per day; keep local forever on failure). */
+/**
+ * GitHub catalog (update once per day; keep local forever on failure).
+ *
+ * `overlay` lets a caller merge extra templates on TOP of the bundled +
+ * remote set — e.g. plugin-contributed templates from
+ * `collectPluginProviderTemplates`. Overlay templates win on id clash, but
+ * plugin ids are namespaced `<plugin>/<id>` so they never collide with
+ * built-ins in practice.
+ */
 export async function listProviderTemplates(opts?: {
   force?: boolean;
+  overlay?: ProviderTemplate[];
 }): Promise<ProviderTemplate[]> {
+  const overlay = opts?.overlay ?? [];
   try {
     const { data } = await loadCatalogDocument<ProviderTemplatesDoc>(
       "provider-templates",
       opts,
     );
     const remote = Array.isArray(data.templates) ? data.templates : [];
-    return mergeTemplates(PROVIDER_TEMPLATES, remote);
+    return mergeTemplates(mergeTemplates(PROVIDER_TEMPLATES, remote), overlay);
   } catch {
-    return [...PROVIDER_TEMPLATES];
+    return mergeTemplates(PROVIDER_TEMPLATES, overlay);
   }
 }
 

@@ -6,8 +6,9 @@
 // own permissionMode) gives the sub-agent a fresh engine.
 
 import { describe, expect, it } from "vitest";
-import { resolveSubagentPermissions } from "../src/subagent.js";
+import { resolveSubagentPermissions, resolveWorktreeRoots } from "../src/subagent.js";
 import { PermissionEngine } from "../src/permissions.js";
+import { resolveSandbox } from "../src/sandbox.js";
 
 describe("resolveSubagentPermissions", () => {
   it("inherits the parent engine by default (built-in agent, no policy)", () => {
@@ -53,5 +54,62 @@ describe("resolveSubagentPermissions", () => {
     });
     expect(got).not.toBe(parent);
     expect(got.getMode()).toBe("auto-edit");
+  });
+});
+
+// A worktree-isolated sub-agent runs in a checkout OUTSIDE the parent cwd. Its
+// sandbox + delivery roots must be re-anchored to the worktree, or (a) the OS
+// sandbox blocks its writes once the worktree isn't under the OS tmpdir and
+// (b) its own edits read as out-of-delivery-root friction.
+describe("resolveWorktreeRoots", () => {
+  const parentCwd = "/repo/project";
+  const worktree = "/elsewhere/cp-worktree-xyz/project";
+
+  it("adds the worktree as a writable root without widening the parent policy", () => {
+    const base = resolveSandbox({ mode: "workspace-write" }, parentCwd);
+    const baseRootsBefore = [...base.writableRoots];
+    const { sandbox } = resolveWorktreeRoots({
+      worktreePath: worktree,
+      baseSandbox: base,
+      parentDeliveryRoots: [parentCwd],
+    });
+    expect(sandbox.writableRoots).toContain(worktree);
+    // The parent's live policy is untouched (clone, not alias).
+    expect(base.writableRoots).toEqual(baseRootsBefore);
+    expect(base.writableRoots).not.toContain(worktree);
+  });
+
+  it("prepends the worktree to the parent's delivery roots", () => {
+    const base = resolveSandbox({ mode: "workspace-write" }, parentCwd);
+    const { deliveryRoots } = resolveWorktreeRoots({
+      worktreePath: worktree,
+      baseSandbox: base,
+      parentDeliveryRoots: [parentCwd, "/some/delivery"],
+    });
+    expect(deliveryRoots).toEqual([worktree, parentCwd, "/some/delivery"]);
+  });
+
+  it("does not duplicate the worktree if already a delivery root", () => {
+    const base = resolveSandbox({ mode: "workspace-write" }, parentCwd);
+    const { deliveryRoots } = resolveWorktreeRoots({
+      worktreePath: worktree,
+      baseSandbox: base,
+      parentDeliveryRoots: [worktree, parentCwd],
+    });
+    expect(deliveryRoots).toEqual([worktree, parentCwd]);
+  });
+
+  it("re-anchors even under a non-temp worktree path (the fragile case)", () => {
+    // This is the whole point: a worktree NOT under the OS tmpdir would not be
+    // covered by defaultTempWritableRoots, so the explicit root is what makes
+    // a worker's writes to its own checkout land.
+    const base = resolveSandbox({ mode: "workspace-write" }, parentCwd);
+    const nonTemp = "/var/lib/agent-worktrees/wt-1/project";
+    const { sandbox } = resolveWorktreeRoots({
+      worktreePath: nonTemp,
+      baseSandbox: base,
+      parentDeliveryRoots: [],
+    });
+    expect(sandbox.writableRoots).toContain(nonTemp);
   });
 });

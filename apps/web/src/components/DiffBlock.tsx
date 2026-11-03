@@ -1,3 +1,4 @@
+import { t } from "../i18n.js";
 import type { DiffLine, FileChange } from "../state/diff.js";
 
 const LINE_STYLES: Record<DiffLine["kind"], string> = {
@@ -57,7 +58,7 @@ export function DiffBlock({
       </div>
       {change.hunks.length === 0 ? (
         <div className="px-3 py-2 text-xs text-[var(--color-ink-dim)]">
-          This tool's payload is not rendered as a diff; see the raw input below.
+          {t("This tool's payload is not rendered as a diff; see the raw input below.")}
         </div>
       ) : (
         change.hunks.map((hunk, hi) => (

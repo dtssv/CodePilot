@@ -26,7 +26,9 @@ import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { type AgentDeps } from "./agent.js";
-import { runtimeRegistry, type AgentRuntime } from "./runtime.js";
+import { INTERRUPTED_RESULT } from "./agent-messages.js";
+import { runtimeRegistry, type AgentRuntime, type PluginToolDef } from "./runtime.js";
+import { BoundedSinkQueue } from "./sessionSink.js";
 import type {
   AgentMode,
   CodepilotConfig,
@@ -34,6 +36,7 @@ import type {
   FollowUpItem,
   ImageAttachment,
   PermissionDecision,
+  PermissionResolution,
   PermissionRequest,
   PromptFile,
   SessionOptions,
@@ -63,6 +66,7 @@ import { LspManager } from "./lsp.js";
 import { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
 import { AuditLogger } from "./audit.js";
+import { compileRedactionPatterns } from "./redact.js";
 import { writePlanFile, setPlanFileStatus } from "./plans.js";
 import { PersistentShell } from "./persistentShell.js";
 import {
@@ -72,7 +76,7 @@ import {
   normalizeRoot,
 } from "./deliveryRoots.js";
 import type { McpManager } from "./mcp.js";
-import { startMcp as startMcpImpl, resolveSessionMcpReferences } from "./session-mcp.js";
+import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod } from "./session-mcp.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
 import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
 import {
@@ -137,12 +141,15 @@ import { ensureProjectState, projectStatePath, scratchDir } from "./projectState
 import { HookEngine } from "./hooks.js";
 import {
   buildStopTranscriptHint,
-  resolveStopVerifyMode,
+  effectiveStopVerifyMode,
   runBuiltinStopVerify,
 } from "./stopVerify.js";
 import { estimateTokens, estimateCostUSD, lookupContextWindow, resolveCompactionThreshold } from "./tokens.js";
+import { analyzeCacheWaste, type CacheTurn, type CacheWasteReport } from "./cacheStats.js";
+import { decideCacheWarm, cacheTtlMs } from "./cacheWarmer.js";
 import {
-  writeCheckpoint,
+  writeCheckpointFromSnapshot,
+  buildCheckpointSnapshot,
   readCheckpoint,
   summariseCheckpointForPrompt,
   makeCheckpointHook,
@@ -176,6 +183,11 @@ import {
  * `0` disables continues entirely. */
 const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
 
+/** Checkpoint fires at this fraction of the compaction hard trigger, so it
+ * always snapshots pre-compaction state (checkpoint ≤ compaction) no matter
+ * how large the output reserve pushes the compaction trigger down. */
+const CHECKPOINT_BELOW_COMPACTION_RATIO = 0.9;
+
 export class Session {
   readonly id: string;
   readonly cwd: string;
@@ -188,7 +200,7 @@ export class Session {
   private readonly systemPromptExtra: string | undefined;
   private readonly onPermissionRequest?: (
     req: PermissionRequest
-  ) => Promise<PermissionDecision>;
+  ) => Promise<PermissionResolution>;
   private readonly onAskUser?: SessionOptions["onAskUser"];
   private readonly onGoalRequest?: SessionOptions["onGoalRequest"];
   private readonly onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
@@ -197,7 +209,11 @@ export class Session {
   * shared) manager. Set once MCP starts; called on dispose so a shared manager
   * never routes a server reverse request to this disposed session. */
   private mcpUnregisterRequestHandler: (() => void) | null = null;
+  private mcpUnregisterToolsChanged: (() => void) | null = null;
   private readonly diagnosticsProvider?: SessionOptions["diagnosticsProvider"];
+  /** Deployment-configured extra redaction patterns, compiled once from
+   * `config.redact.patterns`. Applied on top of the built-in secret floor. */
+  private readonly redactPatterns: readonly import("./redact.js").RedactionPattern[];
  /** Provider override (from Agent SDK / replay mode). When set, skips buildProvider. */
   private readonly providerOverride?: import("./providers/types.js").ChatProvider;
  /** Files the agent has written/edited this session, for snapshot rewind. */
@@ -262,8 +278,20 @@ export class Session {
   private title: string | null = null;
  /** Cached checkpoint hook — initialised in `init`. */
   private checkpointHook: CheckpointHook | null = null;
+  /** In-flight background checkpoint write, if any. The snapshot is built
+   * synchronously on the hot path; the slow small-model distillation + disk
+   * write run here so a completed turn is not held up by a checkpoint. At most
+   * one runs at a time (a new trigger while one is in flight is skipped —
+   * the next turn re-triggers). `dispose()` awaits this so a clean shutdown
+   * never drops a checkpoint. */
+  private pendingCheckpoint: Promise<void> | null = null;
  /** Aggregated usage across all prompts of this session. */
   private usageTotal = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+ /** Per-turn cache-relevant usage, for cache-waste attribution (`getCacheWaste`). */
+  private cacheTurns: CacheTurn[] = [];
+ /** True when the context changed (compaction/branch) just before the next
+  * recorded usage turn, so its re-bill is counted as expected, not waste. */
+  private contextChangedForNextTurn = false;
   /** Latest single-request provider `input` tokens (not cumulative). */
   private lastProviderInputTokens = 0;
  /** Set when the session was loaded with a stale in-flight status (the prior
@@ -283,6 +311,14 @@ export class Session {
   private precompact: { fingerprint: string; result: CompactionResult } | null = null;
  /** Guards against two overlapping background pre-compactions. */
   private precompactInFlight = false;
+ /** Pending prompt-cache warm timer + its abort controller. Scheduled at a
+  * turn end when a warm is cost-effective; cancelled when the next real turn
+  * starts (it supersedes the warm) or on dispose. */
+  private cacheWarmTimer: ReturnType<typeof setTimeout> | null = null;
+  private cacheWarmAbort: AbortController | null = null;
+ /** Measured probability the user continues within the cache TTL. Conservative
+  * default; warming only fires when expected savings still clear the gate. */
+  private cacheWarmContinuationProb = 0.3;
  /** Aggregate request timing across this session (persisted via `request`
  * events; this is the in-memory rollup for getStats/summaries). */
   private requestStats = { count: 0, totalMs: 0, lastMs: 0, lastTtftMs: 0, slowestMs: 0 };
@@ -329,6 +365,20 @@ export class Session {
   private turnOverrideRuleCount = 0;
  /** Resolved agent runtime name (default loop when undefined). */
   private runtimeName: string | undefined;
+ /** Plugin-installed context transform (via the runtime toolkit). Applied to
+  * a copy of the provider view before each request, validated + fail-soft.
+  * Undefined when no plugin set one. */
+  private pluginContextTransform: ((view: import("./providers/types.js").ProviderMessage[]) => import("./providers/types.js").ProviderMessage[]) | undefined;
+ /** Additive event sink mirroring the JSONL log to an external data source,
+  * wrapped in a bounded fail-soft queue. Registered by a plugin runtime (via
+  * the toolkit) or passed directly by a host. Undefined → no mirror. JSONL
+  * stays the source of truth; the sink never gates the canonical write. */
+  private eventSink: import("./sessionSink.js").BoundedSinkQueue | undefined;
+ /** Extra skill/agent directories contributed by installed plugins. Merged
+  * into discovery during `init()` so a plugin's skills/agents actually reach
+  * the running session. Empty when no plugins contribute them. */
+  private readonly pluginSkillDirs: string[];
+  private readonly pluginAgentDirs: string[];
  /** The live runtime instance, lazily resolved at the first prompt. */
   private runtime: AgentRuntime | null = null;
 
@@ -355,8 +405,11 @@ export class Session {
     this.onMcpServerRequest = opts.onMcpServerRequest;
     this.onMcpOpenAuthUrl = opts.onMcpOpenAuthUrl;
     this.diagnosticsProvider = opts.diagnosticsProvider;
+    this.redactPatterns = compileRedactionPatterns(opts.config.redact?.patterns);
     this.providerOverride = opts.provider;
     this.runtimeName = opts.runtime ?? opts.config?.runtime;
+    this.pluginSkillDirs = opts.pluginSkillDirs ?? [];
+    this.pluginAgentDirs = opts.pluginAgentDirs ?? [];
     this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
     this.autoAcceptModeSuggestions = opts.config.autoAcceptModeSuggestions === true;
     this.hostSurface = opts.hostSurface ?? "cli";
@@ -424,6 +477,8 @@ export class Session {
         if (this.disposed) {
           this.mcpUnregisterRequestHandler?.();
           this.mcpUnregisterRequestHandler = null;
+          this.mcpUnregisterToolsChanged?.();
+          this.mcpUnregisterToolsChanged = null;
           const { releaseSharedMcp } = await import("./mcp-pool.js");
           await releaseSharedMcp(mcp);
           return null;
@@ -440,13 +495,19 @@ export class Session {
       });
  // Load trusted hook hashes (for command-hook trust enforcement).
     await this.hooks.loadTrustedHashes();
- // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/.
-    this.customAgents = await discoverCustomAgents(this.cwd);
+ // Discover custom sub-agents from .codepilot/agents/ + ~/.codepilot/agents/
+ // plus any installed plugins' agents/ dirs. Fail-soft: a bad dir yields [].
+    this.customAgents = await discoverCustomAgents(this.cwd, {
+      extraDirs: this.pluginAgentDirs,
+    }).catch(() => new Map<string, CustomAgent>());
     // Discover skills and wire them: advertise in the prompt (via
     // rebuildSystemPrompt below) AND back the `skill` tool store, so an
     // installed skill can actually be loaded on demand (previously the tool
-    // was never registered — skills were dead).
-    this.discoveredSkills = await discoverSkills(this.cwd).catch(() => []);
+    // was never registered — skills were dead). Plugin skill dirs are merged
+    // in as extraDirs so an installed plugin's skills reach the session too.
+    this.discoveredSkills = await discoverSkills(this.cwd, {
+      extraDirs: this.pluginSkillDirs,
+    }).catch(() => []);
     this.skillToolHandle?.setStore(new StaticSkillStore(this.discoveredSkills));
     await this.rebuildSystemPrompt();
     this.checkpointHook = makeCheckpointHook(this.cwd, this.id);
@@ -520,16 +581,70 @@ export class Session {
    * Returns `"queued"` when the text was added to the follow-up queue
    * instead of starting immediately.
    */
+  /**
+   * Resume the last turn from the existing transcript instead of sending a
+   * new message. Use after a turn ended in a recoverable error (provider
+   * failure, tool failure, Stop-verify cap) so "retry" picks up where it
+   * stopped — WITHOUT adding another user bubble. Re-enters the agent loop
+   * driven purely by `this.events`; dangling `tool_use` calls are repaired by
+   * the provider-message builder. Returns "noop" when there is nothing to
+   * resume (no prior user turn, or the last turn did not end in an error).
+   */
+  async resumeLastTurn(): Promise<"started" | "queued" | "noop"> {
+    if (this.disposed) throw new Error("session disposed");
+    if (this.isBusy()) return "queued";
+    if (!this.canResumeLastTurn()) return "noop";
+    const lastUserText = this.lastUserPromptText() ?? "";
+    return this.prompt(lastUserText, undefined, undefined, { resume: true });
+  }
+
+  /**
+   * True when the last turn ended in a recoverable error and there is a user
+   * prompt to resume from. Clients use this to show a "retry from here" affordance
+   * distinct from "send a new message".
+   */
+  canResumeLastTurn(): boolean {
+    let sawUser = false;
+    for (const e of this.events) if (e.type === "message" && e.role === "user") sawUser = true;
+    if (!sawUser) return false;
+    // Walk back past transient/bookkeeping events to the last meaningful one.
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      const e = this.events[i]!;
+      if (e.type === "status" || e.type === "usage" || e.type === "activity") continue;
+      return e.type === "error";
+    }
+    return false;
+  }
+
+  /** Text of the most recent persisted user message, or null. */
+  private lastUserPromptText(): string | null {
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      const e = this.events[i]!;
+      if (e.type === "message" && e.role === "user") {
+        const text = e.content
+          .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
+          .map((b) => b.text)
+          .join("");
+        return text || null;
+      }
+    }
+    return null;
+  }
+
   async prompt(
     text: string,
     images?: ImageAttachment[],
     files?: PromptFile[],
+    opts?: { resume?: boolean },
   ): Promise<"started" | "queued"> {
     if (this.disposed) throw new Error("session disposed");
     if (this.isBusy()) {
       this.enqueueFollowUp({ text, images, files });
       return "queued";
     }
+    const resume = opts?.resume === true;
+    // A real turn supersedes any pending prompt-cache warm.
+    this.cancelCacheWarm();
     this.cancelController = new AbortController();
 
     // Undo baseline: capture pre-turn state of files we already know about.
@@ -545,7 +660,9 @@ export class Session {
 
  // Run UserPromptSubmit hooks. A blocking hook stops the prompt; a
  // rewriting hook replaces the text (first hook wins).
-    const promptHook = await this.hooks.runUserPromptSubmit(text).catch((): {
+    const promptHook = resume
+      ? ({ action: "allow" as const, warnings: [] as string[] })
+      : await this.hooks.runUserPromptSubmit(text).catch((): {
       action: "allow";
       rewrittenPrompt?: string;
       warnings: string[];
@@ -564,8 +681,15 @@ export class Session {
       void this.drainFollowUps();
       return "started";
     }
-    let effectivePrompt = promptHook.rewrittenPrompt ?? text;
+    // On resume there is no fresh user input: skip @mcp resolution,
+    // delivery-root extraction, image mentions and uploads — they all act on
+    // a NEW prompt. `effectivePrompt` stays the recovered last prompt (used
+    // only as the compaction fallback), `attachedImages`/`savedUploads` empty.
+    let effectivePrompt = resume ? text : (promptHook.rewrittenPrompt ?? text);
+    let attachedImages: ImageAttachment[] = [];
+    let savedUploads: Awaited<ReturnType<typeof materializeUploads>> = [];
 
+    if (!resume) {
  // Wait for background MCP (if still starting) so tools / @mcp refs work.
     await this.mcpReady.catch(() => null);
  // Resolve `@mcp:<server>/<uri>` references into inline resource content.
@@ -601,12 +725,11 @@ export class Session {
       await this.persistEvent(ev);
       this.notify(ev);
     }
-    const attachedImages = [...(images ?? []), ...mentioned.images];
+    attachedImages = [...(images ?? []), ...mentioned.images];
 
  // Uploads are written to disk and listed on the message event. The
  // attachment note is injected only when building the provider prompt
  // (see agent-messages) so the user's bubble stays clean.
-    let savedUploads: Awaited<ReturnType<typeof materializeUploads>> = [];
     if (files?.length) {
       try {
         savedUploads = await materializeUploads(this.cwd, files);
@@ -630,6 +753,7 @@ export class Session {
         return "started";
       }
     }
+    } // end preprocessing (skipped on resume)
 
     try {
  // Lazily start the persistent shell (one per session). Its cwd/env
@@ -644,6 +768,10 @@ export class Session {
       const effectiveModel = this.turnOverrideModel ?? this.model;
       // Shrink an already-oversize resumed transcript before the first send.
       await this.ensureContextUnderWindow();
+      // Resolve the agent runtime now (memoized). A plugin runtime installs
+      // its tools / context transform during resolution, so this must happen
+      // before we build `deps` that reads `this.pluginContextTransform`.
+      const runtime = this.getRuntime();
       // Lazily ensure the system prompt exists. Resume defers the init-time
       // build (to return history faster), so build on first use if needed.
       if (!this.systemPromptCache) {
@@ -675,6 +803,10 @@ export class Session {
         // mid-turn; do not capture the instance by value.
         persistentShell: this.livePersistentShellHandle(),
         diagnosticsProvider: this.diagnosticsProvider,
+        redactPatterns: this.redactPatterns,
+        // Installed during runtime resolution above (a plugin runtime may set
+        // it); undefined → agent.ts treats the transform as a no-op.
+        contextTransform: this.pluginContextTransform,
         parentSpan: promptSpan,
         dedupCache: this.dedupCache,
         fileObservations: this.fileObservations,
@@ -763,6 +895,19 @@ export class Session {
           this.usageTotal.output += u.output ?? 0;
           this.usageTotal.cacheRead += u.cacheRead ?? 0;
           this.usageTotal.cacheWrite += u.cacheWrite ?? 0;
+          // Record the turn for cache-waste attribution. A re-bill right after
+          // a compaction/branch is expected (new content), so carry that flag.
+          if ((u.input ?? 0) > 0) {
+            this.cacheTurns.push({
+              at: Date.now(),
+              model: this.model,
+              input: u.input ?? 0,
+              cacheRead: u.cacheRead ?? 0,
+              cacheWrite: u.cacheWrite ?? 0,
+              contextChanged: this.contextChangedForNextTurn,
+            });
+            this.contextChangedForNextTurn = false;
+          }
         },
         // Mid-run compaction: agent already detected pressure (local estimate
         // OR last provider inputTokens). Force — do not re-gate on the local
@@ -774,13 +919,9 @@ export class Session {
           if (this.events === before) return null;
           return this.events.slice();
         },
+        onWarmableRequest: (candidate) => this.scheduleCacheWarm(candidate),
         lastProviderInputTokens: this.lastProviderInputTokens,
       };
-
- // Resolve the agent runtime. Default loop wraps
- // runAgent; unknown explicit names throw here so a misconfigured
- // plugin runtime never silently falls back to the default loop.
-      const runtime = this.getRuntime();
 
       // Stop-hook continue loop: when a Stop hook blocks ending the turn,
       // re-enter the agent with the reason as feedback (capped).
@@ -794,14 +935,21 @@ export class Session {
       let turnImages = attachedImages;
       let turnFiles = savedUploads;
 
+      let firstPass = true;
       for (;;) {
         // Continues after Stop/stopVerify inject feedback for the model only
         // (`systemContinue`) — never as a persisted user bubble.
         const isStopContinue = stopContinueCount > 0;
+        // Resume applies only to the FIRST re-entry: it re-engages the model
+        // on the existing transcript with no new user event. Later passes are
+        // Stop-hook continues, which use `systemContinue` instead.
+        const isResume = resume && firstPass && !isStopContinue;
+        firstPass = false;
         await runtime.prompt(
           {
             history: this.events,
             userText: isStopContinue ? "" : turnText,
+            ...(isResume ? { resume: true } : {}),
             ...(isStopContinue
               ? { systemContinue: turnText }
               : {
@@ -826,16 +974,15 @@ export class Session {
         // User cancel: do not let Stop hooks force a continue.
         if (this.cancelController?.signal.aborted) break;
 
-        const configuredStopMode = resolveStopVerifyMode(this.config.stopVerify);
-        // Conditional upgrade: when stopVerify is off but this prompt modified
-        // code files, run the project's test command once as a completion gate
-        // (fails open if no test command exists). A pure Q&A / analysis turn
-        // with no code changes stays off, avoiding needless 429-prone judge
-        // calls. Explicit "prompt"/"tests" settings are respected as-is.
-        const stopMode: ReturnType<typeof resolveStopVerifyMode> =
-          configuredStopMode === "off" && this.promptModifiedCode()
-            ? "tests"
-            : configuredStopMode;
+        // Conditional upgrade: when stopVerify was NEVER configured (left at the
+        // default) but this prompt modified code files, run the project's test
+        // command once as a completion gate. An EXPLICIT `false`/"off" is an
+        // intentional user choice and is honoured verbatim — only the unset
+        // default upgrades. See `effectiveStopVerifyMode`.
+        const stopMode = effectiveStopVerifyMode({
+          configured: this.config.stopVerify,
+          modifiedCode: this.promptModifiedCode(),
+        });
         const hasUserStop = this.hooks.hasHooks("Stop");
         if (stopMode === "off" && !hasUserStop) break;
 
@@ -1053,8 +1200,17 @@ export class Session {
     }
     const resolved = resolveModelAlias({ ...this.config, model }) ?? model;
     if (resolved === this.model && !providerId) return;
-    this.model = resolved;
-    this.config = { ...this.config, model: resolved };
+    // Apply the new model's per-model capabilities (contextWindow,
+    // maxOutputTokens) from the active provider's `modelCapabilities`, not just
+    // the model name — otherwise a model-only switch keeps the previous model's
+    // window, so the context gauge and compaction geometry use a stale/default
+    // budget (e.g. a user-configured 128k model shown against the 200k
+    // fallback). `applyProviderAndModel` is a no-op for caps when none are
+    // configured, so plain switches are unaffected.
+    const applied = applyProviderAndModel(this.config, this.activeProviderId, resolved);
+    this.model = applied.model;
+    this.config = applied.config;
+    if (applied.providerId) this.activeProviderId = applied.providerId;
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
   }
@@ -1233,6 +1389,8 @@ export class Session {
  */
   contextReport(): {
     totalTokens: number;
+    sentTokens: number;
+    providerInputTokens: number;
     window: number;
     triggerThreshold: number;
     triggerFraction: number;
@@ -1243,10 +1401,19 @@ export class Session {
     topFileReads: { path: string; reads: number; tokens: number }[];
     duplicateReads: { path: string; reads: number }[];
   } {
-    const window = this.config.contextWindow ??
-      lookupContextWindow(this.model).contextWindow;
+    const modelWindow = lookupContextWindow(this.model);
+    const window = this.config.contextWindow ?? modelWindow.contextWindow;
+    // Use the SAME geometry as the real compaction path (`maybeCompact`), which
+    // reserves output tokens — so the displayed trigger line matches where
+    // compaction actually fires, not a plain `window × fraction`.
+    const geometry = compactionGeometry({
+      window,
+      thresholdFraction: this.config.compactionThreshold,
+      maxTokens: this.config.maxTokens,
+      maxOutputTokens: modelWindow.maxOutputTokens,
+    });
+    const trigger = geometry.hardTrigger;
     const fraction = this.config.compactionThreshold ?? DEFAULT_COMPACTION_FRACTION;
-    const trigger = Math.floor(window * fraction);
     const byType = new Map<string, { tokens: number; count: number }>();
     let total = 0;
  // Track file reads for dedup hints.
@@ -1287,6 +1454,17 @@ export class Session {
     const systemTokens = sp
       ? Math.max(0, estimateTokens(sp.full) - skillsTokens)
       : 0;
+    // Current user message: the last user turn is a distinct, user-legible slice
+    // of the conversation category. Surface it separately so the breakdown can
+    // show "this message vs. everything before it", the way Cursor does.
+    let lastMessageTokens = 0;
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      const e = this.events[i]!;
+      if (e.type === "message" && e.role === "user") {
+        lastMessageTokens = estimateEventTokens([e], estimateTokens);
+        break;
+      }
+    }
     // Tool definitions sent to the provider this mode. Split MCP out — its
     // schemas are often the biggest and most surprising contributor.
     let toolTokens = 0;
@@ -1310,12 +1488,17 @@ export class Session {
       if (e.type === "subagent") subagentTokens += tok;
       else conversationTokens += tok;
     }
+    // Split the current user message out of the conversation bucket so the two
+    // don't double-count. `lastMessage` only counts when it is genuinely part
+    // of the (non-subagent) conversation total.
+    const conversationRest = Math.max(0, conversationTokens - lastMessageTokens);
     const byCategory = [
       { category: "system", tokens: systemTokens },
       { category: "skills", tokens: skillsTokens },
       { category: "tools", tokens: toolTokens },
       { category: "mcp", tokens: mcpTokens },
-      { category: "conversation", tokens: conversationTokens },
+      { category: "conversation", tokens: conversationRest },
+      { category: "lastMessage", tokens: lastMessageTokens },
       { category: "subagent", tokens: subagentTokens },
     ]
       .filter((c) => c.tokens > 0)
@@ -1328,12 +1511,30 @@ export class Session {
     const duplicateReads = topFileReads
       .filter((f) => f.reads > 1)
       .map((f) => ({ path: f.path, reads: f.reads }));
+    // `sentTokens` is the accurate per-turn send estimate: event-log tokens
+    // PLUS the fixed cost of the system prompt + skills + tool/MCP schemas,
+    // which ride every request but live outside the event log. The gauge
+    // percentage is driven by this grand total — the plain event-log `total`
+    // understates real usage by that fixed cost.
+    const sentTokens = total + systemTokens + skillsTokens + toolTokens + mcpTokens;
+    // Prefer the provider's own last reported prompt size as ground truth when
+    // we have it; it already accounts for everything the provider actually
+    // tokenised. Before the first response (or on a fresh resume) it is 0 and
+    // the estimate stands in.
+    const providerInputTokens = Math.max(0, this.lastProviderInputTokens);
+    const effectiveTotal = providerInputTokens > 0 ? providerInputTokens : sentTokens;
     return {
+      // Kept for back-compat: the event-log-only total some callers rely on.
       totalTokens: total,
+      // The full per-turn send estimate (event log + system + tools + MCP).
+      sentTokens,
+      // Provider-reported prompt size from the last request (0 until the first
+      // response), the most accurate numerator when available.
+      providerInputTokens,
       window,
       triggerThreshold: trigger,
       triggerFraction: fraction,
-      usagePercent: Math.round((total / window) * 100),
+      usagePercent: window > 0 ? Math.round((effectiveTotal / window) * 100) : 0,
       autoCompactEnabled: this.config.autoCompact !== false,
       byEventType,
       byCategory,
@@ -1539,8 +1740,87 @@ export class Session {
  */
   getRuntime(): AgentRuntime {
     if (this.runtime) return this.runtime;
-    this.runtime = runtimeRegistry.resolve(this.runtimeName, { cwd: this.cwd });
+    this.runtime = runtimeRegistry.resolve(this.runtimeName, {
+      cwd: this.cwd,
+      registerTool: (def) => this.registerPluginTool(def),
+      setContextTransform: (transform) => this.setPluginContextTransform(transform),
+      registerEventSink: (sink) => this.registerPluginEventSink(sink),
+    });
     return this.runtime;
+  }
+
+  /**
+   * Install a plugin-provided context transform. The ABI type
+   * `PluginContextTransform` is the structural twin of a transform over
+   * `ProviderMessage[]`, so this stores it directly; `agent.ts` applies it on
+   * a copy of the view, validates the result, and falls back to the
+   * untransformed view on any problem (fail-soft). Setting it again replaces
+   * the previous transform.
+   */
+  private setPluginContextTransform(
+    transform: (view: import("./providers/types.js").ProviderMessage[]) => import("./providers/types.js").ProviderMessage[],
+  ): void {
+    this.pluginContextTransform = transform;
+  }
+
+  /**
+   * Register a plugin-provided additive event sink. The sink is wrapped in a
+   * {@link BoundedSinkQueue} so it mirrors JSONL lines on a background drain
+   * and can never block or fail the canonical append (fail-soft enforced by
+   * the host). Registering again closes the previous sink and installs the
+   * new one. The ABI `PluginEventSink` is the structural twin of
+   * `SessionEventSink`, so it is stored directly.
+   */
+  private registerPluginEventSink(
+    sink: import("./sessionSink.js").SessionEventSink,
+  ): void {
+    const prev = this.eventSink;
+    this.eventSink = new BoundedSinkQueue(sink, {
+      onError: (err) =>
+        process.stderr.write(`[session] event sink error: ${err.message}\n`),
+    });
+    if (prev) void prev.close();
+  }
+
+  /**
+   * Adapt a plugin-contributed {@link PluginToolDef} into a real registry
+   * entry the model can call. The JSON-schema input is converted to Zod with
+   * the same helper MCP tools use (`jsonSchemaToZod`), so it type-checks and
+   * flows through the normal validation + PreToolUse/PostToolUse + permission
+   * pipeline. A plugin tool may NOT overwrite a built-in (or earlier plugin)
+   * tool of the same name — the first registration wins and later ones are
+   * rejected with a warning, so a plugin cannot silently hijack `bash`/`read_file`.
+   */
+  private registerPluginTool(def: PluginToolDef): void {
+    const name = typeof def?.name === "string" ? def.name.trim() : "";
+    if (!name) throw new Error("plugin tool is missing a name");
+    if (this.toolRegistry.get(name)) {
+      process.stderr.write(
+        `[session] plugin tool "${name}" ignored — a tool with that name already exists\n`,
+      );
+      return;
+    }
+    const schema = def.parameters && typeof def.parameters === "object" ? def.parameters : { type: "object", properties: {} };
+    this.toolRegistry.register({
+      name,
+      description: typeof def.description === "string" ? def.description : "",
+      inputSchema: jsonSchemaToZod(schema as Record<string, unknown>),
+      permission: def.permission ?? "execute",
+      source: "plugin",
+      execute: async (input, ctx) => {
+        // Run the plugin's handler with an ABI-safe context subset. Any throw
+        // becomes an error tool_result, never a crash (fail-soft).
+        try {
+          const r = await def.execute(input, { cwd: ctx.cwd, signal: ctx.signal });
+          return {
+            content: typeof r?.content === "string" ? r.content : String(r?.content ?? ""),
+            isError: r?.isError === true,
+          };
+        } catch (err) {
+          return { content: `plugin tool "${name}" failed: ${(err as Error).message}`, isError: true };
+        }
+      },
+    });
   }
 
  /** The configured runtime name (for `/runtime`-style introspection). */
@@ -1764,9 +2044,9 @@ export class Session {
       // through the host. No handler → leave blocked (a blocked write will
       // still raise the per-write prompt later), never silently widen the jail.
       if (!this.onPermissionRequest) continue;
-      let decision: PermissionDecision;
+      let resolution: PermissionResolution;
       try {
-        decision = await this.onPermissionRequest({
+        resolution = await this.onPermissionRequest({
           requestId: `sandbox_grant_${Math.random().toString(36).slice(2, 10)}`,
           toolName: "sandbox",
           input: { path: dir },
@@ -1778,6 +2058,9 @@ export class Session {
       } catch {
         continue; // host error → leave blocked; per-write prompt still guards
       }
+      // A decline-with-feedback object means "don't widen the jail" — treat it
+      // as a plain deny here (the feedback has no tool_result to ride on).
+      const decision: PermissionDecision = typeof resolution === "string" ? resolution : "deny";
       if (decision === "allow" || decision === "always") {
         await this.expandWritablePath(dir, { persist: decision === "always" });
       }
@@ -1812,6 +2095,53 @@ export class Session {
     return resolve(dir);
   }
 
+  /**
+   * Hot-apply a new sandbox mode to the LIVE session (the host also persists it
+   * to the user config so the next session inherits it). Re-resolves the policy,
+   * re-wires the permission engine + command-hook sandbox, recomputes the
+   * "no OS backend" availability flag, and restarts the persistent shell so the
+   * next bash command runs under the new policy. Mirrors the wiring done once in
+   * the constructor (and the restart done by {@link expandWritablePath}), so a
+   * mid-session switch cannot leave a stale jail behind.
+   *
+   * This is deliberately the ONLY mutation entry point for the mode — writes go
+   * through the same `resolveSandbox` + `setSandbox` path as startup, so there is
+   * no second code path that could drift from the real enforcement.
+   */
+  setSandboxMode(mode: ResolvedSandbox["mode"]): {
+    mode: ResolvedSandbox["mode"];
+    unavailable: boolean;
+    backend: string;
+  } {
+    // Preserve the operator's other sandbox settings (network/writablePaths/
+    // fallback); only the mode changes.
+    this.config = {
+      ...this.config,
+      sandbox: { ...this.config.sandbox, mode },
+    };
+    this.sandbox = resolveSandbox(this.config.sandbox, this.cwd);
+    this._sandboxUnavailable =
+      this.sandbox.mode !== "off" &&
+      detectSandboxBackend() === "none" &&
+      this.sandbox.fallback === "deny";
+    this.permissions.setSandbox(this.sandbox, this.cwd);
+    if (this.config.hookSandbox) {
+      this.hooks.setCommandSandbox(this.sandbox);
+    }
+    // Restart the persistent shell so the next command is (un)jailed per the new
+    // policy. A command already in flight keeps its old shell; the switch takes
+    // effect from the next bash call — the honest boundary for a live change.
+    if (this.persistentShell) {
+      try {
+        this.persistentShell.close();
+      } catch {
+        /* ignore */
+      }
+      this.persistentShell = this.startPersistentShell();
+    }
+    return this.getSandboxStatus();
+  }
+
  /** Sandbox availability status. When `unavailable` is true, bash commands
  * are being refused because sandbox mode is active but no OS backend
  * exists and fallback is "deny". The host should surface this to the
@@ -1844,6 +2174,17 @@ export class Session {
       ...this.usageTotal,
       costUSD: estimateCostUSD(this.model, this.usageTotal),
     };
+  }
+
+ /**
+  * Attribute re-billed (un-cached) input tokens to a cause — idle-TTL expiry,
+  * model switch, or an expected re-bill at a compaction boundary — and quantify
+  * the dollar waste. Pure view over the per-turn usage this session recorded;
+  * drives cost visibility in `/session`. Fail-soft: unknown model price yields
+  * a zero-cost (but still token-counted) miss.
+  */
+  getCacheWaste(): CacheWasteReport {
+    return analyzeCacheWaste(this.cacheTurns);
   }
 
  /** The MCP manager (null when no servers are configured). For `/mcp`. */
@@ -1982,6 +2323,21 @@ export class Session {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.followUpQueue = [];
+    // Flush an in-flight background checkpoint so a clean shutdown never drops
+    // it. Only a true crash (no dispose) can lose one, and the next session at
+    // the same threshold simply rewrites it. Fail-soft: the task already logs.
+    if (this.pendingCheckpoint) {
+      await this.pendingCheckpoint.catch(() => undefined);
+    }
+    // Drain + close the additive event sink so a clean shutdown mirrors every
+    // queued line. Best-effort (the queue swallows sink errors); never blocks
+    // the rest of dispose for long because the queue is bounded.
+    if (this.eventSink) {
+      const sink = this.eventSink;
+      this.eventSink = undefined;
+      await sink.close().catch(() => undefined);
+    }
+    this.cancelCacheWarm();
     this.cancel();
     this.listeners.clear();
  // Detach background-job completion listeners.
@@ -2011,6 +2367,8 @@ export class Session {
     // would route a later server reverse request to this disposed session.
     this.mcpUnregisterRequestHandler?.();
     this.mcpUnregisterRequestHandler = null;
+    this.mcpUnregisterToolsChanged?.();
+    this.mcpUnregisterToolsChanged = null;
     if (mcp) {
       const { releaseSharedMcp } = await import("./mcp-pool.js");
       await releaseSharedMcp(mcp);
@@ -2289,7 +2647,28 @@ export class Session {
       setMcpRequestHandlerCleanup: (unregister) => {
         this.mcpUnregisterRequestHandler = unregister;
       },
+      setMcpToolsChangedCleanup: (unregister) => {
+        this.mcpUnregisterToolsChanged = unregister;
+      },
     });
+  }
+
+  /**
+   * Fold persisted `pin` control events onto their target messages. Latest
+   * pin per message id wins (so a later unpin overrides an earlier pin). Runs
+   * on load and is cheap (one pass; sessions rarely have many pins).
+   */
+  private applyPersistedPins(): void {
+    const latest = new Map<string, boolean>();
+    for (const e of this.events) {
+      if (e.type === "pin") latest.set(e.messageId, e.pinned);
+    }
+    if (latest.size === 0) return;
+    for (const e of this.events) {
+      if (e.type === "message" && latest.has(e.id)) {
+        e.pinned = latest.get(e.id) ? true : undefined;
+      }
+    }
   }
 
   private async loadFromDisk(): Promise<void> {
@@ -2297,17 +2676,28 @@ export class Session {
       const path = sessionPath(this.id);
       const text = await readFile(path, "utf-8");
       const lines = text.split("\n").filter((l) => l.trim().length > 0);
+      // Parse synchronously and only `await` the image rehydration for the few
+      // events that actually carry offloaded images. Awaiting every event (most
+      // have none) forced one microtask round-trip per line — on multi-hundred-
+      // line sessions that dominated resume latency for no work.
       for (const line of lines) {
         try {
           const parsed = JSON.parse(line) as Event;
-          // Rehydrate offloaded images (base64 stored as an artifact ref) so the
-          // in-memory transcript is complete.
-          this.persisted.push(await this.rehydrateEventImages(parsed));
+          if (eventHasOffloadedImages(parsed)) {
+            // Rehydrate offloaded images (base64 stored as an artifact ref) so
+            // the in-memory transcript is complete.
+            this.persisted.push(await this.rehydrateEventImages(parsed));
+          } else {
+            this.persisted.push(parsed);
+          }
         } catch {
  /* skip malformed */
         }
       }
       this.events = liveTranscript(this.persisted);
+      // Reapply compaction anchors: the latest `pin` per message id wins
+      // (append-only safe — the original message line is never rewritten).
+      this.applyPersistedPins();
       for (let i = this.persisted.length - 1; i >= 0; i--) {
         const link = linkIdForEvent(this.persisted[i]!);
         if (link) {
@@ -2338,13 +2728,60 @@ export class Session {
       if (e.type === "status") lastStatus = e.status;
     }
     if (lastStatus === "running" || lastStatus === "waiting_permission") {
+ // The prior run was cut off mid-flight. Before flipping to `idle`, seal
+ // any tool call it left unanswered so the persisted JSONL is
+ // self-consistent (every tool_call has a matching tool_result). The
+ // provider-message builder already repairs dangling calls in-memory
+ // (`closeOpenCalls`), but the on-disk log would otherwise keep an orphan
+ // tool_call forever — breaking export, naive replay, and any consumer
+ // that trusts the raw log. Persist the same side-effect-safe
+ // same `INTERRUPTED_RESULT` as a real tool_result event.
+      await this.sealOrphanedToolCalls();
       const ev: Event = { type: "status", status: "idle" };
       this.events.push(ev);
       await this.persistEvent(ev).catch(() => undefined);
- // The prior run was cut off mid-flight. Flag it so the next prompt's
- // system prompt carries a recovery instruction (resume from checkpoint,
- // don't redo finished steps).
+ // Flag it so the next prompt's system prompt carries a recovery
+ // instruction (resume from checkpoint, don't redo finished steps).
       this.resumedFromInterrupt = true;
+    }
+  }
+
+  /**
+   * Append a synthetic `tool_result` for every tool call in the log that has no
+   * answering `tool_result`, so the persisted JSONL leaves no `tool_use` without
+   * a result after a mid-turn crash. A tool call is identified from either a
+   * `tool_call` event or a `tool_use` block inside an assistant message (the log
+   * records it both ways); a result from a `tool_result` event. Order of the
+   * sealed results does not matter — the message builder keys them by id — but we
+   * emit them in first-seen order for a readable log. Mirrors dsh's
+   * interrupted-turn closers and opencode's `settleStaleToolCalls`, except we
+   * write them back to the source of truth rather than only repairing the view.
+   */
+  private async sealOrphanedToolCalls(): Promise<void> {
+    const callNames = new Map<string, string>();
+    const answered = new Set<string>();
+    for (const e of this.events) {
+      if (e.type === "tool_call") {
+        if (!callNames.has(e.id)) callNames.set(e.id, e.name);
+      } else if (e.type === "message" && e.role === "assistant") {
+        for (const b of e.content) {
+          if (b.type === "tool_use" && !callNames.has(b.id)) callNames.set(b.id, b.name);
+        }
+      } else if (e.type === "tool_result") {
+        answered.add(e.toolCallId);
+      }
+    }
+    for (const [id, name] of callNames) {
+      if (answered.has(id)) continue;
+      const ev: Event = {
+        type: "tool_result",
+        toolCallId: id,
+        name,
+        content: INTERRUPTED_RESULT,
+        isError: true,
+      };
+      this.events.push(ev);
+      await this.persistEvent(ev).catch(() => undefined);
     }
   }
 
@@ -2370,7 +2807,13 @@ export class Session {
     // resume). The in-memory `stamped`/`this.persisted` copies keep their base64;
     // only the on-disk line is slimmed. Rehydrated in `loadFromDisk`.
     const forDisk = await this.offloadEventImages(stamped);
-    await appendFile(path, JSON.stringify(forDisk) + "\n", "utf-8");
+    const line = JSON.stringify(forDisk);
+    await appendFile(path, line + "\n", "utf-8");
+    // Additive mirror: hand the exact JSONL line to an optional external sink
+    // AFTER the canonical append resolves. Enqueue is synchronous, bounded, and
+    // fail-soft — it never blocks or fails this write (JSONL is the source of
+    // truth). No-op when no plugin/host registered a sink.
+    this.eventSink?.enqueue(this.id, line);
   }
 
   /** Threshold above which an inline image is offloaded to an artifact. */
@@ -2623,6 +3066,56 @@ export class Session {
     }
   }
 
+ /** Cancel any pending prompt-cache warm (next real turn supersedes it, or
+  * the session is disposed). */
+  private cancelCacheWarm(): void {
+    if (this.cacheWarmTimer) {
+      clearTimeout(this.cacheWarmTimer);
+      this.cacheWarmTimer = null;
+    }
+    if (this.cacheWarmAbort) {
+      this.cacheWarmAbort.abort();
+      this.cacheWarmAbort = null;
+    }
+  }
+
+ /**
+  * Schedule a cost-gated prompt-cache warm for the turn's exact request. The
+  * agent hands us the prefix size + a faithful 1-token replay closure; we
+  * decide via `decideCacheWarm` whether the expected savings beat the warm's
+  * own cost, and if so fire the replay at ~90% of the cache TTL. Fire-and-
+  * forget and fully fail-soft — a failed warm just means the next turn may
+  * miss the cache, exactly as today.
+  */
+  private scheduleCacheWarm(candidate: {
+    prefixTokens: number;
+    replay: (signal: AbortSignal) => Promise<void>;
+  }): void {
+    // A new candidate supersedes any pending one.
+    this.cancelCacheWarm();
+    if (this.config.cacheWarming !== true) return; // opt-in
+    const decision = decideCacheWarm({
+      model: this.model,
+      ttlMs: cacheTtlMs(this.model),
+      prefixTokens: candidate.prefixTokens,
+      continuationProbability: this.cacheWarmContinuationProb,
+      // A budget-derived thinking block changes with max_tokens; capping output
+      // at 1 would write a different cache entry, so refuse to warm then.
+      replayWouldDiffer:
+        (this.config.thinkingBudget ?? 0) > 0 || this.config.reasoningEffort !== undefined,
+    });
+    if (!decision.warm) return;
+    const abort = new AbortController();
+    this.cacheWarmAbort = abort;
+    this.cacheWarmTimer = setTimeout(() => {
+      this.cacheWarmTimer = null;
+      if (abort.signal.aborted || this.disposed) return;
+      void candidate.replay(abort.signal).catch(() => undefined);
+    }, decision.delayMs);
+    // Don't keep the process alive just to warm a cache.
+    this.cacheWarmTimer.unref?.();
+  }
+
   private async maybeCompact(opts: { force?: boolean } = {}): Promise<void> {
  // Master toggle: when autoCompact is explicitly false, the session
  // never auto-compacts (the user must invoke /compact manually).
@@ -2659,6 +3152,9 @@ export class Session {
     }
     const result = await this.runCompaction(trigger, opts.force === true);
     if (result.events === this.events) return; // no change
+    // The prompt prefix just changed, so the next turn's input re-bill is
+    // expected content, not broken caching — flag it for cache-waste attribution.
+    this.contextChangedForNextTurn = true;
     // Local estimate no longer reflects the last oversize API call.
     if (opts.force) this.lastProviderInputTokens = 0;
     if (result.droppedRange) {
@@ -2716,38 +3212,84 @@ export class Session {
 
   private async maybeCheckpoint(): Promise<void> {
     if (!this.checkpointHook) return;
-    // `resolveCompactionThreshold` already applies the config-window formula
-    // (config override → window * 0.8; else the model's own threshold), so this
-    // is one call rather than a duplicated inline `* 0.8` branch.
-    const threshold = resolveCompactionThreshold(this.model, this.config.contextWindow);
+    // Checkpoint must capture pre-compaction state, so its token trigger has to
+    // sit strictly BELOW the compaction hard trigger — on every config. The old
+    // `resolveCompactionThreshold` (config window × 0.8, else the model's own
+    // threshold) is computed independently of `compactionGeometry.hardTrigger`:
+    // when `outputReserve` is large (big model `maxOutputTokens` or a user
+    // `maxTokens`), `hardTrigger = window − outputReserve` can drop below
+    // `0.8 × window`, so compaction would fire FIRST and the checkpoint would
+    // snapshot the already-summarised history. Deriving the threshold from the
+    // same geometry — and clamping it below `hardTrigger` — keeps the ordering
+    // invariant (checkpoint ≤ compaction) regardless of the reserve.
+    const modelWindow = lookupContextWindow(this.model);
+    const window = this.config.contextWindow ?? modelWindow.contextWindow;
+    const { hardTrigger } = compactionGeometry({
+      window,
+      thresholdFraction: this.config.compactionThreshold,
+      maxTokens: this.config.maxTokens,
+      maxOutputTokens: modelWindow.maxOutputTokens,
+    });
+    const configured = resolveCompactionThreshold(this.model, this.config.contextWindow);
+    // Take the smaller of the configured 0.8-window threshold and a margin
+    // below the compaction trigger, so a large output reserve can never invert
+    // the order. The floor keeps a tiny/unknown window from going to zero.
+    const threshold = Math.max(
+      2_000,
+      Math.min(configured, Math.floor(hardTrigger * CHECKPOINT_BELOW_COMPACTION_RATIO)),
+    );
     const trigger = this.checkpointHook.check(this.events, {
       tokenThreshold: threshold,
       turnsThreshold: 6,
     });
     if (!trigger.shouldCheckpoint) return;
-    try {
-      const result = await writeCheckpoint(this.cwd, this.id, this.events, {
-        tokenThreshold: threshold,
-        turnsThreshold: 6,
-        summariser: buildSmallProvider(this.config),
-        summaryModel: this.config.smallModel,
-      });
-      this.checkpointHook.hasCheckpoint = true;
-      this.checkpointHook.lastCheckpointAt = this.events.length;
- // Clear the sidecar title if it duplicates the checkpoint header —
+    // One background checkpoint at a time: the slow part is a small-model
+    // round trip, and two concurrent writes would race on the same file. A
+    // trigger that arrives while one is in flight is dropped; the next turn
+    // re-evaluates and re-triggers if still warranted.
+    if (this.pendingCheckpoint) return;
+
+    // Build the snapshot NOW, on the hot path, so it captures the transcript
+    // at this exact turn boundary (pre-compaction — see the threshold math
+    // above). The snapshot is plain data, so the live `this.events` may keep
+    // mutating while the background write runs without corrupting it.
+    const snapshot = buildCheckpointSnapshot(this.events);
+    // Advance the cursor immediately: the content is already captured, so the
+    // next turn must treat this boundary as checkpointed even while the disk
+    // write is still in flight. This prevents a re-trigger loop and keeps the
+    // checkpoint≤compaction ordering (a later compaction cannot "un-take" it).
+    this.checkpointHook.hasCheckpoint = true;
+    this.checkpointHook.lastCheckpointAt = this.events.length;
+
+    const summariser = buildSmallProvider(this.config);
+    const summaryModel = this.config.smallModel;
+    // Fire-and-forget the distillation + write. Tracked by `pendingCheckpoint`
+    // so `dispose()` can await a clean shutdown; failures are fail-soft.
+    this.pendingCheckpoint = (async () => {
+      try {
+        const result = await writeCheckpointFromSnapshot(this.cwd, this.id, snapshot, {
+          tokenThreshold: threshold,
+          turnsThreshold: 6,
+          summariser,
+          summaryModel,
+        });
+ // Adopt the checkpoint header as the session title when none is set —
  // the checkpoint now carries the canonical title.
-      if (this.title && result.bytes > 0) {
-        const cp = await readCheckpoint(this.cwd, this.id);
-        const m = cp?.match(/^#\s+Checkpoint for (.+)$/m);
-        if (m && m[1] && m[1].length <= 60 && !this.title) {
-          this.title = m[1];
+        if (!this.title && result.bytes > 0) {
+          const cp = await readCheckpoint(this.cwd, this.id);
+          const m = cp?.match(/^#\s+Checkpoint for (.+)$/m);
+          if (m && m[1] && m[1].length <= 60) {
+            this.title = m[1];
+          }
         }
+      } catch (err) {
+        process.stderr.write(
+          `[session] checkpoint write failed: ${(err as Error).message}\n`
+        );
+      } finally {
+        this.pendingCheckpoint = null;
       }
-    } catch (err) {
-      process.stderr.write(
-        `[session] checkpoint write failed: ${(err as Error).message}\n`
-      );
-    }
+    })();
   }
 
   /** Start the loopback egress proxy when the sandbox network policy is
@@ -2823,6 +3365,39 @@ export class Session {
     await this.maybeCompact({ force: true });
   }
 
+  /**
+   * Anchor (or unanchor) a prior message against compaction. A pinned message
+   * is kept verbatim through folds/trims — use it for a key requirement the
+   * user wants preserved across a long session. Append-only safe: the flag is
+   * applied to the in-memory event AND a `pin` control event is persisted so
+   * the anchor survives a resume (last pin per message id wins on reload).
+   * Returns false when no message with that id exists.
+   */
+  async pinMessage(messageId: string, pinned = true): Promise<boolean> {
+    if (this.disposed) throw new Error("session disposed");
+    let found = false;
+    for (const e of this.events) {
+      if (e.type === "message" && e.id === messageId) {
+        e.pinned = pinned ? true : undefined;
+        found = true;
+      }
+    }
+    if (!found) return false;
+    const ev: Event = { type: "pin", messageId, pinned };
+    await this.persistEvent(ev).catch(() => undefined);
+    this.notify(ev);
+    return true;
+  }
+
+  /** Ids of currently pinned messages (anchored against compaction). */
+  pinnedMessageIds(): string[] {
+    const ids: string[] = [];
+    for (const e of this.events) {
+      if (e.type === "message" && e.pinned) ids.push(e.id);
+    }
+    return ids;
+  }
+
   async clearWorkingContext(reason?: string): Promise<boolean> {
     const hasWork = this.events.some(
       (e) =>
@@ -2896,6 +3471,18 @@ const SUBAGENT_RESULT_CAP = 4_000;
 /** Extract the `<skills>…</skills>` catalogue from a built system prompt, or
  * "" when absent. Used to split the skills catalogue out of the `system`
  * category in contextReport(). */
+/**
+ * True when an event carries at least one image stored as an artifact ref
+ * (offloaded base64) that needs reading back. Lets `loadFromDisk` skip the
+ * async rehydrate path — and its per-event microtask — for the vast majority
+ * of events that have no images at all.
+ */
+function eventHasOffloadedImages(e: Event): boolean {
+  const imgs = (e as { images?: Array<{ base64?: string; ref?: string }> }).images;
+  if (!Array.isArray(imgs) || imgs.length === 0) return false;
+  return imgs.some((img) => !img.base64 && !!img.ref);
+}
+
 function extractSkillsSection(fullPrompt: string): string {
   const start = fullPrompt.indexOf("<skills>");
   if (start < 0) return "";

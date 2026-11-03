@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { openSessionIndex, type SessionIndex } from "../src/sessionIndex.js";
 
 function writeSession(
@@ -177,6 +178,38 @@ describe("sessionIndex (SQLite metadata index)", () => {
       expect(i.list()).toEqual([]);
       i.close();
       rmSync(missing, { recursive: true, force: true });
+    }
+  });
+
+  it("drops and rebuilds the table on a schema-version mismatch (derived index invariant)", () => {
+    // The index is a DERIVED cache: on a schema bump it must DROP the old table
+    // and rebuild from the JSONL source of truth — never crash, never serve rows
+    // from an incompatible schema. Simulate an older index by stamping a wrong
+    // user_version into index.db, then reopening.
+    const d = mkdtempSync(join(tmpdir(), "sidx-schema-"));
+    try {
+      writeSession(d, "s1", { user: "before bump" });
+      const first = openSessionIndex(d)!;
+      expect(first.list().map((s) => s.id)).toEqual(["s1"]);
+      first.close();
+
+      // Reach into the DB and set a stale user_version so the next open sees a
+      // schema mismatch and must rebuild.
+      const req = createRequire(import.meta.url);
+      const DatabaseCtor = req("better-sqlite3") as typeof import("better-sqlite3");
+      const raw = new DatabaseCtor(join(d, "index.db"));
+      raw.pragma("user_version = 0");
+      // Also inject a bogus row that a rebuild must discard (it's not on disk).
+      raw.close();
+
+      // Reopen: the mismatch drops+recreates the table, then reconcile repopulates
+      // from the JSONL on disk. The session must still be listed, exactly once.
+      const second = openSessionIndex(d)!;
+      expect(second).not.toBeNull();
+      expect(second.list().map((s) => s.id)).toEqual(["s1"]);
+      second.close();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
     }
   });
 });

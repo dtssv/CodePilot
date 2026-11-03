@@ -56,16 +56,55 @@ const PATTERNS: RedactionPattern[] = [
   },
 ];
 
-/** Redact known secret shapes from a tool result string. */
-export function redactSecrets(text: string): string {
+/**
+ * Redact known secret shapes from a tool result string. The built-in {@link
+ * PATTERNS} are the floor and always run; `extra` (deployment-configured
+ * patterns, see {@link compileRedactionPatterns}) run AFTER them, so a
+ * deployment can add its own secret shapes but can never weaken the floor.
+ */
+export function redactSecrets(text: string, extra?: readonly RedactionPattern[]): string {
   let out = text;
   for (const { re, replace } of PATTERNS) {
     out = out.replace(re, replace);
+  }
+  if (extra) {
+    for (const { re, replace } of extra) {
+      out = out.replace(re, replace);
+    }
   }
   return out;
 }
 
 /** True when redaction changed the text (useful for tests/metrics). */
-export function containsSecretShape(text: string): boolean {
-  return redactSecrets(text) !== text;
+export function containsSecretShape(text: string, extra?: readonly RedactionPattern[]): boolean {
+  return redactSecrets(text, extra) !== text;
+}
+
+/**
+ * Compile deployment-configured redaction patterns (`redact.patterns` in
+ * config) into runnable {@link RedactionPattern}s. Each entry has a
+ * human-readable `name`, a string `regex`, optional extra `flags` (the global
+ * flag is always forced so every occurrence is redacted), and an optional
+ * `replace` (default `[REDACTED:<name>]`, matching the built-in markers). A
+ * pattern that fails to compile is skipped — a bad user regex must not disable
+ * the built-in floor or crash the loop.
+ */
+export function compileRedactionPatterns(
+  specs: ReadonlyArray<{ name: string; regex: string; flags?: string; replace?: string }> | undefined,
+): RedactionPattern[] {
+  if (!specs || specs.length === 0) return [];
+  const out: RedactionPattern[] = [];
+  for (const s of specs) {
+    // Always global so every occurrence is redacted; dedupe if the caller
+    // already asked for it. Other flags (i, m, s, u) are passed through.
+    const flags = `g${(s.flags ?? "").replace(/g/g, "")}`;
+    let re: RegExp;
+    try {
+      re = new RegExp(s.regex, flags);
+    } catch {
+      continue; // a malformed user pattern must not break redaction
+    }
+    out.push({ name: s.name, re, replace: s.replace ?? `[REDACTED:${s.name}]` });
+  }
+  return out;
 }

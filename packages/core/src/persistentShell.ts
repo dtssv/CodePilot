@@ -42,6 +42,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { modelShellEnv } from "./sandbox.js";
 
 export interface PersistentShellOptions {
  /** Working directory to start the shell in. */
@@ -127,9 +128,8 @@ export class PersistentShell {
  // sacrificial no-op command immediately and swallows its output, letting
  // the shell settle before the first real command.
     const env: Record<string, string> = {
-      ...this.opts.env,
- // Discourage (not eliminate) rc chrome:
-      TERM: "dumb",
+      ...modelShellEnv(this.opts.env),
+ // Discourage (not eliminate) rc chrome (modelShellEnv already set TERM=dumb):
       PS1: "",
       PROMPT: "",
       PS2: "",

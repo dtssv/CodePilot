@@ -151,6 +151,11 @@ describe("runAgent maxTurns (unset = unlimited)", () => {
     expect(err && err.type === "error" && err.recoverable).toBe(true);
     expect(err && err.type === "error" && err.message).toMatch(/maxTurns \(2\)/);
     expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    // Hard tool-lockout at the budget boundary: the LAST turn (turn 1, the
+    // final one before the cap) must send `toolChoice:"none"` so the model
+    // physically cannot start another tool call; the first turn must not.
+    expect(provider.calls[0]!.toolChoice).toBeUndefined();
+    expect(provider.calls[1]!.toolChoice).toBe("none");
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -180,6 +185,75 @@ describe("runAgent maxTurns (unset = unlimited)", () => {
     expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
     expect(r.finalText).toMatch(/Findings/);
     expect(r.reachedTurnBudget).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Graceful wind-down (agent.ts:444-461): the budget is not a hard wall — the
+  // last turns inject a runtime_context nudge urging synthesis, so the model
+  // lands softly instead of being cut off mid-tool-call. No peer harness does a
+  // GRADED wind-down (opencode has a single-level "steps reached" prompt; codex/
+  // dsh have no turn cap; pi hard-fails). These pin the gradient + its carrier.
+  function systemText(opts: StreamChatOptions): string {
+    return opts.messages
+      .filter((m) => m.role === "system")
+      .flatMap((m) => m.content)
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("\n");
+  }
+
+  it("injects a graded wind-down nudge on the last two turns (main session)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // maxTurns 4 → turns 0..3. Keep calling tools so we reach the wind-down.
+    provider.responses = [];
+    for (let i = 0; i < 4; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = {
+      ...f.deps(),
+      maxTurns: 4,
+      // A minimal system prompt so liveContext (which carries the nudge) is
+      // actually injected as a system message we can inspect.
+      systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
+    };
+    await runAgent({ history: [], userText: "go" }, deps);
+    // turn 2 (remaining == 2): soft "two turns left, wrap up" nudge.
+    expect(systemText(provider.calls[2]!)).toMatch(/[Tt]wo turns left/);
+    // turn 3 (remaining == 1): hard "do NOT call any more tools, write your
+    // final answer now" nudge.
+    const last = systemText(provider.calls[3]!);
+    expect(last).toMatch(/about to reach your turn budget/);
+    expect(last).toMatch(/[Dd]o NOT call any more|final answer now/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("gives a sub-agent a structured synthesis nudge (Findings/References/...)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [];
+    for (let i = 0; i < 3; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = {
+      ...f.deps(),
+      maxTurns: 2,
+      isSubagent: true,
+      systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
+    };
+    await runAgent({ history: [], userText: "go" }, deps);
+    // The sub-agent variant asks for a structured conclusion, not just "write
+    // your answer" — so the parent's outcome assessment has sections to read.
+    const nudges = provider.calls.map(systemText).join("\n---\n");
+    expect(nudges).toMatch(/Findings/);
+    expect(nudges).toMatch(/Recommendations|Blocker/);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -580,9 +654,52 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
     expect(provider.calls.length).toBe(3);
     const resumeMsg = provider.calls[2]!.messages
       .flatMap((m) => m.content)
-      .find((c) => c.type === "text" && c.text.includes("no visible final text"));
+      .find((c) => c.type === "text" && c.text.includes("no visible text"));
     expect(resumeMsg).toBeTruthy();
     expect(r.finalText).toBe("resumed and done");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("auto-continues after a degenerate EMPTY first response (no tools, no text)", async () => {
+    // Borrowed from dsh's EMPTY_RESPONSE class: a provider can return a clean
+    // finishReason:stop with zero content blocks on the VERY FIRST call (no
+    // tool use at all). The old empty-stop resume required sawToolCalls, so
+    // this degenerate completion slipped through as a silent blank reply to the
+    // user/parent. Now it is retried (bounded) like any other empty stop.
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [
+      // First call: completely empty successful stop — no tools, no text.
+      [{ kind: "done", finishReason: "stop" }],
+      // Retry produces the real answer.
+      [
+        { kind: "text_delta", messageId: "m2", text: "here is the answer" },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    const f = makeDeps(dir, provider);
+    const r = await runAgent({ history: [], userText: "go" }, f.deps());
+    expect(provider.calls.length).toBe(2);
+    expect(r.finalText).toBe("here is the answer");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("gives up gracefully when a degenerate empty response never recovers", async () => {
+    // Bounded by MAX_EMPTY_STOP_RESUMES so a model that always returns empty
+    // can't loop forever: after the cap we yield the (empty) turn, not spin.
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [
+      [{ kind: "done", finishReason: "stop" }],
+      [{ kind: "done", finishReason: "stop" }],
+      [{ kind: "done", finishReason: "stop" }],
+      [{ kind: "done", finishReason: "stop" }],
+    ];
+    const f = makeDeps(dir, provider);
+    const r = await runAgent({ history: [], userText: "go" }, f.deps());
+    // 1 initial + MAX_EMPTY_STOP_RESUMES (2) retries = 3 calls, then give up.
+    expect(provider.calls.length).toBe(3);
+    expect(r.finalText).toBe("");
     rmSync(dir, { recursive: true, force: true });
   });
 

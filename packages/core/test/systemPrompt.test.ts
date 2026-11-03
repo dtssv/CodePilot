@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt } from "../src/systemPrompt.js";
+import { buildSystemPrompt, assembleSections, type StaticSection } from "../src/systemPrompt.js";
 import type { EnvironmentProvider, EnvironmentSnapshot } from "../src/env.js";
 
 /**
@@ -44,7 +44,7 @@ describe("buildSystemPrompt static prefix", () => {
 
   it("requires researching the target before mutating", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Research the target thoroughly before you mutate/);
+    expect(out.staticPrefix).toMatch(/Research before you mutate/);
     expect(out.staticPrefix).toMatch(/study → implement/);
   });
 
@@ -62,34 +62,32 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Brownfield \(default\)/);
     expect(out.staticPrefix).toMatch(/Greenfield \(no prior code/);
     expect(out.staticPrefix).toMatch(/fully research/);
-    expect(out.staticPrefix).toMatch(/Do not build a screenshot\/CDP harness as step 1/);
+    expect(out.staticPrefix).toMatch(/Do not stand up heavy verification scaffolding/);
   });
 
   it("teaches plan quality: research → implement → verify", async () => {
-    const out = await buildSystemPrompt(baseCtx);
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan_update"] });
     expect(out.staticPrefix).toMatch(/Plan quality/);
     expect(out.staticPrefix).toMatch(/Do not plan verification you cannot perform/);
-    expect(out.staticPrefix).toMatch(/edit → screenshot → edit/);
+    expect(out.staticPrefix).toMatch(/edit→check→edit micro-loop/);
     expect(out.staticPrefix).toMatch(/research\/study/);
   });
 
-  it("distinguishes code correctness from feature\/visual correctness", async () => {
+  it("distinguishes structure checks from behaviour checks", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Code correctness ≠ feature \/ visual correctness/);
+    expect(out.staticPrefix).toMatch(/Structure checks ≠ behaviour checks/);
     expect(out.staticPrefix).toMatch(/Define success before volume/);
     expect(out.staticPrefix).toMatch(/Verify at milestones, not after every edit/);
   });
 
-  it("contains every section heading", async () => {
+  it("contains every always-on section heading (tool-independent)", async () => {
     const out = await buildSystemPrompt(baseCtx);
     for (const heading of [
       "Identity and Environment",
       "Tool-Use Policy",
       "Code Conventions",
-      "Planning and Task State",
       "Testing and Verification",
       "Git Etiquette",
-      "Memory",
       "Token Efficiency",
       "Communication Style",
       "Safety and Security",
@@ -98,6 +96,23 @@ describe("buildSystemPrompt static prefix", () => {
     ]) {
       expect(out.staticPrefix).toContain(heading);
     }
+  });
+
+  it("renders the capability-gated sections only when their tool is exposed", async () => {
+    // Empty toolset: planning / memory / MCP guidance is absent (teaching a
+    // tool the session cannot call is pure waste — philosophy A).
+    const bare = await buildSystemPrompt(baseCtx);
+    expect(bare.staticPrefix).not.toContain("Planning and Task State");
+    expect(bare.staticPrefix).not.toContain("## Memory");
+    expect(bare.staticPrefix).not.toContain("External Context (MCP)");
+    // Expose the tools: the matching sections appear.
+    const full = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["plan_update", "memory_write", "mcp__github__search"],
+    });
+    expect(full.staticPrefix).toContain("Planning and Task State");
+    expect(full.staticPrefix).toContain("## Memory");
+    expect(full.staticPrefix).toContain("External Context (MCP)");
   });
 
   it("includes the configured tool list", async () => {
@@ -340,7 +355,8 @@ describe("buildSystemPrompt dynamic suffix", () => {
   });
 
   it("documents progressive disclosure in the static memory section", async () => {
-    const out = await buildSystemPrompt(baseCtx);
+    // The Memory section is capability-gated on `memory_write` (philosophy A).
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["memory_write"] });
     expect(out.staticPrefix).toContain("progressive disclosure");
     expect(out.staticPrefix).toContain("Topic files");
   });
@@ -415,6 +431,153 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).not.toContain("<tools>");
     expect(out.staticPrefix).toContain("bash");
     expect(out.staticPrefix).toContain("edit_file");
+  });
+});
+
+// C4 contract tests: assert behaviour, not wording. These guard the invariants
+// the Section-registry redesign must preserve — tool/prompt consistency (D1),
+// required-section presence (D2), on top of the cache-stability and
+// token-budget contracts already covered above.
+describe("buildSystemPrompt C4 contracts", () => {
+  // Tools whose usage policy the static prefix hard-codes (§2). Each must be in
+  // the exposed tool set whenever the prompt instructs the model to use it.
+  const TOOL_POLICY_MENTIONS = [
+    "read_file",
+    "edit_file",
+    "write_file",
+    "grep",
+    "glob",
+    "bash",
+    "task",
+    "read_artifact",
+    "read_image",
+    "web_fetch",
+  ];
+
+  it("required sections are present under every mode", async () => {
+    for (const mode of ["chat", "plan", "agent"] as const) {
+      const out = await buildSystemPrompt({ ...baseCtx, mode, toolNames: ["read_file"] });
+      expect(out.staticPrefix, `identity missing in ${mode}`).toContain("Identity and Environment");
+      expect(out.staticPrefix, `evidence/honesty missing in ${mode}`).toContain("Evidence and Honesty");
+      expect(out.staticPrefix, `safety missing in ${mode}`).toContain("Safety and Security");
+    }
+  });
+
+  // Extract the "## 2. Tool-Use Policy" block — the section whose backticked
+  // tool mentions are instructions to USE a tool (unlike §11 mode guidance,
+  // which names tools to say they are absent). The tool-consistency contract
+  // applies to this block.
+  function toolUsePolicyBlock(staticPrefix: string): string {
+    const start = staticPrefix.indexOf("## Tool-Use Policy");
+    expect(start, "Tool-Use Policy heading not found").toBeGreaterThanOrEqual(0);
+    const after = staticPrefix.indexOf("\n## ", start + 1);
+    return staticPrefix.slice(start, after === -1 ? undefined : after);
+  }
+
+  it("tool-consistency: the Tool-Use Policy must not instruct using a tool that is not exposed (D1)", async () => {
+    // chat mode exposes only read-only tools. The §2 policy must drop any bullet
+    // that instructs using a write/execute/delegate tool the mode did not expose.
+    const exposed = ["read_file", "glob", "grep", "ls", "read_artifact", "web_fetch", "web_search", "bash_output"];
+    const out = await buildSystemPrompt({ ...baseCtx, mode: "chat", toolNames: exposed });
+    const block = toolUsePolicyBlock(out.staticPrefix);
+    const offenders = TOOL_POLICY_MENTIONS.filter(
+      (tool) => !exposed.includes(tool) && block.includes(`\`${tool}\``),
+    );
+    expect(offenders, `§2 references unexposed tools in chat mode: ${offenders.join(", ")}`).toEqual([]);
+  });
+
+  it("tool-consistency: full agent toolset keeps the tool-bound bullets", async () => {
+    const exposed = ["read_file", "edit_file", "write_file", "bash", "task", "read_artifact", "grep", "glob"];
+    const out = await buildSystemPrompt({ ...baseCtx, mode: "agent", toolNames: exposed });
+    const block = toolUsePolicyBlock(out.staticPrefix);
+    // The task-delegation and permission-denied bullets are tool-bound and should
+    // be present when their tools are exposed. (Single-tool mechanics like
+    // "prefer edit_file over write_file" now live in each tool's description,
+    // not in the cross-tool policy — C5 downlift to schema.)
+    expect(block).toContain("`task`");
+    expect(block).toContain("Permission denied");
+  });
+
+  // C4 writing-rule C (consolidated red lines + decidable conditions):
+  // negative rules are collected into a `Never:` line per section, and vague
+  // qualifiers are replaced by decidable conditions.
+  it("red lines: §2 and §5 carry a consolidated Never: line", async () => {
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "edit_file", "bash"] });
+    const neverLines = out.staticPrefix.match(/^Never: /gm) ?? [];
+    expect(neverLines.length, "expected consolidated Never: lines in §2 and §5").toBeGreaterThanOrEqual(2);
+  });
+
+  it("decidable conditions: planning uses ≥3-steps, not the vague 'non-trivial task'", async () => {
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "plan_update"] });
+    expect(out.staticPrefix).toContain("≥3 distinct steps");
+    // The planning rule no longer hinges on the undecidable "non-trivial".
+    const planStart = out.staticPrefix.indexOf("## Planning and Task State");
+    expect(planStart, "Planning section not found").toBeGreaterThanOrEqual(0);
+    const planEnd = out.staticPrefix.indexOf("\n## ", planStart + 1);
+    const planBlock = out.staticPrefix.slice(planStart, planEnd);
+    expect(planBlock).not.toMatch(/non-trivial task/);
+  });
+
+  // C4 writing-rule B (single source of truth): a rule has one home. The
+  // re-read/fold-exception rule is owned by §2; other sections must point to it,
+  // not restate it. Guards against the cross-section duplication C4 flagged.
+  it("dedup: the fold-exception re-read rule appears once (owned by §2)", async () => {
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "edit_file", "bash"] });
+    const foldMentions = out.staticPrefix.match(/folded away|fold stub/g) ?? [];
+    // §2's bullet uses "folded away" + "fold stub"; no other section should
+    // restate the fold exception. Allow the single §2 bullet (≤2 phrase hits).
+    expect(foldMentions.length, "fold-exception rule restated outside §2").toBeLessThanOrEqual(2);
+  });
+});
+
+// C4 step 2: the Section registry enforces (not just documents) uniqueness,
+// ordering, and per-model override.
+describe("section registry (assembleSections)", () => {
+  const s = (name: string, order: number, text: string, source?: "core" | "model"): StaticSection =>
+    ({ name, order, source, text });
+
+  it("orders by `order` then name, and joins with blank lines", () => {
+    const out = assembleSections([s("b", 2, "B"), s("a", 1, "A"), s("c", 1, "C")]);
+    // order 1 before 2; within order 1, name "a" before "c".
+    expect(out).toBe("A\n\nC\n\nB\n");
+  });
+
+  it("throws on two core sections with the same name", () => {
+    expect(() => assembleSections([s("dup", 0, "X"), s("dup", 1, "Y")])).toThrow(/duplicate/);
+  });
+
+  it("lets a model section override the core section of the same name", () => {
+    const out = assembleSections([
+      s("tool-use", 0, "CORE tool policy", "core"),
+      s("tool-use", 0, "TERSE tool policy", "model"),
+    ]);
+    expect(out).toContain("TERSE tool policy");
+    expect(out).not.toContain("CORE tool policy");
+  });
+
+  it("rejects a core trying to override a model (only model overrides core)", () => {
+    expect(() =>
+      assembleSections([s("x", 0, "M", "model"), s("x", 1, "C", "core")]),
+    ).toThrow(/duplicate/);
+  });
+
+  // Philosophy A: capability-gated sections render only when every required
+  // tool is in `have`. A section with no `requires` is always rendered.
+  it("drops a section whose `requires` tool is absent, keeps it when present", () => {
+    const sections: StaticSection[] = [
+      { name: "always", order: 0, text: "ALWAYS" },
+      { name: "gated", order: 1, requires: ["plan_update"], text: "GATED" },
+    ];
+    expect(assembleSections(sections, new Set(["read_file"]))).not.toContain("GATED");
+    expect(assembleSections(sections, new Set(["read_file"]))).toContain("ALWAYS");
+    expect(assembleSections(sections, new Set(["plan_update"]))).toContain("GATED");
+  });
+
+  it("renders every section when no `have` set is passed (back-compat)", () => {
+    const sections: StaticSection[] = [
+      { name: "gated", order: 0, requires: ["plan_update"], text: "GATED" },
+    ];
+    expect(assembleSections(sections)).toContain("GATED");
   });
 });
 

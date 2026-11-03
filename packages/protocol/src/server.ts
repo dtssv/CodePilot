@@ -29,6 +29,7 @@ import type {
   Event,
   ImageGenConfig,
   PermissionDecision,
+  PermissionResolution,
   PermissionMode,
   PermissionRequest as CorePermissionRequest,
   QuestionAnswers,
@@ -49,6 +50,7 @@ import {
   loadConfig as coreLoadConfig,
   loadConfigWithSources,
   listProviderTemplates,
+  collectPluginProviderTemplates,
   queryConnectorsWithStatus,
   listSelectableModels,
   listRemoteModels,
@@ -58,6 +60,7 @@ import {
   setUserActiveEndpoint,
   readUserConfigFile,
   writeUserConfigFile,
+  detectSandboxBackend,
   templateToPreset,
   findProviderIdForFlat,
   applyUpdate,
@@ -74,6 +77,7 @@ import {
   queryManagedSkills,
   installSkillFromConnector,
   installSkillFromArchive,
+  installSkillFromSource,
   setSkillEnabled,
   getSkillContent,
   getSkillFile,
@@ -89,6 +93,12 @@ import {
   listInstalledMcpServers,
   setMcpServerEnabled,
   inspectMcpServer,
+  listPluginMarket,
+  searchMarketplace,
+  installPlugin,
+  inspectPluginSource,
+  uninstallPlugin,
+  describeMarketplaceEntry,
   authorizeMcpServer,
   listLanIPv4,
   buildSingleProvider,
@@ -96,6 +106,8 @@ import {
   userMessage,
   discoverSlashCommands,
   discoverSkills,
+  discoverPlugins,
+  pluginResourcePaths,
   sharedBuiltinCommands,
   type EngineUpdateInfo,
   type ProviderPreset,
@@ -325,6 +337,20 @@ export interface PromptSendResult {
   delivery: "started" | "queued" | "steered";
 }
 
+export interface PromptResumeParams {
+  sessionId: string;
+}
+
+export interface PromptResumeResult {
+  /**
+   * `started` — the agent re-entered the last turn from the transcript.
+   * `queued` — a run was already active (should not normally happen for resume).
+   * `noop` — nothing to resume (no prior user turn, or the last turn did not
+   *   end in a recoverable error).
+   */
+  delivery: "started" | "queued" | "noop";
+}
+
 export interface PromptFollowupRemoveParams {
   sessionId: string;
   id: string;
@@ -348,6 +374,10 @@ export interface PromptCancelParams {
 export interface PermissionRespondParams {
   requestId: string;
   decision: PermissionDecision;
+ /** Decline-with-feedback: when `decision` is `"deny"`, an optional correction
+  * message that is surfaced to the model as the tool result instead of a
+  * canned "permission denied". Ignored for allow/always. */
+  feedback?: string;
 }
 
 export interface QuestionRespondParams {
@@ -482,6 +512,10 @@ export function registerServer(
     { imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }
   >("config/setImageGen", (p) => handleConfigSetImageGen(ctx, p));
   peer.onRequest<
+    { mode?: "off" | "workspace-write" | "read-only"; sessionId?: string },
+    { sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } }
+  >("config/setSandbox", (p) => handleConfigSetSandbox(ctx, p));
+  peer.onRequest<
     {
       providerId?: string;
       provider?: ProviderName;
@@ -521,6 +555,19 @@ export function registerServer(
     if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
     const cleared = await requireSession(ctx, p.sessionId).clearWorkingContext(p.reason);
     return { cleared };
+  });
+  // Anchor (or unanchor) a prior message against compaction. Returns the
+  // current set of pinned ids so the client can reflect the toggle.
+  peer.onRequest<
+    { sessionId: string; messageId: string; pinned?: boolean },
+    { ok: boolean; pinned: string[] }
+  >("session/pinMessage", async (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    if (!p?.messageId) throw new RpcError(ErrorCode.InvalidParams, "messageId required");
+    const session = requireSession(ctx, p.sessionId);
+    const ok = await session.pinMessage(p.messageId, p.pinned !== false);
+    return { ok, pinned: session.pinnedMessageIds() };
   });
   peer.onRequest<
     { sessionId: string },
@@ -648,6 +695,56 @@ export function registerServer(
     mcpOauthByName.set(name, { state: "idle" });
     return { state: "idle" as const };
   });
+  // Plugin marketplace + install (parallel to the mcp/* registry RPCs). The
+  // market is the GitHub-hosted discovery entry point; install surfaces the
+  // source via `describe` so a client can confirm before fetching code.
+  peer.onRequest<
+    { query?: string },
+    { plugins: Awaited<ReturnType<typeof listPluginMarket>>; describe: Record<string, string> }
+  >("plugins/market", async (p) => {
+    const all = await listPluginMarket();
+    const plugins = p?.query?.trim() ? searchMarketplace(all, p.query.trim()) : all;
+    const describe: Record<string, string> = {};
+    for (const e of plugins) describe[e.name] = describeMarketplaceEntry(e);
+    return { plugins, describe };
+  });
+  peer.onRequest<Record<string, never>, { plugins: Array<{ name: string; description: string; version: string; source: string; enabled: boolean }> }>(
+    "plugins/list",
+    async () => {
+      const discovered = await discoverPlugins(ctx.defaultCwd);
+      return {
+        plugins: [...discovered.values()].map((pl) => ({
+          name: pl.manifest.name,
+          description: pl.manifest.description,
+          version: pl.manifest.version,
+          source: pl.source,
+          enabled: pl.manifest.enabled !== false,
+        })),
+      };
+    },
+  );
+  // Inspect what a source WILL do before installing it: downloads to a temp
+  // dir, reads the manifest, reports tools + side effects, discards the copy.
+  // A client shows this so the user confirms before any plugin code lands/runs.
+  peer.onRequest<{ source: string }, Awaited<ReturnType<typeof inspectPluginSource>>>(
+    "plugins/inspect",
+    async (p) => {
+      if (!p?.source?.trim()) throw new RpcError(ErrorCode.InvalidParams, "source required");
+      return inspectPluginSource(p.source.trim());
+    },
+  );
+  peer.onRequest<{ source: string; force?: boolean }, { name: string; path: string }>(
+    "plugins/install",
+    async (p) => {
+      if (!p?.source?.trim()) throw new RpcError(ErrorCode.InvalidParams, "source required");
+      const path = await installPlugin(p.source.trim(), { force: p.force === true });
+      return { name: path.split(/[/\\]/).filter(Boolean).pop() ?? "plugin", path };
+    },
+  );
+  peer.onRequest<{ name: string }, { removed: boolean }>("plugins/uninstall", async (p) => {
+    if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+    return { removed: await uninstallPlugin(p.name.trim()) };
+  });
   peer.onRequest<{ code: string; secret: string }, { token: string; cwd: string; sessionId?: string; caps: string[] }>(
     "remote/pair-redeem",
     (p) => handleRemotePairRedeem(p),
@@ -715,6 +812,19 @@ export function registerServer(
       throw new RpcError(ErrorCode.InvalidParams, "filename and dataBase64 required");
     }
     return installSkillFromArchive({ filename: p.filename, dataBase64: p.dataBase64 });
+  });
+  // Install a skill from a git URL, remote archive URL, or local path — the
+  // same source vector as plugin install. The backend already supported this
+  // (`installSkillFromSource`); this RPC exposes it so clients get a "paste a
+  // repo/URL" path, not only connector-catalog + zip upload.
+  peer.onRequest<
+    { source: string },
+    Awaited<ReturnType<typeof installSkillFromSource>>
+  >("skills/install-source", (p) => {
+    if (!p?.source?.trim()) {
+      throw new RpcError(ErrorCode.InvalidParams, "source required");
+    }
+    return installSkillFromSource(p.source);
   });
   peer.onRequest<
     { name: string; enabled: boolean },
@@ -813,6 +923,10 @@ export function registerServer(
   peer.onRequest<PromptSendParams, PromptSendResult>(
     "prompt/send",
     (p) => handlePromptSend(ctx, p),
+  );
+  peer.onRequest<PromptResumeParams, PromptResumeResult>(
+    "prompt/resume",
+    (p) => handlePromptResume(ctx, p),
   );
   peer.onRequest<PromptFollowupRemoveParams, Record<string, never>>(
     "prompt/followup/remove",
@@ -955,6 +1069,7 @@ const REMOTE_METHOD_CAPS: Record<string, RemoteGrant["caps"][number] | "any"> = 
   "workspace/search": "follow",
   "workspace/watch": "follow",
   "prompt/send": "prompt",
+  "prompt/resume": "prompt",
   "prompt/cancel": "cancel",
   "prompt/followup/remove": "prompt",
   "prompt/followup/update": "prompt",
@@ -1140,7 +1255,7 @@ function isBusySession(session: Session): boolean {
 /** A reverse request shown on every client following the session; the first
  * answer wins and the others are told to dismiss it. */
 type PendingPrompt =
-  | { kind: "permission"; params: PermissionRequestParams; settle: (d: PermissionDecision) => void; declined: Set<ServerContext> }
+  | { kind: "permission"; params: PermissionRequestParams; settle: (d: PermissionResolution) => void; declined: Set<ServerContext> }
   | { kind: "question"; params: QuestionRequestParams; settle: (a: QuestionAnswers) => void; declined: Set<ServerContext> };
 
 /** Record that `ctx` now holds `session` (idempotent per connection). */
@@ -1195,13 +1310,13 @@ function failClosed(live: LiveSession, p: PendingPrompt, mode: PermissionMode): 
 function settlePrompt(
   live: LiveSession,
   requestId: string,
-  value: PermissionDecision | QuestionAnswers,
+  value: PermissionResolution | QuestionAnswers,
   from: ServerContext | null,
 ): boolean {
   const p = live.prompts.get(requestId);
   if (!p) return false;
   live.prompts.delete(requestId);
-  if (p.kind === "permission") p.settle(value as PermissionDecision);
+  if (p.kind === "permission") p.settle(value as PermissionResolution);
   else p.settle(value as QuestionAnswers);
   const method = p.kind === "permission" ? "permission/resolved" : "question/resolved";
   for (const h of live.holders) {
@@ -1219,10 +1334,13 @@ function settlePrompt(
 function sendPrompt(live: LiveSession, p: PendingPrompt, holder: ServerContext): void {
   const method = p.kind === "permission" ? "permission/request" : "question/request";
   void holder.peer
-    .request<typeof p.params, { decision?: PermissionDecision; answers?: QuestionAnswers } | undefined>(method, p.params)
+    .request<typeof p.params, { decision?: PermissionDecision; feedback?: string; answers?: QuestionAnswers } | undefined>(method, p.params)
     .then((res) => {
-      if (p.kind === "permission" && res?.decision) settlePrompt(live, p.params.requestId, res.decision, holder);
-      else if (p.kind === "question" && res?.answers) settlePrompt(live, p.params.requestId, res.answers, holder);
+      if (p.kind === "permission" && res?.decision) {
+        settlePrompt(live, p.params.requestId, toResolution(res.decision, res.feedback), holder);
+      } else if (p.kind === "question" && res?.answers) {
+        settlePrompt(live, p.params.requestId, res.answers, holder);
+      }
     })
     .catch(() => {
       p.declined.add(holder);
@@ -1379,6 +1497,10 @@ async function handleInitialize(
     );
   }
   if (params.cwd && typeof params.cwd === "string") {
+    // A scoped remote grant may only set its default cwd to an authorized
+    // workspace — otherwise every cwd-defaulting RPC would silently operate
+    // outside the grant.
+    assertCwdInGrantScope(ctx, params.cwd);
     ctx.defaultCwd = params.cwd;
   }
   if (params.permissionMode) {
@@ -1561,6 +1683,8 @@ async function handleSessionNew(
 ): Promise<{ sessionId: string }> {
   assertInitialized(ctx);
   const cwd = params?.cwd ?? ctx.defaultCwd;
+  // A remote grant may only create a session in an authorized workspace.
+  assertCwdInGrantScope(ctx, params?.cwd);
   const config = await loadConfigSafe(cwd);
   const effectiveConfig = mergeAgentMode(
     mergePermissionMode(config, ctx.defaultPermissionMode),
@@ -1670,6 +1794,7 @@ async function handleConfigGet(
   selectableModels: ReturnType<typeof listSelectableModels>;
   templates: Awaited<ReturnType<typeof listProviderTemplates>>;
   imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
+  sandbox: { mode: "off" | "workspace-write" | "read-only" };
 }> {
   assertInitialized(ctx);
   const cwd = params?.cwd ?? ctx.defaultCwd;
@@ -1692,7 +1817,10 @@ async function handleConfigGet(
       apiKeyHint: key.length <= 4 ? "****" : key.slice(-4),
     };
   })();
-  const templates = await listProviderTemplates();
+  // Plugin-contributed templates merge on top of the bundled + GitHub catalog
+  // (namespaced ids, pure data — no plugin code runs).
+  const pluginTemplates = await collectPluginProviderTemplates(cwd).catch(() => []);
+  const templates = await listProviderTemplates({ overlay: pluginTemplates });
   return {
     active: {
       provider: config.provider,
@@ -1712,7 +1840,47 @@ async function handleConfigGet(
       enabled: config.imageGen?.enabled !== false,
       hasApiKey: !!config.imageGen?.apiKey,
     },
+    sandbox: {
+      // Default mirrors core's resolveSandbox default (workspace-write).
+      mode: config.sandbox?.mode ?? "workspace-write",
+    },
   };
+}
+
+async function handleConfigSetSandbox(
+  ctx: ServerContext,
+  params: { mode?: "off" | "workspace-write" | "read-only"; sessionId?: string },
+): Promise<{ sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } }> {
+  assertInitialized(ctx);
+  const mode = params?.mode;
+  if (mode !== "off" && mode !== "workspace-write" && mode !== "read-only") {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `sandbox mode must be one of: off, workspace-write, read-only`,
+    );
+  }
+  // Persist to the user config (next session inherits it) — same merge-and-write
+  // pattern as config/setImageGen; other sandbox settings are preserved.
+  const { raw } = await readUserConfigFile();
+  const prev =
+    raw.sandbox && typeof raw.sandbox === "object"
+      ? { ...(raw.sandbox as Record<string, unknown>) }
+      : {};
+  prev.mode = mode;
+  raw.sandbox = prev;
+  await writeUserConfigFile(raw);
+  // Hot-apply to the live session when the client names one, so the switch takes
+  // effect immediately (from the next bash command) rather than next session.
+  let status: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } = {
+    mode,
+    unavailable: false,
+    backend: detectSandboxBackend(),
+  };
+  if (params.sessionId) {
+    const session = requireSession(ctx, params.sessionId);
+    status = session.setSandboxMode(mode);
+  }
+  return { sandbox: status };
 }
 
 async function handleConfigUpsertProvider(
@@ -2074,6 +2242,27 @@ function grantAllowedCwds(grant: RemoteGrant): Set<string> {
 }
 
 /**
+ * Enforce that a scoped remote grant may only act on a workspace it authorizes.
+ * No-op for the local (ungranted) connection. Filtering `session/list` alone is
+ * insufficient: a remote phone could otherwise point `initialize`/`session/new`
+ * or any cwd-based `workspace/*` RPC at an arbitrary directory outside its
+ * grant. This closes that gap at every cwd entry point. An absent/empty cwd is
+ * allowed through (it resolves to the grant's own default on the handler side).
+ */
+function assertCwdInGrantScope(ctx: ServerContext, cwd: string | undefined): void {
+  const grant = ctx.remoteGrant;
+  if (!grant) return;
+  if (!cwd || typeof cwd !== "string" || !cwd.trim()) return;
+  const allowed = grantAllowedCwds(grant);
+  if (!allowed.has(normalizeCwd(cwd))) {
+    throw new RpcError(
+      ErrorCode.InvalidRequest,
+      "Remote grant does not authorize this workspace",
+    );
+  }
+}
+
+/**
  * Enforce that a remote grant may only touch sessions in its granted
  * workspaces. No-op for the local (ungranted) connection. Throws if the
  * session's on-disk cwd is outside the grant's cwds.
@@ -2121,6 +2310,8 @@ async function handleSessionArchive(
 const WORKSPACE_MAX_BYTES = 512 * 1024;
 function workspacePath(ctx: ServerContext, input: string | undefined, cwd?: string): { abs: string; rel: string } {
   const rel = input ?? ".";
+  // A remote grant may only read/list against an authorized workspace root.
+  assertCwdInGrantScope(ctx, cwd);
   // Prefer an explicit workspace root (the folder the client has open) over
   // the daemon's process cwd, so file/folder paths resolve against the active
   // workspace in multi-workspace setups.
@@ -2409,6 +2600,7 @@ async function handleWorkspaceSearch(ctx: ServerContext, params: WorkspaceSearch
  * connect) are intentionally omitted (they live in the client). */
 async function handleCommandsList(ctx: ServerContext, params?: CommandsListParams): Promise<CommandsListResult> {
   assertInitialized(ctx);
+  assertCwdInGrantScope(ctx, params?.cwd);
   const cwd = params?.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
   const commands: CommandInfoRpc[] = sharedBuiltinCommands().map((c) => ({
     name: c.name,
@@ -2419,13 +2611,22 @@ async function handleCommandsList(ctx: ServerContext, params?: CommandsListParam
   const warnings: string[] = [];
   try {
     const reserved = new Set(commands.map((c) => c.name));
-    const discovered = await discoverSlashCommands(cwd, { reservedNames: reserved });
+    // Plugin command dirs: discovered fail-soft so a bad plugin never breaks
+    // the `/` menu. Mapped to the "user" RPC source to avoid a wire-type change.
+    let extraDirs: string[] = [];
+    try {
+      const plugins = await discoverPlugins(cwd);
+      extraDirs = pluginResourcePaths(plugins).commands;
+    } catch {
+      /* plugin discovery is best-effort; fall back to project/user commands */
+    }
+    const discovered = await discoverSlashCommands(cwd, { reservedNames: reserved, extraDirs });
     for (const c of discovered.commands) {
       commands.push({
         name: c.name,
         description: c.description,
         argumentHint: c.argumentHint,
-        source: c.source === "builtin" ? "builtin" : c.source,
+        source: c.source === "builtin" ? "builtin" : c.source === "plugin" ? "user" : c.source,
       });
     }
     warnings.push(...discovered.warnings);
@@ -2456,6 +2657,7 @@ const COMPLETION_IGNORE_DIRS = new Set([".git", "node_modules", ".codepilot", "d
  * `@mcp:` refs) — the server does not inline content here. */
 async function handleWorkspaceComplete(ctx: ServerContext, params: WorkspaceCompleteParams): Promise<WorkspaceCompleteResult> {
   assertInitialized(ctx);
+  assertCwdInGrantScope(ctx, params.cwd);
   const cwd = params.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
   const query = (params.query ?? "").trim();
   const ql = query.toLowerCase();
@@ -2545,8 +2747,11 @@ async function handleWorkspaceComplete(ctx: ServerContext, params: WorkspaceComp
   return { candidates: out.slice(0, max) };
 }
 
-/** Resolve the git working directory: explicit workspace cwd over daemon cwd. */
+/** Resolve the git working directory: explicit workspace cwd over daemon cwd.
+ * Also enforces the remote-grant scope — git RPCs can read and mutate a repo,
+ * so a scoped phone must not run them against an unauthorized workspace. */
 function gitCwd(ctx: ServerContext, cwd?: string): string {
+  assertCwdInGrantScope(ctx, cwd);
   return cwd && cwd.trim() ? resolve(cwd) : resolve(ctx.defaultCwd);
 }
 
@@ -2904,6 +3109,37 @@ async function handlePromptSend(
   return { delivery: "started" };
 }
 
+async function handlePromptResume(
+  ctx: ServerContext,
+  params: PromptResumeParams,
+): Promise<PromptResumeResult> {
+  assertInitialized(ctx);
+  const session = ctx.sessions.get(params.sessionId);
+  if (!session) {
+    throw new RpcError(
+      ErrorCode.SessionNotFound,
+      `session not found: ${params.sessionId}`,
+    );
+  }
+  // Nothing to resume (no prior user turn, or the last turn ended cleanly):
+  // report `noop` so the client can fall back to a normal send.
+  if (!session.canResumeLastTurn()) {
+    return { delivery: "noop" };
+  }
+  // Fire-and-forget: the resumed turn's events stream back as `event`
+  // notifications, exactly like a normal prompt.
+  void session.resumeLastTurn().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    void ctx.peer
+      .notify<EventParams>("event", {
+        sessionId: session.id,
+        event: { type: "error", message, recoverable: false },
+      })
+      .catch(() => {});
+  });
+  return { delivery: "started" };
+}
+
 async function handlePromptFollowupRemove(
   ctx: ServerContext,
   params: PromptFollowupRemoveParams,
@@ -2985,7 +3221,7 @@ async function handlePermissionRespond(
   params: PermissionRespondParams,
 ): Promise<Record<string, never>> {
   const live = liveForRequest(params.requestId);
-  if (!live || !settlePrompt(live, params.requestId, params.decision, ctx)) {
+  if (!live || !settlePrompt(live, params.requestId, toResolution(params.decision, params.feedback), ctx)) {
     throw new RpcError(
       ErrorCode.InvalidParams,
       `no pending permission request: ${params.requestId}`,
@@ -3064,7 +3300,7 @@ async function requestPermissionFromClient(
   ctx: ServerContext,
   session: Session,
   req: CorePermissionRequest,
-): Promise<PermissionDecision> {
+): Promise<PermissionResolution> {
   const live = liveFor(ctx, session);
   const params: PermissionRequestParams = {
     sessionId: session.id,
@@ -3074,7 +3310,7 @@ async function requestPermissionFromClient(
     reason: req.reason,
     ...(req.sandboxExpand ? { sandboxExpand: req.sandboxExpand } : {}),
   };
-  return new Promise<PermissionDecision>((settle) => {
+  return new Promise<PermissionResolution>((settle) => {
     const p: PendingPrompt = { kind: "permission", params, settle, declined: new Set() };
     live.prompts.set(params.requestId, p);
     for (const h of live.holders) sendPrompt(live, p, h);
@@ -3085,6 +3321,16 @@ async function requestPermissionFromClient(
  * is not (or no longer) registered — then only `ctx` is asked. */
 function liveFor(ctx: ServerContext, session: Session): LiveSession {
   return liveSessions.get(session.id) ?? { session, holders: new Set([ctx]), prompts: new Map() };
+}
+
+/** Build a core `PermissionResolution` from a wire decision + optional
+ * feedback. Feedback only matters on a deny; allow/always pass through as the
+ * bare decision string. */
+function toResolution(decision: PermissionDecision, feedback?: string): PermissionResolution {
+  if (decision === "deny" && feedback && feedback.trim().length > 0) {
+    return { decision: "deny", feedback };
+  }
+  return decision;
 }
 
 function defaultDecision(mode: PermissionMode): PermissionDecision {

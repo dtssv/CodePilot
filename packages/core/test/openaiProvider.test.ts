@@ -119,6 +119,57 @@ describe("OpenAIProvider request shape", () => {
   });
 });
 
+describe("OpenAIProvider reasoning stream", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("surfaces delta.reasoning_content as thinking_delta (DeepSeek/GLM/Qwen)", async () => {
+    vi.stubGlobal("fetch", async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"let me "}}]}\n\n',
+        'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"the answer"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    const events = await collect(
+      p.stream({ model: "glm-5.2", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    );
+    const thinking = events.filter((e) => e.kind === "thinking_delta");
+    const text = events.filter((e) => e.kind === "text_delta");
+    expect(thinking.map((e) => (e as { text: string }).text)).toEqual(["let me ", "think"]);
+    expect(text.map((e) => (e as { text: string }).text)).toEqual(["the answer"]);
+    // Thinking must lead the visible answer in stream order.
+    expect(events.findIndex((e) => e.kind === "thinking_delta")).toBeLessThan(
+      events.findIndex((e) => e.kind === "text_delta"),
+    );
+  });
+
+  it("also accepts the alternate `reasoning` field name", async () => {
+    vi.stubGlobal("fetch", async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"reasoning":"hmm"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"done"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    );
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    const events = await collect(
+      p.stream({ model: "deepseek-reasoner", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    );
+    expect(events.filter((e) => e.kind === "thinking_delta").map((e) => (e as { text: string }).text)).toEqual(["hmm"]);
+  });
+
+  it("does not emit thinking_delta for ordinary content-only responses", async () => {
+    vi.stubGlobal("fetch", async () => sseResponse(DONE));
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    const events = await collect(
+      p.stream({ model: "gpt-4o", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    );
+    expect(events.some((e) => e.kind === "thinking_delta")).toBe(false);
+  });
+});
+
 describe("OpenAIProvider Azure dialect", () => {
   afterEach(() => vi.restoreAllMocks());
 

@@ -139,15 +139,31 @@ export function reducer(state: AppState, action: Action): AppState {
         plan: [],
         usage: { input: 0, output: 0 },
         subagents: undefined,
+        // Per-session state must be cleared when switching/resuming into another
+        // session, or the previous session's queued follow-ups and last-request
+        // timing leak into the new session's composer (they live in the single
+        // global AppState, not keyed by sessionId). `session-closed` already
+        // resets these — `session-opened` has to as well, or a queued message
+        // from session A shows up in session B. Any follow-ups genuinely
+        // belonging to the opened session arrive via its replayed `followup`
+        // events below.
+        followUps: undefined,
+        lastRequest: undefined,
         permission: undefined,
         question: undefined,
       };
- // Replaying history through the same reducer keeps resumed sessions and
- // live ones on exactly one code path.
-      const replayed = (action.history ?? []).reduce(
-        (acc, event) => reducer(acc, { type: "event", event }),
-        base,
-      );
+ // Replaying history runs the SAME per-event logic as the live path
+ // (`applyEvent`), but with `replay=true` so each event folds into one
+ // private `rows` accumulator in place instead of spread-copying the whole
+ // growing array per event. That turns an O(N²) resume (every streamed
+ // `message_delta` re-copying+filtering all prior rows) into O(N). The
+ // accumulator is never shared outside this fold, so in-place mutation is
+ // safe; the one-time retry-banner cleanup runs once at the end.
+      let replayed = base;
+      for (const event of action.history ?? []) {
+        replayed = applyEvent(replayed, event, true);
+      }
+      replayed = { ...replayed, rows: clearTransientRetryRows(replayed.rows) };
       return showPrompts(replayed, state.pending, false);
     }
  // The prompt itself is not added here: `agent.ts` appends the user message
@@ -279,7 +295,38 @@ function applySubagent(state: AppState, e: Extract<Event, { type: "subagent" }>)
   return { ...state, subagents: { ...state.subagents, [e.parentToolCallId]: runs } };
 }
 
-function applyEvent(state: AppState, e: Event): AppState {
+/**
+ * Prepare the working `rows` array for an event.
+ *
+ * Live path (`replay` false): copy the array and strip transient retry/429
+ * banners — the single-event reducer must stay pure and must repaint retry
+ * banners away as the turn resumes.
+ *
+ * Replay path (`replay` true): the array is a private accumulator created
+ * fresh in `session-opened`, so we mutate it in place (no per-event copy) and
+ * skip the per-event `clearTransientRetryRows` filter. Without this,
+ * `session-opened` was O(N²) — every one of N streamed events (mostly
+ * `message_delta`) spread-copied and filtered the whole growing rows array.
+ * The one-time cleanup runs once after the fold in `replaySession`.
+ */
+function workingRows(state: AppState, replay: boolean): Row[] {
+  return replay ? state.rows : clearTransientRetryRows([...state.rows]);
+}
+
+/**
+ * Append a transcript row. Live path copies (immutability for the pure
+ * reducer); replay path pushes into the private accumulator in place so a
+ * full history fold stays O(N) instead of O(N²).
+ */
+function appendRow(rows: Row[], row: Row, replay: boolean): Row[] {
+  if (replay) {
+    rows.push(row);
+    return rows;
+  }
+  return [...rows, row];
+}
+
+function applyEvent(state: AppState, e: Event, replay = false): AppState {
  // Prefer the event's own timestamp (persisted by the agent loop) so a
  // replayed session shows original times, not the replay moment. Falls back
  // to now for events without one (status/usage/etc.).
@@ -289,7 +336,7 @@ function applyEvent(state: AppState, e: Event): AppState {
       if (e.delta.type === "reasoning") {
         // Stream resumed after a transport retry — drop the transient retry
         // banner (e.g. HTTP 429) so it does not linger in the transcript.
-        const rows = clearTransientRetryRows([...state.rows]);
+        const rows = workingRows(state, replay);
         const idx = findStreamingMessage(rows, e.messageId);
         if (idx >= 0) {
           const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -318,7 +365,7 @@ function applyEvent(state: AppState, e: Event): AppState {
         return { ...state, rows, status: "thinking" };
       }
       if (e.delta.type !== "text") return state; // tool-input JSON is internal
-      const rows = clearTransientRetryRows([...state.rows]);
+      const rows = workingRows(state, replay);
       const idx = findStreamingMessage(rows, e.messageId);
       if (idx >= 0) {
         const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -349,7 +396,7 @@ function applyEvent(state: AppState, e: Event): AppState {
     case "message": {
       const text = messageText(e);
       const reasoning = messageReasoning(e);
-      const rows = clearTransientRetryRows([...state.rows]);
+      const rows = workingRows(state, replay);
       const idx = findStreamingMessage(rows, e.id);
       if (idx >= 0) {
         const row = rows[idx] as Extract<Row, { kind: "message" }>;
@@ -390,34 +437,30 @@ function applyEvent(state: AppState, e: Event): AppState {
       if (e.name === "memory_write") {
         return { ...state, status: "thinking" };
       }
-      return {
-        ...state,
-        status: "thinking",
-        rows: [
-          ...clearTransientRetryRows(state.rows),
-          {
-            kind: "tool",
-            at,
-            tool: {
-              id: e.id,
-              name: e.name,
-              input: e.input,
-              status: "running",
-              change: isFileMutation(e.name)
-                ? fileChangeFromToolCall(e.name, e.input)
-                : null,
-              startedAt: at,
-            },
-          },
-        ],
+      const toolRow: Row = {
+        kind: "tool",
+        at,
+        tool: {
+          id: e.id,
+          name: e.name,
+          input: e.input,
+          status: "running",
+          change: isFileMutation(e.name)
+            ? fileChangeFromToolCall(e.name, e.input)
+            : null,
+          startedAt: at,
+        },
       };
+      const rows = replay ? state.rows : clearTransientRetryRows(state.rows);
+      if (replay) rows.push(toolRow);
+      return { ...state, status: "thinking", rows: replay ? rows : [...rows, toolRow] };
     }
 
     case "tool_result": {
       if (e.name === "memory_write") {
         return state;
       }
-      const rows = clearTransientRetryRows([...state.rows]);
+      const rows = workingRows(state, replay);
       const idx = rows.findIndex(
         (r) => r.kind === "tool" && r.tool.id === e.toolCallId,
       );
@@ -477,20 +520,24 @@ function applyEvent(state: AppState, e: Event): AppState {
       return {
         ...state,
         plan: e.steps,
-        rows: [...state.rows, { kind: "plan", at, steps: e.steps }],
+        rows: appendRow(state.rows, { kind: "plan", at, steps: e.steps }, replay),
       };
 
     case "usage":
       return {
         ...state,
         usage: addUsage(state.usage, e.usage),
-        rows: [...state.rows, { kind: "usage", at, usage: e.usage }],
+        rows: appendRow(state.rows, { kind: "usage", at, usage: e.usage }, replay),
       };
 
     case "compaction":
       return {
         ...state,
-        rows: [...state.rows, { kind: "compaction", at, summary: e.summary, foldKind: e.kind }],
+        rows: appendRow(
+          state.rows,
+          { kind: "compaction", at, summary: e.summary, foldKind: e.kind },
+          replay,
+        ),
       };
 
     case "error": {
@@ -506,10 +553,11 @@ function applyEvent(state: AppState, e: Event): AppState {
       return {
         ...state,
         status: e.recoverable ? state.status : "idle",
-        rows: [
-          ...state.rows,
+        rows: appendRow(
+          state.rows,
           { kind: "error", at, message: e.message, recoverable: e.recoverable },
-        ],
+          replay,
+        ),
       };
     }
 
@@ -567,7 +615,7 @@ function applyEvent(state: AppState, e: Event): AppState {
         ...state,
         agentMode: e.mode,
         notice: `mode → ${e.mode}`,
-        rows: [...state.rows, { kind: "mode", at, mode: e.mode }],
+        rows: appendRow(state.rows, { kind: "mode", at, mode: e.mode }, replay),
       };
 
     case "model":
@@ -620,8 +668,8 @@ function applyEvent(state: AppState, e: Event): AppState {
     case "team_message":
       return {
         ...state,
-        rows: [
-          ...state.rows,
+        rows: appendRow(
+          state.rows,
           {
             kind: "team",
             at: e.timestamp,
@@ -633,7 +681,8 @@ function applyEvent(state: AppState, e: Event): AppState {
               at: e.timestamp,
             },
           },
-        ],
+          replay,
+        ),
       };
 
     case "subagent":

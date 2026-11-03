@@ -106,6 +106,11 @@ export interface McpClient {
  /** Install a handler for server-initiated requests (elicitation,
  * sampling). When unset, such requests are rejected. */
   setServerRequestHandler(h: McpServerRequestHandler | null): void;
+ /** Install a handler invoked when the server announces a tool-list change
+  * (`notifications/tools/list_changed`); the cached tool list is refreshed
+  * before the handler runs so `listTools()` returns the new set. Optional:
+  * transports that cannot receive notifications may omit it. */
+  setToolsChangedHandler?(h: ((server: string) => void) | null): void;
 }
 
 // ---------------------------------------------------------------------------

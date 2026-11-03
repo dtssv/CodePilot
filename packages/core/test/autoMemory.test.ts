@@ -106,4 +106,65 @@ describe("writeAutoMemoryNote + index", () => {
     expect(index).toContain("pnpm tests");
     rmSync(cwd, { recursive: true, force: true });
   });
+
+  // Concurrency contract: the in-turn tool barrier treats memory_write as
+  // parallel-safe (its permission tier is "read"), so two notes can run at
+  // once. The per-path write lock must keep the read-append-write + index
+  // rebuild from clobbering — all concurrent notes must survive, and the
+  // rebuilt index must list every one.
+  it("does not clobber concurrent writes to the same topic", async () => {
+    root = mkdtempSync(join(tmpdir(), "am3-"));
+    const cwd = mkdtempSync(join(tmpdir(), "am3-cwd-"));
+    const n = 8;
+    await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        writeAutoMemoryNote(
+          cwd,
+          {
+            category: "project",
+            topic: "knowledge",
+            summary: `fact number ${i}`,
+            body: `body of fact ${i}`,
+          },
+          { enabled: true, rootDir: root },
+        ),
+      ),
+    );
+    const dir = autoMemoryDir(cwd, root);
+    const topic = readFileSync(join(dir, "knowledge.md"), "utf-8");
+    for (let i = 0; i < n; i++) {
+      expect(topic).toContain(`fact number ${i}`);
+    }
+    const index = await loadAutoMemoryIndex(cwd, { enabled: true, rootDir: root });
+    for (let i = 0; i < n; i++) {
+      expect(index).toContain(`[project] fact number ${i}`);
+    }
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("does not clobber concurrent FileMemorySink writes to MEMORY.md", async () => {
+    root = mkdtempSync(join(tmpdir(), "am4-"));
+    const cwd = mkdtempSync(join(tmpdir(), "am4-cwd-"));
+    const sink = new FileMemorySink(cwd, {
+      // Disable the auto-memory mirror so this isolates the MEMORY.md RMW lock.
+      autoMemory: false,
+    });
+    const n = 8;
+    await Promise.all(
+      Array.from({ length: n }, (_, i) =>
+        sink.write(
+          "project",
+          `entry ${i}`,
+          `content of entry ${i}`,
+          "Discovered durable knowledge",
+        ),
+      ),
+    );
+    const { projectMemoryPath } = await import("../src/memory.js");
+    const text = readFileSync(projectMemoryPath(cwd), "utf-8");
+    for (let i = 0; i < n; i++) {
+      expect(text).toContain(`entry ${i}`);
+    }
+    rmSync(cwd, { recursive: true, force: true });
+  });
 });

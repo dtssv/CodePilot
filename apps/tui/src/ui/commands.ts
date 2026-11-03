@@ -9,6 +9,7 @@
 import type { AgentMode, PermissionMode, SlashCommand } from "@codepilot/core";
 import { resolveSlashCommand } from "@codepilot/core";
 import type { SessionController } from "./controller.js";
+import { THEME_NAMES, type ThemeName } from "./themes.js";
 
 export type CommandResult =
   | { kind: "noop" }
@@ -20,6 +21,8 @@ export type CommandResult =
   | { kind: "pick-provider" }
   | { kind: "pick-mode" }
   | { kind: "pick-agent" }
+  | { kind: "pick-theme" }
+  | { kind: "set-theme"; name: string }
   | { kind: "pick-session" }
   | { kind: "pick-goal" }
   | { kind: "connect" }
@@ -73,6 +76,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "provider", description: "Pick a provider preset (↑↓ + Enter)", args: "[id]" },
   { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo]" },
   { name: "agent", description: "Pick collaboration mode (↑↓ + Enter)", args: "[chat|plan|agent]" },
+  { name: "theme", description: "Pick a colour palette (↑↓ + Enter)", args: "[default|nord|solarized|high-contrast]" },
   { name: "plan", description: "Show the current plan" },
   { name: "compact", description: "Trigger compaction" },
   { name: "retry", description: "Send the last prompt again" },
@@ -108,6 +112,8 @@ export const HELP_TEXT = `Available commands:
        chat   read-only Q&A; no edits, no shell
        plan   read-only + plan_update; model produces a plan
        agent  full autonomy (default)
+
+  /theme                             Pick a colour palette (↑↓ + Enter)
 
   /plan                              Show the current plan
   /compact                           Trigger compaction
@@ -170,6 +176,13 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
         return { kind: "pick-agent" };
       }
       return { kind: "set-agent-mode", mode: rest as AgentMode };
+    }
+    case "theme": {
+      if (rest === "") return { kind: "pick-theme" };
+      if (!(THEME_NAMES as readonly string[]).includes(rest)) {
+        return { kind: "pick-theme" };
+      }
+      return { kind: "set-theme", name: rest as ThemeName };
     }
     case "plan":
       return { kind: "show-plan" };
@@ -239,6 +252,7 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "provider",
   "mode",
   "agent",
+  "theme",
   "plan",
   "compact",
   "resume",

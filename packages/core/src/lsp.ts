@@ -118,7 +118,11 @@ class LspServer {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private initialized: Promise<void> | null = null;
-  private readonly openDocs = new Set<string>();
+  // uri → the last text+version we synced to the server. A Map (not a Set) so
+  // we can detect that the file changed on disk since we opened it and push a
+  // `didChange` — otherwise the server answers position requests against a
+  // stale copy (wrong line/column) after the agent edits the file.
+  private readonly openDocs = new Map<string, { version: number; text: string }>();
 
   constructor(
     private readonly config: LspServerConfig,
@@ -225,7 +229,7 @@ class LspServer {
             definition: { linkSupport: true },
             references: {},
             hover: { contentFormat: ["plaintext", "markdown"] },
-            synchronization: { didOpen: true, didClose: true },
+            synchronization: { didOpen: true, didChange: true, didClose: true },
           },
         },
       });
@@ -234,15 +238,31 @@ class LspServer {
     return this.initialized;
   }
 
-  /** Open a document so position requests resolve (idempotent per uri). */
+  /** Open a document (or re-sync it if it changed on disk) so position
+   * requests resolve against the CURRENT file. Servers like
+   * typescript-language-server need the document open before they answer
+   * position requests; and after the agent edits the file, the server's copy
+   * must be updated (`didChange`) or navigation resolves stale line/columns. */
   private async openDoc(path: string, languageId: string): Promise<string> {
     const uri = pathToFileURL(path).toString();
-    if (this.openDocs.has(uri)) return uri;
     const text = await readFile(path, "utf-8").catch(() => "");
-    this.notify("textDocument/didOpen", {
-      textDocument: { uri, languageId, version: 1, text },
-    });
-    this.openDocs.add(uri);
+    const prev = this.openDocs.get(uri);
+    if (!prev) {
+      this.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId, version: 1, text },
+      });
+      this.openDocs.set(uri, { version: 1, text });
+      return uri;
+    }
+    if (prev.text !== text) {
+      // Full-document sync: resend the whole text with an incremented version.
+      const version = prev.version + 1;
+      this.notify("textDocument/didChange", {
+        textDocument: { uri, version },
+        contentChanges: [{ text }],
+      });
+      this.openDocs.set(uri, { version, text });
+    }
     return uri;
   }
 

@@ -22,6 +22,7 @@ export type CatalogName =
   | "connectors"
   | "provider-templates"
   | "mcp-markets"
+  | "plugins"
   | "manifest";
 
 export interface CacheFile<T> {
@@ -188,11 +189,13 @@ export async function refreshAllCatalogs(): Promise<{
   connectors: string;
   providers: string;
   markets: string;
+  plugins: string;
 }> {
   const c = await loadCatalogDocument("connectors", { force: true });
   const p = await loadCatalogDocument("provider-templates", { force: true });
   const m = await loadCatalogDocument("mcp-markets", { force: true });
-  return { connectors: c.source, providers: p.source, markets: m.source };
+  const pl = await loadCatalogDocument("plugins", { force: true });
+  return { connectors: c.source, providers: p.source, markets: m.source, plugins: pl.source };
 }
 
 export function resetCatalogMemoryForTests(): void {

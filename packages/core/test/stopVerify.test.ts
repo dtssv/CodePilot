@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildStopTranscriptHint,
+  effectiveStopVerifyMode,
   resolveStopVerifyMode,
   runBuiltinStopVerify,
 } from "../src/stopVerify.js";
@@ -24,6 +25,41 @@ describe("resolveStopVerifyMode", () => {
     expect(resolveStopVerifyMode(true)).toBe("prompt");
     expect(resolveStopVerifyMode("prompt")).toBe("prompt");
     expect(resolveStopVerifyMode("tests")).toBe("tests");
+  });
+});
+
+describe("effectiveStopVerifyMode", () => {
+  it("upgrades the UNSET default to tests when the turn modified code", () => {
+    expect(
+      effectiveStopVerifyMode({ configured: undefined, modifiedCode: true }),
+    ).toBe("tests");
+  });
+  it("stays off for the unset default when no code changed", () => {
+    expect(
+      effectiveStopVerifyMode({ configured: undefined, modifiedCode: false }),
+    ).toBe("off");
+  });
+  it("honours an EXPLICIT off/false verbatim — no upgrade even after code changes", () => {
+    expect(
+      effectiveStopVerifyMode({ configured: "off", modifiedCode: true }),
+    ).toBe("off");
+    expect(
+      effectiveStopVerifyMode({ configured: false, modifiedCode: true }),
+    ).toBe("off");
+  });
+  it("passes explicit prompt/tests through unchanged", () => {
+    expect(
+      effectiveStopVerifyMode({ configured: "prompt", modifiedCode: true }),
+    ).toBe("prompt");
+    expect(
+      effectiveStopVerifyMode({ configured: "prompt", modifiedCode: false }),
+    ).toBe("prompt");
+    expect(
+      effectiveStopVerifyMode({ configured: "tests", modifiedCode: false }),
+    ).toBe("tests");
+    expect(
+      effectiveStopVerifyMode({ configured: true, modifiedCode: true }),
+    ).toBe("prompt");
   });
 });
 
@@ -156,6 +192,92 @@ describe("runBuiltinStopVerify", () => {
       });
       expect(r.action).toBe("block");
       expect(r.reason).toMatch(/test/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // These pin the auto-probe test ladder — the capability unique to CodePilot
+  // among codex/opencode/dsh/pi (none of them probe a project's test command;
+  // where they run tests the command is always explicitly supplied). Without a
+  // contract here the probe order / allow-paths could silently drift.
+  function testsCtx(dir: string) {
+    return {
+      cwd: dir,
+      reason: "prompt_completed",
+      stop_hook_active: false,
+      stop_continue_count: 0,
+      stop_continue_cap: 8,
+      session_id: "s",
+      transcript_hint: "",
+      resolvers: {},
+    };
+  }
+
+  it("tests mode ALLOWS when no test command can be detected (nothing to run)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sv-none-"));
+    try {
+      // No package.json, no Cargo/go/pytest/gradle marker → nothing to run.
+      const r = await runBuiltinStopVerify("tests", testsCtx(dir));
+      expect(r).toEqual({ action: "allow", warnings: [] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tests mode ALLOWS when the detected test command passes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sv-pass-"));
+    try {
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ name: "x", scripts: { test: "node -e \"process.exit(0)\"" } }),
+        "utf8",
+      );
+      const r = await runBuiltinStopVerify("tests", testsCtx(dir));
+      expect(r).toEqual({ action: "allow", warnings: [] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tests mode prefers test:unit over the generic test script", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sv-unit-"));
+    try {
+      // If the ladder ran plain `test` it would PASS (exit 0) → allow. We make
+      // only test:unit fail, so a block proves test:unit was the one chosen.
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({
+          name: "x",
+          scripts: {
+            "test:unit": "node -e \"process.exit(3)\"",
+            test: "node -e \"process.exit(0)\"",
+          },
+        }),
+        "utf8",
+      );
+      const r = await runBuiltinStopVerify("tests", testsCtx(dir));
+      expect(r.action).toBe("block");
+      expect(r.reason).toMatch(/test:unit/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tests mode ignores the npm-init placeholder test script (nothing real to run)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sv-ph-"));
+    try {
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({
+          name: "x",
+          scripts: { test: 'echo "Error: no test specified" && exit 1' },
+        }),
+        "utf8",
+      );
+      const r = await runBuiltinStopVerify("tests", testsCtx(dir));
+      // The placeholder must NOT be treated as a real gate (it always exits 1).
+      expect(r).toEqual({ action: "allow", warnings: [] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

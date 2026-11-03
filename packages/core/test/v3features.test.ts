@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { redactSecrets, containsSecretShape } from "../src/redact.js";
+import { redactSecrets, containsSecretShape, compileRedactionPatterns } from "../src/redact.js";
 
 const collect = async (it: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> => {
   const out: StreamEvent[] = [];
@@ -50,6 +50,52 @@ describe("redactSecrets", () => {
     const text = "npm test passed 42 tests in 1.2s";
     expect(containsSecretShape(text)).toBe(false);
     expect(redactSecrets(text)).toBe(text);
+  });
+});
+
+describe("configurable redaction patterns (redact.patterns)", () => {
+  it("applies deployment patterns on top of the built-in floor", () => {
+    const extra = compileRedactionPatterns([
+      { name: "acme-token", regex: "acme-tok-[A-Za-z0-9]{8,}" },
+    ]);
+    const text = "internal acme-tok-ABCDEFGH1234 alongside ghp_abcdefghijklmnopqrstuvwxyz1234";
+    const out = redactSecrets(text, extra);
+    // deployment pattern redacted…
+    expect(out).toContain("[REDACTED:acme-token]");
+    expect(out).not.toContain("acme-tok-ABCDEFGH1234");
+    // …and the built-in floor still runs.
+    expect(out).toContain("[REDACTED:github-token]");
+  });
+
+  it("honours a custom replacement and extra flags", () => {
+    const extra = compileRedactionPatterns([
+      { name: "ticket", regex: "JIRA-\\d+", flags: "i", replace: "<ticket>" },
+    ]);
+    expect(redactSecrets("see jira-42 and JIRA-99", extra)).toBe("see <ticket> and <ticket>");
+  });
+
+  it("forces the global flag so every occurrence is redacted", () => {
+    const extra = compileRedactionPatterns([{ name: "x", regex: "zzz" }]);
+    expect(redactSecrets("zzz zzz zzz", extra)).toBe(
+      "[REDACTED:x] [REDACTED:x] [REDACTED:x]",
+    );
+  });
+
+  it("skips a malformed regex without disabling the built-in floor", () => {
+    // Unbalanced group → invalid regex; must be skipped, not thrown.
+    const extra = compileRedactionPatterns([
+      { name: "bad", regex: "([unterminated" },
+      { name: "good", regex: "mysecret" },
+    ]);
+    expect(extra.map((p) => p.name)).toEqual(["good"]);
+    const out = redactSecrets("mysecret AKIAIOSFODNN7EXAMPLE", extra);
+    expect(out).toContain("[REDACTED:good]");
+    expect(out).toContain("[REDACTED:aws-access-key]");
+  });
+
+  it("returns [] for empty/absent config", () => {
+    expect(compileRedactionPatterns(undefined)).toEqual([]);
+    expect(compileRedactionPatterns([])).toEqual([]);
   });
 });
 
@@ -153,6 +199,59 @@ describe("HookEngine", () => {
     );
     const r = await h.runPostToolUse("bash", {}, "output", false);
     expect(r.feedback).toContain("lint-fix-needed");
+  });
+
+  it("PostToolUse updatedResult REPLACES the result text (redaction)", async () => {
+    const h = new HookEngine(
+      {
+        PostToolUse: [
+          { matcher: "*", command: `sh -c 'echo "{\\"updatedResult\\":\\"[redacted]\\"}"'` },
+        ],
+      },
+      dir
+    );
+    const r = await h.runPostToolUse("bash", {}, "sk-SECRET-TOKEN-12345", false);
+    expect(r.updatedResult).toBe("[redacted]");
+    // The raw JSON is NOT also pushed as feedback when it carried a rewrite.
+    expect(r.feedback).toBeUndefined();
+  });
+
+  it("PostToolUse: first updatedResult wins; later hooks see the rewritten text", async () => {
+    const h = new HookEngine(
+      {
+        PostToolUse: [
+          // First hook rewrites to "ONE".
+          { matcher: "*", command: `sh -c 'echo "{\\"updatedResult\\":\\"ONE\\"}"'` },
+          // Second hook echoes back the result payload it was given as feedback,
+          // proving it saw "ONE" (the rewrite), not the original output.
+          { matcher: "*", command: `sh -c 'cat'` },
+        ],
+      },
+      dir
+    );
+    const r = await h.runPostToolUse("bash", {}, "ORIGINAL", false);
+    expect(r.updatedResult).toBe("ONE");
+    // The second hook's stdout (the payload JSON it was fed) contains the
+    // rewritten result, not the original.
+    expect(r.feedback).toContain("ONE");
+    expect(r.feedback).not.toContain("ORIGINAL");
+  });
+
+  it("PostToolUse updatedResult composes with feedback (both honoured)", async () => {
+    const h = new HookEngine(
+      {
+        PostToolUse: [
+          {
+            matcher: "*",
+            command: `sh -c 'echo "{\\"updatedResult\\":\\"clean\\",\\"feedback\\":\\"note\\"}"'`,
+          },
+        ],
+      },
+      dir
+    );
+    const r = await h.runPostToolUse("bash", {}, "dirty", false);
+    expect(r.updatedResult).toBe("clean");
+    expect(r.feedback).toBe("note");
   });
 });
 

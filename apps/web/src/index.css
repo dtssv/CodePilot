@@ -60,6 +60,160 @@
   color-scheme: light;
 }
 
+/* Named palettes — a codex-style "whole theme" token swap layered on top of
+   the light/dark axis. `data-theme-name` on <html> selects one; each ships a
+   dark (default) and a light variant so it composes with the Theme toggle.
+   "default" sets no attribute → the base tokens above apply. Keep these in
+   sync with THEME_NAMES in surface.ts; the TUI mirrors them in
+   apps/tui/src/ui/themes.ts. */
+
+/* Nord — cool arctic blues. */
+:root[data-theme-name="nord"] {
+  --color-bg: #2e3440;
+  --color-surface: #323846;
+  --color-surface-raised: #3b4252;
+  --color-surface-sunken: #2a2f3a;
+  --color-surface-hover: #434c5e;
+  --color-edge: #434c5e;
+  --color-edge-subtle: #3b4252;
+  --color-ink: #eceff4;
+  --color-ink-dim: #d8dee9;
+  --color-ink-faint: #7b88a1;
+  --color-accent: #88c0d0;
+  --color-accent-strong: #8fbcbb;
+  --color-accent-fg: #2e3440;
+  --color-accent-dim: rgb(136 192 208 / 0.16);
+  --color-info: #81a1c1;
+  --color-add: #a3be8c;
+  --color-add-dim: rgb(163 190 140 / 0.16);
+  --color-remove: #bf616a;
+  --color-remove-dim: rgb(191 97 106 / 0.16);
+  --color-warn: #ebcb8b;
+  --color-warn-dim: rgb(235 203 139 / 0.16);
+}
+:root[data-theme="light"][data-theme-name="nord"] {
+  --color-bg: #eceff4;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #e5e9f0;
+  --color-surface-hover: #e0e6f0;
+  --color-edge: #d8dee9;
+  --color-edge-subtle: #e5e9f0;
+  --color-ink: #2e3440;
+  --color-ink-dim: #434c5e;
+  --color-ink-faint: #7b88a1;
+  --color-accent: #5e81ac;
+  --color-accent-strong: #4c6a8f;
+  --color-accent-fg: #ffffff;
+  --color-accent-dim: rgb(94 129 172 / 0.12);
+  --color-info: #5e81ac;
+  --color-add: #52810f;
+  --color-add-dim: rgb(82 129 15 / 0.1);
+  --color-remove: #bf616a;
+  --color-remove-dim: rgb(191 97 106 / 0.1);
+  --color-warn: #b48a2e;
+  --color-warn-dim: rgb(180 138 46 / 0.1);
+  color-scheme: light;
+}
+
+/* Solarized — Ethan Schoonover's balanced palette. */
+:root[data-theme-name="solarized"] {
+  --color-bg: #002b36;
+  --color-surface: #063642;
+  --color-surface-raised: #073642;
+  --color-surface-sunken: #00252e;
+  --color-surface-hover: #0a4653;
+  --color-edge: #0a4653;
+  --color-edge-subtle: #073642;
+  --color-ink: #eee8d5;
+  --color-ink-dim: #93a1a1;
+  --color-ink-faint: #657b83;
+  --color-accent: #268bd2;
+  --color-accent-strong: #2076b5;
+  --color-accent-fg: #ffffff;
+  --color-accent-dim: rgb(38 139 210 / 0.16);
+  --color-info: #268bd2;
+  --color-add: #859900;
+  --color-add-dim: rgb(133 153 0 / 0.16);
+  --color-remove: #dc322f;
+  --color-remove-dim: rgb(220 50 47 / 0.16);
+  --color-warn: #b58900;
+  --color-warn-dim: rgb(181 137 0 / 0.16);
+}
+:root[data-theme="light"][data-theme-name="solarized"] {
+  --color-bg: #fdf6e3;
+  --color-surface: #fffbf0;
+  --color-surface-raised: #fffbf0;
+  --color-surface-sunken: #eee8d5;
+  --color-surface-hover: #e9e2cd;
+  --color-edge: #ded8c3;
+  --color-edge-subtle: #eee8d5;
+  --color-ink: #073642;
+  --color-ink-dim: #586e75;
+  --color-ink-faint: #93a1a1;
+  --color-accent: #268bd2;
+  --color-accent-strong: #2076b5;
+  --color-accent-fg: #ffffff;
+  --color-accent-dim: rgb(38 139 210 / 0.1);
+  --color-info: #268bd2;
+  --color-add: #728700;
+  --color-add-dim: rgb(114 135 0 / 0.1);
+  --color-remove: #dc322f;
+  --color-remove-dim: rgb(220 50 47 / 0.08);
+  --color-warn: #b58900;
+  --color-warn-dim: rgb(181 137 0 / 0.1);
+  color-scheme: light;
+}
+
+/* High contrast — accessibility-first; maximal foreground/background split. */
+:root[data-theme-name="high-contrast"] {
+  --color-bg: #000000;
+  --color-surface: #0a0a0a;
+  --color-surface-raised: #141414;
+  --color-surface-sunken: #000000;
+  --color-surface-hover: #1f1f1f;
+  --color-edge: #6b6b6b;
+  --color-edge-subtle: #3a3a3a;
+  --color-ink: #ffffff;
+  --color-ink-dim: #e0e0e0;
+  --color-ink-faint: #b0b0b0;
+  --color-accent: #7cc7ff;
+  --color-accent-strong: #a9d9ff;
+  --color-accent-fg: #000000;
+  --color-accent-dim: rgb(124 199 255 / 0.22);
+  --color-info: #7cc7ff;
+  --color-add: #5fe08a;
+  --color-add-dim: rgb(95 224 138 / 0.22);
+  --color-remove: #ff8089;
+  --color-remove-dim: rgb(255 128 137 / 0.22);
+  --color-warn: #ffd45e;
+  --color-warn-dim: rgb(255 212 94 / 0.22);
+}
+:root[data-theme="light"][data-theme-name="high-contrast"] {
+  --color-bg: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f2f2f2;
+  --color-surface-hover: #e6e6e6;
+  --color-edge: #4a4a4a;
+  --color-edge-subtle: #c0c0c0;
+  --color-ink: #000000;
+  --color-ink-dim: #1a1a1a;
+  --color-ink-faint: #444444;
+  --color-accent: #0043a8;
+  --color-accent-strong: #002e75;
+  --color-accent-fg: #ffffff;
+  --color-accent-dim: rgb(0 67 168 / 0.14);
+  --color-info: #0043a8;
+  --color-add: #0a6b2e;
+  --color-add-dim: rgb(10 107 46 / 0.12);
+  --color-remove: #b3000f;
+  --color-remove-dim: rgb(179 0 15 / 0.1);
+  --color-warn: #8a5a00;
+  --color-warn-dim: rgb(138 90 0 / 0.1);
+  color-scheme: light;
+}
+
 :root {
   color-scheme: dark;
 }
@@ -84,6 +238,22 @@ code,
 pre,
 kbd {
   font-family: var(--font-mono);
+}
+
+/* Shiki dual-theme output. With defaultColor:false, Shiki emits both
+   --shiki-light and --shiki-dark on every token; we pick one based on the
+   active palette (dark is the default; [data-theme="light"] switches). */
+.shiki,
+.shiki span {
+  color: var(--shiki-dark, inherit);
+  background-color: transparent;
+}
+:root[data-theme="light"] .shiki,
+:root[data-theme="light"] .shiki span {
+  color: var(--shiki-light, inherit);
+}
+.shiki {
+  background: transparent !important;
 }
 
 ::selection {

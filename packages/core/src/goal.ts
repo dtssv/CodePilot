@@ -19,6 +19,7 @@ import { createSession, type Session } from "./session.js";
 import type { GoalRunOptions, GoalRunResult, Event } from "./types.js";
 import { appendCheckpointRound, checkpointPath } from "./checkpoints.js";
 import { killAllJobs } from "./tools/bashJobs.js";
+import { listSpecFeatures } from "./specs.js";
 
 /**
  * The two goal-completion markers the loop scans the final assistant text
@@ -77,6 +78,16 @@ Additional rules:
 
 The loop will continue until you emit one of the status markers or it hits the round cap.`;
 
+/**
+ * Extra goal-loop guidance injected ONLY when this project has a spec folder
+ * (`<specDir>/<feature>/` with requirements/design/tasks). Kept separate from
+ * `goalPromptBody` so a project that does not use spec-driven development never
+ * sees it — the vast majority of runs have no spec and pay nothing. The
+ * spec-* skills (which produce these artifacts) are an optional plugin; this
+ * clause is the only core-side spec awareness and it is lazy by design.
+ */
+export const goalSpecClause = `\n\nThis project has a spec (a \`.codepilot/specs/<feature>/\` folder with requirements/design/tasks). Treat the acceptance criteria (\`AC-x.y\`) and each task's \`verify:<command> → AC-x.y\` line as the source of truth for "done": run the named verify command and treat an \`AC\` as satisfied only when its command passes. Do not emit \`completed\` for the OBJECTIVE while any acceptance criterion is still unmet.`;
+
 export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
   const session = await createSession(opts);
   try {
@@ -108,6 +119,14 @@ export async function driveGoalRounds(
   const sessionId = session.id;
   const cwd = session.cwd;
   const checkpoint = checkpointPath(cwd, sessionId);
+  // Lazy spec awareness: only when this project actually has spec artifacts do
+  // we bind the goal loop's "done" to acceptance criteria. No specs → [] → the
+  // extra clause is never injected, so non-spec projects are unaffected.
+  const hasSpec = await listSpecFeatures(cwd, {
+    specDirectory: session.getConfig().specDirectory,
+  })
+    .then((f) => f.length > 0)
+    .catch(() => false);
 
  // Helper: fire the per-round checkpoint (file + optional callback).
   const fireCheckpoint = async (
@@ -141,7 +160,7 @@ export async function driveGoalRounds(
   for (round = 1; round <= maxRounds; round++) {
     opts.onRound?.(round, "running");
     await fireCheckpoint(round, "running");
-    const userText = renderRoundPrompt(round, opts.objective);
+    const userText = renderRoundPrompt(round, opts.objective, hasSpec);
     await session.prompt(userText);
 
     const events = session.getEvents();
@@ -175,12 +194,15 @@ export async function driveGoalRounds(
 }
 
 /** Build the user-text for a given round. Round 1 frames the work; later rounds re-anchor it. */
-function renderRoundPrompt(round: number, objective: string): string {
+function renderRoundPrompt(round: number, objective: string, hasSpec = false): string {
+  // The spec clause is appended only when this project has spec artifacts, so
+  // non-spec runs see exactly the original prompt body.
+  const body = hasSpec ? `${goalPromptBody}${goalSpecClause}` : goalPromptBody;
   if (round === 1) {
     return `OBJECTIVE:
 ${objective}
 
-${goalPromptBody}
+${body}
 
 This is round 1 of the goal loop. Begin by reading the current plan (likely empty) and either:
 - call \`plan_update\` to create a first plan, or
@@ -190,7 +212,7 @@ This is round 1 of the goal loop. Begin by reading the current plan (likely empt
 ${objective}
 
 Round ${round} reminder:
-${goalPromptBody}
+${body}
 
 Resume where you left off. If the previous turn ended without a status marker, it means there is still work to do.`;
 }

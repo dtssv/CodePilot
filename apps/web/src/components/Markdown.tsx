@@ -13,6 +13,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import { t } from "../i18n.js";
 import { looksLikeWorkspacePath } from "../state/paths.js";
 import { splitThinking } from "../state/stripThinking.js";
+import { HighlightedCode } from "./HighlightedCode.js";
 import { CheckIcon, ChevronIcon, CopyIcon } from "./Icons.js";
 
 export function Markdown({
@@ -369,7 +370,12 @@ function CodeBlock({ lang, code }: { lang?: string; code: string }): React.React
           {copied ? <CheckIcon className="h-3 w-3" /> : <CopyIcon className="h-3 w-3" />}
         </button>
       </div>
-      <pre className="overflow-x-auto p-3 font-mono text-[12px] leading-5 text-[var(--color-ink)]">{code}</pre>
+      <HighlightedCode
+        code={code}
+        lang={lang}
+        className="overflow-x-auto p-3 text-[12px] leading-5 [&>pre]:m-0 [&>pre]:whitespace-pre"
+        preClassName="overflow-x-auto p-3 font-mono text-[12px] leading-5 text-[var(--color-ink)]"
+      />
     </div>
   );
 }

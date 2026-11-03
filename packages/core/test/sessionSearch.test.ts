@@ -9,6 +9,7 @@ import {
   exportSession,
   deleteSession,
   getSessionsDir,
+  resetSessionIndex,
 } from "../src/session.js";
 import type { Event } from "../src/types.js";
 
@@ -140,5 +141,72 @@ describe("session search & export", () => {
     expect(existsSync(sidecar)).toBe(true);
     expect(readFileSync(sidecar, "utf-8")).toBe("My Custom Title");
     await session.dispose();
+  });
+});
+
+describe("session index ↔ full-scan parity", () => {
+  // The SQLite index is a DERIVED cache; its correctness premise is that its
+  // results EQUAL the authoritative full-scan path (sessionIndex.ts:64
+  // "index results equal full-scan results"). These tests drive the public
+  // listSessions/searchSessions with the index ON vs forced OFF
+  // (CODEPILOT_SESSION_INDEX=off → full scan) and assert the two agree.
+  let workDir: string;
+  const ids = ["parity-alpha", "parity-beta", "parity-gamma"];
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tempHome, "parity-"));
+    mkdirSync(getSessionsDir(), { recursive: true });
+    // A known, isolated set of sessions with distinct titles/content/model.
+    const specs: Array<{ id: string; user: string; model: string }> = [
+      { id: ids[0]!, user: "alpha typechecker crash", model: "m-a" },
+      { id: ids[1]!, user: "beta refactor plan", model: "m-b" },
+      { id: ids[2]!, user: "gamma billing report", model: "m-c" },
+    ];
+    for (const s of specs) {
+      writeFileSync(
+        join(getSessionsDir(), `${s.id}.jsonl`),
+        [
+          JSON.stringify({ type: "message", id: "u", role: "user", content: [{ type: "text", text: s.user }] }),
+          JSON.stringify({ type: "message", id: "a", role: "assistant", content: [{ type: "text", text: "ok" }], model: s.model }),
+        ].join("\n") + "\n",
+        "utf-8",
+      );
+    }
+  });
+  afterEach(() => {
+    delete process.env.CODEPILOT_SESSION_INDEX;
+    resetSessionIndex();
+    for (const id of ids) rmSync(join(getSessionsDir(), `${id}.jsonl`), { force: true });
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  // Keep only our known ids and the fields both paths populate, so the
+  // comparison is stable regardless of other sessions in the shared test dir.
+  const project = (rows: Array<{ id: string; title: string; model?: string; messageCount: number }>) =>
+    rows
+      .filter((r) => ids.includes(r.id))
+      .map((r) => ({ id: r.id, title: r.title, model: r.model, messageCount: r.messageCount }))
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+
+  it("listSessions returns identical summaries with the index on vs off", async () => {
+    resetSessionIndex();
+    const indexed = await listSessions();
+    process.env.CODEPILOT_SESSION_INDEX = "off";
+    resetSessionIndex();
+    const fullScan = await listSessions();
+    expect(project(indexed)).toEqual(project(fullScan));
+    // Sanity: we actually exercised both and found our sessions.
+    expect(project(indexed).length).toBe(ids.length);
+  });
+
+  it("searchSessions returns the same matches with the index on vs off", async () => {
+    resetSessionIndex();
+    const indexed = await searchSessions("typechecker");
+    process.env.CODEPILOT_SESSION_INDEX = "off";
+    resetSessionIndex();
+    const fullScan = await searchSessions("typechecker");
+    const onlyOurs = (rows: Array<{ id: string }>) => rows.map((r) => r.id).filter((id) => ids.includes(id));
+    expect(onlyOurs(indexed)).toEqual(onlyOurs(fullScan));
+    expect(onlyOurs(indexed)).toEqual([ids[0]]);
   });
 });

@@ -231,6 +231,90 @@ describe("assertConsistency", () => {
     expect((err as ConsistencyError).details.actual).toBe("tampered output");
   });
 
+  it("allows a tool_result inside the tail to be a fold stub (budget-pressure compaction)", () => {
+    // Under budget pressure the real build folds results that this fixed-window
+    // ground-truth rebuild keeps whole — even ones inside the checked tail. A
+    // recognised fold stub on the provider side is a legitimate transform, not
+    // corruption, so it must NOT throw.
+    const events: Event[] = [
+      textEvent("m1", "user", "hi"),
+      textEvent("a1", "assistant", "calling tool"),
+      toolCallEvent("tc1", "bash", { command: "ls" }),
+      toolResultEvent("tc1", "bash", "a very long original output that got folded"),
+    ];
+    const providerMessages = exactProviderMessages(events);
+    const toolResultMsg = providerMessages.find((m) =>
+      m.content.some((b) => b.type === "tool_result")
+    )!;
+    toolResultMsg.content = toolResultMsg.content.map((b) =>
+      b.type === "tool_result"
+        ? { ...b, content: "[folded tool_result of bash (44 chars) — already seen]" }
+        : b
+    );
+    expect(() => assertConsistency(providerMessages, events)).not.toThrow();
+  });
+
+  it("allows a tool_result inside the tail to be hard-trim truncated", () => {
+    const full = "x".repeat(2000);
+    const events: Event[] = [
+      textEvent("m1", "user", "hi"),
+      textEvent("a1", "assistant", "calling tool"),
+      toolCallEvent("tc1", "bash", { command: "ls" }),
+      toolResultEvent("tc1", "bash", full),
+    ];
+    const providerMessages = exactProviderMessages(events);
+    const toolResultMsg = providerMessages.find((m) =>
+      m.content.some((b) => b.type === "tool_result")
+    )!;
+    toolResultMsg.content = toolResultMsg.content.map((b) =>
+      b.type === "tool_result"
+        ? { ...b, content: full.slice(0, 200) + "\n… [truncated to fit context window.]\n" + full.slice(-50) }
+        : b
+    );
+    expect(() => assertConsistency(providerMessages, events)).not.toThrow();
+  });
+
+  it("still throws when a tail tool_result is corrupted (not a fold stub)", () => {
+    // A different-but-NOT-compacted content is genuine corruption: the model
+    // saw something other than what we logged. This must still throw.
+    const events: Event[] = [
+      textEvent("m1", "user", "hi"),
+      textEvent("a1", "assistant", "calling tool"),
+      toolCallEvent("tc1", "bash", { command: "ls" }),
+      toolResultEvent("tc1", "bash", "original output"),
+    ];
+    const providerMessages = exactProviderMessages(events);
+    const toolResultMsg = providerMessages.find((m) =>
+      m.content.some((b) => b.type === "tool_result")
+    )!;
+    toolResultMsg.content = toolResultMsg.content.map((b) =>
+      b.type === "tool_result" ? { ...b, content: "a totally different output" } : b
+    );
+    expect(() => assertConsistency(providerMessages, events)).toThrow(ConsistencyError);
+  });
+
+  it("does not treat a truncation-marker rewrite that is LONGER than the original as a legitimate trim", () => {
+    // Guard against a false "trim" where the provider content carries the
+    // truncation notice but is actually longer than the ground truth — that's
+    // a rewrite, not a truncation, and must still be caught.
+    const events: Event[] = [
+      textEvent("m1", "user", "hi"),
+      textEvent("a1", "assistant", "calling tool"),
+      toolCallEvent("tc1", "bash", { command: "ls" }),
+      toolResultEvent("tc1", "bash", "short"),
+    ];
+    const providerMessages = exactProviderMessages(events);
+    const toolResultMsg = providerMessages.find((m) =>
+      m.content.some((b) => b.type === "tool_result")
+    )!;
+    toolResultMsg.content = toolResultMsg.content.map((b) =>
+      b.type === "tool_result"
+        ? { ...b, content: "much longer content … [truncated to fit context window.] with extra appended text" }
+        : b
+    );
+    expect(() => assertConsistency(providerMessages, events)).toThrow(ConsistencyError);
+  });
+
   it("allows folded head to differ (only checks tail)", () => {
  // Build a long transcript so the head is outside the checked tail window.
     const events: Event[] = [];

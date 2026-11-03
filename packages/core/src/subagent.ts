@@ -16,7 +16,7 @@ import { PermissionEngine } from "./permissions.js";
 import { buildProvider } from "./session-utils.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { readMemory, summariseMemory } from "./memory.js";
-import { resolveSandbox } from "./sandbox.js";
+import { resolveSandbox, cloneSandbox, addWritableRoot } from "./sandbox.js";
 import type { SubagentRunner } from "./tools/task.js";
 import { createWorktree, removeWorktree, worktreeDiffStat } from "./worktree.js";
 import { projectStatePath } from "./projectState.js";
@@ -50,6 +50,33 @@ export function resolveSubagentPermissions(args: {
     });
   }
   return parent;
+}
+
+/**
+ * Re-anchor a worktree sub-agent's sandbox and delivery roots to the worktree
+ * path. A worktree lives OUTSIDE the parent cwd (a temp checkout), so the
+ * parent's roots — all built from the parent cwd — do not cover it. Without
+ * this, a worker's writes to its OWN worktree rely on the worktree happening
+ * to sit under the OS tmpdir (an incidental default writable root), which
+ * breaks the moment the worktree parent dir is configured elsewhere.
+ *
+ * The sandbox is CLONED before the worktree root is added, so the parent's
+ * live policy is never widened. The worktree is prepended to the parent's
+ * delivery roots (deduped) so a worker's edits there are on-task, not
+ * out-of-root friction.
+ */
+export function resolveWorktreeRoots(args: {
+  worktreePath: string;
+  baseSandbox: import("./sandbox.js").ResolvedSandbox;
+  parentDeliveryRoots: readonly string[];
+}): { sandbox: import("./sandbox.js").ResolvedSandbox; deliveryRoots: string[] } {
+  const { worktreePath, baseSandbox, parentDeliveryRoots } = args;
+  const sandbox = cloneSandbox(baseSandbox);
+  addWritableRoot(sandbox, worktreePath);
+  const deliveryRoots = parentDeliveryRoots.includes(worktreePath)
+    ? [...parentDeliveryRoots]
+    : [worktreePath, ...parentDeliveryRoots];
+  return { sandbox, deliveryRoots };
 }
 
 /** Sum usage events from a sub-agent transcript (adopted attempt only). */
@@ -196,6 +223,16 @@ export function createSubagentRunner(
       let effectiveCwd = cwd;
       let isolationNote = "";
       let isolationFellBack = false;
+      // When worktree isolation succeeds, the sub-agent's cwd moves to the
+      // worktree — a temp dir OUTSIDE the parent cwd. Its sandbox/delivery
+      // roots must be re-anchored there explicitly: the parent's roots are
+      // built from the parent cwd, so a worker's writes to its OWN worktree
+      // would otherwise rely on the worktree happening to sit under the OS
+      // tmpdir (incidentally a default writable root). That coincidence breaks
+      // the moment the worktree parent dir is configured elsewhere. These stay
+      // undefined unless a worktree is actually created.
+      let worktreeSandbox: import("./sandbox.js").ResolvedSandbox | undefined;
+      let worktreeDeliveryRoots: string[] | undefined;
       if (isolation === "worktree") {
         const wt = await createWorktree({
           cwd,
@@ -204,6 +241,13 @@ export function createSubagentRunner(
         if (wt.ok) {
           worktreeHandle = wt.worktree;
           effectiveCwd = wt.worktree.path;
+          const reanchored = resolveWorktreeRoots({
+            worktreePath: effectiveCwd,
+            baseSandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, cwd),
+            parentDeliveryRoots: opts.getDeliveryRoots?.() ?? [],
+          });
+          worktreeSandbox = reanchored.sandbox;
+          worktreeDeliveryRoots = reanchored.deliveryRoots;
           isolationNote =
             `\n\n[worktree isolation] You are running in a linked git worktree.\n` +
             `  path: ${wt.worktree.path}\n  branch: ${wt.worktree.branch}\n` +
@@ -359,9 +403,9 @@ export function createSubagentRunner(
           outputSchema && provider.name === "openai"
             ? { name: "subagent_result", schema: outputSchema, strict: false }
             : undefined,
-        sandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
+        sandbox: worktreeSandbox ?? opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, effectiveCwd),
         expandSandboxWritable: opts.expandSandboxWritable,
-        deliveryRoots: opts.getDeliveryRoots?.() ?? [effectiveCwd],
+        deliveryRoots: worktreeDeliveryRoots ?? opts.getDeliveryRoots?.() ?? [effectiveCwd],
         addDeliveryRoot: opts.addDeliveryRoot,
         scratchDir: opts.scratchDir?.(),
         projectStateDir: opts.projectStateDir?.(),

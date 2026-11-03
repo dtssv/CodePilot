@@ -17,6 +17,7 @@ import type {
   PromptFile,
   PermissionDecision,
   PermissionMode,
+  PluginCapabilityReport,
   QuestionAnswers,
   QuestionSpec,
   SessionSummary,
@@ -48,7 +49,15 @@ export interface PendingPermission {
 
 /** Context-window usage report (mirrors core Session.contextReport). */
 export interface ContextReport {
+  /** Event-log-only token total (back-compat). */
   totalTokens: number;
+  /** Full per-turn send estimate: event log + system prompt + skills + tool/MCP
+   * schemas. The schemas + system prompt ride every request but live outside
+   * the event log, so this exceeds `totalTokens` and drives the gauge. */
+  sentTokens?: number;
+  /** Provider-reported prompt size from the last request (0 until the first
+   * response). Most accurate numerator when > 0. */
+  providerInputTokens?: number;
   window: number;
   triggerThreshold: number;
   triggerFraction: number;
@@ -175,6 +184,7 @@ export interface ConfigSnapshot {
   selectableModels: SelectableModelInfo[];
   templates: ProviderTemplateInfo[];
   imageGen?: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
+  sandbox?: { mode: "off" | "workspace-write" | "read-only" };
 }
 
 export interface SessionOptions {
@@ -693,6 +703,44 @@ export class CodepilotClient {
     return this.call("mcp/oauth-cancel", { name });
   }
 
+  async listPluginMarket(query?: string): Promise<{
+    plugins: Array<{
+      name: string;
+      description: string;
+      source: string;
+      version?: string;
+      author?: string;
+      tags?: string[];
+    }>;
+    describe: Record<string, string>;
+  }> {
+    return this.call("plugins/market", query ? { query } : {});
+  }
+
+  async listInstalledPlugins(): Promise<{
+    plugins: Array<{
+      name: string;
+      description: string;
+      version: string;
+      source: string;
+      enabled: boolean;
+    }>;
+  }> {
+    return this.call("plugins/list", {});
+  }
+
+  async inspectPlugin(source: string): Promise<PluginCapabilityReport> {
+    return this.call("plugins/inspect", { source });
+  }
+
+  async installPlugin(source: string, force?: boolean): Promise<{ name: string; path: string }> {
+    return this.call("plugins/install", force ? { source, force } : { source });
+  }
+
+  async uninstallPlugin(name: string): Promise<{ removed: boolean }> {
+    return this.call("plugins/uninstall", { name });
+  }
+
   async revokeAllRemote(): Promise<{ revoked: boolean }> {
     return this.call("remote/revoke-all", {});
   }
@@ -783,6 +831,20 @@ export class CodepilotClient {
     message: string;
   }> {
     return this.call("skills/install-archive", { filename, dataBase64 });
+  }
+
+  /**
+   * Install a skill from a git URL, remote archive URL, or local path (the
+   * same source vector as plugin install). Complements the connector-catalog
+   * and zip-upload paths with a "paste a repo/URL" entry.
+   */
+  async installSkillSource(source: string): Promise<{
+    names: string[];
+    replaced: string[];
+    skillPaths: string[];
+    message: string;
+  }> {
+    return this.call("skills/install-source", { source });
   }
 
   async setSkillEnabled(
@@ -988,6 +1050,18 @@ export class CodepilotClient {
     return this.call("prompt/followup/sendNow", { sessionId, id });
   }
 
+  /**
+   * Resume the last turn from the transcript after it ended in an error —
+   * re-engages the model where it stopped instead of sending a new user
+   * message. `noop` means there is nothing to resume; the caller should fall
+   * back to re-sending the last prompt.
+   */
+  async resumeTurn(
+    sessionId: string,
+  ): Promise<{ delivery: "started" | "queued" | "noop" }> {
+    return this.call("prompt/resume", { sessionId });
+  }
+
   async cancel(sessionId: string): Promise<void> {
     await this.call("prompt/cancel", { sessionId });
   }
@@ -1035,6 +1109,20 @@ export class CodepilotClient {
     enabled?: boolean;
   }): Promise<{ imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }> {
     return this.call("config/setImageGen", patch);
+  }
+
+  /**
+   * Change the OS sandbox mode. Persists to the user config (next session
+   * inherits it); pass `sessionId` to also hot-apply it to that live session so
+   * the switch takes effect from the next bash command.
+   */
+  async setSandbox(patch: {
+    mode: "off" | "workspace-write" | "read-only";
+    sessionId?: string;
+  }): Promise<{
+    sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string };
+  }> {
+    return this.call("config/setSandbox", patch);
   }
 
   async upsertProvider(
@@ -1090,8 +1178,15 @@ export class CodepilotClient {
   async respondPermission(
     requestId: string,
     decision: PermissionDecision,
+    feedback?: string,
   ): Promise<void> {
-    await this.call("permission/respond", { requestId, decision });
+    // Decline-with-feedback: a deny may carry a correction the model sees as
+    // the tool result. Only sent on deny with non-empty text.
+    const params =
+      decision === "deny" && feedback && feedback.trim().length > 0
+        ? { requestId, decision, feedback: feedback.trim() }
+        : { requestId, decision };
+    await this.call("permission/respond", params);
   }
 
   async respondQuestion(

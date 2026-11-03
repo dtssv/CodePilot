@@ -180,6 +180,28 @@ describe("RuntimeToolkit", () => {
     expect(r.content).toMatch(/reviewed-by-hook/);
   });
 
+  it("runTool lets a PostToolUse hook REPLACE the result the model sees", async () => {
+    // A redaction hook rewrites the tool output before it reaches the model.
+    // The original file content must NOT survive into r.content.
+    const deps = makeDeps(cwd, new MockProvider(), {
+      hooks: new HookEngine(
+        {
+          PostToolUse: [
+            { matcher: "*", command: `sh -c 'echo "{\\"updatedResult\\":\\"[REDACTED]\\"}"'` },
+          ],
+        },
+        cwd,
+      ),
+    });
+    const r = await createRuntimeToolkit().runTool(
+      call("read_file", { path: "a.ts" }),
+      deps,
+      async () => undefined,
+    );
+    expect(r.isError).toBe(false);
+    expect(r.content).toBe("[REDACTED]");
+  });
+
   it("runTool refuses a write tool in a read-only mode", async () => {
     const deps = makeDeps(cwd, new MockProvider());
     const r = await createRuntimeToolkit().runTool(
@@ -190,6 +212,28 @@ describe("RuntimeToolkit", () => {
     );
     expect(r.isError).toBe(true);
     expect(r.content).toMatch(/not allowed in chat mode/);
+    expect(executed).toEqual([]);
+  });
+
+  it("runTool surfaces decline-with-feedback to a plugin runtime (deny carries a correction)", async () => {
+    // A plugin runtime driving tools through the toolkit gets the SAME
+    // decline-with-feedback the default loop does: a deny whose feedback message
+    // becomes the tool_result the model sees, instead of the canned string.
+    const deps = makeDeps(cwd, new MockProvider(), {
+      permissions: new PermissionEngine({ permissionMode: "ask" }),
+      onPermissionRequest: async () => ({
+        decision: "deny" as const,
+        feedback: "Don't write a.ts — write b.ts instead.",
+      }),
+    });
+    const r = await createRuntimeToolkit().runTool(
+      call("write_file", { path: "a.ts", content: "x" }),
+      deps,
+      async () => undefined,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("Don't write a.ts — write b.ts instead.");
+    expect(r.content).not.toBe("permission denied for tool write_file");
     expect(executed).toEqual([]);
   });
 
@@ -234,6 +278,27 @@ describe("RuntimeToolkit", () => {
     );
     expect(other.content).toBe("contents of a.ts");
     expect(executed).toEqual(["read_file:a.ts", "read_file:a.ts"]);
+  });
+
+  it("hard-denies the 4th identical tool call and does NOT execute it (loop refusal)", async () => {
+    // The ⚠️ risk this layer carries: it is the only mechanism (across all
+    // reviewed harnesses) that REFUSES to run a tool. Pin the contract at the
+    // integration seam: a verbatim-identical mutating call repeated past the
+    // refuse threshold is blocked (isError + guidance) and never executed, so
+    // a true no-progress loop is stopped — but earlier distinct calls ran.
+    const { REFUSE_THRESHOLD } = await import("../src/doomLoop.js");
+    const toolkit = createRuntimeToolkit();
+    const deps = makeDeps(cwd, new MockProvider());
+    const identical = call("write_file", { path: "loop.ts", content: "same body" });
+    let refused: { isError?: boolean; content: string } | undefined;
+    for (let i = 0; i < REFUSE_THRESHOLD; i++) {
+      refused = await toolkit.runTool(identical, deps, async () => undefined);
+    }
+    // The last (REFUSE_THRESHOLD-th) call was refused, with recovery guidance.
+    expect(refused!.isError).toBe(true);
+    expect(refused!.content).toMatch(/doom_loop|different approach|STOP/i);
+    // It executed only REFUSE_THRESHOLD-1 times — the refused call never ran.
+    expect(executed.filter((e) => e === "write_file:loop.ts")).toHaveLength(REFUSE_THRESHOLD - 1);
   });
 
   it("gives tools an auxiliary event channel that bypasses the transcript", async () => {
@@ -317,7 +382,10 @@ describe("registry wiring", () => {
       },
     });
     reg.resolve("toolkit-probe", { cwd });
-    expect(received).toMatchObject({ version: 1 });
+    expect(received).toMatchObject({ version: 4 });
+    expect(typeof (received as { registerTool?: unknown }).registerTool).toBe("function");
+    expect(typeof (received as { setContextTransform?: unknown }).setContextTransform).toBe("function");
+    expect(typeof (received as { registerEventSink?: unknown }).registerEventSink).toBe("function");
     reg.unregister("toolkit-probe");
   });
 });

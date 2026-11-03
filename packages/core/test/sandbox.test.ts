@@ -7,15 +7,19 @@ import {
   assertPathAllowed,
   assertPathAllowedAsync,
   addWritableRoot,
+  cloneSandbox,
   isWriteOutsideSandbox,
   writableRootForTarget,
   buildSeatbeltProfile,
-  looksLikeSandboxWriteDenial,
   checkDangerousCommand,
   sensitivePathHit,
+  gitMetadataWriteHit,
+  looksLikeSandboxWriteDenial,
+  looksLikeSandboxNetworkDenial,
   winPathToWsl,
   wrapCommand,
   detectSandboxBackend,
+  modelShellEnv,
 } from "../src/sandbox.js";
 import { mkdtemp, writeFile, symlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -132,6 +136,40 @@ describe("assertPathAllowed", () => {
   });
 });
 
+describe("cloneSandbox (worktree re-anchoring)", () => {
+  // A worktree-isolated sub-agent re-anchors its writable roots to the
+  // worktree by cloning the parent policy and adding the worktree root.
+  // The clone must NOT widen the parent (shared-array aliasing bug).
+  it("adding a root to the clone does not mutate the original", () => {
+    const parent = resolveSandbox({ mode: "workspace-write" }, cwd);
+    const beforeRoots = [...parent.writableRoots];
+    const clone = cloneSandbox(parent);
+    addWritableRoot(clone, "/tmp/cp-worktree-abc/project");
+    expect(clone.writableRoots).toContain("/tmp/cp-worktree-abc/project");
+    // Parent is untouched — its arrays were copied, not aliased.
+    expect(parent.writableRoots).toEqual(beforeRoots);
+    expect(parent.writableRoots).not.toContain("/tmp/cp-worktree-abc/project");
+  });
+
+  it("deep-copies networkPolicy arrays so the clone can diverge", () => {
+    const parent = resolveSandbox(
+      { mode: "workspace-write", network: { mode: "proxy", allow: ["example.com"] } },
+      cwd,
+    );
+    const clone = cloneSandbox(parent);
+    clone.networkPolicy.allow.push("evil.com");
+    expect(parent.networkPolicy.allow).toEqual(["example.com"]);
+  });
+
+  it("preserves scalar fields", () => {
+    const parent = resolveSandbox({ mode: "read-only" }, cwd);
+    const clone = cloneSandbox(parent);
+    expect(clone.mode).toBe("read-only");
+    expect(clone.fallback).toBe(parent.fallback);
+    expect(clone.network).toBe(parent.network);
+  });
+});
+
 describe("assertPathAllowedAsync (symlink escape)", () => {
   it("follows symlinks when checking writes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cpsb-"));
@@ -235,6 +273,25 @@ describe("checkDangerousCommand", () => {
     expect(checkDangerousCommand("rm -rf /home/*").dangerous).toBe(true);
   });
 
+  it("flags deletion of a .git directory (catastrophic even inside the workspace)", () => {
+    expect(checkDangerousCommand("rm -rf .git").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf ./.git").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf packages/core/.git").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf .git/").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -rf .git/hooks").dangerous).toBe(true);
+    expect(checkDangerousCommand("rm -fr .git").dangerous).toBe(true);
+  });
+
+  it("does NOT flag legitimate git subcommands or similarly-named files", () => {
+    // The .git rule is scoped to `rm`; git subcommands keep their own patterns.
+    expect(checkDangerousCommand("git config user.email a@b.c").dangerous).toBe(false);
+    expect(checkDangerousCommand("git log --oneline").dangerous).toBe(false);
+    expect(checkDangerousCommand("git add .gitignore").dangerous).toBe(false);
+    // `.git` must be a whole path component — not a substring of a filename.
+    expect(checkDangerousCommand("rm -f foo.gitignore").dangerous).toBe(false);
+    expect(checkDangerousCommand("rm -f mygit.txt").dangerous).toBe(false);
+  });
+
   it("passes benign commands", () => {
     expect(checkDangerousCommand("npm test").dangerous).toBe(false);
     expect(checkDangerousCommand("git status").dangerous).toBe(false);
@@ -245,6 +302,23 @@ describe("checkDangerousCommand", () => {
     // shred/truncate of a PROJECT file is fine — only system paths are flagged.
     expect(checkDangerousCommand("shred -u ./tmp/secret").dangerous).toBe(false);
     expect(checkDangerousCommand("truncate -s 0 ./build.log").dangerous).toBe(false);
+  });
+});
+
+describe("gitMetadataWriteHit (workspace .git write floor)", () => {
+  it("flags direct writes under a workspace .git directory", () => {
+    expect(gitMetadataWriteHit(".git/config", cwd)).toContain(".git");
+    expect(gitMetadataWriteHit(".git/hooks/pre-commit", cwd)).toContain(".git");
+    expect(gitMetadataWriteHit("/repo/project/.git/config", cwd)).toBe("/repo/project/.git");
+    // Nested repo / submodule .git also counts.
+    expect(gitMetadataWriteHit("sub/mod/.git/config", cwd)).toContain(".git");
+  });
+
+  it("does NOT flag ordinary files or .git-prefixed names", () => {
+    expect(gitMetadataWriteHit("src/app.ts", cwd)).toBeNull();
+    expect(gitMetadataWriteHit(".gitignore", cwd)).toBeNull();
+    expect(gitMetadataWriteHit(".github/workflows/ci.yml", cwd)).toBeNull();
+    expect(gitMetadataWriteHit("docs/git-notes.md", cwd)).toBeNull();
   });
 });
 
@@ -280,6 +354,56 @@ describe("winPathToWsl", () => {
 
   it("leaves non-drive paths alone (slash-normalised)", () => {
     expect(winPathToWsl("\\\\server\\share")).toBe("//server/share");
+  });
+});
+
+describe("sandbox denial detectors", () => {
+  it("detects OS write denials", () => {
+    expect(looksLikeSandboxWriteDenial("open: Operation not permitted")).toBe(true);
+    expect(looksLikeSandboxWriteDenial("EROFS: read-only file system")).toBe(true);
+    expect(looksLikeSandboxWriteDenial("EACCES: permission denied, open '/x'")).toBe(true);
+    expect(looksLikeSandboxWriteDenial("ok, wrote file")).toBe(false);
+  });
+
+  it("detects network denials the sandbox likely caused", () => {
+    expect(looksLikeSandboxNetworkDenial("getaddrinfo ENOTFOUND registry.npmjs.org")).toBe(true);
+    expect(looksLikeSandboxNetworkDenial("curl: (6) Could not resolve host: github.com")).toBe(true);
+    expect(looksLikeSandboxNetworkDenial("connect ECONNREFUSED 127.0.0.1:5432")).toBe(true);
+    expect(looksLikeSandboxNetworkDenial("dial tcp: Network is unreachable")).toBe(true);
+    expect(looksLikeSandboxNetworkDenial("Temporary failure in name resolution")).toBe(true);
+    // A normal, non-network failure must NOT be flagged as a sandbox net denial.
+    expect(looksLikeSandboxNetworkDenial("SyntaxError: unexpected token")).toBe(false);
+    expect(looksLikeSandboxNetworkDenial("test failed: expected 1 got 2")).toBe(false);
+  });
+});
+
+describe("modelShellEnv", () => {
+  it("sets the non-interactive pager/color/terminal guards", () => {
+    const env = modelShellEnv({ PATH: "/usr/bin" });
+    // No pager → git log/diff/man can't block on a TTY that doesn't exist.
+    expect(env.PAGER).toBe("cat");
+    expect(env.GIT_PAGER).toBe("cat");
+    // No color escapes polluting captured output.
+    expect(env.NO_COLOR).toBe("1");
+    expect(env.TERM).toBe("dumb");
+    // git never drops into an interactive credential/editor prompt.
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+    // Base env is carried through.
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("overlays the guards on top of the base env (agent context wins)", () => {
+    // A base that sets a pager/color must still be neutralized for the agent.
+    const env = modelShellEnv({ PAGER: "less", NO_COLOR: "", TERM: "xterm-256color" });
+    expect(env.PAGER).toBe("cat");
+    expect(env.NO_COLOR).toBe("1");
+    expect(env.TERM).toBe("dumb");
+  });
+
+  it("drops undefined base values (produces a string-only record)", () => {
+    const env = modelShellEnv({ A: "1", B: undefined } as NodeJS.ProcessEnv);
+    expect(env.A).toBe("1");
+    expect("B" in env).toBe(false);
   });
 });
 

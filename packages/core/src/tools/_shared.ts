@@ -78,6 +78,52 @@ export function shouldSkipWalkDir(relPath: string, name: string): boolean {
 }
 
 /**
+ * Shared threshold for spilling large tool output to an artifact. Above this
+ * many characters, a tool keeps a bounded inline view and stashes the full
+ * body via {@link ToolContext.artifact}. Single-sourced here because several
+ * tools (bash / grep / web_fetch / code_mode) independently enforce the same
+ * budget — a drifting per-file copy would make "how big before it spills"
+ * silently inconsistent across tools.
+ */
+export const ARTIFACT_THRESHOLD = 8_000;
+
+/** Default head/tail window for {@link spillHeadTail}. */
+const DEFAULT_SPILL_HEAD = 4_000;
+const DEFAULT_SPILL_TAIL = 4_000;
+
+/**
+ * Spill `content` to an artifact and return a bounded head+tail inline view
+ * with a gap marker. Use when BOTH ends carry signal (e.g. a command's first
+ * lines AND its exit status / stack tail) — a head-only truncation would lose
+ * the tail. Tools where only the head matters (grep matches, fetched pages)
+ * keep their own head-only render but should still use {@link ARTIFACT_THRESHOLD}.
+ *
+ * Returns the full body unchanged when it is at or below the threshold (no
+ * artifact is written in that case).
+ */
+export async function spillHeadTail(
+  ctx: ToolContext,
+  content: string,
+  hint: string,
+  opts: { head?: number; tail?: number } = {}
+): Promise<{ content: string; artifactRef?: string }> {
+  if (content.length <= ARTIFACT_THRESHOLD) return { content };
+  const head = opts.head ?? DEFAULT_SPILL_HEAD;
+  const tail = opts.tail ?? DEFAULT_SPILL_TAIL;
+  const artifactRef = await ctx.artifact(content, hint);
+  const omitted = content.length - head - tail;
+  // Degenerate guard: if head+tail would cover (or overlap) the whole body,
+  // just return it verbatim with the ref — slicing would duplicate content.
+  if (omitted <= 0) return { content, artifactRef };
+  const view =
+    content.slice(0, head) +
+    `\n\n[... ${omitted.toLocaleString()} chars omitted; full output in artifact ${artifactRef} — ` +
+    `use read_artifact with startLine/maxLines for any slice ...]\n\n` +
+    content.slice(content.length - tail);
+  return { content: view, artifactRef };
+}
+
+/**
  * Validate a path against the active sandbox policy. Returns null when the
  * access is allowed, or an error ToolResult ready to return to the model.
  */

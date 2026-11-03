@@ -14,15 +14,16 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { AgentMode, StatusLineConfig } from "@codepilot/core";
-import { runStatusLine, buildPayload } from "@codepilot/core";
+import { runStatusLine, buildPayload, DEFAULT_MODEL_CONTEXT_WINDOW } from "@codepilot/core";
 import type { TuiState } from "./state.js";
 import { color, formatTokens, glyph } from "./theme.js";
 
-const PERM_COLOR: Record<TuiState["permissionMode"], string | undefined> = {
-  ask: undefined,
-  "auto-edit": color.info,
-  yolo: color.remove,
-};
+// Read `color.*` at call time, not module load: the palette is mutable
+// (setTheme reassigns it), so a map captured at import would freeze the
+// default palette's colours.
+function permColor(mode: TuiState["permissionMode"]): string | undefined {
+  return mode === "auto-edit" ? color.info : mode === "yolo" ? color.remove : undefined;
+}
 
 /** Same names as the mode switch in the other clients. */
 const AGENT_LABEL: Record<AgentMode, string> = {
@@ -31,22 +32,23 @@ const AGENT_LABEL: Record<AgentMode, string> = {
   agent: "Agent",
 };
 
-const AGENT_COLOR: Record<AgentMode, string> = {
-  chat: color.info,
-  plan: color.warn,
-  agent: color.accent,
-};
+function agentColor(mode: AgentMode): string {
+  return mode === "plan" ? color.warn : mode === "agent" ? color.accent : color.info;
+}
 
 export function StatusBar({
   state,
   statusLineConfig,
   cwd,
   version,
+  contextWindow,
 }: {
   state: TuiState;
   statusLineConfig?: StatusLineConfig;
   cwd: string;
   version: string;
+ /** Active model's context window; falls back to the core default when unknown. */
+  contextWindow?: number;
 }): React.ReactElement {
   const [customText, setCustomText] = React.useState<string | null>(null);
 
@@ -55,7 +57,7 @@ export function StatusBar({
     if (!statusLineConfig) return;
     const totalInput = state.usage.input + (state.usage.cacheRead ?? 0);
     const totalOutput = state.usage.output;
-    const windowSize = 200_000; // default; could be derived from model
+    const windowSize = contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW;
     const total = totalInput + totalOutput;
     const usedPct = total > 0 && windowSize > 0 ? (total / windowSize) * 100 : null;
     const payload = buildPayload({
@@ -76,7 +78,7 @@ export function StatusBar({
       });
     }, statusLineConfig.updateIntervalMs ?? 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [state.model, state.sessionId, state.usage, statusLineConfig, cwd, version]);
+  }, [state.model, state.sessionId, state.usage, statusLineConfig, cwd, version, contextWindow]);
 
  // Custom status line: render the script's stdout (preserving ANSI).
   if (statusLineConfig && customText !== null) {
@@ -96,11 +98,11 @@ export function StatusBar({
   const sep = <Text color={color.faint}> {glyph.dot} </Text>;
   return (
     <Box paddingX={1}>
-      <Text color={AGENT_COLOR[state.agentMode]} bold>
+      <Text color={agentColor(state.agentMode)} bold>
         {glyph.running} {AGENT_LABEL[state.agentMode]}
       </Text>
       {sep}
-      <Text color={PERM_COLOR[state.permissionMode]} dimColor={state.permissionMode === "ask"}>
+      <Text color={permColor(state.permissionMode)} dimColor={state.permissionMode === "ask"}>
         {state.permissionMode}
       </Text>
       {sep}

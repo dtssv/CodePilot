@@ -198,6 +198,36 @@ describe("Session", () => {
     expect(msg!.images[0]!.base64).toBe(base64);
   });
 
+  it("pins a message against compaction and reapplies the anchor on resume", async () => {
+    const id = "pin-anchor";
+    const path = join(getSessionsDir(), `${id}.jsonl`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        type: "message",
+        id: "u-anchor",
+        role: "user",
+        content: [{ type: "text", text: "the constraint" }],
+      }) + "\n",
+      "utf-8",
+    );
+
+    const session = await createSession({ cwd: workDir, sessionId: id });
+    expect(await session.pinMessage("u-anchor", true)).toBe(true);
+    expect(session.pinnedMessageIds()).toEqual(["u-anchor"]);
+    // Unknown id is a no-op.
+    expect(await session.pinMessage("nope", true)).toBe(false);
+
+    // Resume in a fresh instance: the `pin` control event replays the anchor
+    // back onto the message (append-only — the original line is untouched).
+    const resumed = await createSession({ cwd: workDir, sessionId: id });
+    expect(resumed.pinnedMessageIds()).toEqual(["u-anchor"]);
+    // A later unpin wins on reload.
+    expect(await resumed.pinMessage("u-anchor", false)).toBe(true);
+    const again = await createSession({ cwd: workDir, sessionId: id });
+    expect(again.pinnedMessageIds()).toEqual([]);
+  });
+
   it("prefers a model remembered from same-cwd session history over the config default", async () => {
  // A prior session in this cwd recorded model "glm-5.3" on its assistant turn.
     const priorId = "prior-model-sess";
@@ -219,6 +249,78 @@ describe("Session", () => {
       config: { model: "some-default-model" },
     });
     expect(session.getModel()).toBe("glm-5.3");
+  });
+
+  it("on resume, reads the resumed session's own model directly (resume fast path)", async () => {
+    // The session we resume recorded model "glm-5.7". A newer, same-cwd session
+    // recorded a DIFFERENT model. Resuming by id must pick up THIS session's
+    // own model (read from its one file), not the newest session's — proving
+    // the resume path no longer depends on a full-corpus listSessions() scan.
+    const newerId = "newer-other-model";
+    writeFileSync(
+      join(getSessionsDir(), `${newerId}.jsonl`),
+      [
+        JSON.stringify({ type: "message", id: "u1", role: "user", content: [{ type: "text", text: "hi" }] }),
+        JSON.stringify({ type: "message", id: "a1", role: "assistant", model: "other-model", content: [{ type: "text", text: "ok" }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(join(getSessionsDir(), `${newerId}.cwd`), workDir, "utf-8");
+
+    const resumeId = "resume-own-model";
+    writeFileSync(
+      join(getSessionsDir(), `${resumeId}.jsonl`),
+      [
+        JSON.stringify({ type: "message", id: "u1", role: "user", content: [{ type: "text", text: "hi" }] }),
+        JSON.stringify({ type: "message", id: "a1", role: "assistant", model: "glm-5.7", content: [{ type: "text", text: "ok" }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    writeFileSync(join(getSessionsDir(), `${resumeId}.cwd`), workDir, "utf-8");
+
+    const session = await createSession({
+      cwd: workDir,
+      sessionId: resumeId,
+      config: { model: "some-default-model" },
+    });
+    expect(session.getModel()).toBe("glm-5.7");
+  });
+
+  it("setModel applies the new model's configured context window (not just the name)", async () => {
+    // Regression: switching model via setModel (model-only, no providerId — the
+    // /model slash-command path and any picker that omits providerId) used to
+    // update only config.model, leaving config.contextWindow stale. The context
+    // gauge and compaction geometry then used the previous/default window. The
+    // provider preset configures two models with DIFFERENT windows; after
+    // setModel the report's window must track the switched-to model.
+    const session = await createSession({
+      cwd: workDir,
+      config: {
+        provider: "openai",
+        apiKey: "k",
+        baseURL: "https://example.com/v1",
+        model: "model-small",
+        providers: {
+          work: {
+            provider: "openai",
+            apiKey: "k",
+            baseURL: "https://example.com/v1",
+            model: "model-small",
+            modelCapabilities: {
+              "model-small": { contextWindow: 32_000, modalities: ["text"] },
+              "model-big": { contextWindow: 262_144, modalities: ["text"] },
+            },
+          },
+        },
+      },
+    });
+    await session.setProvider("work", "model-small");
+    expect(session.contextReport().window).toBe(32_000);
+
+    // Model-only switch (no providerId) must still pick up model-big's window.
+    await session.setModel("model-big");
+    expect(session.getModel()).toBe("model-big");
+    expect(session.contextReport().window).toBe(262_144);
   });
 
   it("reconciles a stale 'running' status to idle on resume", async () => {
@@ -462,5 +564,104 @@ describe("Session tool wiring", () => {
       rmSync(dirA, { recursive: true, force: true });
       rmSync(dirB, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Session async checkpoint", () => {
+  let workDir: string;
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tempHome, "ckpt-async-"));
+  });
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  // The checkpoint writer's small-model distillation used to run on the hot
+  // path: a turn that crossed the threshold made the user wait for a round
+  // trip after the work was already done. It now runs in the background — the
+  // snapshot is captured synchronously, the write deferred, and `dispose()`
+  // flushes it. These tests lock that in.
+  it("does not block the trigger on the small-model call, and dispose() flushes", async () => {
+    const { vi } = await import("vitest");
+
+    // A deliberately slow summariser: resolve only when we say so, so we can
+    // observe that maybeCheckpoint() returns BEFORE the model call completes.
+    let releaseFetch: () => void = () => {};
+    const fetchGate = new Promise<void>((r) => (releaseFetch = r));
+    let summariserCalls = 0;
+    const sse = () =>
+      new Response(
+        new ReadableStream({
+          start(c) {
+            const enc = new TextEncoder();
+            c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"## Active intent\\nDISTILLED"}}]}\n\n'));
+            c.enqueue(enc.encode("data: [DONE]\n\n"));
+            c.close();
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    vi.stubGlobal("fetch", async () => {
+      summariserCalls++;
+      await fetchGate; // hang until released
+      return sse();
+    });
+
+    const id = "ckpt-async";
+    // Seed a history large enough to cross the checkpoint token threshold.
+    const words = "alpha beta gamma delta epsilon zeta function return const value error retry commit branch diff patch index token window budget".split(" ");
+    const para = (seed: number, n: number): string =>
+      Array.from({ length: n }, (_, i) => words[(seed * 7 + i * 13) % words.length]).join(" ");
+    const lines: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      lines.push(JSON.stringify({ type: "message", id: `u${i}`, role: "user", content: [{ type: "text", text: para(i, 120) }] }));
+      lines.push(JSON.stringify({ type: "message", id: `a${i}`, role: "assistant", content: [{ type: "text", text: para(i + 100, 120) }] }));
+    }
+    writeFileSync(join(getSessionsDir(), `${id}.jsonl`), lines.join("\n") + "\n", "utf-8");
+
+    const session = await createSession({
+      cwd: workDir,
+      sessionId: id,
+      config: {
+        provider: "openai",
+        apiKey: "k",
+        baseURL: "https://example.com/v1",
+        model: "gpt-4o",
+        smallModel: "gpt-4o-mini",
+        // Small window so the derived token threshold floors low and the
+        // seeded history always crosses it (the common trigger in practice).
+        contextWindow: 8_000,
+      },
+    });
+
+    const internal = session as unknown as {
+      maybeCheckpoint: () => Promise<void>;
+      pendingCheckpoint: Promise<void> | null;
+      checkpointHook: unknown;
+      events: unknown[];
+    };
+
+    const { checkpointExists } = await import("../src/checkpoints.js");
+
+    // Sanity: the hook exists and the seeded history is loaded (so the turns
+    // threshold of 6 is crossed and a checkpoint is warranted).
+    expect(internal.checkpointHook).not.toBeNull();
+    expect(internal.events.length).toBeGreaterThan(12);
+
+    // Trigger. maybeCheckpoint() must return promptly even though the
+    // summariser fetch is still hanging (background, not awaited inline).
+    await internal.maybeCheckpoint();
+    expect(internal.pendingCheckpoint).not.toBeNull(); // a write is in flight
+    expect(summariserCalls).toBe(1); // the model call started…
+    // …but the file is NOT written yet (the slow write is still gated).
+    expect(await checkpointExists(workDir, id)).toBe(false);
+
+    // Release the model call, then dispose() must flush the pending write.
+    releaseFetch();
+    await session.dispose();
+    expect(internal.pendingCheckpoint).toBeNull();
+    expect(await checkpointExists(workDir, id)).toBe(true);
+
+    vi.restoreAllMocks();
   });
 });

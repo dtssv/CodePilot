@@ -6,6 +6,8 @@ JSON catalogs fetched by the engine (GitHub raw → `~/.codepilot/catalog/`).
 |---|---|
 | `connectors.json` | Settings → 连接器 |
 | `provider-templates.json` | Settings → 模型服务商模板 |
+| `mcp-markets.json` | MCP marketplace browse links |
+| `plugins.json` | Plugin marketplace — installable plugin index (discovery entry point) |
 | `manifest.json` | Index of catalogs |
 
 Update rule: try once per calendar day; on failure keep the last local copy forever.

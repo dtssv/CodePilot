@@ -13,11 +13,20 @@ import {
   saveDefaultAgentMode,
   savePermissionMode,
 } from "../prefs.js";
-import type { Layout, Theme } from "../surface.js";
+import { THEME_NAMES, type Layout, type Theme, type ThemeName } from "../surface.js";
 import { CustomMcpPanel } from "./CustomMcpModal.js";
+import { PluginsPanel } from "./PluginsPanel.js";
 
 const PAGE_SIZE = 24;
 type ListTab = "all" | "installed";
+
+/** Display labels for the named palettes (i18n keys). */
+const THEME_NAME_LABELS: Record<ThemeName, string> = {
+  default: "Default",
+  nord: "Nord",
+  solarized: "Solarized",
+  "high-contrast": "High contrast",
+};
 
 /**
  * The HTTP(S) origin a phone should connect to for remote pairing.
@@ -56,6 +65,7 @@ function resolveServeUrl(): string {
 export type SettingsExtraSection =
   | "connectors"
   | "custom-mcp"
+  | "plugins"
   | "skills"
   | "remote"
   | "schedule"
@@ -130,6 +140,8 @@ export function SettingsExtras({
   onComposePrompt,
   theme,
   onTheme,
+  themeName,
+  onThemeName,
   layout,
   onLayout,
 }: {
@@ -138,6 +150,8 @@ export function SettingsExtras({
   onComposePrompt?: (text: string) => void;
   theme: Theme;
   onTheme(theme: Theme): void;
+  themeName: ThemeName;
+  onThemeName(name: ThemeName): void;
   layout: Layout;
   onLayout(layout: Layout): void;
 }): React.ReactElement {
@@ -152,6 +166,7 @@ export function SettingsExtras({
   const [skillTab, setSkillTab] = useState<ListTab>("all");
   const [skillQuery, setSkillQuery] = useState("");
   const [skillQueryDraft, setSkillQueryDraft] = useState("");
+  const [skillSourceDraft, setSkillSourceDraft] = useState("");
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [editingSkill, setEditingSkill] = useState<string | null>(null);
@@ -184,6 +199,11 @@ export function SettingsExtras({
   // it. `null` = unknown / not the desktop surface (hides the toggle).
   const [lanAccess, setLanAccess] = useState<boolean | null>(null);
   const [lanBusy, setLanBusy] = useState(false);
+  // OS sandbox mode for tool execution (bash / file writes). Mirrors the core
+  // `sandbox.mode` config; `null` while loading. Changing it persists to the
+  // user config and hot-applies to the active session.
+  const [sandboxMode, setSandboxMode] = useState<"off" | "workspace-write" | "read-only" | null>(null);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
   // Workspaces to authorize for the next QR (the phone lists exactly these).
   // Defaults to the active workspace; the user can tick more before minting.
   const [pairCwds, setPairCwds] = useState<string[]>([]);
@@ -294,6 +314,7 @@ export function SettingsExtras({
               apiKey: "",
             }));
           }
+          setSandboxMode(cfg.sandbox?.mode ?? "workspace-write");
         })
         .catch(() => {});
     }
@@ -338,6 +359,47 @@ export function SettingsExtras({
       setError(describeError(err));
     } finally {
       setLanBusy(false);
+    }
+  };
+
+  const changeSandboxMode = async (
+    next: "off" | "workspace-write" | "read-only",
+  ): Promise<void> => {
+    setSandboxBusy(true);
+    setError(undefined);
+    setNotice(undefined);
+    const prev = sandboxMode;
+    setSandboxMode(next); // optimistic
+    try {
+      const r = await client.setSandbox({
+        mode: next,
+        sessionId: state.sessionId || undefined,
+      });
+      setSandboxMode(r.sandbox.mode);
+      if (next === "off") {
+        setNotice(
+          t(
+            "Sandbox OFF — tool commands and file writes run WITHOUT OS confinement. Only use on trusted machines.",
+          ),
+        );
+      } else if (r.sandbox.unavailable) {
+        setNotice(
+          t(
+            "Sandbox set, but no OS sandbox backend is available on this host — bash will refuse to run (fail-closed). Install the backend or set the sandbox to off.",
+          ),
+        );
+      } else {
+        setNotice(
+          next === "read-only"
+            ? t("Sandbox set to read-only — the agent cannot write files or run mutating commands.")
+            : t("Sandbox set to workspace-write — writes are confined to the workspace."),
+        );
+      }
+    } catch (err) {
+      setSandboxMode(prev); // revert on failure
+      setError(describeError(err));
+    } finally {
+      setSandboxBusy(false);
     }
   };
 
@@ -558,6 +620,24 @@ export function SettingsExtras({
       const dataBase64 = btoa(binary);
       const r = await client.installSkillArchive(file.name, dataBase64);
       setNotice(r.message);
+      await loadSkills();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const installSkillFromSource = async (): Promise<void> => {
+    const source = skillSourceDraft.trim();
+    if (!source) return;
+    setBusy(true);
+    setNotice(undefined);
+    setError(undefined);
+    try {
+      const r = await client.installSkillSource(source);
+      setNotice(r.message);
+      setSkillSourceDraft("");
       await loadSkills();
     } catch (err) {
       setError(describeError(err));
@@ -838,6 +918,8 @@ export function SettingsExtras({
 
       {section === "custom-mcp" && <CustomMcpPanel cp={cp} />}
 
+      {section === "plugins" && <PluginsPanel cp={cp} />}
+
       {section === "connectors" && (
         <div className="space-y-3">
           <p className="text-[12px] leading-5 text-[var(--color-ink-dim)]">
@@ -1094,6 +1176,26 @@ export function SettingsExtras({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input
+              className="cp-input min-w-[14rem] flex-1 text-[12.5px]"
+              placeholder={t("Install from git URL or archive URL…")}
+              value={skillSourceDraft}
+              disabled={busy}
+              onChange={(e) => setSkillSourceDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void installSkillFromSource();
+              }}
+            />
+            <button
+              type="button"
+              className="cp-btn-ghost py-1.5 text-[12px]"
+              disabled={busy || !skillSourceDraft.trim()}
+              onClick={() => void installSkillFromSource()}
+            >
+              {t("Install")}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
               className="cp-input min-w-[12rem] flex-1 text-[12.5px]"
               placeholder={t("Search skills…")}
               value={skillQueryDraft}
@@ -1334,6 +1436,20 @@ export function SettingsExtras({
                 <option value="dark">{t("Dark")}</option>
               </select>
             </GeneralRow>
+            <GeneralRow title={t("Palette")} hint={t("Named colour scheme")}>
+              <select
+                className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
+                value={themeName}
+                aria-label={t("Palette")}
+                onChange={(e) => onThemeName(e.target.value as ThemeName)}
+              >
+                {THEME_NAMES.map((name) => (
+                  <option key={name} value={name}>
+                    {t(THEME_NAME_LABELS[name])}
+                  </option>
+                ))}
+              </select>
+            </GeneralRow>
             <GeneralRow title={t("Layout")} hint={t("Primary UI layout")}>
               <select
                 className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
@@ -1392,6 +1508,28 @@ export function SettingsExtras({
                   />
                   {lanBusy ? `${t("Applying")}…` : lanAccess ? t("On") : t("Off")}
                 </label>
+              </GeneralRow>
+            )}
+            {sandboxMode !== null && (
+              <GeneralRow
+                title={t("Tool sandbox")}
+                hint={t("OS-level confinement for bash commands and file writes. “workspace-write” confines writes to the workspace; “read-only” blocks writes; “off” runs tools WITHOUT OS confinement (trusted machines only). Applies to the current session immediately.")}
+              >
+                <select
+                  className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
+                  value={sandboxMode}
+                  aria-label={t("Tool sandbox")}
+                  disabled={sandboxBusy}
+                  onChange={(e) =>
+                    void changeSandboxMode(
+                      e.target.value as "off" | "workspace-write" | "read-only",
+                    )
+                  }
+                >
+                  <option value="workspace-write">{t("Workspace write")}</option>
+                  <option value="read-only">{t("Read-only")}</option>
+                  <option value="off">{t("Off (no sandbox)")}</option>
+                </select>
               </GeneralRow>
             )}
           </div>

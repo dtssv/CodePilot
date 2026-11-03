@@ -212,6 +212,55 @@ describe("LspManager e2e (typescript-language-server)", () => {
   );
 
   it.skipIf(!hasTsServer)(
+    "re-syncs the document after an on-disk edit (no stale navigation)",
+    async () => {
+      // Regression: openDoc used to open each uri once and never update the
+      // server's copy. After the agent edits the file, the declaration moves,
+      // so go-to-definition must track the NEW line — requiring a didChange.
+      root = mkdtempSync(join(tmpdir(), "lsp-e2e-"));
+      writeFileSync(
+        join(root, "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { strict: true } }),
+      );
+      const filePath = join(root, "main.ts");
+      // v1: `greet` declared on line 1, called on line 4.
+      writeFileSync(
+        filePath,
+        "function greet(name: string) {\n  return `hi ${name}`;\n}\nconst msg = greet(\"world\");\n",
+      );
+
+      mgr = new LspManager([tsServerConfig(["typescript"])]);
+
+      // First query opens the doc. Call site `greet` is on line 4 (0-based 3).
+      const first = await mgr.navigate("definition", root, filePath, { line: 3, character: 13 });
+      expect(first.ok, first.ok ? "" : (first as { reason: string }).reason).toBe(true);
+      if (!first.ok) return;
+      expect(parseLocations(first.result).some((l) => l.line === 1)).toBe(true);
+
+      // Edit the file: push the declaration down by two blank lines, so `greet`
+      // is now declared on line 3 and called on line 6.
+      writeFileSync(
+        filePath,
+        "\n\nfunction greet(name: string) {\n  return `hi ${name}`;\n}\nconst msg = greet(\"world\");\n",
+      );
+
+      // Second query must re-sync (didChange) and resolve the definition to the
+      // NEW declaration line (3), not the stale line (1).
+      const second = await mgr.navigate("definition", root, filePath, { line: 5, character: 13 });
+      expect(second.ok, second.ok ? "" : (second as { reason: string }).reason).toBe(true);
+      if (!second.ok) return;
+      const locs = parseLocations(second.result);
+      expect(
+        locs.some((l) => l.path === filePath && l.line === 3),
+        `expected definition on line 3 after edit; got ${JSON.stringify(locs)}`,
+      ).toBe(true);
+      // And NOT the stale line 1.
+      expect(locs.some((l) => l.line === 1)).toBe(false);
+    },
+    30_000,
+  );
+
+  it.skipIf(!hasTsServer)(
     "returns hover type info at a symbol",
     async () => {
       root = mkdtempSync(join(tmpdir(), "lsp-e2e-"));

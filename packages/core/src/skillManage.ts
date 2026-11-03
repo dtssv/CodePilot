@@ -7,9 +7,10 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, access, mkdtemp, rm, cp, readdir, lstat } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { listConnectors, type ConnectorRecipe } from "./connectors.js";
 import {
@@ -636,42 +637,132 @@ export async function installSkillFromArchive(
     await mkdir(extractDir, { recursive: true });
     await extractArchive(archivePath, extractDir, kind);
 
-    const skillMds: string[] = [];
-    await walkSkillMd(extractDir, skillMds);
-    if (skillMds.length === 0) {
-      throw new Error("压缩包内未找到 SKILL.md");
+    return await installSkillsFromExtractedTree(extractDir, opts?.skillsDir);
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Copy every SKILL.md folder found under `extractDir` into the skills root,
+ * replacing any existing skill of the same name. Shared by the archive-upload
+ * and remote-source install vectors so both derive names, dedup and report
+ * identically. Throws when the tree contains no SKILL.md (not a skill package).
+ */
+async function installSkillsFromExtractedTree(
+  extractDir: string,
+  skillsDir?: string,
+): Promise<InstallSkillArchiveResult> {
+  const skillMds: string[] = [];
+  await walkSkillMd(extractDir, skillMds);
+  if (skillMds.length === 0) {
+    throw new Error("来源内未找到 SKILL.md");
+  }
+
+  const root = skillsDir ?? defaultSkillsDir();
+  await mkdir(root, { recursive: true });
+  const names: string[] = [];
+  const replaced: string[] = [];
+  const skillPaths: string[] = [];
+
+  for (const mdPath of skillMds) {
+    const folder = join(mdPath, "..");
+    const md = await readFile(mdPath, "utf-8");
+    const fallback = basename(folder) || "skill";
+    const name = skillNameFromMarkdown(md, fallback);
+    const dest = join(root, name);
+    const existed = await userSkillInstalled(name, root);
+    await rm(dest, { recursive: true, force: true });
+    await cp(folder, dest, { recursive: true });
+    names.push(name);
+    skillPaths.push(join(dest, "SKILL.md"));
+    if (existed) replaced.push(name);
+  }
+
+  const unique = [...new Set(names)];
+  return {
+    names: unique,
+    replaced: [...new Set(replaced)],
+    skillPaths,
+    message:
+      replaced.length > 0
+        ? `已安装技能：${unique.join(", ")}（替换：${[...new Set(replaced)].join(", ")}）`
+        : `已安装技能：${unique.join(", ")}`,
+  };
+}
+
+/** Whether a source string is a remote URL / git URL rather than a local path. */
+function isRemoteSkillSource(source: string): boolean {
+  return (
+    source.startsWith("http://") ||
+    source.startsWith("https://") ||
+    source.startsWith("git@") ||
+    source.startsWith("git://") ||
+    source.startsWith("ssh://")
+  );
+}
+
+/**
+ * Install skill(s) from a SOURCE — a git repo URL, a downloadable archive URL,
+ * or a local directory / archive path. This mirrors CodePilot's own plugin
+ * install vector (`installPlugin` in `plugins.ts`) so the two feel the same:
+ *
+ * - `https://…/repo.git`, `git@…`, `git://…`, `ssh://…`, or any `https://…`
+ *   that does not end in a known archive extension → `git clone --depth 1`.
+ * - `https://…/pack.zip|.tar|.tar.gz|.tgz|.7z` → download the bytes and extract
+ *   through the same archive path as an uploaded archive.
+ * - A local directory → copy its tree.
+ * - A local archive file → extract it.
+ *
+ * Every discovered SKILL.md folder is installed into the skills root. Unlike
+ * `installPlugin`, remote fetches run through the normal network path (not the
+ * sandbox): skill install is an explicit, host-initiated Settings action, the
+ * same trust level as uploading an archive.
+ */
+export async function installSkillFromSource(
+  source: string,
+  opts?: { skillsDir?: string },
+): Promise<InstallSkillArchiveResult> {
+  const src = (source || "").trim();
+  if (!src) throw new Error("空来源");
+
+  const work = await mkdtemp(join(tmpdir(), "cp-skill-src-"));
+  const extractDir = join(work, "out");
+  try {
+    await mkdir(extractDir, { recursive: true });
+
+    if (isRemoteSkillSource(src)) {
+      const kind = archiveKind(src);
+      if (kind) {
+        // Remote archive: download the bytes, then extract like an upload.
+        const res = await globalThis.fetch(src);
+        if (!res.ok) {
+          throw new Error(`下载失败：${res.status} ${res.statusText}`);
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length === 0) throw new Error("空文件");
+        if (buf.length > 40 * 1024 * 1024) throw new Error("压缩包过大（上限 40MB）");
+        const archivePath = join(work, basename(src).replace(/[^\w.\-]+/g, "_") || `skill${extname(src)}`);
+        await writeFile(archivePath, buf);
+        await extractArchive(archivePath, extractDir, kind);
+      } else {
+        // Remote repo: shallow clone. `--depth 1` keeps it cheap; 120s cap
+        // matches the archive extraction timeout.
+        await execFileAsync("git", ["clone", "--depth", "1", src, extractDir], { timeout: 120_000 });
+      }
+    } else {
+      // Local path: a directory tree or an archive file.
+      const abs = isAbsolute(src) ? src : resolve(process.cwd(), src);
+      if (!existsSync(abs)) throw new Error(`来源不存在：${abs}`);
+      const kind = archiveKind(abs);
+      if (kind) {
+        await extractArchive(abs, extractDir, kind);
+      } else {
+        await cp(abs, extractDir, { recursive: true });
+      }
     }
 
-    const root = opts?.skillsDir ?? defaultSkillsDir();
-    await mkdir(root, { recursive: true });
-    const names: string[] = [];
-    const replaced: string[] = [];
-    const skillPaths: string[] = [];
-
-    for (const mdPath of skillMds) {
-      const folder = join(mdPath, "..");
-      const md = await readFile(mdPath, "utf-8");
-      const fallback = basename(folder) || "skill";
-      const name = skillNameFromMarkdown(md, fallback);
-      const dest = join(root, name);
-      const existed = await userSkillInstalled(name, root);
-      await rm(dest, { recursive: true, force: true });
-      await cp(folder, dest, { recursive: true });
-      names.push(name);
-      skillPaths.push(join(dest, "SKILL.md"));
-      if (existed) replaced.push(name);
-    }
-
-    const unique = [...new Set(names)];
-    return {
-      names: unique,
-      replaced: [...new Set(replaced)],
-      skillPaths,
-      message:
-        replaced.length > 0
-          ? `已安装技能：${unique.join(", ")}（替换：${[...new Set(replaced)].join(", ")}）`
-          : `已安装技能：${unique.join(", ")}`,
-    };
+    return await installSkillsFromExtractedTree(extractDir, opts?.skillsDir);
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }

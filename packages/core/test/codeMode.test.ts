@@ -414,4 +414,64 @@ describe("code_mode", () => {
     );
     rmSync(dir, { recursive: true, force: true });
   });
+
+  // -----------------------------------------------------------------------
+  // Large-output spill (parity with bash/grep/web_fetch — code_mode is the
+  // multi-step tool most likely to produce huge output via loops).
+  // -----------------------------------------------------------------------
+
+  it("spills large output to an artifact with a bounded head+tail view", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-"));
+    const store = new Map<string, string>();
+    let n = 0;
+    const ctx: ToolContext = {
+      ...makeCtx(dir),
+      async artifact(blob) {
+        const ref = `art_${n++}`;
+        store.set(ref, String(blob));
+        return ref;
+      },
+    };
+    // Produce ~20K chars of output (well over the 8K threshold).
+    const r = await codeModeTool.execute(
+      {
+        code: [
+          "for (let i = 0; i < 2000; i++) console.log(`row-${i}-xxxxx`);",
+          'return "DONE-TAIL-MARKER";',
+        ].join("\n"),
+      },
+      ctx
+    );
+    expect(r.isError).toBeFalsy();
+    // Spilled: has an artifactRef, inline content is bounded, points to artifact.
+    expect(r.artifactRef).toBeTruthy();
+    expect(store.has(r.artifactRef!)).toBe(true);
+    expect(r.content).toContain(r.artifactRef!);
+    expect(r.content).toContain("chars omitted");
+    // Head is preserved (first rows) and tail is preserved (the return value).
+    expect(r.content).toContain("row-0-xxxxx");
+    expect(r.content).toContain("DONE-TAIL-MARKER");
+    // Inline view is far smaller than the full body.
+    const full = store.get(r.artifactRef!)!;
+    expect(r.content.length).toBeLessThan(full.length);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not spill small output (no artifact written)", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-"));
+    let wrote = false;
+    const ctx: ToolContext = {
+      ...makeCtx(dir),
+      async artifact() {
+        wrote = true;
+        return "art_never";
+      },
+    };
+    const r = await codeModeTool.execute({ code: 'return "tiny";' }, ctx);
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toBe("tiny");
+    expect(r.artifactRef).toBeUndefined();
+    expect(wrote).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

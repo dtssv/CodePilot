@@ -34,7 +34,7 @@ import type { ChatProvider } from "./providers/types.js";
 // with session.ts (which imports this module's factory/repository helpers).
 // The concrete class is pulled in lazily inside `createSession` below.
 import type { Session } from "./session.js";
-import { initPluginRuntimes } from "./plugins.js";
+import { initPluginRuntimes, mergePluginConfig, pluginResourcePaths } from "./plugins.js";
 import { createLogger } from "./logger.js";
 import { resolveDefaultModel, resolveModelTarget, applyProviderAndModel } from "./providerCatalog.js";
 import { stripThinking } from "./stripThinking.js";
@@ -554,11 +554,18 @@ async function resolveSessionModel(
   sessionId?: string,
 ): Promise<string | undefined> {
   try {
-    const all = await listSessions(); // newest-first, every workspace
+    // Resume fast path: we only need THIS session's model. Reading the one
+    // file directly avoids `listSessions()`, which on a cold SQLite index
+    // reconciles by synchronously parsing EVERY session's JSONL — the single
+    // biggest stall on first-time resume. Fall through to the full scan only
+    // if this session has no recorded model yet (e.g. never got a reply).
     if (sessionId) {
-      const self = all.find((s) => s.id === sessionId);
+      const self = await extractTitleAndMeta(sessionPath(sessionId), sessionId).catch(
+        () => undefined,
+      );
       if (self?.model) return self.model;
     }
+    const all = await listSessions(); // newest-first, every workspace
     const sameCwdHit = all.find((s) => sameCwd(s.cwd, cwd) && s.model);
     if (sameCwdHit?.model) return sameCwdHit.model;
     const anyHit = all.find((s) => s.model);
@@ -589,6 +596,9 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
  // before the Session is constructed is what makes `runtime: "<plugin>"` in
  // config resolvable — `Session.getRuntime` throws on unknown names.
   let runtime = opts.runtime ?? config.runtime;
+  let pluginSkillDirs: string[] | undefined = opts.pluginSkillDirs;
+  let pluginAgentDirs: string[] | undefined = opts.pluginAgentDirs;
+  let pluginConfig = config;
   if (opts.pluginRuntimes !== false) {
     const log = createLogger("plugins");
     try {
@@ -596,6 +606,40 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
       runtime = runtime ?? init.defaultRuntime;
       for (const [plugin, message] of init.errors) {
         log.warn(`plugin ${plugin}: runtime module failed to load — ${message}`);
+      }
+      // Reuse the discovered plugins (no second scan) to wire the rest of a
+      // plugin's contributions into the live session: hooks + MCP servers via
+      // the config merge, and skills + agents via extra discovery dirs. Each
+      // step is fault-isolated — a single misconfigured/undeclared plugin is
+      // skipped (merge is fail-closed per capability, path collection is
+      // existence-checked) and can never abort session creation or disable
+      // another plugin.
+      try {
+        const merged = mergePluginConfig(
+          config as Record<string, unknown>,
+          init.plugins,
+          (m) => log.warn(m),
+        ) as typeof config;
+        // mergePluginConfig may also resolve a plugin runtime default from the
+        // MANIFEST alone — but `initPluginRuntimes` already chose the default
+        // from plugins whose module actually LOADED (a broken module must not
+        // become the default). Keep the authoritative runtime (the `runtime`
+        // var resolved above) and take only the hooks/mcpServers the merge
+        // contributed.
+        pluginConfig = { ...merged, runtime };
+      } catch (err) {
+        log.warn(`plugin config merge failed — ${(err as Error).message}`);
+      }
+      try {
+        const paths = pluginResourcePaths(init.plugins);
+        if (paths.skills.length > 0) {
+          pluginSkillDirs = [...(pluginSkillDirs ?? []), ...paths.skills];
+        }
+        if (paths.agents.length > 0) {
+          pluginAgentDirs = [...(pluginAgentDirs ?? []), ...paths.agents];
+        }
+      } catch (err) {
+        log.warn(`plugin resource paths failed — ${(err as Error).message}`);
       }
     } catch (err) {
  // Conflicting plugin defaults and the like: a misconfigured plugin must
@@ -611,12 +655,12 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
  // Anthropic default and fails with "missing API key" until the user manually
  // switches models (which runs this same expansion via setModel). Do it here
  // so a fresh/resumed session works on the first message.
-  let resolvedConfig = config;
+  let resolvedConfig = pluginConfig;
   let resolvedModel = model ?? "";
-  const target = model ?? resolveDefaultModel(config)?.model;
+  const target = model ?? resolveDefaultModel(pluginConfig)?.model;
   if (target) {
-    const { providerId } = resolveModelTarget(config, target);
-    const applied = applyProviderAndModel(config, providerId, target);
+    const { providerId } = resolveModelTarget(pluginConfig, target);
+    const applied = applyProviderAndModel(pluginConfig, providerId, target);
     resolvedConfig = applied.config;
     resolvedModel = applied.model;
   }
@@ -629,6 +673,8 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
     ...opts,
     config: resolvedConfig,
     runtime,
+    pluginSkillDirs,
+    pluginAgentDirs,
  // Empty string forces Session to keep config.model; avoid inventing a
  // vendor id the user never configured (was "claude-sonnet-4-5").
     model: resolvedModel || config.model || "",

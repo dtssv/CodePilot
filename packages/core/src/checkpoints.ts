@@ -547,7 +547,25 @@ export async function writeCheckpoint(
   events: ReadonlyArray<Event>,
   opts: CheckpointOptions = {}
 ): Promise<WriteCheckpointResult> {
-  const snap = buildCheckpointSnapshot(events);
+  // Build the snapshot synchronously here so callers that defer the write to a
+  // background task capture state at call time (see writeCheckpointFromSnapshot).
+  return writeCheckpointFromSnapshot(cwd, sessionId, buildCheckpointSnapshot(events), opts);
+}
+
+/**
+ * Write a checkpoint from an ALREADY-BUILT snapshot. Split out from
+ * {@link writeCheckpoint} so a caller can build the snapshot synchronously
+ * (capturing the transcript at a precise point) and then run the slow part —
+ * the small-model distillation and the disk write — off the hot path. The
+ * snapshot is a plain-data copy, so it is safe to hold while the live
+ * transcript keeps mutating.
+ */
+export async function writeCheckpointFromSnapshot(
+  cwd: string,
+  sessionId: string,
+  snap: CheckpointSnapshot,
+  opts: CheckpointOptions = {}
+): Promise<WriteCheckpointResult> {
   let usedModel = false;
   let content = renderCheckpointMarkdown(snap, `Checkpoint for ${sessionId}`);
   if (opts.summariser) {

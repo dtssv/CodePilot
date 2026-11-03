@@ -13,6 +13,7 @@ import {
   type TouchedFile,
 } from "../state/selectors.js";
 import { t } from "../i18n.js";
+import { effectiveContextTokens } from "../state/context.js";
 import { Composer, type ComposerProps } from "./Chrome.js";
 import {
   BookIcon,
@@ -29,6 +30,8 @@ import {
   XIcon,
 } from "./Icons.js";
 import { previewKind } from "../state/paths.js";
+import { langFromPath } from "../state/highlighter.js";
+import { HighlightedCode } from "./HighlightedCode.js";
 import { Markdown } from "./Markdown.js";
 import { PlanChecklist, ProgressBar } from "./Transcript.js";
 
@@ -268,6 +271,7 @@ const CONTEXT_CATEGORY_LABELS: Record<string, string> = {
   tools: "Tool definitions",
   mcp: "MCP tools",
   conversation: "Conversation",
+  lastMessage: "Current message",
   subagent: "Sub-agents",
 };
 
@@ -312,14 +316,15 @@ function ContextSection({
   if (!report || !report.byCategory || report.byCategory.length === 0) return null;
   const cats = report.byCategory;
   const catTotal = cats.reduce((n, c) => n + c.tokens, 0);
-  const pct = report.window > 0 ? (report.totalTokens / report.window) * 100 : 0;
+  const used = effectiveContextTokens(report);
+  const pct = report.window > 0 ? (used / report.window) * 100 : 0;
 
   return (
     <Section title={t("Context window")} right={`${pct.toFixed(1)}%`}>
       <div className="mb-2">
-        <ProgressBar done={report.totalTokens} total={report.window || 1} />
+        <ProgressBar done={used} total={report.window || 1} />
         <div className="mt-1 text-[11px] text-[var(--color-ink-faint)]">
-          {formatTokens(report.totalTokens)} / {formatTokens(report.window)} {t("tokens")}
+          {formatTokens(used)} / {formatTokens(report.window)} {t("tokens")}
           {report.autoCompactEnabled
             ? ` · ${t("auto-compact at")} ${(report.triggerFraction * 100).toFixed(0)}%`
             : ""}
@@ -445,9 +450,12 @@ export function FilePreview({
           ) : kind === "markdown" ? (
             <Markdown text={payload.content} />
           ) : (
-            <pre className="overflow-x-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-3 font-mono text-[12px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">
-              {payload.content}
-            </pre>
+            <HighlightedCode
+              code={payload.content}
+              lang={langFromPath(path)}
+              className="overflow-x-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-3 text-[12px] leading-5 [&>pre]:m-0 [&>pre]:whitespace-pre-wrap"
+              preClassName="overflow-x-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-3 font-mono text-[12px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]"
+            />
           )}
           {payload?.truncated && (
             <div className="mt-3 text-[11px] text-[var(--color-ink-faint)]">{t("Preview truncated (file larger than 512 KiB).")}</div>

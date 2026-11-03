@@ -8,18 +8,21 @@
  * - **Secret redaction**: applied identically to both the persisted event
  * and the provider message, so it is NOT a source of divergence.
  *
- * This module provides a debug/test-only assertion that verifies the
- * *non-folded* portions of the provider messages exactly match the
- * corresponding persisted events. It catches bugs where a tool result's
- * content, a tool call's input, or a message's text diverges between what
- * the model saw and what was logged — a class of bug that is otherwise
- * invisible and extremely hard to reproduce.
+ * This module provides an assertion that verifies the *non-folded* portions
+ * of the provider messages exactly match the corresponding persisted events.
+ * It catches bugs where a tool result's content, a tool call's input, or a
+ * message's text diverges between what the model saw and what was logged — a
+ * class of bug that is otherwise invisible and extremely hard to reproduce.
  *
- * Enable by setting `CODEPILOT_ASSERT_CONSISTENCY=1`. When enabled, the
- * agent loop calls `assertConsistency` after building provider messages
- * and before sending them; any divergence throws an `ConsistencyError`
- * with a precise diff, failing the turn loudly instead of silently
- * corrupting the transcript.
+ * The agent loop runs this on every turn, before sending, via two triggers:
+ * - the `consistencyCheck` config (`"off"` | `"warn"` (default) | `"throw"`):
+ *   `"warn"` emits a non-blocking diagnostic on divergence, `"throw"` fails
+ *   the turn loudly. This is active in production by default (warn mode).
+ * - the `CODEPILOT_ASSERT_CONSISTENCY=1` env var: a hard override that forces
+ *   the throwing path regardless of config — intended for tests/CI.
+ *
+ * On any divergence the check surfaces a precise diff (`ConsistencyError`)
+ * rather than letting the provider transcript silently drift from the log.
  *
  * @module consistency
  */
@@ -27,7 +30,12 @@ import type { ProviderMessage, ProviderMessageContent } from "./providers/types.
 import type { Event } from "./types.js";
 import { compactTranscriptToProviderMessages } from "./agent-messages.js";
 
-/** Whether the consistency assertion is enabled (env-gated, off by default). */
+/**
+ * Whether the `CODEPILOT_ASSERT_CONSISTENCY` env override is set — a hard
+ * force of the throwing path for tests/CI. This is NOT the only trigger: the
+ * `consistencyCheck` config also runs the check (warn by default). Env unset
+ * means "defer to config", not "check disabled".
+ */
 export function consistencyAssertEnabled(): boolean {
   return process.env.CODEPILOT_ASSERT_CONSISTENCY === "1" ||
     process.env.CODEPILOT_ASSERT_CONSISTENCY === "true";
@@ -148,6 +156,15 @@ function assertBlockEqual(actual: ProviderMessageContent, expected: ProviderMess
       });
     }
     if (actual.content !== expected.content) {
+      // A tool_result inside the checked tail may still have been legitimately
+      // compacted: under budget pressure the real build drops its fold window
+      // (keepRecentMessages 8 → 6 → 4 → 2, then a hard trim at 1) and folds or
+      // truncates results that this fixed-window ground-truth rebuild left
+      // whole. That divergence is by design, not corruption. Treat the provider
+      // (`actual`) side being a recognised fold stub / truncation of the full
+      // (`expected`) content as consistent; only a NON-compacted-yet-different
+      // content is a genuine "model saw something other than what we logged".
+      if (isCompactedToolResult(String(actual.content), String(expected.content))) return;
       throw new ConsistencyError(`Tool-result content mismatch at ${ctx}`, {
         expected: String(expected.content).slice(0, 200),
         actual: String(actual.content).slice(0, 200),
@@ -155,4 +172,23 @@ function assertBlockEqual(actual: ProviderMessageContent, expected: ProviderMess
       });
     }
   }
+}
+
+/**
+ * True when `actual` is a legitimate micro-compaction of `expected`: either a
+ * fold stub (`[folded …]`) or a hard-trim truncation (`… [truncated to fit
+ * context window.]`). These transforms are applied on the provider path by
+ * design when the turn is under budget pressure; the no-fold ground-truth
+ * rebuild keeps the full content, so a divergence here is expected, not a bug.
+ */
+function isCompactedToolResult(actual: string, expected: string): boolean {
+  // Fold stubs — see summariseToolResult / foldForBudget in compaction.ts.
+  if (actual.startsWith("[folded tool_result") || actual.startsWith("[folded ")) return true;
+  // Hard-trim truncation keeps a head+tail of the original and injects a
+  // notice. Require the notice AND that the provider content is strictly
+  // shorter than the full content (a real truncation, not a rewrite).
+  if (actual.includes("[truncated to fit context window.]") && actual.length < expected.length) {
+    return true;
+  }
+  return false;
 }

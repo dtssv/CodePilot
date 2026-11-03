@@ -1,0 +1,14 @@
+{
+  "name": "tools-example",
+  "displayName": "Tools Example (custom tool)",
+  "description": "Reference plugin for plugin-contributed tools — registers a `reverse_text` tool the model can call, through the RuntimeToolkit ABI",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/dtssv/codepilot-plugins/tree/main/tools-example",
+  "enabled": true,
+  "permissions": ["runtime", "tools"],
+  "runtime": {
+    "module": "./runtime.mjs",
+    "name": "tools-example"
+  }
+}

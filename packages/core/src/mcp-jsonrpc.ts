@@ -63,12 +63,23 @@ export abstract class BaseJsonRpcClient implements McpClient {
   protected supportsPrompts = false;
  /** Optional reverse-request handler (elicitation/sampling). */
   protected serverRequestHandler: McpServerRequestHandler | null = null;
+ /** Optional notification: the server's tool list changed. Fired AFTER the
+  * client's cached tool list has been refreshed, so the handler can read the
+  * new `listTools()`. */
+  protected toolsChangedHandler: ((server: string) => void) | null = null;
 
  /** Install a handler for server-initiated requests. Pass `null` to
  * disable. When unset, such requests are rejected with code -32601
  * (method not found). */
   setServerRequestHandler(h: McpServerRequestHandler | null): void {
     this.serverRequestHandler = h;
+  }
+
+ /** Install a handler invoked when the server announces a tool-list change
+  * (`notifications/tools/list_changed`). The cached list is refreshed before
+  * the handler runs. Pass `null` to disable. */
+  setToolsChangedHandler(h: ((server: string) => void) | null): void {
+    this.toolsChangedHandler = h;
   }
 
   abstract start(): Promise<void>;
@@ -166,7 +177,12 @@ export abstract class BaseJsonRpcClient implements McpClient {
       void this.handleServerRequest(msg.id, msg.method, msg.params);
       return;
     }
- // Notification (no id) — we don't subscribe to anything in this client.
+ // Server notification (method, no id).
+    if (msg.method !== undefined && (msg.id === undefined || msg.id === null)) {
+      this.handleServerNotification(msg.method);
+      return;
+    }
+ // Response with no id we can't correlate — ignore.
     if (msg.id === undefined || msg.id === null) {
       return;
     }
@@ -216,6 +232,29 @@ export abstract class BaseJsonRpcClient implements McpClient {
   protected failAllPending(err: Error): void {
     for (const [, p] of this.pending) p.reject(err);
     this.pending.clear();
+  }
+
+ /** Handle a server notification (method, no id). We act on
+  * `notifications/tools/list_changed`: re-list the server's tools so a server
+  * that adds/removes tools mid-session is reflected, then fire the optional
+  * tools-changed handler so the consumer (the session) can re-register. Other
+  * `list_changed` notifications refresh their caches too. Unknown
+  * notifications are ignored. */
+  protected handleServerNotification(method: string): void {
+    if (method === "notifications/tools/list_changed") {
+      void this.refreshTools()
+        .then(() => this.toolsChangedHandler?.(this.serverName))
+        .catch(() => undefined);
+      return;
+    }
+    if (method === "notifications/resources/list_changed" && this.supportsResources) {
+      void this.refreshResources().catch(() => undefined);
+      return;
+    }
+    if (method === "notifications/prompts/list_changed" && this.supportsPrompts) {
+      void this.refreshPrompts().catch(() => undefined);
+      return;
+    }
   }
 
  /** Run the standard `initialize` handshake + capability probe. Subclasses

@@ -300,6 +300,31 @@ function withProxyEnv(command: string, policy: ResolvedSandbox): string {
   return `export ${exports}; ${command}`;
 }
 
+/**
+ * Environment overlay that makes child processes behave predictably for a
+ * non-interactive agent: no pager (so `git log` / `git diff` / `man` don't
+ * block on a TTY that doesn't exist), no color escapes, a dumb terminal, and
+ * git's own non-interactive guards. Applied to EVERY command path — the
+ * persistent shell, one-shot bash, and background jobs — so none of them can
+ * silently hang on a pager. Mirrors the set codex and dsh hardcode. Callers
+ * overlay this ON TOP of their base env, so an explicit user value still wins
+ * where it is set deliberately (we only set keys the agent context needs).
+ */
+export function modelShellEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== undefined) out[k] = v;
+  }
+  out.PAGER = "cat";
+  out.GIT_PAGER = "cat";
+  out.NO_COLOR = "1";
+  out.TERM = "dumb";
+  // Never let git drop into an interactive credential/editor prompt that would
+  // hang the non-interactive shell.
+  out.GIT_TERMINAL_PROMPT = "0";
+  return out;
+}
+
 export function wrapCommand(
   command: string,
   policy: ResolvedSandbox
@@ -451,6 +476,33 @@ export function sensitivePathHit(
   return null;
 }
 
+/**
+ * Whether a write targets a `.git/` directory (the git object database /
+ * refs / hooks). This is the workspace-relative counterpart of
+ * {@link SENSITIVE_WRITE_PATHS}: the absolute list cannot name `.git` because
+ * it lives inside the (writable) workspace, yet a direct write there —
+ * `write_file .git/config`, `edit_file .git/hooks/pre-commit` — can corrupt
+ * history or plant a persistence hook. Like the rest of the safety floor this
+ * is NOT a hard deny: it forces an interactive confirmation (even in yolo /
+ * under an active sandbox), so a user who really wants the agent to edit
+ * `.git/…` confirms it at the prompt (or adds a deny rule to block it outright).
+ * Consistent with {@link SENSITIVE_WRITE_PATHS}, the floor sits above allow
+ * rules — a blanket allow does not silently bypass it. Legitimate git
+ * operations go through the `git` binary (`git config …`), which is unaffected —
+ * only direct file-tool writes to the object store are gated.
+ *
+ * `.git` must be a whole path component, so `foo.gitignore` is not matched.
+ * Returns the `.git` directory path (for messaging) or null.
+ */
+export function gitMetadataWriteHit(inputPath: string, cwd: string): string | null {
+  const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
+  const parts = abs.split(/[/\\]/);
+  const idx = parts.indexOf(".git");
+  // Must be a .git *directory* with something under it (or the dir itself).
+  if (idx === -1) return null;
+  return parts.slice(0, idx + 1).join(sep);
+}
+
 export interface PathCheckResult {
   ok: boolean;
   reason?: string;
@@ -491,6 +543,23 @@ export function isWriteOutsideSandbox(
   return !assertPathAllowed(inputPath, "write", policy, cwd).ok;
 }
 
+/** Deep-copy a resolved policy so the copy can be mutated (e.g. {@link
+ * addWritableRoot}) without widening the original. The nested arrays and the
+ * networkPolicy object are copied — a shallow spread would alias the parent's
+ * `writableRoots`/`writablePaths` and leak the extra root back into it. */
+export function cloneSandbox(policy: ResolvedSandbox): ResolvedSandbox {
+  return {
+    ...policy,
+    networkPolicy: {
+      ...policy.networkPolicy,
+      allow: [...policy.networkPolicy.allow],
+      allowPorts: [...policy.networkPolicy.allowPorts],
+    },
+    writablePaths: [...policy.writablePaths],
+    writableRoots: [...policy.writableRoots],
+  };
+}
+
 /** Mutate `policy` to include an extra writable root (idempotent).
  * If `root` does not exist yet, also records its parent in the policy so
  * path-guard checks and the OS profile (see {@link buildSeatbeltProfile})
@@ -520,6 +589,24 @@ export function looksLikeSandboxWriteDenial(text: string): boolean {
     /Read-only file system/i.test(text) ||
     /Permission denied/i.test(text) ||
     /\bEPERM\b|\bEROFS\b|\bEACCES\b/.test(text)
+  );
+}
+
+/** True when command output looks like a network failure the sandbox likely
+ * caused (network disabled / bwrap --unshare-net / proxy allowlist). These are
+ * the errors a service or package manager emits when the jail blocks egress;
+ * used to nudge the model toward a one-command escalation rather than silently
+ * giving up. Deliberately broad (name resolution / connection refused /
+ * unreachable / proxy), matching codex's sandbox-denial network heuristic. */
+export function looksLikeSandboxNetworkDenial(text: string): boolean {
+  return (
+    /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT)\b/.test(text) ||
+    /Could not resolve host/i.test(text) ||
+    /Temporary failure in name resolution/i.test(text) ||
+    /Network is unreachable/i.test(text) ||
+    /Connection refused/i.test(text) ||
+    /(getaddrinfo|dns).{0,40}(failed|ENOTFOUND|EAI_AGAIN)/i.test(text) ||
+    /proxy.{0,30}(refused|denied|blocked)/i.test(text)
   );
 }
 
@@ -645,6 +732,17 @@ const DANGEROUS_PATTERNS: Array<{ re: RegExp; why: string }> = [
   { re: /\btruncate\b[^|]*-s\s*0[^|]*\s\/(?:etc|boot|bin|sbin|usr)\b/, why: "truncate of system path" },
   // Recursive delete of a shell glob at root (`rm -rf /*`, `/home/*`).
   { re: /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+\/\S*\*/, why: "recursive delete of a root glob" },
+  // Destructive removal of a repo's .git directory. Catastrophic even inside
+  // the workspace (an active sandbox otherwise auto-allows it), and unlike
+  // legitimate git subcommands (`git config`, `git log`) this is never a normal
+  // operation. Matches `rm -rf .git`, `rm -rf ./.git`, `rm -rf path/to/.git`,
+  // and a trailing slash. `.git` must be a whole path component (so
+  // `rm foo.gitignore` is NOT caught). Only `rm` is flagged — `git` subcommands
+  // keep their own precise patterns above, so `git config` is never caught.
+  {
+    re: /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+(?:\S*\/)?\.git(?:\/\S*)?(?:\s|$)/,
+    why: "delete of a .git directory",
+  },
 ];
 
 export interface DangerCheck {

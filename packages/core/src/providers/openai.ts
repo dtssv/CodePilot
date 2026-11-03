@@ -117,6 +117,9 @@ export class OpenAIProvider implements ChatProvider {
     if (opts.promptCacheKey) body.prompt_cache_key = opts.promptCacheKey;
     if (opts.tools && opts.tools.length > 0) {
       body.tools = opts.tools.map(toOpenAITool);
+      // Keep the tool defs in the request (cache-prefix stable) but withdraw
+      // the ability to call them when the turn budget says "answer now".
+      if (opts.toolChoice === "none") body.tool_choice = "none";
     }
  // Reasoning effort (o-series / ). Only sent when configured;
  // non-supporting models ignore unknown fields gracefully in most
@@ -222,6 +225,21 @@ export class OpenAIProvider implements ChatProvider {
           for (const choice of choices) {
             const delta = choice.delta as Record<string, unknown> | undefined;
             if (!delta) continue;
+            // Reasoning / chain-of-thought stream. Reasoning models on the
+            // OpenAI-compatible wire (DeepSeek, GLM, Qwen, …) send their
+            // thinking in a SEPARATE field alongside `content` — most commonly
+            // `reasoning_content`, some gateways use `reasoning`. Surface it as
+            // a thinking_delta so it flows through the same agent→UI→render
+            // path as Anthropic/Gemini reasoning; without this the thinking is
+            // silently dropped and never shown. Emit before `content` so the
+            // thinking leads the visible answer in the transcript.
+            const reasoning =
+              (typeof delta.reasoning_content === "string" && delta.reasoning_content) ||
+              (typeof delta.reasoning === "string" && delta.reasoning) ||
+              "";
+            if (reasoning.length > 0) {
+              yield { kind: "thinking_delta", messageId, text: reasoning };
+            }
             const content = delta.content;
             if (typeof content === "string" && content.length > 0) {
               yield { kind: "text_delta", messageId, text: content };

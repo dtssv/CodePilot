@@ -31,6 +31,7 @@ export type {
   QuestionAnswers,
   PermissionRequest,
   PermissionDecision,
+  PermissionResolution,
   CodepilotConfig,
   McpServerConfig,
   SessionOptions,
@@ -245,6 +246,11 @@ export type {
   RuntimeFactoryDeps,
   RuntimeResolveOptions,
   RuntimeToolkit,
+  RuntimeToolkitOptions,
+  PluginToolDef,
+  PluginContextMessage,
+  PluginContextTransform,
+  PluginEventSink,
 } from "./runtime.js";
 // Example runtimes; importing registers "audit" + "mcts" (inert until used).
 export {
@@ -443,6 +449,20 @@ export {
 } from "./skills.js";
 export type { Skill, SkillSource, DiscoverOptions } from "./skills.js";
 
+export {
+  specsDir,
+  listSpecFeatures,
+  readSpecFeature,
+  parseAcceptanceCriteria,
+  parseTasks,
+  specCoverage,
+} from "./specs.js";
+export type {
+  SpecFeature,
+  SpecTask,
+  SpecAcceptanceCriterion,
+} from "./specs.js";
+
 export { skillTool, createSkillTool, StaticSkillStore, setDefaultSkillStore } from "./tools/skill.js";
 export type { SkillStore, SkillToolHandle } from "./tools/skill.js";
 export { LspManager, languageIdForPath, parseLocations, DEFAULT_LSP_SERVERS } from "./lsp.js";
@@ -505,11 +525,32 @@ export {
   estimateMessagesTokens,
   estimateObjectTokens,
   estimateEventsTokens,
+  IMAGE_TOKEN_ESTIMATE,
   lookupContextWindow,
   resolveCompactionThreshold,
   estimateCostUSD,
 } from "./tokens.js";
 export type { TokenEstimator, ModelContextWindow, ModelCost } from "./tokens.js";
+
+// ---- Prompt-cache analysis ----
+export {
+  analyzeCacheWaste,
+  DEFAULT_CACHE_TTL_MS,
+  CACHE_MISS_NOISE_FLOOR,
+} from "./cacheStats.js";
+export type {
+  CacheTurn,
+  CacheMiss,
+  CacheMissCause,
+  CacheWasteReport,
+} from "./cacheStats.js";
+export {
+  decideCacheWarm,
+  cacheTtlMs,
+  CACHE_WARM_TTL_FRACTION,
+  CACHE_WARM_MIN_SAVINGS_USD,
+} from "./cacheWarmer.js";
+export type { CacheWarmDecision, CacheWarmInput } from "./cacheWarmer.js";
 
 // ---- Audit log (structured tool-call record) ----
 export { AuditLogger, readAuditLog, auditDir } from "./audit.js";
@@ -532,6 +573,7 @@ export {
   renderCheckpointMarkdown,
   parseCheckpointMarkdown,
   writeCheckpoint,
+  writeCheckpointFromSnapshot,
   appendCheckpointRound,
   readCheckpoint,
   checkpointExists,
@@ -646,6 +688,7 @@ export {
   queryManagedSkills,
   installSkillFromConnector,
   installSkillFromArchive,
+  installSkillFromSource,
   supportedSkillArchiveExts,
   setSkillEnabled,
   userSkillInstalled,
@@ -795,6 +838,10 @@ export { normalizeMcpToolName, buildMcpToolNameMap, MCP_TOOL_NAME_MAX_LENGTH } f
 
 // ---- Consistency assertion (model-visible equals logged, debug/test only) ----
 export { consistencyAssertEnabled, assertConsistency, ConsistencyError } from "./consistency.js";
+export { applyContextTransform, validateTransformedView } from "./contextTransform.js";
+export type { ContextTransformCheck } from "./contextTransform.js";
+export { BoundedSinkQueue } from "./sessionSink.js";
+export type { SessionEventSink, BoundedSinkQueueOptions } from "./sessionSink.js";
 export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
 export type { BuiltinCommand, BuiltinCommandScope } from "./builtinCommands.js";
 export { FileObservationStore } from "./fsObservation.js";
@@ -817,11 +864,16 @@ export type { Span, TelemetryConfig as OtelTelemetryConfig } from "./telemetry.j
 export {
   discoverPlugins,
   pluginResourcePaths,
+  collectPluginProviderTemplates,
   mergePluginConfig,
   installPlugin,
+  inspectPluginSource,
   uninstallPlugin,
   fetchMarketplaceIndex,
   searchMarketplace,
+  listPluginMarket,
+  describeMarketplaceEntry,
+  describePluginCapabilities,
   derivePluginName,
   loadPluginRuntimes,
   initPluginRuntimes,
@@ -831,9 +883,11 @@ export {
 } from "./plugins.js";
 export type {
   PluginManifest,
+  PluginProviderTemplate,
   Plugin,
   PluginPermission,
   PluginPermissionReport,
+  PluginCapabilityReport,
   MarketplaceEntry,
   DiscoverPluginsOptions,
   InstallOptions,

@@ -70,7 +70,7 @@ export interface SlashCommand {
   body: string;
 }
 
-export type SlashCommandSource = "project" | "user" | "builtin";
+export type SlashCommandSource = "project" | "user" | "builtin" | "plugin";
 
 export interface DiscoverSlashCommandsOptions {
  /** Override the project-local commands directory
@@ -83,6 +83,11 @@ export interface DiscoverSlashCommandsOptions {
   builtinDir?: string;
  /** When false, skip built-in commands. Default true. */
   includeBuiltins?: boolean;
+ /** Extra directories to scan (e.g. plugin `commands/` dirs). Commands found
+  * here use the `"plugin"` source and are LOWEST priority — a project/user
+  * command with the same name wins (first-definition-wins). Each dir is
+  * scanned fail-soft, so one unreadable plugin dir never aborts discovery. */
+  extraDirs?: string[];
  /** Names that are reserved by built-in TUI commands and cannot be
  * overridden by custom files. Files matching a reserved name are
  * skipped (with a warning surfaced via `loadWarnings`). Defaults to
@@ -314,6 +319,15 @@ export async function discoverSlashCommands(
   for (const c of user.commands) add(c);
   warnings.push(...user.warnings);
 
+ // Plugin command dirs: lowest priority (project/user already claimed their
+ // names via first-definition-wins). Each dir is scanned fail-soft inside
+ // scanDirForCommands, so one unreadable plugin dir never aborts discovery.
+  for (const dir of opts.extraDirs ?? []) {
+    const plugin = await scanDirForCommands(dir, "plugin", reserved);
+    for (const c of plugin.commands) add(c);
+    warnings.push(...plugin.warnings);
+  }
+
   if (opts.includeBuiltins !== false) {
     const builtinDir = opts.builtinDir ?? defaultBuiltinCommandsDir();
     const builtin = await scanDirForCommands(builtinDir, "builtin", reserved);
@@ -326,6 +340,7 @@ export async function discoverSlashCommands(
     project: 0,
     user: 1,
     builtin: 2,
+    plugin: 3,
   };
   collected.sort((a, b) => {
     const pa = priority[a.source] - priority[b.source];

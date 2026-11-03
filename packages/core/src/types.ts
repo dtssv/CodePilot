@@ -74,6 +74,14 @@ type EventBody =
       id: string;
       role: "user" | "assistant";
       content: ContentBlock[];
+ /**
+  * Anchor this message against compaction: a pinned message is never folded,
+  * trimmed, or dropped while any unpinned content could be shed instead. Used
+  * for a key requirement/constraint the user (or a plugin) wants kept verbatim
+  * through long sessions, independent of the recent-N window. Pinning does not
+  * change the source of truth — it only biases compaction's eviction order.
+  */
+      pinned?: boolean;
  /** Images the user attached to this message. Persisted with the event so
  * later turns and resumed sessions still send them to the model. */
       images?: ImageAttachment[];
@@ -243,7 +251,14 @@ type EventBody =
       type: "followup";
       action: "queued" | "removed" | "cleared" | "started" | "updated";
       items: FollowUpItem[];
-    };
+    }
+ /**
+  * Anchor/unanchor a prior message against compaction (`pinned` on its
+  * `message` event). Append-only safe: the original line is never rewritten;
+  * on load the latest `pin` for a message id wins and the flag is reapplied to
+  * the in-memory event. The last-writer-wins so a later unpin overrides.
+  */
+  | { type: "pin"; messageId: string; pinned: boolean };
 
 export type Event = EventBody & EventMeta;
 
@@ -375,6 +390,18 @@ export interface PermissionRequest {
 }
 
 export type PermissionDecision = "allow" | "deny" | "always";
+
+/**
+ * What a host's permission handler may return. Either a plain
+ * {@link PermissionDecision}, or a deny that carries a `feedback` message the
+ * model sees as the tool result — "decline-with-feedback". This turns a
+ * dead-end denial into steering ("don't edit that file, edit this one")
+ * instead of a canned "permission denied". Backward-compatible: handlers that
+ * return a bare string still work.
+ */
+export type PermissionResolution =
+  | PermissionDecision
+  | { decision: "deny"; feedback: string };
 
 /** A structured question posed to the user via the host UI. */
 export interface QuestionSpec {
@@ -558,6 +585,11 @@ export interface CodepilotConfig {
  * auto-compacts regardless of token pressure; the user must invoke
  * `/compact` explicitly. Default true. */
   autoCompact?: boolean;
+ /** Prompt-cache warming (opt-in). When true, keep an Anthropic ephemeral
+  * cache alive across idle gaps by replaying the last request (1-token output
+  * cap) at ~90% of the cache TTL, but only when expected savings beat the
+  * warm's own cost. Default false. */
+  cacheWarming?: boolean;
  /** When true, attempt to load the optional pure-JS `gpt-tokenizer` for
   * provider-accurate token counts (falls back to the built-in heuristic
   * when the package is not installed). Default false. */
@@ -585,6 +617,9 @@ export interface CodepilotConfig {
   permissions?: PermissionRules;
  /** OS-level sandbox policy. Default: workspace-write, fail-closed. */
   sandbox?: SandboxConfig;
+ /** Extra secret-redaction patterns applied to tool output, on top of the
+  * built-in floor (which always runs and cannot be disabled here). */
+  redact?: { patterns?: Array<{ name: string; regex: string; flags?: string; replace?: string }> };
  /**
   * Cap on assistant↔tool round trips for one user prompt.
   * Unset or `0` = no limit: the run ends when the model replies without
@@ -683,6 +718,12 @@ export interface CodepilotConfig {
  * Absolute, or relative to the project root when set. Plan files are
  * written here when the agent calls `plan_done`. */
   plansDirectory?: string;
+ /** Directory for spec-driven-development artifacts (requirements.md /
+ * design.md / tasks.md, one sub-folder per feature). Default:
+ * `<cwd>/.codepilot/specs`. Absolute, or relative to the project root when
+ * set. Unlike plans, specs default INSIDE the repo so they are reviewed and
+ * versioned with the code they describe. */
+  specDirectory?: string;
  /** web_fetch configuration: per-domain allowlist + cache TTL. */
   webFetch?: WebFetchConfig;
  /** web_search backend selection (duckduckgo | brave | serper | google). */
@@ -783,6 +824,21 @@ export interface WebSearchConfig {
   cx?: string;
  /** Override the backend endpoint (advanced / self-hosted gateways). */
   endpoint?: string;
+ /** Preferred result language as an ISO-639-1 code (e.g. `zh`, `en`, `ja`).
+  * When omitted, the tool auto-detects CJK vs. Latin from the query so a
+  * Chinese query is anchored to Chinese-language results instead of relying
+  * on IP/UA locale inference. Mapped to each backend's native param
+  * (DDG `kl`, Bing `setlang`, Brave `search_lang`, Google `lr`/`hl`,
+  * Serper `hl`). */
+  language?: string;
+ /** Preferred result region/country as an ISO-3166-1 alpha-2 code (e.g.
+  * `cn`, `us`, `jp`). When omitted, inferred alongside `language`. Mapped to
+  * DDG `kl`, Bing `cc`, Brave `country`, Google `gl`, Serper `gl`. */
+  region?: string;
+ /** Restrict results by recency: `day` | `week` | `month` | `year`. Mapped
+  * to Brave `freshness`, Google `dateRestrict`, Serper `tbs`, DDG/Bing `df`.
+  * When omitted, no recency filter is applied. */
+  freshness?: "day" | "week" | "month" | "year";
 }
 
 export interface ImageAttachment {
@@ -819,7 +875,7 @@ export interface SessionOptions {
  * Surfaced into the system prompt so the model can tailor advice (e.g.
  * "open the diff" only makes sense in an IDE). */
   hostSurface?: "cli" | "tui" | "vscode" | "idea";
-  onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
+  onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionResolution>;
  /** Host handler for structured user questions (ask_user_question / plan_done). */
   onAskUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
  /** Handler for MCP server-initiated requests (`elicitation/create`,
@@ -860,6 +916,13 @@ export interface SessionOptions {
  * false to keep the process registry untouched — plugin runtime modules
  * execute host code, so hosts that never opt into plugins can skip it. */
   pluginRuntimes?: boolean;
+ /** Extra skill directories (e.g. installed plugins' `skills/` dirs) to merge
+  * into discovery during `init()`. Set by `createSession` from discovered
+  * plugins; hosts rarely pass this directly. */
+  pluginSkillDirs?: string[];
+ /** Extra custom-agent directories (plugins' `agents/` dirs) to merge into
+  * discovery during `init()`. Set by `createSession` from discovered plugins. */
+  pluginAgentDirs?: string[];
 }
 
 export interface GoalRunOptions extends SessionOptions {

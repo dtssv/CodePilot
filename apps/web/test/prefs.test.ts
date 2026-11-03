@@ -9,6 +9,8 @@ import {
   loadEndpointPref,
   matchPreferredEndpoint,
   resolvePreferredEndpoint,
+  addWorkspace,
+  replaceWorkspaces,
 } from "../src/prefs.js";
 
 class FakeStorage implements Storage {
@@ -156,5 +158,29 @@ describe("prefs", () => {
       cwd: "",
       workspaces: [],
     });
+  });
+
+  it("replaceWorkspaces purges cached workspaces (remote-grant isolation)", () => {
+    // Simulate a prior LOCAL session that opened four workspaces on this
+    // browser profile.
+    addWorkspace("/work/a");
+    addWorkspace("/work/b");
+    addWorkspace("/work/c");
+    addWorkspace("/work/d");
+    expect(loadPrefs().workspaces).toEqual(["/work/a", "/work/b", "/work/c", "/work/d"]);
+
+    // A remote phone paired for ONLY two workspaces replaces the list. The
+    // stale cached c/d must NOT survive into the scoped remote view.
+    const next = replaceWorkspaces(["/work/a", "/work/b"]);
+    expect(next).toEqual(["/work/a", "/work/b"]);
+    expect(loadPrefs().workspaces).toEqual(["/work/a", "/work/b"]);
+    // The active cwd, if it pointed at a now-purged workspace, resets into the
+    // authorized set.
+    expect(loadPrefs().cwd).toBe("/work/a");
+  });
+
+  it("replaceWorkspaces normalizes trailing slashes and dedupes", () => {
+    const next = replaceWorkspaces(["/work/a/", "/work/a", "/work/b//"]);
+    expect(next).toEqual(["/work/a", "/work/b"]);
   });
 });

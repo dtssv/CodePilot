@@ -183,6 +183,9 @@ export async function runOneTool(
  // Permission check.
   const check = deps.permissions.preflight(tool, effectiveInput);
   let decision: import("./types.js").PermissionDecision = "allow";
+ // Set when the host declines WITH a correction message — surfaced to the
+ // model as the tool result so a denial becomes steering, not a dead end.
+  let denyFeedback: string | undefined;
   if (check === "ask") {
  // Telemetry: one child span per interactive permission request.
     const permSpan = tracer.enabled
@@ -205,7 +208,17 @@ export async function runOneTool(
       try {
         // Stop must unblock this wait; otherwise the prompt never finishes
         // and the follow-up queue cannot drain.
-        decision = await racePermissionWithAbort(deps.onPermissionRequest(req), deps.signal);
+        const resolution = await racePermissionWithAbort(
+          deps.onPermissionRequest(req),
+          deps.signal,
+        );
+        if (typeof resolution === "string") {
+          decision = resolution;
+        } else {
+          // Decline-with-feedback: a deny carrying a correction message.
+          decision = "deny";
+          denyFeedback = resolution.feedback;
+        }
       } catch (err) {
         decision = "deny";
         void err;
@@ -255,6 +268,16 @@ export async function runOneTool(
 
   if (decision === "deny") {
     endToolSpan(new Error(`permission denied for tool ${tc.name}`));
+    // Decline-with-feedback: hand the user's correction to the model so it can
+    // adapt (e.g. edit a different file) instead of just seeing "denied".
+    if (denyFeedback && denyFeedback.trim().length > 0) {
+      return {
+        content:
+          `The user declined \`${tc.name}\` and left this instruction: ${denyFeedback.trim()}\n` +
+          `Follow it instead of re-issuing the same call.`,
+        isError: true,
+      };
+    }
     return {
       content: `permission denied for tool ${tc.name}`,
       isError: true,
@@ -352,7 +375,9 @@ export async function runOneTool(
         content = `[${doomLoopPreWarn}]\n\n${content}`;
       }
     }
- // PostToolUse hooks: stdout is appended as feedback for the model.
+ // PostToolUse hooks: a hook may REPLACE the result text (redact/sanitize),
+ // and/or append feedback for the model. Replacement happens first so
+ // feedback is appended to the rewritten text.
     if (deps.hooks?.hasHooks("PostToolUse")) {
       const post = await deps.hooks.runPostToolUse(
         tc.name,
@@ -360,6 +385,7 @@ export async function runOneTool(
         content,
         result.isError === true,
       );
+      if (post.updatedResult !== undefined) content = post.updatedResult;
       if (post.feedback) content += `\n\n[hook feedback]\n${post.feedback}`;
     }
     if (result.isError === true)
@@ -399,9 +425,9 @@ export async function runOneTool(
 
 /** Resolve with the permission decision, or `"deny"` as soon as `signal` aborts. */
 function racePermissionWithAbort(
-  pending: Promise<import("./types.js").PermissionDecision>,
+  pending: Promise<import("./types.js").PermissionResolution>,
   signal: AbortSignal | undefined,
-): Promise<import("./types.js").PermissionDecision> {
+): Promise<import("./types.js").PermissionResolution> {
   if (!signal) return pending;
   if (signal.aborted) return Promise.resolve("deny");
   return new Promise((resolve) => {

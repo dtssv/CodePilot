@@ -59,6 +59,12 @@ export class GeminiProvider implements ChatProvider {
     }
     if (opts.tools && opts.tools.length > 0) {
       body.tools = [{ functionDeclarations: opts.tools.map(toGeminiTool) }];
+      // Keep the function declarations (cache-prefix stable) but forbid calling
+      // them when the turn budget says "answer now". Gemini spells this
+      // `toolConfig.functionCallingConfig.mode = "NONE"`.
+      if (opts.toolChoice === "none") {
+        body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+      }
     }
     const genConfig: Record<string, unknown> = {};
     if (opts.maxTokens) genConfig.maxOutputTokens = opts.maxTokens;

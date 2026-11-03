@@ -41,8 +41,12 @@ export function normalizeMcpToolName(server: string, tool: string): string {
  // Hash the full name so collisions on the truncated prefix are impossible.
   const hash = createHash("sha256").update(full).digest("hex").slice(0, 8);
  // Keep the `mcp__` prefix and the hash suffix; truncate the middle.
- // Reserve: "mcp__" (5) + "__" (2) + hash (8) = 15 chars of overhead.
-  const budget = MCP_TOOL_NAME_MAX_LENGTH - 15;
+ // The result is `mcp__<server>__<tool>__<hash>` — THREE `__` separators.
+ // Reserve: "mcp__" (5) + "__" (2, server/tool) + "__" (2, tool/hash) +
+ // hash (8) = 17 chars of overhead. (A previous reserve of 15 forgot the
+ // second `__`, so a long name could normalize to 66 chars — 2 over the
+ // limit — defeating the whole point of this function.)
+  const budget = MCP_TOOL_NAME_MAX_LENGTH - 17;
  // Give the server a fair share; the tool name gets the rest.
   const serverPart = server.slice(0, Math.max(1, Math.floor(budget / 3)));
   const toolPart = tool.slice(0, Math.max(1, budget - serverPart.length));

@@ -13,7 +13,7 @@ import type {
 import { describeError } from "../protocol/client.js";
 import { t } from "../i18n.js";
 import { PlusIcon, RefreshIcon, XIcon } from "./Icons.js";
-import type { Layout, Theme } from "../surface.js";
+import type { Layout, Theme, ThemeName } from "../surface.js";
 import { SettingsExtras, type SettingsExtraSection } from "./SettingsExtras.js";
 
 type SettingsNav = "models" | SettingsExtraSection;
@@ -179,6 +179,8 @@ export function SettingsPanel({
   onComposePrompt,
   theme,
   onTheme,
+  themeName,
+  onThemeName,
   layout,
   onLayout,
 }: {
@@ -189,6 +191,8 @@ export function SettingsPanel({
   onComposePrompt?: (text: string) => void;
   theme: Theme;
   onTheme(theme: Theme): void;
+  themeName: ThemeName;
+  onThemeName(name: ThemeName): void;
   layout: Layout;
   onLayout(layout: Layout): void;
 }): React.ReactElement | null {
@@ -638,6 +642,7 @@ export function SettingsPanel({
               ["models", t("Models")],
               ["connectors", t("Connectors")],
               ["custom-mcp", t("Custom connectors")],
+              ["plugins", t("Plugins")],
               ["skills", t("Skills")],
               ["remote", t("Remote")],
               ["schedule", t("Schedule")],
@@ -671,6 +676,8 @@ export function SettingsPanel({
             section={nav}
             theme={theme}
             onTheme={onTheme}
+            themeName={themeName}
+            onThemeName={onThemeName}
             layout={layout}
             onLayout={onLayout}
             onComposePrompt={(text) => {

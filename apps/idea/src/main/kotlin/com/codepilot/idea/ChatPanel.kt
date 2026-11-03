@@ -59,6 +59,10 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
     private var sessionId: String? = null
  /** Map of in-progress assistant messageId → buffered text (for streaming). */
     private val streamingMessages = mutableMapOf<String, String>()
+ /** Map of in-progress assistant messageId → the HTML element rendered in place. */
+    private val streamingElements = mutableMapOf<String, javax.swing.text.Element>()
+ /** Assistant messageIds we streamed, so the trailing `message` event is not re-rendered. */
+    private val streamedMessageIds = mutableSetOf<String>()
  /** Map of toolCallId → buffered JSON (for tool_call input streaming). */
     private val streamingToolInputs = mutableMapOf<String, String>()
  /** Most recent plan steps, keyed by session. */
@@ -446,6 +450,8 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
                 val newId = CodepilotService.getInstance(project).newSessionId()
                 sessionId = newId
                 streamingMessages.clear()
+                streamingElements.clear()
+                streamedMessageIds.clear()
                 streamingToolInputs.clear()
  // Reset the mode latch: the new session will report its own mode.
                 val settings = CodepilotSettings.getInstance().state
@@ -507,8 +513,12 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         appendHtml("<div style='margin:4px 0;color:#888;font-style:italic'>[${escape(text)}]</div>")
     }
 
+    /** Markup for one assistant message; shared by append and in-place streaming. */
+    private fun assistantHtml(text: String): String =
+        "<div style='margin:6px 0'><b style='color:#2f7d3a'>CodePilot:</b><br>${escape(text).replace("\n", "<br>")}</div>"
+
     private fun appendAssistant(text: String) {
-        appendHtml("<div style='margin:6px 0'><b style='color:#2f7d3a'>CodePilot:</b><br>${escape(text).replace("\n", "<br>")}</div>")
+        appendHtml(assistantHtml(text))
     }
 
     private fun appendToolCall(name: String, input: String) {
@@ -547,13 +557,35 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         appendHtml("<div style='margin:6px 0;color:#a00000'><b>Error:</b> ${escape(message)}</div>")
     }
 
- /** Append streamed delta to the in-progress assistant buffer and re-render. */
+ /**
+  * Append a streamed delta to the in-progress assistant buffer and render it
+  * in place. The first delta inserts one block carrying a stable element id;
+  * subsequent deltas rewrite that same block via setOuterHTML rather than
+  * appending a fresh (duplicating) copy. The trailing `message` event for the
+  * same id is then suppressed (see onSessionEvent / streamedMessageIds).
+  */
     private fun streamAssistantDelta(messageId: String, delta: String) {
-        val current = streamingMessages[messageId] ?: ""
-        val combined = current + delta
+        val combined = (streamingMessages[messageId] ?: "") + delta
         streamingMessages[messageId] = combined
- // Re-render the assistant message in-place.
-        appendAssistant(combined)
+        streamedMessageIds.add(messageId)
+        SwingUtilities.invokeLater {
+            val doc: HTMLDocument = messagePane.styledDocument as HTMLDocument
+            val domId = "cp-msg-$messageId"
+            val html = "<div id='$domId' style='margin:6px 0'>" +
+                "<b style='color:#2f7d3a'>CodePilot:</b><br>${escape(combined).replace("\n", "<br>")}</div>"
+            try {
+                val existing = doc.getElement(domId)
+                if (existing != null) {
+                    doc.setOuterHTML(existing, html)
+                } else {
+                    val kit = messagePane.editorKit as HTMLEditorKit
+                    kit.insertHTML(doc, doc.length, html, 0, 0, null)
+                }
+                messagePane.caretPosition = doc.length
+            } catch (e: Exception) {
+                log.warn("streamAssistantDelta failed: ${e.message}", e)
+            }
+        }
     }
 
  /** Stream a tool_call input by buffering partial JSON until the tool_call message arrives. */
@@ -595,6 +627,7 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         when (event.get("type")?.asString) {
             "message" -> {
                 val role = event.get("role")?.asString ?: "assistant"
+                val messageId = event.get("id")?.asString
                 val content = event.getAsJsonArray("content") ?: return
                 val text = StringBuilder()
                 for (el in content) {
@@ -606,6 +639,13 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
                         val input = block.get("input")?.toString() ?: "{}"
                         appendToolCall(name, input)
                     }
+                }
+ // If this assistant message was already rendered incrementally via
+ // message_delta, the final event is a duplicate — drop it. Clear the
+ // per-message streaming state either way.
+                if (messageId != null && streamedMessageIds.remove(messageId)) {
+                    streamingMessages.remove(messageId)
+                    return
                 }
                 if (text.isNotEmpty()) {
                     if (role == "user") appendUser(text.toString()) else appendAssistant(text.toString())

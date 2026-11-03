@@ -259,6 +259,40 @@ describe("CodepilotClient", () => {
     });
   });
 
+  it("sends feedback on a decline-with-feedback deny, and omits it otherwise", async () => {
+    const { client, socket } = await connected();
+
+    const withFeedback = client.respondPermission("s1#r2", "deny", "edit b.txt instead");
+    await tick();
+    socket.reply("permission/respond", {});
+    await withFeedback;
+    expect(socket.lastRequest("permission/respond")?.params).toEqual({
+      requestId: "s1#r2",
+      decision: "deny",
+      feedback: "edit b.txt instead",
+    });
+
+    // Feedback is ignored for allow (only a deny carries it).
+    const allowWithText = client.respondPermission("s1#r3", "allow", "ignored");
+    await tick();
+    socket.reply("permission/respond", {});
+    await allowWithText;
+    expect(socket.lastRequest("permission/respond")?.params).toEqual({
+      requestId: "s1#r3",
+      decision: "allow",
+    });
+
+    // A whitespace-only feedback string collapses to a bare deny.
+    const blank = client.respondPermission("s1#r4", "deny", "   ");
+    await tick();
+    socket.reply("permission/respond", {});
+    await blank;
+    expect(socket.lastRequest("permission/respond")?.params).toEqual({
+      requestId: "s1#r4",
+      decision: "deny",
+    });
+  });
+
   it("surfaces a question request", async () => {
     const { socket, harness } = await connected();
     socket.deliver({

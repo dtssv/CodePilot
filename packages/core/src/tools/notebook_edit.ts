@@ -10,10 +10,11 @@
 // preserved for existing cells; new cells get a generated ID.
 
 import { z } from "zod";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join, isAbsolute } from "node:path";
 import type { ToolDef } from "./types.js";
+import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
 
 // ---------------------------------------------------------------------------
 // Notebook JSON types (minimal subset of nbformat v4)
@@ -145,7 +146,27 @@ export const notebookEditTool: ToolDef<typeof schema> = {
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
+    const guard = await guardPath(ctx, input.notebook_path, "write");
+    if (guard) return guard;
+    const delivery = await guardDeliveryWrite(ctx, input.notebook_path);
+    if (delivery) return delivery;
     const path = resolvePath(input.notebook_path, ctx.cwd);
+
+    // notebook_edit always targets an existing notebook and locates cells by
+    // index — so it depends even more than edit_file on the agent knowing the
+    // file's current state. Apply the same read-before-write + staleness guard
+    // as the other write tools: the notebook must have been read this session
+    // and must not have changed on disk since.
+    let preStat: { mtimeMs: number; size: number } | null = null;
+    try {
+      const st = await stat(path);
+      preStat = { mtimeMs: st.mtimeMs, size: st.size };
+    } catch {
+      preStat = null;
+    }
+    const fresh = guardFreshWrite(ctx, path, preStat);
+    if (fresh) return fresh;
+
     let nb: Notebook;
     try {
       nb = await readNotebook(path);
@@ -218,6 +239,14 @@ export const notebookEditTool: ToolDef<typeof schema> = {
         await writeFile(path, serializeNotebook(nb), "utf-8");
       } catch (err) {
         return { content: `Cell edited in memory but failed to write notebook: ${(err as Error).message}`, isError: true };
+      }
+      // Re-observe so a subsequent notebook_edit in the same session sees the
+      // just-written state as fresh (not stale against the pre-write stat).
+      try {
+        const s = await stat(path);
+        ctx.reobserveFile?.(path, { mtimeMs: s.mtimeMs, size: s.size });
+      } catch {
+        /* best-effort */
       }
     }
     return { content: resultMsg };

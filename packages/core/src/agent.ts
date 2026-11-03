@@ -16,7 +16,7 @@ import type {
   ProviderToolDef,
   StreamChatOptions,
 } from "./providers/types.js";
-import { ToolRegistry } from "./tools/types.js";
+import { ToolRegistry, type PermissionLevel } from "./tools/types.js";
 import type { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
 import type {
@@ -25,7 +25,7 @@ import type {
   ContentBlock,
   Event,
   ImageAttachment,
-  PermissionDecision,
+  PermissionResolution,
   PermissionRequest,
   QuestionAnswers,
   QuestionRequest,
@@ -33,9 +33,10 @@ import type {
 } from "./types.js";
 import type { ResolvedSandbox } from "./sandbox.js";
 import type { HookEngine } from "./hooks.js";
-import { redactSecrets } from "./redact.js";
+import { redactSecrets, type RedactionPattern } from "./redact.js";
 import { DoomLoopDetector, type DedupCache } from "./doomLoop.js";
 import { consistencyAssertEnabled, assertConsistency } from "./consistency.js";
+import { applyContextTransform } from "./contextTransform.js";
 import { detectRunawayRepetition } from "./textDegeneration.js";
 import { getTracer, type Span } from "./telemetry.js";
 import {
@@ -48,7 +49,7 @@ import {
   emitTokenEstimateIfNeeded,
   type ToolExecResult,
 } from "./agent-tools.js";
-import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO } from "./compaction.js";
+import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO, compactionGeometry } from "./compaction.js";
 // Message-based transient classifier (shared SoT). Re-exported below for
 // existing `from "./agent.js"` callers.
 import { isTransientError } from "./transientError.js";
@@ -101,6 +102,19 @@ export interface AgentDeps {
    * can resync `history` / `produced`. Return `null` when nothing changed.
    */
   compactNow?: () => Promise<Event[] | null>;
+ /**
+  * Register a prompt-cache warm candidate at a normal turn end. The agent
+  * passes the prefix size (last request's input tokens) and a `replay` closure
+  * that re-sends THE EXACT request just built (same messages/tools/system) with
+  * a 1-token output cap — a faithful, drift-free warm. The session decides
+  * (cost-gated, see `decideCacheWarm`) whether and when to call `replay`, and
+  * cancels it when the next real turn starts. Fire-and-forget; omitting this
+  * callback disables warming.
+  */
+  onWarmableRequest?: (candidate: {
+    prefixTokens: number;
+    replay: (signal: AbortSignal) => Promise<void>;
+  }) => void;
  /** Stable per-session cache-affinity key (→ OpenAI `prompt_cache_key`). */
   promptCacheKey?: string;
  /** Provider-enforced structured output for this run (OpenAI/Azure
@@ -108,8 +122,9 @@ export interface AgentDeps {
   * only when the provider supports it AND the run is a single structured
   * completion — some models reject it combined with tool-calling. */
   responseFormat?: StreamChatOptions["responseFormat"];
- /** Permission request handler. */
-  onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
+ /** Permission request handler. May return a plain decision or a
+  * decline-with-feedback object (see PermissionResolution). */
+  onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionResolution>;
  /** Maximum number of assistant turns per prompt. */
   maxTurns?: number;
  /** True when this run is a sub-agent (driven by the `task` tool). Turn caps
@@ -193,6 +208,24 @@ export interface AgentDeps {
    * where tools fall back to their prior (unguarded) behaviour.
    */
   fileObservations?: import("./fsObservation.js").FileObservationStore;
+  /**
+   * Deployment-configured extra redaction patterns (`redact.patterns` in
+   * config), already compiled. Applied to tool output AFTER the built-in
+   * secret floor — never instead of it. Omitted in tests/sub-agents.
+   */
+  redactPatterns?: readonly RedactionPattern[];
+  /**
+   * Optional plugin-provided context transform. Called with a COPY of the
+   * provider message view right before each provider request — AFTER
+   * CodePilot's own fold/compaction and the consistency check, so a plugin
+   * can prune / window / inject memory into what the model sees WITHOUT
+   * touching the persisted transcript (the copy is thrown away after the
+   * request). The returned view is validated (roles legal, tool_use ↔
+   * tool_result pairing preserved, non-empty); on any validation failure or
+   * throw the untransformed view is used (fail-soft — never send a malformed
+   * request). Set by the Session from a plugin runtime; omitted → no-op.
+   */
+  contextTransform?: (view: ProviderMessage[]) => ProviderMessage[];
 }
 
 export interface AgentRunInput {
@@ -209,6 +242,18 @@ export interface AgentRunInput {
    * a fake user bubble for `<stop_hook_continue>…`.
    */
   systemContinue?: string;
+  /**
+   * Resume the LAST turn from the existing `history` instead of starting a
+   * new one. Set after a turn ended in an error (provider failure, tool
+   * failure, Stop-verify cap) so a user "retry" picks up exactly where it
+   * stopped: no new `role:"user"` event is emitted, and the provider view is
+   * rebuilt from `history` (whose trailing user turn + any assistant/tool
+   * progress already drives the model; dangling `tool_use` calls are repaired
+   * into "interrupted" results by `compactTranscriptToProviderMessages`). The
+   * `userText` carries the last prompt only as the compaction fallback — it is
+   * NOT re-appended when the history is non-empty.
+   */
+  resume?: boolean;
 }
 
 export interface AgentRunResult {
@@ -303,14 +348,29 @@ export async function runAgent(
     deps.config.maxTokens ?? modelWindow.maxOutputTokens ?? 8_192,
   );
   // Hard send ceiling: configured window minus system prompt + output headroom.
+  // This bounds a SINGLE request's prompt (system + transcript + output room) —
+  // a different concept from the history-size compaction trigger below, so it
+  // keeps its own formula (it alone subtracts `systemReserve`).
   const hardBudget = Math.max(
     4_000,
     contextWindow - systemReserve - outputReserve - 1_024,
   );
-  // Auto-compact trigger (~92% of window by default), never above hardBudget.
+  // Auto-compact trigger: when the live transcript reaches this token count we
+  // ask the session to compact. This is a HISTORY-size decision and must match
+  // the session's own `maybeCompact` trigger exactly — both now come from the
+  // shared `compactionGeometry` so the mid-run trigger and the turn-boundary
+  // trigger can never drift apart (previously agent.ts recomputed its own
+  // `contextWindow * 0.92` capped at `hardBudget`, a third parallel formula).
+  // Still capped at `hardBudget` so we never let history alone exceed what one
+  // request can carry.
   const autoTrigger = Math.min(
     hardBudget,
-    Math.floor(contextWindow * (deps.config.compactionThreshold ?? 0.92)),
+    compactionGeometry({
+      window: contextWindow,
+      thresholdFraction: deps.config.compactionThreshold,
+      maxTokens: deps.config.maxTokens,
+      maxOutputTokens: modelWindow.maxOutputTokens,
+    }).hardTrigger,
   );
   // Soft fold target for speed (default 48K); still capped by hardBudget.
   const softBudget = deps.config.maxContextTokens ?? 48_000;
@@ -322,13 +382,18 @@ export async function runAgent(
   let lastInputTokens = Math.max(0, deps.lastProviderInputTokens ?? 0);
 
  // Append the user message as a transcript event — unless this run is a
- // Stop-hook continue (systemContinue): that feedback must reach the model
- // without impersonating the user in the UI / persisted JSONL.
-  const userImages = input.systemContinue ? undefined : input.images;
+ // Stop-hook continue (systemContinue) or a resume of the last turn. In both
+ // cases the model must be re-engaged WITHOUT emitting another `role:"user"`
+ // event: the continue feedback reaches the model via `systemContinue`, and a
+ // resume drives purely from the existing `history` (whose trailing user turn
+ // is already there). Emitting a new user bubble for either would fake human
+ // input in the UI / persisted JSONL.
+  const suppressUserEvent = !!input.systemContinue || !!input.resume;
+  const userImages = suppressUserEvent ? undefined : input.images;
   let pendingProviderResume: string | null = input.systemContinue?.trim()
     ? input.systemContinue
     : null;
-  if (!input.systemContinue) {
+  if (!suppressUserEvent) {
     const userMessageId = `msg_${randomUUID()}`;
     const userEvent: Event = {
       type: "message",
@@ -426,9 +491,14 @@ export async function runAgent(
     // Turn-budget wind-down: when a finite cap is set, urge synthesis before
     // (and on) the last turns — never rely on a hard error to end the run.
     // Sub-agents also get a dedicated bonus turn (see subagentSynthesisBonus).
+    // On the final turn we ALSO hard-disable tool calls (`toolChoice:"none"`)
+    // so the model physically cannot start another tool call the prose nudge
+    // asked it to avoid — the nudge is advisory, this is the backstop.
+    let lockToolsThisTurn = false;
     if (Number.isFinite(maxTurns) && turn > 0) {
       const remaining = maxTurns - turn;
       if (subagentSynthesisBonus || remaining <= 1) {
+        lockToolsThisTurn = true;
         systemSteerNotices.push(
           deps.isSubagent
             ? `Turn budget reached (${turn}/${Number.isFinite(maxTurns) ? maxTurns : "∞"}). ` +
@@ -500,6 +570,10 @@ export async function runAgent(
       hardBudget: sendHardBudget,
       maxUnfoldedToolResults,
     });
+    // The view actually sent to the provider this request: `providerMessages`
+    // after an optional plugin context transform (see below). Hoisted here so
+    // the cache-warm replay can capture the SAME messages that were streamed.
+    let sendMessages: ProviderMessage[] = providerMessages;
     // Count of trailing provider-only messages appended below that are
     // intentionally NOT in the event log (resume nudges). The consistency
     // check must skip these — otherwise it reports a false "Role mismatch"
@@ -524,10 +598,12 @@ export async function runAgent(
     const providerTools = buildProviderToolDefs(deps.tools, agentMode, { lazyMcp });
     const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices });
 
- // Debug/test consistency assertion: verify the
- // non-folded tail of the provider messages matches the persisted event
- // log. Only active when CODEPILOT_ASSERT_CONSISTENCY=1. Catches bugs
- // where what the model sees diverges from what was logged. The trailing
+ // Consistency assertion: verify the non-folded tail of the provider
+ // messages matches the persisted event log, catching bugs where what the
+ // model sees diverges from what was logged. Two triggers: the
+ // `consistencyCheck` config (warn by default → non-blocking diagnostic;
+ // throw → fail the turn) and the `CODEPILOT_ASSERT_CONSISTENCY=1` env
+ // override (forces the throwing path for tests/CI). The trailing
  // provider-only resume nudge (if any) is excluded — it is deliberately not
  // in the log, so comparing it would always report a spurious mismatch.
     const consistencyView = providerOnlyTrailing > 0
@@ -720,9 +796,24 @@ export async function runAgent(
       };
 
       await emitAux({ type: "activity", phase: "model", since: startedAt });
+      // Plugin context transform (source-safe): a plugin may prune / window /
+      // inject-memory into what the model sees for THIS request only. Runs on a
+      // copy, after the consistency check (which validates CodePilot's own
+      // view), validated + fail-soft so a bad transform never sends a malformed
+      // request. The persisted transcript is untouched.
+      sendMessages = applyContextTransform(
+        providerMessages,
+        deps.contextTransform,
+        (reason) =>
+          void emitAux({
+            type: "error",
+            message: `context transform ignored — ${reason}`,
+            recoverable: true,
+          }),
+      );
       let degenerated = false;
       try {
-        for await (const ev of streamOnce(deps.provider, deps, providerMessages, providerTools, id, { liveContext, onRetry })) {
+        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, toolChoice: lockToolsThisTurn ? "none" : undefined })) {
           if (deps.signal?.aborted) break;
           switch (ev.kind) {
             case "text_delta": {
@@ -928,9 +1019,14 @@ export async function runAgent(
       const trimmed = finalText.trim();
       const allEvents = [...input.history, ...produced];
 
-      // Empty successful stop after tools: keep going.
+      // Empty successful stop: the model ended cleanly (finishReason stop, no
+      // error, no tool calls) but produced no visible text at all. This happens
+      // two ways, both handled here: (a) after tool use the model forgot to
+      // write a closing summary, and (b) a provider degenerate completion where
+      // the very first response streams zero content blocks — surfacing that
+      // raw to the user/parent is a silent blank reply. Rather than yield an
+      // empty turn, retry (bounded) asking the model to continue / respond.
       if (
-        sawToolCalls &&
         !sawError &&
         trimmed === "" &&
         emptyStopResumes < MAX_EMPTY_STOP_RESUMES
@@ -976,6 +1072,37 @@ export async function runAgent(
 
       // Normal conversational end: yield the turn to the user.
       if (!sawError) await closeFinishedPlan(produced, emit);
+      // Offer this turn's exact request as a prompt-cache warm candidate. The
+      // session decides (cost-gated) whether to keep the cached prefix alive
+      // during the idle gap by replaying it with a 1-token output cap. We
+      // capture the SAME messages/tools/system just streamed — a faithful,
+      // drift-free replay — and never fire it ourselves.
+      if (deps.onWarmableRequest && !sawError && lastInputTokens > 0) {
+        const warmMessages = sendMessages;
+        const warmTools = providerTools;
+        const warmContext = liveContext;
+        deps.onWarmableRequest({
+          prefixTokens: lastInputTokens,
+          replay: async (signal: AbortSignal): Promise<void> => {
+            const warmDeps: AgentDeps = {
+              ...deps,
+              signal,
+              config: { ...deps.config, maxTokens: 1 },
+            };
+            // Drain the stream; a 1-token reply is enough to refresh the cache.
+            for await (const _ of streamOnce(
+              deps.provider,
+              warmDeps,
+              warmMessages,
+              warmTools,
+              `warm_${randomUUID()}`,
+              { liveContext: warmContext },
+            )) {
+              if (signal.aborted) break;
+            }
+          },
+        });
+      }
       await emit({ type: "status", status: "idle" });
       return {
         events: produced,
@@ -987,14 +1114,24 @@ export async function runAgent(
     resumedText = "";
     sawToolCalls = true;
 
- // Run tools in parallel.
+ // Run tools with a read/write concurrency barrier. Read-only and network
+ // tools have no filesystem side effects, so they run concurrently; write and
+ // execute tools can race each other — two parallel edits to the same file
+ // would clobber, and the mtime/size CAS guard only covers staleness ACROSS
+ // turns, not two in-flight writes inside one turn (both pre-stat the same
+ // baseline and each passes the check). So mutating calls are serialized and
+ // run exclusively, the way codex (RwLock read/write gate) and dsh (fail-closed
+ // exclusive barrier) do it in the orchestration layer. Results are still
+ // collected in the model's original call order.
     await emitAux({ type: "activity", phase: "tools", since: Date.now(), tools: toolCalls.map((tc) => tc.name) });
-    const toolResults = await Promise.all(
-      toolCalls.map((tc) =>
-        hasUnparsedInput(tc)
-          ? Promise.resolve<ToolExecResult>({ content: truncated ? TRUNCATED_CALL : MALFORMED_CALL, isError: true })
-          : runOneTool(tc, deps, emit, agentMode, doomLoop)
-      )
+    const runCall = (tc: ToolUseBlock): Promise<ToolExecResult> =>
+      hasUnparsedInput(tc)
+        ? Promise.resolve<ToolExecResult>({ content: truncated ? TRUNCATED_CALL : MALFORMED_CALL, isError: true })
+        : runOneTool(tc, deps, emit, agentMode, doomLoop);
+    const toolResults = await runToolsWithBarrier(
+      toolCalls,
+      (tc) => isParallelSafeTool(deps.tools.get(tc.name)?.permission),
+      runCall,
     );
     const planOnlyTurn = toolCalls.every((tc) => tc.name === "plan_update");
     for (let i = 0; i < toolCalls.length; i++) {
@@ -1002,7 +1139,7 @@ export async function runAgent(
       const r = toolResults[i]!;
  // Secret redaction: credentials must never reach the transcript, the
  // model context or artifacts (see redact.ts).
-      let safeContent = redactSecrets(r.content);
+      let safeContent = redactSecrets(r.content, deps.redactPatterns);
       if (planOnlyTurn && !r.isError) safeContent += PLAN_ONLY_TURN;
  // Fold-safety net: any result big enough to be folded later (minChars
  // 400 in compaction.ts) but without its own artifactRef gets one now,
@@ -1166,6 +1303,50 @@ export function isAbortMessage(message: string): boolean {
   );
 }
 
+/**
+ * Whether a tool can run concurrently with other tools in the same turn.
+ * Read-only and network tools have no local filesystem side effects, so they
+ * are safe to run in parallel. Write/execute tools mutate the working tree (or
+ * run arbitrary commands) and must be serialized to avoid write-write races.
+ * Fail-closed: an unknown permission (undefined) is treated as NOT parallel-safe
+ * — the same conservative default dsh uses for tools that don't prove safety.
+ */
+export function isParallelSafeTool(permission: PermissionLevel | undefined): boolean {
+  return permission === "read" || permission === "network";
+}
+
+/**
+ * Execute a turn's tool calls with a read/write concurrency barrier, returning
+ * results in the original call order. Maximal runs of adjacent parallel-safe
+ * calls execute concurrently; each non-parallel-safe (mutating) call runs
+ * exclusively, after all prior calls have settled and before any later call
+ * starts. This is the orchestration-layer equivalent of codex's RwLock
+ * read/write gate: reads parallelize, writes serialize, order is preserved.
+ */
+export async function runToolsWithBarrier<T>(
+  calls: readonly T[],
+  isParallelSafe: (call: T) => boolean,
+  run: (call: T) => Promise<ToolExecResult>,
+): Promise<ToolExecResult[]> {
+  const results = new Array<ToolExecResult>(calls.length);
+  let i = 0;
+  while (i < calls.length) {
+    if (isParallelSafe(calls[i]!)) {
+      // Gather the maximal run of adjacent parallel-safe calls and run them
+      // together; a mutating call (or the end) closes the batch.
+      const start = i;
+      while (i < calls.length && isParallelSafe(calls[i]!)) i++;
+      const batch = await Promise.all(calls.slice(start, i).map((c) => run(c)));
+      for (let j = 0; j < batch.length; j++) results[start + j] = batch[j]!;
+    } else {
+      // Exclusive: nothing else runs while this mutating call is in flight.
+      results[i] = await run(calls[i]!);
+      i++;
+    }
+  }
+  return results;
+}
+
 const MAX_TRUNCATION_RESUMES = 3;
 /** Max consecutive mid-stream interrupts resumed by continuation before we
  * give up on continuing and fall back to regenerating the turn. */
@@ -1189,9 +1370,9 @@ const INTERRUPT_RESUME =
   "repeat what you already wrote, and do NOT restart the task from the beginning.";
 
 const EMPTY_STOP_RESUME =
-  "[system] Your previous response ended successfully but contained no visible final text after " +
-  "tool use. Continue the existing task from its current state without repeating completed work. " +
-  "Call tools if you still have autonomous work; otherwise write a short status for the user.";
+  "[system] Your previous response ended successfully but contained no visible text. Respond to " +
+  "the user now: continue the task from its current state without repeating completed work — call " +
+  "tools if you still have autonomous work, otherwise write a short status or answer for the user.";
 
 const PLAN_SOFT_RESUME =
   "[system] Your plan still has unfinished steps, and your last reply looked incomplete. " +

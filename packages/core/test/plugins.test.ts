@@ -6,16 +6,23 @@ import { join } from "node:path";
 import {
   discoverPlugins,
   pluginResourcePaths,
+  collectPluginProviderTemplates,
   mergePluginConfig,
   installPlugin,
+  inspectPluginSource,
   uninstallPlugin,
   searchMarketplace,
+  fetchMarketplaceIndex,
+  listPluginMarket,
+  describeMarketplaceEntry,
+  describePluginCapabilities,
   derivePluginName,
   pluginPermissionReport,
   type Plugin,
   type PluginManifest,
   type MarketplaceEntry,
 } from "../src/plugins.js";
+import { resetCatalogMemoryForTests } from "../src/remoteCatalog.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -212,6 +219,84 @@ describe("discoverPlugins", () => {
 
     expect(plugins.size).toBe(1);
     expect(plugins.get("real-plugin")!.manifest.name).toBe("real-plugin");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectPluginProviderTemplates (Phase 5 §4.3)
+// ---------------------------------------------------------------------------
+
+describe("collectPluginProviderTemplates", () => {
+  let work: string;
+  let userDir: string;
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), "plugins-tmpl-"));
+    userDir = mkdtempSync(join(tmpdir(), "plugins-tmpl-user-"));
+  });
+  afterEach(() => {
+    rmSync(work, { recursive: true, force: true });
+    rmSync(userDir, { recursive: true, force: true });
+  });
+
+  it("collects a plugin's provider templates with namespaced ids", async () => {
+    const projectPlugins = join(work, ".codepilot", "plugins");
+    writePlugin(projectPlugins, "acme", {
+      name: "acme",
+      description: "provider templates",
+      providerTemplates: [
+        {
+          id: "gw",
+          displayName: "Acme Gateway",
+          provider: "openai",
+          baseURL: "https://acme.example/v1",
+          models: ["acme-large"],
+        },
+      ],
+    });
+
+    const templates = await collectPluginProviderTemplates(work, {
+      projectDir: projectPlugins,
+      userDir: join(userDir, "plugins"),
+    });
+
+    expect(templates).toHaveLength(1);
+    // Namespaced so a plugin can never shadow a built-in id.
+    expect(templates[0]!.id).toBe("acme/gw");
+    expect(templates[0]!.displayName).toBe("Acme Gateway");
+    expect(templates[0]!.baseURL).toBe("https://acme.example/v1");
+  });
+
+  it("skips templates missing a required field or naming an unknown provider", async () => {
+    const projectPlugins = join(work, ".codepilot", "plugins");
+    writePlugin(projectPlugins, "mixed", {
+      name: "mixed",
+      description: "some valid, some not",
+      providerTemplates: [
+        { id: "ok", displayName: "OK", provider: "anthropic" },
+        // missing displayName
+        { id: "bad1", provider: "openai" } as never,
+        // unknown provider adapter
+        { id: "bad2", displayName: "Bad", provider: "not-a-provider" } as never,
+      ],
+    });
+
+    const templates = await collectPluginProviderTemplates(work, {
+      projectDir: projectPlugins,
+      userDir: join(userDir, "plugins"),
+    });
+
+    expect(templates.map((t) => t.id)).toEqual(["mixed/ok"]);
+  });
+
+  it("returns an empty list when no plugin declares templates", async () => {
+    const projectPlugins = join(work, ".codepilot", "plugins");
+    writePlugin(projectPlugins, "plain", { name: "plain", description: "no templates" });
+    const templates = await collectPluginProviderTemplates(work, {
+      projectDir: projectPlugins,
+      userDir: join(userDir, "plugins"),
+    });
+    expect(templates).toEqual([]);
   });
 });
 
@@ -511,6 +596,171 @@ describe("installPlugin", () => {
     await expect(installPlugin(emptySrc, { installDir: target })).rejects.toThrow();
     expect(existsSync(target)).toBe(false);
   });
+
+  it("installs a plugin from a monorepo sub-directory via a #subdir fragment", async () => {
+    // A single repo/dir hosting many plugins (the dsh pattern). The source
+    // root has no plugin.json; the real plugin lives under <root>/<subdir>.
+    const mono = join(base, "mono-repo");
+    const sub = join(mono, "code-review");
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(
+      join(sub, "plugin.json"),
+      JSON.stringify(makeManifest({ name: "code-review" })),
+      "utf-8",
+    );
+
+    const target = await installPlugin(`${mono}#code-review`, { installDir: installRoot });
+    expect(existsSync(join(target, "plugin.json"))).toBe(true);
+    const manifest = JSON.parse(
+      await import("node:fs/promises").then((fs) =>
+        fs.readFile(join(target, "plugin.json"), "utf-8"),
+      ),
+    );
+    expect(manifest.name).toBe("code-review");
+  });
+
+  it("throws when the #subdir fragment points at a missing sub-directory", async () => {
+    const mono = join(base, "mono-repo2");
+    mkdirSync(mono, { recursive: true });
+    await expect(
+      installPlugin(`${mono}#does-not-exist`, { installDir: join(base, "t2") }),
+    ).rejects.toThrow(/source not found|sub-directory not found/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describePluginCapabilities — the pre-install side-effect report
+// ---------------------------------------------------------------------------
+
+describe("describePluginCapabilities", () => {
+  let base: string;
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "plugins-cap-"));
+  });
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("flags a skills-only plugin as side-effect-free", async () => {
+    const dir = writePlugin(base, "skilly", { name: "skilly", description: "s" }, ["skills/greet"]);
+    const report = await describePluginCapabilities(makeManifest({ name: "skilly" }), dir);
+    expect(report.sideEffectFree).toBe(true);
+    expect(report.resources.skills).toBe(1);
+    expect(report.summary).toMatch(/no side effects/i);
+  });
+
+  it("reports hooks, mcp servers, and runtime from the manifest", async () => {
+    const manifest = makeManifest({
+      name: "heavy",
+      hooks: { PreToolUse: [{ matcher: "bash" }] } as never,
+      mcpServers: { fetchy: {} } as never,
+      runtime: { module: "./runtime.mjs" },
+    });
+    const report = await describePluginCapabilities(manifest);
+    expect(report.hooks).toContain("PreToolUse");
+    expect(report.mcpServers).toContain("fetchy");
+    expect(report.hasRuntime).toBe(true);
+    expect(report.sideEffectFree).toBe(false);
+  });
+
+  it("surfaces advisory side-effect tags (network/fileWrite/bash)", async () => {
+    const report = await describePluginCapabilities(
+      makeManifest({ name: "sfx", permissions: ["bash", "network"] }),
+    );
+    expect(report.sideEffects).toEqual(expect.arrayContaining(["bash", "network"]));
+    expect(report.sideEffectFree).toBe(false);
+  });
+
+  it("statically scans the runtime module for registered tool names", async () => {
+    const dir = writePlugin(
+      base,
+      "tooler",
+      { name: "tooler", description: "t", permissions: ["runtime", "tools"], runtime: { module: "./runtime.mjs" } },
+    );
+    writeFileSync(
+      join(dir, "runtime.mjs"),
+      `export default { name: "x", create(deps) {
+         deps.toolkit.registerTool({ name: "reverse_text", description: "", parameters: {}, async execute() { return { content: "" }; } });
+         deps.toolkit.registerTool({ name: "shout", description: "", parameters: {}, async execute() { return { content: "" }; } });
+         return { name: "x", prompt: (i, d) => deps.toolkit.runDefault(i, d), cancel(){}, state: () => "idle" };
+       } };`,
+      "utf-8",
+    );
+    const report = await describePluginCapabilities(
+      makeManifest({ name: "tooler", permissions: ["runtime", "tools"], runtime: { module: "./runtime.mjs" } }),
+      dir,
+    );
+    expect(report.tools).toEqual(expect.arrayContaining(["reverse_text", "shout"]));
+    expect(report.toolsPartial).toBe(false);
+    expect(report.summary).toMatch(/reverse_text/);
+  });
+
+  it("marks tools partial when it declares `tools` but no names could be scanned", async () => {
+    // Declares the tools permission but ships no readable runtime module.
+    const report = await describePluginCapabilities(
+      makeManifest({ name: "dyn", permissions: ["runtime", "tools"], runtime: { module: "./missing.mjs" } }),
+    );
+    expect(report.tools).toEqual([]);
+    expect(report.toolsPartial).toBe(true);
+    expect(report.summary).toMatch(/custom tools/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inspectPluginSource — download, report, discard (no install)
+// ---------------------------------------------------------------------------
+
+describe("inspectPluginSource", () => {
+  let base: string;
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "plugins-inspect-"));
+  });
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("reports a local source's capabilities without installing it", async () => {
+    const src = join(base, "src");
+    mkdirSync(join(src, "skills", "s"), { recursive: true });
+    writeFileSync(
+      join(src, "plugin.json"),
+      JSON.stringify(makeManifest({ name: "inspect-me", description: "d" })),
+      "utf-8",
+    );
+    const report = await inspectPluginSource(src);
+    expect(report.name).toBe("inspect-me");
+    expect(report.resources.skills).toBe(1);
+    expect(report.sideEffectFree).toBe(true);
+    // Nothing was installed anywhere under the user plugins dir.
+    expect(existsSync(join(base, "installed"))).toBe(false);
+  });
+
+  it("scans a local source's runtime module for tools, source untouched", async () => {
+    const src = join(base, "src2");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(
+      join(src, "plugin.json"),
+      JSON.stringify(
+        makeManifest({ name: "t2", permissions: ["runtime", "tools"], runtime: { module: "./runtime.mjs" } }),
+      ),
+      "utf-8",
+    );
+    writeFileSync(
+      join(src, "runtime.mjs"),
+      `export default { create(deps) { deps.toolkit.registerTool({ name: "do_thing", description:"", parameters:{}, async execute(){return {content:""};} }); return {}; } };`,
+      "utf-8",
+    );
+    const report = await inspectPluginSource(src);
+    expect(report.tools).toContain("do_thing");
+    // The source dir is left exactly as-is (inspect copies to temp, discards).
+    expect(existsSync(join(src, "runtime.mjs"))).toBe(true);
+  });
+
+  it("throws on a source with no valid plugin.json", async () => {
+    const empty = join(base, "empty");
+    mkdirSync(empty, { recursive: true });
+    await expect(inspectPluginSource(empty)).rejects.toThrow(/no plugin\.json/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -625,6 +875,132 @@ describe("searchMarketplace", () => {
 });
 
 // ---------------------------------------------------------------------------
+// listPluginMarket — the GitHub-hosted discovery entry point (bundled seed)
+// ---------------------------------------------------------------------------
+
+describe("listPluginMarket", () => {
+  beforeEach(() => resetCatalogMemoryForTests());
+  afterEach(() => resetCatalogMemoryForTests());
+
+  it("lists installable plugins from the bundled catalog (offline-safe)", async () => {
+    // No network in test → daily fetch fails → falls back to the bundled
+    // catalog/plugins.json shipped with @codepilot/core.
+    const list = await listPluginMarket();
+    expect(list.length).toBeGreaterThan(0);
+    // Every entry must carry the fields install + a browse UI need.
+    for (const e of list) {
+      expect(typeof e.name).toBe("string");
+      expect(e.name.length).toBeGreaterThan(0);
+      expect(typeof e.source).toBe("string");
+      expect(e.source.length).toBeGreaterThan(0);
+    }
+    // The shipped reference plugins are discoverable by name.
+    expect(list.some((e) => e.name === "code-review")).toBe(true);
+    expect(list.some((e) => e.name === "test-gen")).toBe(true);
+  });
+
+  it("feeds searchMarketplace so a browse flow can filter", async () => {
+    const list = await listPluginMarket();
+    const hits = searchMarketplace(list, "security");
+    expect(hits.some((e) => e.name === "security-audit")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchMarketplaceIndex — custom third-party index source (add-your-own URL)
+// ---------------------------------------------------------------------------
+
+describe("fetchMarketplaceIndex", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  function mockFetch(status: number, body: unknown): void {
+    globalThis.fetch = (async () =>
+      ({
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: status === 200 ? "OK" : "ERR",
+        json: async () => body,
+      }) as unknown as Response) as typeof fetch;
+  }
+
+  it("accepts a bare array of entries", async () => {
+    mockFetch(200, [
+      { name: "a", description: "d", source: "https://github.com/x/a" },
+      { name: "b", description: "d", source: "https://github.com/x/b" },
+    ]);
+    const list = await fetchMarketplaceIndex("https://example.com/index.json");
+    expect(list.map((e) => e.name)).toEqual(["a", "b"]);
+  });
+
+  it("accepts a { plugins: [...] } document (same shape as the catalog)", async () => {
+    mockFetch(200, { version: 1, plugins: [{ name: "c", source: "https://github.com/x/c" }] });
+    const list = await fetchMarketplaceIndex("https://example.com/index.json");
+    expect(list).toHaveLength(1);
+    expect(list[0]!.name).toBe("c");
+    expect(list[0]!.description).toBe("");
+  });
+
+  it("drops malformed rows instead of poisoning the whole list", async () => {
+    mockFetch(200, [
+      { name: "good", source: "https://github.com/x/good" },
+      { description: "no name or source" },
+      { name: "no-source" },
+      42,
+    ]);
+    const list = await fetchMarketplaceIndex("https://example.com/index.json");
+    expect(list.map((e) => e.name)).toEqual(["good"]);
+  });
+
+  it("throws on a non-2xx response", async () => {
+    mockFetch(404, {});
+    await expect(fetchMarketplaceIndex("https://example.com/missing.json")).rejects.toThrow(
+      /fetch failed: 404/,
+    );
+  });
+
+  it("throws when the index is neither an array nor { plugins }", async () => {
+    mockFetch(200, { nope: true });
+    await expect(fetchMarketplaceIndex("https://example.com/weird.json")).rejects.toThrow(
+      /not an array or/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describeMarketplaceEntry — the install-source confirmation line
+// ---------------------------------------------------------------------------
+
+describe("describeMarketplaceEntry", () => {
+  it("surfaces the git source for a confirmation prompt", () => {
+    const line = describeMarketplaceEntry({
+      name: "code-review",
+      description: "d",
+      source: "https://github.com/codepilot/plugins",
+      version: "1.0.0",
+      author: "CodePilot",
+    });
+    expect(line).toContain("code-review");
+    expect(line).toContain("v1.0.0");
+    expect(line).toContain("by CodePilot");
+    expect(line).toContain("git:");
+    expect(line).toContain("https://github.com/codepilot/plugins");
+  });
+
+  it("labels a local-path source", () => {
+    const line = describeMarketplaceEntry({
+      name: "local",
+      description: "d",
+      source: "/home/me/my-plugin",
+    });
+    expect(line).toContain("local path:");
+    expect(line).toContain("/home/me/my-plugin");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // derivePluginName
 // ---------------------------------------------------------------------------
 
@@ -665,6 +1041,22 @@ describe("derivePluginName", () => {
 
   it("returns last segment for a bare name", () => {
     expect(derivePluginName("just-a-name")).toBe("just-a-name");
+  });
+
+  it("names the plugin after the #subdir fragment on a git URL", () => {
+    expect(
+      derivePluginName("https://github.com/dtssv/codepilot-plugins.git#code-review"),
+    ).toBe("code-review");
+  });
+
+  it("uses the last segment of a nested #subdir fragment", () => {
+    expect(
+      derivePluginName("https://github.com/acme/repo.git#plugins/test-gen"),
+    ).toBe("test-gen");
+  });
+
+  it("falls back to the repo name when the fragment is empty", () => {
+    expect(derivePluginName("https://github.com/acme/my-plugin.git#")).toBe("my-plugin");
   });
 });
 

@@ -31,6 +31,9 @@ export interface SessionMcpHost {
   * unregistering, a disposed session's handler stays registered and a server
   * reverse request would be routed to a dead session. */
   setMcpRequestHandlerCleanup?(unregister: () => void): void;
+ /** Stash the unregister fn for the tools-changed handler (see
+  * setMcpRequestHandlerCleanup — a separate slot so both cleanups survive). */
+  setMcpToolsChangedCleanup?(unregister: () => void): void;
 }
 
 /** Start configured MCP servers (shared process-wide) and register tools.
@@ -54,28 +57,25 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
       );
       host.setMcpRequestHandlerCleanup?.(unregister);
     }
-    for (const t of mcp.listAllTools()) {
- // Normalize the tool name to fit provider limits (64 chars) and
- // prevent collisions between long names. The original (server, name)
- // pair is captured in the closure so invocation is unaffected.
-      const registeredName = normalizeMcpToolName(t.server, t.name);
- // Register a thin wrapper tool.
-      host.withToolRegistry((registry) =>
-        registry.register({
-          name: registeredName,
-          description: `[mcp:${t.server}] ${t.description}`,
-          inputSchema: jsonSchemaToZod(t.inputSchema),
-          permission: "network",
-          source: "mcp",
-          mcpMeta: { server: t.server, toolName: t.name, jsonSchema: t.inputSchema },
-          execute: async (input) => {
-            const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-            const r = await mcp!.invoke(t.server, t.name, args);
-            return { content: r.content, isError: r.isError };
-          },
-        })
-      );
-    }
+    const mgr = mcp;
+    for (const t of mgr.listAllTools()) registerMcpTool(host, mgr, t);
+    // A server may add/remove tools mid-session (`notifications/tools/list_changed`).
+    // When that happens the manager has already refreshed its cached list; we
+    // drop this server's old wrapper tools and re-register the new set so the
+    // provider sees the current tools. Only the changed server is touched.
+    const unregisterChanged = mgr.setToolsChangedHandler((server) => {
+      host.withToolRegistry((registry) => {
+        for (const tool of registry.all()) {
+          if (tool.source === "mcp" && tool.mcpMeta?.server === server) {
+            registry.unregister(tool.name);
+          }
+        }
+      });
+      for (const t of mgr.listAllTools()) {
+        if (t.server === server) registerMcpTool(host, mgr, t);
+      }
+    });
+    host.setMcpToolsChangedCleanup?.(unregisterChanged);
     return mcp;
   } catch (err) {
     process.stderr.write(
@@ -83,6 +83,34 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
     );
     return mcp;
   }
+}
+
+/** Register one MCP tool as a thin wrapper in the session's tool registry.
+ * Shared by initial startup and the tool-list-change re-registration path. */
+function registerMcpTool(
+  host: SessionMcpHost,
+  mgr: McpManager,
+  t: { server: string; name: string; description: string; inputSchema: Record<string, unknown> },
+): void {
+ // Normalize the tool name to fit provider limits (64 chars) and prevent
+ // collisions between long names. The original (server, name) pair is
+ // captured in the closure so invocation is unaffected.
+  const registeredName = normalizeMcpToolName(t.server, t.name);
+  host.withToolRegistry((registry) =>
+    registry.register({
+      name: registeredName,
+      description: `[mcp:${t.server}] ${t.description}`,
+      inputSchema: jsonSchemaToZod(t.inputSchema),
+      permission: "network",
+      source: "mcp",
+      mcpMeta: { server: t.server, toolName: t.name, jsonSchema: t.inputSchema },
+      execute: async (input) => {
+        const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+        const r = await mgr.invoke(t.server, t.name, args);
+        return { content: r.content, isError: r.isError };
+      },
+    })
+  );
 }
 
 /** Resolve `@mcp:<server>/<uri>` references into inline resource content.

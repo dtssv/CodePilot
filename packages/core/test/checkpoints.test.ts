@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   shouldCheckpoint as shouldCheckpointFn,
   writeCheckpoint,
+  writeCheckpointFromSnapshot,
   readCheckpoint,
   checkpointExists,
   checkpointPath,
@@ -167,6 +168,40 @@ describe("file persistence", () => {
     const id = "exists";
     await writeCheckpoint(workDir, id, []);
     expect(await checkpointExists(workDir, id)).toBe(true);
+  });
+
+  it("writeCheckpointFromSnapshot writes an identical file from a prebuilt snapshot", async () => {
+    // The async-checkpoint path builds the snapshot synchronously on the hot
+    // path, then writes from it in the background. A write from the prebuilt
+    // snapshot must be equivalent to writing straight from the events.
+    const id = "from-snap";
+    const events = makeEvents(3, 100);
+    const snap = buildCheckpointSnapshot(events);
+    const result = await writeCheckpointFromSnapshot(workDir, id, snap, { tokenThreshold: 10 });
+    expect(result.bytes).toBeGreaterThan(0);
+    expect(existsSync(result.path)).toBe(true);
+    const fromSnap = await readCheckpoint(workDir, id);
+
+    const id2 = "from-events";
+    await writeCheckpoint(workDir, id2, events, { tokenThreshold: 10 });
+    const fromEvents = await readCheckpoint(workDir, id2);
+    // Same content modulo the id-bearing header line.
+    const strip = (t: string | null) => (t ?? "").replace(/Checkpoint for \S+/g, "Checkpoint for ID");
+    expect(strip(fromSnap)).toBe(strip(fromEvents));
+  });
+
+  it("writeCheckpointFromSnapshot holds a stable snapshot while events mutate", async () => {
+    // Capture a snapshot, then mutate the source array. The written file must
+    // reflect the capture point, not the later mutation — this is what makes
+    // deferring the write to the background safe.
+    const id = "stable";
+    const events = makeEvents(2, 50);
+    const snap = buildCheckpointSnapshot(events);
+    // Mutate the live array after the snapshot is taken.
+    events.push({ type: "message", id: "late", role: "user", content: [{ type: "text", text: "LATE_MUTATION" }] });
+    await writeCheckpointFromSnapshot(workDir, id, snap, { tokenThreshold: 10 });
+    const text = await readCheckpoint(workDir, id);
+    expect(text).not.toContain("LATE_MUTATION");
   });
 
   it("appends round-level blocks", async () => {

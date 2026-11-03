@@ -11,7 +11,7 @@
 import type {
   CodepilotConfig,
   GoalRunResult,
-  PermissionDecision,
+  PermissionResolution,
   PermissionMode,
   QuestionAnswers,
   QuestionRequest,
@@ -51,15 +51,17 @@ export type SessionController = CoreSessionController | MockSessionController | 
  * Bridge between the React UI and the (possibly async) permission callback
  * that core sees. Implementation in cli.tsx wires
  * onPermissionRequest = (req) => bridge.waitDecision(req)
- * The UI calls `bridge.resolve(requestId, decision)` when the user picks.
+ * The UI calls `bridge.resolve(requestId, resolution)` when the user picks.
+ * A resolution is either a plain decision or a decline-with-feedback object.
  */
 export interface PermissionBridge {
  /** UI subscribes to know when a request is waiting for the user. */
   onPending(listener: (req: PendingPermission) => void): () => void;
  /** Core awaits this; resolved when the UI calls `resolve`. */
-  waitDecision(req: PendingPermission): Promise<PermissionDecision>;
- /** UI calls this when the user decides. */
-  resolve(requestId: string, decision: PermissionDecision): void;
+  waitDecision(req: PendingPermission): Promise<PermissionResolution>;
+ /** UI calls this when the user decides. A deny may carry a `feedback`
+  * message (decline-with-feedback) the model sees as the tool result. */
+  resolve(requestId: string, resolution: PermissionResolution): void;
  /** Another client answered first: drop the waiter and hide the prompt. */
   dismiss(requestId: string): void;
   onDismiss(listener: (requestId: string) => void): () => void;
@@ -198,7 +200,7 @@ export interface ActiveSession {
     config?: CodepilotConfig;
   }): Promise<ActiveSession>;
   listSessions(): Promise<SessionSummary[]>;
-  onPermissionRequest(req: PendingPermission): Promise<PermissionDecision>;
+  onPermissionRequest(req: PendingPermission): Promise<PermissionResolution>;
 }
 
 /**
@@ -208,7 +210,7 @@ export interface ActiveSession {
 export function createPermissionBridge(): PermissionBridge {
   const waiters = new Map<
     string,
-    { resolve: (d: PermissionDecision) => void; reject: (e: Error) => void }
+    { resolve: (d: PermissionResolution) => void; reject: (e: Error) => void }
   >();
   const listeners = new Set<(req: PendingPermission) => void>();
 
@@ -220,19 +222,19 @@ export function createPermissionBridge(): PermissionBridge {
       };
     },
     waitDecision(req) {
-      return new Promise<PermissionDecision>((resolve, reject) => {
+      return new Promise<PermissionResolution>((resolve, reject) => {
         waiters.set(req.requestId, { resolve, reject });
         for (const l of listeners) l(req);
       });
     },
-    resolve(requestId, decision) {
+    resolve(requestId, resolution) {
       const w = waiters.get(requestId);
       if (w === undefined) {
  // No waiter: caller passed a stale id; ignore.
         return;
       }
       waiters.delete(requestId);
-      w.resolve(decision);
+      w.resolve(resolution);
     },
     ...dismissable(waiters),
   };

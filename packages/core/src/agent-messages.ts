@@ -151,8 +151,21 @@ function foldForBudget(
   return { events: out, foldedCount: totalFolded };
 }
 
-const INTERRUPTED_RESULT =
-  "[not executed: the turn was interrupted before this tool ran. Re-issue the call only if you still need it.]";
+// Synthetic result for a tool_use left unanswered when the turn was cut off
+// (crash/restart/interrupt). The phrasing is deliberately side-effect-safe: the
+// interrupt may have landed AFTER the tool started — even after it finished but
+// before its result was persisted — so the outcome is genuinely UNKNOWN, not a
+// guaranteed "never ran". Telling the model to blindly re-issue would double a
+// mutating action (duplicate write, repeated request, re-deleted data). We take
+// dsh's repair-closer stance: retry only read-only / idempotent calls; for a
+// call that may have side effects, verify the real state (re-read the file, list
+// the resource) or ask the user before re-running.
+export const INTERRUPTED_RESULT =
+  "[interrupted: the turn was cut off before this tool's result was recorded, so its outcome is " +
+  "UNKNOWN — it may not have run, or may have already taken effect. Do NOT blindly re-issue it. " +
+  "If the call is read-only or idempotent, you may safely retry. If it could have side effects " +
+  "(writing/editing files, running commands, network or data changes), first verify the actual " +
+  "state (e.g. re-read the file or list the resource) or ask the user before re-running.]";
 
 /**
  * Map the internal event transcript into the provider's message format.
@@ -360,6 +373,8 @@ export async function* streamOnce(
  * prompt-start `<plan>` block of the dynamic suffix. */
     liveContext?: string;
     onRetry?: StreamChatOptions["onRetry"];
+ /** Tool-call policy for this turn (see StreamChatOptions.toolChoice). */
+    toolChoice?: StreamChatOptions["toolChoice"];
   } = {},
 ): AsyncIterable<StreamEvent> {
   const sys = deps.systemPrompt;
@@ -433,5 +448,6 @@ export async function* streamOnce(
     promptCacheKey: deps.promptCacheKey,
     responseFormat: deps.responseFormat,
     onRetry: extra.onRetry,
+    toolChoice: extra.toolChoice,
   });
 }

@@ -98,6 +98,30 @@ export function removeWorkspace(cwd: string): string[] {
   return next;
 }
 
+/**
+ * Replace the entire workspace list with exactly `cwds` (normalized, deduped)
+ * and persist it. Unlike {@link addWorkspace}, this PURGES any prior entries —
+ * used by a remote phone so only the grant-authorized workspaces remain,
+ * discarding stale localStorage-cached workspaces from an earlier local
+ * session on the same browser profile.
+ */
+export function replaceWorkspaces(cwds: string[]): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const raw of cwds) {
+    const trimmed = raw.trim().replace(/\/+$/, "") || raw.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    next.push(trimmed);
+  }
+  saveWorkspaces(next);
+  const active = read(localStorage, CWD_KEY);
+  if (!active || !next.some((w) => sameCwd(w, active))) {
+    write(localStorage, CWD_KEY, next[0] ?? "");
+  }
+  return next;
+}
+
 /** Remember the model chosen for a workspace (and as the global last pick). */
 export function saveEndpointPref(cwd: string | undefined, pref: EndpointPref): void {
   if (!pref.model) return;

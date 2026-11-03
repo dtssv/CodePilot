@@ -68,6 +68,13 @@ class FakeSession {
   setReasoningEffort(effort: "low" | "medium" | "high" | undefined) {
     this.config = { ...this.config, reasoningEffort: effort, thinkingBudget: undefined };
   }
+
+  sandboxMode: "off" | "workspace-write" | "read-only" = "workspace-write";
+  setSandboxMode(mode: "off" | "workspace-write" | "read-only") {
+    this.sandboxMode = mode;
+    this.config = { ...this.config, sandbox: { mode } };
+    return { mode, unavailable: false, backend: "none" };
+  }
   getReasoningEffort(): "low" | "medium" | "high" | undefined {
     return this.config.reasoningEffort as "low" | "medium" | "high" | undefined;
   }
@@ -125,7 +132,11 @@ class FakeSession {
         input: { cmd: "ls" },
         reason: "needs approval",
       };
-      const decision = (await this.permissionHandler(req)) as string;
+      const resolution = (await this.permissionHandler(req)) as
+        | string
+        | { decision: string; feedback?: string };
+      const decision = typeof resolution === "string" ? resolution : resolution.decision;
+      const feedback = typeof resolution === "string" ? undefined : resolution.feedback;
       this.emit({
         type: "tool_call",
         id: "t1",
@@ -136,14 +147,14 @@ class FakeSession {
         type: "tool_result",
         toolCallId: "t1",
         name: "bash",
-        content: "ok",
+        content: feedback ?? "ok",
         isError: decision === "deny",
       });
       this.emit({
         type: "message",
         id: "m1",
         role: "assistant",
-        content: [{ type: "text", text: `decision=${decision}` }],
+        content: [{ type: "text", text: `decision=${decision}${feedback ? ` feedback=${feedback}` : ""}` }],
       });
       return;
     }
@@ -206,6 +217,10 @@ class FakeSession {
 
 const sessionsById = new Map<string, FakeSession>();
 
+// Mutable stand-in for the user config file, so config/setSandbox persistence
+// does not touch the real ~/.codepilot/config.json during tests.
+let fakeUserConfig: Record<string, unknown> = {};
+
 vi.mock("@codepilot/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@codepilot/core")>();
   return {
@@ -266,6 +281,12 @@ vi.mock("@codepilot/core", async (importOriginal) => {
     })),
     deleteUserProvider: vi.fn(async () => ({})),
     setUserActiveEndpoint: vi.fn(async () => undefined),
+    // Keep sandbox-config persistence off the real user config file during tests.
+    readUserConfigFile: vi.fn(async () => ({ raw: fakeUserConfig, path: "/tmp/fake-config.json" })),
+    writeUserConfigFile: vi.fn(async (raw: Record<string, unknown>) => {
+      fakeUserConfig = raw;
+    }),
+    detectSandboxBackend: vi.fn(() => "none" as const),
     runGoal: vi.fn(),
   };
 });
@@ -411,6 +432,33 @@ describe("server / protocol handlers", () => {
     );
   });
 
+  it("plugins/market returns the bundled discovery list with install-source descriptions", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "test", version: "0.0.0" },
+    });
+    const res = await client.request<
+      { query?: string },
+      { plugins: Array<{ name: string; source: string }>; describe: Record<string, string> }
+    >("plugins/market", {});
+    // The GitHub-hosted (bundled-seed) discovery entry point yields installable
+    // plugins, each with a human-readable install-source line for confirmation.
+    expect(res.plugins.length).toBeGreaterThan(0);
+    const first = res.plugins[0]!;
+    expect(typeof first.name).toBe("string");
+    expect(typeof first.source).toBe("string");
+    expect(res.describe[first.name]).toContain(first.source);
+    // The query filter narrows the list.
+    const filtered = await client.request<
+      { query?: string },
+      { plugins: Array<{ name: string }> }
+    >("plugins/market", { query: "security" });
+    expect(filtered.plugins.some((p) => p.name === "security-audit")).toBe(true);
+  });
+
   it("config/get redacts api keys and lists selectable models", async () => {
     registerServer(server, { defaultCwd: "/tmp" });
     await client.request("initialize", {
@@ -432,6 +480,68 @@ describe("server / protocol handlers", () => {
     expect(snap.providers.deepseek?.apiKey).toBeUndefined();
     expect(snap.selectableModels.some((m) => m.id === "deepseek/deepseek-reasoner")).toBe(true);
     expect(snap.templates.length).toBeGreaterThan(0);
+  });
+
+  it("config/setSandbox persists the mode and hot-applies to a live session", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    const res = await client.request<
+      { mode: string; sessionId: string },
+      { sandbox: { mode: string; unavailable: boolean; backend: string } }
+    >("config/setSandbox", { mode: "off", sessionId });
+    expect(res.sandbox.mode).toBe("off");
+    // Persisted to the (faked) user config file.
+    expect((fakeUserConfig.sandbox as { mode?: string } | undefined)?.mode).toBe("off");
+    // Hot-applied to the live session.
+    const session = sessionsById.get(sessionId)!;
+    expect(session.sandboxMode).toBe("off");
+  });
+
+  it("config/setSandbox persists even without a live session", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<
+      { mode: string },
+      { sandbox: { mode: string } }
+    >("config/setSandbox", { mode: "read-only" });
+    expect(res.sandbox.mode).toBe("read-only");
+    expect((fakeUserConfig.sandbox as { mode?: string } | undefined)?.mode).toBe("read-only");
+  });
+
+  it("config/setSandbox rejects an invalid mode", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await expect(
+      client.request("config/setSandbox", { mode: "bogus" }),
+    ).rejects.toThrow(/sandbox mode must be one of/);
+  });
+
+  it("config/get reports the sandbox mode", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const snap = await client.request<{}, { sandbox: { mode: string } }>("config/get", {});
+    expect(snap.sandbox.mode).toBe("workspace-write");
   });
 
   it("session/setModel switches model and emits model event", async () => {
@@ -525,6 +635,45 @@ describe("server / protocol handlers", () => {
       (e: any) => e?.event?.type === "message" && e.event.role === "assistant",
     );
     expect(messages.length).toBeGreaterThan(0);
+  });
+
+  it("decline-with-feedback: permission/respond feedback reaches core as a deny resolution", async () => {
+    registerServer(server, { defaultCwd: "/work", defaultPermissionMode: "ask" });
+
+    client.onRequest<{ requestId: string }, Record<string, never>>(
+      "permission/request",
+      async ({ requestId }) => {
+        void client.request("permission/respond", {
+          requestId,
+          decision: "deny",
+          feedback: "edit b.txt instead",
+        });
+        return {};
+      },
+    );
+
+    const events: unknown[] = [];
+    client.onNotification("event", (params) => events.push(params));
+
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    await client.request("prompt/send", { sessionId, text: "hi" });
+    await settled();
+
+    // The FakeSession reflects the resolution it received from core: a deny
+    // whose feedback rode through as the tool_result content.
+    const toolResult = events.find((e: any) => e?.event?.type === "tool_result");
+    expect((toolResult as any)?.event?.content).toBe("edit b.txt instead");
+    expect((toolResult as any)?.event?.isError).toBe(true);
+    const msg = events.find(
+      (e: any) => e?.event?.type === "message" && e.event.role === "assistant",
+    );
+    expect((msg as any)?.event?.content?.[0]?.text).toContain("feedback=edit b.txt instead");
   });
 
   it("permission/respond without a pending request returns -32602", async () => {
@@ -754,6 +903,123 @@ describe("server / protocol handlers", () => {
     await expect(
       client.request("session/resume", { sessionId: outside.id }),
     ).rejects.toBeInstanceOf(RpcError);
+  });
+
+  it("a remote grant cannot point cwd-based RPCs at an unauthorized workspace", async () => {
+    // Grant authorizes ONLY /work/a. Every cwd entry point must reject /work/b.
+    serverHandle = registerServer(server, {
+      defaultCwd: "/work/a",
+      remoteGrant: {
+        token: "t",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+        cwd: "/work/a",
+        cwds: ["/work/a"],
+        caps: ["prompt", "cancel", "follow", "answer"],
+      },
+    });
+    // initialize to an authorized cwd succeeds.
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    // Re-initializing to an UNauthorized cwd (how the web client switches the
+    // active workspace) must be refused — the former escalation vector.
+    await expect(
+      client.request("initialize", {
+        protocolVersion: PROTOCOL_VERSION,
+        cwd: "/work/b",
+        permissionMode: "ask",
+        clientInfo: { name: "t", version: "0" },
+      }),
+    ).rejects.toBeInstanceOf(RpcError);
+    // session/new, workspace/list, and commands/list at /work/b are refused too.
+    await expect(
+      client.request("session/new", { cwd: "/work/b" }),
+    ).rejects.toBeInstanceOf(RpcError);
+    await expect(
+      client.request("workspace/list", { path: ".", cwd: "/work/b" }),
+    ).rejects.toBeInstanceOf(RpcError);
+    await expect(
+      client.request("commands/list", { cwd: "/work/b" }),
+    ).rejects.toBeInstanceOf(RpcError);
+  });
+
+  it("a remote grant denies-by-default any method not in the allowlist", async () => {
+    // Security invariant: the scoped-grant gate is a DEFAULT-DENY per-method
+    // allowlist (REMOTE_METHOD_CAPS). A privileged RPC that nobody added to the
+    // map must be rejected for a phone grant — so a future privileged handler
+    // added without an allowlist entry can never be silently reachable from a
+    // scoped remote device. `workspace/write` is a registered handler that is
+    // intentionally absent from REMOTE_METHOD_CAPS.
+    serverHandle = registerServer(server, {
+      defaultCwd: "/work/a",
+      remoteGrant: {
+        token: "t",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+        cwd: "/work/a",
+        cwds: ["/work/a"],
+        caps: ["prompt", "cancel", "follow", "answer"],
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await expect(
+      client.request("workspace/write", { cwd: "/work/a", path: "x.txt", content: "y" }),
+    ).rejects.toBeInstanceOf(RpcError);
+  });
+
+  it("a remote grant is refused a method whose required capability it lacks", async () => {
+    // The grant can follow but was NOT given the `prompt` capability, so
+    // prompt/send (REMOTE_METHOD_CAPS["prompt/send"] === "prompt") must be
+    // rejected even though the method IS in the allowlist.
+    serverHandle = registerServer(server, {
+      defaultCwd: "/work/a",
+      remoteGrant: {
+        token: "t",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3_600_000,
+        cwd: "/work/a",
+        cwds: ["/work/a"],
+        caps: ["follow"],
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await expect(
+      client.request("prompt/send", { sessionId: "s1", text: "hi" }),
+    ).rejects.toBeInstanceOf(RpcError);
+  });
+
+  it("the local (ungranted) connection is unaffected by cwd-scope enforcement", async () => {
+    // No remoteGrant → any cwd is allowed (the normal desktop/web case).
+    registerServer(server, { defaultCwd: "/work/a" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work/a",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    // Re-initialize to a different workspace: allowed for a local connection.
+    await expect(
+      client.request("initialize", {
+        protocolVersion: PROTOCOL_VERSION,
+        cwd: "/work/b",
+        permissionMode: "ask",
+        clientInfo: { name: "t", version: "0" },
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("workspace list/read/search are cwd-confined", async () => {

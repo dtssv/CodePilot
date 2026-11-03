@@ -52,7 +52,7 @@ export interface CustomAgent {
  /** Absolute path to the .md file on disk. */
   path: string;
  /** Which source this agent came from. */
-  source: "project" | "user";
+  source: "project" | "user" | "plugin";
 }
 
 export interface DiscoverOptions {
@@ -60,6 +60,11 @@ export interface DiscoverOptions {
   projectDir?: string;
  /** Override the user-global agents directory (defaults to `~/.codepilot/agents`). */
   userDir?: string;
+ /** Extra directories to scan after project/user (e.g. plugin `agents/` dirs).
+  * Agents found here use the `"plugin"` source and are LOWEST priority:
+  * a project/user agent with the same name wins. Each dir is scanned
+  * fail-soft, so one unreadable plugin dir never aborts discovery. */
+  extraDirs?: string[];
 }
 
 /**
@@ -74,7 +79,14 @@ export async function discoverCustomAgents(
   const projectDir = opts.projectDir ?? join(cwd, ".codepilot", "agents");
   const userDir = opts.userDir ?? join(homedir(), ".codepilot", "agents");
   const out = new Map<string, CustomAgent>();
- // User agents first (lower priority), then project agents overwrite.
+ // Lowest priority first so later (higher-priority) sources overwrite by name:
+ // plugin agents < user agents < project agents. Each dir is loaded
+ // fail-soft inside loadAgentsFromDir (unreadable dir → []), so one bad
+ // plugin dir can never abort discovery of the rest.
+  for (const dir of opts.extraDirs ?? []) {
+    const found = await loadAgentsFromDir(dir, "plugin");
+    for (const a of found) out.set(a.name, a);
+  }
   for (const [source, dir] of [["user", userDir], ["project", projectDir]] as const) {
     const found = await loadAgentsFromDir(dir, source);
     for (const a of found) out.set(a.name, a);
@@ -84,7 +96,7 @@ export async function discoverCustomAgents(
 
 async function loadAgentsFromDir(
   dir: string,
-  source: "project" | "user"
+  source: "project" | "user" | "plugin"
 ): Promise<CustomAgent[]> {
   let entries: string[];
   try {
@@ -116,7 +128,7 @@ async function loadAgentsFromDir(
 export function parseAgentFile(
   text: string,
   path: string,
-  source: "project" | "user"
+  source: "project" | "user" | "plugin"
 ): CustomAgent | null {
   const { frontmatter, body } = splitFrontmatter(text);
   if (!frontmatter) return null;

@@ -34,6 +34,11 @@
 // never fatal).
 // - STDOUT JSON: hooks may emit a JSON object on stdout for richer
 // control. See `hooks-handlers.ts` `interpretDecision` for the schema.
+// Notable fields: `decision:"block"` + `reason` (block); `feedback`
+// (appended to a tool result); `updatedInput` (PreToolUse: rewrite the
+// tool input); `updatedResult` (PostToolUse: REPLACE the result text the
+// model sees — redact/sanitize/summarize, unlike `feedback` which appends);
+// `prompt` (UserPromptSubmit: rewrite the prompt).
 
 import type { HooksConfig, HookEntryConfig } from "./types.js";
 import { HookTrustStore, hashCommand, trustSubject } from "./hooks-trust.js";
@@ -108,6 +113,12 @@ export interface PreHookResult {
 export interface PostHookResult {
  /** Extra text appended to the tool result the model sees. */
   feedback?: string;
+ /** Replacement tool-result text. When a PostToolUse hook returns
+  * `{"updatedResult":"…"}`, it REPLACES the output the model sees (redaction /
+  * sanitization / summarization), unlike `feedback` which only appends. The
+  * first hook to return one wins; later hooks run against the rewritten text.
+  * Undefined means no hook rewrote the result. */
+  updatedResult?: string;
   warnings: string[];
 }
 
@@ -273,7 +284,14 @@ export class HookEngine {
     return { action: "allow", updatedInput: updated, warnings };
   }
 
- /** Run PostToolUse hooks; concatenates any stdout feedback. */
+ /**
+  * Run PostToolUse hooks. Concatenates any stdout feedback (appended to the
+  * tool result), and lets a hook REPLACE the result text via
+  * `{"updatedResult":"…"}` — the first such hook wins and later hooks see the
+  * rewritten text as their `result` payload (so chained redaction composes).
+  * Feedback still appends on top of the (possibly rewritten) result. The
+  * rewritten text is bounded the same as the inbound result (50k).
+  */
   async runPostToolUse(
     toolName: string,
     input: unknown,
@@ -282,18 +300,26 @@ export class HookEngine {
   ): Promise<PostHookResult> {
     const warnings: string[] = [];
     const feedback: string[] = [];
+    let current = result;
+    let updatedResult: string | undefined;
     for (const h of this.matching("PostToolUse", toolName, { tool: toolName })) {
       const r = await this.runHook(h, {
         event: "PostToolUse",
         tool: toolName,
         input,
-        result: result.slice(0, 50_000),
+        result: current.slice(0, 50_000),
         isError,
         cwd: this.cwd,
       });
       const decision = interpretDecision(r);
+      if (decision.updatedResult !== undefined && updatedResult === undefined) {
+        updatedResult = decision.updatedResult.slice(0, 50_000);
+        current = updatedResult;
+      }
       if (decision.feedback) feedback.push(decision.feedback);
-      else if (r.stdout.trim()) feedback.push(r.stdout.trim());
+      else if (r.stdout.trim() && decision.updatedResult === undefined) {
+        feedback.push(r.stdout.trim());
+      }
       if (r.code !== 0 && r.code !== null) {
         warnings.push(
           `PostToolUse hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
@@ -302,7 +328,7 @@ export class HookEngine {
       if (r.timedOut)
         warnings.push(`PostToolUse hook "${h.command}" timed out`);
     }
-    return { feedback: feedback.join("\n") || undefined, warnings };
+    return { feedback: feedback.join("\n") || undefined, updatedResult, warnings };
   }
 
  /**

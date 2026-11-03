@@ -203,6 +203,10 @@ export interface PromptCancelParams {
 export interface PermissionRespondParams {
   requestId: string;
   decision: PermissionDecision;
+  /** Decline-with-feedback: on a `"deny"`, an optional correction message the
+   * model sees as the tool result instead of a canned "permission denied".
+   * Ignored for allow/always. Sent by the embedded web UI's PermissionCard. */
+  feedback?: string;
 }
 
 export interface SessionResumeParams {

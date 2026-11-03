@@ -246,6 +246,9 @@ export const WebSearchConfigSchema = z
     apiKey: z.string().optional(),
     cx: z.string().optional(),
     endpoint: z.string().url().optional(),
+    language: z.string().optional(),
+    region: z.string().optional(),
+    freshness: z.enum(["day", "week", "month", "year"]).optional(),
   })
   .strict();
 
@@ -297,6 +300,11 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
+    // Prompt-cache warming (opt-in): when true, the session keeps an Anthropic
+    // ephemeral cache alive across idle gaps by replaying the last request with
+    // a 1-token output cap at ~90% of the cache TTL — but only when the
+    // expected savings beat the warm's own cost (see cacheWarmer). Default off.
+    cacheWarming: z.boolean().optional(),
     // When true, createSession attempts to load the optional pure-JS
     // `gpt-tokenizer` package for provider-accurate token counts; falls back
     // to the built-in heuristic when the package is not installed.
@@ -330,6 +338,26 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     autoApprove: z.array(z.string().min(1)).optional(),
     permissions: PermissionRulesSchema.optional(),
     sandbox: SandboxConfigSchema.optional(),
+    // Extra secret-redaction patterns applied to tool output, ON TOP of the
+    // built-in floor (AWS/OpenAI/Anthropic/GitHub keys, PEM blocks, bearer
+    // tokens, connection-string/env/JSON secrets). Use this for deployment- or
+    // org-specific secret shapes. A malformed regex is skipped; the built-in
+    // floor always runs and cannot be disabled here.
+    redact: z
+      .object({
+        patterns: z
+          .array(
+            z.object({
+              name: z.string().min(1),
+              regex: z.string().min(1),
+              flags: z.string().optional(),
+              replace: z.string().optional(),
+            }),
+          )
+          .optional(),
+      })
+      .strict()
+      .optional(),
     // 0 = unlimited. Positive caps the agent↔tool loop for CI / unattended
     // runs.
     maxTurns: z.number().int().min(0).max(10_000).optional(),

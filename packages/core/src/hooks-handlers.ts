@@ -357,6 +357,11 @@ export interface HookDecision {
   rewrittenPrompt?: string;
  /** PreToolUse: replacement input object. */
   updatedInput?: unknown;
+ /** PostToolUse: replacement tool-result TEXT the model sees. Lets a hook
+  * redact/sanitize/summarize output before it reaches the model (unlike
+  * `feedback`, which only appends). Honoured only for PostToolUse; the first
+  * hook that returns one wins and later hooks see the rewritten text. */
+  updatedResult?: string;
 }
 
 /**
@@ -380,7 +385,9 @@ export function interpretDecision(r: HookRawResult): HookDecision {
     const rewrittenPrompt =
       typeof json.prompt === "string" ? json.prompt : undefined;
     const updatedInput = "updatedInput" in json ? json.updatedInput : undefined;
-    return { action, reason, feedback, rewrittenPrompt, updatedInput };
+    const updatedResult =
+      typeof json.updatedResult === "string" ? json.updatedResult : undefined;
+    return { action, reason, feedback, rewrittenPrompt, updatedInput, updatedResult };
   }
   return { action: "allow" };
 }

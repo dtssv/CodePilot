@@ -46,4 +46,17 @@ describe("PersistentShell", () => {
     expect(r.exitCode).not.toBe(0);
     expect((await shell.run("echo still-alive", { timeout: 5_000 })).stdout.trim()).toBe("still-alive");
   }, 30_000);
+
+  it("applies the non-interactive pager/terminal guards in the shell env", async () => {
+    // Without these, a `git log` / `git diff` / `man` in the persistent shell
+    // spawns a pager waiting for a TTY that never appears and hangs until the
+    // command timeout. Assert the guards reached the live shell environment.
+    shell = new PersistentShell({ cwd: tmpdir(), shell: "/bin/sh", shellArgs: [] });
+    const r = await shell.run(
+      'echo "$PAGER|$GIT_PAGER|$TERM|$NO_COLOR|$GIT_TERMINAL_PROMPT"',
+      { timeout: 5_000 },
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("cat|cat|dumb|1|0");
+  }, 15_000);
 });

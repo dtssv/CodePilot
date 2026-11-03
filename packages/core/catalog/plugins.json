@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-02",
+  "plugins": [
+    {
+      "name": "hello-world",
+      "description": "Starter template — one command, one skill, one hook. Copy it to build your own plugin.",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#hello-world",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["example", "starter", "template", "tutorial"]
+    },
+    {
+      "name": "code-review",
+      "description": "Automated code review with configurable rules and severity levels",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#code-review",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["review", "quality", "lint"]
+    },
+    {
+      "name": "doc-gen",
+      "description": "Generate API docs, README sections, JSDoc/TSDoc comments, and architecture diagrams",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#doc-gen",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["docs", "documentation", "jsdoc"]
+    },
+    {
+      "name": "perf-profile",
+      "description": "Performance profiling — identify bottlenecks, memory leaks, and optimization opportunities",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#perf-profile",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["performance", "profiling", "optimization"]
+    },
+    {
+      "name": "refactor",
+      "description": "Safe automated refactoring — extract functions, rename symbols, simplify conditionals, modernize syntax",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#refactor",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["refactor", "codemod", "cleanup"]
+    },
+    {
+      "name": "runtime-example",
+      "description": "Reference plugin for custom agent runtimes — primes each prompt with a listing of the working directory, then delegates to the built-in loop",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#runtime-example",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["runtime", "example", "reference"]
+    },
+    {
+      "name": "security-audit",
+      "description": "Security audit — dependency scanning, secret detection, injection prevention, auth/authz review",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#security-audit",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["security", "audit", "secrets"]
+    },
+    {
+      "name": "spec-driven",
+      "description": "Spec-driven development — requirements → design → tasks with numbered, verifiable acceptance criteria. Three skills and matching slash commands that produce reviewable Markdown specs under .codepilot/specs/<feature>/ and bind each task to a runnable verify command.",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#spec-driven",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["spec", "requirements", "design", "tasks", "methodology", "workflow"]
+    },
+    {
+      "name": "test-gen",
+      "description": "Generate unit tests, integration tests, and test fixtures for your codebase",
+      "source": "https://github.com/dtssv/codepilot-plugins.git#test-gen",
+      "version": "1.0.0",
+      "author": "CodePilot",
+      "tags": ["testing", "tests", "fixtures"]
+    }
+  ]
+}

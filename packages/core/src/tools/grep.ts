@@ -5,13 +5,13 @@ import { z } from "zod";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import type { ToolDef } from "./types.js";
-import { shouldSkipWalkDir, guardPath } from "./_shared.js";
+import { shouldSkipWalkDir, guardPath, ARTIFACT_THRESHOLD } from "./_shared.js";
 
-/** Above this many chars, the full match list spills to an artifact and the
- * inline result keeps a head slice + a pointer. A huge grep result (hundreds
- * of matches with context) otherwise sits verbatim in the transcript and
- * gets re-sent every turn, ballooning tokens and slowing the whole session. */
-const ARTIFACT_THRESHOLD = 8_000;
+/** How many chars of the match list to keep inline before spilling the rest to
+ * an artifact. Head-only (first matches are usually the most relevant); the
+ * spill threshold itself is the shared {@link ARTIFACT_THRESHOLD}. A huge grep
+ * result otherwise sits verbatim in the transcript and gets re-sent every turn,
+ * ballooning tokens and slowing the whole session. */
 const HEAD_CHARS = 6_000;
 
 const schema = z.object({

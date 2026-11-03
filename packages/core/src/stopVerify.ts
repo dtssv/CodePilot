@@ -29,6 +29,29 @@ export function resolveStopVerifyMode(
   return "off";
 }
 
+/**
+ * Decide the effective stopVerify mode for a completed turn, applying the
+ * conditional "run the project tests" upgrade.
+ *
+ * The upgrade only fires when stopVerify was NEVER configured (left at the
+ * default) and the turn actually modified code — a pure analysis/Q&A turn stays
+ * off, avoiding needless 429-prone judge calls. An EXPLICIT `false`/"off" is an
+ * intentional user choice and is honoured verbatim: we must not silently run
+ * the test gate on a user who deliberately turned verification off. Explicit
+ * "prompt"/"tests" settings pass through unchanged.
+ */
+export function effectiveStopVerifyMode(args: {
+  /** Raw config value, so an explicit `false`/"off" is distinguishable from unset. */
+  configured: boolean | StopVerifyMode | undefined;
+  /** Whether this turn wrote/edited a code file. */
+  modifiedCode: boolean;
+}): StopVerifyMode {
+  const resolved = resolveStopVerifyMode(args.configured);
+  const unset = args.configured === undefined;
+  if (resolved === "off" && unset && args.modifiedCode) return "tests";
+  return resolved;
+}
+
 export interface StopVerifyContext {
   cwd: string;
   reason: string;
@@ -89,6 +112,13 @@ Allow when:
 - Evidence matches the claim (tests/build for code tasks; browser/screenshot for UI), OR the agent clearly stated verification was impossible and why.
 - The change is a narrow code fix with an appropriate automated check, or a Q&A/planning turn with no deliverable to verify.
 - stop_hook_active is true and the agent fixed the prior concern.
+
+De-escalation: you have already blocked this turn stop_continue_count time(s)
+out of a cap of stop_continue_cap. Each block costs the user another full model
+turn, so raise your bar for blocking as the count approaches the cap: block only
+on a concrete, actionable gap you have NOT already raised. If the same concern
+keeps recurring and the agent is clearly trying but cannot close it, allow and
+let the agent report the limitation to the user rather than spinning to the cap.
 
 Respond with JSON only — no markdown:
 {"decision":"allow"}

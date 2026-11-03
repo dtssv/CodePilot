@@ -1,0 +1,14 @@
+{
+  "name": "sink-example",
+  "displayName": "Event Sink Example (mirror the log)",
+  "description": "Reference plugin for an additive event sink — mirrors every persisted JSONL line to an external data source (here, a local file) through the RuntimeToolkit ABI. JSONL stays the source of truth; the mirror is best-effort and fail-soft",
+  "version": "1.0.0",
+  "author": "CodePilot",
+  "homepage": "https://github.com/dtssv/codepilot-plugins/tree/main/sink-example",
+  "enabled": true,
+  "permissions": ["runtime", "fileWrite"],
+  "runtime": {
+    "module": "./runtime.mjs",
+    "name": "sink-example"
+  }
+}

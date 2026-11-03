@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import type {
   AgentMode,
   ImageAttachment,
-  PermissionDecision,
+  PermissionResolution,
   PromptFile,
   QuestionAnswers,
   ReasoningEffort,
@@ -28,6 +28,7 @@ import {
   loadPrefs,
   loadReasoningEffort,
   removeWorkspace,
+  replaceWorkspaces,
   matchPreferredEndpoint,
   saveDefaultAgentMode,
   saveEndpointPref,
@@ -56,9 +57,11 @@ export interface Codepilot {
   changeCwd(cwd: string): Promise<void>;
  /** Add/focus a workspace folder and bind subsequent sessions to it. */
   openWorkspace(cwd: string): Promise<void>;
- /** Merge workspaces into the local list without switching the active one
-  * (used to seed a remote phone with the authorized set). */
-  seedWorkspaces(cwds: string[]): void;
+ /** Seed the local workspace list without switching the active one. By default
+  * merges; pass `replace: true` to make the list EXACTLY `cwds` (used by a
+  * remote phone so only the grant-authorized workspaces show, never the
+  * localStorage-cached set from a prior local session). */
+  seedWorkspaces(cwds: string[], opts?: { replace?: boolean }): void;
  /** Remove a workspace from the open list (does not delete sessions on disk). */
   closeWorkspace(cwd: string): Promise<void>;
   newSession(mode?: AgentMode): Promise<string | undefined>;
@@ -87,7 +90,7 @@ export interface Codepilot {
     providerId?: string,
     reasoningEffort?: ReasoningEffort | null,
   ): Promise<void>;
-  decidePermission(decision: PermissionDecision): Promise<void>;
+  decidePermission(resolution: PermissionResolution): Promise<void>;
   answerQuestion(answers: QuestionAnswers): Promise<void>;
   notify(text?: string): void;
  /** Leave the current session and show the home/empty screen. */
@@ -313,7 +316,15 @@ export function useCodepilot(): Codepilot {
     [client, refreshSessions, applyPreferredModel],
   );
 
-  const seedWorkspaces = useCallback((cwds: string[]) => {
+  const seedWorkspaces = useCallback((cwds: string[], opts?: { replace?: boolean }) => {
+    // Replace mode (remote phone): the displayed set becomes EXACTLY the
+    // grant-authorized cwds, purging any localStorage-cached workspaces from a
+    // prior local session — otherwise a phone paired for 2 workspaces would
+    // still see every workspace this browser profile had open before.
+    if (opts?.replace) {
+      setWorkspaces(replaceWorkspaces(cwds));
+      return;
+    }
     let next = loadPrefs().workspaces;
     for (const raw of cwds) {
       const cwd = raw.trim().replace(/\/+$/, "") || raw.trim();
@@ -542,10 +553,21 @@ export function useCodepilot(): Codepilot {
 
   const retryLast = useCallback(async () => {
     const id = live.current.sessionId;
+    if (!id) return;
+    // Prefer resuming the last turn from the breakpoint (no new user bubble):
+    // the agent re-engages exactly where it stopped. Only when there is
+    // nothing to resume (the server reports `noop`) do we fall back to
+    // re-sending the last prompt as a fresh message.
+    try {
+      const res = await client.resumeTurn(id);
+      if (res.delivery !== "noop") return;
+    } catch {
+      /* fall through to resend */
+    }
     const text = lastUserPrompt(live.current.rows);
-    if (!id || !text) return;
+    if (!text) return;
     await sendTo(id, text);
-  }, [sendTo]);
+  }, [client, sendTo]);
 
   const cancel = useCallback(async () => {
     const id = live.current.sessionId;
@@ -622,12 +644,15 @@ export function useCodepilot(): Codepilot {
   );
 
   const decidePermission = useCallback(
-    async (decision: PermissionDecision) => {
+    async (resolution: PermissionResolution) => {
       const req = live.current.permission;
       if (!req) return;
       dispatch({ type: "permission-resolved" });
       try {
-        await client.respondPermission(req.requestId, decision);
+        // Split a decline-with-feedback object into decision + message.
+        const decision = typeof resolution === "string" ? resolution : resolution.decision;
+        const feedback = typeof resolution === "string" ? undefined : resolution.feedback;
+        await client.respondPermission(req.requestId, decision, feedback);
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });
       }

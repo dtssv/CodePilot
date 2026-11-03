@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { acceptSave, changedExternally, canSave, type EditorFile } from "../state/workspaceEditor.js";
 import { GitDiffController, type GitDiffState } from "../state/gitDiff.js";
 import type { CodepilotClient } from "../protocol/client.js";
@@ -17,9 +17,30 @@ import {
 } from "./Icons.js";
 import { InteractiveTerminal } from "./InteractiveTerminal.js";
 
+// CodeMirror is heavy and only needed once a file is opened — load it on demand
+// so the chat-only flow never pays for it.
+const CodeEditor = lazy(() => import("./CodeEditor.js").then((m) => ({ default: m.CodeEditor })));
+
 type Entry = { name: string; path: string; kind: "file" | "directory"; size?: number };
 
+/** Track the active light/dark palette from the <html data-theme> attribute. */
+function useIsDark(): boolean {
+  const [dark, setDark] = useState(() =>
+    typeof document === "undefined" ? true : document.documentElement.dataset.theme !== "light",
+  );
+  useEffect(() => {
+    const el = document.documentElement;
+    const update = (): void => setDark(el.dataset.theme !== "light");
+    update();
+    const obs = new MutationObserver(update);
+    obs.observe(el, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => obs.disconnect();
+  }, []);
+  return dark;
+}
+
 export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = false, onToggleMaximize, onClose }: { client: CodepilotClient; cwd: string; connected: boolean; rows?: Row[]; maximized?: boolean; onToggleMaximize?: () => void; onClose?: () => void }): React.ReactElement {
+  const dark = useIsDark();
   const [path, setPath] = useState(".");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<EditorFile | null>(null);
@@ -62,7 +83,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
       });
   }, [rows]);
   const openFile = async (file: string) => {
-    if (saving || (dirty && !window.confirm("Discard unsaved changes and reload?"))) return;
+    if (saving || (dirty && !window.confirm(t("Discard unsaved changes and reload?")))) return;
     const revision = ++readRevision.current;
     try {
       const result = await client.readWorkspace(file, cwd);
@@ -74,7 +95,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
     }
   };
   const load = async (next = path) => {
-    if (saving || (dirty && !window.confirm("Discard unsaved changes?"))) return;
+    if (saving || (dirty && !window.confirm(t("Discard unsaved changes?")))) return;
     const revision = ++readRevision.current;
     try {
       const result = await client.listWorkspace(next, cwd);
@@ -148,7 +169,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
             <TerminalIcon className="h-3.5 w-3.5" />
             <span className="ml-1 text-[10.5px]">{t("Terminal")}</span>
           </HeaderButton>
-          <HeaderButton onClick={() => void load()} title="Refresh listing">
+          <HeaderButton onClick={() => void load()} title={t("Refresh listing")}>
             <RefreshIcon className="h-3.5 w-3.5" />
           </HeaderButton>
           {onClose && (
@@ -167,7 +188,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
       <button type="button" onClick={() => void client.gitStatus(cwd).then(setGit).catch(err => setError(String(err)))}
         className="group flex w-full items-center gap-1.5 border-b border-[var(--color-edge-subtle)] px-3 py-1.5 text-left text-[10px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-raised)]">
         <GitIcon className="h-3 w-3 shrink-0 text-[var(--color-ink-faint)] group-hover:text-[var(--color-accent)]" />
-        <span className="font-mono">{git?.branch ?? "load status"}</span>
+        <span className="font-mono">{git?.branch ?? t("load status")}</span>
         {git && git.files.length > 0 && (
           <span className="ml-auto rounded-full bg-[var(--color-accent-dim)] px-1.5 font-mono text-[9px] text-[var(--color-accent)]">{git.files.length}</span>
         )}
@@ -180,7 +201,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
               <span className={`shrink-0 rounded px-1 font-mono ${gitStatusTone(f.status)}`}>{f.status}</span>
               <span className="truncate font-mono text-[var(--color-ink-dim)]">{f.path}</span>
             </button>
-          )) : <div className="px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">Clean</div>}
+          )) : <div className="px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">{t("Clean")}</div>}
         </div>
       )}
 
@@ -192,14 +213,14 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
         }).catch(err => { if (revision === searchRevision.current) setError(String(err)); });
       }}>
         <SearchIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-ink-faint)]" />
-        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search workspace…"
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder={t("Search workspace…")}
           className="min-w-0 flex-1 rounded-md border border-[var(--color-edge-subtle)] bg-transparent px-2 py-1 text-xs text-[var(--color-ink)] outline-none placeholder:text-[var(--color-ink-faint)] focus:border-[var(--color-accent)]" />
-        <button type="submit" className="rounded-md border border-[var(--color-edge-subtle)] px-2 py-0.5 text-[10px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]">Go</button>
+        <button type="submit" className="rounded-md border border-[var(--color-edge-subtle)] px-2 py-0.5 text-[10px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]">{t("Go")}</button>
       </form>
 
       {error && <div className="mx-2 mt-2 shrink-0 rounded-md border border-[var(--color-remove-dim)] bg-[var(--color-remove-dim)] px-2 py-1 text-[10px] text-[var(--color-remove)]">{error}</div>}
-      {watchError && <div role="status" className="shrink-0 px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">Live watch unavailable ({watchError}); polling.</div>}
-      {searchTruncated && <div role="status" className="shrink-0 px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">Search results truncated.</div>}
+      {watchError && <div role="status" className="shrink-0 px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">{t("Live watch unavailable; polling.")} ({watchError})</div>}
+      {searchTruncated && <div role="status" className="shrink-0 px-3 py-1 text-[10px] text-[var(--color-ink-faint)]">{t("Search results truncated.")}</div>}
 
       {matches.length > 0 && (
         <div className="max-h-28 shrink-0 overflow-auto border-b border-[var(--color-edge-subtle)]">
@@ -237,7 +258,7 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--color-surface-sunken)]">
           {gitDiff !== null && (
-            <section aria-label="Git diff" className="max-h-[40%] shrink-0 overflow-auto border-b border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
+            <section aria-label={t("Git diff")} className="max-h-[40%] shrink-0 overflow-auto border-b border-[var(--color-edge-subtle)] bg-[var(--color-surface)]">
               <div className="sticky top-0 flex items-center gap-2 border-b border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] px-3 py-1 text-[10px] text-[var(--color-ink-dim)]">
                 <FileIcon className="h-3 w-3 shrink-0" />
                 <span className="truncate font-mono">{gitDiff.path}</span>
@@ -247,8 +268,8 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
                     const staged = !gitDiff.staged;
                     setDiffStaged(staged);
                     void diffController.load(gitDiff.path, staged);
-                  }} className="text-[var(--color-accent)] hover:underline">Toggle staged</button>
-                  <button type="button" aria-label="Close Git diff" onClick={() => diffController.close()} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"><XIcon className="h-3 w-3" /></button>
+                  }} className="text-[var(--color-accent)] hover:underline">{t("Toggle staged")}</button>
+                  <button type="button" aria-label={t("Close Git diff")} onClick={() => diffController.close()} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"><XIcon className="h-3 w-3" /></button>
                 </div>
               </div>
               {gitDiff.loading ? <p role="status" className="px-3 py-2 text-[10px] text-[var(--color-ink-faint)]">Loading diff…</p> :
@@ -269,46 +290,50 @@ export function WorkspacePanel({ client, cwd, connected, rows = [], maximized = 
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                   {externalChanged && <span className="text-[var(--color-remove)]">changed externally</span>}
                   <button type="button" disabled={saving} onClick={() => void openFile(selected.path)}
-                    className="text-[var(--color-ink-dim)] hover:text-[var(--color-ink)] disabled:opacity-40">Reload</button>
+                    className="text-[var(--color-ink-dim)] hover:text-[var(--color-ink)] disabled:opacity-40">{t("Reload")}</button>
                   {dirty && <>
                     <button type="button" onClick={() => setShowDiff(v => !v)}
-                      className="text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]">{showDiff ? "Hide diff" : "Diff"}</button>
+                      className="text-[var(--color-ink-dim)] hover:text-[var(--color-ink)]">{showDiff ? t("Hide diff") : t("Diff")}</button>
                     <button type="button" disabled={!canSave(selected, saving, externalChanged)}
                       onClick={() => {
-                        if (!window.confirm("Save changes to this file?")) return;
+                        if (!window.confirm(t("Save changes to this file?"))) return;
                         readRevision.current++; setSaving(true);
                         void client.writeWorkspace(selected.path, selected.content, selected.size, selected.originalHash, cwd)
                           .then(r => { setSelected(acceptSave(selected, r)); setDirty(false); setExternalChanged(false); })
                           .catch(err => setError(String(err)))
                           .finally(() => setSaving(false));
                       }}
-                      title="Save changes"
+                      title={t("Save changes")}
                       className="flex items-center gap-1 text-[var(--color-accent)] hover:underline disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:no-underline">
                       <SaveIcon className="h-3 w-3" />
-                      {saving ? "Saving…" : "Save"}
+                      {saving ? t("Saving…") : t("Save")}
                     </button>
                   </>}
-                  <button type="button" aria-label="Close file" onClick={() => {
-                    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+                  <button type="button" aria-label={t("Close file")} onClick={() => {
+                    if (dirty && !window.confirm(t("Discard unsaved changes?"))) return;
                     setSelected(null); setDirty(false); setShowDiff(false);
                   }} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">
                     <XIcon className="h-3 w-3" />
                   </button>
                 </div>
               </div>
-              <div className="flex min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-5">
-                <pre className="sticky left-0 select-none border-r border-[var(--color-edge-subtle)] bg-[var(--color-surface)] px-2 py-1 text-right text-[var(--color-ink-faint)]">
-                  {selected.content.split("\n").map((_, i) => `${i + 1}\n`)}
-                </pre>
+              <div className="flex min-h-0 flex-1 overflow-hidden text-[12px] leading-5">
                 {showDiff && (
-                  <pre className="shrink-0 border-r border-[var(--color-edge-subtle)] bg-[var(--color-accent-dim)] p-2 text-[11px] text-[var(--color-ink-dim)]">
-                    {selected.original === selected.content ? "No changes" : `--- original\n+++ edited\n${selected.content}`}
+                  <pre className="shrink-0 overflow-auto border-r border-[var(--color-edge-subtle)] bg-[var(--color-accent-dim)] p-2 font-mono text-[11px] text-[var(--color-ink-dim)]">
+                    {selected.original === selected.content ? t("No changes") : `--- original\n+++ edited\n${selected.content}`}
                   </pre>
                 )}
-                <textarea aria-label="File editor" readOnly={selected.truncated || saving} value={selected.content}
-                  onChange={e => { setSelected({ ...selected, content: e.target.value }); setDirty(e.target.value !== selected.original); }}
-                  spellCheck={false}
-                  className="min-w-0 flex-1 resize-none whitespace-pre-wrap bg-transparent px-3 py-1 outline-none" />
+                <div aria-label={t("File editor")} className="min-w-0 flex-1 overflow-hidden">
+                  <Suspense fallback={<pre className="h-full overflow-auto p-3 font-mono text-[12px] text-[var(--color-ink-dim)]">{selected.content}</pre>}>
+                    <CodeEditor
+                      path={selected.path}
+                      value={selected.content}
+                      readOnly={selected.truncated || saving}
+                      dark={dark}
+                      onChange={(next) => { setSelected({ ...selected, content: next }); setDirty(next !== selected.original); }}
+                    />
+                  </Suspense>
+                </div>
               </div>
             </div>
           ) : (

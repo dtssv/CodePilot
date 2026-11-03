@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/codepilot/codepilot.git",
+    "url": "https://github.com/dtssv/CodePilot.git",
     "directory": "apps/vscode"
   },
   "type": "module",

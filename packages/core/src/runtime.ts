@@ -30,6 +30,82 @@ import type { AgentMode, Event, ToolUseBlock } from "./types.js";
 export type AgentRuntimeState = "idle" | "running" | "waiting_permission";
 
 /**
+ * A tool a plugin runtime can contribute to the session, described in
+ * ABI-safe terms (no `@codepilot/core` types). The core adapts this into a
+ * real registry entry so the model can call it; execution still flows through
+ * the permission + PreToolUse/PostToolUse pipeline like any built-in tool.
+ *
+ * `parameters` is a JSON Schema object (the same shape MCP tools provide), NOT
+ * a Zod schema — the plugin module cannot import Zod from the core copy.
+ */
+export interface PluginToolDef {
+  /** Unique, namespaced tool name (e.g. "myplugin_fetch"). */
+  name: string;
+  description: string;
+  /** JSON Schema for the tool input (object schema recommended). */
+  parameters: Record<string, unknown>;
+  /**
+   * Permission tier, gating the call like a built-in tool. Defaults to
+   * "execute" when omitted (the safe, prompt-by-default tier).
+   */
+  permission?: "read" | "write" | "execute" | "network";
+  /** Run the tool. Returns plain text content (+ optional error flag). */
+  execute(
+    input: unknown,
+    ctx: { cwd: string; signal?: AbortSignal },
+  ): Promise<{ content: string; isError?: boolean }>;
+}
+
+/**
+ * A provider message as seen by a plugin context transform — the plain data
+ * shape of the model's view (role + content blocks). ABI-safe: a plugin
+ * operates on this structure without importing any core type. Mirrors the
+ * core `ProviderMessage`, so the two stay assignable.
+ */
+export interface PluginContextMessage {
+  role: "user" | "assistant" | "system";
+  content: Array<
+    | { type: "text"; text: string }
+    | { type: "tool_use"; id: string; name: string; input: unknown }
+    | { type: "tool_result"; toolCallId: string; content: string; isError?: boolean }
+    | { type: "image"; mediaType: string; base64: string }
+  >;
+}
+
+/**
+ * A plugin context transform: given a COPY of the model's message view for one
+ * request, return the view to actually send. Runs after CodePilot's own
+ * fold/compaction, so a plugin can prune / window / inject-memory WITHOUT
+ * touching the persisted transcript. The result is validated (legal roles,
+ * tool_use ↔ tool_result pairing, non-empty) and ignored fail-soft on any
+ * problem (the untransformed view is sent instead). Modelled on pi's
+ * `context` event.
+ */
+export type PluginContextTransform = (
+  view: PluginContextMessage[],
+) => PluginContextMessage[];
+
+/**
+ * An additive session event sink a plugin can register to MIRROR the JSONL
+ * event log to an external data source (NAS / OSS / DB / webhook). ABI-safe:
+ * the plugin receives the exact JSONL line already written locally, AFTER the
+ * canonical append resolves.
+ *
+ * This never replaces the source of truth — JSONL stays the single writer. The
+ * host wraps the sink in a bounded, single-flight queue, so `write` being slow
+ * or throwing can never block or fail the canonical write (fail-soft is
+ * enforced by the host, not the sink author).
+ */
+export interface PluginEventSink {
+  /** Mirror one already-persisted JSONL line (no trailing newline). */
+  write(sessionId: string, line: string): Promise<void> | void;
+  /** Optional: flush any buffered writes (best-effort). */
+  flush?(sessionId: string): Promise<void> | void;
+  /** Optional: release resources when the session disposes. */
+  close?(): Promise<void> | void;
+}
+
+/**
  * A pluggable agent runtime. Implementations drive one prompt to completion
  * (model streaming + tool execution), emitting session events through
  * `deps.onEvent` exactly like the default loop does, so persistence,
@@ -61,7 +137,37 @@ export interface AgentRuntime {
  */
 export interface RuntimeToolkit {
  /** ABI version, bumped when a member changes shape. */
-  readonly version: 1;
+  readonly version: 4;
+ /**
+  * Register a tool the model can call for the rest of the session. The tool
+  * is adapted into the core registry and executed through the same pipeline
+  * as built-in tools (permission check, PreToolUse/PostToolUse hooks, Zod
+  * validation of the JSON-schema input, telemetry). Call it while
+  * constructing the runtime (a factory's `create`).
+  *
+  * No-op when the host did not wire a registrar (e.g. a bare toolkit built
+  * for a test); a throwing registration is swallowed so one bad tool never
+  * breaks the session (fail-soft).
+  */
+  registerTool(def: PluginToolDef): void;
+ /**
+  * Install a context transform for the rest of the session. The transform is
+  * applied to a COPY of the model's message view before each provider
+  * request (after CodePilot's own fold/compaction), so a plugin can prune /
+  * window / inject-memory without touching the persisted transcript. The
+  * returned view is validated and ignored fail-soft on any problem. Setting
+  * it again replaces the previous transform. No-op on a bare toolkit.
+  */
+  setContextTransform(transform: PluginContextTransform): void;
+ /**
+  * Register an additive event sink that MIRRORS the session's JSONL event
+  * log to an external data source. The sink receives each already-persisted
+  * line AFTER the canonical local append; the host wraps it in a bounded,
+  * single-flight queue so a slow or throwing sink can never block or fail the
+  * canonical write (JSONL stays the source of truth). Registering again
+  * replaces the previous sink. No-op on a bare toolkit.
+  */
+  registerEventSink(sink: PluginEventSink): void;
  /** Run the built-in agent loop — the behaviour of `DefaultRuntime`. */
   runDefault(input: AgentRunInput, deps: AgentDeps): Promise<AgentRunResult>;
  /**
@@ -87,8 +193,22 @@ export interface RuntimeToolkit {
   redactToolOutput(text: string): string;
 }
 
+/**
+ * Options for {@link createRuntimeToolkit}. The host (a `Session`) passes a
+ * `registerTool` registrar bound to its own tool registry; when absent,
+ * `toolkit.registerTool` is a safe no-op.
+ */
+export interface RuntimeToolkitOptions {
+  /** Adapt + add a plugin tool to the session's registry. Fail-soft. */
+  registerTool?: (def: PluginToolDef) => void;
+  /** Install the session's context transform. Fail-soft. */
+  setContextTransform?: (transform: PluginContextTransform) => void;
+  /** Register the session's additive event sink. Fail-soft. */
+  registerEventSink?: (sink: PluginEventSink) => void;
+}
+
 /** Build a {@link RuntimeToolkit} bound to the core implementation. */
-export function createRuntimeToolkit(): RuntimeToolkit {
+export function createRuntimeToolkit(opts: RuntimeToolkitOptions = {}): RuntimeToolkit {
   // A toolkit instance is long-lived (one per runtime), so give it a single
   // DoomLoopDetector that persists across `runTool` calls. Without this, a
   // custom runtime driving tools through the toolkit would get NONE of the
@@ -98,7 +218,42 @@ export function createRuntimeToolkit(): RuntimeToolkit {
   // makes repeat-call detection meaningful (a per-call detector never trips).
   const doomLoop = new DoomLoopDetector();
   return {
-    version: 1,
+    version: 4,
+    registerTool: (def) => {
+      if (!opts.registerTool) return; // bare toolkit (e.g. test) → no-op
+      try {
+        opts.registerTool(def);
+      } catch (err) {
+        // Fail-soft: a bad registration must never break the session.
+        process.stderr.write(
+          `[runtime] plugin tool "${def?.name ?? "?"}" registration failed: ${
+            (err as Error).message
+          }\n`,
+        );
+      }
+    },
+    setContextTransform: (transform) => {
+      if (!opts.setContextTransform) return; // bare toolkit → no-op
+      try {
+        opts.setContextTransform(transform);
+      } catch (err) {
+        // Fail-soft: a bad install must never break the session.
+        process.stderr.write(
+          `[runtime] context transform install failed: ${(err as Error).message}\n`,
+        );
+      }
+    },
+    registerEventSink: (sink) => {
+      if (!opts.registerEventSink) return; // bare toolkit → no-op
+      try {
+        opts.registerEventSink(sink);
+      } catch (err) {
+        // Fail-soft: a bad registration must never break the session.
+        process.stderr.write(
+          `[runtime] event sink registration failed: ${(err as Error).message}\n`,
+        );
+      }
+    },
     runDefault: (input, deps) => runAgent(input, deps),
     runTool: (call, deps, emit, mode = "agent") =>
       runOneTool(call, deps, emit, mode, doomLoop),
@@ -122,6 +277,17 @@ export interface RuntimeFactoryDeps {
 export interface RuntimeResolveOptions {
   cwd: string;
   toolkit?: RuntimeToolkit;
+  /**
+   * Registrar for plugin-contributed tools, bound to the caller's tool
+   * registry. Used to build the default toolkit when `toolkit` is omitted.
+   */
+  registerTool?: (def: PluginToolDef) => void;
+  /** Installer for the session's context transform. Used to build the
+   * default toolkit when `toolkit` is omitted. */
+  setContextTransform?: (transform: PluginContextTransform) => void;
+  /** Registrar for the session's additive event sink. Used to build the
+   * default toolkit when `toolkit` is omitted. */
+  registerEventSink?: (sink: PluginEventSink) => void;
 }
 
 /** A named constructor for runtimes. Registered in the RuntimeRegistry. */
@@ -230,7 +396,13 @@ export class RuntimeRegistry {
     }
     return factory.create({
       cwd: opts.cwd,
-      toolkit: opts.toolkit ?? createRuntimeToolkit(),
+      toolkit:
+        opts.toolkit ??
+        createRuntimeToolkit({
+          registerTool: opts.registerTool,
+          setContextTransform: opts.setContextTransform,
+          registerEventSink: opts.registerEventSink,
+        }),
     });
   }
 }

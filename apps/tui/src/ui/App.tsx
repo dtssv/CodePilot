@@ -15,7 +15,7 @@ import { Box, Text, useInput } from "ink";
 import {
   type AgentMode,
   type Event,
-  type PermissionDecision,
+  type PermissionResolution,
   type PermissionMode,
   type Session,
   type SlashCommand,
@@ -49,7 +49,8 @@ import { SelectMenu, TextPrompt, type SelectOption } from "./SelectMenu.js";
 import { StatusBar } from "./StatusBar.js";
 import { Spinner } from "./Spinner.js";
 import { initialState, reducer, type TuiState } from "./state.js";
-import { CATEGORY_ACTIVE, brand, color, glyph, shortPath } from "./theme.js";
+import { CATEGORY_ACTIVE, brand, color, glyph, shortPath, setTheme, activeTheme } from "./theme.js";
+import { THEME_LABELS, THEME_NAMES, loadThemePref, saveThemePref, type ThemeName } from "./themes.js";
 import { groupRows, planProgress, runningTool } from "./transcript.js";
 import {
   isCommand,
@@ -58,6 +59,10 @@ import {
   BUILTIN_COMMAND_NAMES,
 } from "./commands.js";
 import type { GoalBridge, PermissionBridge, QuestionBridge, SessionController } from "./controller.js";
+
+// Apply the saved palette before the first render so a chosen theme is active
+// from the first frame (mutates the shared `color` palette in place).
+setTheme(loadThemePref());
 
 export interface AppProps {
   session: Session;
@@ -301,6 +306,26 @@ export function App(props: AppProps): React.ReactElement {
     };
   }, [permissionBridge, questionBridge]);
 
+  // Ring the terminal bell when a run finishes, so a user who switched away
+  // gets a nudge. Only for runs long enough to matter, and the bell is skipped
+  // when CODEPILOT_NO_BELL is set (some terminals turn it into a noisy flash).
+  const runStartRef = React.useRef<number | undefined>(undefined);
+  const prevBusyRef = React.useRef(state.busy);
+  React.useEffect(() => {
+    const prev = prevBusyRef.current;
+    if (!prev && state.busy) {
+      runStartRef.current = Date.now();
+    } else if (prev && !state.busy) {
+      const started = runStartRef.current;
+      runStartRef.current = undefined;
+      const longEnough = started === undefined || Date.now() - started >= 10_000;
+      if (longEnough && !process.env.CODEPILOT_NO_BELL) {
+        process.stdout.write("\x07");
+      }
+    }
+    prevBusyRef.current = state.busy;
+  }, [state.busy]);
+
   const onQuestionDone = React.useCallback(
     (answers: import("@codepilot/core").QuestionAnswers) => {
       const pending = state.question;
@@ -314,10 +339,10 @@ export function App(props: AppProps): React.ReactElement {
   );
 
   const onPermissionDecide = React.useCallback(
-    (decision: PermissionDecision) => {
+    (resolution: PermissionResolution) => {
       const pending = state.permission;
       if (pending !== undefined) {
-        permissionBridge.resolve(pending.requestId, decision);
+        permissionBridge.resolve(pending.requestId, resolution);
       }
       dispatch({ type: "permission-resolve" });
       dispatch({ type: "set-status", status: state.busy ? "thinking" : "idle" });
@@ -352,6 +377,15 @@ export function App(props: AppProps): React.ReactElement {
   const applyPermissionMode = React.useCallback((mode: PermissionMode) => {
     dispatch({ type: "set-mode", mode });
     dispatch({ type: "set-notice", text: `Permission mode: ${mode}` });
+  }, []);
+
+  const applyTheme = React.useCallback((name: ThemeName) => {
+    // Mutates the shared `color` palette in place; the set-notice dispatch
+    // below forces a reducer state change so every component re-renders and
+    // reads the new colours.
+    const applied = setTheme(name);
+    saveThemePref(applied);
+    dispatch({ type: "set-notice", text: `Theme → ${THEME_LABELS[applied]}` });
   }, []);
 
   const applyAgentMode = React.useCallback(
@@ -688,6 +722,29 @@ export function App(props: AppProps): React.ReactElement {
             await applyAgentMode(result.mode);
             return;
           }
+          case "pick-theme": {
+            setSelectOverlay({
+              title: "/theme  (colour palette)",
+              current: activeTheme,
+              options: THEME_NAMES.map((name) => ({
+                value: name,
+                label: THEME_LABELS[name],
+                description:
+                  name === "default"
+                    ? "built-in CodePilot palette"
+                    : `${name} colours`,
+              })),
+              onPick: (name) => {
+                setSelectOverlay(null);
+                applyTheme(name as ThemeName);
+              },
+            });
+            return;
+          }
+          case "set-theme": {
+            applyTheme(result.name as ThemeName);
+            return;
+          }
           case "pick-session": {
             await openSessionPicker();
             return;
@@ -719,6 +776,26 @@ export function App(props: AppProps): React.ReactElement {
             if (last?.kind !== "user" || last.text.trim() === "") {
               dispatch({ type: "set-notice", text: "Nothing to retry yet." });
               return;
+            }
+            // Prefer resuming the last turn from the breakpoint (no new user
+            // message): the agent re-engages where it stopped. Only fall back
+            // to re-sending the prompt when there is nothing to resume.
+            const s = session as {
+              canResumeLastTurn?: () => boolean;
+              resumeLastTurn?: () => Promise<"started" | "queued" | "noop">;
+            };
+            if (
+              typeof s.resumeLastTurn === "function" &&
+              (typeof s.canResumeLastTurn !== "function" || s.canResumeLastTurn())
+            ) {
+              dispatch({ type: "set-busy", busy: true });
+              dispatch({ type: "set-status", status: "thinking" });
+              try {
+                const r = await s.resumeLastTurn();
+                if (r !== "noop") return;
+              } catch {
+                /* fall back to resend */
+              }
             }
             text = last.text;
             break;
@@ -1275,7 +1352,7 @@ export function App(props: AppProps): React.ReactElement {
         state={state}
         statusLineConfig={session.getStatusLineConfig()}
         cwd={cwd}
-        version="2.0.0"
+        version="1.0.0"
       />
 
       {state.busy ? (

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<idea-plugin url="https://github.com/codepilot/codepilot"
+<idea-plugin url="https://github.com/dtssv/CodePilot"
              package="com.codepilot.idea">
 
     <id>com.codepilot.idea</id>
     <name>CodePilot</name>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
     <vendor>CodePilot</vendor>
 
     <description><![CDATA[
@@ -15,7 +15,7 @@
         model, and permission mode. IDEs without JCEF fall back to a Swing chat.
     ]]></description>
 
-    <change-notes><![CDATA[Initial scaffold.]]></change-notes>
+    <change-notes><![CDATA[First stable release: JCEF chat tool window sharing the web UI, Swing fallback, editor "Ask CodePilot" action, and settings for binary path, model, and permission mode.]]></change-notes>
 
     <!-- IntelliJ Platform 2024.1+ (build 233). -->
     <idea-version since-build="233" until-build="251.*" />

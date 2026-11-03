@@ -24,6 +24,7 @@ import type {
   AgentMode,
   Event,
   PermissionDecision,
+  PermissionResolution,
   Session,
   SessionSummary,
 } from "@codepilot/core";
@@ -42,7 +43,7 @@ export interface MockSessionOptions {
 export interface MockSessionHandle {
   session: Session;
   defaultModel: string;
-  permissionDecision: (reqId: string) => Promise<PermissionDecision>;
+  permissionDecision: (reqId: string) => Promise<PermissionResolution>;
 }
 
 /**
@@ -145,16 +146,17 @@ class MockSessionImpl implements SessionShape {
       };
       this.emit({ type: "tool_call", id: toolCallId, name: "bash", input: req.input });
       this.emit({ type: "status", status: "waiting_permission" });
-      const decision: PermissionDecision = this.yolo
-        ? "allow"
-        : await this.bridge.waitDecision(req);
+      const resolution = this.yolo ? "allow" : await this.bridge.waitDecision(req);
+      // Normalize a decline-with-feedback object to its decision + message.
+      const decision: PermissionDecision = typeof resolution === "string" ? resolution : resolution.decision;
+      const feedback = typeof resolution === "string" ? undefined : resolution.feedback;
       this.emit({ type: "status", status: "running" });
       if (decision === "deny") {
         this.emit({
           type: "tool_result",
           toolCallId,
           name: "bash",
-          content: "denied by user",
+          content: feedback && feedback.trim().length > 0 ? `declined: ${feedback.trim()}` : "denied by user",
           isError: true,
         });
       } else {

@@ -27,6 +27,7 @@ import { projectStatePath } from "./projectState.js";
 import {
   resolveMemoryTopic,
   writeAutoMemoryNote,
+  withMemoryWriteLock,
   type AutoMemoryConfig,
 } from "./autoMemory.js";
 
@@ -250,26 +251,31 @@ export class FileMemorySink implements MemorySink {
   ): Promise<string> {
     const path =
       scope === "project" ? projectMemoryPath(this.cwd) : USER_MEMORY_PATH;
-    let existing = "";
-    try {
-      existing = await readFile(path, "utf-8");
-    } catch {
-      /* fresh */
-    }
-    const parsed = parseMemory(existing);
     const target = canonicaliseSection(section) ?? classifySection(title, content);
     const stamp = new Date().toISOString().slice(0, 10);
     const body = content.trim();
-    // Keep MEMORY.md lean: long bodies live in progressive topic files;
-    // the section only keeps a short blurb + pointer when spilling.
-    const { blurb, spilled } = spillBlurb(body);
-    const block = spilled
-      ? `\n### ${title} (${stamp})\n\n${blurb}\n\n_Full note in progressive memory (see topic files under \`~/.codepilot/memory/\`)._\n`
-      : `\n### ${title} (${stamp})\n\n${body}\n`;
-    parsed.sections[target] = (parsed.sections[target] || "").trimEnd() + "\n" + block;
-    const newText = renderMemory(parsed);
-    await mkdir(join(path, ".."), { recursive: true }).catch(() => undefined);
-    await writeFile(path, newText, "utf-8");
+    // Serialize the read-parse-mutate-write on MEMORY.md so two concurrent
+    // memory_write calls in one turn can't clobber each other's section edit
+    // (same reasoning as withMemoryWriteLock in autoMemory).
+    await withMemoryWriteLock(path, async () => {
+      let existing = "";
+      try {
+        existing = await readFile(path, "utf-8");
+      } catch {
+        /* fresh */
+      }
+      const parsed = parseMemory(existing);
+      // Keep MEMORY.md lean: long bodies live in progressive topic files;
+      // the section only keeps a short blurb + pointer when spilling.
+      const { blurb, spilled } = spillBlurb(body);
+      const block = spilled
+        ? `\n### ${title} (${stamp})\n\n${blurb}\n\n_Full note in progressive memory (see topic files under \`~/.codepilot/memory/\`)._\n`
+        : `\n### ${title} (${stamp})\n\n${body}\n`;
+      parsed.sections[target] = (parsed.sections[target] || "").trimEnd() + "\n" + block;
+      const newText = renderMemory(parsed);
+      await mkdir(join(path, ".."), { recursive: true }).catch(() => undefined);
+      await writeFile(path, newText, "utf-8");
+    });
 
     const am = this.opts?.autoMemory;
     if (am !== false && (am?.enabled !== false)) {

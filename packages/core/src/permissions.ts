@@ -44,6 +44,7 @@ import {
   detectSandboxBackend,
   isWriteOutsideSandbox,
   sensitivePathHit,
+  gitMetadataWriteHit,
   writableRootForTarget,
   type ResolvedSandbox,
 } from "./sandbox.js";
@@ -166,6 +167,16 @@ export class PermissionEngine {
       : firstMatch(this.rules().deny, tool.name, primary, input);
     if (deny) return { decision: "deny", reason: `matched deny rule "${deny}"` };
 
+    // Per-command sandbox escalation (bash `escalate_sandbox: true`): the model
+    // asked to run THIS one command WITHOUT the OS jail (e.g. a dev server the
+    // sandbox's network/fs policy breaks). Mirrors codex `require_escalated` /
+    // dsh `sandbox_permissions`: it always forces an interactive confirmation —
+    // never auto-allowed, even under yolo, an active sandbox, or an allow rule —
+    // because dropping the jail for a command is exactly what the user must see.
+    // A deny rule (checked above) still wins. The escalation is ephemeral: it
+    // applies only to this invocation and never changes the session policy.
+    if (bash && isSandboxEscalation(input)) return "ask";
+
  // Sensitive-path floor — applies EVEN when the sandbox is off or the mode is
  // yolo, and above every allow rule. A write/delete onto a system, boot, or
  // credential path (/etc, ~/.ssh, shell rc files, …) forces an interactive
@@ -181,7 +192,10 @@ export class PermissionEngine {
         const writePaths = extractWritePaths(tool.name, input);
         const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
         for (const p of candidates) {
-          if (sensitivePathHit(p, "write", cwd)) return "ask";
+          // System/credential floor + workspace .git floor. The latter has no
+          // absolute path (it lives inside the writable workspace) so it needs
+          // its own component check; both only force "ask", never hard-deny.
+          if (sensitivePathHit(p, "write", cwd) || gitMetadataWriteHit(p, cwd)) return "ask";
         }
       }
       // bash: a command that writes/deletes under a sensitive root. The
@@ -321,6 +335,13 @@ export class PermissionEngine {
     if (tool.name === "bash" && primary) {
       const danger = checkDangerousCommand(primary);
       if (danger.dangerous) reason += ` DANGEROUS: ${danger.why}.`;
+      if (isSandboxEscalation(input)) {
+        const why = (input as Record<string, unknown>).justification;
+        reason +=
+          ` SANDBOX ESCALATION: this command will run WITHOUT the OS sandbox` +
+          ` (full host access for this one command).` +
+          (typeof why === "string" && why.trim() ? ` Reason: ${why.trim()}` : "");
+      }
     }
     // Flag a sensitive system/credential target so the approval card states the
     // stakes — this is the ask forced by the sensitive-path floor in preflight.
@@ -331,6 +352,13 @@ export class PermissionEngine {
         const hit = sensitivePathHit(p, "write", cwd);
         if (hit) {
           reason += ` SENSITIVE PATH: writing under ${hit} (system/credential location).`;
+          break;
+        }
+        const gitHit = gitMetadataWriteHit(p, cwd);
+        if (gitHit) {
+          reason +=
+            ` GIT METADATA: writing under ${gitHit} can corrupt history or plant a hook; ` +
+            `use \`git\` subcommands instead.`;
           break;
         }
       }
@@ -482,6 +510,17 @@ export function normalizeBashPrimary(command: string): string {
     break;
   }
   return s;
+}
+
+/** Whether a bash input requests per-command sandbox escalation (run this one
+ * command without the OS jail). A plain boolean field on the bash input; kept
+ * here so the preflight gate and the bash tool read it the same way. */
+export function isSandboxEscalation(input: unknown): boolean {
+  return (
+    !!input &&
+    typeof input === "object" &&
+    (input as Record<string, unknown>).escalate_sandbox === true
+  );
 }
 
 /** Tools' primary argument extractor. */

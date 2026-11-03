@@ -1,7 +1,7 @@
 // web_search backend selection + per-backend request shaping (fetch stubbed).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveSearchBackend, webSearchTool } from "../src/tools/web_search.js";
+import { resolveSearchBackend, resolveSearchLocale, webSearchTool } from "../src/tools/web_search.js";
 import { resolveSandbox } from "../src/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { CodepilotConfig } from "../src/types.js";
@@ -56,6 +56,173 @@ describe("resolveSearchBackend", () => {
     expect(resolveSearchBackend({ provider: "google", apiKey: "gk" }, { GOOGLE_CSE_ID: "envcx" })).toMatchObject({
       cx: "envcx",
     });
+  });
+});
+
+describe("resolveSearchLocale", () => {
+  it("auto-detects Chinese (Han) → zh/cn", () => {
+    expect(resolveSearchLocale("灵异搞笑小说 推荐", undefined)).toMatchObject({
+      language: "zh",
+      region: "cn",
+    });
+  });
+
+  it("auto-detects Japanese kana → ja/jp and Korean → ko/kr", () => {
+    expect(resolveSearchLocale("おすすめの小説", undefined)).toMatchObject({
+      language: "ja",
+      region: "jp",
+    });
+    expect(resolveSearchLocale("추천 소설", undefined)).toMatchObject({
+      language: "ko",
+      region: "kr",
+    });
+  });
+
+  it("leaves a Latin query unconstrained (no silent region lock-in)", () => {
+    const loc = resolveSearchLocale("rust async runtime", undefined);
+    expect(loc.language).toBeUndefined();
+    expect(loc.region).toBeUndefined();
+  });
+
+  it("an explicit config language/region overrides auto-detection", () => {
+    expect(
+      resolveSearchLocale("灵异小说", { language: "en", region: "us" }),
+    ).toMatchObject({ language: "en", region: "us" });
+  });
+
+  it("carries freshness from config regardless of script", () => {
+    expect(resolveSearchLocale("rust", { freshness: "year" })).toMatchObject({
+      freshness: "year",
+    });
+    expect(resolveSearchLocale("小说", { freshness: "month" })).toMatchObject({
+      language: "zh",
+      region: "cn",
+      freshness: "month",
+    });
+  });
+
+  it("a per-call override beats config and auto-detection", () => {
+    // Override language wins over both config and the Chinese auto-detect.
+    expect(
+      resolveSearchLocale("灵异小说", { language: "fr", region: "fr" }, { language: "en", region: "us" }),
+    ).toMatchObject({ language: "en", region: "us" });
+    // Override freshness wins over config freshness.
+    expect(
+      resolveSearchLocale("rust", { freshness: "year" }, { freshness: "day" }),
+    ).toMatchObject({ freshness: "day" });
+  });
+
+  it("an override of region alone disables CJK auto-detect (no silent language)", () => {
+    const loc = resolveSearchLocale("灵异小说", undefined, { region: "sg" });
+    expect(loc.region).toBe("sg");
+    expect(loc.language).toBeUndefined();
+  });
+});
+
+describe("webSearchTool locale params on the wire", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("anchors a Chinese query on Brave (search_lang/country)", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    });
+    await webSearchTool.execute(
+      { query: "灵异搞笑小说 起点 番茄 推荐 2024 2025 热门" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(seen).toContain("search_lang=zh");
+    expect(seen).toContain("country=cn");
+  });
+
+  it("maps config freshness to the Brave freshness token", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    });
+    await webSearchTool.execute(
+      { query: "rust release notes" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk", freshness: "year" } }),
+    );
+    expect(seen).toContain("freshness=py");
+  });
+
+  it("sends lr/hl/gl to Google CSE for a Chinese query", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    await webSearchTool.execute(
+      { query: "灵异小说推荐" },
+      ctx({ webSearch: { provider: "google", apiKey: "gk", cx: "cx1" } }),
+    );
+    expect(seen).toContain("lr=lang_zh");
+    expect(seen).toContain("hl=zh");
+    expect(seen).toContain("gl=cn");
+  });
+
+  it("does NOT add locale params for a Latin query (unchanged behaviour)", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    });
+    await webSearchTool.execute(
+      { query: "typescript generics" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(seen).not.toContain("search_lang");
+    expect(seen).not.toContain("country");
+  });
+
+  it("applies per-call tool params (language/region/freshness) over auto-detect", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    });
+    // A Latin query that would normally be unconstrained, forced to zh/cn + day.
+    await webSearchTool.execute(
+      { query: "ghost comedy novels", language: "zh", region: "cn", freshness: "day" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(seen).toContain("search_lang=zh");
+    expect(seen).toContain("country=cn");
+    expect(seen).toContain("freshness=pd");
+  });
+
+  it("a per-call language overrides a Chinese query's auto-detect", async () => {
+    let seen = "";
+    vi.stubGlobal("fetch", async (url: string) => {
+      seen = url;
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    });
+    await webSearchTool.execute(
+      { query: "灵异搞笑小说 推荐", language: "en", region: "us" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(seen).toContain("search_lang=en");
+    expect(seen).toContain("country=us");
+  });
+
+  it("tags the output header with the active locale", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response(
+        JSON.stringify({ web: { results: [{ title: "T", url: "https://x.io", description: "d" }] } }),
+        { status: 200 },
+      ),
+    );
+    const r = await webSearchTool.execute(
+      { query: "灵异小说" },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(r.content).toContain("[zh-cn]");
   });
 });
 

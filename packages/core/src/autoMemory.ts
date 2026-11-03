@@ -69,6 +69,36 @@ const DEFAULT_CONFIG: AutoMemoryConfig = {
   maxIndexBytes: 25 * 1024,
 };
 
+// Per-key serialization for memory file writes.
+//
+// Memory writes are read-modify-write (read the topic/index file, append,
+// write it back; FileMemorySink does the same for MEMORY.md). The in-turn
+// tool barrier (agent.ts) treats `memory_write` as parallel-safe because its
+// permission TIER is "read" (an approval axis, not a side-effect axis), so two
+// `memory_write` calls in one turn can run concurrently. Without this lock two
+// concurrent writers read the same baseline and the second writeFile clobbers
+// the first's entry (last-writer-wins) and the rebuilt index reflects a partial
+// view. codex avoids this entirely by writing each note as an immutable
+// O_EXCL file + an OS lock; we take the lighter in-process equivalent: a
+// promise chain keyed by the directory/path being mutated, so RMW cycles over
+// the same files run strictly one at a time (across sessions sharing a cwd too,
+// since the chains are module-global).
+const memoryWriteChains = new Map<string, Promise<unknown>>();
+
+/** Run `fn` after any in-flight write to `key` settles; serializes RMW. */
+export function withMemoryWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = memoryWriteChains.get(key) ?? Promise.resolve();
+  // Chain regardless of whether the previous write resolved or rejected.
+  const next = prev.then(fn, fn);
+  // Keep the chain tail even on failure so the next writer still serializes;
+  // prune the map entry once this is the last link to avoid unbounded growth.
+  memoryWriteChains.set(key, next);
+  void next.catch(() => undefined).finally(() => {
+    if (memoryWriteChains.get(key) === next) memoryWriteChains.delete(key);
+  });
+  return next;
+}
+
 /**
  * Compute a stable hash for a project (by absolute cwd path). This keeps
  * each project's auto memory in its own subdirectory, so notes from one
@@ -257,15 +287,19 @@ export async function writeAutoMemoryNote(
       .slice(0, 12);
   const full: AutoMemoryNote = { ...note, id, date, topic };
   const topicPath = join(dir, `${topic}.md`);
-  const existing = await safeRead(topicPath);
-  const bullet = `- [${full.category}] ${full.summary} (${date})${full.source ? ` — ${full.source}` : ""}`;
-  if (existing.includes(bullet)) {
+  // Serialize the read-append-write + index rebuild so two concurrent notes in
+  // the same turn cannot clobber each other (see withMemoryWriteLock).
+  return withMemoryWriteLock(dir, async () => {
+    const existing = await safeRead(topicPath);
+    const bullet = `- [${full.category}] ${full.summary} (${date})${full.source ? ` — ${full.source}` : ""}`;
+    if (existing.includes(bullet)) {
+      return id;
+    }
+    const block = `\n${bullet}\n\n${full.body.trim()}\n`;
+    await writeFile(topicPath, (existing + block).replace(/^\n+/, ""), "utf-8");
+    await rebuildIndex(dir, cwd);
     return id;
-  }
-  const block = `\n${bullet}\n\n${full.body.trim()}\n`;
-  await writeFile(topicPath, (existing + block).replace(/^\n+/, ""), "utf-8");
-  await rebuildIndex(dir, cwd);
-  return id;
+  });
 }
 
 /**
@@ -333,17 +367,19 @@ async function safeReaddir(dir: string): Promise<string[]> {
 }
 
 /**
- * Delete a note by id. Best-effort; rebuilds the index after any change.
+ * Delete a single note by id. NOT yet implemented: `writeAutoMemoryNote`
+ * persists only the bullet + body (the note `id` is never written into the
+ * topic file), so there is no on-disk key to match against. Per-id delete
+ * therefore needs a topic-file format change and is deferred until a caller
+ * needs it. Returns false (nothing deleted) and does not touch the index — do
+ * not mistake this for a working delete. Use {@link clearAutoMemory} to wipe a
+ * project's notes wholesale.
  */
 export async function deleteAutoMemoryNote(
-  cwd: string,
-  id: string,
-  cfg: AutoMemoryConfig = DEFAULT_CONFIG,
+  _cwd: string,
+  _id: string,
+  _cfg: AutoMemoryConfig = DEFAULT_CONFIG,
 ): Promise<boolean> {
-  if (!cfg.enabled) return false;
-  const dir = autoMemoryDir(cwd, cfg.rootDir);
-  void id;
-  await rebuildIndex(dir, cwd).catch(() => undefined);
   return false;
 }
 

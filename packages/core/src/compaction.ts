@@ -11,7 +11,7 @@ import type {
   UsageInfo,
 } from "./types.js";
 import type { ChatProvider } from "./providers/types.js";
-import { estimateTokens as defaultTokenEstimator } from "./tokens.js";
+import { estimateTokens as defaultTokenEstimator, IMAGE_TOKEN_ESTIMATE } from "./tokens.js";
 
 export interface CompactionOptions {
  /** Trigger compaction when total estimated tokens >= this. */
@@ -124,7 +124,6 @@ export function compactionGeometry(input: {
 
 /** Providers bill a downscaled image at roughly 1–1.6K tokens; base64 length
  * says nothing about it. */
-const IMAGE_TOKEN_ESTIMATE = 1_600;
 
 export function estimateEventTokens(
   events: Event[],
@@ -182,6 +181,8 @@ function serializeEventForEstimate(e: Event): string {
     case "stop_continue":
     case "subagent":
     case "followup":
+    case "pin":
+      // Control events — not sent to the provider, so zero context cost.
       return "";
     case "request":
  // Pure timing metadata — never sent to the provider, so zero cost.
@@ -576,10 +577,18 @@ export function trimEventsToBudget(
       const recentHasPlan = recent.some((e) => e.type === "plan");
       const recentClean =
         recent[0]?.type === "compaction" ? recent.slice(1) : recent;
+      // Pinned messages in the dropped range are kept VERBATIM: carry them
+      // forward (in order) right after the handoff stub instead of letting the
+      // summary paraphrase them. This is the anchor guarantee — a pinned user
+      // requirement survives every trim intact, not just as summary prose.
+      const carriedPins = drop.filter(
+        (e): e is Extract<Event, { type: "message" }> =>
+          e.type === "message" && e.pinned === true,
+      );
       working =
         plan && !recentHasPlan
-          ? [stub, { type: "plan", steps: plan }, ...recentClean]
-          : [stub, ...recentClean];
+          ? [stub, ...carriedPins, { type: "plan", steps: plan }, ...recentClean]
+          : [stub, ...carriedPins, ...recentClean];
       trimmed = true;
     }
 
@@ -864,6 +873,8 @@ function payloadLen(e: Event): number {
 /** Higher = safer to shrink. Negative = protected. */
 function truncationPriority(e: Event, idx: number, lastUser: number): number {
   if (e.type === "plan") return -1;
+  // A pinned message is protected from payload truncation outright.
+  if (e.type === "message" && e.pinned) return -1;
   if (e.type === "message" && e.role === "user") {
     if (idx >= lastUser && lastUser >= 0) return -1;
     return 1; // old user asks — last resort only
@@ -890,6 +901,8 @@ function stripOlderImages(
   let removed = 0;
   const out = events.map((e, idx) => {
     if (idx >= cutoff) return e;
+    // A pinned message keeps its images too (the anchor is kept intact).
+    if (e.type === "message" && e.pinned) return e;
     if ((e.type === "message" || e.type === "tool_result") && e.images?.length) {
       removed += e.images.length;
       return { ...e, images: undefined };
@@ -941,14 +954,31 @@ export async function compact(
       } catch {
         summary = "";
       }
+      // Forward-progress gate (borrowed from dsh's "summary must be strictly
+      // smaller than what it replaces", region.ts:417-422): a small model can
+      // degenerate and return a summary as long as — or longer than — the
+      // history it replaces (verbose restatement, echoing the input). Swapping
+      // that in makes compaction a no-op or a REGRESSION, and worse, persists a
+      // bloated blob as a "compaction" the next pass trusts. Only adopt the
+      // summary when it genuinely shrinks the dropped range; otherwise discard
+      // it and let Pass 3's hard local trim guarantee we fit.
       if (summary) {
         const compactionEvent: Event = { type: "compaction", kind: "summary", summary };
         const plan = extractPlan(drop);
         const keepPlan = plan && !recent.some((e) => e.type === "plan");
-        working = keepPlan
-          ? [compactionEvent, { type: "plan", steps: plan }, ...recent]
-          : [compactionEvent, ...recent];
-        droppedRange = { from: 0, to: cutoff };
+        const replacement = keepPlan
+          ? [compactionEvent, { type: "plan", steps: plan } as Event]
+          : [compactionEvent];
+        const droppedTokens = estimateEventTokens(drop, est);
+        const replacementTokens = estimateEventTokens(replacement, est);
+        if (replacementTokens < droppedTokens) {
+          working = [...replacement, ...recent];
+          droppedRange = { from: 0, to: cutoff };
+        } else {
+          // Non-shrinking summary: treat it as a failed summarisation so the
+          // reason/return value don't claim a summary that wasn't applied.
+          summary = "";
+        }
       }
     }
   }

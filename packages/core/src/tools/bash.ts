@@ -12,16 +12,11 @@ import {
   wrapCommand,
   resolveSandbox,
   looksLikeSandboxWriteDenial,
+  looksLikeSandboxNetworkDenial,
+  modelShellEnv,
 } from "../sandbox.js";
+import { spillHeadTail } from "./_shared.js";
 import { spawnBackgroundJob } from "./bashJobs.js";
-
-/** Below this size, output is returned verbatim. Above, it spills to an
- * artifact and the inline view keeps the head + tail with a gap marker. */
-const ARTIFACT_THRESHOLD = 8_000;
-/** How many chars of head/tail to keep when truncating inline. Tuned so a
- * typical compile error block (head) + a stack tail fit comfortably. */
-const HEAD_CHARS = 4_000;
-const TAIL_CHARS = 4_000;
 
 const schema = z.object({
   command: z
@@ -47,6 +42,24 @@ const schema = z.object({
         "Playwright, PDF/WebGL) that can outlive a foreground timeout. Poll with " +
         "`bash_output`, stop with `bash_kill`.",
     ),
+  escalate_sandbox: z
+    .boolean()
+    .optional()
+    .describe(
+      "Run THIS ONE command WITHOUT the OS sandbox (full host access), after a user " +
+        "approval prompt. Use only when a command FAILED because the sandbox blocked it " +
+        "— e.g. a dev server that needs the network while the sandbox denies it, or a " +
+        "write the jail refuses. The escalation is for this single call only; it does " +
+        "NOT change the session's sandbox. Always pair with `justification`. Do not use " +
+        "it pre-emptively — try the normal (sandboxed) command first.",
+    ),
+  justification: z
+    .string()
+    .optional()
+    .describe(
+      "Required with `escalate_sandbox`: one sentence shown to the user explaining why " +
+        "this exact command needs to run outside the sandbox.",
+    ),
 });
 
 export const bashTool: ToolDef<typeof schema> = {
@@ -66,7 +79,14 @@ export const bashTool: ToolDef<typeof schema> = {
   async execute(input, ctx) {
     const timeout = input.timeout ?? 60_000;
     const cwd = input.cwd ?? ctx.cwd;
-    const policy = ctx.sandbox ?? resolveSandbox(undefined, cwd);
+    const basePolicy = ctx.sandbox ?? resolveSandbox(undefined, cwd);
+    // Per-command escalation: run THIS command without the OS jail. The
+    // permission engine has already forced (and the user granted) an approval
+    // prompt to reach here — escalation is never auto-allowed. Ephemeral: we
+    // only loosen the policy for this one wrap; ctx.sandbox (the session policy)
+    // is untouched, so the next command is sandboxed again.
+    const escalated = input.escalate_sandbox === true;
+    const policy = escalated ? { ...basePolicy, mode: "off" as const } : basePolicy;
     const wrapped = wrapCommand(input.command, policy);
 
     if (input.run_in_background) {
@@ -83,7 +103,7 @@ export const bashTool: ToolDef<typeof schema> = {
       return {
         content:
           `started background job ${job.meta.id} (pid ${job.meta.pid ?? "?"})` +
-          `${wrapped.sandboxed ? ` [sandboxed: ${wrapped.backend}]` : ""}\n` +
+          `${wrapped.sandboxed ? ` [sandboxed: ${wrapped.backend}]` : escalated ? ` [UNSANDBOXED — escalated]` : ""}\n` +
           `Use bash_output(job_id="${job.meta.id}") to read output, bash_kill to stop it.`,
       };
     }
@@ -97,7 +117,7 @@ export const bashTool: ToolDef<typeof schema> = {
     let code: number | null;
     let signal: NodeJS.Signals | null;
     let timedOut: boolean;
-    if (ctx.persistentShell && !input.cwd) {
+    if (ctx.persistentShell && !input.cwd && !escalated) {
  // The persistent shell runs the *unwrapped* command — the shell
  // itself was started inside the sandbox wrapper. Re-wrapping here
  // would double-sandbox. We pass the user's command verbatim.
@@ -136,34 +156,39 @@ export const bashTool: ToolDef<typeof schema> = {
     if (code !== 0) {
       content = `[exit ${code ?? (timedOut ? "timeout" : "?")}]\n${content}`;
     }
-    // Mechanistic: if the OS jail blocked a write, say how to expand roots —
-    // do not try to guess paths from the command text.
-    if (
-      policy.mode !== "off" &&
-      wrapped.sandboxed &&
-      looksLikeSandboxWriteDenial(content)
-    ) {
-      content +=
-        `\n\n[sandbox] Write blocked by the OS jail (writable roots: ` +
-        `${policy.writableRoots.join(", ")}). ` +
-        `To work outside them: write via write_file/edit_file so the user can ` +
-        `"Allow folder", or ask the user to add the directory to ` +
-        `sandbox.writablePaths / approve a delivery-root expand.`;
+    // Mechanistic: if the OS jail blocked this command, tell the model how to
+    // recover — expand roots for a write, or escalate for a network/other
+    // denial. Only when the command ran sandboxed AND was not already an
+    // escalation (otherwise the advice is stale). We do not guess paths from
+    // the command text.
+    if (policy.mode !== "off" && wrapped.sandboxed && !escalated && code !== 0) {
+      if (looksLikeSandboxWriteDenial(content)) {
+        content +=
+          `\n\n[sandbox] Write blocked by the OS jail (writable roots: ` +
+          `${policy.writableRoots.join(", ")}). ` +
+          `To work outside them: write via write_file/edit_file so the user can ` +
+          `"Allow folder", or ask the user to add the directory to ` +
+          `sandbox.writablePaths / approve a delivery-root expand. If a shell ` +
+          `command genuinely needs host access, retry it with ` +
+          `\`escalate_sandbox: true\` + a \`justification\` (runs that one command ` +
+          `outside the sandbox after a user prompt).`;
+      } else if (looksLikeSandboxNetworkDenial(content)) {
+        content +=
+          `\n\n[sandbox] This looks like a network failure caused by the OS jail ` +
+          `(the sandbox restricts network egress). If this command legitimately ` +
+          `needs the network, retry it with \`escalate_sandbox: true\` and a ` +
+          `\`justification\` — that runs this one command outside the sandbox ` +
+          `after a user approval prompt. Do not disable the sandbox for the whole ` +
+          `session.`;
+      }
     }
-    let artifactRef: string | undefined;
-    if (content.length > ARTIFACT_THRESHOLD) {
- // Spill the full output to an artifact, then render a head+tail view
- // inline with a gap marker. This preserves the start (where the
- // command's first lines / the first error usually live) AND the end
- // (where exit status, final summary, and stack traces land), which a
- // head-only truncation loses. same truncated head+tail shape.
-      artifactRef = await ctx.artifact(content, `bash:${input.command.slice(0, 80)}`);
-      const omitted = content.length - HEAD_CHARS - TAIL_CHARS;
-      content =
-        content.slice(0, HEAD_CHARS) +
-        `\n\n[... ${omitted.toLocaleString()} chars omitted; full output in artifact ${artifactRef} — use read_artifact with startLine/maxLines for any slice ...]\n\n` +
-        content.slice(content.length - TAIL_CHARS);
-    }
+    // Spill large output to an artifact, keeping a head+tail inline view. This
+    // preserves the start (the command's first lines / the first error) AND the
+    // end (exit status, final summary, stack traces), which a head-only
+    // truncation loses. Shared helper so the threshold/shape can't drift.
+    const spilled = await spillHeadTail(ctx, content, `bash:${input.command.slice(0, 80)}`);
+    content = spilled.content;
+    const artifactRef = spilled.artifactRef;
     // Timeouts must surface as errors so the model changes approach (e.g.
     // background + bash_output). Soft-cancel via SIGTERM without a timeout
     // stays non-error so a user abort isn't mistaken for a failed command.
@@ -239,7 +264,7 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
  // screenshot/dev-server command.
     const child = spawn(opts.shell, [...opts.shellArgs, cmd], {
       cwd: opts.cwd,
-      env: process.env,
+      env: modelShellEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

@@ -4,18 +4,22 @@ import { HostBridge } from "./protocol/bridge.js";
 import { describeError, type CodepilotClient } from "./protocol/client.js";
 import { useCodepilot, type Codepilot } from "./state/useCodepilot.js";
 import { interpretSlash } from "./state/slashCommands.js";
+import { notifyTurnComplete, primeNotifications } from "./state/notifications.js";
 import type { Row } from "./state/rows.js";
 import type { ImageAttachment, PromptFile } from "@codepilot/core";
 import { loadPrefs, savePrefs, sameCwd } from "./prefs.js";
 import {
   applyLayout,
   applyTheme,
+  applyThemeName,
   detectSurface,
   initialTheme,
+  initialThemeName,
   saveLayout,
   type Layout,
   type Surface,
   type Theme,
+  type ThemeName,
 } from "./surface.js";
 import { applyHostLocale, t, useLocale } from "./i18n.js";
 import { Transcript } from "./components/Transcript.js";
@@ -31,6 +35,7 @@ import {
 } from "./components/Chrome.js";
 import { AgentHome, FilePreview, TaskPanel } from "./components/AgentView.js";
 import { ModelPicker } from "./components/ModelPicker.js";
+import { ContextGauge } from "./components/ContextGauge.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
 import { WorkspacePanel } from "./components/WorkspacePanel.js";
 import {
@@ -53,6 +58,7 @@ import {
 import { TrajectoryPanel } from "./components/TrajectoryPanel.js";
 import { BrowserPanel } from "./components/BrowserPanel.js";
 import { GitPanel } from "./components/GitPanel.js";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette.js";
 
 declare global {
   interface Window {
@@ -96,6 +102,7 @@ export function App(): React.ReactElement {
   const surface = useMemo<Surface>(detectSurface, []);
   const [layout, setLayout] = useState<Layout>(surface.layout);
   const [theme, setTheme] = useState<Theme>(() => initialTheme(surface.host));
+  const [themeName, setThemeName] = useState<ThemeName>(initialThemeName);
   const cp = useCodepilot();
   const cpRef = useRef(cp);
   cpRef.current = cp;
@@ -104,7 +111,31 @@ export function App(): React.ReactElement {
   if (surface.host && bridgeRef.current === null) bridgeRef.current = new HostBridge(surface.host);
 
   useEffect(() => applyTheme(theme), [theme]);
+  useEffect(() => applyThemeName(themeName), [themeName]);
   useEffect(() => applyLayout(layout), [layout]);
+
+  // Notify when a long turn finishes while the window is in the background.
+  const runStartRef = useRef<number | undefined>(undefined);
+  const prevStatusRef = useRef(cp.state.status);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    const status = cp.state.status;
+    if (prev === "idle" && status !== "idle") {
+      runStartRef.current = Date.now();
+      primeNotifications();
+    } else if (prev !== "idle" && status === "idle") {
+      const last = [...cp.state.rows].reverse().find((r) => r.kind === "message" && r.msg.role === "assistant");
+      const body = last?.kind === "message" ? last.msg.text.slice(0, 140) : "";
+      notifyTurnComplete({
+        title: cp.state.sessions.find((s) => s.id === cp.state.sessionId)?.title || "CodePilot",
+        body: body || t("Ready"),
+        startedAt: runStartRef.current,
+        onClick: () => window.focus(),
+      });
+      runStartRef.current = undefined;
+    }
+    prevStatusRef.current = status;
+  }, [cp.state.status, cp.state.rows, cp.state.sessions, cp.state.sessionId]);
 
   const toggleTheme = useCallback(() => {
     setTheme((prev) => {
@@ -117,6 +148,11 @@ export function App(): React.ReactElement {
   const setThemePersist = useCallback((next: Theme) => {
     applyTheme(next, true);
     setTheme(next);
+  }, []);
+
+  const setThemeNamePersist = useCallback((next: ThemeName) => {
+    applyThemeName(next, true);
+    setThemeName(next);
   }, []);
 
   const switchLayout = useCallback((next: Layout) => {
@@ -171,9 +207,11 @@ export function App(): React.ReactElement {
         cwd: prefs.cwd,
         workspaces: prefs.workspaces,
       });
- // Remote phone: seed the workspace list with every authorized workspace so
- // the sidebar shows them all, not just the active one.
-      if (surface.remoteCwds?.length) cp.seedWorkspaces(surface.remoteCwds);
+      // Remote phone: show EXACTLY the grant-authorized workspaces. Replace
+      // (not merge) so stale localStorage-cached workspaces from a prior local
+      // session on this browser profile don't leak into the scoped remote view.
+      if (surface.remote) cp.seedWorkspaces(surface.remoteCwds ?? [], { replace: true });
+      else if (surface.remoteCwds?.length) cp.seedWorkspaces(surface.remoteCwds);
       void afterConnect(cp.connect({ url, token, cwd: surface.autoConnect.cwd || undefined }));
     } else if (prefs.url && prefs.token) {
       void afterConnect(cp.connect({ url: prefs.url, token: prefs.token }));
@@ -196,6 +234,8 @@ export function App(): React.ReactElement {
     theme,
     toggleTheme,
     setThemePersist,
+    themeName,
+    setThemeNamePersist,
     layout,
     switchLayout,
   };
@@ -221,6 +261,8 @@ interface LayoutProps {
   theme: Theme;
   toggleTheme(): void;
   setThemePersist(theme: Theme): void;
+  themeName: ThemeName;
+  setThemeNamePersist(name: ThemeName): void;
   layout: Layout;
   switchLayout(layout: Layout): void;
 }
@@ -288,9 +330,21 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
       },
     },
     footer: (
-      <span className="flex min-w-0 flex-wrap items-center gap-2">
-        <ModelPicker cp={cp} />
-        <UsageLine state={state} />
+      // Single no-wrap row: the model name (truncatable) takes the slack, the
+      // context gauge stays fixed and always visible, and the cumulative-usage
+      // line is the first to hide when the composer is narrow (e.g. the files
+      // panel is open) — it's the least important and its big number read as
+      // "deformation" when it wrapped under the gauge.
+      <span className="flex min-w-0 items-center gap-2 overflow-hidden">
+        <span className="flex min-w-0 shrink items-center overflow-hidden">
+          <ModelPicker cp={cp} />
+        </span>
+        <span className="shrink-0">
+          <ContextGauge client={cp.client} sessionId={state.sessionId} state={state} />
+        </span>
+        <span className="hidden shrink-0 min-[560px]:inline-flex">
+          <UsageLine state={state} />
+        </span>
       </span>
     ),
   };
@@ -300,6 +354,12 @@ function scrollSignature(rows: Row[]): string {
   const last = rows[rows.length - 1];
   const tail = last?.kind === "message" ? last.msg.text.length : last?.kind === "tool" ? last.tool.status : "";
   return `${rows.length}:${tail}`;
+}
+
+/** Last one or two path segments, for compact workspace/session hints. */
+function shortCwd(cwd: string): string {
+  const parts = cwd.split(/[/\\]/).filter(Boolean);
+  return parts.slice(-2).join("/") || cwd;
 }
 
 /** Full-page connect form only when we have nothing to try with. A URL with
@@ -324,6 +384,8 @@ function WebLayout({
   theme,
   toggleTheme,
   setThemePersist,
+  themeName,
+  setThemeNamePersist,
   layout,
   switchLayout,
   surface,
@@ -337,6 +399,7 @@ function WebLayout({
   const [showTrajectory, setShowTrajectory] = useState(false);
   const [showGit, setShowGit] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -363,6 +426,18 @@ function WebLayout({
       if (cmd === "check-updates") checkUpdateRef.current();
       else setShowSettings(true);
     });
+  }, []);
+  // Global ⌘K / Ctrl+K toggles the command palette. Registered before any
+  // early return so the hook order stays stable.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setShowPalette((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
   const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const composer = useComposer(cp, draft, setDraft, t("Ask CodePilot…"));
@@ -426,6 +501,75 @@ function WebLayout({
     }
   };
   checkUpdateRef.current = () => void checkForUpdate();
+
+  // Build the ⌘K palette commands fresh each render (only the open palette
+  // consumes them, so memoization is not worth the hook complexity). This is a
+  // plain const — not a hook — so it may live after the early connect-screen
+  // return above.
+  const paletteCommands: PaletteCommand[] = [];
+  {
+    const cmds = paletteCommands;
+    const act = (id: string, title: string, run: () => void, keywords?: string): void => {
+      cmds.push({ id, title, group: t("Actions"), run, keywords });
+    };
+    act("new-chat", t("New chat / session"), () => {
+      if (!state.cwd) {
+        cp.notify(t("Select a workspace first, or open a new one."));
+        return;
+      }
+      void cp.newSession();
+    });
+    if (state.cwd) {
+      act("toggle-files", t("Toggle Files panel"), () => {
+        setShowWorkspace((v) => !v);
+        setWorkspaceMax(false);
+        setShowTrajectory(false);
+        setShowGit(false);
+        setBrowserUrl(null);
+      });
+      act("toggle-git", t("Toggle Git panel"), () => {
+        setShowGit((v) => !v);
+        setShowWorkspace(false);
+        setShowTrajectory(false);
+        setBrowserUrl(null);
+      });
+    }
+    if (state.sessionId) {
+      act("toggle-trajectory", t("Toggle Trajectory panel"), () => {
+        setShowTrajectory((v) => !v);
+        setShowWorkspace(false);
+        setShowGit(false);
+        setBrowserUrl(null);
+      });
+    }
+    act("settings", t("Settings"), () => setShowSettings(true));
+    act("toggle-theme", t("Toggle theme"), () => toggleTheme());
+    act("agent-view", t("Switch to Agent view"), () => onSwitch());
+    if (connected && !checkingUpdate) {
+      act("check-updates", t("Check for updates"), () => void checkForUpdate());
+    }
+    for (const s of state.sessions) {
+      if (s.id === state.sessionId) continue;
+      cmds.push({
+        id: `session-${s.id}`,
+        title: s.title || s.id,
+        hint: s.cwd ? shortCwd(s.cwd) : undefined,
+        group: t("Resume session"),
+        keywords: s.id,
+        run: () => void resumeInWorkspace(s.id, s.cwd || state.cwd),
+      });
+    }
+    for (const ws of cp.workspaces) {
+      if (sameCwd(ws, state.cwd)) continue;
+      cmds.push({
+        id: `ws-${ws}`,
+        title: shortCwd(ws),
+        hint: ws,
+        group: t("Open workspace"),
+        run: () => void cp.openWorkspace(ws),
+      });
+    }
+  }
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--color-bg)]">
@@ -588,6 +732,7 @@ function WebLayout({
                 scrollContainerRef={scrollElRef}
                 status={state.status}
                 activity={state.activity}
+                plan={state.plan}
                 permission={state.permission}
                 question={state.question}
                 onDecide={(d) => void cp.decidePermission(d)}
@@ -661,6 +806,8 @@ function WebLayout({
         onClose={() => setShowSettings(false)}
         theme={theme}
         onTheme={setThemePersist}
+        themeName={themeName}
+        onThemeName={setThemeNamePersist}
         layout={layout}
         onLayout={switchLayout}
         onComposePrompt={(text) => {
@@ -668,6 +815,7 @@ function WebLayout({
           setShowSettings(false);
         }}
       />
+      {showPalette && <CommandPalette commands={paletteCommands} onClose={() => setShowPalette(false)} />}
     </div>
   );
 }
@@ -757,6 +905,8 @@ function AgentLayout({
   theme,
   toggleTheme,
   setThemePersist,
+  themeName,
+  setThemeNamePersist,
   layout,
   switchLayout,
   surface,
@@ -932,6 +1082,7 @@ function AgentLayout({
                   scrollContainerRef={scrollElRef}
                   status={state.status}
                   activity={state.activity}
+                  plan={state.plan}
                   permission={state.permission}
                   question={state.question}
                   planInline={remote}
@@ -998,6 +1149,8 @@ function AgentLayout({
           onClose={() => setShowSettings(false)}
           theme={theme}
           onTheme={setThemePersist}
+          themeName={themeName}
+          onThemeName={setThemeNamePersist}
           layout={layout}
           onLayout={switchLayout}
           onComposePrompt={(text) => {
@@ -1135,6 +1288,7 @@ function EmbeddedLayout({
               scrollContainerRef={scrollElRef}
               status={state.status}
               activity={state.activity}
+              plan={state.plan}
               permission={state.permission}
               question={state.question}
               density="compact"

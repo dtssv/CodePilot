@@ -78,6 +78,17 @@ export interface StreamChatOptions {
   };
  /** Called before each transport-level retry (429 / 5xx / network). */
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
+ /**
+  * Tool-call policy for this turn. `"auto"` (default) lets the model decide;
+  * `"none"` hard-disables tool calls so the model MUST answer in text. The
+  * agent loop sets `"none"` at the turn-budget boundary (and the sub-agent
+  * synthesis turn) so the final turn cannot start another tool call that would
+  * blow the budget — a hard backstop to the prose wind-down nudge. Tool
+  * definitions are still sent (so the prompt cache prefix stays stable);
+  * only the ability to invoke them is withdrawn. Providers without a native
+  * `tool_choice` knob ignore it. Omitted ⇒ provider default (auto).
+  */
+  toolChoice?: "auto" | "none";
 }
 
 export type StreamEvent =
