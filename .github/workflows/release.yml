@@ -155,7 +155,26 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ "${{ matrix.family }}" = "win" ]; then
+            pnpm install --frozen-lockfile --ignore-scripts 2>&1 | tee /tmp/install.log
+            pnpm rebuild electron 2>&1 | tee -a /tmp/install.log
+          else
+            pnpm install --frozen-lockfile 2>&1 | tee /tmp/install.log
+          fi
+
+      - name: Install diagnostics
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Install log (tail)"
+            echo '```'
+            tail -100 /tmp/install.log 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package desktop app
         run: pnpm package:desktop
