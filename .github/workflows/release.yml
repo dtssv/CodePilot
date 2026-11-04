@@ -280,6 +280,31 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
+      - name: Clean existing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${{ steps.version.outputs.version }}"
+          REPO="dtssv/CodePilot"
+          RELEASE_ID=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+          if [ -z "$RELEASE_ID" ]; then
+            echo "No existing release for $TAG — nothing to clean."
+            exit 0
+          fi
+          echo "Cleaning assets on release $RELEASE_ID…"
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/releases/$RELEASE_ID/assets" \
+            | python3 -c "
+          import json, sys, subprocess
+          for a in json.load(sys.stdin):
+              print('  deleting', a['name'])
+              subprocess.run(['curl','-fsSL','-X','DELETE','-H',f'Authorization: Bearer {\"$GH_TOKEN\"}',
+                              f'https://api.github.com/repos/$REPO/releases/assets/{a[\"id\"]}'])
+          "
+
       - name: Create GitHub Release
         id: release
         uses: softprops/action-gh-release@v2
