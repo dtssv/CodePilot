@@ -120,8 +120,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: "host/engine", state: "ready" });
   }
 
-  private async openFile(path: string, line?: number): Promise<void> {
+  private async openFile(rawPath: string, line?: number): Promise<void> {
     const root = this.opts.cwd();
+    // Defensive: strip a trailing `:line[:col]` anchor if a caller passed the
+    // raw `src/foo.ts:42` string, and adopt the line when none was given.
+    const anchor = /^(.*?[^/\\]):(\d{1,9})(?::\d{1,9})?$/.exec(rawPath);
+    const pathHasShape = anchor ? /[\\/]|\.[a-z0-9]{1,16}$/i.test(anchor[1]!) : false;
+    const path = anchor && pathHasShape ? anchor[1]! : rawPath;
+    if (line === undefined && anchor && pathHasShape) {
+      const n = Number(anchor[2]);
+      if (Number.isFinite(n) && n > 0) line = n;
+    }
     const uri = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)
       ? vscode.Uri.file(path)
       : vscode.Uri.joinPath(vscode.Uri.file(root), path);

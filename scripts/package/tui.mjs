@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 /**
- * Package `codepilot-tui`: platform binaries + npm .tgz.
+ * Package `codepilot-tui`: self-contained binaries (via Bun) + npm .tgz.
  *
- * Ink/yoga use top-level await, so we `pnpm deploy` a prod tree and let pkg
- * follow real node_modules instead of esbuild-bundling the TUI into one CJS.
+ * The TUI is ESM and Ink/yoga use top-level await, so it cannot be bundled to
+ * CJS for @yao-pkg/pkg (which also can't reliably run an ESM entry from its
+ * snapshot FS). Bun's `--compile` handles ESM + top-level await + native addons
+ * natively, so we use it here — the same approach opencode uses for the same
+ * reason. Native addons (better-sqlite3) are embedded host-arch; cross-compiled
+ * targets carry the host arch but degrade fail-soft (the session index is
+ * optional). CI builds each target on its own OS/arch runner for correctness.
  */
 
-import { chmodSync, existsSync, renameSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, renameSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   CACHE_ROOT,
   RELEASE_ROOT,
   REPO_ROOT,
-  cleanDir,
+  bunTargetFor,
   ensureDir,
   fail,
   log,
@@ -20,51 +26,57 @@ import {
   resolveTargets,
   run,
 } from "./_util.mjs";
-import { runPkg } from "./bundle-node.mjs";
 
 const outDir = join(RELEASE_ROOT, "tui");
-const deployDir = join(CACHE_ROOT, "tui-deploy");
+const bundleScript = join(REPO_ROOT, "scripts", "package", "bundle-bun.mjs");
+
+/** Locate the `bun` executable (PATH, or the default user install). */
+function findBun() {
+  const probe = spawnSync("bun", ["--version"], { encoding: "utf8" });
+  if (probe.status === 0) return "bun";
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const fallback = join(home, ".bun", "bin", process.platform === "win32" ? "bun.exe" : "bun");
+  if (existsSync(fallback)) return fallback;
+  fail(
+    "bun not found — install it (https://bun.sh) to package the TUI.\n" +
+      "  curl -fsSL https://bun.sh/install | bash",
+  );
+  return "bun";
+}
 
 async function main() {
   ensureDir(outDir);
   pnpm(["--filter", "@codepilot/tui", "build"]);
-  const distCli = join(REPO_ROOT, "apps", "tui", "dist", "cli.js");
-  if (!existsSync(distCli)) fail("apps/tui/dist/cli.js missing");
+  const entry = join(REPO_ROOT, "apps", "tui", "dist", "cli.js");
+  if (!existsSync(entry)) fail("apps/tui/dist/cli.js missing");
 
-  cleanDir(deployDir);
- // Portable prod install of the tui package + deps.
-  pnpm(["--filter", "@codepilot/tui", "deploy", "--prod", deployDir]);
-
-  const entry = join(deployDir, "dist", "cli.js");
-  if (!existsSync(entry)) fail(`deploy missing ${entry}`);
-
- // pkg needs a package.json "bin" / main near the entry for some resolvers.
-  const pkgJsonPath = join(deployDir, "package.json");
-  if (existsSync(pkgJsonPath)) {
-    const pj = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-    pj.bin = { "codepilot-tui": "./dist/cli.js" };
-    writeFileSync(pkgJsonPath, `${JSON.stringify(pj, null, 2)}\n`);
-  }
+  const bun = findBun();
 
   for (const t of resolveTargets()) {
-    const base = join(outDir, `codepilot-tui-${t.binarySuffix.replace(/\.exe$/, "")}`);
-    try {
-      runPkg({ entry, targets: [t.pkgTarget], outputPath: base });
-    } catch (err) {
-      log(`skip ${t.pkgTarget}: ${err instanceof Error ? err.message : err}`);
+    const suffix = t.binarySuffix.replace(/\.exe$/, "");
+    const wanted = join(outDir, `codepilot-tui-${t.binarySuffix}`);
+    // Bun appends .exe for windows targets; build to a base path then fix up.
+    const base = join(outDir, `codepilot-tui-${suffix}`);
+    const bunTarget = bunTargetFor(t.family, t.arch);
+    const r = spawnSync(bun, [bundleScript, entry, base, bunTarget], {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+    });
+    if (r.status !== 0) {
+      log(`skip ${bunTarget}: bun compile exited ${r.status}`);
       continue;
     }
     if (t.family === "win") {
       const exe = `${base}.exe`;
-      const wanted = join(outDir, `codepilot-tui-${t.binarySuffix}`);
       if (existsSync(exe) && exe !== wanted) renameSync(exe, wanted);
     } else if (existsSync(base)) {
       try {
         chmodSync(base, 0o755);
       } catch {
- /* ignore */
+        /* ignore */
       }
     }
+    log(`binary ready: ${wanted}`);
   }
 
   const npmDir = ensureDir(join(outDir, "npm"));

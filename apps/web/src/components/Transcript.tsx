@@ -1241,6 +1241,9 @@ export function QuestionCard({
                 value={freeText[q.id] ?? ""}
                 onChange={(e) => setFreeText((prev) => ({ ...prev, [q.id]: e.target.value }))}
                 onKeyDown={(e) => {
+                  // IME composition (Chinese/Japanese input) uses Enter to
+                  // commit a candidate; that must not submit the answer.
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                   if (e.key === "Enter") submit();
                 }}
                 placeholder={t("or type an answer")}

@@ -931,6 +931,7 @@ export function SettingsExtras({
               value={connectorQueryDraft}
               onChange={(e) => setConnectorQueryDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") setConnectorQuery(connectorQueryDraft.trim());
               }}
             />
@@ -1182,6 +1183,7 @@ export function SettingsExtras({
               disabled={busy}
               onChange={(e) => setSkillSourceDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") void installSkillFromSource();
               }}
             />
@@ -1201,6 +1203,7 @@ export function SettingsExtras({
               value={skillQueryDraft}
               onChange={(e) => setSkillQueryDraft(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") setSkillQuery(skillQueryDraft.trim());
               }}
             />
@@ -1274,6 +1277,7 @@ export function SettingsExtras({
                     value={newSkillFilePath}
                     onChange={(e) => setNewSkillFilePath(e.target.value)}
                     onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                       if (e.key === "Enter") void addSkillFile();
                       if (e.key === "Escape") {
                         setAddingSkillFile(false);

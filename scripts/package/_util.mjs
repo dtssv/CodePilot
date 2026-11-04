@@ -59,6 +59,18 @@ export function binaryNameSuffix(family, arch) {
 }
 
 /**
+ * Bun `--compile` target for a family/arch (bun-<os>-<arch>). Used by the TUI,
+ * which Bun compiles (ESM + top-level await + native addons) instead of pkg.
+ * @param {OsFamily} family @param {string} arch
+ */
+export function bunTargetFor(family, arch) {
+  const a = arch === "arm64" ? "arm64" : "x64";
+  if (family === "win") return `bun-windows-${a}`;
+  if (family === "mac") return `bun-darwin-${a}`;
+  return `bun-linux-${a}`;
+}
+
+/**
  * Parse PACKAGE_TARGETS / argv for which platforms to build.
  * Default: current host only. `--all` or PACKAGE_TARGETS=win,mac,linux for more.
  * @param {string[]} argv
@@ -212,6 +224,18 @@ export async function zipDir(srcDir, outZip) {
   if (tar.status === 0) return;
 
   fail(`Could not create zip at ${outZip} (need zip, tar, or PowerShell Compress-Archive)`);
+}
+
+/**
+ * Create a gzip tarball of a directory's *contents* at `outTarGz`.
+ * `tar` ships with macOS, Linux, and Windows 10+ (bsdtar as `tar.exe`).
+ */
+export function tarGzipDir(srcDir, outTarGz) {
+  ensureDir(dirname(outTarGz));
+  if (existsSync(outTarGz)) rmSync(outTarGz, { force: true });
+  const r = spawnSync("tar", ["-czf", outTarGz, "-C", srcDir, "."], { stdio: "inherit" });
+  if (r.status === 0) return;
+  fail(`Could not create tarball at ${outTarGz} (need tar)`);
 }
 
 export function copyTree(src, dest) {

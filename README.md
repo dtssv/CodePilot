@@ -8,7 +8,7 @@
 
 ### 一键安装（推荐）
 
-需要 **Node.js ≥ 20** 与 npm。
+下载自包含的单文件二进制（内嵌运行时），**无需预装 Node.js 或 npm**。
 
 **macOS / Linux / Windows（Git Bash 或 WSL）：**
 
@@ -34,20 +34,20 @@ irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1 |
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1))) -Version v1.0.0
 ```
 
-**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号）：
+**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号）；它会转交给 PowerShell 执行：
 
 ```bat
 install.cmd
 install.cmd v1.0.0
 ```
 
-会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取各端共用的 npm 包，装到 `~/.codepilot`（Windows 为 `%USERPROFILE%\.codepilot`）：
+会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取对应平台的二进制，装到 `~/.codepilot/bin`（Windows 为 `%USERPROFILE%\.codepilot\bin`）并加入 PATH：
 
 | 资源 | 说明 |
 |---|---|
-| `codepilot-core-*.tgz` | 引擎 |
-| `codepilot-protocol-*.tgz` | `codepilot` CLI |
-| `codepilot-tui-*.tgz` | `codepilot-tui` 终端 UI |
+| `codepilot-<平台>` | `codepilot` CLI（内嵌运行时的单文件二进制） |
+| `codepilot-tui-<平台>` | `codepilot-tui` 终端 UI（单文件二进制） |
+| `codepilot-web-<平台>.tar.gz` | 各端共用的 Web SPA 静态资源 |
 | `install.sh` / `install.ps1` / `install.cmd` | 安装脚本（Release 也附带，分别对应 shell / PowerShell / 旧版 Windows） |
 
 装好后：

@@ -4,8 +4,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
 #
-# Installs @codepilot/core + protocol + tui into ~/.codepilot (npm prefix).
-# Requires Node.js >= 20 and npm.
+# Installs self-contained CodePilot binaries (TUI + CLI) into ~/.codepilot/bin.
+# No Node.js or npm required — the binaries embed their own runtime.
+#
+# Install from a local build (for testing a release before it is published):
+#   PACKAGE_TARGETS=mac corepack pnpm package:cli && corepack pnpm package:tui
+#   CODEPILOT_DIST_DIR=dist/release scripts/install.sh
 #
 set -euo pipefail
 
@@ -14,6 +18,9 @@ PREFIX="${CODEPILOT_INSTALL_DIR:-$HOME/.codepilot}"
 BIN_DIR="$PREFIX/bin"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_DL="${GITHUB_DL:-https://github.com}"
+# Point at a local `dist/release` tree to install from a local build instead of
+# a GitHub release (no network). Expects dist/release/{cli,tui}/… layout.
+DIST_DIR="${CODEPILOT_DIST_DIR:-}"
 
 RED='\033[0;31m'
 MUTED='\033[0;2m'
@@ -21,7 +28,7 @@ NC='\033[0m'
 
 usage() {
   cat <<EOF
-Install CodePilot (CLI + TUI)
+Install CodePilot (self-contained TUI + CLI binaries — no Node.js required)
 
 Usage:
   curl -fsSL …/install.sh | bash
@@ -35,6 +42,8 @@ Options:
 Environment:
   CODEPILOT_REPO          GitHub owner/repo (default: dtssv/CodePilot)
   CODEPILOT_INSTALL_DIR   Install prefix (default: ~/.codepilot)
+  CODEPILOT_DIST_DIR      Install from a local dist/release tree instead of a
+                          GitHub release (for testing an unpublished build)
 EOF
 }
 
@@ -59,25 +68,33 @@ need_cmd() {
   fi
 }
 
-check_node() {
-  need_cmd node
-  need_cmd npm
-  need_cmd curl
-  local major
-  major=$(node -p "process.versions.node.split('.')[0]")
-  if [[ "$major" -lt 20 ]]; then
-    echo -e "${RED}Node.js >= 20 required (found $(node -v))${NC}" >&2
-    exit 1
-  fi
+# Map `uname` output to CodePilot's binary suffix (matches scripts/package
+# _util.mjs binaryNameSuffix): darwin-<arch> / linux-<arch> / win-<arch>.exe.
+detect_target() {
+  local os arch
+  os=$(uname -s)
+  arch=$(uname -m)
+  case "$os" in
+    Darwin) OS_FAMILY="mac" ;;
+    Linux) OS_FAMILY="linux" ;;
+    MINGW*|MSYS*|CYGWIN*) OS_FAMILY="win" ;;
+    *) echo -e "${RED}Unsupported OS: ${os}${NC}" >&2; exit 1 ;;
+  esac
+  case "$arch" in
+    arm64|aarch64) CPU_ARCH="arm64" ;;
+    x86_64|amd64) CPU_ARCH="x64" ;;
+    *) echo -e "${RED}Unsupported architecture: ${arch}${NC}" >&2; exit 1 ;;
+  esac
+  case "$OS_FAMILY" in
+    mac) TARGET="darwin-${CPU_ARCH}"; EXE="" ;;
+    linux) TARGET="linux-${CPU_ARCH}"; EXE="" ;;
+    win) TARGET="win-${CPU_ARCH}"; EXE=".exe" ;;
+  esac
 }
 
 resolve_tag() {
   if [[ -n "$requested_version" ]]; then
-    if [[ "$requested_version" == v* ]]; then
-      TAG="$requested_version"
-    else
-      TAG="v$requested_version"
-    fi
+    [[ "$requested_version" == v* ]] && TAG="$requested_version" || TAG="v$requested_version"
     return
   fi
   local json
@@ -89,16 +106,9 @@ resolve_tag() {
   fi
 }
 
-# Strip leading v → 1.0.0 for asset filenames codepilot-*-1.0.0.tgz
-version_number() {
-  echo "${TAG#v}"
-}
-
-download_tarball() {
-  local name="$1"
-  local url="${GITHUB_DL}/${REPO}/releases/download/${TAG}/${name}"
-  local out="$2/${name}"
-  echo -e "${MUTED}↓ ${NC}${name}"
+download() {
+  local url="$1" out="$2"
+  echo -e "${MUTED}↓ ${NC}$(basename "$out")"
   if ! curl -fL --progress-bar -o "$out" "$url"; then
     echo -e "${RED}Download failed: ${url}${NC}" >&2
     echo -e "${MUTED}See ${GITHUB_DL}/${REPO}/releases${NC}" >&2
@@ -106,31 +116,56 @@ download_tarball() {
   fi
 }
 
-install_packages() {
+# Copy a required binary + the shared web/ SPA from a local dist/release tree.
+install_from_dist() {
+  detect_target
+  local cli_src tui_src web_src
+  cli_src="$DIST_DIR/cli/codepilot-${TARGET}${EXE}"
+  tui_src="$DIST_DIR/tui/codepilot-tui-${TARGET}${EXE}"
+  web_src="$DIST_DIR/cli/web"
+  [[ -f "$tui_src" ]] || { echo -e "${RED}Missing ${tui_src} — run: corepack pnpm package:tui${NC}" >&2; exit 1; }
+  [[ -f "$cli_src" ]] || { echo -e "${RED}Missing ${cli_src} — run: corepack pnpm package:cli${NC}" >&2; exit 1; }
+
+  echo -e "${MUTED}Installing CodePilot ${NC}(local dist, ${TARGET}) ${MUTED}→ ${NC}${PREFIX}"
+  mkdir -p "$BIN_DIR"
+  cp "$tui_src" "$BIN_DIR/codepilot-tui${EXE}"
+  cp "$cli_src" "$BIN_DIR/codepilot${EXE}"
+  chmod +x "$BIN_DIR/codepilot-tui${EXE}" "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
+  if [[ -d "$web_src" ]]; then
+    rm -rf "$BIN_DIR/web"
+    cp -R "$web_src" "$BIN_DIR/web"
+  fi
+}
+
+# Download the platform binaries + shared web/ SPA from a GitHub release.
+install_from_release() {
+  detect_target
   resolve_tag
-  local ver tmp
-  ver=$(version_number)
+  local tmp
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/codepilot-install.XXXXXX")
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" EXIT
 
-  echo -e "${MUTED}Installing CodePilot ${NC}${TAG} ${MUTED}→ ${NC}${PREFIX}"
+  echo -e "${MUTED}Installing CodePilot ${NC}${TAG} ${MUTED}(${TARGET}) → ${NC}${PREFIX}"
+  local base="${GITHUB_DL}/${REPO}/releases/download/${TAG}"
+  download "${base}/codepilot-tui-${TARGET}${EXE}" "$tmp/codepilot-tui${EXE}"
+  download "${base}/codepilot-${TARGET}${EXE}" "$tmp/codepilot${EXE}"
+  download "${base}/codepilot-web-${TARGET}.tar.gz" "$tmp/web.tar.gz"
 
-  download_tarball "codepilot-core-${ver}.tgz" "$tmp"
-  download_tarball "codepilot-protocol-${ver}.tgz" "$tmp"
-  download_tarball "codepilot-tui-${ver}.tgz" "$tmp"
+  mkdir -p "$BIN_DIR"
+  cp "$tmp/codepilot-tui${EXE}" "$BIN_DIR/codepilot-tui${EXE}"
+  cp "$tmp/codepilot${EXE}" "$BIN_DIR/codepilot${EXE}"
+  chmod +x "$BIN_DIR/codepilot-tui${EXE}" "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
+  rm -rf "$BIN_DIR/web"
+  mkdir -p "$BIN_DIR/web"
+  tar -xzf "$tmp/web.tar.gz" -C "$BIN_DIR/web"
+}
 
-  mkdir -p "$PREFIX"
-  npm install -g --prefix "$PREFIX" \
-    "$tmp/codepilot-core-${ver}.tgz" \
-    "$tmp/codepilot-protocol-${ver}.tgz" \
-    "$tmp/codepilot-tui-${ver}.tgz"
-
-  if [[ ! -x "$BIN_DIR/codepilot-tui" && ! -L "$BIN_DIR/codepilot-tui" ]]; then
-    echo -e "${RED}Install finished but ${BIN_DIR}/codepilot-tui is missing${NC}" >&2
+verify_install() {
+  if [[ ! -x "$BIN_DIR/codepilot-tui${EXE}" ]]; then
+    echo -e "${RED}Install finished but ${BIN_DIR}/codepilot-tui${EXE} is missing or not executable${NC}" >&2
     exit 1
   fi
-
   echo -e "${MUTED}Bins:${NC}"
   ls -la "$BIN_DIR"/codepilot* 2>/dev/null || true
 }
@@ -203,8 +238,13 @@ ensure_path() {
   esac
 }
 
-check_node
-install_packages
+need_cmd curl
+if [[ -n "$DIST_DIR" ]]; then
+  install_from_dist
+else
+  install_from_release
+fi
+verify_install
 ensure_path
 
 echo ""

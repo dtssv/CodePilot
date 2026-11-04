@@ -20,6 +20,7 @@ import {
   pnpm,
   resolveTargets,
   run,
+  tarGzipDir,
 } from "./_util.mjs";
 import { bundleNodeEntry, runPkg } from "./bundle-node.mjs";
 
@@ -78,14 +79,23 @@ function packageBinaries() {
       }
     }
  // Ship SPA beside the binary for detectWebRoot(execPath/web).
-    const webNextTo = join(outDir, `web-${t.binarySuffix.replace(/\.exe$/, "")}`);
  // One shared web/ is enough — copy once as outDir/web
     const sharedWeb = join(outDir, "web");
     if (!existsSync(join(sharedWeb, "index.html"))) {
       copyTree(webCache, sharedWeb);
     }
-    void webNextTo;
     log(`binary ready: ${binary}`);
+  }
+ // Per-target web SPA tarball — the install.sh/ps1 release path downloads
+ // codepilot-web-<target>.tar.gz and unpacks it beside the binary.
+  const sharedWeb = join(outDir, "web");
+  if (existsSync(join(sharedWeb, "index.html"))) {
+    for (const t of targets) {
+      const suffix = t.binarySuffix.replace(/\.exe$/, "");
+      const tarball = join(outDir, `codepilot-web-${suffix}.tar.gz`);
+      tarGzipDir(sharedWeb, tarball);
+      log(`web tarball: ${tarball}`);
+    }
   }
 }
 

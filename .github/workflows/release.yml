@@ -3,10 +3,14 @@ name: Release
 # Triggered by pushing a tag matching `v*.*.*` (e.g. v2.0.1, v3.0.0).
 # Builds and publishes:
 #   - @codepilot/core, @codepilot/protocol, @codepilot/tui → npm (public)
+#   - codepilot + codepilot-tui binaries (6 targets, built per-OS/arch)
+#     + web SPA tarballs — @yao-pkg/pkg only builds for its host platform
 #   - codepilot-vscode → GitHub Release as .vsix
 #   - CodePilot IDEA plugin → GitHub Release as .zip
-# A GitHub Release is created automatically (softprops/action-gh-release)
-# and all artifacts are attached to it.
+#   - Desktop app (.dmg / .exe / .AppImage)
+# The CLI/TUI binaries are what scripts/install.{sh,ps1} download — no Node
+# needed at runtime. A GitHub Release is created automatically
+# (softprops/action-gh-release) and all artifacts are attached to it.
 
 on:
   push:
@@ -206,6 +210,84 @@ jobs:
           path: artifacts/desktop/*
 
 # ---------------------------------------------------------------------
+# CLI + TUI binaries (self-contained — no Node needed at runtime). These
+# are what scripts/install.{sh,ps1} download. Both are built per-OS/arch on
+# arch-native runners:
+#   - CLI: esbuild→CJS→@yao-pkg/pkg, which only builds for its host platform.
+#   - TUI: Bun --compile (ESM + top-level await + native addons). Bun can
+#     cross-compile, but embeds host-arch native addons, so we build on the
+#     native runner for a correct better-sqlite3 (the session index).
+# Each runner also emits the shared web SPA tarball (codepilot-web-<target>.tar.gz)
+# via package:cli; they are identical across targets, one per target is shipped.
+# ---------------------------------------------------------------------
+  binaries:
+    name: Binaries (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest        # arm64
+            target: darwin-arm64
+          - os: macos-13            # x64
+            target: darwin-x64
+          - os: ubuntu-latest       # x64
+            target: linux-x64
+          - os: ubuntu-24.04-arm    # arm64
+            target: linux-arm64
+          - os: windows-latest      # x64
+            target: win-x64
+          - os: windows-11-arm      # arm64
+            target: win-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install Bun (for the TUI binary)
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      # No PACKAGE_TARGETS → currentPlatform() → this runner's own OS+arch,
+      # so pkg produces exactly matrix.target. package:cli also writes the
+      # web SPA tarball for this target.
+      - name: Package CLI binary (+ web tarball)
+        run: pnpm package:cli
+
+      # package:tui uses Bun --compile; no PACKAGE_TARGETS → host target.
+      - name: Package TUI binary
+        run: pnpm package:tui
+
+      - name: Collect binaries + web tarball
+        shell: bash
+        run: |
+          mkdir -p artifacts/bin
+          find dist/release/cli -maxdepth 1 -type f \( \
+            -name "codepilot-darwin-*" -o -name "codepilot-linux-*" \
+            -o -name "codepilot-win-*" -o -name "codepilot-web-*.tar.gz" \
+          \) ! -name "*.tgz" -exec cp {} artifacts/bin/ \;
+          find dist/release/tui -maxdepth 1 -type f -name "codepilot-tui-*" \
+            ! -name "*.tgz" -exec cp {} artifacts/bin/ \;
+          ls -la artifacts/bin/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: artifacts/bin/*
+
+# ---------------------------------------------------------------------
 # Publish to npm. Separate job so a publish failure doesn't block the
 # GitHub Release. Each package is published with `--access public` and
 # `--no-git-checks` (the tag checkout is detached, not on a branch).
@@ -255,7 +337,7 @@ jobs:
   # ---------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [build, desktop]
+    needs: [build, desktop, binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -273,6 +355,9 @@ jobs:
             -name "*.vsix" -o -name "*.zip" \
             -o -name "*.dmg" -o -name "*.exe" -o -name "*.AppImage" \
             -o -name "install.sh" -o -name "install.ps1" -o -name "install.cmd" \
+            -o -name "codepilot-darwin-*" -o -name "codepilot-linux-*" \
+            -o -name "codepilot-win-*" \
+            -o -name "codepilot-tui-*" -o -name "codepilot-web-*.tar.gz" \
           \) -exec cp {} assets/ \;
           ls -la assets/
 
@@ -310,6 +395,11 @@ jobs:
             assets/install.sh
             assets/install.ps1
             assets/install.cmd
+            assets/codepilot-darwin-*
+            assets/codepilot-linux-*
+            assets/codepilot-win-*
+            assets/codepilot-tui-*
+            assets/codepilot-web-*.tar.gz
 
       - name: Release diagnostics
         if: always()

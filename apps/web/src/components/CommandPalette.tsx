@@ -88,6 +88,9 @@ export function CommandPalette({
   };
 
   const onKeyDown = (e: React.KeyboardEvent): void => {
+    // IME composition (Chinese/Japanese input) uses Enter/arrows to navigate
+    // candidates; those keys must not drive the palette while composing.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((i) => Math.min(i + 1, results.length - 1));

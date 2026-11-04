@@ -102,11 +102,18 @@ class WebChatPanel private constructor(
         browser.cefBrowser.executeJavaScript(js, browser.cefBrowser.url, 0)
     }
 
-    private fun openFile(path: String, line: Int?) {
+    private fun openFile(rawPath: String, line: Int?) {
+        // Defensive: strip a trailing `:line[:col]` anchor if a caller passed
+        // the raw `src/foo.ts:42` string, and adopt the line when none was given.
+        val anchor = Regex("""^(.*?[^/\\]):(\d{1,9})(?::\d{1,9})?$""").find(rawPath)
+        val head = anchor?.groupValues?.get(1)
+        val hasShape = head != null && Regex("""[\\/]|\.[a-z0-9]{1,16}$""", RegexOption.IGNORE_CASE).containsMatchIn(head)
+        val path = if (hasShape) head!! else rawPath
+        val effectiveLine = line ?: if (hasShape) anchor!!.groupValues[2].toIntOrNull()?.takeIf { it > 0 } else null
         val abs = if (File(path).isAbsolute) path else File(cwd, path).path
         ApplicationManager.getApplication().invokeLater {
             val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(abs) ?: return@invokeLater
-            OpenFileDescriptor(project, vf, ((line ?: 1) - 1).coerceAtLeast(0), 0).navigate(true)
+            OpenFileDescriptor(project, vf, ((effectiveLine ?: 1) - 1).coerceAtLeast(0), 0).navigate(true)
         }
     }
 
