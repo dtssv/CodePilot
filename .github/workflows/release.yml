@@ -281,6 +281,7 @@ jobs:
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
@@ -297,3 +298,13 @@ jobs:
             assets/install.sh
             assets/install.ps1
             assets/install.cmd
+
+      - name: Release diagnostics
+        if: always()
+        run: |
+          {
+            echo "## Release job state"
+            echo "outcome: ${{ steps.release.outcome }}"
+            echo "## assets found"
+            ls -la assets/ || echo "(no assets dir)"
+          } >> "$GITHUB_STEP_SUMMARY"
