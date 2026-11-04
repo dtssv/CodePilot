@@ -183,7 +183,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts/desktop
-          find dist/release/desktop -type f \( \
+          find dist/release/desktop -maxdepth 1 -type f \( \
             -name "*.dmg" -o -name "*.exe" -o -name "*.AppImage" \
           \) -exec cp {} artifacts/desktop/ \;
           ls -la artifacts/desktop/
