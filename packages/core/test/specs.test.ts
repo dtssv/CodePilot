@@ -117,7 +117,7 @@ describe("discovery on disk", () => {
     expect(one?.hasDesign).toBe(false);
     expect(one?.hasTasks).toBe(true);
     expect(one?.acceptanceCriteria.map((a) => a.id)).toEqual(["AC-1.1"]);
-    expect(one?.tasks[0]!.closesAcceptanceCriteria).toEqual(["AC-1.1"]);
+    expect(one?.tasks[0]?.closesAcceptanceCriteria).toEqual(["AC-1.1"]);
 
     const all = await listSpecFeatures(dir);
     expect(all.map((f) => f.slug)).toEqual(["alpha"]);
