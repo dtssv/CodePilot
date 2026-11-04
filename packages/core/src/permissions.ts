@@ -169,12 +169,11 @@ export class PermissionEngine {
 
     // Per-command sandbox escalation (bash `escalate_sandbox: true`): the model
     // asked to run THIS one command WITHOUT the OS jail (e.g. a dev server the
-    // sandbox's network/fs policy breaks). Mirrors codex `require_escalated` /
-    // dsh `sandbox_permissions`: it always forces an interactive confirmation —
-    // never auto-allowed, even under yolo, an active sandbox, or an allow rule —
-    // because dropping the jail for a command is exactly what the user must see.
-    // A deny rule (checked above) still wins. The escalation is ephemeral: it
-    // applies only to this invocation and never changes the session policy.
+    // sandbox's network/fs policy breaks). It always forces an interactive
+    // confirmation — never auto-allowed, even under yolo, an active sandbox, or
+    // an allow rule. A deny rule (checked above) still wins. The escalation is
+    // ephemeral: it applies only to this invocation and never changes the
+    // session policy.
     if (bash && isSandboxEscalation(input)) return "ask";
 
  // Sensitive-path floor — applies EVEN when the sandbox is off or the mode is

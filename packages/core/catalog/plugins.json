@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "hello-world",
-      "description": "Starter template — one command, one skill, one hook. Copy it to build your own plugin.",
+      "description": "Starter template — one command, one skill, one hook.",
       "source": "https://github.com/dtssv/codepilot-plugins.git#hello-world",
       "version": "1.0.0",
       "author": "CodePilot",
@@ -60,7 +60,7 @@
     },
     {
       "name": "spec-driven",
-      "description": "Spec-driven development — requirements → design → tasks with numbered, verifiable acceptance criteria. Three skills and matching slash commands that produce reviewable Markdown specs under .codepilot/specs/<feature>/ and bind each task to a runnable verify command.",
+      "description": "Spec-driven development — a requirements, design, and tasks workflow with numbered, verifiable acceptance criteria. Three skills and matching slash commands that produce reviewable Markdown specs under .codepilot/specs/<feature>/ and bind each task to a runnable verify command.",
       "source": "https://github.com/dtssv/codepilot-plugins.git#spec-driven",
       "version": "1.0.0",
       "author": "CodePilot",

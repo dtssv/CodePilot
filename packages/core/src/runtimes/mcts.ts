@@ -18,8 +18,7 @@
 // exploit phase can modify anything.
 //
 // Cost: N + 2 provider runs per prompt (N exploration + 1 scoring +
-// 1 exploitation). That is the trade — spend tokens to avoid committing to
-// the first plan the model thinks of.
+// 1 exploitation).
 
 import { randomUUID } from "node:crypto";
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent.js";

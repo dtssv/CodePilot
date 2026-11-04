@@ -159,9 +159,8 @@ export async function runOneTool(
     if (cached) {
       endToolSpan();
       const kind = doomLoop.cachedResultKind(tc.name, tc.input);
- // State facts, not commands: an imperative "do NOT re-read" reads to the
- // model as "this path is blocked" and pushes it toward bash workarounds.
- // The window slice (when path-keyed) is already applied by cachedResult.
+ // State facts, not commands. The window slice (when path-keyed) is already
+ // applied by cachedResult.
       const prefix =
         kind === "path"
           ? `[dedup: served from cache — read_file(${tc.name === "read_file" ? "" : ""}same path) ran earlier in this run ` +

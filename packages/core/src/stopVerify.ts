@@ -30,26 +30,23 @@ export function resolveStopVerifyMode(
 }
 
 /**
- * Decide the effective stopVerify mode for a completed turn, applying the
- * conditional "run the project tests" upgrade.
+ * Decide the effective stopVerify mode for a completed turn.
  *
- * The upgrade only fires when stopVerify was NEVER configured (left at the
- * default) and the turn actually modified code — a pure analysis/Q&A turn stays
- * off, avoiding needless 429-prone judge calls. An EXPLICIT `false`/"off" is an
- * intentional user choice and is honoured verbatim: we must not silently run
- * the test gate on a user who deliberately turned verification off. Explicit
- * "prompt"/"tests" settings pass through unchanged.
+ * stopVerify is strictly opt-in: it runs only when the user explicitly sets a
+ * mode ("prompt"/"tests"/true), and stays off otherwise. There is no automatic
+ * "the turn touched a .ts file, so run the project tests" upgrade — that forced
+ * a completion gate onto turns the user never asked to verify (including pure
+ * analysis turns that merely edited a string in a source file), and when the
+ * detected test command could not run in the hook's environment it looped,
+ * re-summarising each round until the continue cap. Verification is the model's
+ * own judgement (see the system prompt) or a user-configured Stop hook, not a
+ * gate the framework imposes by file extension.
  */
 export function effectiveStopVerifyMode(args: {
-  /** Raw config value, so an explicit `false`/"off" is distinguishable from unset. */
+  /** Raw config value; an explicit `false`/"off" is honoured as off, same as unset. */
   configured: boolean | StopVerifyMode | undefined;
-  /** Whether this turn wrote/edited a code file. */
-  modifiedCode: boolean;
 }): StopVerifyMode {
-  const resolved = resolveStopVerifyMode(args.configured);
-  const unset = args.configured === undefined;
-  if (resolved === "off" && unset && args.modifiedCode) return "tests";
-  return resolved;
+  return resolveStopVerifyMode(args.configured);
 }
 
 export interface StopVerifyContext {

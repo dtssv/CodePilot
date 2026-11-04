@@ -78,7 +78,7 @@ describe("assessSubagentOutcome", () => {
 
   // Regression: sub-agents A/B from the same session — "I'll analyze… read all
   // files in parallel" with ZERO tool steps, previously adopted as ok. The hard
-  // rule (borrowed from dsh): 0 tool steps = failure, regardless of text.
+  // rule: 0 tool steps = failure, regardless of text.
   it("marks any 0-step run as failed even with substantial text (premature-termination form)", () => {
     const events: Event[] = [
       {

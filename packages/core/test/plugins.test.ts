@@ -598,8 +598,8 @@ describe("installPlugin", () => {
   });
 
   it("installs a plugin from a monorepo sub-directory via a #subdir fragment", async () => {
-    // A single repo/dir hosting many plugins (the dsh pattern). The source
-    // root has no plugin.json; the real plugin lives under <root>/<subdir>.
+    // A single repo/dir hosting many plugins. The source root has no
+    // plugin.json; the real plugin lives under <root>/<subdir>.
     const mono = join(base, "mono-repo");
     const sub = join(mono, "code-review");
     mkdirSync(sub, { recursive: true });

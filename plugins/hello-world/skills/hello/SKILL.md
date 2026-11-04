@@ -1,6 +1,6 @@
 ---
 name: hello
-description: A minimal skill that explains how CodePilot plugins are structured. Load it to learn the anatomy of a plugin.
+description: A minimal skill that explains how CodePilot plugins are structured. Demonstrates the anatomy of a plugin.
 when: The user asks how plugins work, how to write a plugin, or mentions the hello-world example.
 ---
 

@@ -954,14 +954,13 @@ export async function compact(
       } catch {
         summary = "";
       }
-      // Forward-progress gate (borrowed from dsh's "summary must be strictly
-      // smaller than what it replaces", region.ts:417-422): a small model can
-      // degenerate and return a summary as long as — or longer than — the
-      // history it replaces (verbose restatement, echoing the input). Swapping
-      // that in makes compaction a no-op or a REGRESSION, and worse, persists a
-      // bloated blob as a "compaction" the next pass trusts. Only adopt the
-      // summary when it genuinely shrinks the dropped range; otherwise discard
-      // it and let Pass 3's hard local trim guarantee we fit.
+      // Forward-progress gate: a small model can degenerate and return a
+      // summary as long as — or longer than — the history it replaces (verbose
+      // restatement, echoing the input). Swapping that in makes compaction a
+      // no-op or a REGRESSION, and worse, persists a bloated blob as a
+      // "compaction" the next pass trusts. Only adopt the summary when it
+      // genuinely shrinks the dropped range; otherwise discard it and let
+      // Pass 3's hard local trim guarantee we fit.
       if (summary) {
         const compactionEvent: Event = { type: "compaction", kind: "summary", summary };
         const plan = extractPlan(drop);

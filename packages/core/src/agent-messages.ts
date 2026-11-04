@@ -156,10 +156,10 @@ function foldForBudget(
 // interrupt may have landed AFTER the tool started — even after it finished but
 // before its result was persisted — so the outcome is genuinely UNKNOWN, not a
 // guaranteed "never ran". Telling the model to blindly re-issue would double a
-// mutating action (duplicate write, repeated request, re-deleted data). We take
-// dsh's repair-closer stance: retry only read-only / idempotent calls; for a
-// call that may have side effects, verify the real state (re-read the file, list
-// the resource) or ask the user before re-running.
+// mutating action (duplicate write, repeated request, re-deleted data). Retry
+// only read-only / idempotent calls; for a call that may have side effects,
+// verify the real state (re-read the file, list the resource) or ask the user
+// before re-running.
 export const INTERRUPTED_RESULT =
   "[interrupted: the turn was cut off before this tool's result was recorded, so its outcome is " +
   "UNKNOWN — it may not have run, or may have already taken effect. Do NOT blindly re-issue it. " +

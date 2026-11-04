@@ -3,11 +3,9 @@
 // CodePilot used to run every tool call in a turn via a single `Promise.all`,
 // which races two writes to the same file (the mtime/size CAS guard only
 // catches staleness ACROSS turns, not two in-flight writes inside one turn).
-// codex (RwLock read/write gate) and dsh (fail-closed exclusive barrier) both
-// serialize mutating tools at the orchestration layer; these tests pin that
-// behaviour for CodePilot's equivalent: reads parallelize, writes/execute run
-// exclusively, results stay in the model's original call order, and an unknown
-// permission is fail-closed (serial).
+// These tests pin the barrier's behaviour: reads parallelize, writes/execute
+// run exclusively, results stay in the model's original call order, and an
+// unknown permission is fail-closed (serial).
 
 import { describe, expect, it } from "vitest";
 import { runToolsWithBarrier, isParallelSafeTool } from "../src/agent.js";

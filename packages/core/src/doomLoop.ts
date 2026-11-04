@@ -19,19 +19,18 @@
 // it already read) counts toward a soft path budget and WARNS. A
 // non-overlapping, advancing window (legitimate paging through a large
 // file: lines 1-500, 500-1000, 1000-1500 …) is progress — it resets the
-// budget and is never penalised. This layer never refuses: every mainstream
-// harness either dedups re-reads (Claude Code) or asks, but none hard-denies
-// a read on path count — doing so false-positives on paging. Path-keyed
+// budget and is never penalised. This layer never refuses a read on path
+// count — doing so false-positives on paging. Path-keyed
 // result replay still serves a second windowed read of an already-fetched
 // file from cache instead of another disk hit.
 //
 // DELIBERATELY REMOVED — "mutation burst": a former layer that warned then
 // refused after N consecutive edits to the same path(s) without an intervening
 // verify (test/build/lint) command. It was dropped on purpose and should not be
-// re-added: no mainstream harness (opencode, codex, Claude Code) does this; it
-// contradicted layer 3's own rule that a count must never hard-deny (legitimate
-// iteration — building a large file section by section — is indistinguishable
-// from a loop by edit count alone); and even as a warning it poisoned context,
+// re-added: it contradicted layer 3's own rule that a count must never
+// hard-deny (legitimate iteration — building a large file section by section —
+// is indistinguishable from a loop by edit count alone); and even as a warning
+// it poisoned context,
 // since weaker models tend to believe the "you're looping" message and abandon
 // productive work. Exact-repetition (layer 1) and rotating batches (layer 2)
 // still catch genuine no-progress loops without this false-positive-prone brake.

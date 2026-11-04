@@ -1,7 +1,7 @@
 {
   "name": "provider-template-example",
   "displayName": "Provider Template Example",
-  "description": "Reference plugin for plugin-contributed provider templates — adds an OpenAI-compatible gateway entry to the provider picker. Pure data: no code, no runtime, no side effects. The template carries a baseURL + model list only; you still supply your own API key in Settings.",
+  "description": "Reference plugin for plugin-contributed provider templates — adds an OpenAI-compatible gateway entry to the provider picker. The template carries a baseURL + model list only.",
   "version": "1.0.0",
   "author": "CodePilot",
   "homepage": "https://github.com/dtssv/codepilot-plugins/tree/main/provider-template-example",
@@ -14,7 +14,7 @@
       "baseURL": "https://api.example.com/v1",
       "models": ["example-large", "example-small"],
       "smallModel": "example-small",
-      "description": "An OpenAI-compatible gateway, contributed by a plugin. Swap the baseURL/models for a real endpoint.",
+      "description": "An OpenAI-compatible gateway, contributed by a plugin.",
       "requiresBaseURL": false
     }
   ]

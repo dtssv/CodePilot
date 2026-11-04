@@ -195,7 +195,7 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
         <div className="min-w-0 flex-1">
           <h3 className="text-[13px] font-semibold text-[var(--color-ink)]">{t("Plugin manager")}</h3>
           <p className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
-            {t("Plugins bundle skills, agents, commands, hooks, and MCP servers. Installing runs plugin code — review the source first.")}
+            {t("Plugins bundle skills, agents, commands, hooks, and MCP servers. Installing runs the plugin's code in the current session.")}
           </p>
         </div>
         {view === "list" ? (
@@ -256,7 +256,7 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
             spellCheck={false}
           />
           <p className="text-[11px] leading-4 text-[var(--color-ink-faint)]">
-            {t("A git URL is cloned; a local path is copied. The plugin's code runs in your session — only install sources you trust.")}
+            {t("A git URL is cloned; a local path is copied.")}
           </p>
           {confirming === "__url__" && (
             <div className="space-y-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2">

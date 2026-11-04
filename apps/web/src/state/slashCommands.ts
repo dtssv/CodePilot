@@ -1,11 +1,10 @@
 // Client-side slash-command interpreter for the web/embedded surfaces.
 //
-// Mirrors codex's model (verified in codex-rs/tui/src/chatwidget/slash_dispatch.rs):
-// a slash command is primarily a LOCAL action (switch mode, compact, clear,
+// A slash command is primarily a LOCAL action (switch mode, compact, clear,
 // open a picker) — NOT a prompt to the model. When the command carries trailing
 // args (e.g. `/plan add a test`), we perform the local action first, then send
-// the remaining text to the model (codex's `SlashCommand::Plan if !trimmed.is_empty()`
-// path). With no args, only the local action runs — no LLM call.
+// the remaining text to the model. With no args, only the local action runs —
+// no LLM call.
 //
 // Commands we don't recognise as local (project/user markdown commands) are
 // left to flow through to the server as a normal prompt, which expands them.

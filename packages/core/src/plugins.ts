@@ -770,8 +770,8 @@ export interface InstallOptions {
  * - Local paths: copied into the plugins dir.
  *
  * A **monorepo sub-directory** can be selected with a `#subdir` fragment, so a
- * single repository can host many plugins (the dsh pattern). The repo is cloned
- * to a temp dir and only `<subdir>` is copied into place:
+ * single repository can host many plugins. The repo is cloned to a temp dir
+ * and only `<subdir>` is copied into place:
  *   `https://github.com/acme/plugins.git#code-review` → installs `code-review`.
  * The fragment works for git URLs and local paths alike.
  *

@@ -29,37 +29,20 @@ describe("resolveStopVerifyMode", () => {
 });
 
 describe("effectiveStopVerifyMode", () => {
-  it("upgrades the UNSET default to tests when the turn modified code", () => {
-    expect(
-      effectiveStopVerifyMode({ configured: undefined, modifiedCode: true }),
-    ).toBe("tests");
+  it("stays off for the unset default (no automatic upgrade — strictly opt-in)", () => {
+    // The old behaviour auto-upgraded unset→tests whenever the turn edited a
+    // code-like file, which forced a test gate onto turns the user never asked
+    // to verify (e.g. editing a string in a .ts file during an analysis task).
+    expect(effectiveStopVerifyMode({ configured: undefined })).toBe("off");
   });
-  it("stays off for the unset default when no code changed", () => {
-    expect(
-      effectiveStopVerifyMode({ configured: undefined, modifiedCode: false }),
-    ).toBe("off");
+  it("honours an EXPLICIT off/false verbatim", () => {
+    expect(effectiveStopVerifyMode({ configured: "off" })).toBe("off");
+    expect(effectiveStopVerifyMode({ configured: false })).toBe("off");
   });
-  it("honours an EXPLICIT off/false verbatim — no upgrade even after code changes", () => {
-    expect(
-      effectiveStopVerifyMode({ configured: "off", modifiedCode: true }),
-    ).toBe("off");
-    expect(
-      effectiveStopVerifyMode({ configured: false, modifiedCode: true }),
-    ).toBe("off");
-  });
-  it("passes explicit prompt/tests through unchanged", () => {
-    expect(
-      effectiveStopVerifyMode({ configured: "prompt", modifiedCode: true }),
-    ).toBe("prompt");
-    expect(
-      effectiveStopVerifyMode({ configured: "prompt", modifiedCode: false }),
-    ).toBe("prompt");
-    expect(
-      effectiveStopVerifyMode({ configured: "tests", modifiedCode: false }),
-    ).toBe("tests");
-    expect(
-      effectiveStopVerifyMode({ configured: true, modifiedCode: true }),
-    ).toBe("prompt");
+  it("passes explicit prompt/tests/true through unchanged", () => {
+    expect(effectiveStopVerifyMode({ configured: "prompt" })).toBe("prompt");
+    expect(effectiveStopVerifyMode({ configured: "tests" })).toBe("tests");
+    expect(effectiveStopVerifyMode({ configured: true })).toBe("prompt");
   });
 });
 

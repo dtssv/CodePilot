@@ -3,9 +3,9 @@ import { DoomLoopDetector } from "../src/doomLoop.js";
 
 // The old "mutation burst" brake (N consecutive edits on the same path without
 // an intervening verify command => warn then refuse) was removed. It was a
-// CodePilot-only mechanism that no mainstream harness implements, it was
-// internally inconsistent with the path-read layer (which never refuses on a
-// count, precisely to avoid false-positives on legitimate iteration), and even
+// CodePilot-only mechanism, internally inconsistent with the path-read layer
+// (which never refuses on a count, precisely to avoid false-positives on
+// legitimate iteration), and even
 // as a warning it polluted the model's context — weaker models would "believe"
 // the warning and abandon productive work (e.g. building up a large file section
 // by section). These tests pin the NEW guarantee: editing the same file many

@@ -306,8 +306,8 @@ function withProxyEnv(command: string, policy: ResolvedSandbox): string {
  * block on a TTY that doesn't exist), no color escapes, a dumb terminal, and
  * git's own non-interactive guards. Applied to EVERY command path — the
  * persistent shell, one-shot bash, and background jobs — so none of them can
- * silently hang on a pager. Mirrors the set codex and dsh hardcode. Callers
- * overlay this ON TOP of their base env, so an explicit user value still wins
+ * silently hang on a pager. Callers overlay this ON TOP of their base env, so
+ * an explicit user value still wins
  * where it is set deliberately (we only set keys the agent context needs).
  */
 export function modelShellEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string> {

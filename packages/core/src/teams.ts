@@ -466,8 +466,8 @@ export async function runTeam(
       }
       const unassigned = needAssignment.filter((d) => !objectives.has(d.index));
       if (unassigned.length > 0) {
- // Fall back to the team objective so the member still does useful
- // work; say so, because an un-decomposed team is not what was asked.
+ // Fall back to the team objective for unassigned members, and note
+ // the substitution in `notes`.
         notes.push(
           `leader did not produce an assignment for ${unassigned
             .map((d) => d.name)

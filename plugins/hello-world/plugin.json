@@ -1,7 +1,7 @@
 {
   "name": "hello-world",
   "displayName": "Hello World (starter template)",
-  "description": "The smallest useful plugin — one command, one skill, and one lifecycle hook. Copy this directory and edit it to build your own plugin.",
+  "description": "The smallest useful plugin — one command, one skill, and one lifecycle hook.",
   "version": "1.0.0",
   "author": "CodePilot",
   "homepage": "https://github.com/codepilot/plugins/tree/main/hello-world",

@@ -1,7 +1,7 @@
 // Session factory + repository + provider construction.
 //
-// Despite the "-utils" filename (kept to avoid churning every import site),
-// this module is NOT a grab-bag of helpers: it is the three collaborators the
+// Despite the "-utils" filename, this module is NOT a grab-bag of helpers: it
+// is the three collaborators the
 // `Session` class delegates to —
 //   1. ProviderFactory  — buildProvider / buildSmallProvider / FallbackProvider,
 //   2. SessionRepository — persistence paths, listing, search, export, delete,

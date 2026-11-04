@@ -974,14 +974,11 @@ export class Session {
         // User cancel: do not let Stop hooks force a continue.
         if (this.cancelController?.signal.aborted) break;
 
-        // Conditional upgrade: when stopVerify was NEVER configured (left at the
-        // default) but this prompt modified code files, run the project's test
-        // command once as a completion gate. An EXPLICIT `false`/"off" is an
-        // intentional user choice and is honoured verbatim — only the unset
-        // default upgrades. See `effectiveStopVerifyMode`.
+        // stopVerify is strictly opt-in: it runs only when the user set a mode
+        // ("prompt"/"tests"/true). No automatic "modified code → run tests"
+        // upgrade. See `effectiveStopVerifyMode`.
         const stopMode = effectiveStopVerifyMode({
           configured: this.config.stopVerify,
-          modifiedCode: this.promptModifiedCode(),
         });
         const hasUserStop = this.hooks.hasHooks("Stop");
         if (stopMode === "off" && !hasUserStop) break;
@@ -2553,30 +2550,6 @@ export class Session {
     this.wireHookResolvers(task.runner);
   }
 
-  /** True when the current prompt's events include a write/edit/apply_patch
-   * to a code-like file — used to conditionally enable the stopVerify tests
-   * gate. Scans back to the last user message so it reflects *this* prompt. */
-  private promptModifiedCode(): boolean {
-    const CODE_EXT =
-      /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|kts|rb|php|c|h|cc|cpp|hpp|cs|swift|scala|sh|bash|sql|vue|svelte)$/i;
-    for (let i = this.events.length - 1; i >= 0; i--) {
-      const e = this.events[i]!;
-      if (e.type === "message" && e.role === "user") break;
-      if (e.type !== "tool_call") continue;
-      const input = (e.input ?? {}) as Record<string, unknown>;
-      if (e.name === "write_file" || e.name === "edit_file") {
-        const p = input.path;
-        if (typeof p === "string" && CODE_EXT.test(p)) return true;
-      } else if (e.name === "apply_patch" && typeof input.patch === "string") {
-        for (const line of input.patch.split(/\r?\n/)) {
-          const m = line.match(/^\*\*\* (?:Add|Update) File: (.+)$/);
-          if (m && CODE_EXT.test(m[1]!.trim())) return true;
-        }
-      }
-    }
-    return false;
-  }
-
   /**
    * Wire prompt/agent/MCP resolvers so Stop (and other) hooks can use
    * non-command handlers. Safe to call once builtins are registered.
@@ -2753,9 +2726,7 @@ export class Session {
    * `tool_call` event or a `tool_use` block inside an assistant message (the log
    * records it both ways); a result from a `tool_result` event. Order of the
    * sealed results does not matter — the message builder keys them by id — but we
-   * emit them in first-seen order for a readable log. Mirrors dsh's
-   * interrupted-turn closers and opencode's `settleStaleToolCalls`, except we
-   * write them back to the source of truth rather than only repairing the view.
+   * emit them in first-seen order for a readable log.
    */
   private async sealOrphanedToolCalls(): Promise<void> {
     const callNames = new Map<string, string>();

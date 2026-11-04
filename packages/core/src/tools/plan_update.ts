@@ -21,7 +21,7 @@ export const planUpdateTool: ToolDef<typeof schema> = {
   description:
     "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps; " +
     "skip for roughly the easiest ~25%. Prefer: research → implement → verify (one real check " +
-    "near the end), not edit↔screenshot every step. Each step: `{id, title, status}` " +
+    "near the end), not edit↔verify every step. Each step: `{id, title, status}` " +
     "(pending|in_progress|completed|blocked). Update when status changes, in the SAME response " +
     "as that step's tool calls — never plan_update alone. Keep 3–8 steps; put blockers in the title.",
   inputSchema: schema,

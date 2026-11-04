@@ -7,10 +7,9 @@
 // There is no "detect a complex/long task and auto-start a goal loop"
 // heuristic anywhere — that would be scenario-specific and misfire. Instead the
 // MODEL, which understands the request, declares "this is a long-horizon
-// objective worth driving in rounds" via a structured tool call. This mirrors
-// how dsh exposes `create_goal` (model-invoked, not inferred from the prompt)
-// and matches CodePilot's `suggest_mode` / `start_new_task` philosophy: a
-// generic capability the model opts into, never a system guess.
+// objective worth driving in rounds" via a structured tool call — model-invoked,
+// not inferred from the prompt. It is a generic capability the model opts into,
+// never a system guess.
 //
 // How the loop actually runs
 // --------------------------
@@ -27,8 +26,7 @@ import { z } from "zod";
 import type { ToolDef } from "./types.js";
 
 // Model-initiated goals get a wide cap so the loop can actually finish long
-// work rather than stopping half-way (mirrors dsh's "wide cap + block-on-limit,
-// not no-cap" design). The host may clamp this.
+// work rather than stopping half-way. The host may clamp this.
 export const DEFAULT_MODEL_GOAL_ROUNDS = 100;
 
 const schema = z.object({

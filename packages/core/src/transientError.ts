@@ -28,9 +28,34 @@ const TRANSIENT_PATTERNS: RegExp[] = [
   /stream (ended|closed)|unexpected end/i,
 ];
 
+/** Client errors (HTTP 4xx) are deterministic: the request itself is wrong
+ * (bad params, unsupported schema, auth, not found), so retrying sends the same
+ * bad request and fails the same way — it must fail fast. The exceptions are the
+ * few 4xx that genuinely clear on retry: 408 request-timeout, 409 conflict,
+ * 425 too-early, 429 rate-limit (mirrors the retryable set in providers/retry.ts).
+ *
+ * Providers frame the status as a standalone code right before a colon —
+ * "OpenAI 400: <body>", "Anthropic 404: <body>", "Gemini 400: <body>" (see
+ * providers/{openai,anthropic,gemini}.ts). We anchor on that "<code>:" token so
+ * a stray 4xx/5xx number or a "please try again" nicety inside the response body
+ * cannot flip the verdict. Status 0 / network-level failures have no such token
+ * and fall through to the transient-pattern check below. */
+const STATUS_TOKEN = /(?:^|\s)(\d{3}):/;
+const RETRYABLE_CLIENT_STATUS = new Set([408, 409, 425, 429]);
+
 /** Whether an error message describes a transient failure (network blip,
  * rate-limit, gateway overload, dropped stream) rather than a deterministic
  * one. Callers use it to decide whether a retry / regenerate is worthwhile. */
 export function isTransientError(message: string): boolean {
+  // When the provider framed a status code ("<Provider> <code>: <body>"), a 4xx
+  // client error is non-retryable unless it is one of the retryable 4xx. This
+  // veto wins over any transient-looking text in the body.
+  const m = STATUS_TOKEN.exec(message);
+  if (m) {
+    const status = Number(m[1]);
+    if (status >= 400 && status <= 499 && !RETRYABLE_CLIENT_STATUS.has(status)) {
+      return false;
+    }
+  }
   return TRANSIENT_PATTERNS.some((re) => re.test(message));
 }

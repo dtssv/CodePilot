@@ -39,12 +39,9 @@ const schema = z.object({
 export const readImageTool: ToolDef<typeof schema> = {
   name: "read_image",
   description:
-    "See image pixels (jpeg/png/gif/webp): mockups, reference GIFs, UI screenshots, " +
-    "diagrams. For visual/replication tasks: study the reference thoroughly *before* " +
-    "coding (sample key frames — not a capture loop); re-check screenshots at milestones " +
-    "or near done, not after every tiny edit. Not for text (`read_file`) or raw bytes " +
-    "(`bash`). Don't reload images already in context or user attachments. Max 20MB; " +
-    "sandbox paths only.",
+    "See the pixels of an image file (jpeg/png/gif/webp) when visual inspection is " +
+    "needed. Not for text (`read_file`) or raw bytes (`bash`). Don't reload images " +
+    "already in context or user attachments. Max 20MB; sandbox paths only.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

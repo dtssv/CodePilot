@@ -56,10 +56,10 @@ const ZH: Record<string, string> = {
   "Fetch models": "获取模型列表",
   "Fetching…": "获取中…",
   "Then tick the models you want in the picker.": "选择模型。",
-  "Enter an API key before fetching models": "请先填写 API Key 再获取模型",
-  "Enter an API key, then fetch the real model list.": "请先填写 API Key，再获取模型列表。",
+  "Enter an API key before fetching models": "获取模型需要 API Key",
+  "Enter an API key, then fetch the real model list.": "获取模型列表需要 API Key。",
   "No models yet — click Fetch models, then tick what you want.":
-    "暂无模型 — 点击「获取模型列表」，再勾选要用的模型。",
+    "暂无模型 — 使用「获取模型列表」选择要用的模型。",
   "Context window": "上下文窗口",
   "Context window usage": "上下文窗口占用",
   "auto-compact at": "自动压缩阈值",
@@ -86,7 +86,7 @@ const ZH: Record<string, string> = {
   "Provider saved": "服务商已保存",
   "baseURL is required for custom providers": "自定义服务商需要填写 baseURL",
   "Select at least one model": "请至少选择一个模型",
-  "Save the provider before setting it as default": "请先保存服务商再设为默认",
+  "Save the provider before setting it as default": "保存服务商后方可设为默认",
   "No models returned — check baseURL / apiKey": "未返回模型，请检查 baseURL / apiKey",
   Files: "文件",
   "Open workspace…": "打开工作区…",
@@ -132,9 +132,9 @@ const ZH: Record<string, string> = {
   "Sessions are tied to a folder. Open one or more workspaces from the sidebar.":
     "会话与工作区绑定。可在侧栏打开一个或多个工作区。",
   "Connect to CodePilot": "连接 CodePilot",
-  "Run the command below in your project, then paste the URL it prints.": "在项目目录运行下面的命令，然后粘贴输出的地址。",
+  "Run the command below in your project, then paste the URL it prints.": "在项目目录运行下面的命令并粘贴输出的地址。",
   "Run the command below, then paste the URL it prints. Open a workspace folder after connecting.":
-    "运行下面的命令，粘贴输出的地址。连接后再打开工作区。",
+    "运行下面的命令并粘贴输出的地址。连接后打开工作区。",
   New: "新建",
   "New chat": "新对话",
   "New task": "新建任务",
@@ -246,7 +246,7 @@ const ZH: Record<string, string> = {
   Activity: "当前动态",
   Idle: "空闲",
   "What should we get done today?": "今天想让我帮你完成什么？",
-  "CodePilot plans the work, carries it out step by step and reports back.": "CodePilot 会先规划，再一步步执行并汇报结果。",
+  "CodePilot plans the work, carries it out step by step and reports back.": "CodePilot 规划、执行并汇报结果。",
   "Pick a workspace": "选择工作目录",
   Workspace: "工作区",
   "Bash tool output": "Bash 工具输出",
@@ -385,7 +385,7 @@ const ZH: Record<string, string> = {
   "Authorization complete.": "授权完成。",
   "Open the URL if the browser did not.": "若浏览器未打开，请点击链接。",
   "This MCP needs authorization. Click Authorize, then refresh.":
-    "该 MCP 需要授权。请点击「授权」，完成后再刷新。",
+    "该 MCP 需要授权。点击「授权」并刷新。",
   "Filter tools…": "筛选工具…",
   "Skills guide the agent. Install catalog skills, or enable/disable installed ones.":
     "技能用于指导智能体的行为。可安装目录中的技能，或启用/停用已有技能。",
@@ -414,9 +414,9 @@ const ZH: Record<string, string> = {
   "Paste connector JSON": "粘贴连接器 JSON",
   "Install from JSON": "从 JSON 安装",
   "QR uses your LAN IP (not 127.0.0.1) so the phone can reach this machine":
-    "二维码使用局域网 IP（不是 127.0.0.1），手机才能访问本机",
+    "二维码使用局域网 IP（不是 127.0.0.1）以供手机访问本机",
   "Serve must listen on 0.0.0.0 — otherwise the phone cannot connect":
-    "服务需以 --host 0.0.0.0 监听，否则手机无法连接",
+    "服务以 --host 0.0.0.0 监听以供手机连接",
   "Scoped grant: prompt / cancel / follow only — not config or updates":
     "授权范围仅限发消息/取消/跟随 — 不含改配置或升级",
   "Generate one-time QR": "生成一次性二维码",
@@ -531,12 +531,12 @@ const ZH: Record<string, string> = {
     "沙箱已设置，但本机没有可用的系统级沙箱后端 — bash 将拒绝运行（fail-closed）。请安装后端，或将沙箱设为关闭。",
   Plugins: "插件",
   "Plugin manager": "插件管理",
-  "Plugins bundle skills, agents, commands, hooks, and MCP servers. Installing runs plugin code — review the source first.":
-    "插件包含 skills、agents、命令、hooks 和 MCP server。安装时会运行其中的代码，请先确认来源可信。",
+  "Plugins bundle skills, agents, commands, hooks, and MCP servers. Installing runs the plugin's code in the current session.":
+    "插件打包 skills、agents、命令、hooks 与 MCP server，安装即在当前会话运行其代码。",
   "+ Install from URL": "+ 从 URL 安装",
   "Install from a git URL or local path": "从 git URL 或本地路径安装",
-  "A git URL is cloned; a local path is copied. The plugin's code runs in your session — only install sources you trust.":
-    "git URL 会被克隆；本地路径会被拷贝。插件代码会在你的会话中运行，请只安装可信来源。",
+  "A git URL is cloned; a local path is copied.":
+    "git URL 克隆到本地，本地路径直接拷贝。",
   Installing: "安装中",
   "Search plugins…": "搜索插件…",
   Uninstall: "卸载",
@@ -595,7 +595,7 @@ const ZH: Record<string, string> = {
   "Generate from staged diff": "根据已暂存的变更生成",
   Generate: "生成",
   "Describe your changes…": "描述你的更改…",
-  "Stage changes before committing": "提交前请先暂存变更",
+  "Stage changes before committing": "提交前需暂存变更",
   Committing: "提交中",
   Commit: "提交",
   Committed: "已提交。",

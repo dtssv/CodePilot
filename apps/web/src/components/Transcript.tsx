@@ -289,7 +289,7 @@ function AssistantTurnView({
               return (
                 <div key={p.msg.id}>
                   {p.msg.reasoning ? (
-                    <ReasoningBlock text={p.msg.reasoning} streaming={p.msg.streaming && !p.msg.text} />
+                    <ReasoningBlock text={p.msg.reasoning} streaming={p.msg.streaming ?? false} />
                   ) : null}
                   <Markdown text={p.msg.text} onOpenPath={onOpenPath} />
                   {p.msg.streaming && (

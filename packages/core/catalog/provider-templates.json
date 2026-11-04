@@ -131,7 +131,7 @@
       "provider": "openai",
       "models": [],
       "requiresBaseURL": true,
-      "description": "Any Chat Completions gateway — set baseURL yourself"
+      "description": "Any Chat Completions gateway. Requires a baseURL."
     },
     {
       "id": "custom-anthropic",
@@ -139,7 +139,7 @@
       "provider": "anthropic",
       "models": [],
       "requiresBaseURL": true,
-      "description": "Any Anthropic Messages-compatible gateway — set baseURL yourself"
+      "description": "Any Anthropic Messages-compatible gateway. Requires a baseURL."
     },
     {
       "id": "azure-openai",
@@ -147,7 +147,7 @@
       "provider": "azure",
       "models": [],
       "requiresBaseURL": true,
-      "description": "Azure OpenAI — set baseURL to your resource endpoint (https://<resource>.openai.azure.com) and model to the deployment name"
+      "description": "Azure OpenAI. baseURL is the endpoint, model is the deployment name."
     },
     {
       "id": "copilot",

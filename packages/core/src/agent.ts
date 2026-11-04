@@ -1120,9 +1120,8 @@ export async function runAgent(
  // would clobber, and the mtime/size CAS guard only covers staleness ACROSS
  // turns, not two in-flight writes inside one turn (both pre-stat the same
  // baseline and each passes the check). So mutating calls are serialized and
- // run exclusively, the way codex (RwLock read/write gate) and dsh (fail-closed
- // exclusive barrier) do it in the orchestration layer. Results are still
- // collected in the model's original call order.
+ // run exclusively. Results are still collected in the model's original call
+ // order.
     await emitAux({ type: "activity", phase: "tools", since: Date.now(), tools: toolCalls.map((tc) => tc.name) });
     const runCall = (tc: ToolUseBlock): Promise<ToolExecResult> =>
       hasUnparsedInput(tc)
@@ -1308,8 +1307,7 @@ export function isAbortMessage(message: string): boolean {
  * Read-only and network tools have no local filesystem side effects, so they
  * are safe to run in parallel. Write/execute tools mutate the working tree (or
  * run arbitrary commands) and must be serialized to avoid write-write races.
- * Fail-closed: an unknown permission (undefined) is treated as NOT parallel-safe
- * — the same conservative default dsh uses for tools that don't prove safety.
+ * Fail-closed: an unknown permission (undefined) is treated as NOT parallel-safe.
  */
 export function isParallelSafeTool(permission: PermissionLevel | undefined): boolean {
   return permission === "read" || permission === "network";
@@ -1320,8 +1318,7 @@ export function isParallelSafeTool(permission: PermissionLevel | undefined): boo
  * results in the original call order. Maximal runs of adjacent parallel-safe
  * calls execute concurrently; each non-parallel-safe (mutating) call runs
  * exclusively, after all prior calls have settled and before any later call
- * starts. This is the orchestration-layer equivalent of codex's RwLock
- * read/write gate: reads parallelize, writes serialize, order is preserved.
+ * starts. Reads parallelize, writes serialize, order is preserved.
  */
 export async function runToolsWithBarrier<T>(
   calls: readonly T[],

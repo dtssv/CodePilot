@@ -33,8 +33,8 @@ export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | Reasonin
 
 /**
  * Optional envelope fields stamped onto every persisted session event so
- * transcripts can be audited like mainstream harness JSONL (cwd / branch /
- * version / parent chain) without bloating the live UI event stream.
+ * transcripts can be audited (cwd / branch / version / parent chain)
+ * without bloating the live UI event stream.
  */
 export interface EventMeta {
   /** Epoch ms when the event was produced. */

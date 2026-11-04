@@ -78,11 +78,9 @@ const DEFAULT_CONFIG: AutoMemoryConfig = {
 // `memory_write` calls in one turn can run concurrently. Without this lock two
 // concurrent writers read the same baseline and the second writeFile clobbers
 // the first's entry (last-writer-wins) and the rebuilt index reflects a partial
-// view. codex avoids this entirely by writing each note as an immutable
-// O_EXCL file + an OS lock; we take the lighter in-process equivalent: a
-// promise chain keyed by the directory/path being mutated, so RMW cycles over
-// the same files run strictly one at a time (across sessions sharing a cwd too,
-// since the chains are module-global).
+// view. A promise chain keyed by the directory/path being mutated makes RMW
+// cycles over the same files run strictly one at a time (across sessions
+// sharing a cwd too, since the chains are module-global).
 const memoryWriteChains = new Map<string, Promise<unknown>>();
 
 /** Run `fn` after any in-flight write to `key` settles; serializes RMW. */
