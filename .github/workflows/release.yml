@@ -238,8 +238,9 @@ jobs:
           done
 
   # ---------------------------------------------------------------------
-  # Create the GitHub Release and attach the IDE artifacts. The npm
-  # tarballs are also attached for archival (the canonical source is npm).
+  # Create the GitHub Release with the final installable artifacts.
+  # npm packages are published to the npm registry by the publish-npm
+  # job and are not duplicated as release assets.
   # ---------------------------------------------------------------------
   github-release:
     name: GitHub Release
@@ -258,7 +259,7 @@ jobs:
         run: |
           mkdir -p assets
           find release-assets -type f \( \
-            -name "*.vsix" -o -name "*.zip" -o -name "*.tgz" \
+            -name "*.vsix" -o -name "*.zip" \
             -o -name "*.dmg" -o -name "*.exe" -o -name "*.AppImage" \
             -o -name "install.sh" -o -name "install.ps1" -o -name "install.cmd" \
           \) -exec cp {} assets/ \;
@@ -279,7 +280,6 @@ jobs:
           files: |
             assets/*.vsix
             assets/*.zip
-            assets/*.tgz
             assets/*.dmg
             assets/*.exe
             assets/*.AppImage
