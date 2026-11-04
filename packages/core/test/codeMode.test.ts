@@ -175,7 +175,17 @@ describe("code_mode", () => {
 
   it("bash executes a command", async () => {
     const dir = mkdtempSync(join(realTmpdir(), "cm-"));
-    const ctx = makeCtx(dir);
+    const ctx: ToolContext = {
+      cwd: dir,
+      signal: undefined,
+      sandbox: resolveSandbox({ mode: "off" }, dir),
+      async artifact() {
+        return "art_x";
+      },
+      async readArtifact() {
+        return "";
+      },
+    };
     const r = await codeModeTool.execute(
       { code: 'return await bash("echo hi");' },
       ctx

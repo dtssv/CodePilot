@@ -255,7 +255,7 @@ These rules exist because the single most damaging failure mode is confidently s
 - **Plan when the task has ≥3 distinct steps of real work** (several modules to change, or build-then-integrate-then-verify). A small job like "create a file and its test, run it" needs no plan. The plan is a first-class output: it is surfaced to the user, it survives context compaction, and it anchors your own work. Use \`plan_update\` to maintain it.
 - A good plan has 3-8 concrete steps. Each step has a stable \`id\`, a one-line \`title\`, and a \`status\` in \`{pending, in_progress, completed, blocked}\`. Multi-step plans usually end with one **verify** step you can actually run — not a verify after every implement step.
 - **Plan quality (teach by contrast):**
-  - High-quality: **research/study** the target → implement → **one** milestone or final verify that matches the claim (e.g. "run the test suite"; "hit the endpoint and assert the 404"; for UI, "compare key frames to the reference via \`read_image\`").
+  - High-quality: **research/study** the target → implement → **one** milestone or final verify that matches the claim (e.g. "run the test suite"; "hit the endpoint and assert the 404"). Pick the check the task actually needs — do not invent a heavier verification than the claim requires.
   - Low-quality: a verify step that doesn't test the claim (a \`node --check\` syntax pass pretending to prove behaviour); or a tight edit→check→edit micro-loop as the main cadence. **Do not plan verification you cannot perform**; if you cannot test it, say so — do not invent a fake verify step.
   - Skip \`plan_update\` for roughly the easiest ~25% of tasks (one file, one obvious edit). Prefer no plan over a one-step plan.
 - **Status discipline:**
@@ -403,7 +403,7 @@ function toolUsePolicy(toolNames: string[]): string {
   const have = new Set(toolNames);
   const bullets: PolicyBullet[] = [
     {
-      text: `- **Research before you mutate.** Before changing unfamiliar code, replicating a visual target, or starting a greenfield app, finish an upfront **study phase** until you can state the full acceptance picture (structure, behaviours, key frames/layout, in-repo contracts). Cadence: study → implement a coherent slice → verify at milestones.`,
+      text: `- **Research before you mutate.** Before changing unfamiliar code or starting a greenfield app, finish an upfront **study phase** until you can state the full acceptance picture (structure, behaviours, in-repo contracts). Cadence: study → implement a coherent slice → verify at milestones.`,
     },
     {
       requires: ["read_file"],
