@@ -102,8 +102,15 @@ jobs:
         run: |
           {
             echo "## Test failures (${{ matrix.os }} / node ${{ matrix.node }})"
+            echo ""
+            echo "### Matched lines"
             echo '```'
-            grep -E 'FAIL |AssertionError|ELIFECYCLE|Test Files.*failed|ERR_PNPM' test-output.log | head -100 || true
+            grep -E 'FAIL |AssertionError|ELIFECYCLE|Test Files.*failed|ERR_PNPM|Error:|❌|⎯⎯⎯' test-output.log | head -100 || true
+            echo '```'
+            echo ""
+            echo "### Full output (last 250 lines)"
+            echo '```'
+            tail -250 test-output.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
