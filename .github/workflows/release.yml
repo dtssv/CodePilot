@@ -122,11 +122,64 @@ jobs:
           name: install-script
           path: artifacts/install/*
 
-  # ---------------------------------------------------------------------
-  # Publish to npm. Separate job so a publish failure doesn't block the
-  # GitHub Release. Each package is published with `--access public` and
-  # `--no-git-checks` (the tag checkout is detached, not on a branch).
-  # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Desktop (Electron) app — cross-platform. electron-builder can only
+# produce a platform's installer on that platform's host, so a matrix
+# builds macOS (.dmg), Windows (.exe), and Linux (.AppImage), each for
+# x64 + arm64.
+# ---------------------------------------------------------------------
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            family: mac
+          - os: windows-latest
+            family: win
+          - os: ubuntu-latest
+            family: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Package desktop app
+        run: pnpm package:desktop
+
+      - name: Collect desktop artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/desktop
+          find dist/release/desktop -type f \( \
+            -name "*.dmg" -o -name "*.exe" -o -name "*.AppImage" \
+          \) -exec cp {} artifacts/desktop/ \;
+          ls -la artifacts/desktop/
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.family }}
+          path: artifacts/desktop/*
+
+# ---------------------------------------------------------------------
+# Publish to npm. Separate job so a publish failure doesn't block the
+# GitHub Release. Each package is published with `--access public` and
+# `--no-git-checks` (the tag checkout is detached, not on a branch).
+# ---------------------------------------------------------------------
   publish-npm:
     name: Publish to npm
     needs: build
@@ -171,7 +224,7 @@ jobs:
   # ---------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -187,6 +240,7 @@ jobs:
           mkdir -p assets
           find release-assets -type f \( \
             -name "*.vsix" -o -name "*.zip" -o -name "*.tgz" \
+            -o -name "*.dmg" -o -name "*.exe" -o -name "*.AppImage" \
             -o -name "install.sh" -o -name "install.ps1" -o -name "install.cmd" \
           \) -exec cp {} assets/ \;
           ls -la assets/
@@ -207,6 +261,9 @@ jobs:
             assets/*.vsix
             assets/*.zip
             assets/*.tgz
+            assets/*.dmg
+            assets/*.exe
+            assets/*.AppImage
             assets/install.sh
             assets/install.ps1
             assets/install.cmd
