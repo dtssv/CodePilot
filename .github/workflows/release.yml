@@ -56,7 +56,18 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        id: test
+        run: pnpm test 2>&1 | tee /tmp/test.log
+
+      - name: Test diagnostics
+        if: always() && steps.test.outcome != 'skipped'
+        run: |
+          {
+            echo "## Test output (tail)"
+            echo '```'
+            tail -150 /tmp/test.log 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # --- npm packages (tarballs) ---
       - name: Pack npm packages
