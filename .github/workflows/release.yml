@@ -226,19 +226,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest        # arm64
-            target: darwin-arm64
-          - os: macos-13            # x64
-            target: darwin-x64
-          - os: ubuntu-latest       # x64
+          # Cross-compile both macOS arches on macos-latest (arm64).
+          # macos-13 (Intel) runners have very long queue times on public repos.
+          - os: macos-latest
+            target: darwin
+            package_targets: mac
+          - os: ubuntu-latest
             target: linux-x64
-          - os: ubuntu-24.04-arm    # arm64
+            package_targets: linux-x64
+          - os: ubuntu-24.04-arm
             target: linux-arm64
-          - os: windows-latest      # x64
-            target: win-x64
-          - os: windows-11-arm      # arm64
-            target: win-arm64
+            package_targets: linux-arm64
+          # Cross-compile both Windows arches on windows-latest (x64).
+          # windows-11-arm runners also have long queue times.
+          - os: windows-latest
+            target: win
+            package_targets: win
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -275,14 +280,16 @@ jobs:
           path: ~/.pkg-cache
           key: pkg-cache-${{ matrix.target }}-${{ runner.os }}-v3.6
 
-      # No PACKAGE_TARGETS → currentPlatform() → this runner's own OS+arch,
-      # so pkg produces exactly matrix.target. package:cli also writes the
-      # web SPA tarball for this target.
+      # PACKAGE_TARGETS cross-compiles all arches for this OS family on a
+      # single runner, avoiding slow Intel/ARM-specific runners.
       - name: Package CLI binary (+ web tarball)
+        env:
+          PACKAGE_TARGETS: ${{ matrix.package_targets }}
         run: pnpm package:cli
 
-      # package:tui uses Bun --compile; no PACKAGE_TARGETS → host target.
       - name: Package TUI binary
+        env:
+          PACKAGE_TARGETS: ${{ matrix.package_targets }}
         run: pnpm package:tui
 
       - name: Collect binaries + web tarball
