@@ -31,7 +31,21 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: pnpm
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      # Node-version-scoped key: native addons (better-sqlite3, node-pty) link
+      # against a specific Node ABI, so the store must not be shared across
+      # Node versions or the cached .node binary fails to load (ERR_DLOPEN_FAILED).
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-node20-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node20-pnpm-store-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -67,17 +81,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      # Node-version-scoped key: native addons (better-sqlite3, node-pty) link
+      # against a specific Node ABI, so the store must not be shared across
+      # Node versions or the cached .node binary fails to load (ERR_DLOPEN_FAILED).
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-node${{ matrix.node }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node${{ matrix.node }}-pnpm-store-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Native addons (better-sqlite3, node-pty) are compiled during install.
-      # The shared pnpm store cache is keyed by OS + lockfile, not Node version,
-      # so a binary compiled under one Node ABI can be reused under another.
-      # Rebuild against the runner's actual Node to fix the ABI mismatch.
-      - name: Rebuild native addons
-        run: pnpm rebuild better-sqlite3 node-pty
 
       # Workspace packages export types from dist/; typecheck needs a prior build
       # on a clean runner (local trees often already have dist/ from `pnpm build`).
@@ -140,7 +161,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: pnpm
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-node20-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-node20-pnpm-store-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
