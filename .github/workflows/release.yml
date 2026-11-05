@@ -349,11 +349,11 @@ jobs:
   # ---------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    needs: [build, desktop, binaries]
-    # Build + desktop are the core deliverables (IDE extensions + installers).
-    # Binaries (standalone zero-Node CLI) is best-effort — don't block the
-    # release if it fails on a given platform.
-    if: always() && needs.build.result == 'success' && needs.desktop.result == 'success'
+    # Depends on build + desktop only (the core deliverables: IDE extensions
+    # + installers). The binaries job (standalone zero-Node CLI) runs in
+    # parallel and is best-effort — whatever it produces is collected, but a
+    # slow or failed binary target must not block the release.
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
