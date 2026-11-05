@@ -72,6 +72,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Native addons (better-sqlite3, node-pty) are compiled during install.
+      # The shared pnpm store cache is keyed by OS + lockfile, not Node version,
+      # so a binary compiled under one Node ABI can be reused under another.
+      # Rebuild against the runner's actual Node to fix the ABI mismatch.
+      - name: Rebuild native addons
+        run: pnpm rebuild better-sqlite3 node-pty
+
       # Workspace packages export types from dist/; typecheck needs a prior build
       # on a clean runner (local trees often already have dist/ from `pnpm build`).
       - name: Build
