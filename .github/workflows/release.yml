@@ -239,6 +239,10 @@ jobs:
           - os: windows-11-arm      # arm64
             target: win-arm64
     runs-on: ${{ matrix.os }}
+    # Best-effort: standalone zero-Node binaries are a bonus asset. A failure
+    # on any single target must not block the release (IDE extensions +
+    # desktop installers are the core deliverables).
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -250,14 +254,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: pnpm
 
       - name: Install Bun (for the TUI binary)
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
         shell: bash
-        run: pnpm install --frozen-lockfile
+        # Windows: node-pty install script can fail on CI runners. Use
+        # --ignore-scripts to skip native compilation, then rebuild only the
+        # packages that have prebuilds or need compilation for this host.
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pnpm install --frozen-lockfile --ignore-scripts
+            pnpm rebuild node-pty
+          else
+            pnpm install --frozen-lockfile
+          fi
 
       # No PACKAGE_TARGETS → currentPlatform() → this runner's own OS+arch,
       # so pkg produces exactly matrix.target. package:cli also writes the
@@ -338,6 +350,10 @@ jobs:
   github-release:
     name: GitHub Release
     needs: [build, desktop, binaries]
+    # Build + desktop are the core deliverables (IDE extensions + installers).
+    # Binaries (standalone zero-Node CLI) is best-effort — don't block the
+    # release if it fails on a given platform.
+    if: always() && needs.build.result == 'success' && needs.desktop.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
