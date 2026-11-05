@@ -79,16 +79,18 @@ IDE 插件从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载：`
 本地打多端产物（输出在 `dist/release/`）：
 
 ```bash
-corepack pnpm package:tui -- --all      # TUI 二进制
-corepack pnpm package:cli -- --all      # codepilot CLI 二进制 + npm 包
-corepack pnpm package:web -- --all      # codepilot-web 启动器（开箱即起 serve --web）
+corepack pnpm package:tui -- --all      # TUI 二进制（Bun --compile）
+corepack pnpm package:cli -- --all      # codepilot CLI 二进制 + npm 包 + Web SPA 资源
 corepack pnpm package:desktop           # Electron 桌面安装包（.dmg/.exe/.AppImage）
 corepack pnpm package:all -- --all      # 全部端
 # 二进制命名：*-darwin-arm64 / *-darwin-x64 / *-linux-x64 / *-linux-arm64 / *-win-x64.exe / *-win-arm64.exe
 ```
 
+Web 不再单独打包成 `codepilot-web` 启动器：在 TUI 里敲 `/web`（或 `codepilot serve --web`）即可在浏览器打开，和当前会话共享。`package:cli` 会随 CLI 产出各端共用的 Web SPA 静态资源 `codepilot-web-<平台>.tar.gz`。
+
 跨平台说明：
-- CLI/Web/TUI 用 `@yao-pkg/pkg`，可从任意宿主交叉编译到 **Windows (x64/arm64)、macOS (Intel/Apple 芯片)、Linux (x64/arm64)**。
+- CLI 用 `@yao-pkg/pkg`，**只能为宿主平台构建**（其远端 base-Node 缓存对非宿主目标 404），因此 CI 按 OS/arch 分别在原生 runner 上构建。
+- TUI 用 Bun `--compile`（支持 ESM + 顶层 await + 原生插件）。Bun 可从单一宿主交叉编译全部目标，但会内嵌宿主架构的原生插件，故 CI 仍在各自原生 runner 上构建以得到正确的 `better_sqlite3.node`。
 - Linux 二进制动态链接宿主 glibc：请在**尽量旧的 glibc 环境**（如 CentOS 7 / manylinux 容器）里构建以最大化兼容；**不支持 musl (Alpine)**。
 - Desktop (`package:desktop`) 用 electron-builder，产 mac dmg / win nsis / linux AppImage；macOS/Windows 的签名需在对应宿主并配好证书。
 

@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { REPO_ROOT, log, pnpm } from "./_util.mjs";
 
 const steps = [
-  ["web", join(REPO_ROOT, "scripts", "package", "web.mjs")],
   ["cli", join(REPO_ROOT, "scripts", "package", "cli.mjs")],
   ["tui", join(REPO_ROOT, "scripts", "package", "tui.mjs")],
   ["desktop", join(REPO_ROOT, "scripts", "package", "desktop.mjs")],

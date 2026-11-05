@@ -59,7 +59,7 @@ function runDesktop() {
 if (kind === "desktop") {
   runDesktop;
 } else {
-  const namePrefix = kind === "web" ? "codepilot-web" : kind === "tui" ? "codepilot-tui" : "codepilot";
+  const namePrefix = kind === "tui" ? "codepilot-tui" : "codepilot";
   const dir = join(RELEASE_ROOT, kind);
   const bin = findHostBinary(dir, namePrefix);
   if (!bin) {

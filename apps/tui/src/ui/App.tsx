@@ -96,7 +96,7 @@ export interface ScrollState {
 export function App(props: AppProps): React.ReactElement {
   const {
     session: initialSession,
-    controller,
+    controller: initialController,
     permissionBridge,
     questionBridge,
     goalBridge,
@@ -109,6 +109,10 @@ export function App(props: AppProps): React.ReactElement {
 
  // Live session can be swapped by /resume without restarting the TUI.
   const [session, setSession] = React.useState(initialSession);
+ // The backend can be swapped at runtime too: /web promotes an in-process
+ // (core) controller to a remote one attached to a freshly started serve, so
+ // the TUI and the browser share one live session.
+  const [controller, setController] = React.useState(initialController);
 
  // Goal loop requested by the model (via `start_goal`) but not yet driven,
  // keyed by session id. Consumed when the triggering turn settles (idle), then
@@ -117,6 +121,9 @@ export function App(props: AppProps): React.ReactElement {
  // event subscription reads current values without re-subscribing.
   const pendingGoalRef = React.useRef<Map<string, { objective: string; maxRounds?: number }>>(new Map());
   const activeGoalLoopsRef = React.useRef<Set<string>>(new Set());
+  // Holds the in-process web server started by /web (--local mode) so it can be
+  // torn down when the TUI exits. Null until /web starts one.
+  const webServerRef = React.useRef<import("@codepilot/protocol/ws").WebSocketServerHandle | null>(null);
 
   const [state, dispatch] = React.useReducer(reducer, undefined, () =>
     initialState({
@@ -989,6 +996,117 @@ export function App(props: AppProps): React.ReactElement {
             }
             return;
           }
+          case "open-web": {
+            try {
+              const [{ readLiveServeInfo }, agentApp] = await Promise.all([
+                import("@codepilot/protocol/serve-info"),
+                import("@codepilot/protocol/agent-app"),
+              ]);
+              const { webPageUrl, openBrowser, detectWebRoot } = agentApp;
+
+              // 1) A serve is already live (the default attached TUI, or one we
+              //    started earlier): just point the browser at it. The browser
+              //    and TUI share the same server session.
+              const live = await readLiveServeInfo();
+              if (live) {
+                openBrowser(webPageUrl(live.host, live.port, live.token || undefined));
+                dispatch({
+                  type: "set-notice",
+                  text: `Opening the web UI (${live.host}:${live.port}) — it shares this session.`,
+                });
+                return;
+              }
+
+              // 2) In-process (--local) engine: no serve exists. Start one in
+              //    this process (serving the SPA), advertise it via serve.json,
+              //    then promote this TUI to a remote client that resumes the
+              //    SAME session id — so the TUI and the browser follow one live
+              //    session on the new serve.
+              if (controller.kind !== "core") {
+                dispatch({
+                  type: "set-notice",
+                  text: "Cannot open the web UI from this backend (no serve and not an in-process engine).",
+                });
+                return;
+              }
+              const [{ startWebSocketServer }, { writeServeInfo }] =
+                await Promise.all([
+                  import("@codepilot/protocol/ws"),
+                  import("@codepilot/protocol/serve-info"),
+                ]);
+              const webRoot = detectWebRoot();
+              const handle = await startWebSocketServer({
+                host: "127.0.0.1",
+                port: 18765,
+                staticRoot: webRoot,
+                defaultCwd: cwd,
+              });
+              const version = controller.core.CORE_VERSION ?? "0.0.0";
+              await writeServeInfo({
+                url: handle.url,
+                token: handle.token ?? "",
+                pid: process.pid,
+                host: handle.host,
+                port: handle.port,
+                startedAt: new Date().toISOString(),
+                version,
+              });
+              webServerRef.current = handle;
+
+              // Re-attach this TUI as a remote client resuming the current
+              // session id, and swap the controller so later commands use the
+              // serve too.
+              const { RemoteSession } = await import("../remoteSession.js");
+              const remote = await RemoteSession.connect({
+                url: handle.url,
+                token: handle.token || undefined,
+                cwd,
+                sessionId: session.id,
+                onPermissionRequest: (req) => permissionBridge.waitDecision(req),
+                onAskUser: (req) => questionBridge.waitAnswers(req),
+                onPromptResolved: (kind, requestId) =>
+                  kind === "permission"
+                    ? permissionBridge.dismiss(requestId)
+                    : questionBridge.dismiss(requestId),
+              });
+              const prev = session;
+              let current = remote;
+              const nextController: SessionController = {
+                kind: "remote",
+                cwd,
+                listSessions: () => current.listSessions(),
+                openSession: async (id: string) => {
+                  current = await current.reopen(id);
+                  return current as unknown as Session;
+                },
+              };
+              dispatch({ type: "clear" });
+              setController(nextController);
+              setSession(remote as unknown as Session);
+              dispatch({
+                type: "init",
+                sessionId: remote.id,
+                cwd: remote.getCwd(),
+                model: remote.getModel(),
+                permissionMode: state.permissionMode,
+                agentMode: remote.getAgentMode(),
+              });
+              openBrowser(webPageUrl(handle.host, handle.port, handle.token || undefined));
+              dispatch({
+                type: "set-notice",
+                text: `Started a local web server (${handle.host}:${handle.port}) and opened the browser — it shares this session.`,
+              });
+              // The old in-process session object is superseded by the serve's
+              // live instance (same id, resumed from JSONL); release it.
+              void prev.dispose?.().catch(() => undefined);
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: `/web failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
+            return;
+          }
           case "schedule-list": {
             try {
               const { listScheduledTasks } = await import("@codepilot/core");
@@ -1133,6 +1251,16 @@ export function App(props: AppProps): React.ReactElement {
         await session.dispose();
       } catch {
  /* ignore */
+      }
+      // Tear down the web server /web started in-process, clearing serve.json.
+      if (webServerRef.current) {
+        try {
+          await webServerRef.current.close();
+          const { clearServeInfo } = await import("@codepilot/protocol/serve-info");
+          await clearServeInfo();
+        } catch {
+ /* best-effort */
+        }
       }
       await killAllJobs().catch(() => {});
  // Compact the persistent prompt history on the way out.

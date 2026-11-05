@@ -43,9 +43,9 @@ import {
 } from "@codepilot/core";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import * as readline from "node:readline";
+import { detectWebRoot } from "./agent-app.js";
 import { PrettyRenderer, prettyOutput } from "./cli-render.js";
 import { startServer } from "./server.js";
 
@@ -136,20 +136,6 @@ Environment:
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
-  // Web-launcher binaries (packaged as `codepilot-web-<platform>`) default to
-  // hosting the SPA + opening the browser. Detect by executable name and
-  // rewrite argv to `serve --web --web-root` unless the user already passed a
-  // subcommand. `process.execPath` is the real binary under pkg's snapshot.
-  const invokedName = ((): string => {
-    try {
-      return process.execPath.split(/[\\/]/).pop() ?? "";
-    } catch {
-      return "";
-    }
-  })();
-  if (/^codepilot-web\b/.test(invokedName) && !argv.includes("serve")) {
-    argv.unshift("serve", "--web", "--web-root");
-  }
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(helpText() + "\n");
     return 0;
@@ -709,32 +695,6 @@ async function cmdServeWeb(
 }
 
 /** The built web SPA next to this package (`<repo>/apps/web/dist`). */
-function detectWebRoot(what: string): string | undefined {
-  const candidates: string[] = [];
-  // 1) Next to a packaged binary (pkg): `<dir-of-exe>/web`. This is where the
-  //    CLI / web-launcher package scripts stage the SPA.
-  try {
-    candidates.push(resolve(dirname(process.execPath), "web"));
-  } catch {
-    /* ignore */
-  }
-  // 2) Source-tree / npm layout relative to this module.
-  try {
-    const here = fileURLToPath(new URL(".", import.meta.url));
-    candidates.push(resolve(here, "..", "..", "..", "apps", "web", "dist"));
-  } catch {
-    /* ignore */
-  }
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, "index.html"))) return candidate;
-  }
-  process.stderr.write(
-    `${what}: no web UI found (looked in: ${candidates.join(", ")})\n` +
-      `Build it first (pnpm --filter @codepilot/web build) or pass --web-root <dir>.\n`,
-  );
-  return undefined;
-}
-
 /**
  * `codepilot agent [dir]`: serve the web UI and protocol on loopback and
  * open the agent layout in an app window. Exits when the window closes.

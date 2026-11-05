@@ -11,7 +11,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface AppBrowser {
   name: string;
@@ -75,6 +76,37 @@ export function webPageUrl(
   const q = new URLSearchParams({ layout: "web" });
   if (token) q.set("token", token);
   return `http://${browserHost(host)}:${port}/?${q.toString()}`;
+}
+
+/**
+ * Locate the built web SPA directory (the folder containing `index.html`).
+ * Checks the packaged-binary layout (`<dir-of-exe>/web`) first, then the
+ * source/npm layout relative to this module. Returns undefined if neither
+ * exists; pass `what` to emit a build hint to stderr on miss.
+ */
+export function detectWebRoot(what?: string): string | undefined {
+  const candidates: string[] = [];
+  try {
+    candidates.push(resolve(dirname(process.execPath), "web"));
+  } catch {
+    /* ignore */
+  }
+  try {
+    const here = fileURLToPath(new URL(".", import.meta.url));
+    candidates.push(resolve(here, "..", "..", "..", "apps", "web", "dist"));
+  } catch {
+    /* ignore */
+  }
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, "index.html"))) return candidate;
+  }
+  if (what) {
+    process.stderr.write(
+      `${what}: no web UI found (looked in: ${candidates.join(", ")})\n` +
+        `Build it first (pnpm --filter @codepilot/web build) or pass --web-root <dir>.\n`,
+    );
+  }
+  return undefined;
 }
 
 /** Open a URL in the default browser (tab), fire-and-forget. */

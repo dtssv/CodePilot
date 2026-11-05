@@ -47,6 +47,7 @@ export type CommandResult =
   | { kind: "redo" }
   | { kind: "init"; force: boolean }
   | { kind: "remote-qr" }
+  | { kind: "open-web" }
   | { kind: "schedule-list" }
   | {
       kind: "custom-command";
@@ -94,6 +95,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "undo", description: "Undo last agent file edits" },
   { name: "redo", description: "Redo last undone file edits" },
   { name: "init", description: "Scaffold AGENTS.md for this project", args: "[--force]" },
+  { name: "web", description: "Open the web UI in your browser (shares this session)" },
   { name: "remote", description: "Mint a one-time QR for phone remote control" },
   { name: "schedule", description: "List scheduled / idle tasks" },
   { name: "exit", description: "Exit CodePilot" },
@@ -126,6 +128,7 @@ export const HELP_TEXT = `Available commands:
   /export [md|jsonl] [path]          Export this session transcript
   /undo · /redo                      Undo/redo last agent file edits
   /init [--force]                    Scaffold AGENTS.md (commit-ready)
+  /web                               Open the web UI in your browser (same session)
   /remote                            One-time QR for phone remote control
   /schedule                          List idle/scheduled tasks
 
@@ -230,6 +233,8 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "redo" };
     case "init":
       return { kind: "init", force: /\b--force\b/.test(rest) };
+    case "web":
+      return { kind: "open-web" };
     case "remote":
       return { kind: "remote-qr" };
     case "schedule":
@@ -269,6 +274,7 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "undo",
   "redo",
   "init",
+  "web",
   "remote",
   "schedule",
   "exit",
