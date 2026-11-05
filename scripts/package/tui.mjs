@@ -46,6 +46,10 @@ function findBun() {
 
 async function main() {
   ensureDir(outDir);
+  // tui imports @codepilot/core and @codepilot/protocol — build them first
+  // so their dist/ exists when tsc resolves types on a clean checkout.
+  pnpm(["--filter", "@codepilot/core", "build"]);
+  pnpm(["--filter", "@codepilot/protocol", "build"]);
   pnpm(["--filter", "@codepilot/tui", "build"]);
   const entry = join(REPO_ROOT, "apps", "tui", "dist", "cli.js");
   if (!existsSync(entry)) fail("apps/tui/dist/cli.js missing");

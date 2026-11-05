@@ -239,10 +239,6 @@ jobs:
           - os: windows-11-arm      # arm64
             target: win-arm64
     runs-on: ${{ matrix.os }}
-    # Best-effort: standalone zero-Node binaries are a bonus asset. A failure
-    # on any single target must not block the release (IDE extensions +
-    # desktop installers are the core deliverables).
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -349,11 +345,7 @@ jobs:
   # ---------------------------------------------------------------------
   github-release:
     name: GitHub Release
-    # Depends on build + desktop only (the core deliverables: IDE extensions
-    # + installers). The binaries job (standalone zero-Node CLI) runs in
-    # parallel and is best-effort — whatever it produces is collected, but a
-    # slow or failed binary target must not block the release.
-    needs: [build, desktop]
+    needs: [build, desktop, binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

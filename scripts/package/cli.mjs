@@ -38,7 +38,6 @@ async function buildWeb() {
 }
 
 async function bundleCli() {
-  pnpm(["--filter", "@codepilot/protocol", "build"]);
   await bundleNodeEntry({
     entry: join(REPO_ROOT, "packages", "protocol", "dist", "cli.js"),
     outfile: entryOut,
@@ -114,6 +113,10 @@ function packageNpm() {
 
 async function main() {
   ensureDir(outDir);
+  // Build core+protocol first — both web (vite import) and bundleCli (esbuild
+  // import) resolve @codepilot/core and @codepilot/protocol from dist/.
+  pnpm(["--filter", "@codepilot/core", "build"]);
+  pnpm(["--filter", "@codepilot/protocol", "build"]);
   await buildWeb();
   await bundleCli();
   packageBinaries();
