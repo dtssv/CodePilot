@@ -100,7 +100,15 @@ export function runPkg(opts) {
     }
   }
   log(`pkg ${opts.targets.join(",")} → ${opts.outputPath}`);
-  const r = spawnSync(process.execPath, args, { stdio: "inherit" });
+  // 10-min timeout — pkg downloads a ~40 MB pre-built Node binary on first
+  // run; without a timeout a stalled download hangs the CI job indefinitely.
+  const r = spawnSync(process.execPath, args, { stdio: "inherit", timeout: 600_000 });
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    throw new Error(`pkg timed out after 10 min (likely stalled Node binary download)`);
+  }
+  if (r.error) {
+    throw new Error(`pkg spawn error: ${r.error.message}`);
+  }
   if (r.status !== 0) {
     throw new Error(`pkg failed with exit ${r.status}`);
   }

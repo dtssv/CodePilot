@@ -267,6 +267,14 @@ jobs:
             pnpm install --frozen-lockfile
           fi
 
+      # @yao-pkg/pkg downloads a ~40 MB pre-built Node.js binary on first run.
+      # Cache it so subsequent runs don't re-download (and potentially stall).
+      - name: Cache pkg Node binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.pkg-cache
+          key: pkg-cache-${{ matrix.target }}-${{ runner.os }}-v3.6
+
       # No PACKAGE_TARGETS → currentPlatform() → this runner's own OS+arch,
       # so pkg produces exactly matrix.target. package:cli also writes the
       # web SPA tarball for this target.
