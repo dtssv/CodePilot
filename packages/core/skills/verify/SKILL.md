@@ -28,12 +28,12 @@ checklist, a generic verify-before-done gate.
 
 ## Notes
 
-- A visual check (screenshot / `read_image`) is warranted only when the task is
-  to reproduce or match a given visual reference, or the user asked to verify the
-  UI. In that case compare against the same reference used in the study phase, in
-  addition to any build step — not an edit↔screenshot loop. Building a page with
-  no such reference does not call for screenshotting it or standing up an
-  environment just to inspect the UI; use the ordinary checks (build, typecheck,
-  and any logic/interaction tests the change needs).
+- A visual comparison (e.g. `read_image`) is warranted only when the task
+  supplies a concrete visual reference to match — a mockup, a design, a "make
+  it look like X". Then compare the result against that same reference near
+  completion, in addition to any build step — not an edit↔screenshot loop.
+  Building something from a description with no such reference does not call for
+  capturing and inspecting it; the ordinary checks (build, typecheck, and any
+  logic/behaviour tests the change needs) are the verification.
 - If verification is impossible (missing tooling, no network, no harness), say
   so explicitly instead of pretending the change was verified.

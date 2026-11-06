@@ -704,9 +704,12 @@ checklist, a generic verify-before-done gate.
 
 ## Notes
 
-- Visual / asset tasks: after a coherent slice (or near completion), compare
-  against the same reference used in the study phase (e.g. \`read_image\`) in
-  addition to any build step — not an edit↔screenshot loop.
+- A visual comparison (e.g. \`read_image\`) is warranted only when the task
+  supplies a concrete visual reference to match — a mockup, a design, a "make
+  it look like X". Then compare the result against that same reference near
+  completion, in addition to any build step — not an edit↔screenshot loop.
+  Building UI from a description with no such reference does not call for
+  screenshotting it; a clean build/run is the check.
 - If verification is impossible (missing tooling, no network, no harness), say
   so explicitly instead of pretending the change was verified.
 `,

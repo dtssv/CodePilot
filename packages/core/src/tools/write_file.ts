@@ -35,8 +35,8 @@ export const writeFileTool: ToolDef<typeof schema> = {
   name: "write_file",
   description:
     "Create or overwrite one file on disk. Requires `path` + `content` (the file body). " +
-    "Only for persisting text files — never for running shell commands, starting browsers, " +
-    "or taking screenshots (use `bash` with `command` for those). Prefer `edit_file` for " +
+    "Only for persisting text files — never for running shell commands or other processes " +
+    "(use `bash` with `command` for those). Prefer `edit_file` for " +
     "partial edits. Read an existing file before overwriting it. Set `append: true` to add " +
     "to the end instead of overwriting — useful for building a large file across several " +
     "calls without re-sending the whole body. Never write secrets; sandbox blocks " +

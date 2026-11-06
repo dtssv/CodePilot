@@ -307,6 +307,25 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("</memory>");
   });
 
+  it("frames memory headings as a table of contents, not instructions", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      memory: {
+        project: "## Use headless Chrome for screenshots\nbody",
+        user: "## Some preference\nbody",
+        progressive: "- [project] once used technique X (2026-01-01)",
+      },
+    });
+    // The heading is still advertised (so the model can read_file it)…
+    expect(out.dynamicSuffix).toContain("## Use headless Chrome for screenshots");
+    // …but framed as a catalog of past notes, not a to-do list / instruction.
+    expect(out.dynamicSuffix).toContain("table of contents");
+    expect(out.dynamicSuffix).toContain("not actions to take");
+    expect(out.dynamicSuffix).toContain("does not mean use it now");
+    // Progressive index carries the same "reference, not instruction" framing.
+    expect(out.dynamicSuffix).toContain("not instructions for this task");
+  });
+
   it("does not inject project/user memory bodies into the per-turn suffix", async () => {
     const body = "secret-long-note ".repeat(100);
     const out = await buildSystemPrompt({

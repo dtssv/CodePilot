@@ -2,7 +2,7 @@
 //
  // Modes (config `stopVerify`):
  // - "off"    — disabled (default). No extra request at turn end.
- // - "prompt" — small-model judge: code correctness ≠ feature/visual correctness
+ // - "prompt" — small-model judge: structure checks ≠ behaviour correctness
  // - "tests"  — run a detected project test command when one exists; else allow
  // - true     — alias for "prompt"
  //
@@ -97,17 +97,20 @@ export function buildStopTranscriptHint(events: Event[], maxChars = 6_000): stri
 }
 
 const PROMPT_JUDGE = `You are a completion gate for a coding agent (Stop hook).
-Decide whether the agent may END this turn.
+Decide whether the agent may END this turn. Judge only from evidence in the
+conversation — tool results, command output, file contents. The agent claiming
+it is done is not evidence. Do not assume any particular verification method,
+tool, framework, or runtime; the right check is whatever the task and project
+call for.
 
 Block when ANY of these are true:
-- The user task is UI / visual / interactive / frontend and there is no evidence of running a dev server, opening a browser, or comparing via screenshots/read_image.
-- The agent claims done but only ran syntax/typecheck/lint/\`node --check\` while the task needed feature-level or visual verification.
+- The task has a deliverable whose behaviour was claimed to work, but nothing in the transcript exercised that behaviour — only structure checks (parse/typecheck/lint) were run, with no evidence of the result being exercised the way the task calls for.
 - Stated acceptance criteria look unmet, or verification was skipped without saying why it was impossible.
 - stop_hook_active is true AND the prior block reason was not addressed in the latest assistant work.
 
 Allow when:
-- Evidence matches the claim (tests/build for code tasks; browser/screenshot for UI), OR the agent clearly stated verification was impossible and why.
-- The change is a narrow code fix with an appropriate automated check, or a Q&A/planning turn with no deliverable to verify.
+- The evidence shown matches the claim (the check that fits the task was run and its outcome is visible), OR the agent clearly stated verification was impossible and why.
+- The change is a narrow fix with an appropriate automated check, or a Q&A/planning turn with no deliverable to verify.
 - stop_hook_active is true and the agent fixed the prior concern.
 
 De-escalation: you have already blocked this turn stop_continue_count time(s)

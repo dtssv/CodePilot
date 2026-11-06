@@ -11,7 +11,7 @@ const schema = z.object({
 export const bashKillTool: ToolDef<typeof schema> = {
   name: "bash_kill",
   description:
-    "SIGTERM a background `bash` job by `job_id`. Kill unused servers/watchers before finishing.",
+    "SIGTERM a background `bash` job by `job_id`. Kill unused background jobs before finishing.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

@@ -35,14 +35,14 @@ export const planUpdateTool: ToolDef<typeof schema> = {
     let content = `plan updated: ${steps.length} step(s)`;
     // Soft nudge only — never refuse. Prefer research→build→one real verify over filler.
     const VERIFY_HINT =
-      /verif|test|build|lint|check|e2e|regress|ci|typecheck|screenshot|visual|accept|browser|compare|harness/i;
+      /verif|test|build|lint|check|e2e|regress|ci|typecheck|accept|compare|harness|run\b/i;
     if (
       steps.length >= 3 &&
       !steps.some((s) => VERIFY_HINT.test(s.title))
     ) {
       content +=
         `\n\n[reminder] Multi-step plans should end with one verification step you can ` +
-        `actually run (test/build/browser — not a fake sanity check), after research + implement.`;
+        `actually run — a real check that fits the task, not a fake sanity check — after research + implement.`;
     }
     return {
       content,

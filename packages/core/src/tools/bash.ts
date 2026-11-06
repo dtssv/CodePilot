@@ -23,7 +23,7 @@ const schema = z.object({
     .string()
     .describe(
       "Required. The shell command string to execute via /bin/sh -c " +
-        "(e.g. builds, tests, curl, headless Chrome). This is the only way to run a process.",
+        "(e.g. builds, tests, scripts, network fetches). This is the only way to run a process.",
     ),
   timeout: z
     .number()
@@ -37,10 +37,9 @@ const schema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Run detached and return a job id immediately. Use for long-running processes " +
-        "(dev servers, watchers) and browser/rendering jobs (headless Chrome, Puppeteer, " +
-        "Playwright, PDF/WebGL) that can outlive a foreground timeout. Poll with " +
-        "`bash_output`, stop with `bash_kill`.",
+      "Run detached and return a job id immediately. Use for long-running or long-lived " +
+        "processes (servers, watchers, rendering/compute jobs) that can outlive a foreground " +
+        "timeout. Poll with `bash_output`, stop with `bash_kill`.",
     ),
   escalate_sandbox: z
     .boolean()
@@ -66,14 +65,14 @@ export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
     "Execute a shell command (`command` required). Use for builds, tests, package managers, " +
-    "network downloads, and headless browser/screenshot processes. " +
+    "network fetches, and any other process the task needs. " +
     "Not for creating or editing project files — use `write_file` / `edit_file` for that; " +
     "prefer `read_file` / `grep` / `glob` over shell for reading code. " +
     "Default timeout 60s (max 10m); output >8KB spills to an artifact (`read_artifact`). " +
-    "Set `run_in_background: true` for long-lived or browser jobs, then `bash_output` / `bash_kill`. " +
+    "Set `run_in_background: true` for long-lived jobs, then `bash_output` / `bash_kill`. " +
     "Foreground calls share one shell (`cd`/`export` persist). " +
-    "OS sandbox limits writes to the workspace, `/tmp`, and `~/.codepilot`; put command " +
-    "outputs (screenshots, Chrome profiles, zips) under session `scratch_dir`, not `cwd/.tmp`.",
+    "OS sandbox limits writes to the workspace, `/tmp`, and `~/.codepilot`; put run " +
+    "artifacts (generated files, caches, zips) under session `scratch_dir`, not `cwd/.tmp`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
