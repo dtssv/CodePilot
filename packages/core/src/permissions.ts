@@ -249,10 +249,20 @@ export class PermissionEngine {
     }
 
  // 4. mode defaults.
- // memory_write is a silent side channel (project-state / user MEMORY.md);
- // never prompt — same posture as other read-tier bookkeeping tools.
+ // memory_write to PROJECT scope is a silent side channel (project-state
+ // MEMORY.md); never prompt — same posture as other read-tier bookkeeping
+ // tools. Writing USER scope (global ~/.codepilot/MEMORY.md) is different:
+ // it is a cross-project rule the agent would otherwise persist silently and
+ // re-inject into every future session. Other harnesses gate this (codex's
+ // ad_hoc_note only writes "after the user explicitly asks to remember";
+ // Claude Code's `#` asks which scope), so require interactive confirmation
+ // for user-scope writes. yolo mode still auto-allows (see below).
     if (tool.name === "memory_write") {
-      return { decision: "allow", reason: "memory_write is silent and auto-allowed" };
+      const scope = (input as { scope?: unknown } | null)?.scope;
+      if (scope === "user" && this.mode !== "yolo") {
+        return "ask";
+      }
+      return { decision: "allow", reason: "memory_write (project scope) is silent and auto-allowed" };
     }
     if (tool.permission === "read") {
       return { decision: "allow", reason: "read-only tool" };

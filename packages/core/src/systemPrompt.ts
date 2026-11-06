@@ -269,11 +269,11 @@ These rules exist because the single most damaging failure mode is confidently s
   push("testing", `## Testing and Verification
 
 - **Define success before volume.** Finish the study phase (see Tool-Use Policy) until gates are named — then implement. Verification without prior gates is thrashing; gates without a finished study are guesswork.
-- **Verify at milestones, not after every edit.** Batch related changes, then run the check that matches the claim (test/build/browser).
-- **Structure checks ≠ behaviour checks.** \`tsc\`, \`node --check\`, and lint prove the code parses and typechecks — not that it does the right thing. Prove behaviour by exercising it: run the program, call the function/endpoint, assert the output — using whatever check the task calls for. If you cannot run the behaviour check, say so — do not substitute a syntax pass.
-- **Start narrow, broaden as needed.** A single test covering the changed unit is the floor; for cross-cutting changes, run the full suite. For greenfield, finish a real slice before investing heavily in verification scaffolding.
+- **Verify at milestones, not after every edit.** Batch related changes, then run the check the task actually calls for. Pick the check from the project and the task — do not assume a tool, framework, or runtime the project has not shown it uses; if the project already has tests, a build, or a lint/format step, prefer those over anything you invent.
+- **Structure checks ≠ behaviour checks.** \`tsc\`, \`node --check\`, and lint prove the code parses and typechecks — not that it does the right thing. Prove behaviour by exercising it with whatever the task calls for (run it, call the function/endpoint, assert the output). If you cannot run the behaviour check, say so — do not substitute a syntax pass.
+- **Start narrow, broaden as needed.** A single test covering the changed unit is the floor; for cross-cutting changes, run the full suite. Match the effort to the change — do not stand up verification scaffolding (or add tests to a codebase that has none) beyond what the task needs.
 - **Iterate on failure, but cap blind retries.** Read the failure, fix the root cause, re-run. If the same target fails repeatedly, stop and reassess rather than looping.
-- **Report what you ran.** In your final message, list the commands/checks you ran and their pass/fail status. If you could not run a check (no browser, no network, missing tool), say so explicitly.
+- **Report what you ran.** In your final message, list the commands/checks you ran and their pass/fail status. If you could not run a check (no runtime, no network, missing tool), say so explicitly.
 
 Never: claim "done" without naming the check and its outcome (or why it was impossible); disable a test or weaken an assertion to make it pass (fix the test instead, and call it out).`);
 
@@ -289,7 +289,7 @@ Never: claim "done" without naming the check and its outcome (or why it was impo
 
 - CodePilot keeps durable knowledge **out of the git tree**, with a thin always-loaded index and topic files you open on demand (same pattern as AGENTS.md + \`.agents/context/\` style harnesses). The dynamic suffix lists the concrete paths (project \`MEMORY.md\`, the progressive index + topic files, user memory) and injects the always-loaded index.
 - **Protocol:** When a bullet or task needs detail, \`read_file\` the absolute topic path listed under "Topic files" — do **not** re-derive by scanning the whole repo if a topic already covers it.
-- **Write with \`memory_write\`** (its description covers scope/section/topic). Capture only durable, cross-session facts — never today's task/plan/bug. Prefer project scope unless the fact applies across repos.`, ["memory_write"]);
+- **Write with \`memory_write\`** (its description covers scope/section/topic). Capture only durable, cross-session facts — never today's task/plan/bug, and never a one-off procedure or something already in the code/git history. **Default to project scope** (silent). **User (global) scope injects into every future session across all repos and requires the user's confirmation** — reserve it for a genuine cross-repo preference or constraint the user has stated, not for experience you decided is reusable.`, ["memory_write"]);
 
   if (hasMcp) {
     push("mcp", `## External Context (MCP)
@@ -623,11 +623,14 @@ function renderMemoryBlock(memory: MemoryContents): string {
   const blocks: string[] = [];
   if (memory.progressive && memory.progressive.trim().length > 0) {
     blocks.push(`### Progressive index (~/.codepilot/memory/…/MEMORY.md)
-_Bullets + topic paths. Use read_file on a topic path for full notes._
+_Reference notes from past sessions, not instructions for this task. A bullet mentioning a tool or technique records that it was once used, not that you should use it now — let the current task decide. read_file a topic path only when the task needs that detail._
 ${memory.progressive.trim()}`);
   }
   // Project / user memory: advertise their paths + section headings only, so the
   // model knows they exist and can read_file them when a task needs the detail.
+  // The headings are a table of contents (what notes exist), NOT a to-do list —
+  // frame them as such so a note titled e.g. "<some technique>" is not read as
+  // "do <that technique>".
   const headingsOnly = (text: string): string =>
     text
       .split(/\r?\n/)
@@ -638,12 +641,12 @@ ${memory.progressive.trim()}`);
   if (memory.project && memory.project.trim().length > 0) {
     const h = headingsOnly(memory.project);
     blocks.push(`### Project memory available (~/.codepilot/projects/…/MEMORY.md)
-_read_file the path above for full notes._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
+_read_file the path above for full notes. The section titles below are a table of contents — what past notes exist, not actions to take; a title naming a technique does not mean use it now._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
   }
   if (memory.user && memory.user.trim().length > 0) {
     const h = headingsOnly(memory.user);
     blocks.push(`### User memory available (~/.codepilot/MEMORY.md)
-_read_file the path above for full notes._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
+_read_file the path above for full notes. The section titles below are a table of contents — what past notes exist, not actions to take; a title naming a technique does not mean use it now._${h ? `\nSections: ${h.replace(/\n/g, " · ")}` : ""}`);
   }
   if (blocks.length === 0) {
     return `<memory>

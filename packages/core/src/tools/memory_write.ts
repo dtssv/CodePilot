@@ -59,7 +59,10 @@ export const memoryWriteTool: ToolDef<typeof schema> & { sink?: MemorySink } = {
     "Silently append durable knowledge to project/user memory and the progressive " +
     "index+topic store (not the workspace). Use for facts future sessions need. " +
     "Not for today's task/plan. Do not narrate this step. " +
-    "Prefer a specific `section` or `topic` so later sessions can read_file only that topic.",
+    "Prefer a specific `section` or `topic` so later sessions can read_file only that topic. " +
+    "Default to project scope (silent). Reserve user scope for a genuine cross-repo " +
+    "user preference or constraint — it injects into every future session and needs the " +
+    "user's confirmation, so do not use it for one-off procedures or project-specific facts.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

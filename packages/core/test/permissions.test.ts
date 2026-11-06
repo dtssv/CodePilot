@@ -58,6 +58,41 @@ describe("PermissionEngine", () => {
     expect(e.preflight(t, {})).toBe("ask");
   });
 
+  describe("memory_write scope gating", () => {
+    const mem = makeTool("memory_write", "read");
+
+    it("auto-allows project-scope writes silently in any mode", () => {
+      for (const permissionMode of ["ask", "auto-edit"] as const) {
+        const e = new PermissionEngine({ permissionMode });
+        expect(e.preflight(mem, { scope: "project", title: "t", content: "c" })).toEqual({
+          decision: "allow",
+          reason: "memory_write (project scope) is silent and auto-allowed",
+        });
+      }
+    });
+
+    it("auto-allows when scope is omitted (defaults to project)", () => {
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      expect(e.preflight(mem, { title: "t", content: "c" })).toEqual({
+        decision: "allow",
+        reason: "memory_write (project scope) is silent and auto-allowed",
+      });
+    });
+
+    it("asks before writing user (global) scope", () => {
+      const e = new PermissionEngine({ permissionMode: "auto-edit" });
+      expect(e.preflight(mem, { scope: "user", title: "t", content: "c" })).toBe("ask");
+    });
+
+    it("still auto-allows user scope under yolo", () => {
+      const e = new PermissionEngine({ permissionMode: "yolo" });
+      expect(e.preflight(mem, { scope: "user", title: "t", content: "c" })).toEqual({
+        decision: "allow",
+        reason: "memory_write (project scope) is silent and auto-allowed",
+      });
+    });
+  });
+
   it("auto-approves tools named in autoApprove", () => {
     const e = new PermissionEngine({ autoApprove: ["lint", "test_*"] });
     const t1 = makeTool("lint", "execute");
