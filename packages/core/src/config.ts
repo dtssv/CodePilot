@@ -444,6 +444,10 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
  // option the core has never heard of.
     runtime: z.string().min(1).optional(),
     runtimeOptions: z.record(z.string().min(1), z.unknown()).optional(),
+ // First-run onboarding marker. Set (to an ISO timestamp) once the user has
+ // been shown the first-launch setup guide — whether they completed it or
+ // skipped it — so the TUI never auto-opens the guide again. User-scope only.
+    onboardedAt: z.string().optional(),
  // Profile composition ----------------------------------------------
  // Named partial configs. Activated via `activeProfile` (config key,
  // CODEPILOT_PROFILE env var, or the `--profile <name>` CLI flag).

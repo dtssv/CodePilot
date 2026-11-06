@@ -26,6 +26,7 @@ export type CommandResult =
   | { kind: "pick-session" }
   | { kind: "pick-goal" }
   | { kind: "connect" }
+  | { kind: "setup" }
   | { kind: "set-mode"; mode: PermissionMode }
   | { kind: "set-agent-mode"; mode: AgentMode }
   | { kind: "list-sessions" }
@@ -73,6 +74,7 @@ export interface CommandInfo {
 export const COMMANDS: readonly CommandInfo[] = [
   { name: "help", description: "Show available commands" },
   { name: "connect", description: "Interactively add a model provider (API key)" },
+  { name: "setup", description: "Run the first-run setup guide (provider · search · images)" },
   { name: "model", description: "Pick a model (↑↓ + Enter)", args: "[provider/model]" },
   { name: "provider", description: "Pick a provider preset (↑↓ + Enter)", args: "[id]" },
   { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo]" },
@@ -106,6 +108,7 @@ const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo"]
 
 export const HELP_TEXT = `Available commands:
   /help                              Show this help
+  /setup                             First-run guide: provider · search · images
   /connect                           Add a provider (interactive wizard)
   /model                             Pick a model (↑↓ + Enter)
   /provider                          Pick a provider (↑↓ + Enter)
@@ -158,6 +161,8 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "system", text: HELP_TEXT };
     case "connect":
       return { kind: "connect" };
+    case "setup":
+      return { kind: "setup" };
     case "model": {
       if (rest === "") return { kind: "list-models" };
       return { kind: "set-model", model: rest };

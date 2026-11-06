@@ -44,6 +44,7 @@ import { InputBox } from "./InputBox.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { QuestionPrompt } from "./QuestionPrompt.js";
 import { ConnectWizard } from "./ConnectWizard.js";
+import { SetupWizard } from "./SetupWizard.js";
 import { ModelPicker } from "./ModelPicker.js";
 import { SelectMenu, TextPrompt, type SelectOption } from "./SelectMenu.js";
 import { StatusBar } from "./StatusBar.js";
@@ -200,6 +201,7 @@ export function App(props: AppProps): React.ReactElement {
  // can't shadow them.
   const [customCommands, setCustomCommands] = React.useState<SlashCommand[]>([]);
   const [showConnect, setShowConnect] = React.useState(false);
+  const [showSetup, setShowSetup] = React.useState(false);
   const [showModelPicker, setShowModelPicker] = React.useState(false);
   const [modelPickerRows, setModelPickerRows] = React.useState<
     import("@codepilot/core").SelectableModel[]
@@ -247,6 +249,67 @@ export function App(props: AppProps): React.ReactElement {
       cancelled = true;
     };
   }, [cwd]);
+
+ // First-run setup guide: auto-open once when the user has never been shown
+ // it (no `onboardedAt` marker in the user config). Completing OR skipping the
+ // guide stamps the marker so it never auto-opens again; `/setup` re-runs it.
+  React.useEffect(() => {
+    try {
+      const cfg = session.getConfig() as { onboardedAt?: unknown };
+      if (cfg.onboardedAt === undefined || cfg.onboardedAt === null) {
+        setShowSetup(true);
+      }
+    } catch {
+  // Config unavailable — skip auto-open rather than block the UI.
+    }
+  // Run once on mount; re-opening is handled by the `/setup` command.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+ // Activate a freshly connected provider (reload config, merge, switch model).
+ // Shared by the standalone /connect wizard and the first-run setup guide.
+  const activateProvider = React.useCallback(
+    async (id: string, model: string, notify = false) => {
+      try {
+        const { loadConfigWithSources } = await import("@codepilot/core");
+        const { config } = await loadConfigWithSources(cwd);
+        session.mergeProviders(config.providers ?? {});
+        await session.setProvider(id, model);
+        dispatch({
+          type: "set-model",
+          model: session.getModel(),
+          providerId: session.getProviderId() ?? id,
+        });
+        if (notify) {
+          dispatch({
+            type: "set-notice",
+            text: `Connected ${id} · ${model}\nUse /model to switch models.`,
+          });
+        }
+      } catch (err: unknown) {
+        dispatch({
+          type: "set-notice",
+          text: `Connected but switch failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    },
+    [cwd, session],
+  );
+
+ // Persist the onboarding marker (best-effort) when the setup guide closes.
+  const stampOnboarded = React.useCallback(async () => {
+    try {
+      const { readUserConfigFile, writeUserConfigFile } = await import(
+        "@codepilot/core"
+      );
+      const { raw } = await readUserConfigFile();
+      raw.onboardedAt = new Date().toISOString();
+      await writeUserConfigFile(raw);
+    } catch {
+  // Marker persistence is best-effort; a failure just means the guide may
+  // auto-open again next launch, which is harmless.
+    }
+  }, [session]);
 
  // The merged autocomplete list (built-ins + custom). Memoised so InputBox
  // doesn't re-render on every keystroke.
@@ -617,6 +680,10 @@ export function App(props: AppProps): React.ReactElement {
           }
           case "connect": {
             setShowConnect(true);
+            return;
+          }
+          case "setup": {
+            setShowSetup(true);
             return;
           }
           case "list-models": {
@@ -1316,6 +1383,7 @@ export function App(props: AppProps): React.ReactElement {
         pendingPerm === undefined &&
         pendingQuestion === undefined &&
         !showConnect &&
+        !showSetup &&
         !showModelPicker &&
         selectOverlay === null &&
         textOverlay === null,
@@ -1361,6 +1429,30 @@ export function App(props: AppProps): React.ReactElement {
         <Box paddingX={1} marginY={1}>
           <QuestionPrompt request={pendingQuestion} onDone={onQuestionDone} />
         </Box>
+      ) : showSetup ? (
+        <Box paddingX={1} marginY={1}>
+          <SetupWizard
+            existingIds={Object.keys(
+              (session.getConfig() as { providers?: Record<string, unknown> }).providers ?? {},
+            )}
+            hasProvider={
+              Object.keys(
+                (session.getConfig() as { providers?: Record<string, unknown> }).providers ?? {},
+              ).length > 0
+            }
+            onProviderConnected={(result) => {
+              void activateProvider(result.id, result.model);
+            }}
+            onDone={(lines) => {
+              setShowSetup(false);
+              void stampOnboarded();
+              dispatch({
+                type: "set-notice",
+                text: `Setup complete:\n${lines.join("\n")}\nRe-run anytime with /setup.`,
+              });
+            }}
+          />
+        </Box>
       ) : showConnect ? (
         <Box paddingX={1} marginY={1}>
           <ConnectWizard
@@ -1373,28 +1465,7 @@ export function App(props: AppProps): React.ReactElement {
                 dispatch({ type: "set-notice", text: "Connect cancelled" });
                 return;
               }
-              void (async () => {
-                try {
-                  const { loadConfigWithSources } = await import("@codepilot/core");
-                  const { config } = await loadConfigWithSources(cwd);
-                  session.mergeProviders(config.providers ?? {});
-                  await session.setProvider(result.id, result.model);
-                  dispatch({
-                    type: "set-model",
-                    model: session.getModel(),
-                    providerId: session.getProviderId() ?? result.id,
-                  });
-                  dispatch({
-                    type: "set-notice",
-                    text: `Connected ${result.id} · ${result.model}\nUse /model to switch models.`,
-                  });
-                } catch (err: unknown) {
-                  dispatch({
-                    type: "set-notice",
-                    text: `Connected but switch failed: ${err instanceof Error ? err.message : String(err)}`,
-                  });
-                }
-              })();
+              void activateProvider(result.id, result.model, true);
             }}
           />
         </Box>

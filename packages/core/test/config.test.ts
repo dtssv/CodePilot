@@ -116,6 +116,11 @@ describe("validateConfig", () => {
     expect(r.provider).toBe("openai");
   });
 
+  it("accepts the onboardedAt first-run marker", () => {
+    const r = validateConfig({ onboardedAt: "2026-01-01T00:00:00.000Z" });
+    expect(r.onboardedAt).toBe("2026-01-01T00:00:00.000Z");
+  });
+
   it("rejects unknown top-level keys with a readable path", () => {
     let err: Error | undefined;
     try {

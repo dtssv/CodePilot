@@ -761,6 +761,10 @@ export interface CodepilotConfig {
  * own entry; unknown keys are ignored rather than rejected, so a plugin
  * runtime can define options the core knows nothing about. */
   runtimeOptions?: Record<string, unknown>;
+ /** First-run onboarding marker. Set (to an ISO timestamp) once the user has
+  * been shown the first-launch setup guide — whether they completed it or
+  * skipped it — so the TUI never auto-opens the guide again. User-scope only. */
+  onboardedAt?: string;
 }
 
 export interface StatusLineConfig {
