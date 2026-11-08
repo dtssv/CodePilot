@@ -108,9 +108,11 @@ val copyWebview by tasks.registering {
     val srcPath = rootProject.projectDir.resolve("../web/dist-embed/index.html").normalize()
     val destDir = webviewResources.map { it.dir("webview") }
     outputs.dir(destDir)
-    // Do not declare optional inputs.file(...) — missing paths break configuration
-    // on some Gradle versions. Stamp the source path as a property instead.
-    inputs.property("webviewSrc", srcPath.absolutePath)
+    // Fingerprint the source file's CONTENT so a rebuilt embed re-triggers the
+    // copy (a stale embed in the packaged plugin was the bug). `inputs.files`
+    // tolerates a missing path (empty set) without breaking configuration, so
+    // we keep the existence flag only to switch between copy and stub below.
+    inputs.files(srcPath)
     inputs.property("webviewSrcExists", srcPath.isFile)
     doLast {
         val out = destDir.get().asFile
