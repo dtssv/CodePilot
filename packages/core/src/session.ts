@@ -318,6 +318,10 @@ export class Session {
   private precompactInFlight = false;
  /** Guards against two overlapping background memory-pipeline runs. */
   private memoryPipelineInFlight = false;
+ /** Set when a background consolidation rewrote the progressive-memory index.
+  * The next turn forces a system-prompt rebuild so the model sees the updated
+  * memory instead of the stale index captured in `systemPromptCache`. */
+  private memoryIndexDirty = false;
  /** Pending prompt-cache warm timer + its abort controller. Scheduled at a
   * turn end when a warm is cost-effective; cancelled when the next real turn
   * starts (it supersedes the warm) or on dispose. */
@@ -781,7 +785,10 @@ export class Session {
       const runtime = this.getRuntime();
       // Lazily ensure the system prompt exists. Resume defers the init-time
       // build (to return history faster), so build on first use if needed.
-      if (!this.systemPromptCache) {
+      // Also rebuild when a background consolidation updated the memory index,
+      // so the model never reads a stale MEMORY.md after it was consolidated.
+      if (!this.systemPromptCache || this.memoryIndexDirty) {
+        this.memoryIndexDirty = false;
         await this.rebuildSystemPrompt().catch(() => undefined);
       }
       const deps: AgentDeps = {
@@ -3162,7 +3169,10 @@ export class Session {
         redactPatterns: this.redactPatterns,
       };
       await extractSessionMemory(this.events, deps).catch(() => 0);
-      await maybeConsolidateMemory(deps).catch(() => false);
+      const consolidated = await maybeConsolidateMemory(deps).catch(() => false);
+      // A consolidation rewrote MEMORY.md; mark the index stale so the next
+      // turn rebuilds the system prompt with the updated memory.
+      if (consolidated) this.memoryIndexDirty = true;
     } catch {
       /* fail-soft: memory consolidation never blocks the session */
     } finally {
