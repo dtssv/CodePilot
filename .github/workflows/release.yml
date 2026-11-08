@@ -280,6 +280,18 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
+        id: setup-bun-3
+        continue-on-error: true
+
+      # setup-bun downloads from github.com/oven-sh/bun/releases (Azure Blob
+      # CDN), which suffers prolonged 504s on Actions runners. npm serves the
+      # same Bun binaries via the npm registry (Cloudflare CDN) — a different
+      # source that does not share the outage. Fall back to it so a GitHub
+      # release-asset outage can't block the release.
+      - name: Install Bun (npm fallback)
+        if: steps.setup-bun-3.outcome == 'failure'
+        shell: bash
+        run: npm install -g bun@1.4.4
 
       - name: Install dependencies
         shell: bash
