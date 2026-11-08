@@ -57,7 +57,7 @@ describe("subagent role block", () => {
 });
 
 describe("compaction summary prompt", () => {
-  it("enumerates the seven required sections in order", () => {
+  it("enumerates the eight required sections in order", () => {
     const order = [
       "USER REQUESTS",
       "CURRENT STATE",
@@ -65,7 +65,8 @@ describe("compaction summary prompt", () => {
       "DECISIONS MADE",
       "ERRORS AND FIXES",
       "OPEN THREADS",
-      "NEXT CONCRETE ACTION",
+      "NEXT MOVE",
+      "IMPORTANT CONTEXT",
     ];
     let lastIdx = -1;
     for (const heading of order) {
@@ -75,8 +76,11 @@ describe("compaction summary prompt", () => {
     }
   });
 
-  it("instructs preservation of verbatim literals", () => {
+  it("keeps the anti-loss disciplines (verbatim, never-drop, verified-vs-assumed, source separation)", () => {
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/verbatim/i);
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Never paraphrase/);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/never drop a section/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Distinguish verified from assumed/);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Source separation/);
   });
 });

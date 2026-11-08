@@ -174,7 +174,7 @@ const schema = z
           "`leader` that splits the goal into assignments, members can share one " +
           "git worktree, edits to the same file by two members are detected and " +
           "reported, and the results are merged per `merge_strategy`. Use for work " +
-          "that is one job but splits cleanly by area (frontend/backend/security)."
+          "that is one job but splits cleanly into disjoint, independently-ownable areas."
       ),
     merge_strategy: z
       .enum(["leader_summary", "voting", "concat"])

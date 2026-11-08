@@ -20,8 +20,7 @@ export const planUpdateTool: ToolDef<typeof schema> = {
   name: "plan_update",
   description:
     "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps; " +
-    "skip for roughly the easiest ~25%. Prefer: research → implement → verify (one real check " +
-    "near the end), not edit↔verify every step. Each step: `{id, title, status}` " +
+    "skip for roughly the easiest ~25%. Each step: `{id, title, status}` " +
     "(pending|in_progress|completed|blocked). Update when status changes, in the SAME response " +
     "as that step's tool calls — never plan_update alone. Keep 3–8 steps; put blockers in the title.",
   inputSchema: schema,
@@ -32,20 +31,8 @@ export const planUpdateTool: ToolDef<typeof schema> = {
       title: s.title,
       status: s.status,
     }));
-    let content = `plan updated: ${steps.length} step(s)`;
-    // Soft nudge only — never refuse. Prefer research→build→one real verify over filler.
-    const VERIFY_HINT =
-      /verif|test|build|lint|check|e2e|regress|ci|typecheck|accept|compare|harness|run\b/i;
-    if (
-      steps.length >= 3 &&
-      !steps.some((s) => VERIFY_HINT.test(s.title))
-    ) {
-      content +=
-        `\n\n[reminder] Multi-step plans should end with one verification step you can ` +
-        `actually run — a real check that fits the task, not a fake sanity check — after research + implement.`;
-    }
     return {
-      content,
+      content: `plan updated: ${steps.length} step(s)`,
       blocks: [
         { type: "text", text: JSON.stringify({ type: "plan", steps }) },
       ],

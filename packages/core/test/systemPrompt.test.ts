@@ -45,7 +45,9 @@ describe("buildSystemPrompt static prefix", () => {
   it("requires researching the target before mutating", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Research before you mutate/);
-    expect(out.staticPrefix).toMatch(/study → implement/);
+    expect(out.staticPrefix).toMatch(/study phase/);
+    // Must not prescribe a fixed study→implement→verify cadence template.
+    expect(out.staticPrefix).not.toMatch(/study → implement/);
   });
 
   it("carries the evidence/honesty discipline (anti-laziness rules)", async () => {
@@ -65,12 +67,15 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Do not stand up heavy verification scaffolding/);
   });
 
-  it("teaches plan quality: research → implement → verify", async () => {
+  it("teaches plan quality without binding to a fixed workflow", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan_update"] });
     expect(out.staticPrefix).toMatch(/Plan quality/);
-    expect(out.staticPrefix).toMatch(/Do not plan verification you cannot perform/);
+    expect(out.staticPrefix).toMatch(/Do not plan a check you cannot perform/);
     expect(out.staticPrefix).toMatch(/edit→check→edit micro-loop/);
-    expect(out.staticPrefix).toMatch(/research\/study/);
+    expect(out.staticPrefix).toMatch(/independently checkable/);
+    // Must NOT prescribe a fixed research→implement→verify workflow or scenario examples.
+    expect(out.staticPrefix).not.toMatch(/research\/study/);
+    expect(out.staticPrefix).not.toMatch(/assert the 404/);
   });
 
   it("distinguishes structure checks from behaviour checks", async () => {
