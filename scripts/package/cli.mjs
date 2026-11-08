@@ -57,8 +57,10 @@ function packageBinaries() {
         outputPath: outPath,
       });
     } catch (err) {
-      log(`skip ${t.pkgTarget}: ${err instanceof Error ? err.message : err}`);
-      continue;
+      // Don't silently skip: a 504'd Node-binary download used to fail soft
+      // here, producing a release with no CLI binary. Surface the error so
+      // the CI job fails instead of shipping an incomplete release.
+      fail(`pkg ${t.pkgTarget}: ${err instanceof Error ? err.message : err}`);
     }
  // pkg may emit outPath or outPath.exe
     let binary = outPath;

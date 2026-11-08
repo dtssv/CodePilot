@@ -100,16 +100,30 @@ export function runPkg(opts) {
     }
   }
   log(`pkg ${opts.targets.join(",")} → ${opts.outputPath}`);
-  // 10-min timeout — pkg downloads a ~40 MB pre-built Node binary on first
-  // run; without a timeout a stalled download hangs the CI job indefinitely.
-  const r = spawnSync(process.execPath, args, { stdio: "inherit", timeout: 600_000 });
-  if (r.error && r.error.code === "ETIMEDOUT") {
-    throw new Error(`pkg timed out after 10 min (likely stalled Node binary download)`);
+  // pkg downloads a ~40 MB pre-built Node binary on first run. That download
+  // 504s intermittently on CI runners (github.com/*/releases/download), and
+  // pkg then falls back to compiling Node from source — which takes 20+ min
+  // and is never what we want. A short per-attempt timeout kills the source
+  // build fast; retrying gives a transient 504 time to clear. A successful
+  // download+package finishes well under the timeout, and the result is
+  // cached in ~/.pkg-cache so later targets/attempts skip the download.
+  const MAX_ATTEMPTS = 3;
+  const ATTEMPT_TIMEOUT_MS = 300_000; // 5 min
+  let lastErr = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const r = spawnSync(process.execPath, args, { stdio: "inherit", timeout: ATTEMPT_TIMEOUT_MS });
+    if (r.error && r.error.code === "ETIMEDOUT") {
+      lastErr = `pkg timed out after ${ATTEMPT_TIMEOUT_MS / 1000}s (stalled download or source build)`;
+    } else if (r.error) {
+      lastErr = `pkg spawn error: ${r.error.message}`;
+    } else if (r.status !== 0) {
+      lastErr = `pkg failed with exit ${r.status}`;
+    } else {
+      return; // success
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      log(`pkg attempt ${attempt}/${MAX_ATTEMPTS} failed (${lastErr}); retrying…`);
+    }
   }
-  if (r.error) {
-    throw new Error(`pkg spawn error: ${r.error.message}`);
-  }
-  if (r.status !== 0) {
-    throw new Error(`pkg failed with exit ${r.status}`);
-  }
+  throw new Error(`${lastErr} (after ${MAX_ATTEMPTS} attempts)`);
 }
