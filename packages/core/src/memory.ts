@@ -30,6 +30,7 @@ import {
   withMemoryWriteLock,
   type AutoMemoryConfig,
 } from "./autoMemory.js";
+import { redactSecrets, type RedactionPattern } from "./redact.js";
 
 /** Legacy / shareable name still *read* from the workspace tree. */
 export const PROJECT_MEMORY_NAME = "CODEPILOT.md";
@@ -239,7 +240,11 @@ export function classifySection(title: string, content: string): MemorySection {
 export class FileMemorySink implements MemorySink {
   constructor(
     private readonly cwd: string,
-    private readonly opts?: { autoMemory?: AutoMemoryConfig | false },
+    private readonly opts?: {
+      autoMemory?: AutoMemoryConfig | false;
+      /** Deployment redaction patterns applied on top of the built-in floor. */
+      redactPatterns?: readonly RedactionPattern[];
+    },
   ) {}
 
   async write(
@@ -253,7 +258,11 @@ export class FileMemorySink implements MemorySink {
       scope === "project" ? projectMemoryPath(this.cwd) : USER_MEMORY_PATH;
     const target = canonicaliseSection(section) ?? classifySection(title, content);
     const stamp = new Date().toISOString().slice(0, 10);
-    const body = content.trim();
+    // Redact secrets before anything reaches disk — a credential the agent put
+    // in a note would otherwise be replayed into every future session's prompt.
+    const extra = this.opts?.redactPatterns;
+    title = redactSecrets(title, extra);
+    const body = redactSecrets(content.trim(), extra);
     // Serialize the read-parse-mutate-write on MEMORY.md so two concurrent
     // memory_write calls in one turn can't clobber each other's section edit
     // (same reasoning as withMemoryWriteLock in autoMemory).

@@ -65,6 +65,11 @@ import { createSkillTool, StaticSkillStore, type SkillToolHandle } from "./tools
 import { LspManager } from "./lsp.js";
 import { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
+import {
+  extractSessionMemory,
+  maybeConsolidateMemory,
+  type MemoryConsolidationConfig,
+} from "./memoryConsolidation.js";
 import { AuditLogger } from "./audit.js";
 import { compileRedactionPatterns } from "./redact.js";
 import { writePlanFile, setPlanFileStatus } from "./plans.js";
@@ -311,6 +316,8 @@ export class Session {
   private precompact: { fingerprint: string; result: CompactionResult } | null = null;
  /** Guards against two overlapping background pre-compactions. */
   private precompactInFlight = false;
+ /** Guards against two overlapping background memory-pipeline runs. */
+  private memoryPipelineInFlight = false;
  /** Pending prompt-cache warm timer + its abort controller. Scheduled at a
   * turn end when a warm is cost-effective; cancelled when the next real turn
   * starts (it supersedes the warm) or on dispose. */
@@ -1096,6 +1103,11 @@ export class Session {
  // for free instead of blocking on the small model. Fire-and-forget; the
  // fingerprint guard discards it if the next prompt changes the transcript.
       if (!turnAborted) void this.precomputeCompaction();
+ // Fold this session's durable learnings into project memory in the
+ // background (fire-and-forget, fail-soft): extract notes from the
+ // transcript, then run a project-wide consolidation when its dual gate
+ // (time since last run + accumulated drafts) is satisfied.
+      if (!turnAborted) void this.runMemoryPipeline();
     }
     return "started";
   }
@@ -2526,6 +2538,7 @@ export class Session {
     memoryWrite.sink = new FileMemorySink(this.cwd, {
       autoMemory:
         this.config.autoMemoryEnabled === false ? false : { enabled: true },
+      redactPatterns: this.redactPatterns,
     });
 
  // Wire plan_done's plan-file persistence. The plan is written to
@@ -3122,6 +3135,38 @@ export class Session {
       /* best-effort: a failed pre-compaction just means the next turn blocks */
     } finally {
       this.precompactInFlight = false;
+    }
+  }
+
+ /**
+  * Background memory pipeline: extract durable notes from this session, then
+  * consolidate drafts into project memory when the dual gate fires. Guarded so
+  * at most one run is in flight; fully fail-soft (memory is an optimisation,
+  * never a blocker). Skipped when auto memory is disabled.
+  */
+  private async runMemoryPipeline(): Promise<void> {
+    if (this.config.autoMemoryEnabled === false) return;
+    if (this.memoryPipelineInFlight) return;
+    this.memoryPipelineInFlight = true;
+    try {
+      const cfg: MemoryConsolidationConfig = {
+        enabled: true,
+        minHoursBetweenConsolidation: this.config.memoryConsolidationMinHours,
+        minDraftsForConsolidation: this.config.memoryConsolidationMinDrafts,
+      };
+      const deps = {
+        cwd: this.cwd,
+        provider: buildSmallProvider(this.config),
+        model: this.config.smallModel,
+        config: cfg,
+        redactPatterns: this.redactPatterns,
+      };
+      await extractSessionMemory(this.events, deps).catch(() => 0);
+      await maybeConsolidateMemory(deps).catch(() => false);
+    } catch {
+      /* fail-soft: memory consolidation never blocks the session */
+    } finally {
+      this.memoryPipelineInFlight = false;
     }
   }
 

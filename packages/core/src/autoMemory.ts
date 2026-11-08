@@ -302,7 +302,13 @@ export async function writeAutoMemoryNote(
 
 /**
  * Rebuild MEMORY.md by scanning all topic files. Called after every write.
+ * Exported as `rebuildAutoMemoryIndex` for callers (e.g. consolidation) that
+ * rewrite a topic file directly and need to refresh the always-loaded index.
  */
+export async function rebuildAutoMemoryIndex(dir: string, cwd: string): Promise<void> {
+  return rebuildIndex(dir, cwd);
+}
+
 async function rebuildIndex(dir: string, cwd: string): Promise<void> {
   const topicFiles = await listTopicFiles(dir);
   const lines: string[] = [];

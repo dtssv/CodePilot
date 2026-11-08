@@ -736,6 +736,10 @@ export interface CodepilotConfig {
  /** Auto memory master toggle (default: true). When false, the agent never
  * writes auto-memory notes and the index is not loaded into the prompt. */
   autoMemoryEnabled?: boolean;
+ /** Minimum hours between background memory-consolidation runs (default: 6). */
+  memoryConsolidationMinHours?: number;
+ /** Minimum accumulated draft notes before a consolidation runs (default: 5). */
+  memoryConsolidationMinDrafts?: number;
  /** Directory for plan files. Default: `~/.codepilot/projects/<hash>/plans`.
  * Absolute, or relative to the project root when set. Plan files are
  * written here when the agent calls `plan_done`. */

@@ -182,6 +182,14 @@ export type {
   AutoMemoryNote,
   MemoryTopic,
 } from "./autoMemory.js";
+export {
+  extractSessionMemory,
+  maybeConsolidateMemory,
+} from "./memoryConsolidation.js";
+export type {
+  MemoryConsolidationConfig,
+  MemoryPipelineDeps,
+} from "./memoryConsolidation.js";
 
 // ---- System prompt ----
 export { buildSystemPrompt } from "./systemPrompt.js";
