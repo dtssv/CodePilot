@@ -116,6 +116,33 @@ export interface ChatProvider {
  /** Cheap model used for background work (compaction, titles). */
   readonly smallModel: string;
   stream(opts: StreamChatOptions): AsyncIterable<StreamEvent>;
+ /**
+  * OPTIONAL native fill-in-the-middle completion (design G, phase 2/4). When a
+  * provider/model supports it (OpenAI-compatible `/v1/completions` with a
+  * `suffix`, i.e. DeepSeek-Coder / Codestral / Qwen-Coder / vLLM / Ollama FIM),
+  * this returns the raw middle text for a prefix+suffix in ONE non-streaming
+  * call — strictly lower latency and higher quality than wrapping the task in a
+  * chat prompt. Providers without a FIM endpoint omit this; callers
+  * (handleInlineCompletion) fall back to the chat path. Used ONLY by inline
+  * completion, never by the agent loop.
+  */
+  fim?(opts: FimCompletionOptions): Promise<FimCompletionResult>;
+}
+
+export interface FimCompletionOptions {
+  model: string;
+  /** Code before the cursor. */
+  prefix: string;
+  /** Code after the cursor. */
+  suffix: string;
+  /** Soft cap on generated tokens. */
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+export interface FimCompletionResult {
+  /** The generated middle text (already stripped of any stop sequence). */
+  text: string;
 }
 
 /** Build a human-readable text rendering of a ContentBlock array. */

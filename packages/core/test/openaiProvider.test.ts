@@ -119,6 +119,75 @@ describe("OpenAIProvider request shape", () => {
   });
 });
 
+describe("OpenAIProvider.fim (native fill-in-the-middle)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("POSTs prompt+suffix to /v1/completions and returns choices[0].text", async () => {
+    let url: string | undefined;
+    let body: Record<string, unknown> | undefined;
+    let headers: Record<string, string> | undefined;
+    vi.stubGlobal("fetch", async (u: string, init: RequestInit) => {
+      url = u;
+      body = JSON.parse(init.body as string);
+      headers = init.headers as Record<string, string>;
+      return new Response(JSON.stringify({ choices: [{ text: "return 1;" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    const r = await p.fim({ model: "deepseek-coder", prefix: "function f() {\n  ", suffix: "\n}", maxTokens: 64 });
+    expect(url).toBe("https://example.com/v1/completions");
+    expect(body?.prompt).toBe("function f() {\n  ");
+    expect(body?.suffix).toBe("\n}");
+    expect(body?.stream).toBe(false);
+    expect(body?.max_tokens).toBe(64);
+    expect(headers?.authorization).toBe("Bearer k");
+    expect(r.text).toBe("return 1;");
+  });
+
+  it("appends /v1 when baseURL omits it", async () => {
+    let url: string | undefined;
+    vi.stubGlobal("fetch", async (u: string) => {
+      url = u;
+      return new Response(JSON.stringify({ choices: [{ text: "x" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com" });
+    await p.fim({ model: "m", prefix: "a", suffix: "b" });
+    expect(url).toBe("https://example.com/v1/completions");
+  });
+
+  it("returns empty text when the response has no choices", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    const r = await p.fim({ model: "m", prefix: "a", suffix: "b" });
+    expect(r.text).toBe("");
+  });
+
+  it("throws on a non-OK response (caller fast-fails)", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response("bad model", { status: 400 }),
+    );
+    const p = new OpenAIProvider({ apiKey: "k", baseURL: "https://example.com/v1" });
+    await expect(p.fim({ model: "m", prefix: "a", suffix: "b" })).rejects.toThrow(/FIM 400/);
+  });
+
+  it("rejects FIM on the Azure dialect", async () => {
+    const p = new OpenAIProvider({
+      apiKey: "k",
+      baseURL: "https://example.openai.azure.com",
+      apiStyle: "azure",
+      azureApiVersion: "2024-10-21",
+    });
+    await expect(p.fim({ model: "m", prefix: "a", suffix: "b" })).rejects.toThrow(/Azure/);
+  });
+});
+
 describe("OpenAIProvider reasoning stream", () => {
   afterEach(() => vi.restoreAllMocks());
 

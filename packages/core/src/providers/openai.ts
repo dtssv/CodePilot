@@ -7,6 +7,8 @@ import { fetchWithRetry, RateLimitAbortedError } from "./retry.js";
 import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
+  FimCompletionOptions,
+  FimCompletionResult,
   ProviderMessage,
   ProviderMessageContent,
   ProviderToolDef,
@@ -321,6 +323,43 @@ export class OpenAIProvider implements ChatProvider {
     }
     void sawDone;
     yield { kind: "done", finishReason };
+  }
+
+  /**
+   * Native FIM via the OpenAI-compatible `/v1/completions` endpoint with a
+   * `suffix` (design G, phase 4). DeepSeek-Coder / Codestral / Qwen-Coder /
+   * vLLM / Ollama expose this. ONE non-streaming, FAST-FAIL call (no retry — a
+   * late inline completion is worse than none). Azure's deployment routing has
+   * no legacy-completions equivalent, so FIM is openai-dialect only; the
+   * handler falls back to the chat path for azure.
+   */
+  async fim(opts: FimCompletionOptions): Promise<FimCompletionResult> {
+    if (this.apiStyle === "azure") {
+      throw new Error("FIM is not supported on the Azure dialect");
+    }
+    const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/completions`;
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      prompt: opts.prefix,
+      suffix: opts.suffix,
+      stream: false,
+    };
+    if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...this.authHeaders() },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`FIM ${res.status}: ${text.slice(0, 300)}`);
+    }
+    const json = (await res.json()) as {
+      choices?: Array<{ text?: string }>;
+    };
+    const text = json.choices?.[0]?.text ?? "";
+    return { text };
   }
 }
 

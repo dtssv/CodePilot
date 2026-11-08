@@ -104,6 +104,11 @@ import {
   buildSingleProvider,
   PROVIDER_NAMES,
   userMessage,
+  decideCompletionModel,
+  buildCompletionPrompt,
+  cleanCompletion,
+  COMPLETION_SYSTEM_PROMPT,
+  COMPLETION_MAX_TOKENS,
   discoverSlashCommands,
   discoverSkills,
   discoverPlugins,
@@ -306,6 +311,36 @@ export interface GitPushPullParams { cwd?: string; remote?: string; branch?: str
 export interface GitCheckoutParams { cwd?: string; branch: string; create?: boolean; }
 export interface GitGenericResult { ok: boolean; output: string; }
 export interface GitCommitMessageResult { message: string; }
+
+/** Inline (Tab) code completion for the editor plugins. prefix/suffix framed
+ * for a future native FIM swap (design §3, docs/design/G-inline-completion.md).
+ * Stateless: the client owns debounce / cancel / cache. */
+export interface InlineCompletionParams {
+  /** Text before the cursor (client-capped). */
+  prefix: string;
+  /** Text after the cursor (FIM-ready; chat phase uses as trailing context). */
+  suffix: string;
+  /** Workspace-relative path of the edited file — language inference only. */
+  path: string;
+  /** Opaque client token; echoed so the client can match its newest request. */
+  requestId: string;
+  /** Which workspace / session's provider to use. */
+  cwd?: string;
+  sessionId?: string;
+  /** Soft cap on suggestion length (tokens). Defaults to the core small cap. */
+  maxTokens?: number;
+}
+export interface InlineCompletionResult {
+  /** Text to insert at the cursor. Empty string = no suggestion. */
+  completion: string;
+  /** Echoed request token for the client to match against its latest request. */
+  requestId: string;
+  /** Set when completion was skipped WITHOUT calling the model — currently
+   * "no-small-model" when the resolved model is the main chat model (design
+   * §2.5). Lets the client show the one-time "configure a lightweight
+   * completion model" notice. */
+  disabledReason?: string;
+}
 export interface WorkspaceStatParams { path: string; cwd?: string; }
 export interface WorkspaceStatResult { path: string; exists: boolean; size: number; hash: string; modifiedAt?: number; }
 export interface WorkspaceWatchParams { path?: string; cwd?: string; }
@@ -616,6 +651,7 @@ export function registerServer(
   peer.onRequest<GitPushPullParams, GitGenericResult>("git/fetch", (p) => handleGitFetch(ctx, p));
   peer.onRequest<GitCheckoutParams, GitGenericResult>("git/checkout", (p) => handleGitCheckout(ctx, p));
   peer.onRequest<{ cwd?: string; sessionId?: string }, GitCommitMessageResult>("git/commit-message", (p) => handleGitCommitMessage(ctx, p));
+  peer.onRequest<InlineCompletionParams, InlineCompletionResult>("completion/inline", (p) => handleInlineCompletion(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
   peer.onRequest<Record<string, never>, SystemUpdateCheckResult>("system/update-check", () =>
@@ -2984,6 +3020,102 @@ async function handleGitCommitMessage(ctx: ServerContext, params?: { cwd?: strin
   const message = text.trim().replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
   if (!message) throw new RpcError(ErrorCode.InternalError, "model returned an empty commit message");
   return { message };
+}
+
+// Inline (Tab) code completion. Mirrors the commit-message template (resolve
+// the session's provider + apiKey) but inverts two things for as-you-type use:
+//   1. model gate — never run on the main chat model (design §2.5); and
+//   2. retry — FAST-FAIL (one attempt, short timeout). A late completion is
+//      worse than none, so we do not relax retry the way commit-message does.
+// Stateless by design: the editor plugins own debounce / cancel / cache (§5.1).
+async function handleInlineCompletion(ctx: ServerContext, params: InlineCompletionParams): Promise<InlineCompletionResult> {
+  assertInitialized(ctx);
+  const requestId = params.requestId;
+  const empty = (disabledReason?: string): InlineCompletionResult =>
+    disabledReason ? { completion: "", requestId, disabledReason } : { completion: "", requestId };
+
+  if (!params.prefix && !params.suffix) return empty();
+
+  const root = gitCwd(ctx, params.cwd);
+  let live = params.sessionId ? liveSessions.get(params.sessionId) : undefined;
+  if (!live) {
+    for (const s of liveSessions.values()) {
+      if (resolve(s.session.cwd) === root) { live = s; break; }
+    }
+  }
+
+  // Fast-fail retry: a single attempt with a short abort budget. A completion
+  // that arrives after the next keystroke is useless.
+  const fastFail = { maxRetries: 0, retryAbortOnDelayMs: 2000 };
+  let provider: ReturnType<typeof buildSingleProvider>;
+  let mainModel: string;
+  let completionModel: string | undefined;
+  let useFim = false;
+  try {
+    if (live) {
+      const cfg = { ...live.session.getConfig(), ...fastFail };
+      provider = buildSingleProvider(cfg);
+      mainModel = live.session.getModel() || provider.defaultModel;
+      completionModel = cfg.completion?.model;
+      useFim = cfg.completion?.fim === true;
+    } else {
+      const cfg = { ...((await loadConfigSafe(root)) ?? {}), ...fastFail };
+      provider = buildSingleProvider(cfg);
+      mainModel = provider.defaultModel;
+      completionModel = cfg.completion?.model;
+      useFim = cfg.completion?.fim === true;
+    }
+  } catch {
+    // No model configured — nothing to complete with.
+    return empty();
+  }
+
+  const decision = decideCompletionModel({
+    mainModel,
+    smallModel: provider.smallModel,
+    completionModel,
+  });
+  if (!decision.run) return empty(decision.disabledReason);
+
+  const maxTokens = params.maxTokens && params.maxTokens > 0 ? params.maxTokens : COMPLETION_MAX_TOKENS;
+
+  // Native FIM path (opt-in + provider supports it): one non-streaming call
+  // with prefix+suffix, strictly lower latency than the chat wrapper. Falls
+  // back to the chat path on any FIM error (fast-fail).
+  if (useFim && typeof provider.fim === "function") {
+    try {
+      const r = await provider.fim({
+        model: decision.model,
+        prefix: params.prefix,
+        suffix: params.suffix,
+        maxTokens,
+      });
+      return { completion: cleanCompletion(r.text, params.prefix), requestId };
+    } catch {
+      return empty();
+    }
+  }
+
+  const prompt = buildCompletionPrompt({ prefix: params.prefix, suffix: params.suffix, path: params.path });
+  let raw = "";
+  try {
+    for await (const ev of provider.stream({
+      model: decision.model,
+      systemPrompt: COMPLETION_SYSTEM_PROMPT,
+      messages: [userMessage(prompt)],
+      maxTokens,
+    })) {
+      if (ev.kind === "text_delta") raw += ev.text;
+      else if (ev.kind === "error") throw new Error(ev.message);
+    }
+  } catch {
+    // Fast-fail: any error (including a rate-limit) yields no suggestion rather
+    // than a late one. The client simply shows nothing.
+    return empty();
+  }
+
+  const completion = cleanCompletion(raw, params.prefix);
+  return { completion, requestId };
 }
 
 const WATCH_DEBOUNCE_MS = 150;

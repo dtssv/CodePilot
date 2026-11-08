@@ -220,7 +220,7 @@ export type { McpToolDescriptor, McpInvokeRequest, McpInvokeResult } from "./mcp
 // ---- Agent ----
 export { runAgent } from "./agent.js";
 export type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
-export { stripThinking, splitThinking, hasVisibleAssistantContent } from "./stripThinking.js";
+export { stripThinking, splitThinking, hasVisibleAssistantContent, stripGoalStatus } from "./stripThinking.js";
 export type { ThinkingSegment } from "./stripThinking.js";
 export {
   reasoningEffortChoicesForModel,
@@ -321,6 +321,20 @@ export {
 
 // ---- Goal ----
 export { runGoal, driveGoalRounds } from "./goal.js";
+
+// ---- Inline (Tab) code completion ----
+export {
+  decideCompletionModel,
+  buildCompletionPrompt,
+  cleanCompletion,
+  COMPLETION_SYSTEM_PROMPT,
+  COMPLETION_MAX_TOKENS,
+  COMPLETION_MAX_LINES,
+} from "./completion.js";
+export type {
+  InlineCompletionInput,
+  CompletionModelDecision,
+} from "./completion.js";
 
 // ---- Config (v2 layered loader) ----
 // NOTE: `loadConfig` and `mergeConfig` are already exported above in the

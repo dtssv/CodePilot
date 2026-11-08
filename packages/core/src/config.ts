@@ -300,6 +300,19 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
+    // Inline (Tab) code completion for the editor plugins. Off by default; runs
+    // on the user's provider/apiKey but gated to a lightweight model (see
+    // docs/design/G-inline-completion.md). Ignored by non-editor clients.
+    completion: z
+      .object({
+        enabled: z.boolean().optional(),
+        model: z.string().min(1).optional(),
+        debounceMs: z.number().int().min(0).max(5000).optional(),
+        maxTokens: z.number().int().positive().max(2000).optional(),
+        fim: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
     // Prompt-cache warming (opt-in): when true, the session keeps an Anthropic
     // ephemeral cache alive across idle gaps by replaying the last request with
     // a 1-token output cap at ~90% of the cache TTL — but only when the

@@ -585,6 +585,28 @@ export interface CodepilotConfig {
  * auto-compacts regardless of token pressure; the user must invoke
  * `/compact` explicitly. Default true. */
   autoCompact?: boolean;
+ /** Inline (Tab) code completion for the editor plugins (VSCode / IntelliJ).
+  * Off by default. Runs on the user's existing provider + apiKey but is gated
+  * to a lightweight model: completion uses `completion.model` if set, else the
+  * `smallModel`, and stays OFF when the resolved model is the main chat model
+  * (so as-you-type completion never silently bills the big model). Ignored by
+  * non-editor clients (TUI/desktop/web). See docs/design/G-inline-completion.md. */
+  completion?: {
+   /** Master toggle. Default false. */
+   enabled?: boolean;
+   /** Explicit lightweight completion model on the same provider/apiKey.
+    * Overrides the smallModel gate when set. */
+   model?: string;
+   /** Debounce before firing after the user pauses typing (ms). Default ~200. */
+   debounceMs?: number;
+   /** Soft cap on suggestion length (tokens). Default small (see core). */
+   maxTokens?: number;
+   /** Use the provider's native fill-in-the-middle endpoint
+    * (OpenAI-compatible `/v1/completions` with `suffix`) instead of the prompted
+    * chat path. Opt-in: only enable when the completion model is a FIM/Coder
+    * model (DeepSeek-Coder, Codestral, Qwen-Coder, …). Default false. */
+   fim?: boolean;
+  };
  /** Prompt-cache warming (opt-in). When true, keep an Anthropic ephemeral
   * cache alive across idle gaps by replaying the last request (1-token output
   * cap) at ~90% of the cache TTL, but only when expected savings beat the

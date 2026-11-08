@@ -292,7 +292,7 @@ vi.mock("@codepilot/core", async (importOriginal) => {
 });
 
 // Now we can import the modules under test.
-import { createSession, listSessions } from "@codepilot/core";
+import { createSession, listSessions, loadConfig } from "@codepilot/core";
 import {
   PROTOCOL_VERSION,
   registerServer,
@@ -1332,6 +1332,100 @@ describe("server / protocol handlers", () => {
       expect(err).toBeInstanceOf(RpcError);
       expect((err as RpcError).code).toBe(-32000);
     }
+  });
+
+  // ---------- inline completion (design G) ----------
+
+  it("completion/inline uses the native FIM endpoint when completion.fim is set", async () => {
+    // Override config for this call: an explicit completion model (skips the
+    // smallModel gate) plus the FIM opt-in. The provider is the mocked DeepSeek
+    // OpenAI-compatible endpoint, so FIM POSTs to its /v1/completions.
+    // buildSingleProvider reads apiKey/baseURL/model at the top level (the
+    // resolved-config shape), so mirror that here.
+    vi.mocked(loadConfig).mockResolvedValueOnce({
+      provider: "openai",
+      model: "deepseek-chat",
+      apiKey: "sk-secret-key-xyz",
+      baseURL: "https://api.deepseek.com/v1",
+      completion: { model: "deepseek-coder", fim: true },
+    } as any);
+
+    let fimUrl: string | undefined;
+    let fimBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (u: string, init: RequestInit) => {
+      fimUrl = u;
+      fimBody = JSON.parse(init.body as string);
+      return new Response(JSON.stringify({ choices: [{ text: "sum(a, b)" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    // A cwd no other test's live session uses, so the handler takes the
+    // stateless loadConfig path (not a leaked live session).
+    const cwd = "/completion-fim";
+    registerServer(server, { defaultCwd: cwd });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd,
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+
+    const res = await client.request<
+      { prefix: string; suffix: string; path: string; requestId: string; maxTokens: number; cwd: string },
+      { completion: string; requestId: string; disabledReason?: string }
+    >("completion/inline", {
+      prefix: "def add(a, b):\n    return ",
+      suffix: "\n",
+      path: "a.py",
+      requestId: "r1",
+      maxTokens: 32,
+      cwd,
+    });
+
+    expect(fimUrl).toBe("https://api.deepseek.com/v1/completions");
+    expect(fimBody?.model).toBe("deepseek-coder");
+    expect(fimBody?.suffix).toBe("\n");
+    expect(res.completion).toContain("sum(a, b)");
+    expect(res.requestId).toBe("r1");
+    expect(res.disabledReason).toBeUndefined();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("completion/inline reports no-small-model when no distinct model is configured", async () => {
+    // smallModel falls back to the main model and there is no completion
+    // override → the gate disables completion.
+    vi.mocked(loadConfig).mockResolvedValueOnce({
+      provider: "openai",
+      model: "deepseek-chat",
+      apiKey: "sk-secret-key-xyz",
+      baseURL: "https://api.deepseek.com/v1",
+    } as any);
+    const cwd = "/completion-gate";
+    registerServer(server, { defaultCwd: cwd });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd,
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+
+    const res = await client.request<
+      { prefix: string; suffix: string; path: string; requestId: string; cwd: string },
+      { completion: string; requestId: string; disabledReason?: string }
+    >("completion/inline", {
+      prefix: "x = ",
+      suffix: "",
+      path: "a.py",
+      requestId: "r2",
+      cwd,
+    });
+
+    expect(res.completion).toBe("");
+    expect(res.disabledReason).toBe("no-small-model");
+    expect(res.requestId).toBe("r2");
   });
 });
 describe("multi-client session following", () => {
