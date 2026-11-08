@@ -256,22 +256,30 @@ jobs:
         with:
           node-version: "20"
 
+      # setup-bun intermittently 504s when downloading the Bun binary from
+      # GitHub. The action has no retry, so we run it up to three times — a
+      # transient upstream 504 usually clears on the next attempt. Pin to a
+      # concrete version so resolution doesn't add an extra API call.
       - name: Install Bun (for the TUI binary)
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.x"
-        id: setup-bun
+          bun-version: "1.4.4"
+        id: setup-bun-1
         continue-on-error: true
 
-      # setup-bun intermittently 504s when resolving "latest" or downloading
-      # the binary; fall back to a direct install so a transient upstream
-      # outage doesn't fail the whole release.
-      - name: Install Bun (fallback)
-        if: steps.setup-bun.outcome == 'failure'
-        shell: bash
-        run: |
-          curl -fsSL https://bun.sh/install | bash
-          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+      - name: Install Bun (retry 2)
+        if: steps.setup-bun-1.outcome == 'failure'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+        id: setup-bun-2
+        continue-on-error: true
+
+      - name: Install Bun (retry 3)
+        if: steps.setup-bun-2.outcome == 'failure'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
 
       - name: Install dependencies
         shell: bash
