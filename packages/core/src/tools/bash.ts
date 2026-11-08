@@ -188,14 +188,16 @@ export const bashTool: ToolDef<typeof schema> = {
     const spilled = await spillHeadTail(ctx, content, `bash:${input.command.slice(0, 80)}`);
     content = spilled.content;
     const artifactRef = spilled.artifactRef;
-    // Timeouts must surface as errors so the model changes approach (e.g.
-    // background + bash_output). Soft-cancel via SIGTERM without a timeout
-    // stays non-error so a user abort isn't mistaken for a failed command.
-    const isError =
-      timedOut ||
-      (code !== null && code !== 0) ||
-      signal === "SIGINT" ||
-      signal === "SIGKILL";
+    // A non-zero exit code is DATA, not an error: `grep`/`find`/`diff`/`test`
+    // exit non-zero on a perfectly normal "no match"/"differs" outcome, and a
+    // pipeline's exit is just its last command's. Binding isError to the exit
+    // code makes the model misread these as failures and retry/abandon. The
+    // exit status is already surfaced in the output (`[exit N]` above) for the
+    // model to judge by the actual output. isError is reserved for cases where
+    // the command did not run to completion: timeout, or a hard kill/interrupt.
+    // Soft-cancel via SIGTERM without a timeout stays non-error so a user abort
+    // isn't mistaken for a failed command.
+    const isError = timedOut || signal === "SIGINT" || signal === "SIGKILL";
     return {
       content,
       isError,

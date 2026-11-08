@@ -146,6 +146,50 @@ describe("bash background jobs", () => {
   }, 15000);
 });
 
+describe("bash exit-code vs isError", () => {
+  let dir: string;
+  const sandboxOffCtx = (): ToolContext => ({
+    cwd: dir,
+    artifact: async () => "art_x",
+    readArtifact: async () => "",
+    sandbox: resolveSandbox({ mode: "off" }, dir ?? "/tmp"),
+  });
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cpexit-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // A non-zero exit is DATA, not a failure. grep/find/diff/test exit non-zero on
+  // a normal "no match"; a pipeline's exit is just its last command's. isError
+  // is reserved for commands that did not run to completion (timeout / hard kill).
+  it("does not mark a plain non-zero exit as error, but surfaces [exit N]", async () => {
+    const res = await bashTool.execute({ command: "exit 1" }, sandboxOffCtx());
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toMatch(/\[exit 1\]/);
+  });
+
+  it("grep no-match in a pipeline is not an error (the classic false failure)", async () => {
+    // First grep matches, second finds nothing → pipeline exits 1. Must NOT be
+    // treated as a failed command.
+    const res = await bashTool.execute(
+      { command: "printf 'alpha\\nbeta\\n' | grep alpha | grep zzz_no_match" },
+      sandboxOffCtx(),
+    );
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toMatch(/\[exit 1\]/);
+  });
+
+  it("a successful command stays non-error with no exit marker", async () => {
+    const res = await bashTool.execute({ command: "echo ok" }, sandboxOffCtx());
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toContain("ok");
+    expect(res.content).not.toMatch(/\[exit/);
+  });
+});
+
 describe("elideBinaryLines", () => {
   it("collapses binary runs and keeps the surrounding text", () => {
     const bin = "\u001f\ufffd\b\u0000\ufffdx\ufffd\u0003";
