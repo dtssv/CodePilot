@@ -2786,6 +2786,64 @@ export class Session {
     }
   }
 
+  /** Link ids of every event already in the append-only log. */
+  private persistedLinkIdSet(): Set<string> {
+    const ids = new Set<string>();
+    for (const p of this.persisted) {
+      const id = linkIdForEvent(p);
+      if (id) ids.add(id);
+    }
+    return ids;
+  }
+
+  /**
+   * The subset of a compaction result that is genuinely new and must be
+   * appended to the log: the synthesised `compaction` summary (new by
+   * construction) plus any `plan`/pins/tail events whose stable link id is not
+   * already persisted. Everything already on disk — the retained tail, folded
+   * copies (same link id as their original), carried-forward pins — is skipped,
+   * so the append-only log is never duplicated.
+   */
+  private newCompactionEvents(events: Event[]): Event[] {
+    const persistedLinkIds = this.persistedLinkIdSet();
+    const out: Event[] = [];
+    for (const e of events) {
+      // The fresh compaction summary heads the result and is always new; keep it
+      // even if its (keepFrom-less) link id coincidentally collides.
+      if (e.type === "compaction") {
+        out.push(e);
+        continue;
+      }
+      const id = linkIdForEvent(e);
+      if (id && persistedLinkIds.has(id)) continue;
+      if (this.persisted.includes(e)) continue;
+      out.push(e);
+    }
+    return out;
+  }
+
+  /**
+   * The compaction `keepFrom` boundary: the position in `this.persisted` of the
+   * first retained tail event — i.e. the first event in `events` (after the new
+   * prefix) that is already persisted. Matched by link id so a folded/stamped
+   * copy still resolves to its on-disk original. Returns `this.persisted.length`
+   * (empty tail) when no retained event is found.
+   */
+  private compactionKeepFrom(events: Event[]): number {
+    const persistedLinkIds = this.persistedLinkIdSet();
+    for (const e of events) {
+      if (e.type === "compaction") continue;
+      const byRef = this.persisted.indexOf(e);
+      if (byRef >= 0) return byRef;
+      const id = linkIdForEvent(e);
+      if (id && persistedLinkIds.has(id)) {
+        const idx = this.persisted.findIndex((p) => linkIdForEvent(p) === id);
+        if (idx >= 0) return idx;
+      }
+    }
+    return this.persisted.length;
+  }
+
   private async persistEvent(e: Event): Promise<void> {
     // Refresh branch occasionally (cheap spawn); keep last known value on miss.
     if (this.persisted.length % 25 === 0) {
@@ -3158,20 +3216,35 @@ export class Session {
     this.contextChangedForNextTurn = true;
     // Local estimate no longer reflects the last oversize API call.
     if (opts.force) this.lastProviderInputTokens = 0;
+    // Which events in the model-facing result are genuinely NEW (and so must be
+    // appended), versus turns already in the append-only log.
+    //
+    // Architecture (matches codex's `Compacted` checkpoint and opencode's
+    // `compaction` message + `seq` cursor): compaction appends ONLY the events
+    // it synthesised — the `compaction` summary boundary, and a rescued `plan`
+    // when it carried one forward. Everything else in `result.events` is the
+    // retained/folded tail (and verbatim carried pins), which is already on
+    // disk. It is NEVER re-appended: `liveTranscript` recomputes the model view
+    // from the summary's `keepFrom` at read time, and the full text stays in the
+    // JSONL (+ the Markdown archive).
+    //
+    // "New" is decided by stable link id, not object reference. `compact()`
+    // rebuilds kept events while folding ({...e}) and `persistEvent` stores a
+    // stamped copy in `this.persisted`, so a reference check misses already-
+    // logged turns and duplicates the whole tail (the doubled conclusion/summary
+    // on resume this fixes). A folded tool_result shares its original's link id,
+    // so it is correctly treated as already-persisted — the fold is a read-time
+    // view, not a new durable fact.
+    const newEvents = this.newCompactionEvents(result.events);
     if (result.droppedRange) {
  // The original transcript stays on disk; some UIs
  // then tells the model where to re-read it. We do both: leave the
  // JSONL append-only, and write a Markdown archive the model can grep.
       const head = result.events[0];
       if (head?.type === "compaction") {
-        let keepFrom = this.persisted.length;
-        for (const e of result.events.slice(1)) {
-          const idx = this.persisted.indexOf(e);
-          if (idx >= 0) {
-            keepFrom = idx;
-            break;
-          }
-        }
+        // keepFrom points into the append-only file at the first retained turn:
+        // the first event after the new prefix that is already persisted.
+        const keepFrom = this.compactionKeepFrom(result.events);
         const archive = historyArchivePath(this.id);
         let pointer = "";
         try {
@@ -3189,15 +3262,17 @@ export class Session {
         } catch {
  /* archive is best-effort; the JSONL still has the turns */
         }
-        result.events[0] = { ...head, keepFrom, summary: `${head.summary}${pointer}` };
+        const withBoundary = { ...head, keepFrom, summary: `${head.summary}${pointer}` };
+        result.events[0] = withBoundary;
+        newEvents[0] = withBoundary;
       }
     }
     this.events = result.events;
- // Append only events the JSONL does not already have (the new summary,
- // and a rescued plan if compact synthesised one). Never rewrite —
- // dropped turns stay in the file for resume / export / grep.
-    for (const e of this.events) {
-      if (this.persisted.includes(e)) continue;
+ // Append ONLY the events compaction genuinely created (the summary, and a
+ // rescued plan if compact synthesised one). Never re-append the retained
+ // tail — those turns are already in the file and stay there for resume /
+ // export / grep; `liveTranscript` rebuilds the model view from `keepFrom`.
+    for (const e of newEvents) {
       await this.persistEvent(e);
     }
  // Notify listeners of the new compaction event.

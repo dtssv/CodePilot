@@ -128,6 +128,17 @@ describe("compaction keeps the dropped turns reachable", () => {
 
     const summariserCall = requests.find((r) => r.system?.includes("context compactor"));
     expect(summariserCall?.system).toContain("1. USER REQUESTS");
+
+    // The retained tail must be written to the log exactly ONCE. compaction's
+    // only new durable fact is the summary boundary (+ a rescued plan); it must
+    // never re-append the turns it kept — doing so duplicated every message in
+    // the JSONL and surfaced a doubled conclusion/summary on resume.
+    const msgIds = persisted.filter((e) => e.type === "message").map((e) => (e as { id: string }).id);
+    const dupeMsgIds = msgIds.filter((v, i) => msgIds.indexOf(v) !== i);
+    expect(dupeMsgIds).toEqual([]);
+    // Exactly one compaction summary was appended for this single run.
+    expect(persisted.filter((e) => e.type === "compaction").length).toBe(1);
+
     await session.dispose?.();
     await deleteSession(id);
   }, 30_000);
