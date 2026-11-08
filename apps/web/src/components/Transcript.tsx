@@ -1147,7 +1147,11 @@ export function QuestionCard({
 
   const pick = (id: string, label: string, multi: boolean): void => {
     setAnswers((prev) => {
-      if (!multi) return { ...prev, [id]: label };
+      if (!multi) {
+        // Single-select is a toggle too: clicking the already-selected option
+        // clears it, so the user can undo a pick (and submit free text instead).
+        return prev[id] === label ? { ...prev, [id]: "" } : { ...prev, [id]: label };
+      }
       const current = prev[id];
       const list = Array.isArray(current) ? current : current ? [current] : [];
       return { ...prev, [id]: list.includes(label) ? list.filter((l) => l !== label) : [...list, label] };
@@ -1162,6 +1166,11 @@ export function QuestionCard({
     const merged: QuestionAnswers = { ...answers };
     for (const [id, text] of Object.entries(freeText)) {
       if (text.trim() !== "") merged[id] = text.trim();
+    }
+    // Drop deselected/empty answers so a cancelled single-select doesn't submit
+    // an empty string as if it were a choice.
+    for (const [id, v] of Object.entries(merged)) {
+      if (v === "" || (Array.isArray(v) && v.length === 0)) delete merged[id];
     }
     onAnswer(merged);
   };

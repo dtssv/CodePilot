@@ -258,7 +258,12 @@ function parseBlocks(src: string): Block[] {
       (lines[i] ?? "").trim() !== "" &&
       !CODE_FENCE.test((lines[i] ?? "").trim()) &&
       !/^(#{1,6})\s/.test(lines[i] ?? "") &&
-      !(para.length > 0 && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i] ?? ""))
+      !(para.length > 0 && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i] ?? "")) &&
+      // Stop before a table that follows text with no blank line between: the
+      // current line is the header row and the next is the alignment separator.
+      // Without this, the whole table is swallowed into the paragraph and never
+      // rendered as a table.
+      !((lines[i] ?? "").includes("|") && TABLE_SEP.test(lines[i + 1] ?? ""))
     ) {
       para.push(lines[i] ?? "");
       i++;
