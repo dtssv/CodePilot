@@ -61,6 +61,7 @@ async function main() {
   }
 
   const families = [...new Set(resolveTargets().map((t) => t.family))];
+  const MAX_ATTEMPTS = 3;
   for (const family of families) {
     const args = [
       "electron-builder",
@@ -71,12 +72,17 @@ async function main() {
     ];
  // Run inside apps/desktop so local electron-builder + config resolve.
  // Per-arch targets come from the `build.<platform>.target[].arch` config.
-    const code = run("corepack", ["pnpm", "exec", ...args], { allowFail: true, cwd: appDir });
+ // electron-builder downloads ~100 MB electron binaries via app-builder-bin,
+ // which has no retry; a transient 504/502 aborts the whole packaging run.
+ // Retry the full command — successful artifacts are idempotent.
+    let code = 0;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      code = run("corepack", ["pnpm", "exec", ...args], { allowFail: true, cwd: appDir });
+      if (code === 0) break;
+      if (attempt < MAX_ATTEMPTS) log(`desktop ${family} attempt ${attempt} failed (exit ${code}); retrying…`);
+    }
     if (code !== 0) {
-      log(
-        `desktop ${family} failed (exit ${code}). ` +
-          (family === "mac" ? "macOS targets usually require a Mac host / signing tooling." : "See electron-builder log above."),
-      );
+      fail(`desktop ${family} failed (exit ${code}) after ${MAX_ATTEMPTS} attempts. See electron-builder log above.`);
     }
   }
   log(`Desktop release → ${outDir}`);

@@ -421,7 +421,7 @@ jobs:
             -o -name "codepilot-darwin-*" -o -name "codepilot-linux-*" \
             -o -name "codepilot-win-*" \
             -o -name "codepilot-tui-*" -o -name "codepilot-web-*.tar.gz" \
-          \) -exec cp {} assets/ \;
+          \) ! -name "*.tgz" -exec cp {} assets/ \;
           ls -la assets/
 
       - name: Extract version from tag
