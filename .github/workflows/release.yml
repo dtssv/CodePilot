@@ -298,12 +298,25 @@ jobs:
         # Windows: node-pty install script can fail on CI runners. Use
         # --ignore-scripts to skip native compilation, then rebuild only the
         # packages that have prebuilds or need compilation for this host.
+        # Retry the install: postinstall hooks (electron, etc.) download
+        # binaries from github.com/*/releases/download, which intermittently
+        # 504s on Actions runners; a retry usually clears it.
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            pnpm install --frozen-lockfile --ignore-scripts
+            for i in 1 2 3; do
+              pnpm install --frozen-lockfile --ignore-scripts && break
+              [ "$i" = 3 ] && exit 1
+              echo "install attempt $i failed, retrying…"
+              sleep 10
+            done
             pnpm rebuild node-pty
           else
-            pnpm install --frozen-lockfile
+            for i in 1 2 3; do
+              pnpm install --frozen-lockfile && break
+              [ "$i" = 3 ] && exit 1
+              echo "install attempt $i failed, retrying…"
+              sleep 10
+            done
           fi
 
       # @yao-pkg/pkg downloads a ~40 MB pre-built Node.js binary on first run.
