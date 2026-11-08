@@ -45,6 +45,16 @@
         "category": "CodePilot"
       },
       {
+        "command": "codepilot.addToChat",
+        "title": "CodePilot: Add Selection to Chat",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.addToNewChat",
+        "title": "CodePilot: Add Selection to New Chat",
+        "category": "CodePilot"
+      },
+      {
         "command": "codepilot.askSelection",
         "title": "CodePilot: Ask about selection",
         "category": "CodePilot"
@@ -174,6 +184,21 @@
           ],
           "default": "agent",
           "description": "Default collaboration mode for new sessions (Ask / Plan / Agent). The webview and `CodePilot: Switch Mode` can override this at runtime; `session/setMode` is supported on an open session."
+        },
+        "codepilot.completion.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable inline (Tab) code completion as you type. Runs on your existing provider but requires a lightweight `smallModel` distinct from your main chat model (e.g. a local Ollama qwen2.5-coder, or a free Groq / Gemini Flash model) — otherwise it stays off."
+        },
+        "codepilot.completion.debounceMs": {
+          "type": "number",
+          "default": 200,
+          "description": "Milliseconds to wait after you stop typing before requesting an inline completion."
+        },
+        "codepilot.completion.maxTokens": {
+          "type": "number",
+          "default": 96,
+          "description": "Soft cap on inline completion length (tokens). Smaller is faster and cheaper."
         }
       }
     },
@@ -185,9 +210,21 @@
         "when": "editorTextFocus"
       },
       {
-        "command": "codepilot.askSelection",
+        "command": "codepilot.addToChat",
         "key": "ctrl+shift+l",
         "mac": "cmd+shift+l",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "codepilot.addToNewChat",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "codepilot.askSelection",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
         "when": "editorHasSelection"
       },
       {
@@ -199,9 +236,19 @@
     "menus": {
       "editor/context": [
         {
+          "command": "codepilot.addToChat",
+          "when": "editorHasSelection",
+          "group": "codepilot@1"
+        },
+        {
+          "command": "codepilot.addToNewChat",
+          "when": "editorHasSelection",
+          "group": "codepilot@2"
+        },
+        {
           "command": "codepilot.askSelection",
           "when": "editorHasSelection",
-          "group": "codepilot"
+          "group": "codepilot@3"
         }
       ]
     }

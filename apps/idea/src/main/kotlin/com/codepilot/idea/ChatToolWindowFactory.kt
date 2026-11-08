@@ -15,7 +15,7 @@ class ChatToolWindowFactory : ToolWindowFactory {
         try {
             val panel: ChatHost = WebChatPanel.createOrNull(project) ?: ChatPanel(project)
             val root = panel.component
- // Stash a reference on the root so AskAction.findChatPanel can retrieve it cheaply.
+ // Stash a reference on the root so the editor add-to-chat actions can retrieve it cheaply.
             root.putClientProperty(CHAT_PANEL_KEY, panel)
             val content: Content = ContentFactory.getInstance().createContent(root, "Chat", false)
             content.setDisposer {

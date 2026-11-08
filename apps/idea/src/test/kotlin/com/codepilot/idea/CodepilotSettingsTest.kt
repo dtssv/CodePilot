@@ -22,6 +22,9 @@ class CodepilotSettingsTest {
         assertEquals("agent", s.defaultMode)
         assertEquals("", s.extraArgs)
         assertEquals("", s.extraEnv)
+        assertEquals(false, s.completionEnabled)
+        assertEquals(200, s.completionDebounceMs)
+        assertEquals(96, s.completionMaxTokens)
     }
 
  // ---------- read/write roundtrip ----------
@@ -36,6 +39,9 @@ class CodepilotSettingsTest {
             defaultMode = "plan",
             extraArgs = "--verbose --timeout 30",
             extraEnv = "ANTHROPIC_API_KEY=sk-test\nFOO=bar",
+            completionEnabled = true,
+            completionDebounceMs = 150,
+            completionMaxTokens = 48,
         )
 
         settings.loadState(original)
@@ -48,6 +54,9 @@ class CodepilotSettingsTest {
         assertEquals("plan", readBack.defaultMode)
         assertEquals("--verbose --timeout 30", readBack.extraArgs)
         assertEquals("ANTHROPIC_API_KEY=sk-test\nFOO=bar", readBack.extraEnv)
+        assertEquals(true, readBack.completionEnabled)
+        assertEquals(150, readBack.completionDebounceMs)
+        assertEquals(48, readBack.completionMaxTokens)
     }
 
     @Test

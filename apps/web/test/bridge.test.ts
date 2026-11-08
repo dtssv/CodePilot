@@ -53,6 +53,19 @@ describe("HostBridge (IntelliJ channel)", () => {
     const { detectHostKind } = await load();
     expect(detectHostKind()).toBe("idea");
   });
+
+  it("posts openFile with a line and insertText through the host channel", async () => {
+    const { HostBridge } = await load();
+    const sent: string[] = [];
+    win.__codepilotHostPost = (json) => sent.push(json);
+    const bridge = new HostBridge("idea");
+    bridge.post({ type: "openFile", path: "src/a.ts", line: 42 });
+    bridge.post({ type: "insertText", text: "const x = 1;" });
+    expect(sent.map((s) => JSON.parse(s))).toEqual([
+      { type: "openFile", path: "src/a.ts", line: 42 },
+      { type: "insertText", text: "const x = 1;" },
+    ]);
+  });
 });
 
 describe("BridgeTransport", () => {

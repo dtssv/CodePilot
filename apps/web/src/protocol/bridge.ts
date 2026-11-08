@@ -8,6 +8,7 @@
 // { type: "ready" } UI mounted, send host/init
 // { type: "restart" } respawn the engine
 // { type: "openFile", path, line? }
+// { type: "insertText", text } insert at the editor caret
 // host → UI { type: "rpc", line }
 // { type: "host/init", cwd, theme?, locale?, surface? }
 // { type: "host/engine", state: "starting" | "ready" | "stopped", error? }
@@ -41,7 +42,11 @@ export type UiToHost =
   | { type: "rpc"; line: string }
   | { type: "ready" }
   | { type: "restart" }
-  | { type: "openFile"; path: string; line?: number };
+  | { type: "openFile"; path: string; line?: number }
+  /** Insert code at the host editor's caret (or replace its selection). The
+   * host writes the active editor — this never touches disk, so it carries no
+   * apply/write semantics; the user still edits and saves as usual. */
+  | { type: "insertText"; text: string };
 
 declare global {
   interface Window {

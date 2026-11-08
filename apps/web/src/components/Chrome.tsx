@@ -62,6 +62,10 @@ export interface ComposerProps {
   modes?: AgentMode[];
   onMode?(m: AgentMode): void;
   size?: "md" | "lg";
+  /** Tighten spacing for a narrow IDE sidebar (embedded layout). Reduces the
+   * action-row gaps/padding and lets the mode switch compress so the model
+   * picker keeps a usable minimum width at ~250px. */
+  compact?: boolean;
   autoFocus?: boolean;
   footer?: React.ReactNode;
   followUps?: FollowUpItem[];
@@ -90,6 +94,7 @@ export function Composer({
   modes = [],
   onMode,
   size = "md",
+  compact = false,
   autoFocus = false,
   footer,
   followUps = [],
@@ -359,7 +364,7 @@ export function Composer({
           size === "lg" ? "min-h-20 pt-4 pb-2 text-[14.5px] leading-6" : "min-h-11 pt-3 pb-1 text-[13px] leading-6"
         }`}
       />
-      <div className="flex items-center gap-2 px-2.5 pb-2.5">
+      <div className={`flex items-center px-2.5 pb-2.5 ${compact ? "gap-1" : "gap-2"}`}>
         <input
           ref={fileRef}
           type="file"
@@ -381,7 +386,7 @@ export function Composer({
           <FileIcon className="h-4 w-4" />
         </button>
         {modes.length > 1 && mode && onMode && (
-          <ModeSwitch mode={mode} modes={modes} onMode={onMode} disabled={disabled} />
+          <ModeSwitch mode={mode} modes={modes} onMode={onMode} disabled={disabled} compact={compact} />
         )}
         {/* overflow-visible: ModelPicker menu portals out; truncate clipped it. */}
         <div className="min-w-0 flex-1 overflow-visible text-[11px] text-[var(--color-ink-faint)]">
@@ -443,12 +448,35 @@ export function ModeSwitch({
   modes,
   onMode,
   disabled,
+  compact = false,
 }: {
   mode: AgentMode;
   modes: AgentMode[];
   onMode(m: AgentMode): void;
   disabled?: boolean;
+  /** Narrow IDE sidebar: show only the active mode's label, cycle on click, so
+   * the switch stays a single compact chip instead of three full-word buttons. */
+  compact?: boolean;
 }): React.ReactElement {
+  if (compact) {
+    const cycle = (): void => {
+      const i = modes.indexOf(mode);
+      const next = modes[(i + 1) % modes.length];
+      if (next) onMode(next);
+    };
+    return (
+      <button
+        type="button"
+        onClick={cycle}
+        disabled={disabled}
+        title={t(MODE_HINT[mode] ?? mode)}
+        aria-label={t("Switch mode")}
+        className="flex shrink-0 items-center rounded-lg bg-[var(--color-surface-sunken)] px-2 py-1 text-[11.5px] font-medium text-[var(--color-ink)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed"
+      >
+        {t(MODE_LABEL[mode] ?? mode)}
+      </button>
+    );
+  }
   return (
     <div className="flex shrink-0 gap-0.5 rounded-lg bg-[var(--color-surface-sunken)] p-0.5">
       {modes.map((m) => (

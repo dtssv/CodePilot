@@ -220,12 +220,24 @@ export function App(): React.ReactElement {
   }, []);
 
   const openFile = useCallback(
-    (path: string) => {
-      if (bridgeRef.current) bridgeRef.current.post({ type: "openFile", path });
+    (rawPath: string, lineArg?: number) => {
+      // A clicked reference may carry a trailing `:line(:col)` (e.g.
+      // "src/foo.ts:42"); split it off so the host can open at that line.
+      const { path, line } = splitPathLine(rawPath, lineArg);
+      if (bridgeRef.current) bridgeRef.current.post({ type: "openFile", path, line });
       else void openResolvedPath(cp.client, cp.state.cwd, path);
     },
     [cp.state.cwd],
   );
+
+  // Insert a code snippet at the IDE editor's caret (embedded only; host writes
+  // the active editor, never disk). Returns false when no host is present so the
+  // caller can fall back to copy.
+  const insertIntoEditor = useCallback((text: string): boolean => {
+    if (!bridgeRef.current) return false;
+    bridgeRef.current.post({ type: "insertText", text });
+    return true;
+  }, []);
 
   const common = {
     cp,
@@ -243,7 +255,7 @@ export function App(): React.ReactElement {
   return (
     <>
       {layout === "embedded" ? (
-        <EmbeddedLayout {...common} bridge={bridgeRef.current} onOpenFile={openFile} />
+        <EmbeddedLayout {...common} bridge={bridgeRef.current} onOpenFile={openFile} onInsertCode={insertIntoEditor} />
       ) : layout === "agent" ? (
         <AgentLayout {...common} surface={surface} onSwitch={() => switchLayout("web")} />
       ) : (
@@ -1196,7 +1208,13 @@ function EmbeddedLayout({
   setDraft,
   bridge,
   onOpenFile,
-}: LayoutProps & { bridge: HostBridge | null; onOpenFile(path: string): void }): React.ReactElement {
+  onInsertCode,
+}: LayoutProps & {
+  bridge: HostBridge | null;
+  onOpenFile(path: string, line?: number): void;
+  /** Insert a code block into the IDE editor; returns false when unavailable. */
+  onInsertCode(text: string): boolean;
+}): React.ReactElement {
   const { state } = cp;
   const [showHistory, setShowHistory] = useState(false);
   const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
@@ -1296,6 +1314,7 @@ function EmbeddedLayout({
               onAnswer={(a) => void cp.answerQuestion(a)}
               onRetry={() => void cp.retryLast()}
               onOpenPath={onOpenFile}
+              onInsertCode={onInsertCode}
             />
           )}
           <EmbeddedFiles cp={cp} onOpenFile={onOpenFile} />
@@ -1304,7 +1323,7 @@ function EmbeddedLayout({
 
       <div data-cp-composer className="shrink-0 px-2 pb-2">
         <ReconnectBanner cp={cp} />
-        <Composer {...composer} />
+        <Composer {...composer} compact />
       </div>
     </div>
   );
@@ -1333,6 +1352,18 @@ function EmbeddedFiles({ cp, onOpenFile }: { cp: Codepilot; onOpenFile(path: str
       ))}
     </div>
   );
+}
+
+/** Split a trailing `:line(:col)` off a clicked path reference. An explicit
+ * `lineArg` wins. Windows drive letters (`C:\…`) are preserved — only a
+ * `:digits` suffix after a non-drive path segment is treated as a line. */
+function splitPathLine(raw: string, lineArg?: number): { path: string; line?: number } {
+  if (lineArg !== undefined) return { path: raw, line: lineArg };
+  const m = /^(.*?):(\d+)(?::\d+)?$/.exec(raw);
+  if (m && m[1] && !/^[A-Za-z]$/.test(m[1])) {
+    return { path: m[1], line: Number(m[2]) };
+  }
+  return { path: raw };
 }
 
 function joinPath(cwd: string, path: string): string {

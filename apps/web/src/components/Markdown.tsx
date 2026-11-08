@@ -19,11 +19,15 @@ import { CheckIcon, ChevronIcon, CopyIcon } from "./Icons.js";
 export function Markdown({
   text,
   onOpenPath,
+  onInsertCode,
+  final,
 }: {
   text: string;
   onOpenPath?: (path: string) => void;
+  onInsertCode?: (text: string) => boolean;
+  final?: boolean;
 }): React.ReactElement {
-  const segments = useMemo(() => splitThinking(text), [text]);
+  const segments = useMemo(() => splitThinking(text, { final }), [text, final]);
   if (segments.length === 0) {
     return <div className="cp-md text-[13.5px] leading-[1.7] text-[var(--color-ink-faint)]" />;
   }
@@ -33,7 +37,7 @@ export function Markdown({
         seg.kind === "think" ? (
           <ThinkingFold key={i} text={seg.text} incomplete={seg.incomplete} />
         ) : (
-          <MarkdownBody key={i} text={seg.text} onOpenPath={onOpenPath} />
+          <MarkdownBody key={i} text={seg.text} onOpenPath={onOpenPath} onInsertCode={onInsertCode} />
         ),
       )}
     </div>
@@ -43,13 +47,15 @@ export function Markdown({
 function MarkdownBody({
   text,
   onOpenPath,
+  onInsertCode,
 }: {
   text: string;
   onOpenPath?: (path: string) => void;
+  onInsertCode?: (text: string) => boolean;
 }): React.ReactElement | null {
   const blocks = useMemo(() => parseBlocks(text), [text]);
   if (blocks.length === 0) return null;
-  return <>{blocks.map((b, i) => renderBlock(b, i, onOpenPath))}</>;
+  return <>{blocks.map((b, i) => renderBlock(b, i, onOpenPath, onInsertCode))}</>;
 }
 
 /** Collapsed by default; click to reveal model chain-of-thought. */
@@ -267,10 +273,15 @@ function parseBlocks(src: string): Block[] {
 
 const HEADING_SIZE = ["text-[17px]", "text-[15.5px]", "text-[14px]", "text-[13.5px]"];
 
-function renderBlock(b: Block, i: number, onOpenPath?: (path: string) => void): ReactNode {
+function renderBlock(
+  b: Block,
+  i: number,
+  onOpenPath?: (path: string) => void,
+  onInsertCode?: (text: string) => boolean,
+): ReactNode {
   switch (b.kind) {
     case "code":
-      return <CodeBlock key={i} lang={b.lang} code={b.lines.join("\n")} />;
+      return <CodeBlock key={i} lang={b.lang} code={b.lines.join("\n")} onInsertCode={onInsertCode} />;
     case "heading":
       return (
         <div key={i} className={`${HEADING_SIZE[b.level - 1]} pt-1 font-semibold tracking-tight text-[var(--color-ink)]`}>
@@ -350,12 +361,36 @@ function renderBlock(b: Block, i: number, onOpenPath?: (path: string) => void): 
   }
 }
 
-function CodeBlock({ lang, code }: { lang?: string; code: string }): React.ReactElement {
+function CodeBlock({
+  lang,
+  code,
+  onInsertCode,
+}: {
+  lang?: string;
+  code: string;
+  onInsertCode?: (text: string) => boolean;
+}): React.ReactElement {
   const [copied, setCopied] = useState(false);
+  const [inserted, setInserted] = useState(false);
   return (
     <div className="group/code overflow-hidden rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)]">
-      <div className="flex items-center border-b border-[var(--color-edge-subtle)] px-3 py-1">
+      <div className="flex items-center gap-1 border-b border-[var(--color-edge-subtle)] px-3 py-1">
         <span className="font-mono text-[10.5px] tracking-wide text-[var(--color-ink-faint)] lowercase">{lang || "text"}</span>
+        {onInsertCode && (
+          <button
+            type="button"
+            onClick={() => {
+              if (onInsertCode(code)) {
+                setInserted(true);
+                setTimeout(() => setInserted(false), 1200);
+              }
+            }}
+            className="ml-auto flex items-center gap-1 rounded px-1 text-[10.5px] text-[var(--color-ink-faint)] opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-[var(--color-ink)]"
+            title={t("Insert at cursor")}
+          >
+            {inserted ? <CheckIcon className="h-3 w-3" /> : t("Insert")}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {
@@ -364,7 +399,7 @@ function CodeBlock({ lang, code }: { lang?: string; code: string }): React.React
               setTimeout(() => setCopied(false), 1200);
             });
           }}
-          className="ml-auto flex items-center gap-1 rounded px-1 text-[10.5px] text-[var(--color-ink-faint)] opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-[var(--color-ink)]"
+          className={`flex items-center gap-1 rounded px-1 text-[10.5px] text-[var(--color-ink-faint)] opacity-0 transition-opacity group-hover/code:opacity-100 hover:text-[var(--color-ink)] ${onInsertCode ? "" : "ml-auto"}`}
           title="Copy"
         >
           {copied ? <CheckIcon className="h-3 w-3" /> : <CopyIcon className="h-3 w-3" />}

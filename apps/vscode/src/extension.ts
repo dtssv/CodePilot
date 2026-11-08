@@ -12,6 +12,7 @@
 import * as vscode from "vscode";
 
 import { SettingsStore, StatusBar, modeLabel } from "./config.js";
+import { CompletionProvider } from "./completion.js";
 import { Engine, tapServerLine } from "./engine.js";
 import { ChatViewProvider } from "./sidebar.js";
 import { AGENT_MODES, type AgentMode, type Event } from "./types.js";
@@ -95,6 +96,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       statusBar.setMode(mode);
       view?.command({ name: "mode", mode });
     }),
+    vscode.commands.registerCommand("codepilot.addToChat", () => addSelection(false)),
+    vscode.commands.registerCommand("codepilot.addToNewChat", () => addSelection(true)),
     vscode.commands.registerCommand("codepilot.askSelection", askSelection),
     vscode.commands.registerCommand("codepilot.explainFile", () =>
       promptOnActiveFile("Explain this file in a structured way (overview, key components, gotchas)."),
@@ -106,6 +109,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
     vscode.commands.registerCommand("codepilot.showOutput", () => OUTPUT.show()),
     vscode.commands.registerCommand("codepilot.checkUpdates", () => runCheckUpdatesCommand(context)),
+  );
+
+  // Inline (Tab) completion — off unless `codepilot.completion.enabled`. The
+  // provider itself re-reads the setting on every request, so toggling takes
+  // effect without a reload; registering it unconditionally is cheap.
+  const completion = new CompletionProvider(
+    engine,
+    () => settings.snapshot(),
+    cwd,
+    (message) => void vscode.window.showInformationMessage(message),
+  );
+  context.subscriptions.push(
+    vscode.languages.registerInlineCompletionItemProvider({ pattern: "**" }, completion),
+    { dispose: () => completion.dispose() },
   );
 
   // Plugin channel only — engine updates live in Settings → Updates / `codepilot update`.
@@ -124,6 +141,30 @@ async function focusView(): Promise<void> {
 }
 
 /* ---------------- editor → prompt ---------------- */
+
+/** Cursor-style "Add to Chat" / "Add to New Chat": drop the selected code into
+ * the composer as a reference WITHOUT sending, so the user writes their own
+ * prompt around it. `newChat` opens a fresh session first. */
+async function addSelection(newChat: boolean): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const selected = editor?.document.getText(editor.selection);
+  if (!editor || !selected) {
+    void vscode.window.showInformationMessage("CodePilot: select some code first.");
+    return;
+  }
+  const sel = editor.selection;
+  const rel = vscode.workspace.asRelativePath(editor.document.uri);
+  const fence = "```";
+  const text =
+    `${fence}${editor.document.languageId}\n` +
+    `// @${rel} L${sel.start.line + 1}-${sel.end.line + 1}\n${selected}\n${fence}`;
+  await focusView();
+  // closeSession() is synchronous and the draft is not bound to a session, so
+  // opening a new chat before injecting cannot race the reference into the old
+  // session (the next real send lazily creates the fresh one).
+  if (newChat) view?.command({ name: "new" });
+  view?.prompt(text, false);
+}
 
 async function askSelection(): Promise<void> {
   const editor = vscode.window.activeTextEditor;

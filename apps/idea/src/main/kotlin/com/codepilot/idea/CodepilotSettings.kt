@@ -35,6 +35,12 @@ class CodepilotSettings : PersistentStateComponent<CodepilotSettings.State> {
         var defaultMode: String = "agent", // chat | plan | agent — default collaboration mode for new sessions
         var extraArgs: String = "",
         var extraEnv: String = "",
+        /** Inline (Tab) completion. Off by default; see docs/design/G-inline-completion.md.
+         * Runs on the user's provider but needs a lightweight smallModel distinct
+         * from the main chat model (gated server-side). */
+        var completionEnabled: Boolean = false,
+        var completionDebounceMs: Int = 200,
+        var completionMaxTokens: Int = 96,
     )
 
     private var state = State()
@@ -68,6 +74,7 @@ class CodepilotSettingsConfigurable : Configurable {
     private val defaultModeCombo = ComboBox(CodepilotSettings.defaultModes.toTypedArray())
     private val extraArgsField = JBTextField()
     private val extraEnvArea = JTextArea(4, 40)
+    private val completionCheckbox = javax.swing.JCheckBox("Enable inline (Tab) completion")
     private var panel: JPanel? = null
 
     override fun getDisplayName(): String = "CodePilot"
@@ -88,6 +95,8 @@ class CodepilotSettingsConfigurable : Configurable {
         extraArgsField.toolTipText = "Extra CLI args passed to `codepilot` (space separated)."
         extraEnvArea.text = settings.extraEnv
         extraEnvArea.toolTipText = "Extra env vars passed to `codepilot serve` — one `KEY=VALUE` per line."
+        completionCheckbox.isSelected = settings.completionEnabled
+        completionCheckbox.toolTipText = "Ghost-text completion as you type. Needs a lightweight `smallModel` distinct from your main chat model (e.g. a local Ollama qwen2.5-coder, or a free Groq / Gemini Flash model); otherwise it stays off."
 
         panel = FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel("`codepilot` executable:"), pathField, 1, false)
@@ -97,6 +106,7 @@ class CodepilotSettingsConfigurable : Configurable {
             .addLabeledComponent(JBLabel("Default collaboration mode:"), defaultModeCombo, 1, false)
             .addLabeledComponent(JBLabel("Extra args:"), extraArgsField, 1, false)
             .addLabeledComponent(JBLabel("Extra env (one per line):"), wrap(extraEnvArea), 1, false)
+            .addComponent(completionCheckbox)
             .addVerticalGap(8)
             .panel
 
@@ -110,6 +120,7 @@ class CodepilotSettingsConfigurable : Configurable {
                 defaultModeCombo.selectedItem = "agent"
                 extraArgsField.text = ""
                 extraEnvArea.text = ""
+                completionCheckbox.isSelected = false
             }
         }
         val south = JPanel().apply {
@@ -139,7 +150,8 @@ class CodepilotSettingsConfigurable : Configurable {
             (permissionCombo.selectedItem as? String ?: "ask") != s.permissionMode ||
             CodepilotSettings.normalizeMode(defaultModeCombo.selectedItem as? String) != CodepilotSettings.normalizeMode(s.defaultMode) ||
             extraArgsField.text != s.extraArgs ||
-            extraEnvArea.text != s.extraEnv
+            extraEnvArea.text != s.extraEnv ||
+            completionCheckbox.isSelected != s.completionEnabled
     }
 
     override fun apply() {
@@ -153,6 +165,7 @@ class CodepilotSettingsConfigurable : Configurable {
         s.defaultMode = CodepilotSettings.normalizeMode(defaultModeCombo.selectedItem as? String)
         s.extraArgs = extraArgsField.text.trim()
         s.extraEnv = extraEnvArea.text
+        s.completionEnabled = completionCheckbox.isSelected
  // Push to in-memory cache.
         CodepilotSettings.getInstance().loadState(s)
     }
@@ -166,5 +179,6 @@ class CodepilotSettingsConfigurable : Configurable {
         defaultModeCombo.selectedItem = CodepilotSettings.normalizeMode(s.defaultMode)
         extraArgsField.text = s.extraArgs
         extraEnvArea.text = s.extraEnv
+        completionCheckbox.isSelected = s.completionEnabled
     }
 }

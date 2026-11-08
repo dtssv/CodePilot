@@ -19,7 +19,7 @@ data class HostInit(val cwd: String, val theme: String, val locale: String)
 /**
  * The IDE side of the web UI's host bridge (apps/web/src/protocol/bridge.ts).
  *
- * page → IDE rpc {line} · ready · restart · openFile {path, line?}
+ * page → IDE rpc {line} · ready · restart · openFile {path, line?} · insertText {text}
  * IDE → page rpc {line} · host/init · host/engine · host/theme · host/prompt
  *
  * Messages for the page wait until it reports `ready`; that also (re)sends
@@ -29,6 +29,7 @@ class HostRelay(
     private val deliver: (String) -> Unit,
     private val init: () -> HostInit,
     private val openFile: (path: String, line: Int?) -> Unit = { _, _ -> },
+    private val insertText: (text: String) -> Unit = { },
     private val onEngineError: (String) -> Unit = {},
 ) {
     lateinit var engine: LineEngine
@@ -68,6 +69,7 @@ class HostRelay(
                 val line = msg.get("line")?.takeIf { it.isJsonPrimitive }?.asInt
                 openFile(path, line)
             }
+            "insertText" -> msg.str("text")?.let { text -> insertText(text) }
         }
     }
 
@@ -82,6 +84,9 @@ class HostRelay(
         addProperty("text", text)
         addProperty("send", send)
     })
+
+ /** Run a composer command in the page (e.g. "new" opens a fresh session). */
+    fun command(name: String) = send(obj("host/command") { addProperty("name", name) })
 
  /** The page was torn down (reload, dispose); hold messages until it is back. */
     @Synchronized

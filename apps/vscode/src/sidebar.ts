@@ -2,7 +2,7 @@
 // relays its JSON-RPC traffic to the engine process.
 //
 // Message contract (see apps/web/src/protocol/bridge.ts):
-// webview → host rpc {line} · ready · restart · openFile {path, line?}
+// webview → host rpc {line} · ready · restart · openFile {path, line?} · insertText {text}
 // host → webview rpc {line} · host/init · host/engine · host/theme
 // host/prompt {text, send?} · host/command {name, mode?}
 
@@ -29,7 +29,8 @@ type FromWebview =
   | { type: "rpc"; line: string }
   | { type: "ready" }
   | { type: "restart" }
-  | { type: "openFile"; path: string; line?: number };
+  | { type: "openFile"; path: string; line?: number }
+  | { type: "insertText"; text: string };
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | null = null;
@@ -102,6 +103,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "openFile":
         void this.openFile(msg.path, msg.line);
         return;
+      case "insertText":
+        void this.insertText(msg.text);
+        return;
+    }
+  }
+
+  /** Insert code at the active editor's cursor (replacing any selection). Never
+   * writes disk — the user keeps and saves the edit themselves. */
+  private async insertText(text: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage(
+        "CodePilot: open a file and place the cursor where the code should go.",
+      );
+      return;
+    }
+    try {
+      await editor.edit((b) => {
+        for (const sel of editor.selections) b.replace(sel, text);
+      });
+    } catch (err) {
+      this.opts.log?.(`insertText: ${errorText(err)}`);
     }
   }
 

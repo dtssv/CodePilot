@@ -69,8 +69,13 @@ export interface TranscriptProps {
   onRetry(): void;
  /** Sub-agents spawned by `task` calls, keyed by the parent tool call id. */
   subagents?: Record<string, SubagentRun[]>;
-  /** Open a workspace path in the in-app preview (or host editor). */
-  onOpenPath?: (path: string) => void;
+  /** Open a workspace path in the in-app preview (or host editor). An optional
+   * `line` is honored by the IDE-host path (embedded); the in-app preview
+   * ignores it. */
+  onOpenPath?: (path: string, line?: number) => void;
+  /** Insert a code block into the IDE editor (embedded only). When set, code
+   * blocks show an "Insert" action; returns false if the host declined. */
+  onInsertCode?: (text: string) => boolean;
   /** The scroll container that wraps this transcript. When provided, drilling
    * into a sub-agent and back restores each view's own scroll position instead
    * of leaking the sub-agent's scroll offset onto the main task view. */
@@ -83,7 +88,8 @@ interface SubagentNav {
 }
 
 const SubagentContext = createContext<SubagentNav | undefined>(undefined);
-const OpenPathContext = createContext<((path: string) => void) | undefined>(undefined);
+const OpenPathContext = createContext<((path: string, line?: number) => void) | undefined>(undefined);
+const InsertCodeContext = createContext<((text: string) => boolean) | undefined>(undefined);
 
 export function Transcript(props: TranscriptProps): React.ReactElement {
   const [viewing, setViewing] = useState<{ toolCallId: string; index: number } | undefined>();
@@ -125,9 +131,11 @@ export function Transcript(props: TranscriptProps): React.ReactElement {
   if (!run) {
     return (
       <OpenPathContext.Provider value={props.onOpenPath}>
-        <SubagentContext.Provider value={nav}>
-          <MainTranscript {...props} />
-        </SubagentContext.Provider>
+        <InsertCodeContext.Provider value={props.onInsertCode}>
+          <SubagentContext.Provider value={nav}>
+            <MainTranscript {...props} />
+          </SubagentContext.Provider>
+        </InsertCodeContext.Provider>
       </OpenPathContext.Provider>
     );
   }
@@ -270,6 +278,7 @@ function AssistantTurnView({
   onRetry(): void;
 }): React.ReactElement | null {
   const onOpenPath = useContext(OpenPathContext);
+  const onInsertCode = useContext(InsertCodeContext);
   if (parts.length === 0) return null;
   const messages = parts.filter((p): p is Extract<typeof p, { kind: "message" }> => p.kind === "message");
   const streaming = messages.some((m) => m.msg.streaming);
@@ -291,7 +300,7 @@ function AssistantTurnView({
                   {p.msg.reasoning ? (
                     <ReasoningBlock text={p.msg.reasoning} streaming={p.msg.streaming ?? false} />
                   ) : null}
-                  <Markdown text={p.msg.text} onOpenPath={onOpenPath} />
+                  <Markdown text={p.msg.text} onOpenPath={onOpenPath} onInsertCode={onInsertCode} final={!p.msg.streaming} />
                   {p.msg.streaming && (
                     <span className="ml-0.5 inline-block h-4 w-1.5 animate-breathe rounded-sm bg-[var(--color-accent)] align-text-bottom" />
                   )}

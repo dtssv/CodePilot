@@ -13,14 +13,12 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
 
 /**
- * Editor right-click action: "Ask CodePilot".
- *
- * If there's a selection, sends the file path + selected snippet to the chat as a
- * prefilled prompt. If there's no selection, sends the entire current file.
+ * Base for editor actions that hand the current selection (or whole file) to the
+ * CodePilot chat as a reference. Subclasses decide whether to open a new chat.
  */
-class AskAction : AnAction() {
+abstract class AddToChatBase(private val newChat: Boolean) : AnAction() {
 
-    private val log = logger<AskAction>()
+    private val log = logger<AddToChatBase>()
 
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
@@ -54,14 +52,20 @@ class AskAction : AnAction() {
             return
         }
         tw.activate {
- // Walk to the content's ChatPanel and prefill its input.
+ // Walk to the content's ChatPanel and inject the reference into its input.
             tw.contentManager.contents.firstOrNull()?.component?.let { comp ->
                 val chat = comp.getClientProperty(ChatToolWindowFactory.CHAT_PANEL_KEY) as? ChatHost
-                chat?.sendEditorContext(filePath, language, text)
+                chat?.addEditorContext(filePath, language, text, newChat)
             }
         }
     }
 }
+
+/** Editor action: add the selection to the CURRENT chat (Cursor "Add to Chat"). */
+class AddToChatAction : AddToChatBase(newChat = false)
+
+/** Editor action: add the selection to a NEW chat (Cursor "Add to New Chat"). */
+class AddToNewChatAction : AddToChatBase(newChat = true)
 
 /** Toolbar / Tools-menu shortcut: opens the chat tool window. */
 class ShowToolWindowAction : AnAction() {

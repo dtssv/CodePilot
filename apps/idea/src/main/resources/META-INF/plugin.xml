@@ -17,8 +17,10 @@
 
     <change-notes><![CDATA[First stable release: JCEF chat tool window sharing the web UI, Swing fallback, editor "Ask CodePilot" action, and settings for binary path, model, and permission mode.]]></change-notes>
 
-    <!-- IntelliJ Platform 2024.1+ (build 233). -->
-    <idea-version since-build="233" until-build="251.*" />
+    <!-- IntelliJ Platform 2024.1+ (build 241). Raised from 233 to 241 for the
+         inline (Tab) completion API (com.intellij.codeInsight.inline.completion),
+         which is only present and stable enough from 2024.1. -->
+    <idea-version since-build="241" until-build="251.*" />
 
     <!-- Project-level dependency: only need an Application service and a Project service. -->
     <depends>com.intellij.modules.platform</depends>
@@ -32,26 +34,45 @@
         serviceImplementation="com.codepilot.idea.CodepilotService$ProjectService"
         id="CodepilotProjectService"/>
 
-    <!-- ===== Tool Window ===== -->
+    <!-- ===== Tool Window + inline completion ===== -->
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="CodePilot"
                     anchor="right"
                     factoryClass="com.codepilot.idea.ChatToolWindowFactory"
                     icon="AllIcons.Actions.Execute"
                     canCloseContents="true"/>
+
+        <!-- Inline (Tab) code completion. The provider itself is a no-op unless
+             `completionEnabled` is set in CodePilot settings, so registering it
+             unconditionally is cheap. Experimental platform API — hence the
+             since-build 241 floor above. -->
+        <inline.completion.provider
+            implementation="com.codepilot.idea.CodepilotInlineCompletionProvider"/>
     </extensions>
 
-    <!-- ===== Editor right-click action: "Ask CodePilot" ===== -->
+    <!-- ===== Editor actions: add selection to chat (Cursor-style) ===== -->
     <actions>
-        <action id="codepilot.ask"
-                class="com.codepilot.idea.AskAction"
-                text="Ask CodePilot"
-                description="Send the current selection (with file path) to the CodePilot session."
+        <!-- Add selection to the CURRENT chat, without sending. -->
+        <action id="codepilot.addToChat"
+                class="com.codepilot.idea.AddToChatAction"
+                text="CodePilot: Add Selection to Chat"
+                description="Drop the current selection into the CodePilot chat as a reference, without sending."
                 icon="AllIcons.Actions.IntentionBulb">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-            <!-- Allow triggering from the editor with the standard shortcut when no menu is shown. -->
-            <keyboard-shortcut keymap="$default" first-keystroke="alt C"/>
-    </action>
+            <keyboard-shortcut keymap="$default" first-keystroke="control shift L"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta shift L"/>
+        </action>
+
+        <!-- Add selection to a NEW chat, without sending. -->
+        <action id="codepilot.addToNewChat"
+                class="com.codepilot.idea.AddToNewChatAction"
+                text="CodePilot: Add Selection to New Chat"
+                description="Open a fresh CodePilot chat and drop the current selection into it as a reference, without sending."
+                icon="AllIcons.Actions.IntentionBulb">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="control alt L"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="meta alt L"/>
+        </action>
 
         <!-- Quick toolbar action to show the tool window if it's been closed. -->
         <action id="codepilot.showToolWindow"

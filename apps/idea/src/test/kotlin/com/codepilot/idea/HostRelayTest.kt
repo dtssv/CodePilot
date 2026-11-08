@@ -33,11 +33,13 @@ class HostRelayTest {
 
     private val delivered = mutableListOf<JsonObject>()
     private val opened = mutableListOf<Pair<String, Int?>>()
+    private val inserted = mutableListOf<String>()
     private val engine = FakeEngine()
     private val relay = HostRelay(
         deliver = { delivered += JsonParser.parseString(it).asJsonObject },
         init = { HostInit(cwd = "/work", theme = "light", locale = "zh") },
         openFile = { p, l -> opened += p to l },
+        insertText = { inserted += it },
     ).also { it.engine = engine }
 
     private fun types() = delivered.map { it["type"].asString }
@@ -111,6 +113,13 @@ class HostRelayTest {
         relay.fromPage("not json")
         relay.fromPage("""["array"]""")
         assertEquals(listOf("src/a.kt" to 3, "b.md" to null), opened)
+    }
+
+    @Test
+    fun `insertText forwards the snippet and ignores an empty payload`() {
+        relay.fromPage("""{"type":"insertText","text":"val x = 1"}""")
+        relay.fromPage("""{"type":"insertText"}""")
+        assertEquals(listOf("val x = 1"), inserted)
     }
 
     @Test

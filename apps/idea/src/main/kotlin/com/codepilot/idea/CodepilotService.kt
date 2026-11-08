@@ -46,6 +46,14 @@ class CodepilotService private constructor() {
             }
         }
 
+        /** Drop the cached client (shutting it down) so the next [client] call
+         * re-spawns the process. Used by the UI's Reconnect after a failure —
+         * without this, a dead-but-non-null client would be handed back forever. */
+        @Synchronized
+        fun resetClient() {
+            runCatching { clientRef.getAndSet(null)?.shutdown() }
+        }
+
         override fun dispose() {
             clientRef.getAndSet(null)?.shutdown()
         }
@@ -72,6 +80,10 @@ class CodepilotService private constructor() {
 
         fun client(): CodepilotClient? = ApplicationManager.getApplication()
             .getService(Application::class.java)?.client()
+
+        /** Drop the shared client so the next call re-spawns (see [Application.resetClient]). */
+        fun resetClient() = ApplicationManager.getApplication()
+            .getService(Application::class.java)?.resetClient()
 
         fun newSessionId(): String? {
             val settings = CodepilotSettings.getInstance().state

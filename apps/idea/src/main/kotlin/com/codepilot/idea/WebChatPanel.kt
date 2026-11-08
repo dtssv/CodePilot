@@ -4,7 +4,9 @@ import com.google.gson.Gson
 import com.intellij.ide.ui.LafManagerListener
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
@@ -43,6 +45,7 @@ class WebChatPanel private constructor(
         deliver = ::deliver,
         init = { HostInit(cwd = cwd, theme = currentTheme(), locale = Locale.getDefault().language) },
         openFile = ::openFile,
+        insertText = ::insertText,
         onEngineError = { log.warn("codepilot engine: $it") },
     )
 
@@ -83,10 +86,14 @@ class WebChatPanel private constructor(
         browser.loadHTML(withPreset(html, currentTheme()))
     }
 
-    override fun sendEditorContext(filePath: String, language: String?, snippet: String) {
+    override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
         val rel = project.basePath?.let { base -> File(filePath).relativeToOrNull(File(base))?.path } ?: filePath
         val lang = language?.lowercase().orEmpty()
-        relay.prompt("Explain this code.\n\n```$lang\n// @$rel\n$snippet\n```", send = false)
+        // closeSession() in the page is synchronous and the draft is not bound to
+        // a session, so opening a new chat before injecting cannot race the
+        // reference into the old session.
+        if (newChat) relay.command("new")
+        relay.prompt("```$lang\n// @$rel\n$snippet\n```", send = false)
     }
 
     override fun dispose() {
@@ -114,6 +121,23 @@ class WebChatPanel private constructor(
         ApplicationManager.getApplication().invokeLater {
             val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(abs) ?: return@invokeLater
             OpenFileDescriptor(project, vf, ((effectiveLine ?: 1) - 1).coerceAtLeast(0), 0).navigate(true)
+        }
+    }
+
+    /** Insert [text] at the active editor's caret (replacing any selection).
+     * Never writes disk — the user keeps and saves the edit themselves. */
+    private fun insertText(text: String) {
+        ApplicationManager.getApplication().invokeLater {
+            val editor = FileEditorManager.getInstance(project).selectedTextEditor ?: return@invokeLater
+            val document = editor.document
+            if (!document.isWritable) return@invokeLater
+            WriteCommandAction.runWriteCommandAction(project, "CodePilot Insert", null, {
+                val caret = editor.caretModel.currentCaret
+                val start = caret.selectionStart
+                val end = caret.selectionEnd
+                document.replaceString(start, end, text)
+                caret.moveToOffset(start + text.length)
+            })
         }
     }
 

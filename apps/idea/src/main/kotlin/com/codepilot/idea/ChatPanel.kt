@@ -1,7 +1,10 @@
 package com.codepilot.idea
 
 import com.google.gson.JsonObject
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
@@ -16,6 +19,7 @@ import kotlinx.coroutines.swing.Swing
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.event.ActionEvent
+import java.io.File
 import javax.swing.AbstractAction
 import javax.swing.BorderFactory
 import javax.swing.Box
@@ -81,6 +85,13 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         caret.updatePolicy = DefaultCaret.ALWAYS_UPDATE
         border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
         background = JBColor.background()
+ // Clicking a linkified `codepilot:` path opens it in the editor — the Swing
+ // fallback's version of the web UI's click-to-open (see openPath).
+        addHyperlinkListener { e ->
+            if (e.eventType == javax.swing.event.HyperlinkEvent.EventType.ACTIVATED) {
+                e.description?.let { openPath(it) }
+            }
+        }
     }
     private val scroll = JBScrollPane(messagePane).apply {
         verticalScrollBarPolicy = JBScrollPane.VERTICAL_SCROLLBAR_ALWAYS
@@ -111,6 +122,11 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
     }
     private val newSessionButton = JButton("New Session").apply {
         addActionListener { startNewSession() }
+    }
+    private val reconnectButton = JButton("Reconnect").apply {
+        toolTipText = "Restart the CodePilot engine connection."
+        addActionListener { reconnect() }
+        isVisible = false
     }
     private val statusLabel = JLabel("Starting…").apply {
         horizontalAlignment = JLabel.LEFT
@@ -170,6 +186,8 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         val toolbar = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             add(newSessionButton)
+            add(Box.createHorizontalStrut(8))
+            add(reconnectButton)
             add(Box.createHorizontalGlue())
         }
 
@@ -220,14 +238,14 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         }
     }
 
- /** Send an editor-selected snippet as a "Explain this" request. */
-    override fun sendEditorContext(filePath: String, language: String?, snippet: String) {
+ /** Drop an editor selection into the composer as a reference, without sending
+  * (Cursor "Add to Chat"). When [newChat] is true, open a fresh session first. */
+    override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
+        if (newChat) startNewSession()
         val tagged = buildString {
-            append("Here is a snippet from `").append(filePath).append("`")
-            language?.let { append(" (").append(it).append(")") }
-            append(":\n\n```")
+            append("```")
             language?.let { append(it) }
-            append("\n").append(snippet).append("\n```\n\nPlease explain what this code does.")
+            append("\n// @").append(filePath).append("\n").append(snippet).append("\n```")
         }
         prefillInput(tagged)
     }
@@ -263,6 +281,7 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
                         appendSystem("Connection failure: ${msg.message}")
                         sendButton.isEnabled = false
                         cancelButton.isEnabled = false
+                        reconnectButton.isVisible = true
                     }
                 }
             }
@@ -444,6 +463,19 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         statusLabel.text = "Cancelled."
     }
 
+    /** Re-establish the engine connection after a failure and re-subscribe. The
+     * cached client is dropped first so the service re-spawns a live process
+     * instead of handing back the dead one. */
+    private fun reconnect() {
+        reconnectButton.isVisible = false
+        statusLabel.text = "Reconnecting…"
+        appendSystem("Reconnecting…")
+        scope.launch(Dispatchers.IO) {
+            runCatching { CodepilotService.getInstance().resetClient() }
+            SwingUtilities.invokeLater { startClientAndSubscribe() }
+        }
+    }
+
     private fun startNewSession() {
         scope.launch(Dispatchers.IO) {
             try {
@@ -532,7 +564,8 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
 
     private fun appendToolResult(name: String, content: String, isError: Boolean) {
         val color = if (isError) "#a00000" else "#555"
-        appendHtml("<div style='margin:6px 0'><b style='color:$color'>tool_result: ${escape(name)}</b><br><pre style='background:${codeBg()};padding:6px;border-radius:4px;white-space:pre-wrap'>${escape(content.take(4000))}${if (content.length > 4000) "\n…" else ""}</pre></div>")
+        val body = linkify(escape(content.take(4000))) + if (content.length > 4000) "\n…" else ""
+        appendHtml("<div style='margin:6px 0'><b style='color:$color'>tool_result: ${escape(name)}</b><br><pre style='background:${codeBg()};padding:6px;border-radius:4px;white-space:pre-wrap'>$body</pre></div>")
     }
 
     private fun appendPlan(steps: List<PlanStep>) {
@@ -616,6 +649,18 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
         .replace("'", "&#39;")
+
+ /** Open a `path` or `path:line(:col)` reference in the editor. Mirrors
+  * WebChatPanel.openFile; disk is never written. */
+    private fun openPath(raw: String) {
+        val (path, line) = parsePathLine(raw)
+        val cwd = project.basePath ?: System.getProperty("user.dir") ?: "."
+        val abs = if (File(path).isAbsolute) path else File(cwd, path).path
+        ApplicationManager.getApplication().invokeLater {
+            val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(abs) ?: return@invokeLater
+            OpenFileDescriptor(project, vf, ((line ?: 1) - 1).coerceAtLeast(0), 0).navigate(true)
+        }
+    }
 
  // ----- Event normalization from server `event` notifications -----
  /**
@@ -726,6 +771,46 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         o.get(key)?.let {
             if (it.isJsonNull) null else if (it.isJsonPrimitive) it.asString else it.toString()
         }
+
+    companion object {
+        // A workspace path (with `/` or a short file extension), optionally
+        // `:line(:col)`. Matches on already-escaped text so it never swallows
+        // markup. Kept conservative to avoid linkifying prose.
+        private val PATH_RE = Regex(
+            """(?<![\w/])((?:[\w.\-]+/)+[\w.\-]+(?::\d{1,9}(?::\d{1,9})?)?|[\w.\-]+\.[a-z0-9]{1,16}(?::\d{1,9}(?::\d{1,9})?)?)""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        private val ANCHOR_RE = Regex("""^(.*?[^/\\]):(\d{1,9})(?::\d{1,9})?$""")
+        private val SHAPE_RE = Regex("""[\\/]|\.[a-z0-9]{1,16}$""", RegexOption.IGNORE_CASE)
+
+        /**
+         * Linkify workspace paths (optionally `:line`) in already-escaped text,
+         * turning them into `<a href="path">` so a click reaches [openPath].
+         * Deliberately conservative: a token is a path only when it has a `/`
+         * separator or a short file extension, so prose words are left alone.
+         */
+        fun linkify(escaped: String): String =
+            PATH_RE.replace(escaped) { m ->
+                val token = m.value
+                "<a href='${token}' style='color:#3a6df0;text-decoration:none'>$token</a>"
+            }
+
+        /**
+         * Split a `path:line(:col)` reference into its path and 1-based line.
+         * A trailing `:digits` is a line only when the head still looks like a
+         * path (has a separator or a file extension); otherwise the whole string
+         * is the path and the line is null. Windows `C:\…` stays intact.
+         */
+        fun parsePathLine(raw: String): Pair<String, Int?> {
+            val anchor = ANCHOR_RE.find(raw)
+            val head = anchor?.groupValues?.get(1)
+            val hasShape = head != null && SHAPE_RE.containsMatchIn(head)
+            val path = if (hasShape) head!! else raw
+            val line = if (hasShape) anchor!!.groupValues[2].toIntOrNull()?.takeIf { it > 0 } else null
+            return path to line
+        }
+    }
 }
 
 data class PlanStep(val id: String, val title: String, val status: String)
