@@ -306,6 +306,45 @@ class CodepilotClient(
         return r.get("sessionId").asString
     }
 
+    /**
+     * Inline (Tab) code completion. Fast-fail by design: a short timeout so a
+     * stale request can't hang the editor (the server also fast-fails on its
+     * own). Returns the text to insert (possibly empty), or null on
+     * timeout/disabled/error — the caller renders nothing in that case.
+     *
+     * The "no small model" gate lives server-side; when it fires the result
+     * carries `disabledReason` and an empty completion, which [onDisabled] is
+     * invoked for so the caller can prompt the user once.
+     */
+    fun inlineComplete(
+        prefix: String,
+        suffix: String,
+        path: String,
+        maxTokens: Int,
+        timeoutMs: Long = 8_000,
+        onDisabled: (reason: String) -> Unit = {},
+    ): String? {
+        val args = JsonObject().apply {
+            addProperty("prefix", prefix)
+            addProperty("suffix", suffix)
+            addProperty("path", path)
+            addProperty("requestId", idGen.get().toString())
+            addProperty("maxTokens", maxTokens)
+        }
+        return try {
+            val r = sendRequest("completion/inline", args, timeoutMs = timeoutMs) ?: return null
+            val reason = r.get("disabledReason")?.asString
+            if (reason != null) {
+                onDisabled(reason)
+                return null
+            }
+            r.get("completion")?.asString
+        } catch (t: Throwable) {
+            log.debug("inlineComplete failed: ${t.message}")
+            null
+        }
+    }
+
  // ---------- Transport internals ----------
 
     private fun sendRequest(method: String, params: JsonObject, timeoutMs: Long = 30_000): JsonObject? {

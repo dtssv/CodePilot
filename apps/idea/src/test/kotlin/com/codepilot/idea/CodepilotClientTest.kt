@@ -390,6 +390,75 @@ class CodepilotClientTest {
 
  // ---------- misc protocol helpers ----------
 
+    // ---------- inline completion ----------
+
+    @Test
+    fun `inlineComplete returns the completion text`() {
+        val behavior = FakeCodepilotServer.Behavior(
+            responder = { method, params ->
+                when (method) {
+                    "initialize" -> JsonObject().apply { addProperty("protocolVersion", 1) }
+                    "completion/inline" -> JsonObject().apply {
+                        addProperty("completion", "foo()")
+                        addProperty("requestId", params.get("requestId").asString)
+                    }
+                    else -> null
+                }
+            },
+        )
+        val c = startClient(behavior)
+        c.initialize("/repo", "ask")
+
+        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96)
+        assertEquals("foo()", text)
+    }
+
+    @Test
+    fun `inlineComplete returns null and reports disabledReason`() {
+        val behavior = FakeCodepilotServer.Behavior(
+            responder = { method, _ ->
+                when (method) {
+                    "initialize" -> JsonObject().apply { addProperty("protocolVersion", 1) }
+                    "completion/inline" -> JsonObject().apply {
+                        addProperty("completion", "")
+                        addProperty("requestId", "x")
+                        addProperty("disabledReason", "no-small-model")
+                    }
+                    else -> null
+                }
+            },
+        )
+        val c = startClient(behavior)
+        c.initialize("/repo", "ask")
+
+        var reported: String? = null
+        val text = c.inlineComplete(
+            prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96,
+            onDisabled = { reported = it },
+        )
+        assertEquals(null, text)
+        assertEquals("no-small-model", reported)
+    }
+
+    @Test
+    fun `inlineComplete returns null on timeout (fast-fail)`() {
+        val behavior = FakeCodepilotServer.Behavior(
+            responder = { method, _ ->
+                when (method) {
+                    "initialize" -> JsonObject().apply { addProperty("protocolVersion", 1) }
+                    "completion/inline" -> JsonObject().apply { addProperty("completion", "late") }
+                    else -> null
+                }
+            },
+            delaysMs = mapOf("completion/inline" to 2_000L),
+        )
+        val c = startClient(behavior)
+        c.initialize("/repo", "ask")
+
+        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96, timeoutMs = 200L)
+        assertEquals(null, text)
+    }
+
     @Test
     fun `resumeSession and forkSession parse responses`() {
         val c = startClient(defaultBehavior())

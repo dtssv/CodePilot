@@ -20,6 +20,7 @@ describe("SettingsStore", () => {
       showDiff: true,
       protocolVersion: 1,
       agentMode: "agent",
+      completion: { enabled: false, debounceMs: 200, maxTokens: 96 },
     });
     store.dispose();
   });

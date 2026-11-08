@@ -103,6 +103,63 @@ describe("Engine", () => {
   });
 });
 
+describe("Engine.request (host-side RPC)", () => {
+  it("resolves when a matching vsc-host response arrives", async () => {
+    const { engine, procs } = makeEngine();
+    engine.start();
+    const p = engine.request<{ completion: string }>("completion/inline", { prefix: "a" });
+    // Read the request the engine wrote to find the id it generated.
+    const written = procs[0].stdin.read()?.toString() ?? "";
+    const req = JSON.parse(written.trim()) as { id: string; method: string };
+    expect(req.method).toBe("completion/inline");
+    expect(req.id).toMatch(/^vsc-host-/);
+    // Simulate the daemon's response on the shared line stream.
+    engine.emit("line", JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { completion: "bc" } }));
+    await expect(p).resolves.toEqual({ completion: "bc" });
+  });
+
+  it("ignores responses for ids it did not issue (webview traffic)", async () => {
+    const { engine, procs } = makeEngine();
+    engine.start();
+    const p = engine.request("completion/inline", {});
+    const req = JSON.parse((procs[0].stdin.read()?.toString() ?? "").trim()) as { id: string };
+    // A webview response (numeric id) must not resolve our host request.
+    engine.emit("line", JSON.stringify({ jsonrpc: "2.0", id: 7, result: { x: 1 } }));
+    let settled = false;
+    void p.then(() => (settled = true), () => (settled = true));
+    await new Promise((r) => setImmediate(r));
+    expect(settled).toBe(false);
+    engine.emit("line", JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { ok: true } }));
+    await expect(p).resolves.toEqual({ ok: true });
+  });
+
+  it("rejects on a JSON-RPC error", async () => {
+    const { engine, procs } = makeEngine();
+    engine.start();
+    const p = engine.request("completion/inline", {});
+    const req = JSON.parse((procs[0].stdin.read()?.toString() ?? "").trim()) as { id: string };
+    engine.emit("line", JSON.stringify({ jsonrpc: "2.0", id: req.id, error: { message: "nope" } }));
+    await expect(p).rejects.toThrow(/nope/);
+  });
+
+  it("rejects pending host requests when the engine exits", async () => {
+    const { engine, procs } = makeEngine();
+    engine.start();
+    const p = engine.request("completion/inline", {});
+    procs[0].emit("exit", 1, null);
+    await expect(p).rejects.toThrow(/stopped|exited/);
+  });
+
+  it("aborts when the signal fires", async () => {
+    const { engine } = makeEngine();
+    engine.start();
+    const ctl = new AbortController();
+    const p = engine.request("completion/inline", {}, { signal: ctl.signal });
+    ctl.abort();
+    await expect(p).rejects.toThrow(/aborted/);
+  });
+});
+
 describe("tapServerLine", () => {
   it("picks out event and usage notifications only", () => {
     const events: unknown[] = [];

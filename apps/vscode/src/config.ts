@@ -21,6 +21,12 @@ export interface CodepilotSettings {
   protocolVersion: number;
  /** Default {@link AgentMode} applied to every new session. */
   agentMode: AgentMode;
+ /** Inline (Tab) completion. Off by default; see docs/design/G-inline-completion.md. */
+  completion: {
+    enabled: boolean;
+    debounceMs: number;
+    maxTokens: number;
+  };
 }
 
 const KEYS = {
@@ -36,6 +42,9 @@ const KEYS = {
   showDiff: "codepilot.showDiff",
   protocolVersion: "codepilot.protocolVersion",
   agentMode: "codepilot.agentMode",
+  completionEnabled: "codepilot.completion.enabled",
+  completionDebounceMs: "codepilot.completion.debounceMs",
+  completionMaxTokens: "codepilot.completion.maxTokens",
 } as const;
 
 function readConfig(cfg: vscode.WorkspaceConfiguration): CodepilotSettings {
@@ -55,6 +64,11 @@ function readConfig(cfg: vscode.WorkspaceConfiguration): CodepilotSettings {
     showDiff: cfg.get<boolean>(KEYS.showDiff, true),
     protocolVersion: cfg.get<number>(KEYS.protocolVersion, 1),
     agentMode,
+    completion: {
+      enabled: cfg.get<boolean>(KEYS.completionEnabled, false),
+      debounceMs: cfg.get<number>(KEYS.completionDebounceMs, 200),
+      maxTokens: cfg.get<number>(KEYS.completionMaxTokens, 96),
+    },
   };
 }
 

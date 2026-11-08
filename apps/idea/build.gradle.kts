@@ -88,8 +88,9 @@ intellijPlatform {
         changeNotes = "Chat tool window runs the shared CodePilot UI (JCEF), with a Swing fallback."
 
         // Since/until — match IntelliJ Platform 2.x expectations (YYMM build numbers).
+        // 241 floor for the inline (Tab) completion API.
         ideaVersion {
-            sinceBuild = "233"
+            sinceBuild = "241"
             untilBuild = "251.*"
         }
     }

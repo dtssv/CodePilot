@@ -49,6 +49,17 @@ export class Engine extends EventEmitter {
   private starting = false;
   private generation = 0;
 
+  // Host-side JSON-RPC requests (for features the extension host owns directly,
+  // e.g. inline completion). The chat webview owns its OWN client; these two
+  // never collide because host request ids are namespaced ("vsc-host-*") and
+  // each side only resolves ids it generated. Response lines are broadcast to
+  // both; the one that didn't issue the id simply ignores it.
+  private hostReqSeq = 0;
+  private readonly hostPending = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+  >();
+
   constructor(
     private readonly settings: () => CodepilotSettings,
     private readonly cwd: () => string,
@@ -57,6 +68,82 @@ export class Engine extends EventEmitter {
     private readonly spawner: Spawner = spawn,
   ) {
     super();
+    // Peek every relayed line for responses to our host-issued requests.
+    this.on("line", (line) => this.matchHostResponse(line));
+    this.on("exit", () => this.rejectAllHostPending("engine stopped"));
+  }
+
+  /**
+   * Issue a JSON-RPC request from the extension host and await its result.
+   * Used by host-owned features (inline completion). Rejects if the engine is
+   * not running, on timeout, or when the peer returns an error. `signal` aborts
+   * the wait (the in-flight request is abandoned, not cancelled on the server —
+   * the server fast-fails cheaply on its own).
+   */
+  request<R = unknown>(
+    method: string,
+    params: unknown,
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<R> {
+    const id = `vsc-host-${++this.hostReqSeq}`;
+    const line = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    return new Promise<R>((resolve, reject) => {
+      let settled = false;
+      const done = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        this.hostPending.delete(id);
+        clearTimeout(timer);
+        if (opts?.signal) opts.signal.removeEventListener("abort", onAbort);
+        fn();
+      };
+      const onAbort = (): void => done(() => reject(new Error("aborted")));
+      const timer = setTimeout(
+        () => done(() => reject(new Error(`request ${method} timed out`))),
+        opts?.timeoutMs ?? 10_000,
+      );
+      if (opts?.signal) {
+        if (opts.signal.aborted) {
+          clearTimeout(timer);
+          reject(new Error("aborted"));
+          return;
+        }
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.hostPending.set(id, {
+        resolve: (v) => done(() => resolve(v as R)),
+        reject: (e) => done(() => reject(e)),
+      });
+      try {
+        this.write(line);
+      } catch (err) {
+        done(() => reject(err instanceof Error ? err : new Error(String(err))));
+      }
+    });
+  }
+
+  private matchHostResponse(line: string): void {
+    if (this.hostPending.size === 0) return;
+    if (!line.includes('"vsc-host-')) return;
+    let msg: { id?: unknown; result?: unknown; error?: { message?: unknown } };
+    try {
+      msg = JSON.parse(line) as typeof msg;
+    } catch {
+      return;
+    }
+    if (typeof msg.id !== "string") return;
+    const pending = this.hostPending.get(msg.id);
+    if (!pending) return;
+    if (msg.error) {
+      pending.reject(new Error(String(msg.error.message ?? "request failed")));
+    } else {
+      pending.resolve(msg.result);
+    }
+  }
+
+  private rejectAllHostPending(reason: string): void {
+    for (const p of this.hostPending.values()) p.reject(new Error(reason));
+    this.hostPending.clear();
   }
 
   get running(): boolean {

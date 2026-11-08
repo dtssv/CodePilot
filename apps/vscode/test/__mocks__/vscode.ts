@@ -84,6 +84,9 @@ export const workspace = {
   get workspaceFolders() {
     return __workspaceFolders;
   },
+  asRelativePath(uri: { fsPath?: string } | string): string {
+    return typeof uri === "string" ? uri : uri.fsPath ?? "";
+  },
 };
 
 /* ---------------- status bar ---------------- */
@@ -117,8 +120,21 @@ export function __setColorTheme(kind: number): void {
 
 export const env = { language: "en" };
 
+/** Active editor exposed via `window.activeTextEditor`. Tests set this to
+ * drive the completion provider's selection/gating logic. */
+export let __activeTextEditor: unknown = undefined;
+export function __setActiveTextEditor(editor: unknown): void {
+  __activeTextEditor = editor;
+}
+
 export const window = {
   activeColorTheme: { kind: 2 } as { kind: number },
+  get activeTextEditor() {
+    return __activeTextEditor;
+  },
+  async showInformationMessage(_message: string): Promise<undefined> {
+    return undefined;
+  },
   onDidChangeActiveColorTheme(listener: (t: { kind: number }) => void): Disposable {
     themeListeners.add(listener);
     return new Disposable(() => themeListeners.delete(listener));
@@ -174,6 +190,55 @@ export class Uri {
   }
 }
 
+/* ---------------- editor primitives (completion) ---------------- */
+
+export class Position {
+  constructor(readonly line: number, readonly character: number) {}
+}
+
+export class Range {
+  constructor(readonly start: Position, readonly end: Position) {}
+}
+
+export class Selection {
+  constructor(readonly anchor: Position, readonly active: Position) {}
+  get isEmpty(): boolean {
+    return this.anchor.line === this.active.line && this.anchor.character === this.active.character;
+  }
+}
+
+export class InlineCompletionItem {
+  constructor(readonly insertText: string, readonly range?: Range) {}
+}
+
+/** Minimal cancellation token + source, enough for the completion provider. */
+export class CancellationTokenSource {
+  private listeners = new Set<() => void>();
+  private cancelled = false;
+  readonly token = {
+    isCancellationRequested: false,
+    onCancellationRequested: (fn: () => void): Disposable => {
+      this.listeners.add(fn);
+      return new Disposable(() => this.listeners.delete(fn));
+    },
+  };
+  cancel(): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    this.token.isCancellationRequested = true;
+    for (const fn of this.listeners) fn();
+  }
+  dispose(): void {
+    this.listeners.clear();
+  }
+}
+
+export const languages = {
+  registerInlineCompletionItemProvider(_selector: unknown, _provider: unknown): Disposable {
+    return new Disposable(() => {});
+  },
+};
+
 /* ---------------- misc ---------------- */
 
 /** Reset all mock state between tests. */
@@ -185,4 +250,5 @@ export function __resetAll(): void {
   configChangeListeners.clear();
   themeListeners.clear();
   window.activeColorTheme = { kind: 2 };
+  __setActiveTextEditor(undefined);
 }
