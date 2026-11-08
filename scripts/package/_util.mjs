@@ -46,9 +46,13 @@ export function currentPlatform() {
 
 /** @param {OsFamily} family @param {string} arch */
 export function pkgTargetFor(family, arch) {
-  if (family === "win") return arch === "arm64" ? "node20-win-arm64" : "node20-win-x64";
-  if (family === "mac") return arch === "arm64" ? "node20-macos-arm64" : "node20-macos-x64";
-  return arch === "arm64" ? "node20-linux-arm64" : "node20-linux-x64";
+  // node22: yao-pkg/pkg-fetch v3.6 publishes prebuilt Node binaries for
+  // node22 (v22.22.3+) on all 6 targets, but NOT for node20. A node20 target
+  // makes pkg fall back to compiling Node from source, which fails on CI
+  // runners without a full C++ toolchain (e.g. Windows).
+  if (family === "win") return arch === "arm64" ? "node22-win-arm64" : "node22-win-x64";
+  if (family === "mac") return arch === "arm64" ? "node22-macos-arm64" : "node22-macos-x64";
+  return arch === "arm64" ? "node22-linux-arm64" : "node22-linux-x64";
 }
 
 /** @param {OsFamily} family @param {string} arch */
