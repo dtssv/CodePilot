@@ -36,7 +36,7 @@ function AssistantTurnBlock({ parts }: { parts: TurnPart[] }): React.ReactElemen
               return (
                 <Box key={p.msg.id} flexDirection="column">
                   {p.msg.reasoning ? <ReasoningBlock text={p.msg.reasoning} /> : null}
-                  <Markdown dimColor={false}>{p.msg.text}</Markdown>
+                  <Markdown dimColor={false} final={!p.msg.streaming}>{p.msg.text}</Markdown>
                 </Box>
               );
             case "steps":
@@ -283,6 +283,34 @@ function RowView({ row }: { row: Extract<TurnPart, { kind: "row" }>["row"] }): R
           </Text>
         </Box>
       );
+    case "goal": {
+      const cap = row.maxRounds ? `/${row.maxRounds}` : "";
+      const head =
+        row.status === "running"
+          ? `${glyph.active} Goal loop · round ${row.round}${cap} · running…`
+          : row.status === "completed"
+            ? `${glyph.ok} Goal loop · completed after round ${row.round}${cap}`
+            : row.status === "blocked"
+              ? `${glyph.warn} Goal loop · blocked at round ${row.round}${cap}`
+              : `${glyph.warn} Goal loop · round limit (${row.round}${cap})`;
+      const headColor =
+        row.status === "completed"
+          ? color.add
+          : row.status === "running"
+            ? color.accent
+            : color.warn;
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={headColor}>{head}</Text>
+          {row.detail ? (
+            <Text color={color.faint}>
+              {"  "}
+              {glyph.dot} {oneLine(row.detail, 120)}
+            </Text>
+          ) : null}
+        </Box>
+      );
+    }
     case "team":
       return <TeamBlock row={row} />;
   }

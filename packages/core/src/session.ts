@@ -1709,6 +1709,36 @@ export class Session {
     return this.cancelController !== null;
   }
 
+  /**
+   * Resolve once the session is idle (no `prompt()` in flight AND no queued
+   * follow-ups left to drain). Returns immediately if already idle. Used by the
+   * goal loop so it does not advance a round until the round it just enqueued —
+   * because the session was busy — has actually executed. Without this, a goal
+   * loop driven over a busy session spins at memory speed, enqueuing one
+   * `renderRoundPrompt` per iteration (the queued round prompts pile up and the
+   * loop never sees fresh output), rather than running one round at a time.
+   */
+  async waitUntilIdle(): Promise<void> {
+    if (this.disposed) return;
+    if (!this.isBusy() && this.followUpQueue.length === 0) return;
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (this.disposed || (!this.isBusy() && this.followUpQueue.length === 0)) {
+          unsubscribe();
+          resolve();
+        }
+      };
+      const unsubscribe = this.subscribe((e) => {
+        // Re-check on every status transition; `idle` is the one that matters,
+        // but checking on any event keeps this robust to future status values.
+        if (e.type === "status") check();
+      });
+      // A follow-up draining back-to-back can flip busy→idle→busy between our
+      // check and the subscribe, so verify once more after wiring the listener.
+      check();
+    });
+  }
+
   cancel(): void {
     if (this.cancelController) {
  // Active run: abort it. The agent loop + provider stream observe the

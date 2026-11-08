@@ -9,6 +9,27 @@ const THINK_BLOCK = new RegExp(
 const THINK_OPEN = new RegExp(`<(?:${TAG_NAMES})\\b[^>]*>`, "i");
 const THINK_TAG = new RegExp(`<\\/?(?:${TAG_NAMES})\\b[^>]*>`, "gi");
 
+// Goal-loop protocol markers — internal control signal, never a user message.
+// Stripped at display only; see packages/core/src/stripThinking.ts.
+const GOAL_TAG_NAMES = "goal_status|goal_blocked_reason|goal_completed_summary";
+const GOAL_BLOCK = new RegExp(
+  `<(?:${GOAL_TAG_NAMES})\\b[^>]*>[\\s\\S]*?<\\/(?:${GOAL_TAG_NAMES})\\s*>`,
+  "gi",
+);
+const GOAL_TAG = new RegExp(`<\\/?(?:${GOAL_TAG_NAMES})\\b[^>]*>`, "gi");
+
+export function stripGoalStatus(text: string): string {
+  if (!text || !new RegExp(`<\\/?(?:${GOAL_TAG_NAMES})\\b`, "i").test(text)) {
+    return text;
+  }
+  return text
+    .replace(GOAL_BLOCK, "")
+    .replace(GOAL_TAG, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export type ThinkingSegment =
   | { kind: "text"; text: string }
   | { kind: "think"; text: string; incomplete?: boolean };
@@ -20,7 +41,12 @@ function scrubOrphanTags(s: string): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
-export function splitThinking(text: string): ThinkingSegment[] {
+export function splitThinking(
+  text: string,
+  opts?: { final?: boolean },
+): ThinkingSegment[] {
+  if (!text) return [];
+  text = stripGoalStatus(text);
   if (!text) return [];
   if (!new RegExp(`<\\/?(?:${TAG_NAMES})\\b`, "i").test(text)) {
     return [{ kind: "text", text }];
@@ -32,10 +58,10 @@ export function splitThinking(text: string): ThinkingSegment[] {
   if (!new RegExp(`<\\/?(?:${TAG_NAMES})\\b`, "i").test(masked)) {
     return [{ kind: "text", text }];
   }
-  return splitThinkingRaw(text, masked);
+  return splitThinkingRaw(text, masked, opts?.final === true);
 }
 
-function splitThinkingRaw(text: string, matchOn: string): ThinkingSegment[] {
+function splitThinkingRaw(text: string, matchOn: string, final = false): ThinkingSegment[] {
   const out: ThinkingSegment[] = [];
   let last = 0;
   const re = new RegExp(THINK_BLOCK.source, "gi");
@@ -61,7 +87,9 @@ function splitThinkingRaw(text: string, matchOn: string): ThinkingSegment[] {
     if (before.trim()) out.push({ kind: "text", text: before });
     const openMatch = restMask.slice(openIdx).match(THINK_OPEN)!;
     const body = rest.slice(openIdx + openMatch[0].length);
-    out.push({ kind: "think", text: body, incomplete: true });
+    // On a final (non-streaming) turn an unclosed think is a model that never
+    // emitted </think>; present it as a completed Thought, not a stuck spinner.
+    out.push(final ? { kind: "think", text: body } : { kind: "think", text: body, incomplete: true });
   } else {
     const cleaned = scrubOrphanTags(rest);
     if (cleaned.trim()) out.push({ kind: "text", text: cleaned });
@@ -108,7 +136,8 @@ function maskCodeSpans(text: string): string {
 }
 
 export function stripThinking(text: string): string {
-  if (!text || !new RegExp(`<\\/?(?:${TAG_NAMES})\\b`, "i").test(text)) return text;
+  const hasThink = !!text && new RegExp(`<\\/?(?:${TAG_NAMES})\\b`, "i").test(text);
+  if (!hasThink) return stripGoalStatus(text);
   return splitThinking(text)
     .filter((s): s is Extract<ThinkingSegment, { kind: "text" }> => s.kind === "text")
     .map((s) => s.text)

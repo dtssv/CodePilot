@@ -434,3 +434,50 @@ describe("TUI state machine — end-to-end session lifecycle", () => {
     expect(state.notice).toContain("plan");
   });
 });
+
+describe("TUI state — goal loop is visible as a durable row", () => {
+  it("creates one goal row and updates it in place across rounds", () => {
+    let state: TuiState = initialState({
+      sessionId: "g1",
+      cwd: "/tmp/proj",
+      model: "m",
+      permissionMode: "ask",
+      agentMode: "agent",
+    });
+
+    // Round 1 running: a durable goal row appears (not just a transient notice).
+    state = reducer(state, {
+      type: "event",
+      event: { type: "goal_progress", round: 1, maxRounds: 5, status: "running" },
+    });
+    let goalRows = state.rows.filter((r) => r.kind === "goal");
+    expect(goalRows.length).toBe(1);
+    expect(state.notice).toContain("round 1/5");
+
+    // Round 2 running: still one row, updated in place.
+    state = reducer(state, {
+      type: "event",
+      event: { type: "goal_progress", round: 2, maxRounds: 5, status: "running" },
+    });
+    goalRows = state.rows.filter((r) => r.kind === "goal");
+    expect(goalRows.length).toBe(1);
+    expect((goalRows[0] as Extract<Row, { kind: "goal" }>).round).toBe(2);
+
+    // Completed: the running row flips to completed and carries the reason.
+    state = reducer(state, {
+      type: "event",
+      event: {
+        type: "goal_progress",
+        round: 3,
+        maxRounds: 5,
+        status: "completed",
+        reason: "all tests green",
+      },
+    });
+    goalRows = state.rows.filter((r) => r.kind === "goal");
+    expect(goalRows.length).toBe(1);
+    const done = goalRows[0] as Extract<Row, { kind: "goal" }>;
+    expect(done.status).toBe("completed");
+    expect(done.detail).toBe("all tests green");
+  });
+});

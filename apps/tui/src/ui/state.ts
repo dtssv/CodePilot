@@ -117,6 +117,14 @@ export type Row =
   | { kind: "usage"; usage: UsageInfo; at: number }
   | { kind: "error"; message: string; recoverable: boolean; at: number }
   | { kind: "system"; text: string; at: number }
+  | {
+      kind: "goal";
+      round: number;
+      maxRounds?: number;
+      status: "running" | "completed" | "blocked" | "round_limit";
+      detail?: string;
+      at: number;
+    }
   | { kind: "retry"; attempt: number; maxAttempts: number; delayMs: number; reason: string; at: number }
   | {
       kind: "team";
@@ -617,8 +625,38 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             notice: `Plan approved — switching to ${ev.mode} mode`,
           };
         case "goal_progress": {
- // Live per-round progress of an active goal loop. Show a compact
- // status line; the authoritative record is the checkpoint file.
+ // Live per-round progress of an active goal loop. We keep ONE durable
+ // transcript row for the loop (so a model-initiated goal via `start_goal`
+ // is unmistakable and persists in scrollback), updating it each round,
+ // plus a compact notice for the status bar. The authoritative record is
+ // the checkpoint file.
+          const detail =
+            ev.status === "completed"
+              ? ev.reason
+              : ev.status === "blocked"
+                ? ev.blockedReason ?? ev.reason
+                : ev.status === "round_limit"
+                  ? ev.reason
+                  : undefined;
+          const goalRows = state.rows.slice();
+          let goalIdx = -1;
+          for (let i = goalRows.length - 1; i >= 0; i--) {
+            const r = goalRows[i]!;
+            if (r.kind === "goal" && r.status === "running") {
+              goalIdx = i;
+              break;
+            }
+          }
+          const goalRow: Extract<Row, { kind: "goal" }> = {
+            kind: "goal",
+            round: ev.round,
+            ...(ev.maxRounds !== undefined ? { maxRounds: ev.maxRounds } : {}),
+            status: ev.status,
+            ...(detail !== undefined ? { detail } : {}),
+            at: Date.now(),
+          };
+          if (goalIdx >= 0) goalRows[goalIdx] = goalRow;
+          else goalRows.push(goalRow);
           const cap = ev.maxRounds ? `/${ev.maxRounds}` : "";
           const tail =
             ev.status === "running"
@@ -630,6 +668,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
                   : `round limit${ev.reason ? ` — ${ev.reason}` : ""}`;
           return {
             ...state,
+            rows: goalRows,
             notice: `Goal · round ${ev.round}${cap} · ${tail}`,
           };
         }

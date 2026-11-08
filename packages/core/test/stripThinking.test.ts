@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasVisibleAssistantContent, splitThinking, stripThinking } from "../src/stripThinking.js";
+import { hasVisibleAssistantContent, splitThinking, stripThinking, stripGoalStatus, type ThinkingSegment } from "../src/stripThinking.js";
 
 describe("stripThinking", () => {
   it("removes closed think blocks and keeps the answer", () => {
@@ -23,6 +23,77 @@ describe("stripThinking", () => {
     expect(stripThinking("前言</think>\n正文")).toBe("前言\n正文");
   });
 });
+
+describe("stripGoalStatus", () => {
+  it("removes the completed marker and its surrounding whitespace", () => {
+    expect(stripGoalStatus("Done.\n\n<goal_status>completed</goal_status>")).toBe("Done.");
+    expect(stripGoalStatus("<goal_status>completed</goal_status>")).toBe("");
+  });
+
+  it("removes blocked marker and reason block", () => {
+    const raw =
+      "Can't proceed.\n<goal_status>blocked</goal_status>\n<goal_blocked_reason>GH_TOKEN not set</goal_blocked_reason>";
+    expect(stripGoalStatus(raw)).toBe("Can't proceed.");
+  });
+
+  it("removes a completed-summary block", () => {
+    const raw =
+      "All green.\n<goal_completed_summary>migrated auth + tests pass</goal_completed_summary>\n<goal_status>completed</goal_status>";
+    expect(stripGoalStatus(raw)).toBe("All green.");
+  });
+
+  it("drops orphan goal tags left mid-stream", () => {
+    expect(stripGoalStatus("working…\n<goal_status>")).toBe("working…");
+    expect(stripGoalStatus("</goal_status>\nnext")).toBe("next");
+  });
+
+  it("is a no-op on text without goal markers", () => {
+    expect(stripGoalStatus("plain answer")).toBe("plain answer");
+    expect(stripGoalStatus("")).toBe("");
+  });
+});
+
+describe("goal markers never surface in rendered output", () => {
+  it("stripThinking removes goal markers even without think tags", () => {
+    expect(stripThinking("Finished.\n<goal_status>completed</goal_status>")).toBe("Finished.");
+  });
+
+  it("splitThinking drops goal markers from its text segments", () => {
+    const segs = splitThinking("The result.\n<goal_status>completed</goal_status>");
+    expect(segs).toEqual([{ kind: "text", text: "The result." }]);
+  });
+
+  it("hasVisibleAssistantContent is false for a goal-marker-only message", () => {
+    expect(hasVisibleAssistantContent("<goal_status>completed</goal_status>")).toBe(false);
+  });
+});
+
+describe("unclosed think on a final turn is not a stuck 'Thinking…'", () => {
+  const raw = "<think>\nreasoning that never closed\nand then the real answer";
+
+  it("while streaming, a trailing open think stays incomplete", () => {
+    const segs = splitThinking(raw);
+    const think = segs.find((s) => s.kind === "think");
+    expect(think).toBeDefined();
+    expect((think as Extract<ThinkingSegment, { kind: "think" }>).incomplete).toBe(true);
+  });
+
+  it("on a final turn, the same open think becomes a completed Thought", () => {
+    const segs = splitThinking(raw, { final: true });
+    const think = segs.find((s) => s.kind === "think");
+    expect(think).toBeDefined();
+    // Not incomplete → renders as "Thought", collapsible, never a stuck spinner.
+    expect((think as Extract<ThinkingSegment, { kind: "think" }>).incomplete).toBeUndefined();
+  });
+
+  it("properly-closed think is unaffected by final", () => {
+    const closed = "<think>\nreasoning\n</think>\nthe answer";
+    const streamed = splitThinking(closed);
+    const fin = splitThinking(closed, { final: true });
+    expect(streamed).toEqual(fin);
+  });
+});
+
 
 describe("splitThinking", () => {
   it("separates think bodies from the answer", () => {

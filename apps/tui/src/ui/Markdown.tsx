@@ -286,6 +286,9 @@ export interface MarkdownProps {
   children: string;
  /** Optional dimming for partial streams. */
   dimColor?: boolean;
+ /** True once the turn has finished streaming. A trailing unclosed `<think>`
+  * then renders as a completed Thought instead of a perpetual "Thinking…". */
+  final?: boolean;
 }
 
 /** Spacing comes from the source's blank lines only: trim and collapse them. */
@@ -399,8 +402,8 @@ function MarkdownBlocks({ text, dimColor }: { text: string; dimColor?: boolean }
   );
 }
 
-export function Markdown({ children, dimColor }: MarkdownProps): React.ReactElement {
-  const segments: ThinkingSegment[] = splitThinking(children);
+export function Markdown({ children, dimColor, final }: MarkdownProps): React.ReactElement {
+  const segments: ThinkingSegment[] = splitThinking(children, { final });
   return (
     <Box flexDirection="column">
       {segments.map((seg, i) =>

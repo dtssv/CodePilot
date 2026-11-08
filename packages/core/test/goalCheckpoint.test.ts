@@ -103,6 +103,64 @@ describe("runGoal — checkpoint integration", () => {
   });
 });
 
+describe("driveGoalRounds — busy session does not spin / pile up round prompts", () => {
+  let workDir: string;
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tempHome, "goal-busy-"));
+  });
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it("waits for the session to drain before scanning when prompt() returns 'queued'", async () => {
+    const { driveGoalRounds } = await import("../src/goal.js");
+
+    // A minimal Session-shaped fake that reproduces the real race: the session
+    // is "busy", so prompt() enqueues (returns "queued") instead of executing.
+    // Without the waitUntilIdle() fix, driveGoalRounds would read stale events,
+    // find no status marker, and spin — calling prompt() once per for-loop
+    // iteration (the "7 identical OBJECTIVE" pile-up). With the fix it calls
+    // waitUntilIdle(), and only then does the completion marker appear.
+    const prompts: string[] = [];
+    let events: Array<{ type: string; role?: string; content?: unknown }> = [];
+    let busy = true;
+
+    const fakeSession = {
+      id: "busy-session",
+      cwd: workDir,
+      getConfig: () => ({}) as never,
+      prompt: async (text: string) => {
+        prompts.push(text);
+        // Busy: the round prompt is enqueued, not executed; no new output yet.
+        return "queued" as const;
+      },
+      waitUntilIdle: async () => {
+        // The enqueued round prompt now runs and the model reports completed.
+        busy = false;
+        events = [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "<goal_status>completed</goal_status>" }],
+          },
+        ];
+      },
+      getEvents: () => events.slice(),
+    } as unknown as import("../src/session.js").Session;
+
+    const result = await driveGoalRounds(fakeSession, {
+      objective: "do the thing",
+      maxRounds: 10,
+    });
+
+    expect(result.status).toBe("completed");
+    // The loop must NOT have spun: exactly one round prompt was sent, then it
+    // waited and saw the completion marker — not 10 (maxRounds) pile-ups.
+    expect(prompts.length).toBe(1);
+    expect(busy).toBe(false);
+  });
+});
+
 describe("extractBlockedReason via goalPromptBody behaviour", () => {
   it("recognises the standard marker set", async () => {
  // Smoke test for the exported regex array.

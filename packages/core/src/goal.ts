@@ -161,7 +161,17 @@ export async function driveGoalRounds(
     opts.onRound?.(round, "running");
     await fireCheckpoint(round, "running");
     const userText = renderRoundPrompt(round, opts.objective, hasSpec);
-    await session.prompt(userText);
+    const delivery = await session.prompt(userText);
+    // When the session was busy (e.g. a goal loop was escalated from a still-
+    // running agent turn via `start_goal`), `prompt()` does not execute the
+    // round — it enqueues it and returns "queued". Advancing immediately would
+    // scan the previous round's stale output, find no status marker, and spin:
+    // one queued round prompt per iteration (the "7 identical OBJECTIVE
+    // (unchanged across rounds)" pile-up). Wait for the session to drain so the
+    // round we just enqueued actually runs before we read its result.
+    if (delivery === "queued") {
+      await session.waitUntilIdle();
+    }
 
     const events = session.getEvents();
     const lastAssistant = lastAssistantText(events);
