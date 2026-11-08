@@ -1192,44 +1192,47 @@ export function QuestionCard({
                   const recommended =
                     i === 0 || /\(recommended\)|（推荐）|推荐/i.test(opt.label);
                   const cleanLabel = opt.label.replace(/\s*\(recommended\)\s*/i, "").replace(/（推荐）/g, "").trim();
+                  // The whole row is the click target (via keyboard too), so a
+                  // click anywhere on the option selects it — the checkbox/radio
+                  // is just an indicator, not the only hit area. A drag to select
+                  // text still works because that fires selectionchange, not click.
+                  const toggle = (): void => pick(q.id, opt.label, q.multiSelect === true);
                   return (
                     <div
                       key={opt.label}
-                      className={`group flex items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors ${
+                      role={q.multiSelect ? "checkbox" : "radio"}
+                      aria-checked={picked}
+                      tabIndex={0}
+                      onClick={toggle}
+                      onKeyDown={(e) => {
+                        if (e.key === " " || e.key === "Enter") {
+                          e.preventDefault();
+                          toggle();
+                        }
+                      }}
+                      className={`group flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors ${
                         picked
                           ? "border-[var(--color-accent)] bg-[var(--color-accent-dim)]"
                           : "border-[var(--color-edge)] hover:bg-[var(--color-surface-hover)]"
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => pick(q.id, opt.label, q.multiSelect === true)}
-                        aria-pressed={picked}
-                        className="mt-0.5 shrink-0"
-                        title={q.multiSelect ? t("Toggle") : t("Select")}
+                      <span
+                        className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border ${
+                          q.multiSelect ? "rounded" : "rounded-full"
+                        } ${
+                          picked
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-white"
+                            : "border-[var(--color-edge)] text-transparent group-hover:border-[var(--color-ink-dim)]"
+                        }`}
                       >
-                        <span
-                          className={`flex h-4 w-4 items-center justify-center border ${
-                            q.multiSelect ? "rounded" : "rounded-full"
-                          } ${
-                            picked
-                              ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-white"
-                              : "border-[var(--color-edge)] text-transparent group-hover:border-[var(--color-ink-dim)]"
-                          }`}
-                        >
-                          {picked && <CheckIcon className="h-3 w-3" />}
-                        </span>
-                      </button>
+                        {picked && <CheckIcon className="h-3 w-3" />}
+                      </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
                           {/* select-text so the user can copy the answer to search it */}
-                          <button
-                            type="button"
-                            onClick={() => pick(q.id, opt.label, q.multiSelect === true)}
-                            className="select-text text-left text-[13px] font-medium text-[var(--color-ink)]"
-                          >
+                          <span className="select-text text-left text-[13px] font-medium text-[var(--color-ink)]">
                             {cleanLabel}
-                          </button>
+                          </span>
                           {recommended && (
                             <span className="rounded-full bg-[var(--color-accent-dim)] px-1.5 py-px text-[10px] font-semibold text-[var(--color-accent)]">
                               {t("Recommended")}
