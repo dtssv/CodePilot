@@ -109,6 +109,10 @@ export function ContextGauge({
   const [pos, setPos] = useState<MenuPos | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  // Track the session the current `report` belongs to so we can drop a stale
+  // report the instant the session changes, without flickering on in-session
+  // refreshes (which share this effect via `refreshKey`).
+  const reportSessionRef = useRef<string | undefined>(undefined);
 
   // Trigger-only key: refetch when the transcript grows or the run status
   // changes (a turn just settled → the new send cost is known).
@@ -118,6 +122,15 @@ export function ContextGauge({
     if (!sessionId || state.connection !== "connected") {
       setReport(null);
       return;
+    }
+    // Clear the previous session's report the instant the session changes so
+    // switching into (or creating) another session never shows the old
+    // session's usage during the async fetch below. Guarded by the session ref
+    // so ordinary in-session refreshes (same `sessionId`, new `refreshKey`)
+    // don't blank the gauge and make it flicker.
+    if (reportSessionRef.current !== sessionId) {
+      reportSessionRef.current = sessionId;
+      setReport(null);
     }
     let alive = true;
     client
