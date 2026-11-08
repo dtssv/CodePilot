@@ -258,6 +258,20 @@ jobs:
 
       - name: Install Bun (for the TUI binary)
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.x"
+        id: setup-bun
+        continue-on-error: true
+
+      # setup-bun intermittently 504s when resolving "latest" or downloading
+      # the binary; fall back to a direct install so a transient upstream
+      # outage doesn't fail the whole release.
+      - name: Install Bun (fallback)
+        if: steps.setup-bun.outcome == 'failure'
+        shell: bash
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         shell: bash
