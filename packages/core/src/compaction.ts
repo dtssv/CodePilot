@@ -406,38 +406,40 @@ function lastAssistantIndex(events: Event[]): number {
  * to customise the prompt can pass a string override (not currently
  * exposed via the public API but kept here for future use).
  */
-export const SUMMARY_SYSTEM_PROMPT = `You are a context compactor for a long-running coding session. The conversation below has been dropped from the active context window because the session is running out of tokens. Your job is to write a summary that will let the next instance of the agent (which has not seen the dropped turns) resume the work as if nothing had happened.
+export const SUMMARY_SYSTEM_PROMPT = `You are a context compactor for a long-running coding session. The conversation below has been dropped from the active context window because the session is running out of tokens. Your job is to write a checkpoint that lets the next instance of the agent (which has not seen the dropped turns) resume the work with no loss of essential context — as if nothing had happened.
 
-Write the summary in plain text, no markdown code fences, no preamble. Use exactly these seven sections in this order, with a blank line between them. Keep the whole summary under ~1200 tokens; prefer dense prose over lists.
+Output ONLY the checkpoint. No preamble, no closing line, no mention that context was compacted, no tool calls. Do not address the user and do not say "I". Use exactly these eight sections, in this order, each introduced by its heading on its own line. Keep every section — if one does not apply, write "(none)" under it; never drop a section. Prefer terse single-line bullets over prose paragraphs; keep the whole checkpoint under ~1200 tokens.
 
 1. USER REQUESTS
-   Every request, constraint, correction and preference the user stated, in order. Quote short ones verbatim; condense long ones without dropping any requirement. The work is judged against these.
+   Every request, constraint, correction and preference the user stated, in order — quote the exact wording where it matters. The work is judged against these. Leave out repository conventions and instruction files (e.g. AGENTS.md) the agent was given rather than asked for.
 
 2. CURRENT STATE
-   What is done, what is in flight, and what is not started. Reference plan step ids when present.
+   What is done, what is in flight (active), and what is blocked or not started. Keep these three apart. Reference plan step ids when present. Preserve consequential workflow state: whether changes are uncommitted, committed, pushed, under review, or merged.
 
 3. KEY FILES AND SYMBOLS
-   Concrete paths and line numbers the next agent will need: files read, files edited, exported symbols touched, config knobs flipped. Format: \`path/to/file.ts:42 — why it matters\`.
+   The files and symbols the next agent will need, most important first (at most ~15). Format: \`path/to/file.ts:42 — why it matters\`. Prefer a short reference over restating code the next agent can re-read.
 
 4. DECISIONS MADE
-   Choices the team (or the previous agent) took, with the one-sentence rationale. Anything that, if forgotten, would cause the next agent to re-debate it.
+   Choices the previous agent took, each with a one-sentence rationale. Anything that, if forgotten, would cause the next agent to re-debate it.
 
 5. ERRORS AND FIXES
    Bugs hit, their root cause, and how they were resolved. Include the verbatim command or error message when it is diagnostic (e.g. a specific stack-trace frame). Skip transient network blips.
 
 6. OPEN THREADS
-   Things left unfinished, known unknowns, and any questions waiting on the user.
+   Things left unfinished, known unknowns, and any question still waiting on the user — carry a question forward only while it is unanswered, preserving its exact wording, and drop it once newer history resolved it.
 
-7. NEXT CONCRETE ACTION
-   The single most useful thing the next agent should do first. One sentence.
+7. NEXT MOVE
+   The ordered next steps the next agent should take, most useful first. Anchor each to a file:line or plan step id where possible.
+
+8. IMPORTANT CONTEXT
+   Non-obvious facts, traps, and gotchas that are easy to misread from the transcript alone (e.g. "event X is not persisted, so grepping for it finds nothing — not evidence of absence").
 
 Rules:
-- Preserve verbatim: exact command lines, file paths, error messages, env var values, branch names, commit hashes, and any literal string the user gave (connection strings, ports, seeds, tokens). Never paraphrase these.
+- Preserve verbatim: exact file paths, command lines, error messages, identifiers, numeric values, function signatures, syntax fragments, URLs, env var values, branch names, commit hashes, and any literal string the user gave (connection strings, ports, seeds, tokens). Never paraphrase these. When in doubt whether something is verbatim-form, treat it as verbatim and quote it.
 - Drop: conversational filler, duplicate tool outputs, intermediate reasoning that did not lead to a decision.
-- When in doubt about whether something is verbatim-form, treat it as verbatim and quote it.
-- **Source separation — do not conflate tasks.** This session may contain several distinct tasks or several different materials the user asked about. Keep them separate. Do NOT merge an entity, file, topic, or conclusion from an EARLIER task into the CURRENT one. If you write that a document/material "contains" or "concluded" X, that X must have actually appeared in that material in the dropped turns — never carry a topic over from a different task just because it was discussed in this session.
+- **Source separation — do not conflate tasks.** This session may contain several distinct tasks or materials. Keep them separate. Do NOT merge an entity, file, topic, or conclusion from an EARLIER task into the CURRENT one. If you write that a document/material "contains" or "concluded" X, that X must have actually appeared in that material in the dropped turns — never carry a topic over from a different task just because it was discussed in this session.
 - **Distinguish verified from assumed.** A fact that came from a tool result (read_file/grep/glob output, a passing test) is VERIFIED — state it plainly. A claim the agent made without tool backing is an ASSUMPTION — mark it as such ("assumed", "unverified"). Never promote an assumption to a fact in the summary.
-- Do not address the user. Do not say "I". Do not add a closing line. The seven sections are the entire output.`;
+- If an earlier checkpoint/summary already appears in the dropped turns, do not copy it forward verbatim: keep its still-true facts, drop stale ones, and merge in newer information.`;
 
 const ARCHIVE_TOOL_RESULT_CHARS = 20_000;
 
@@ -743,7 +745,7 @@ export function buildLocalHandoffSummary(
     );
   }
   sections.push(
-    "NEXT CONCRETE ACTION\nContinue from the recent turns below. Re-read files via tools (or read_artifact for folded results) if you need exact earlier text — do not invent requirements that are not in USER REQUESTS / plan.",
+    "NEXT MOVE\nContinue from the recent turns below. Re-read files via tools (or read_artifact for folded results) if you need exact earlier text — do not invent requirements that are not in USER REQUESTS / plan.",
   );
   return capText(sections.join("\n\n"), maxChars);
 }
