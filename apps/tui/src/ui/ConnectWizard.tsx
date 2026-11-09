@@ -16,6 +16,7 @@ import {
   type RemoteModelInfo,
 } from "@codepilot/core";
 import { color as palette } from "./theme.js";
+import { isEscape } from "./keys.js";
 
 export interface ConnectWizardProps {
  /** Existing providers-map ids (for unique id allocation). */
@@ -42,8 +43,8 @@ export function ConnectWizard(props: ConnectWizardProps): React.ReactElement {
   const [step, setStep] = React.useState<Step>({ kind: "pick-vendor" });
   const [error, setError] = React.useState<string | undefined>();
 
-  useInput((_input, key) => {
-    if (key.escape) onDone({ id: "", model: "", cancelled: true });
+  useInput((input, key) => {
+    if (isEscape(input, key)) onDone({ id: "", model: "", cancelled: true });
   });
 
   const vendors = [...PROVIDER_TEMPLATES];

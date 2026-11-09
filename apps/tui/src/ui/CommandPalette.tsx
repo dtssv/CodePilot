@@ -51,9 +51,30 @@ export function paletteState(
   return { filtered, selected: clamped };
 }
 
+/**
+ * Compute the scroll window so the selected row stays visible. Centres the
+ * cursor and clamps to the list bounds. Pure; exported for tests.
+ */
+export function paletteWindow(
+  total: number,
+  selected: number,
+  maxRows: number,
+): { start: number; end: number } {
+  if (total <= maxRows) return { start: 0, end: total };
+  const start = Math.max(0, Math.min(selected - Math.floor(maxRows / 2), total - maxRows));
+  return { start, end: start + maxRows };
+}
+
 export function CommandPalette(props: CommandPaletteProps): React.ReactElement {
   const { query, commands, selected, maxRows = 10 } = props;
   const { filtered, selected: sel } = paletteState(commands, query, selected);
+
+  // Scroll the window to keep the selected row visible: centre the cursor and
+  // clamp to the list bounds, so moving past maxRows follows the selection.
+  const { start: windowStart, end: windowEnd } = paletteWindow(filtered.length, sel, maxRows);
+  const windowed = filtered.slice(windowStart, windowEnd);
+  const hiddenAbove = windowStart;
+  const hiddenBelow = filtered.length - windowEnd;
 
   return (
     <Box
@@ -76,8 +97,12 @@ export function CommandPalette(props: CommandPaletteProps): React.ReactElement {
         </Box>
       ) : (
         <Box flexDirection="column" marginTop={1}>
-          {filtered.slice(0, maxRows).map((c, i) => {
-            const isSel = i === sel;
+          {hiddenAbove > 0 ? (
+            <Text color={color.faint}>  ↑ {hiddenAbove} more</Text>
+          ) : null}
+          {windowed.map((c, i) => {
+            const idx = windowStart + i;
+            const isSel = idx === sel;
             return (
               <Box key={c.name}>
                 <Text color={isSel ? color.accent : color.faint}>
@@ -91,8 +116,8 @@ export function CommandPalette(props: CommandPaletteProps): React.ReactElement {
               </Box>
             );
           })}
-          {filtered.length > maxRows ? (
-            <Text color={color.faint}>  … {filtered.length - maxRows} more — keep typing</Text>
+          {hiddenBelow > 0 ? (
+            <Text color={color.faint}>  ↓ {hiddenBelow} more — {sel + 1}/{filtered.length}</Text>
           ) : null}
         </Box>
       )}

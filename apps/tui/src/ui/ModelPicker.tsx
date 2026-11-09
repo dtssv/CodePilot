@@ -5,6 +5,7 @@ import React from "react";
 import { Box, Text, useInput } from "ink";
 import type { SelectableModel } from "@codepilot/core";
 import { color as palette } from "./theme.js";
+import { isCancel } from "./keys.js";
 
 export interface ModelPickerProps {
   models: readonly SelectableModel[];
@@ -31,7 +32,7 @@ export function ModelPicker(props: ModelPickerProps): React.ReactElement {
   const rows = models;
 
   useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === "c")) {
+    if (isCancel(input, key)) {
       onCancel();
       return;
     }

@@ -4,6 +4,7 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { color as palette } from "./theme.js";
+import { isCancel } from "./keys.js";
 
 export interface SelectOption {
   value: string;
@@ -30,7 +31,7 @@ export function SelectMenu(props: SelectMenuProps): React.ReactElement {
   const [cursor, setCursor] = React.useState(initial < 0 ? 0 : initial);
 
   useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === "c")) {
+    if (isCancel(input, key)) {
       onCancel();
       return;
     }
@@ -113,7 +114,7 @@ export function TextPrompt(props: {
   const [value, setValue] = React.useState("");
 
   useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === "c")) {
+    if (isCancel(input, key)) {
       onCancel();
       return;
     }

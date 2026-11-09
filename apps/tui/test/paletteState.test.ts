@@ -7,7 +7,7 @@
  * keep component tests to shallow prop contracts via direct invocation.
  */
 import { describe, expect, it } from "vitest";
-import { paletteState } from "../src/ui/CommandPalette.js";
+import { paletteState, paletteWindow } from "../src/ui/CommandPalette.js";
 import type { CommandInfo } from "../src/ui/commands.js";
 
 const cmds: CommandInfo[] = [
@@ -36,5 +36,30 @@ describe("paletteState", () => {
  // both survive; the exact match must rank first.
     const refined = paletteState(cmds, "mode", 0).filtered.map((c) => c.name);
     expect(refined[0]).toBe("mode");
+  });
+});
+
+describe("paletteWindow (scroll follows selection)", () => {
+  it("shows the whole list when it fits", () => {
+    expect(paletteWindow(5, 0, 10)).toEqual({ start: 0, end: 5 });
+    expect(paletteWindow(10, 9, 10)).toEqual({ start: 0, end: 10 });
+  });
+
+  it("keeps the selected row inside the window when scrolled past maxRows", () => {
+    // 30 items, window of 10, cursor at 20 → window must include index 20.
+    const w = paletteWindow(30, 20, 10);
+    expect(w.end - w.start).toBe(10);
+    expect(20).toBeGreaterThanOrEqual(w.start);
+    expect(20).toBeLessThan(w.end);
+  });
+
+  it("clamps the window to the list end", () => {
+    const w = paletteWindow(30, 29, 10);
+    expect(w).toEqual({ start: 20, end: 30 });
+  });
+
+  it("clamps the window to the list start", () => {
+    const w = paletteWindow(30, 0, 10);
+    expect(w).toEqual({ start: 0, end: 10 });
   });
 });

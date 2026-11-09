@@ -1223,6 +1223,9 @@ export function App(props: AppProps): React.ReactElement {
         }
       }
  // Real prompt dispatch.
+      // Clear any lingering status notice (e.g. the setup/connect summary) so
+      // it does not stay pinned below the transcript once a new turn begins.
+      dispatch({ type: "set-notice", text: undefined });
       try {
         if (delivery === "steer" && state.busy) {
           const s = session as {

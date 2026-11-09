@@ -23,6 +23,7 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { color as palette } from "./theme.js";
+import { isEscape } from "./keys.js";
 import type { CommandInfo } from "./commands.js";
 import { listFilesForCompletion } from "./fileComplete.js";
 import { CommandPalette, paletteState } from "./CommandPalette.js";
@@ -259,7 +260,7 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
 
  // ---- menu key routing ---------------------------------------------
       if (menu !== null) {
-        if (key.escape) {
+        if (isEscape(input, key)) {
  // Restore whatever the user had before the menu opened.
           closeMenu(true);
           return;

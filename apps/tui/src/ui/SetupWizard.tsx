@@ -21,6 +21,7 @@ import {
   type WebSearchProvider,
 } from "@codepilot/core";
 import { color as palette } from "./theme.js";
+import { isEscape } from "./keys.js";
 import { ConnectWizard } from "./ConnectWizard.js";
 
 export interface SetupWizardProps {
@@ -376,7 +377,7 @@ function OptionList({
 }): React.ReactElement {
   const [cursor, setCursor] = React.useState(0);
   useInput((input, key) => {
-    if (key.escape) {
+    if (isEscape(input, key)) {
       onEscape?.();
       return;
     }
@@ -418,7 +419,7 @@ function FreeText({
 }): React.ReactElement {
   const [value, setValue] = React.useState("");
   useInput((input, key) => {
-    if (key.escape) {
+    if (isEscape(input, key)) {
       onEscape?.();
       return;
     }

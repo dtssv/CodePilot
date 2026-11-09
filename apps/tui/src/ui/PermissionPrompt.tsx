@@ -15,6 +15,7 @@ import React from "react";
 import { Box, Text, useInput } from "ink";
 import type { PermissionResolution } from "@codepilot/core";
 import { CATEGORY_VERB, changeCounts, color, glyph, oneLine, toolCategory, toolTarget } from "./theme.js";
+import { isEscape } from "./keys.js";
 
 export interface PermissionPromptProps {
   toolName: string;
@@ -57,7 +58,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
         if (key.return) {
           const text = feedback.trim();
           onDecide(text.length > 0 ? { decision: "deny", feedback: text } : "deny");
-        } else if (key.escape) {
+        } else if (isEscape(ch, key)) {
           setFeedbackMode(false);
           setFeedback("");
         } else if (key.backspace || key.delete) {
@@ -70,7 +71,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
       if (key.upArrow) setIdx((i) => (i - 1 + OPTIONS.length) % OPTIONS.length);
       else if (key.downArrow) setIdx((i) => (i + 1) % OPTIONS.length);
       else if (key.return) act(OPTIONS[idx]!.action);
-      else if (key.escape) onDecide("deny");
+      else if (isEscape(ch, key)) onDecide("deny");
       else if (ch === "1" || ch === "y" || ch === "Y") onDecide("allow");
       else if (ch === "2" || ch === "a" || ch === "A") onDecide("always");
       else if (ch === "3" || ch === "n" || ch === "N") onDecide("deny");
