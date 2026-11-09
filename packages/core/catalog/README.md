@@ -15,4 +15,8 @@ Update rule: try once per calendar day; on failure keep the last local copy fore
 
 `packages/core/catalog/` is the same content, shipped as the offline seed inside `@codepilot/core`. Keep both directories in sync when editing.
 
+`search-engines.json` additionally has an inlined copy in
+`packages/core/src/searchEngines.ts` (`INLINE_SEED`) so the seed survives the
+Bun `--compile` binary; keep it in sync too.
+
 Override base URL: `CODEPILOT_CATALOG_BASE_URL` (default: this folder on `main`).

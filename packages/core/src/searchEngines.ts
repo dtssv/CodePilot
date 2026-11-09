@@ -33,6 +33,9 @@ interface SearchEnginesDoc {
 }
 
 function bundledSearchEngines(): SearchEngineTemplate[] {
+  // Prefer the on-disk bundled JSON (dev / npm install), but fall back to the
+  // inlined copy below so the seed survives Bun's `--compile` binary, where the
+  // relative readFileSync has no backing file in the virtual FS.
   try {
     const path = join(
       dirname(fileURLToPath(import.meta.url)),
@@ -41,11 +44,95 @@ function bundledSearchEngines(): SearchEngineTemplate[] {
       "search-engines.json",
     );
     const doc = JSON.parse(readFileSync(path, "utf-8")) as SearchEnginesDoc;
-    return Array.isArray(doc.engines) ? doc.engines : [];
+    if (Array.isArray(doc.engines) && doc.engines.length > 0) return doc.engines;
   } catch {
-    return [];
+    // fall through to the inlined seed
   }
+  return INLINE_SEED;
 }
+
+/**
+ * Inlined copy of `catalog/search-engines.json`. Kept in sync with that file;
+ * it is the offline seed for the compiled binary (and any environment where the
+ * bundled JSON is unreadable). The GitHub catalog still overrides it daily.
+ */
+const INLINE_SEED: SearchEngineTemplate[] = [
+  {
+    id: "brave",
+    displayName: "Brave Search",
+    description: "2000/mo free · brave.com/search/api",
+    signupUrl: "https://brave.com/search/api",
+    needsKey: true,
+    keyEnvVar: "BRAVE_API_KEY",
+    template: {
+      method: "GET",
+      url: "https://api.search.brave.com/res/v1/web/search?q={query}&count={max}",
+      headers: { "X-Subscription-Token": "${BRAVE_API_KEY}" },
+      resultsPath: "web.results",
+      fields: { title: "title", url: "url", snippet: "description" },
+    },
+  },
+  {
+    id: "serper",
+    displayName: "Serper (Google results)",
+    description: "2500 free · serper.dev",
+    signupUrl: "https://serper.dev",
+    needsKey: true,
+    keyEnvVar: "SERPER_API_KEY",
+    template: {
+      method: "POST",
+      url: "https://google.serper.dev/search",
+      headers: { "X-API-KEY": "${SERPER_API_KEY}", "Content-Type": "application/json" },
+      body: '{"q":"{query}","num":{max}}',
+      resultsPath: "organic",
+      fields: { title: "title", url: "link", snippet: "snippet" },
+    },
+  },
+  {
+    id: "tavily",
+    displayName: "Tavily",
+    description: "AI-optimized search · tavily.com",
+    signupUrl: "https://tavily.com",
+    needsKey: true,
+    keyEnvVar: "TAVILY_API_KEY",
+    template: {
+      method: "POST",
+      url: "https://api.tavily.com/search",
+      headers: { "Content-Type": "application/json" },
+      body: '{"api_key":"${TAVILY_API_KEY}","query":"{query}","max_results":{max}}',
+      resultsPath: "results",
+      fields: { title: "title", url: "url", snippet: "content" },
+    },
+  },
+  {
+    id: "searxng",
+    displayName: "SearXNG (self-hosted)",
+    description: "point at your own SearXNG instance",
+    needsKey: false,
+    template: {
+      method: "GET",
+      url: "${SEARXNG_URL}/search?q={query}&format=json",
+      resultsPath: "results",
+      fields: { title: "title", url: "url", snippet: "content" },
+    },
+  },
+  {
+    id: "bocha",
+    displayName: "博查 Bocha (中文)",
+    description: "中文搜索 API · bochaai.com",
+    signupUrl: "https://open.bochaai.com",
+    needsKey: true,
+    keyEnvVar: "BOCHA_API_KEY",
+    template: {
+      method: "POST",
+      url: "https://api.bochaai.com/v1/web-search",
+      headers: { Authorization: "Bearer ${BOCHA_API_KEY}", "Content-Type": "application/json" },
+      body: '{"query":"{query}","count":{max}}',
+      resultsPath: "data.webPages.value",
+      fields: { title: "name", url: "url", snippet: "snippet" },
+    },
+  },
+];
 
 /** Offline / boot fallback (bundled JSON). Prefer {@link listSearchEngines}. */
 export const SEARCH_ENGINES: readonly SearchEngineTemplate[] = bundledSearchEngines();
