@@ -375,15 +375,19 @@ describe("connection and sessions", () => {
     // The resume fast path mutates one accumulator in place with replay=true.
     // It MUST produce byte-identical transcript rows to the pure live path, or
     // a resumed session would render differently from the one you just lived.
+    // Stamp every event with an explicit `ts` so both fold paths derive their
+    // row timestamps from it rather than Date.now() — otherwise a fold that
+    // straddles a millisecond boundary would make the two paths differ by 1ms.
+    const ts = 1_700_000_000_000;
     const history: Event[] = [
-      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }] },
-      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "wor" } },
-      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "king" } },
-      { type: "tool_call", id: "t1", name: "read_file", input: { path: "a.ts" } },
-      { type: "tool_result", toolCallId: "t1", name: "read_file", content: "contents" },
-      { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "working" }] },
-      { type: "plan", steps: [{ id: "s1", title: "step", status: "completed" }] },
-      { type: "usage", usage: { input: 10, output: 4 } },
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }], ts },
+      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "wor" }, ts },
+      { type: "message_delta", messageId: "a1", delta: { type: "text", text: "king" }, ts },
+      { type: "tool_call", id: "t1", name: "read_file", input: { path: "a.ts" }, ts },
+      { type: "tool_result", toolCallId: "t1", name: "read_file", content: "contents", ts },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "working" }], ts },
+      { type: "plan", steps: [{ id: "s1", title: "step", status: "completed" }], ts },
+      { type: "usage", usage: { input: 10, output: 4 }, ts },
     ];
 
     // Live path: each event through the reducer onto a fresh session.
