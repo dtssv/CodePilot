@@ -28,6 +28,8 @@ import type {
   CodepilotConfig,
   Event,
   ImageGenConfig,
+  WebSearchConfig,
+  CustomSearchTemplate,
   PermissionDecision,
   PermissionResolution,
   PermissionMode,
@@ -50,6 +52,7 @@ import {
   loadConfig as coreLoadConfig,
   loadConfigWithSources,
   listProviderTemplates,
+  listSearchEngines,
   collectPluginProviderTemplates,
   queryConnectorsWithStatus,
   listSelectableModels,
@@ -546,6 +549,14 @@ export function registerServer(
     { baseURL?: string; apiKey?: string; model?: string; enabled?: boolean },
     { imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }
   >("config/setImageGen", (p) => handleConfigSetImageGen(ctx, p));
+  peer.onRequest<
+    { provider?: WebSearchConfig["provider"]; apiKey?: string; cx?: string; custom?: CustomSearchTemplate },
+    { webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }
+  >("config/setWebSearch", (p) => handleConfigSetWebSearch(ctx, p));
+  peer.onRequest<{ onboardedAt?: string }, { onboardedAt: string }>(
+    "config/setOnboarded",
+    (p) => handleConfigSetOnboarded(ctx, p),
+  );
   peer.onRequest<
     { mode?: "off" | "workspace-write" | "read-only"; sessionId?: string },
     { sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } }
@@ -1831,6 +1842,12 @@ async function handleConfigGet(
   selectableModels: ReturnType<typeof listSelectableModels>;
   templates: Awaited<ReturnType<typeof listProviderTemplates>>;
   imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
+  webSearch: {
+    provider?: string;
+    hasApiKey: boolean;
+    customUrl?: string;
+    engines: Awaited<ReturnType<typeof listSearchEngines>>;
+  };
   sandbox: { mode: "off" | "workspace-write" | "read-only" };
 }> {
   assertInitialized(ctx);
@@ -1858,6 +1875,7 @@ async function handleConfigGet(
   // (namespaced ids, pure data — no plugin code runs).
   const pluginTemplates = await collectPluginProviderTemplates(cwd).catch(() => []);
   const templates = await listProviderTemplates({ overlay: pluginTemplates });
+  const searchEngines = await listSearchEngines().catch(() => []);
   return {
     active: {
       provider: config.provider,
@@ -1879,6 +1897,14 @@ async function handleConfigGet(
       model: config.imageGen?.model,
       enabled: config.imageGen?.enabled !== false,
       hasApiKey: !!config.imageGen?.apiKey,
+    },
+    webSearch: {
+      provider: config.webSearch?.provider,
+      hasApiKey: !!config.webSearch?.apiKey,
+      customUrl: config.webSearch?.custom?.url,
+      // Catalog of ready-made engines so a client can offer a picker without
+      // bundling its own list.
+      engines: searchEngines,
     },
     sandbox: {
       // Default mirrors core's resolveSandbox default (workspace-write).
@@ -2073,6 +2099,59 @@ async function handleConfigSetImageGen(
       hasApiKey: !!next.apiKey,
     },
   };
+}
+
+/**
+ * Persist the web_search backend to the shared user config, so every client
+ * (TUI / web / desktop) that follows the same daemon inherits it. Writing an
+ * empty apiKey preserves the stored one; a `custom` template is stored verbatim.
+ */
+async function handleConfigSetWebSearch(
+  ctx: ServerContext,
+  params: { provider?: WebSearchConfig["provider"]; apiKey?: string; cx?: string; custom?: CustomSearchTemplate },
+): Promise<{ webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }> {
+  assertInitialized(ctx);
+  const { raw } = await readUserConfigFile();
+  const prev = (raw.webSearch as WebSearchConfig | undefined) ?? {};
+  const apiKey =
+    params.apiKey === undefined || params.apiKey === "" ? prev.apiKey : params.apiKey.trim();
+  const next: WebSearchConfig = { ...prev };
+  if (params.provider !== undefined) next.provider = params.provider;
+  if (apiKey !== undefined) next.apiKey = apiKey;
+  if (params.cx !== undefined) next.cx = params.cx.trim() || undefined;
+  if (params.custom !== undefined) next.custom = params.custom;
+  // DuckDuckGo is keyless; clear a stale key/template so it doesn't leak through.
+  if (next.provider === "duckduckgo") {
+    next.apiKey = undefined;
+    next.custom = undefined;
+  }
+  raw.webSearch = next;
+  await writeUserConfigFile(raw);
+  return {
+    webSearch: {
+      provider: next.provider,
+      hasApiKey: !!next.apiKey,
+      customUrl: next.custom?.url,
+    },
+  };
+}
+
+/**
+ * Stamp the first-run marker in the shared user config so every client (TUI /
+ * web / desktop) following the same daemon knows onboarding is done and does
+ * not re-show its setup guide. Idempotent; keeps an existing marker.
+ */
+async function handleConfigSetOnboarded(
+  ctx: ServerContext,
+  params: { onboardedAt?: string },
+): Promise<{ onboardedAt: string }> {
+  assertInitialized(ctx);
+  const { raw } = await readUserConfigFile();
+  const existing = typeof raw.onboardedAt === "string" ? raw.onboardedAt : undefined;
+  const stamp = existing ?? params.onboardedAt ?? new Date().toISOString();
+  raw.onboardedAt = stamp;
+  await writeUserConfigFile(raw);
+  return { onboardedAt: stamp };
 }
 
 async function handleConfigSetActive(

@@ -21,6 +21,7 @@ const DEFAULT_BASE =
 export type CatalogName =
   | "connectors"
   | "provider-templates"
+  | "search-engines"
   | "mcp-markets"
   | "plugins"
   | "manifest";
@@ -188,14 +189,22 @@ export async function loadCatalogDocument<T>(
 export async function refreshAllCatalogs(): Promise<{
   connectors: string;
   providers: string;
+  searchEngines: string;
   markets: string;
   plugins: string;
 }> {
   const c = await loadCatalogDocument("connectors", { force: true });
   const p = await loadCatalogDocument("provider-templates", { force: true });
+  const s = await loadCatalogDocument("search-engines", { force: true });
   const m = await loadCatalogDocument("mcp-markets", { force: true });
   const pl = await loadCatalogDocument("plugins", { force: true });
-  return { connectors: c.source, providers: p.source, markets: m.source, plugins: pl.source };
+  return {
+    connectors: c.source,
+    providers: p.source,
+    searchEngines: s.source,
+    markets: m.source,
+    plugins: pl.source,
+  };
 }
 
 export function resetCatalogMemoryForTests(): void {

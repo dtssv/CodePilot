@@ -37,6 +37,7 @@ import { AgentHome, FilePreview, TaskPanel } from "./components/AgentView.js";
 import { ModelPicker } from "./components/ModelPicker.js";
 import { ContextGauge } from "./components/ContextGauge.js";
 import { SettingsPanel } from "./components/SettingsPanel.js";
+import { OnboardingGuide } from "./components/OnboardingGuide.js";
 import { WorkspacePanel } from "./components/WorkspacePanel.js";
 import {
   AlertIcon,
@@ -261,6 +262,14 @@ export function App(): React.ReactElement {
       ) : (
         <WebLayout {...common} surface={surface} onSwitch={() => switchLayout("agent")} />
       )}
+      {/* First-run guide only on the standalone web/desktop surface, not the
+          IDE-embedded or remote-paired surfaces (those have their own flows). */}
+      {layout !== "embedded" && !surface.remote && (
+        <OnboardingGuide
+          cp={cp}
+          onOpenSettings={() => window.dispatchEvent(new Event("codepilot:open-settings"))}
+        />
+      )}
       <Toast text={cp.state.notice} onDone={() => cp.notify(undefined)} />
     </>
   );
@@ -438,6 +447,13 @@ function WebLayout({
       if (cmd === "check-updates") checkUpdateRef.current();
       else setShowSettings(true);
     });
+  }, []);
+  // The first-run guide (and any surface) can request the Settings panel via a
+  // window event, so it doesn't need a direct handle to this layout's state.
+  useEffect(() => {
+    const open = (): void => setShowSettings(true);
+    window.addEventListener("codepilot:open-settings", open);
+    return () => window.removeEventListener("codepilot:open-settings", open);
   }, []);
   // Global ⌘K / Ctrl+K toggles the command palette. Registered before any
   // early return so the hook order stays stable.
@@ -934,6 +950,13 @@ function AgentLayout({
   const { setRef: scrollRef, elRef: scrollElRef } = useStickyScroll(scrollSignature(state.rows) + (state.permission ? "p" : "") + (state.question ? "q" : ""));
   const connected = state.connection === "connected";
   const inTask = !!state.sessionId;
+
+  // The first-run guide can request the Settings panel via a window event.
+  useEffect(() => {
+    const open = (): void => setShowSettings(true);
+    window.addEventListener("codepilot:open-settings", open);
+    return () => window.removeEventListener("codepilot:open-settings", open);
+  }, []);
 
   const homeComposer = {
     ...useComposer(cp, draft, setDraft, t("Describe a task for CodePilot…")),

@@ -4,6 +4,7 @@
   "catalogs": {
     "connectors": "connectors.json",
     "provider-templates": "provider-templates.json",
+    "search-engines": "search-engines.json",
     "mcp-markets": "mcp-markets.json"
   },
   "refresh": "once-per-calendar-day; keep local forever on failure"

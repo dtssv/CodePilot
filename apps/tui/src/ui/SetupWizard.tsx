@@ -18,7 +18,9 @@ import { Box, Text, useInput } from "ink";
 import {
   readUserConfigFile,
   writeUserConfigFile,
+  listSearchEngines,
   type WebSearchProvider,
+  type SearchEngineTemplate,
 } from "@codepilot/core";
 import { color as palette } from "./theme.js";
 import { isEscape } from "./keys.js";
@@ -49,28 +51,14 @@ type SearchChoice = {
   signupUrl?: string;
 };
 
-const SEARCH_CHOICES: readonly SearchChoice[] = [
+// Fixed endpoints of the search step: the keyless default and the hand-written
+// custom template. Ready-made keyed engines come from the catalog at runtime.
+const BASE_SEARCH_CHOICES: readonly SearchChoice[] = [
   {
     provider: "duckduckgo",
     label: "DuckDuckGo (default, keyless)",
     description: "free, no key — best-effort quality",
     needsKey: false,
-  },
-  {
-    provider: "brave",
-    label: "Brave Search API",
-    description: "2000/mo free · brave.com/search/api",
-    needsKey: true,
-    envVar: "BRAVE_API_KEY",
-    signupUrl: "https://brave.com/search/api",
-  },
-  {
-    provider: "serper",
-    label: "Serper (Google results)",
-    description: "2500 free · serper.dev",
-    needsKey: true,
-    envVar: "SERPER_API_KEY",
-    signupUrl: "https://serper.dev",
   },
   {
     provider: "custom",
@@ -85,7 +73,7 @@ type Step =
   | { kind: "welcome" }
   | { kind: "provider" }
   | { kind: "search-pick" }
-  | { kind: "search-key"; choice: SearchChoice }
+  | { kind: "search-engine-key"; engine: SearchEngineTemplate }
   | { kind: "search-custom-url" }
   | { kind: "search-custom-header"; url: string }
   | { kind: "image-ask" }
@@ -98,7 +86,24 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
   const { existingIds, hasProvider, onProviderConnected, onDone } = props;
   const [step, setStep] = React.useState<Step>({ kind: "welcome" });
   const [error, setError] = React.useState<string | undefined>();
+  const [engines, setEngines] = React.useState<SearchEngineTemplate[]>([]);
   const summary = React.useRef<string[]>([]);
+
+  // Load the ready-made search engines (bundled + GitHub catalog) once; the
+  // picker shows them alongside the keyless default and the custom template.
+  React.useEffect(() => {
+    let alive = true;
+    void listSearchEngines()
+      .then((list) => {
+        if (alive) setEngines(list);
+      })
+      .catch(() => {
+        /* best-effort; picker still offers default + custom */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Finish immediately, stamping a "skipped" summary unless steps already ran.
   const finishNow = React.useCallback(() => {
@@ -110,7 +115,7 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
   // guide destructively — skipping is a valid, expected outcome).
   const advance = React.useCallback((from: Step["kind"]) => {
     if (from === "provider") setStep({ kind: "search-pick" });
-    else if (from === "search-pick" || from === "search-key")
+    else if (from === "search-pick" || from === "search-engine-key")
       setStep({ kind: "image-ask" });
     else if (
       from === "image-ask" ||
@@ -177,54 +182,83 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
 
   // ---- Step 2: web search backend --------------------------------------
   if (step.kind === "search-pick") {
+    // Default + catalog engines + the hand-written custom template.
+    const defaultChoice = BASE_SEARCH_CHOICES[0]!;
+    const customChoice = BASE_SEARCH_CHOICES[1]!;
+    const options = [
+      { label: defaultChoice.label, description: defaultChoice.description, value: "duckduckgo" },
+      ...engines.map((e) => ({
+        label: e.displayName,
+        description: e.description ?? "",
+        value: `engine:${e.id}`,
+      })),
+      { label: customChoice.label, description: customChoice.description, value: "custom" },
+    ];
     return (
       <WizardFrame title="Setup · 2/3 web search" hint="Esc keep default">
         <Text dimColor>
-          DuckDuckGo works with no key but quality is weak. Pick a stronger
-          backend (needs a free key) or keep the default:
+          DuckDuckGo works with no key but quality is weak. Pick a ready-made
+          engine (some need a free key) or keep the default:
         </Text>
         <OptionList
-          options={SEARCH_CHOICES.map((c) => ({
-            label: c.label,
-            description: c.description,
-            value: c.provider,
-          }))}
+          options={options}
           onEscape={() => {
             summary.current.push("Search → DuckDuckGo (default)");
             advance("search-pick");
           }}
-          onPick={(provider) => {
-            const choice = SEARCH_CHOICES.find((c) => c.provider === provider)!;
-            if (choice.custom) {
+          onPick={(value) => {
+            if (value === "custom") {
               setStep({ kind: "search-custom-url" });
               return;
             }
-            if (!choice.needsKey) {
-              // DuckDuckGo: leave config untouched (auto-fallback already does
-              // this). Just move on.
+            if (value === "duckduckgo") {
+              // Leave config untouched (auto-fallback already does this).
               summary.current.push("Search → DuckDuckGo (default)");
               setStep({ kind: "image-ask" });
               return;
             }
-            setStep({ kind: "search-key", choice });
+            const id = value.slice("engine:".length);
+            const engine = engines.find((e) => e.id === id);
+            if (!engine) {
+              setStep({ kind: "image-ask" });
+              return;
+            }
+            if (engine.needsKey) {
+              setStep({ kind: "search-engine-key", engine });
+              return;
+            }
+            // Keyless catalog engine → write its template straight away.
+            void (async () => {
+              setStep({ kind: "saving" });
+              try {
+                await patchUserConfig((raw) => {
+                  raw.webSearch = { provider: "custom", custom: engine.template };
+                });
+                summary.current.push(`Search → ${engine.displayName}`);
+                setStep({ kind: "image-ask" });
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+                setStep({ kind: "search-pick" });
+              }
+            })();
           }}
         />
       </WizardFrame>
     );
   }
 
-  if (step.kind === "search-key") {
-    const { choice } = step;
+  if (step.kind === "search-engine-key") {
+    const { engine } = step;
     return (
       <WizardFrame
-        title={`Setup · 2/3 · ${choice.label}`}
+        title={`Setup · 2/3 · ${engine.displayName}`}
         hint="Esc skip this backend"
       >
         {error && <Text color={palette.remove}>{error}</Text>}
         <Text dimColor>
-          Get a free key at {choice.signupUrl}. Paste it below, or press Esc to
-          keep DuckDuckGo. (You can also set {choice.envVar} in your shell
-          instead.)
+          {engine.signupUrl ? `Get a key at ${engine.signupUrl}. ` : ""}
+          Paste it below, or press Esc to keep DuckDuckGo.
+          {engine.keyEnvVar ? ` (You can also set ${engine.keyEnvVar} in your shell.)` : ""}
         </Text>
         <Text>API key:</Text>
         <FreeText
@@ -232,7 +266,7 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
           placeholder="paste key…"
           onEscape={() => {
             summary.current.push("Search → DuckDuckGo (default)");
-            advance("search-key");
+            advance("search-engine-key");
           }}
           onSubmit={(apiKey) => {
             void (async () => {
@@ -240,19 +274,21 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
               setStep({ kind: "saving" });
               try {
                 await patchUserConfig((raw) => {
+                  // The engine template references the key via its ${ENV} var;
+                  // store the entered key under webSearch.apiKey AND set the
+                  // conventional env var name is left to the user. We write the
+                  // template and the key so resolveSearchBackend passes it along.
                   raw.webSearch = {
-                    ...(typeof raw.webSearch === "object" && raw.webSearch
-                      ? (raw.webSearch as Record<string, unknown>)
-                      : {}),
-                    provider: choice.provider,
+                    provider: "custom",
+                    custom: engine.template,
                     apiKey,
                   };
                 });
-                summary.current.push(`Search → ${choice.label}`);
+                summary.current.push(`Search → ${engine.displayName}`);
                 setStep({ kind: "image-ask" });
               } catch (err) {
                 setError(err instanceof Error ? err.message : String(err));
-                setStep({ kind: "search-key", choice });
+                setStep({ kind: "search-engine-key", engine });
               }
             })();
           }}
@@ -275,7 +311,7 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
           placeholder="https://…?q={query}"
           onEscape={() => {
             summary.current.push("Search → DuckDuckGo (default)");
-            advance("search-key");
+            advance("search-pick");
           }}
           onSubmit={(url) => setStep({ kind: "search-custom-header", url })}
         />

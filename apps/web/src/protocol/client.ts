@@ -170,6 +170,27 @@ export interface ProviderTemplateInfo {
   requiresBaseURL?: boolean;
 }
 
+/** HTTP template for a `custom` web_search backend. */
+export interface CustomSearchTemplateInfo {
+  method?: "GET" | "POST";
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  resultsPath?: string;
+  fields?: { title?: string; url?: string; snippet?: string };
+}
+
+/** One ready-made search engine from the catalog. */
+export interface SearchEngineInfo {
+  id: string;
+  displayName: string;
+  description?: string;
+  signupUrl?: string;
+  needsKey?: boolean;
+  keyEnvVar?: string;
+  template: CustomSearchTemplateInfo;
+}
+
 export interface ConfigSnapshot {
   active: {
     provider?: string;
@@ -179,11 +200,18 @@ export interface ConfigSnapshot {
     providerId?: string;
     hasApiKey: boolean;
     apiKeyHint?: string;
+    onboardedAt?: string;
   };
   providers: Record<string, ConfigProviderRedacted>;
   selectableModels: SelectableModelInfo[];
   templates: ProviderTemplateInfo[];
   imageGen?: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
+  webSearch?: {
+    provider?: string;
+    hasApiKey: boolean;
+    customUrl?: string;
+    engines: SearchEngineInfo[];
+  };
   sandbox?: { mode: "off" | "workspace-write" | "read-only" };
 }
 
@@ -1109,6 +1137,25 @@ export class CodepilotClient {
     enabled?: boolean;
   }): Promise<{ imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }> {
     return this.call("config/setImageGen", patch);
+  }
+
+  /**
+   * Set the web_search backend. Persists to the shared user config, so every
+   * client following the same daemon inherits it. An empty apiKey keeps the
+   * stored one; `custom` carries a full HTTP template.
+   */
+  async setWebSearch(patch: {
+    provider?: "duckduckgo" | "brave" | "serper" | "google" | "custom";
+    apiKey?: string;
+    cx?: string;
+    custom?: CustomSearchTemplateInfo;
+  }): Promise<{ webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }> {
+    return this.call("config/setWebSearch", patch);
+  }
+
+  /** Stamp the first-run marker in the shared config (idempotent). */
+  async setOnboarded(): Promise<{ onboardedAt: string }> {
+    return this.call("config/setOnboarded", {});
   }
 
   /**

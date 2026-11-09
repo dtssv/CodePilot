@@ -263,6 +263,25 @@ const ZH: Record<string, string> = {
   saved: "已保存",
   "Image generation settings saved — applies on next session.":
     "图片生成设置已保存 — 下次会话生效。",
+  "Web search": "网络搜索",
+  "Choose the search backend used by the web_search tool. Pick a catalog engine or the keyless default.":
+    "选择 web_search 工具使用的搜索后端。可从目录选一个引擎，或用无需密钥的默认项。",
+  "Search engine": "搜索引擎",
+  "DuckDuckGo (default, keyless)": "DuckDuckGo（默认，无需密钥）",
+  "Get a key": "获取密钥",
+  Endpoint: "接口地址",
+  "Search settings saved — applies on next session.": "搜索设置已保存 — 下次会话生效。",
+  "Welcome to CodePilot": "欢迎使用 CodePilot",
+  "Let's get you set up. These are optional and can be changed anytime in Settings:":
+    "来做个简单配置。以下都是可选项，随时可在「设置」里修改：",
+  "Provider — connect a model (needed to chat)": "服务商 — 连接一个模型（对话必需）",
+  "Web search — keyless default, or pick a stronger engine":
+    "网络搜索 — 默认无需密钥，也可选更强的引擎",
+  "Image generation — off by default, opt in here": "图片生成 — 默认关闭，可在此开启",
+  "Settings are shared across all CodePilot clients on this machine.":
+    "设置在本机所有 CodePilot 客户端之间共享。",
+  "Skip for now": "暂时跳过",
+  "Open Settings": "打开设置",
   "Agent bash": "Agent bash",
   Shell: "Shell",
   "No shell found": "未找到 shell",

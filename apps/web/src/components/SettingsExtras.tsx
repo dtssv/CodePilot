@@ -7,6 +7,7 @@ import type { AgentMode, PermissionMode } from "@codepilot/core";
 
 import type { Codepilot } from "../state/useCodepilot.js";
 import { describeError } from "../protocol/client.js";
+import type { SearchEngineInfo } from "../protocol/client.js";
 import { getLocale, setLocale, t, type Locale } from "../i18n.js";
 import {
   loadPermissionMode,
@@ -188,6 +189,16 @@ export function SettingsExtras({
     enabled: true,
     hasApiKey: false,
   });
+  // Web search: the chosen backend id (built-in keyless/keyed, a catalog engine
+  // id, or "custom"), its key, the catalog of ready-made engines, and the live
+  // custom URL. The key field is shared by keyed built-ins and catalog engines.
+  const [search, setSearch] = useState<{
+    engines: SearchEngineInfo[];
+    choice: string;
+    apiKey: string;
+    hasApiKey: boolean;
+    customUrl: string;
+  }>({ engines: [], choice: "duckduckgo", apiKey: "", hasApiKey: false, customUrl: "" });
   const [updateBusy, setUpdateBusy] = useState(false);
   const [qr, setQr] = useState<{
     url: string;
@@ -313,6 +324,24 @@ export function SettingsExtras({
               hasApiKey: !!cfg.imageGen?.hasApiKey,
               apiKey: "",
             }));
+          }
+          if (cfg.webSearch) {
+            const ws = cfg.webSearch;
+            const engines = ws.engines ?? [];
+            // Map the stored config back to a picker choice: a catalog engine
+            // whose template URL matches, else the raw provider, else default.
+            let choice = ws.provider ?? "duckduckgo";
+            if (ws.provider === "custom" && ws.customUrl) {
+              const match = engines.find((e) => e.template.url === ws.customUrl);
+              if (match) choice = match.id;
+            }
+            setSearch({
+              engines,
+              choice,
+              apiKey: "",
+              hasApiKey: !!ws.hasApiKey,
+              customUrl: ws.customUrl ?? "",
+            });
           }
           setSandboxMode(cfg.sandbox?.mode ?? "workspace-write");
         })
@@ -874,6 +903,43 @@ export function SettingsExtras({
         enabled: r.imageGen.enabled,
       }));
       setNotice(t("Image generation settings saved — applies on next session."));
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The currently selected catalog engine (if the choice is a catalog id).
+  const selectedEngine = search.engines.find((e) => e.id === search.choice);
+
+  const saveWebSearch = async (): Promise<void> => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      let patch: Parameters<typeof client.setWebSearch>[0];
+      if (search.choice === "duckduckgo") {
+        patch = { provider: "duckduckgo" };
+      } else if (selectedEngine) {
+        // Catalog engine → write its template verbatim as the custom backend;
+        // the key field (when the engine needs one) rides along on apiKey.
+        patch = {
+          provider: "custom",
+          apiKey: search.apiKey,
+          custom: selectedEngine.template,
+        };
+      } else {
+        // A built-in keyed backend (brave/serper/google) kept its own provider.
+        patch = { provider: search.choice as "brave" | "serper" | "google", apiKey: search.apiKey };
+      }
+      const r = await client.setWebSearch(patch);
+      setSearch((prev) => ({
+        ...prev,
+        apiKey: "",
+        hasApiKey: r.webSearch.hasApiKey,
+        customUrl: r.webSearch.customUrl ?? prev.customUrl,
+      }));
+      setNotice(t("Search settings saved — applies on next session."));
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -1604,6 +1670,64 @@ export function SettingsExtras({
                 className="cp-btn py-1.5 text-[12px]"
                 disabled={busy || state.connection !== "connected"}
                 onClick={() => void saveImageGen()}
+              >
+                {t("Save changes")}
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] p-3">
+            <div>
+              <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Web search")}</div>
+              <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
+                {t("Choose the search backend used by the web_search tool. Pick a catalog engine or the keyless default.")}
+              </div>
+            </div>
+            <div className="mt-2 space-y-2">
+              <label className="block">
+                <span className="cp-eyebrow">{t("Search engine")}</span>
+                <select
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  value={search.choice}
+                  aria-label={t("Search engine")}
+                  onChange={(e) => setSearch((p) => ({ ...p, choice: e.target.value, apiKey: "" }))}
+                >
+                  <option value="duckduckgo">{t("DuckDuckGo (default, keyless)")}</option>
+                  {search.engines.map((eng) => (
+                    <option key={eng.id} value={eng.id}>
+                      {eng.displayName}
+                      {eng.description ? ` — ${eng.description}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedEngine?.needsKey && (
+                <label className="block">
+                  <span className="cp-eyebrow">{t("API key")}</span>
+                  <input
+                    type="password"
+                    className="cp-input mt-0.5 w-full text-[12.5px]"
+                    placeholder={search.hasApiKey ? "••••••• (" + t("saved") + ")" : selectedEngine.keyEnvVar ?? ""}
+                    value={search.apiKey}
+                    onChange={(e) => setSearch((p) => ({ ...p, apiKey: e.target.value }))}
+                  />
+                  {selectedEngine.signupUrl && (
+                    <span className="mt-0.5 block text-[11px] text-[var(--color-ink-faint)]">
+                      {t("Get a key")}: {selectedEngine.signupUrl}
+                    </span>
+                  )}
+                </label>
+              )}
+              {selectedEngine && (
+                <div className="text-[11px] leading-4 text-[var(--color-ink-faint)]">
+                  {t("Endpoint")}: {selectedEngine.template.url}
+                </div>
+              )}
+              <button
+                type="button"
+                className="cp-btn py-1.5 text-[12px]"
+                disabled={busy || state.connection !== "connected"}
+                onClick={() => void saveWebSearch()}
               >
                 {t("Save changes")}
               </button>

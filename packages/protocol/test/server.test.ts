@@ -548,6 +548,86 @@ describe("server / protocol handlers", () => {
     expect(snap.sandbox.mode).toBe("workspace-write");
   });
 
+  it("config/get lists the search-engine catalog", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const snap = await client.request<
+      {},
+      { webSearch: { engines: Array<{ id: string }> } }
+    >("config/get", {});
+    expect(snap.webSearch.engines.length).toBeGreaterThan(0);
+    expect(snap.webSearch.engines.some((e) => e.id === "brave")).toBe(true);
+  });
+
+  it("config/setWebSearch persists a custom template to the shared config", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<
+      { provider: string; apiKey: string; custom: { url: string } },
+      { webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }
+    >("config/setWebSearch", {
+      provider: "custom",
+      apiKey: "sk-search-123",
+      custom: { url: "https://api.example.com/s?q={query}" },
+    });
+    expect(res.webSearch.provider).toBe("custom");
+    expect(res.webSearch.hasApiKey).toBe(true);
+    expect(res.webSearch.customUrl).toBe("https://api.example.com/s?q={query}");
+    const stored = fakeUserConfig.webSearch as { provider?: string; apiKey?: string; custom?: { url?: string } };
+    expect(stored.provider).toBe("custom");
+    expect(stored.custom?.url).toBe("https://api.example.com/s?q={query}");
+  });
+
+  it("config/setWebSearch(duckduckgo) clears a stale key/template", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await client.request("config/setWebSearch", {
+      provider: "custom",
+      apiKey: "sk-x",
+      custom: { url: "https://x/s" },
+    });
+    const res = await client.request<
+      { provider: string },
+      { webSearch: { provider?: string; hasApiKey: boolean } }
+    >("config/setWebSearch", { provider: "duckduckgo" });
+    expect(res.webSearch.provider).toBe("duckduckgo");
+    expect(res.webSearch.hasApiKey).toBe(false);
+    const stored = fakeUserConfig.webSearch as { apiKey?: string; custom?: unknown };
+    expect(stored.apiKey).toBeUndefined();
+    expect(stored.custom).toBeUndefined();
+  });
+
+  it("config/setOnboarded stamps the shared first-run marker idempotently", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const first = await client.request<{}, { onboardedAt: string }>("config/setOnboarded", {});
+    expect(typeof first.onboardedAt).toBe("string");
+    expect(fakeUserConfig.onboardedAt).toBe(first.onboardedAt);
+    // A second call keeps the original stamp (idempotent).
+    const second = await client.request<{}, { onboardedAt: string }>("config/setOnboarded", {});
+    expect(second.onboardedAt).toBe(first.onboardedAt);
+  });
+
   it("session/setModel switches model and emits model event", async () => {
     registerServer(server, { defaultCwd: "/tmp" });
     const events: unknown[] = [];

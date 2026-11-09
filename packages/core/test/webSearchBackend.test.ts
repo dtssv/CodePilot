@@ -418,6 +418,34 @@ describe("webSearchTool backends", () => {
     expect(r.content).toContain("no results array");
   });
 
+  it("custom: a stored webSearch.apiKey satisfies the template's ${ENV} when unset in env", async () => {
+    vi.stubEnv("CATALOG_KEY", "");
+    let seenAuth: string | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      seenAuth = (init.headers as Record<string, string>).Authorization;
+      return new Response(JSON.stringify([{ title: "T", url: "https://t.io", snippet: "s" }]), {
+        status: 200,
+      });
+    });
+    const r = await webSearchTool.execute(
+      { query: "q" },
+      ctx({
+        webSearch: {
+          provider: "custom",
+          // The key is NOT in env; it's stored under webSearch.apiKey and must
+          // fill the template's ${CATALOG_KEY} reference.
+          apiKey: "pasted-key-abc",
+          custom: {
+            url: "https://api.example.com/s?q={query}",
+            headers: { Authorization: "Bearer ${CATALOG_KEY}" },
+          },
+        },
+      }),
+    );
+    expect(r.isError).toBeFalsy();
+    expect(seenAuth).toBe("Bearer pasted-key-abc");
+  });
+
   it("falls back to Bing HTML when DuckDuckGo is unreachable", async () => {
     vi.stubEnv("BRAVE_API_KEY", "");
     vi.stubEnv("SERPER_API_KEY", "");

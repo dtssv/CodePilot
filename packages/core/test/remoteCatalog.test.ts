@@ -55,4 +55,15 @@ describe("catalog list (bundled)", () => {
     expect(list.length).toBeGreaterThan(0);
     expect(list.some((t) => t.id === "deepseek")).toBe(true);
   });
+
+  it("lists search engines from bundled JSON, each a usable custom template", async () => {
+    const { listSearchEngines } = await import("../src/searchEngines.js");
+    const list = await listSearchEngines();
+    expect(list.length).toBeGreaterThan(0);
+    const brave = list.find((e) => e.id === "brave");
+    expect(brave).toBeDefined();
+    expect(brave?.needsKey).toBe(true);
+    // Every engine carries a URL template so it can be written to webSearch.custom.
+    expect(list.every((e) => typeof e.template.url === "string" && e.template.url.length > 0)).toBe(true);
+  });
 });

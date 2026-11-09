@@ -247,7 +247,14 @@ export const webSearchTool: ToolDef<typeof schema> = {
           hits = await googleSearch(input.query, max, backend, locale, controller.signal, ctx);
           break;
         case "custom":
-          hits = await customSearch(input.query, max, backend.custom, locale, controller.signal);
+          hits = await customSearch(
+            input.query,
+            max,
+            backend.custom,
+            locale,
+            controller.signal,
+            backend.apiKey,
+          );
           break;
         default:
           hits = await duckDuckGoSearch(input.query, max, locale, controller.signal);
@@ -444,9 +451,24 @@ async function googleSearch(
 
 // --------------------------------------------------------------- custom
 
-/** Resolve `${ENV}` references in a string against the process environment. */
-function interpolateEnv(s: string, env: NodeJS.ProcessEnv = process.env): string {
-  return s.replace(/\$\{([A-Z0-9_]+)\}/gi, (_m, name: string) => env[name] ?? "");
+/**
+ * Resolve `${ENV}` references in a string against the process environment,
+ * falling back to `storedKey` for any variable not set in the environment. The
+ * fallback lets a key pasted into `webSearch.apiKey` satisfy a catalog engine's
+ * template (which references a conventional env var) without the user also
+ * exporting that variable in their shell.
+ */
+function interpolateEnv(
+  s: string,
+  env: NodeJS.ProcessEnv = process.env,
+  storedKey?: string,
+): string {
+  return s.replace(/\$\{([A-Z0-9_]+)\}/gi, (_m, name: string) => {
+    const fromEnv = env[name];
+    // An unset OR empty env var falls back to the stored key.
+    if (fromEnv) return fromEnv;
+    return storedKey ?? "";
+  });
 }
 
 /**
@@ -489,20 +511,21 @@ async function customSearch(
   tpl: CustomSearchTemplate | undefined,
   locale: SearchLocale,
   signal: AbortSignal,
+  storedKey?: string,
 ): Promise<SearchHit[]> {
   if (!tpl?.url) {
     throw new Error("missing webSearch.custom.url (define the custom search template)");
   }
   const values = { query, max, language: locale.language, region: locale.region };
-  const url = interpolateEnv(fillPlaceholders(tpl.url, values, true));
+  const url = interpolateEnv(fillPlaceholders(tpl.url, values, true), process.env, storedKey);
   const method = tpl.method ?? "GET";
   const headers: Record<string, string> = { accept: "application/json" };
   for (const [k, v] of Object.entries(tpl.headers ?? {})) {
-    headers[k] = interpolateEnv(fillPlaceholders(v, values, true));
+    headers[k] = interpolateEnv(fillPlaceholders(v, values, true), process.env, storedKey);
   }
   const body =
     method === "POST" && tpl.body !== undefined
-      ? interpolateEnv(fillPlaceholders(tpl.body, values, false))
+      ? interpolateEnv(fillPlaceholders(tpl.body, values, false), process.env, storedKey)
       : undefined;
   const res = await fetch(url, { method, signal, headers, body });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

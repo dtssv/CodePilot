@@ -743,6 +743,8 @@ export {
   resetCatalogMemoryForTests,
 } from "./remoteCatalog.js";
 export type { CatalogName, CacheFile as CatalogCacheFile } from "./remoteCatalog.js";
+export { listSearchEngines, SEARCH_ENGINES } from "./searchEngines.js";
+export type { SearchEngineTemplate } from "./searchEngines.js";
 export type {
   ConnectorRecipe,
   ConnectorKind,
