@@ -1,12 +1,14 @@
-# CodePilot
+<p align="center"><strong>CodePilot</strong> 是一个在本地运行的编程 Agent。</p>
 
-编程 Agent：命令行、终端 UI、浏览器、桌面窗，以及 VS Code / IntelliJ 插件。
+<p align="center">
+一个命令行工具，同时是全屏终端 UI、浏览器界面、桌面窗，以及 VS Code / IntelliJ 插件。
+</p>
 
 ---
 
-## 安装
+## 快速开始
 
-### 一键安装（推荐）
+### 安装
 
 下载自包含的单文件二进制（内嵌运行时），**无需预装 Node.js 或 npm**。
 
@@ -16,83 +18,105 @@
 curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash
 ```
 
-指定版本：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
-```
-
 **Windows（PowerShell，原生）：**
 
 ```powershell
 irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1 | iex
 ```
 
+脚本会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取对应平台的 `codepilot-<平台>` 二进制，装到 `~/.codepilot/bin`（Windows 为 `%USERPROFILE%\.codepilot\bin`）并加入 PATH。
+
+<details>
+<summary>指定版本 / 旧版 Windows / 从 Release 手动下载</summary>
+
 指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
+```
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1))) -Version v1.0.0
 ```
 
-**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号）；它会转交给 PowerShell 执行：
+**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号），它会转交给 PowerShell 执行：
 
 ```bat
 install.cmd
 install.cmd v1.0.0
 ```
 
-会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取对应平台的二进制，装到 `~/.codepilot/bin`（Windows 为 `%USERPROFILE%\.codepilot\bin`）并加入 PATH：
+每个 Release 附带 6 个平台二进制，命名为 `codepilot-<平台>`：
+`darwin-arm64` / `darwin-x64` / `linux-x64` / `linux-arm64` / `win-x64.exe` / `win-arm64.exe`。TUI、命令行、浏览器界面都在这一个文件里。
 
-| 资源 | 说明 |
-|---|---|
-| `codepilot-<平台>` | `codepilot` CLI（内嵌运行时的单文件二进制） |
-| `codepilot-tui-<平台>` | `codepilot-tui` 终端 UI（单文件二进制） |
-| `codepilot-web-<平台>.tar.gz` | 各端共用的 Web SPA 静态资源 |
-| `install.sh` / `install.ps1` / `install.cmd` | 安装脚本（Release 也附带，分别对应 shell / PowerShell / 旧版 Windows） |
+</details>
 
-装好后：
+### 运行
 
 ```bash
-codepilot-tui
-codepilot --help
+codepilot            # 全屏终端 UI
+codepilot web        # 在浏览器里打开同一个会话
+codepilot --help     # 所有命令
 ```
 
-### 从源码安装
+配一个模型密钥即可开始：`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 或 `GITHUB_TOKEN`，也可以在配置里写 OpenAI 兼容网关。
+
+---
+
+## 使用
+
+**全屏 TUI**——直接运行 `codepilot`。常用斜杠命令：
+
+- `/agent chat｜plan｜agent` 切换协作模式，`/mode ask｜auto-edit｜yolo` 切换权限模式
+- `/model` · `/provider` 选模型 / 服务商，`/connect` 向导式添加密钥
+- `/web` 在浏览器里打开当前会话，`/remote` 生成手机扫码遥控二维码
+- `/export [md｜jsonl]` 导出会话，`/init` 生成 `AGENTS.md`，`/undo` · `/redo` 撤销 / 重做改动
+- `/context` · `/mcp` · `/skills` · `/agents` 查看上下文与运行时状态
+- Ctrl+C：忙时取消当前轮，空闲时退出
+
+**跑一次任务**（非交互）：
 
 ```bash
-git clone https://github.com/dtssv/CodePilot.git
-cd CodePilot
-corepack enable
-corepack pnpm install
-corepack pnpm build
-
-alias codepilot='node '"$PWD"'/packages/protocol/dist/cli.js'
-alias codepilot-tui='node '"$PWD"'/apps/tui/dist/cli.js'
-# 或
-corepack pnpm --filter @codepilot/protocol --filter @codepilot/tui link --global
+codepilot run "给 src/auth.ts 加上输入校验并补单测"
+codepilot run "…" --cwd ~/proj --permission-mode auto-edit
 ```
 
-模型密钥：`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GITHUB_TOKEN`，或在配置里写 OpenAI 兼容网关。
-
-IDE 插件从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载：`codepilot-vscode-*.vsix`、`codepilot-idea-*.zip`。
-
-本地打多端产物（输出在 `dist/release/`）：
+**长任务循环**：
 
 ```bash
-corepack pnpm package:tui -- --all      # TUI 二进制（Bun --compile）
-corepack pnpm package:cli -- --all      # codepilot CLI 二进制 + npm 包 + Web SPA 资源
-corepack pnpm package:desktop           # Electron 桌面安装包（.dmg/.exe/.AppImage）
-corepack pnpm package:all -- --all      # 全部端
-# 二进制命名：*-darwin-arm64 / *-darwin-x64 / *-linux-x64 / *-linux-arm64 / *-win-x64.exe / *-win-arm64.exe
+codepilot goal "把回调风格 API 迁成 async/await" --max-rounds 50
 ```
 
-Web 不再单独打包成 `codepilot-web` 启动器：在 TUI 里敲 `/web`（或 `codepilot serve --web`）即可在浏览器打开，和当前会话共享。`package:cli` 会随 CLI 产出各端共用的 Web SPA 静态资源 `codepilot-web-<平台>.tar.gz`。
+**浏览器界面**——`codepilot web` 开起本地服务并打开浏览器（默认 `127.0.0.1:18765`，打印访问 token）；手机扫码用 `--host 0.0.0.0`：
 
-跨平台说明：
-- CLI 用 `@yao-pkg/pkg`，**只能为宿主平台构建**（其远端 base-Node 缓存对非宿主目标 404），因此 CI 按 OS/arch 分别在原生 runner 上构建。
-- TUI 用 Bun `--compile`（支持 ESM + 顶层 await + 原生插件）。Bun 可从单一宿主交叉编译全部目标，但会内嵌宿主架构的原生插件，故 CI 仍在各自原生 runner 上构建以得到正确的 `better_sqlite3.node`。
-- Linux 二进制动态链接宿主 glibc：请在**尽量旧的 glibc 环境**（如 CentOS 7 / manylinux 容器）里构建以最大化兼容；**不支持 musl (Alpine)**。
-- Desktop (`package:desktop`) 用 electron-builder，产 mac dmg / win nsis / linux AppImage；macOS/Windows 的签名需在对应宿主并配好证书。
+```bash
+codepilot web --host 0.0.0.0        # 局域网可访问；可加 --port / --token / --no-open
+codepilot connect 127.0.0.1:18765 --token <token>   # 终端附着到正在运行的服务
+```
+
+浏览器 / 桌面端里，对话中的文件路径和产出文件都可**点击预览**（Markdown、代码、图片等）。设置面板含：连接器（飞书 / 钉钉 / 企微 / Notion / GitHub 等）、MCP 市场、远程扫码、定时任务。
+
+**桌面窗 / Agent 窗**：
+
+```bash
+codepilot agent ~/my-project        # 任务型 UI，开在 Chrome/Edge app 窗口
+corepack pnpm desktop               # Electron 桌面端（源码运行）
+```
+
+**导出会话**（排查用）：
+
+```bash
+codepilot export                 # 最新会话 → stdout（markdown）
+codepilot export <id> --format jsonl -o out.jsonl
+```
+
+**自动更新**：
+
+```bash
+codepilot update          # 立刻检查并升级
+codepilot update --check  # 只检查不安装
+# 关闭：CODEPILOT_SKIP_UPDATE=1 或启动加 --no-update
+```
 
 ---
 
@@ -100,12 +124,7 @@ Web 不再单独打包成 `codepilot-web` 启动器：在 TUI 里敲 `/web`（�
 
 - 用户：`~/.codepilot/config.json`
 - 项目：`<repo>/.codepilot/config.json`（覆盖同名项）
-- 项目说明：仓库根 `CODEPILOT.md` / `AGENTS.md`
-- **渐进式项目记忆**（不进 git）：会话只注入薄索引；细节按需 `read_file`
-  - `~/.codepilot/projects/<hash>/MEMORY.md` — 分节摘要
-  - `~/.codepilot/memory/<hash>/MEMORY.md` — 索引子弹 + topic 路径
-  - 同目录 `overview.md` / `architecture.md` / `standards.md` / `knowledge.md` / … — 全文
-  - Agent 用 `memory_write`（可带 `section` / `topic`）静默写入；`autoMemoryEnabled: false` 可关
+- 项目说明：仓库根 `CODEPILOT.md` / `AGENTS.md`（作为项目记忆注入）
 
 ```json
 {
@@ -116,21 +135,11 @@ Web 不再单独打包成 `codepilot-web` 启动器：在 TUI 里敲 `/web`（�
       "baseURL": "http://127.0.0.1:3456/v1",
       "apiKey": "${OPENAI_API_KEY}",
       "model": "your-model-id",
-      "models": ["your-model-id"],
-      "modelCapabilities": {
-        "your-model-id": {
-          "contextWindow": 200000,
-          "maxOutputTokens": 32000,
-          "modalities": ["text"]
-        }
-      }
+      "models": ["your-model-id"]
     }
   },
   "permissionMode": "ask",
-  "sandbox": {
-    "mode": "workspace-write",
-    "writablePaths": []
-  }
+  "sandbox": { "mode": "workspace-write", "writablePaths": [] }
 }
 ```
 
@@ -142,105 +151,13 @@ Web 不再单独打包成 `codepilot-web` 启动器：在 TUI 里敲 `/web`（�
 | `sandbox.writablePaths` | 额外可写目录 |
 | `mcpServers` | MCP 服务器 |
 
-```bash
-codepilot config show
-codepilot config providers
-codepilot config add …
-codepilot config use …
-```
-
----
-
-## 使用
+命令行管理配置：
 
 ```bash
-export OPENAI_API_KEY=...
-# 或 ANTHROPIC_API_KEY / GITHUB_TOKEN
+codepilot config show | providers | add | use | remove | templates
 ```
 
-### 跑一次任务
-
-```bash
-codepilot run "给 src/auth.ts 加上输入校验并补单测"
-codepilot run "…" --cwd ~/proj --permission-mode auto-edit
-```
-
-### 长任务
-
-```bash
-codepilot goal "把回调风格 API 迁成 async/await" --max-rounds 50
-```
-
-### 交互终端
-
-```bash
-codepilot          # 多轮 REPL
-codepilot-tui      # 全屏 TUI
-```
-
-常用：`/agent chat|plan|agent`（协作模式）、`/mode ask|auto-edit|yolo`（权限模式）、`/model`、`/provider`、`/export`、`/clear`、`/exit`。  
-Ctrl+C：忙时取消当前轮，空闲时退出。
-
-导出会话（排查用）：
-
-```bash
-codepilot export                 # 最新会话 → stdout（markdown）
-codepilot export <id> -o out.md
-codepilot export <id> --format jsonl -o out.jsonl
-# TUI 内：/export 或 /export jsonl ./trace.jsonl
-```
-
-### 自动更新（引擎 vs 插件）
-
-```bash
-codepilot update          # 立刻检查并升级引擎
-codepilot update --check  # 只检查不安装
-# 关闭：CODEPILOT_SKIP_UPDATE=1 或启动加 --no-update
-```
-
-Web / Agent 客户端里，对话中的文件路径与产出文件可**点击预览**（Markdown、代码、图片等），不必再开外部软件。
-
-### 浏览器界面
-
-```bash
-codepilot serve --web --web-root
-# 默认 http://127.0.0.1:18765 ，会打印访问 token
-```
-
-可选：`--port`、`--host`、`--token`、`--no-open`、`--no-auth`。
-
-```bash
-codepilot connect
-codepilot connect 127.0.0.1:18765 --token <token>
-```
-
-设置面板子页：
-
-| 页 | 说明 |
-|---|---|
-| 连接器 | 飞书 / 钉钉 / 企微 / Notion / GitHub 等；可跳转官方授权页后填写凭证安装 |
-| MCP 市场 | 打开 mcp.so / Smithery 等开源市场链接；找到后粘贴 JSON 安装 |
-| 远程 | 一次性二维码（局域网 IP，非 127.0.0.1）；手机 scoped 授权 |
-| 定时 | 闲时任务（`serve` 内调度） |
-
-连接器与模型服务商列表来自仓库 `catalog/*.json`（GitHub raw），本地在 `~/.codepilot/catalog/`：**每天最多尝试更新一次**；弱网/离线失败则**一直沿用本地**。可用 `CODEPILOT_CATALOG_BASE_URL` 覆盖源地址。
-
-手机扫码请用局域网监听：
-
-```bash
-codepilot serve --web --web-root --host 0.0.0.0
-```
-
-TUI：`/undo` `/redo`、`/init`、`/remote`、`/schedule`。
-
-### Agent 窗 / 桌面
-
-```bash
-codepilot agent ~/my-project
-corepack pnpm desktop
-```
-
-### 模式
+**协作模式**（`--mode` 或 `/agent`）：
 
 | 模式 | 用途 |
 |---|---|
@@ -248,18 +165,49 @@ corepack pnpm desktop
 | `plan` | 只读摸清情况并出计划 |
 | `agent` | 默认：可改代码、跑命令（按权限模式确认） |
 
-图形端切换「问答 / 计划 / 智能体」；命令行 `--mode`；TUI `/agent`。
+---
 
-### VS Code / IntelliJ
+## IDE 插件
 
-- VS Code：`codepilot-vscode-*.vsix` → 「从 VSIX 安装…」
-- IntelliJ：`codepilot-idea-*.zip` → 「从磁盘安装」
+从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载：
 
-```bash
-corepack pnpm package:vscode
-corepack pnpm package:idea   # 需 JDK 17
-```
+- VS Code：`codepilot-vscode-*.vsix` →「从 VSIX 安装…」
+- IntelliJ：`codepilot-idea-*.zip` →「从磁盘安装插件」
 
 ---
 
-源码：https://github.com/dtssv/CodePilot  
+## 从源码构建
+
+```bash
+git clone https://github.com/dtssv/CodePilot.git
+cd CodePilot
+corepack enable
+corepack pnpm install
+corepack pnpm build
+
+alias codepilot='node '"$PWD"'/apps/tui/dist/cli.js'
+```
+
+打多端产物（输出在 `dist/release/`）：
+
+```bash
+corepack pnpm package:cli -- --all   # 统一 codepilot 二进制（Bun --compile，内嵌 Web UI）
+corepack pnpm package:desktop        # Electron 桌面安装包（.dmg / .exe / .AppImage）
+corepack pnpm package:vscode         # VS Code 扩展（.vsix）
+corepack pnpm package:idea           # IntelliJ 插件（需 JDK 17）
+corepack pnpm package:all -- --all   # 全部
+```
+
+<details>
+<summary>构建与跨平台说明</summary>
+
+- 统一二进制用 Bun `--compile` 打包 TUI 入口，内嵌 Web SPA。裸 `codepilot` 进 TUI；`web` / `serve` / `run` / `goal` / `agent` / `config` / `export` / `update` / `connect` 走命令行。
+- Bun 可从单一宿主交叉编译全部目标，但会内嵌宿主架构的原生插件，故 CI 在各自原生 runner 上构建以得到正确的 `better_sqlite3.node`。
+- Linux 二进制动态链接宿主 glibc：请在**尽量旧的 glibc 环境**（如 CentOS 7 / manylinux 容器）里构建以最大化兼容；**不支持 musl (Alpine)**。
+- Desktop 用 electron-builder；macOS / Windows 的签名需在对应宿主并配好证书。
+
+</details>
+
+---
+
+源码：https://github.com/dtssv/CodePilot
