@@ -12,14 +12,14 @@ describe("buildSubagentToolRegistry", () => {
     expect(names.has("web_fetch")).toBe(true);
     expect(names.has("web_search")).toBe(true);
     // No write/execute surface for explore.
-    for (const n of ["write_file", "edit_file", "apply_patch", "bash"]) {
+    for (const n of ["write_file", "edit_file", "apply_patch", "bash", "task_board"]) {
       expect(names.has(n)).toBe(false);
     }
   });
 
   it("gives worker sub-agents the write/execute surface on top", () => {
     const names = new Set(buildSubagentToolRegistry("worker").all().map((t) => t.name));
-    for (const n of ["write_file", "edit_file", "apply_patch", "bash"]) {
+    for (const n of ["write_file", "edit_file", "apply_patch", "bash", "task_board"]) {
       expect(names.has(n)).toBe(true);
     }
     // Workers keep research tools too.

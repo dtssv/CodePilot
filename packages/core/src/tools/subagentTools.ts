@@ -9,7 +9,8 @@
 //   side-effect-free, and research is the whole point of an explore agent, so
 //   they are included for every type.
 // - `worker`: everything explore has, plus write/edit/patch/bash to carry out
-//   a delegated change (and verify it).
+//   a delegated change (and verify it), and the shared task board for
+//   coordinating with peer workers.
 
 import { ToolRegistry } from "./types.js";
 import {
@@ -26,6 +27,7 @@ import {
   applyPatchTool,
   bashTool,
 } from "./index.js";
+import { taskBoardTool } from "./task_board.js";
 
 export function buildSubagentToolRegistry(agentType?: "explore" | "worker"): ToolRegistry {
   const r = new ToolRegistry();
@@ -43,6 +45,7 @@ export function buildSubagentToolRegistry(agentType?: "explore" | "worker"): Too
     r.register(editFileTool);
     r.register(applyPatchTool);
     r.register(bashTool);
+    r.register(taskBoardTool);
   }
   return r;
 }

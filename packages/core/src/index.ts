@@ -834,6 +834,9 @@ export { ISOLATION_MODES } from "./tools/task.js";
 export type { Isolation } from "./tools/task.js";
 export { parseCsv } from "./tools/task.js";
 export { buildSubagentToolRegistry } from "./tools/subagentTools.js";
+export { taskBoardTool } from "./tools/task_board.js";
+export { TaskBoard, foldTasks } from "./taskBoard.js";
+export type { TaskBoardEntry, TaskSnapshot, TaskStatus, TaskBoardResult } from "./taskBoard.js";
 
 // ---- Runtime management & introspection (/mcp /hooks /agents /skills /context) ----
 export {

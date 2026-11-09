@@ -30,6 +30,7 @@ export { planUpdateTool } from "./plan_update.js";
 export { memoryWriteTool } from "./memory_write.js";
 export type { MemorySink, MemoryWriteOpts } from "./memory_write.js";
 export { readArtifactTool } from "./read_artifact.js";
+export { taskBoardTool } from "./task_board.js";
 export { taskTool } from "./task.js";
 export type { SubagentRunner } from "./task.js";
 export { harnessBridgeTool, buildHarnessCommand, extractHarnessOutput } from "./harnessBridge.js";
