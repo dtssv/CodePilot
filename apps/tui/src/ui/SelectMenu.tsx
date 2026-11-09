@@ -49,7 +49,10 @@ export function SelectMenu(props: SelectMenuProps): React.ReactElement {
       onPick(options[n - 1]!.value);
       return;
     }
-    if (key.return) onPick(options[cursor]!.value);
+    if (key.return) {
+      const opt = options[Math.min(cursor, options.length - 1)];
+      if (opt) onPick(opt.value);
+    }
   });
 
   const window = 14;

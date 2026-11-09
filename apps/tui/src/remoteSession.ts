@@ -216,7 +216,7 @@ export class RemoteSession {
   private async fetchConfigSnapshot(): Promise<void> {
     try {
       const cfg = await this.peer.request<unknown, {
-        active: { provider?: string; model?: string; providerId?: string };
+        active: { provider?: string; model?: string; providerId?: string; onboardedAt?: string };
         providers: Record<string, unknown>;
         selectableModels: unknown;
       }>("config/get", { cwd: this.opts.cwd });
@@ -224,6 +224,9 @@ export class RemoteSession {
         provider: cfg.active?.provider,
         model: cfg.active?.model,
         providers: cfg.providers ?? {},
+        // Carry the first-run marker so the TUI's setup guide doesn't re-open
+        // every launch when following a shared server.
+        onboardedAt: cfg.active?.onboardedAt,
       };
       if (cfg.active?.model) this.model = cfg.active.model;
       if (cfg.active?.providerId) this.providerId = cfg.active.providerId;

@@ -263,6 +263,7 @@ vi.mock("@codepilot/core", async (importOriginal) => {
         provider: "openai",
         model: "deepseek-chat",
         apiKey: "sk-secret-key-xyz",
+        onboardedAt: "2026-01-02T03:04:05.000Z",
         providers: {
           deepseek: {
             provider: "openai",
@@ -470,6 +471,7 @@ describe("server / protocol handlers", () => {
     const snap = await client.request<
       {},
       {
+        active: { onboardedAt?: string };
         providers: Record<string, { hasApiKey?: boolean; apiKeyHint?: string; apiKey?: string }>;
         selectableModels: Array<{ id: string }>;
         templates: unknown[];
@@ -480,6 +482,8 @@ describe("server / protocol handlers", () => {
     expect(snap.providers.deepseek?.apiKey).toBeUndefined();
     expect(snap.selectableModels.some((m) => m.id === "deepseek/deepseek-reasoner")).toBe(true);
     expect(snap.templates.length).toBeGreaterThan(0);
+    // The first-run marker is surfaced so a remote TUI won't re-show setup.
+    expect(snap.active.onboardedAt).toBe("2026-01-02T03:04:05.000Z");
   });
 
   it("config/setSandbox persists the mode and hot-applies to a live session", async () => {

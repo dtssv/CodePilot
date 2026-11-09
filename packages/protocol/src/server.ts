@@ -1825,6 +1825,7 @@ async function handleConfigGet(
     providerId?: string;
     hasApiKey: boolean;
     apiKeyHint?: string;
+    onboardedAt?: string;
   };
   providers: Record<string, ReturnType<typeof redactProviderPreset>>;
   selectableModels: ReturnType<typeof listSelectableModels>;
@@ -1866,6 +1867,9 @@ async function handleConfigGet(
       providerId: findProviderIdForFlat(config),
       hasApiKey,
       apiKeyHint,
+      // The first-run marker so a remote client (TUI) can tell whether the user
+      // has already completed onboarding instead of re-showing the setup guide.
+      onboardedAt: config.onboardedAt,
     },
     providers,
     selectableModels: listSelectableModels(config),

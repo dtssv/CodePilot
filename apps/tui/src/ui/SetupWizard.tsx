@@ -381,10 +381,13 @@ function OptionList({
       onEscape?.();
       return;
     }
+    if (options.length === 0) return;
     if (key.upArrow) setCursor((i) => (i - 1 + options.length) % options.length);
     else if (key.downArrow) setCursor((i) => (i + 1) % options.length);
-    else if (key.return) onPick(options[cursor]!.value);
-    else {
+    else if (key.return) {
+      const opt = options[Math.min(cursor, options.length - 1)];
+      if (opt) onPick(opt.value);
+    } else {
       const n = Number.parseInt(input, 10);
       if (!Number.isNaN(n) && n >= 1 && n <= options.length && String(n) === input) {
         onPick(options[n - 1]!.value);

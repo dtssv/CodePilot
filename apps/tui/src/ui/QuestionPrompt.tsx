@@ -84,6 +84,7 @@ function OptionPicker(props: OptionPickerProps): React.ReactElement {
 
   useInput(
     (input, key) => {
+      if (options.length === 0) return;
       if (key.upArrow) {
         setCursor((i) => (i - 1 + options.length) % options.length);
         return;
@@ -118,7 +119,8 @@ function OptionPicker(props: OptionPickerProps): React.ReactElement {
               .map(({ o }) => o.label),
           );
         } else {
-          onPick(options[cursor]!.label);
+          const opt = options[Math.min(cursor, options.length - 1)];
+          if (opt) onPick(opt.label);
         }
         return;
       }
