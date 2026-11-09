@@ -37,6 +37,8 @@ export interface RemoteSessionOptions {
   }) => Promise<QuestionAnswers>;
  /** Another client following the session answered a pending request. */
   onPromptResolved?: (kind: "permission" | "question", requestId: string) => void;
+ /** Connection state changes (for a status line while auto-reconnecting). */
+  onConnectionChange?: (state: "connected" | "reconnecting" | "lost") => void;
 }
 
 type Listener = (e: Event) => void;
@@ -50,10 +52,22 @@ function wsUrl(url: string, token?: string): string {
   return u;
 }
 
+/**
+ * True for the family of errors a dropped socket produces: a write after the
+ * transport closed, or an in-flight request rejected when the peer loop ended
+ * ("peer disconnected" / "peer closed" / "transport read failed").
+ */
+function isDisconnectError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /transport closed|peer disconnected|peer closed|transport read failed/i.test(err.message)
+  );
+}
+
 export class RemoteSession {
-  readonly id: string;
-  private readonly peer: Peer;
-  private readonly socket: { close(): void };
+  id: string;
+  private peer: Peer;
+  private socket: { close(): void };
   private readonly listeners = new Set<Listener>();
   private events: Event[] = [];
   private mode: AgentMode;
@@ -67,6 +81,28 @@ export class RemoteSession {
  * by read-only UI like the model picker and status bar. */
   private configSnapshot: Record<string, unknown> = {};
   private opts!: RemoteSessionOptions;
+ /** In-flight reconnect, so overlapping failures await one attempt. */
+  private reconnecting: Promise<void> | null = null;
+
+ /** Emit a connection-state change to both the optional hook and the UI
+  * stream (as a transient recoverable banner the transcript already renders). */
+  private emitConnection(state: "connected" | "reconnecting" | "lost"): void {
+    this.opts.onConnectionChange?.(state);
+    const text =
+      state === "reconnecting"
+        ? "Connection to the shared server dropped — reconnecting…"
+        : state === "lost"
+          ? "Still trying to reach the shared server…"
+          : "Reconnected to the shared server.";
+    // `recoverable: true` renders as a transient banner, cleared on the next turn.
+    for (const l of this.listeners) {
+      try {
+        l({ type: "error", message: text, recoverable: true } as unknown as Event);
+      } catch {
+        /* listener errors are not fatal */
+      }
+    }
+  }
 
   private constructor(id: string, peer: Peer, socket: { close(): void }, mode: AgentMode) {
     this.id = id;
@@ -77,6 +113,50 @@ export class RemoteSession {
 
  /** Connect to a serve, attach to a session, and return a ready RemoteSession. */
   static async connect(opts: RemoteSessionOptions): Promise<RemoteSession> {
+    const self = new RemoteSession("", null as unknown as Peer, { close() {} }, opts.agentMode ?? "agent");
+    self.cwd = opts.cwd;
+    self.opts = opts;
+    const peer = await self.openPeer();
+
+ // Resolve the target session. Priority:
+ // 1. explicit sessionId → resume & FOLLOW it (true two-end sync).
+ // 2. --attach (attachNewest) → follow the server's newest session.
+ // 3. default → start a FRESH session, so the terminal runs independently
+ // and never hijacks whatever another client is already viewing.
+    let sessionId = opts.sessionId;
+    if (!sessionId && opts.attachNewest) {
+      const { sessions } = await peer.request<unknown, { sessions: { id: string; updatedAt?: number }[] }>(
+        "session/list",
+        {},
+      );
+      sessionId = [...(sessions ?? [])].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]?.id;
+    }
+    self.id = sessionId ?? "";
+
+ // Fetch a config snapshot (providers / model / statusLine) for read-only UI.
+    await self.fetchConfigSnapshot();
+
+    if (sessionId) {
+      const res = await peer.request<unknown, { sessionId: string; events: Event[] }>("session/resume", { sessionId });
+      self.events = res.events ?? [];
+ // Seed derived state from history.
+      for (const e of self.events) self.deriveState(e);
+    } else {
+      const res = await peer.request<unknown, { sessionId: string }>("session/new", { cwd: opts.cwd });
+      self.id = res.sessionId;
+    }
+    self.opts.onConnectionChange?.("connected");
+    return self;
+  }
+
+ /**
+  * Open a fresh WebSocket + Peer, wire the reverse-request and notification
+  * handlers, and run `initialize`. Used by both the first connect and every
+  * auto-reconnect. Installs a close handler that triggers reconnection unless
+  * the session has been disposed.
+  */
+  private async openPeer(): Promise<Peer> {
+    const opts = this.opts;
     const { WebSocket } = await import("ws");
     const socket = new WebSocket(wsUrl(opts.url, opts.token));
     await new Promise<void>((resolve, reject) => {
@@ -100,6 +180,18 @@ export class RemoteSession {
       const answers = await opts.onAskUser(req as never);
       return { answers };
     });
+    for (const kind of ["permission", "question"] as const) {
+      peer.onNotification(`${kind}/resolved`, (p: unknown) => {
+        const { sessionId: sid, requestId } = p as { sessionId: string; requestId: string };
+        if (sid === this.id) opts.onPromptResolved?.(kind, requestId);
+      });
+    }
+ // Stream events into the local mirror + listeners.
+    peer.onNotification("event", (p: unknown) => {
+      const { sessionId: sid, event } = p as { sessionId: string; event: Event };
+      if (sid !== this.id) return;
+      this.ingest(event);
+    });
 
     await peer.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
@@ -108,64 +200,92 @@ export class RemoteSession {
       clientInfo: { name: "codepilot-tui", version: "0" },
     });
 
- // Resolve the target session. Priority:
- // 1. explicit sessionId → resume & FOLLOW it (true two-end sync).
- // 2. --attach (attachNewest) → follow the server's newest session.
- // 3. default → start a FRESH session, so the terminal runs independently
- // and never hijacks whatever another client is already viewing.
-    let sessionId = opts.sessionId;
-    if (!sessionId && opts.attachNewest) {
-      const { sessions } = await peer.request<unknown, { sessions: { id: string; updatedAt?: number }[] }>(
-        "session/list",
-        {},
-      );
-      sessionId = [...(sessions ?? [])].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0]?.id;
-    }
+ // A close on a live session (server reaped an idle socket, restart, blip)
+ // kicks off auto-reconnect. An intentional dispose skips this.
+    socket.on("close", () => {
+      if (this.disposed) return;
+      void this.reconnect();
+    });
 
-    const self = new RemoteSession(sessionId ?? "", peer, socket as unknown as { close(): void }, opts.agentMode ?? "agent");
-    self.cwd = opts.cwd;
-    self.opts = opts;
-    for (const kind of ["permission", "question"] as const) {
-      peer.onNotification(`${kind}/resolved`, (p: unknown) => {
-        const { sessionId: sid, requestId } = p as { sessionId: string; requestId: string };
-        if (sid === self.id) opts.onPromptResolved?.(kind, requestId);
-      });
-    }
- // Fetch a config snapshot (providers / model / statusLine) for read-only UI.
+    this.peer = peer;
+    this.socket = socket as unknown as { close(): void };
+    return peer;
+  }
+
+ /** Best-effort config snapshot for read-only UI (model / providers). */
+  private async fetchConfigSnapshot(): Promise<void> {
     try {
-      const cfg = await peer.request<unknown, {
+      const cfg = await this.peer.request<unknown, {
         active: { provider?: string; model?: string; providerId?: string };
         providers: Record<string, unknown>;
         selectableModels: unknown;
-      }>("config/get", { cwd: opts.cwd });
-      self.configSnapshot = {
+      }>("config/get", { cwd: this.opts.cwd });
+      this.configSnapshot = {
         provider: cfg.active?.provider,
         model: cfg.active?.model,
         providers: cfg.providers ?? {},
       };
-      if (cfg.active?.model) self.model = cfg.active.model;
-      if (cfg.active?.providerId) self.providerId = cfg.active.providerId;
+      if (cfg.active?.model) this.model = cfg.active.model;
+      if (cfg.active?.providerId) this.providerId = cfg.active.providerId;
     } catch {
  /* best-effort; UI degrades gracefully */
     }
+  }
 
- // Stream events into the local mirror + listeners.
-    peer.onNotification("event", (p: unknown) => {
-      const { sessionId: sid, event } = p as { sessionId: string; event: Event };
-      if (sid !== self.id) return;
-      self.ingest(event);
+ /**
+  * Re-establish the socket to the same daemon and re-attach to the same
+  * session, with capped exponential backoff. Concurrent callers share one
+  * attempt. Resolves once reconnected; stays trying until disposed.
+  */
+  private reconnect(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (this.reconnecting) return this.reconnecting;
+    this.emitConnection("reconnecting");
+    this.reconnecting = (async () => {
+      let delay = 300;
+      for (let attempt = 0; !this.disposed; attempt++) {
+        try {
+          await this.openPeer();
+          if (this.id) {
+            const res = await this.peer.request<unknown, { sessionId: string; events: Event[] }>(
+              "session/resume",
+              { sessionId: this.id },
+            );
+            // Replay any events the UI missed while the socket was down.
+            const known = this.events.length;
+            const fresh = res.events ?? [];
+            for (let i = known; i < fresh.length; i++) this.ingest(fresh[i]!);
+          }
+          await this.fetchConfigSnapshot();
+          this.emitConnection("connected");
+          return;
+        } catch {
+          this.emitConnection("lost");
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 5_000);
+        }
+      }
+    })();
+    const attempt = this.reconnecting;
+    void attempt.finally(() => {
+      if (this.reconnecting === attempt) this.reconnecting = null;
     });
+    return attempt;
+  }
 
-    if (sessionId) {
-      const res = await peer.request<unknown, { sessionId: string; events: Event[] }>("session/resume", { sessionId });
-      self.events = res.events ?? [];
- // Seed derived state from history.
-      for (const e of self.events) self.deriveState(e);
-    } else {
-      const res = await peer.request<unknown, { sessionId: string }>("session/new", { cwd: opts.cwd });
-      (self as { id: string }).id = res.sessionId;
+ /**
+  * Run an RPC, transparently waiting for an in-flight reconnect and retrying
+  * once if the socket dropped — so read-only calls like the /resume picker
+  * self-heal instead of surfacing "websocket transport closed".
+  */
+  private async rpc<R>(method: string, params: unknown): Promise<R> {
+    try {
+      return await this.peer.request<unknown, R>(method, params);
+    } catch (err) {
+      if (this.disposed || !isDisconnectError(err)) throw err;
+      await this.reconnect();
+      return await this.peer.request<unknown, R>(method, params);
     }
-    return self;
   }
 
   private deriveState(e: Event): void {
@@ -207,7 +327,7 @@ export class RemoteSession {
 
  /** Every session the server knows, for the /resume picker. */
   async listSessions(): Promise<{ id: string; title: string; updatedAt: number; cwd: string; messageCount: number }[]> {
-    const res = await this.peer.request<unknown, { sessions: { id: string; title: string; updatedAt: number; cwd: string; messageCount?: number }[] }>(
+    const res = await this.rpc<{ sessions: { id: string; title: string; updatedAt: number; cwd: string; messageCount?: number }[] }>(
       "session/list",
       {},
     );
@@ -225,10 +345,10 @@ export class RemoteSession {
     images?: unknown,
     delivery?: "auto" | "queue" | "steer",
   ): Promise<"started" | "queued" | "steered"> {
-    const res = await this.peer.request<
-      unknown,
-      { delivery?: "started" | "queued" | "steered" }
-    >("prompt/send", { sessionId: this.id, text, images, delivery: delivery ?? "auto" });
+    const res = await this.rpc<{ delivery?: "started" | "queued" | "steered" }>(
+      "prompt/send",
+      { sessionId: this.id, text, images, delivery: delivery ?? "auto" },
+    );
     return res?.delivery ?? "started";
   }
 
@@ -244,10 +364,10 @@ export class RemoteSession {
    * the TUI can fall back to re-sending the last prompt.
    */
   async resumeLastTurn(): Promise<"started" | "queued" | "noop"> {
-    const res = await this.peer.request<
-      unknown,
-      { delivery?: "started" | "queued" | "noop" }
-    >("prompt/resume", { sessionId: this.id });
+    const res = await this.rpc<{ delivery?: "started" | "queued" | "noop" }>(
+      "prompt/resume",
+      { sessionId: this.id },
+    );
     return res?.delivery ?? "noop";
   }
 
@@ -377,5 +497,12 @@ export class RemoteSession {
     this.listeners.clear();
     try { await this.peer.close(); } catch { /* ignore */ }
     try { this.socket.close(); } catch { /* ignore */ }
+  }
+
+ /** Test seam: force the current socket closed to exercise auto-reconnect. */
+  __dropSocketForTest(): void {
+    const s = this.socket as unknown as { terminate?: () => void; close(): void };
+    if (typeof s.terminate === "function") s.terminate();
+    else s.close();
   }
 }

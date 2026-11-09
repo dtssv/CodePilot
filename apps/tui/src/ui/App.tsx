@@ -616,10 +616,11 @@ export function App(props: AppProps): React.ReactElement {
         },
       });
     } catch (err: unknown) {
-      dispatch({
-        type: "set-notice",
-        text: `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      const msg = err instanceof Error ? err.message : String(err);
+      const friendly = /transport closed|peer disconnected|peer closed/i.test(msg)
+        ? "Lost the connection to the shared server — reconnecting. Try /resume again in a moment."
+        : `Failed to list sessions: ${msg}`;
+      dispatch({ type: "set-notice", text: friendly });
     }
   }, [loadResumeSessions, resumeSessionById, session.id]);
 
