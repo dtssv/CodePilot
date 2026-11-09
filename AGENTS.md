@@ -73,26 +73,41 @@ end-to-end check.
   `PACKAGE_TARGETS=mac node scripts/package/desktop.mjs`, then copy
   `dist/release/desktop/mac-arm64/CodePilot Agent.app` to `/Applications` and
   `xattr -dr com.apple.quarantine`.
-- Self-contained CLI/TUI binaries (what `scripts/install.{sh,ps1}` download — no
-  Node at runtime). Two different pipelines, for hard reasons:
-  - **CLI** (`scripts/package/cli.mjs`): esbuild→single CJS→`@yao-pkg/pkg`. Works
-    because the CLI is fully bundleable (better-sqlite3 is fail-soft/optional).
-    `@yao-pkg/pkg` can only build for its **host** platform — its remote base-Node
-    cache 404s for non-host targets ("Not able to build for 'win' here, only for
-    'macos'"), so there is **no cross-compile**; CI builds per-OS/arch.
-  - **TUI** (`scripts/package/tui.mjs` + `bundle-bun.mjs`): **Bun `--compile`**,
-    NOT pkg. The TUI is ESM and Ink/yoga use top-level await, so esbuild can't emit
-    CJS, and pkg can't reliably run an ESM entry from its snapshot FS
-    (ERR_MODULE_NOT_FOUND / broken `import.meta`). Bun handles ESM+TLA+native addons.
-    `bundle-bun.mjs` stubs Ink's dev-only `react-devtools-core` and inlines core's
-    `require("../package.json")` version probe (same fixup `bundle-node.mjs` does for
-    the CLI). Bun CAN cross-compile all 6 targets from one host, but embeds host-arch
-    native addons, so CI builds each on its native runner for a correct
-    `better_sqlite3.node`.
-  - `scripts/install.sh` / `.ps1` download `codepilot-<target>`, `codepilot-tui-<target>`,
-    and `codepilot-web-<target>.tar.gz` into `~/.codepilot/bin`; `install.cmd` is a
-    thin PowerShell shim. `CODEPILOT_DIST_DIR=dist/release` installs from a local
-    build for testing. Verify a binary is truly self-contained with a node-free PATH:
+- Self-contained **unified** `codepilot` binary (what `scripts/install.{sh,ps1}`
+  download — no Node at runtime). One pipeline:
+  - **`scripts/package/cli.mjs` + `bundle-bun.mjs`**: **Bun `--compile`** of the
+    TUI entry (`apps/tui/dist/cli.js`). The single binary is both the interactive
+    TUI (bare `codepilot`) and the command surface (`codepilot web` / `serve` /
+    `run` / …) — the TUI entry routes `CLI_COMMANDS` first tokens to the protocol
+    CLI's `runProtocolCli`. pkg is retired: the TUI is ESM and Ink/yoga use
+    top-level await, which esbuild can't emit as CJS and pkg can't run from its
+    snapshot FS. Bun handles ESM+TLA+native addons and CAN cross-compile all 6
+    targets from one host, but embeds host-arch native addons, so CI builds each
+    on its native runner for a correct `better_sqlite3.node`.
+    `bundle-bun.mjs` stubs Ink's dev-only `react-devtools-core` and inlines
+    core's `require("../package.json")` version probe.
+  - **web is embedded in the binary**, not a separate asset. `cli.mjs` builds the
+    web SPA then runs `scripts/package/gen-web-vfs.mjs` to overwrite
+    `packages/protocol/dist/web-vfs.generated.js` with `import … with { type:
+    "file" }` lines (one per `apps/web/dist` file) — this runs AFTER `tsc` (the
+    committed source VFS stays empty so it type-checks) and BEFORE the Bun
+    compile. At runtime `materializeEmbeddedWeb` (`web-embed.ts`) copies the
+    embedded files to a temp dir with `readFileSync`/`writeFileSync` (`cpSync`
+    can't read Bun's `/$bunfs` virtual FS) and the existing static server serves
+    them; the source/npm build falls back to `detectWebRoot`.
+  - **Bun `--compile` gotchas** (don't reintroduce): a module reached via a
+    **nested/second dynamic `import`** inside a compiled binary loses both its
+    `node:http` bind and its `with { type: "file" }` embeds (works fine under
+    `bun run`), so the protocol CLI imports `ws.js` statically and the TUI entry
+    imports `runProtocolCli` statically. Every module in a compiled binary shares
+    the same `import.meta.url`/`Bun.main`/`argv[1]`, so the protocol CLI's
+    self-exec guard can't detect "am I the entry" — the TUI entry imports
+    `./unifiedMarker.js` first to set `globalThis.__CODEPILOT_UNIFIED__`, which
+    `isDirectEntry()` checks to stay dormant.
+  - `scripts/install.sh` / `.ps1` download a single `codepilot-<target>` into
+    `~/.codepilot/bin`; `install.cmd` is a thin PowerShell shim.
+    `CODEPILOT_DIST_DIR=dist/release` installs from a local build for testing.
+    Verify a binary is truly self-contained with a node-free PATH:
     `env -i HOME=$HOME PATH=.../bin:/usr/bin:/bin codepilot --help`.
 - `AGENTS.md` (this file) and `CODEPILOT.md` are both read as project memory by
   `packages/core/src/memory.ts`. Keep this file current when rules change.
