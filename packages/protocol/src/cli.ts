@@ -44,10 +44,13 @@ import {
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
 import { detectWebRoot } from "./agent-app.js";
+import { materializeEmbeddedWeb } from "./web-embed.js";
 import { PrettyRenderer, prettyOutput } from "./cli-render.js";
 import { startServer } from "./server.js";
+import { startWebSocketServer } from "./ws.js";
 
 interface ParsedArgs {
   positional: string[];
@@ -90,6 +93,8 @@ Usage:
                                          \`serve\` and follow a live session in
                                          real time (same session the web UI
                                          drives; default 127.0.0.1:18765)
+  codepilot web [--port N] [--host H]  — open the web UI (serves the embedded
+                       [--token T] [--no-open]  SPA and opens the browser)
   codepilot serve                      — JSON-RPC over stdio
   codepilot serve --web [--port N] [--host H] [--token T]
                        [--allow-origin O1,O2] [--no-auth] [--web-root [DIR]]
@@ -134,8 +139,8 @@ Environment:
 `;
 }
 
-async function main(): Promise<number> {
-  const argv = process.argv.slice(2);
+export async function runProtocolCli(rawArgv?: readonly string[]): Promise<number> {
+  const argv = rawArgv ? [...rawArgv] : process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(helpText() + "\n");
     return 0;
@@ -161,6 +166,11 @@ async function main(): Promise<number> {
   switch (cmd) {
     case "serve":
       return cmdServe(flags);
+    case "web":
+      // Open the web UI: serve the embedded SPA over the protocol on one
+      // loopback port and open the browser (unless --no-open). Honours
+      // --port / --host / --token like `serve --web`.
+      return cmdServeWeb({ ...flags, web: true, "web-root": true });
     case "run":
       return cmdRun(positional.slice(1), flags);
     case "goal":
@@ -475,7 +485,6 @@ const DEFAULT_WEB_PORT = 18765;
 async function cmdServeWeb(
   flags: Record<string, string | boolean>,
 ): Promise<number> {
-  const { startWebSocketServer } = await import("./ws.js");
   const portFlag = flags["port"];
   const port =
     typeof portFlag === "string" ? Number(portFlag) : DEFAULT_WEB_PORT;
@@ -494,7 +503,9 @@ async function cmdServeWeb(
   const webRootFlag = flags["web-root"];
   let webRoot: string | undefined;
   if (webRootFlag === true) {
-    webRoot = detectWebRoot("--web-root");
+    // Prefer the SPA embedded in this binary; fall back to the filesystem
+    // layout (source / npm) when nothing is embedded.
+    webRoot = materializeEmbeddedWeb() ?? detectWebRoot("--web-root");
     if (!webRoot) return 2;
   } else if (typeof webRootFlag === "string") {
     if (!existsSync(join(webRootFlag, "index.html"))) {
@@ -717,7 +728,6 @@ async function cmdAgent(
     return 2;
   }
 
-  const { startWebSocketServer } = await import("./ws.js");
   const { agentPageUrl, openAgentWindow } = await import("./agent-app.js");
   const handle = await startWebSocketServer({ port, host: "127.0.0.1", staticRoot: webRoot, defaultCwd: cwd });
   const url = agentPageUrl(handle.host, handle.port, handle.token, cwd);
@@ -1443,12 +1453,32 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-main().then(
-  (code) => process.exit(code),
-  (err) => {
-    process.stderr.write(
-      `codepilot: fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-    );
-    process.exit(1);
-  },
-);
+// Run only when invoked directly as the entry point; when imported (e.g. by the
+// unified binary's TUI entry) this module exposes `runProtocolCli` without
+// self-executing. In a Bun-compiled binary every module shares one
+// `import.meta.url`, so the unified entry sets `__CODEPILOT_UNIFIED__` first to
+// suppress this self-exec; the standalone protocol binary leaves it unset.
+function isDirectEntry(): boolean {
+  if ((globalThis as { __CODEPILOT_UNIFIED__?: boolean }).__CODEPILOT_UNIFIED__) {
+    return false;
+  }
+  try {
+    const self = fileURLToPath(import.meta.url);
+    const entry = process.argv[1] ? resolve(process.argv[1]) : "";
+    return entry === self;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectEntry()) {
+  runProtocolCli().then(
+    (code) => process.exit(code),
+    (err) => {
+      process.stderr.write(
+        `codepilot: fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    },
+  );
+}

@@ -26,6 +26,10 @@
       "types": "./dist/serve-info.d.ts",
       "import": "./dist/serve-info.js"
     },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {

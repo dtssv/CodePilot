@@ -2,7 +2,7 @@
 // subcommand argv parsing added in #28.
 
 import { describe, expect, it } from "vitest";
-import { parseArgs, parseConfigPatch } from "../src/cli.js";
+import { parseArgs, parseConfigPatch } from "../src/cliArgs.js";
 
 describe("parseArgs: --profile", () => {
   it("parses '--profile <name>' (space-separated)", () => {
