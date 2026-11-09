@@ -7,10 +7,18 @@
 //
 //   { "webSearch": { "provider": "brave", "apiKey": "${BRAVE_API_KEY}" } }
 //
-// Supported backends: duckduckgo (default), brave, serper, google (CSE).
+// Supported backends: duckduckgo (default), brave, serper, google (CSE), and
+// `custom` — a user-defined HTTP template so any JSON search API (Baidu, Bing,
+// a self-hosted gateway) can be used without new backend code:
+//
+//   { "webSearch": { "provider": "custom", "custom": {
+//       "url": "https://api.example.com/search?q={query}&n={max}",
+//       "headers": { "Authorization": "Bearer ${MY_KEY}" },
+//       "resultsPath": "data.items",
+//       "fields": { "title": "name", "url": "link", "snippet": "desc" } } } }
 
 import { z } from "zod";
-import type { WebSearchConfig, WebSearchProvider } from "../types.js";
+import type { CustomSearchTemplate, WebSearchConfig, WebSearchProvider } from "../types.js";
 import type { ToolDef, ToolContext } from "./types.js";
 import { htmlToText } from "./web_fetch.js";
 
@@ -49,7 +57,7 @@ interface SearchHit {
 }
 
 /** Conventional env var holding each backend's API key. */
-const ENV_KEY: Record<Exclude<WebSearchProvider, "duckduckgo">, string> = {
+const ENV_KEY: Record<"brave" | "serper" | "google", string> = {
   brave: "BRAVE_API_KEY",
   serper: "SERPER_API_KEY",
   google: "GOOGLE_API_KEY",
@@ -59,9 +67,18 @@ const ENV_KEY: Record<Exclude<WebSearchProvider, "duckduckgo">, string> = {
 export function resolveSearchBackend(
   cfg: WebSearchConfig | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): { provider: WebSearchProvider; apiKey?: string; cx?: string; endpoint?: string } {
+): {
+  provider: WebSearchProvider;
+  apiKey?: string;
+  cx?: string;
+  endpoint?: string;
+  custom?: CustomSearchTemplate;
+} {
   // Explicit provider wins; its key comes from config or the conventional env.
   if (cfg?.provider) {
+    if (cfg.provider === "custom") {
+      return { provider: "custom", apiKey: cfg.apiKey, endpoint: cfg.endpoint, custom: cfg.custom };
+    }
     const apiKey =
       cfg.apiKey ?? (cfg.provider === "duckduckgo" ? undefined : env[ENV_KEY[cfg.provider]]);
     return { provider: cfg.provider, apiKey, cx: cfg.cx ?? env.GOOGLE_CSE_ID, endpoint: cfg.endpoint };
@@ -229,6 +246,9 @@ export const webSearchTool: ToolDef<typeof schema> = {
         case "google":
           hits = await googleSearch(input.query, max, backend, locale, controller.signal, ctx);
           break;
+        case "custom":
+          hits = await customSearch(input.query, max, backend.custom, locale, controller.signal);
+          break;
         default:
           hits = await duckDuckGoSearch(input.query, max, locale, controller.signal);
       }
@@ -248,7 +268,7 @@ export const webSearchTool: ToolDef<typeof schema> = {
       const msg = formatFetchError(err, SEARCH_TIMEOUT_MS);
       const hint =
         backend.provider === "duckduckgo"
-          ? " DuckDuckGo is often blocked; set BRAVE_API_KEY / SERPER_API_KEY, or web_fetch a known URL."
+          ? " DuckDuckGo is often blocked; set BRAVE_API_KEY / SERPER_API_KEY, configure webSearch.provider=custom, or web_fetch a known URL."
           : " Try web_fetch with a direct URL, or another webSearch.provider.";
       return {
         content: `web_search (${backend.provider}) failed: ${msg}.${hint}`,
@@ -419,6 +439,84 @@ async function googleSearch(
     title: htmlToText(r.title ?? ""),
     url: r.link ?? "",
     snippet: htmlToText(r.snippet ?? ""),
+  }));
+}
+
+// --------------------------------------------------------------- custom
+
+/** Resolve `${ENV}` references in a string against the process environment. */
+function interpolateEnv(s: string, env: NodeJS.ProcessEnv = process.env): string {
+  return s.replace(/\$\{([A-Z0-9_]+)\}/gi, (_m, name: string) => env[name] ?? "");
+}
+
+/**
+ * Substitute `{query}`/`{max}`/`{language}`/`{region}` placeholders. When
+ * `encode` is true (URLs) each value is URL-encoded; otherwise (JSON bodies)
+ * it is JSON-escaped so the result stays valid JSON.
+ */
+function fillPlaceholders(
+  template: string,
+  values: { query: string; max: number; language?: string; region?: string },
+  encode: boolean,
+): string {
+  const enc = (v: string): string => {
+    if (encode) return encodeURIComponent(v);
+    // JSON-escape without the surrounding quotes, so it can sit inside a string.
+    const j = JSON.stringify(v);
+    return j.slice(1, j.length - 1);
+  };
+  return template
+    .replace(/\{query\}/g, enc(values.query))
+    .replace(/\{max\}/g, String(values.max))
+    .replace(/\{language\}/g, enc(values.language ?? ""))
+    .replace(/\{region\}/g, enc(values.region ?? ""));
+}
+
+/** Follow a dot-path (e.g. `data.items`) into a JSON value; undefined if absent. */
+function dotPath(obj: unknown, path: string | undefined): unknown {
+  if (!path) return obj;
+  let cur: unknown = obj;
+  for (const key of path.split(".")) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+async function customSearch(
+  query: string,
+  max: number,
+  tpl: CustomSearchTemplate | undefined,
+  locale: SearchLocale,
+  signal: AbortSignal,
+): Promise<SearchHit[]> {
+  if (!tpl?.url) {
+    throw new Error("missing webSearch.custom.url (define the custom search template)");
+  }
+  const values = { query, max, language: locale.language, region: locale.region };
+  const url = interpolateEnv(fillPlaceholders(tpl.url, values, true));
+  const method = tpl.method ?? "GET";
+  const headers: Record<string, string> = { accept: "application/json" };
+  for (const [k, v] of Object.entries(tpl.headers ?? {})) {
+    headers[k] = interpolateEnv(fillPlaceholders(v, values, true));
+  }
+  const body =
+    method === "POST" && tpl.body !== undefined
+      ? interpolateEnv(fillPlaceholders(tpl.body, values, false))
+      : undefined;
+  const res = await fetch(url, { method, signal, headers, body });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = (await res.json()) as unknown;
+  const arr = dotPath(json, tpl.resultsPath);
+  if (!Array.isArray(arr)) {
+    const where = tpl.resultsPath ? `at "${tpl.resultsPath}"` : "(response root)";
+    throw new Error(`custom search: no results array ${where}`);
+  }
+  const f = { title: tpl.fields?.title ?? "title", url: tpl.fields?.url ?? "url", snippet: tpl.fields?.snippet ?? "snippet" };
+  return arr.map((r) => ({
+    title: htmlToText(String(dotPath(r, f.title) ?? "")),
+    url: String(dotPath(r, f.url) ?? ""),
+    snippet: htmlToText(String(dotPath(r, f.snippet) ?? "")),
   }));
 }
 

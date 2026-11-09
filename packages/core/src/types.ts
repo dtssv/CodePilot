@@ -837,7 +837,35 @@ export interface ImageGenConfig {
 }
 
 /** Which search backend `web_search` uses. */
-export type WebSearchProvider = "duckduckgo" | "brave" | "serper" | "google";
+export type WebSearchProvider = "duckduckgo" | "brave" | "serper" | "google" | "custom";
+
+/**
+ * A user-defined HTTP search backend. The URL / headers / body support
+ * `{query}` / `{max}` / `{language}` / `{region}` placeholders and `${ENV}`
+ * interpolation; the JSON response is mapped to hits via `resultsPath` (a
+ * dot-path to the array) and `fields` (which keys hold the title / url /
+ * snippet). This lets any JSON search API (Baidu, Bing, DeepSeek, a self-hosted
+ * gateway) be configured without new backend code.
+ */
+export interface CustomSearchTemplate {
+ /** HTTP method. Default `GET`. */
+  method?: "GET" | "POST";
+ /** Request URL. Placeholders are URL-encoded. e.g.
+  * `https://api.example.com/search?q={query}&n={max}`. */
+  url: string;
+ /** Request headers; values support `${ENV}` and placeholders. */
+  headers?: Record<string, string>;
+ /** Request body for POST; a JSON string with placeholders (NOT URL-encoded
+  * inside JSON) or any raw string. Ignored for GET. */
+  body?: string;
+ /** Dot-path to the results array in the JSON response, e.g. `data.items`.
+  * Omit when the response is itself an array. */
+  resultsPath?: string;
+ /** Which fields of each result hold the title / url / snippet. Each is a
+  * dot-path relative to a result object. Defaults: `title` / `url` /
+  * `snippet`. */
+  fields?: { title?: string; url?: string; snippet?: string };
+}
 
 export interface WebSearchConfig {
  /** Search backend. Defaults to auto: if a provider API key is present
@@ -869,6 +897,9 @@ export interface WebSearchConfig {
   * to Brave `freshness`, Google `dateRestrict`, Serper `tbs`, DDG/Bing `df`.
   * When omitted, no recency filter is applied. */
   freshness?: "day" | "week" | "month" | "year";
+ /** HTTP template for the `custom` backend (provider: "custom"). Required
+  * when provider is `custom`; ignored otherwise. */
+  custom?: CustomSearchTemplate;
 }
 
 export interface ImageAttachment {

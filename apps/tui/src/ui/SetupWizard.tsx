@@ -43,6 +43,8 @@ type SearchChoice = {
   label: string;
   description: string;
   needsKey: boolean;
+  /** Collect a URL template instead of a bare API key (the `custom` backend). */
+  custom?: boolean;
   envVar?: string;
   signupUrl?: string;
 };
@@ -70,12 +72,22 @@ const SEARCH_CHOICES: readonly SearchChoice[] = [
     envVar: "SERPER_API_KEY",
     signupUrl: "https://serper.dev",
   },
+  {
+    provider: "custom",
+    label: "Custom (any JSON search API)",
+    description: "paste a URL template — Baidu, Bing, self-hosted…",
+    needsKey: false,
+    custom: true,
+  },
 ];
 
 type Step =
+  | { kind: "welcome" }
   | { kind: "provider" }
   | { kind: "search-pick" }
   | { kind: "search-key"; choice: SearchChoice }
+  | { kind: "search-custom-url" }
+  | { kind: "search-custom-header"; url: string }
   | { kind: "image-ask" }
   | { kind: "image-base-url" }
   | { kind: "image-key"; baseURL: string }
@@ -84,9 +96,15 @@ type Step =
 
 export function SetupWizard(props: SetupWizardProps): React.ReactElement {
   const { existingIds, hasProvider, onProviderConnected, onDone } = props;
-  const [step, setStep] = React.useState<Step>({ kind: "provider" });
+  const [step, setStep] = React.useState<Step>({ kind: "welcome" });
   const [error, setError] = React.useState<string | undefined>();
   const summary = React.useRef<string[]>([]);
+
+  // Finish immediately, stamping a "skipped" summary unless steps already ran.
+  const finishNow = React.useCallback(() => {
+    setStep({ kind: "saving" });
+    onDone(summary.current.length ? summary.current : ["Setup skipped — run /setup anytime"]);
+  }, [onDone]);
 
   // Esc at any point skips the current step forward (never cancels the whole
   // guide destructively — skipping is a valid, expected outcome).
@@ -104,6 +122,31 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
       onDone(summary.current.length ? summary.current : ["Setup skipped"]);
     }
   }, [onDone]);
+
+  // ---- Step 0: welcome -------------------------------------------------
+  if (step.kind === "welcome") {
+    return (
+      <WizardFrame title="Welcome to CodePilot" hint="Esc skip all">
+        <Text>Let's get you set up in 3 quick, optional steps:</Text>
+        <Box flexDirection="column" marginTop={1} marginBottom={1}>
+          <Text dimColor>  1. Provider — connect a model (needed to chat)</Text>
+          <Text dimColor>  2. Web search — keyless default, or a stronger backend</Text>
+          <Text dimColor>  3. Image generation — off by default, opt in here</Text>
+        </Box>
+        <Text dimColor>Each step can be skipped with Esc. You can re-run this anytime with /setup.</Text>
+        <Box marginTop={1}>
+          <OptionList
+            options={[
+              { label: "Start setup", value: "start" },
+              { label: "Skip all (I'll configure later)", value: "skip" },
+            ]}
+            onEscape={finishNow}
+            onPick={(v) => (v === "skip" ? finishNow() : setStep({ kind: "provider" }))}
+          />
+        </Box>
+      </WizardFrame>
+    );
+  }
 
   // ---- Step 1: provider (embed ConnectWizard) --------------------------
   if (step.kind === "provider") {
@@ -152,6 +195,10 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
           }}
           onPick={(provider) => {
             const choice = SEARCH_CHOICES.find((c) => c.provider === provider)!;
+            if (choice.custom) {
+              setStep({ kind: "search-custom-url" });
+              return;
+            }
             if (!choice.needsKey) {
               // DuckDuckGo: leave config untouched (auto-fallback already does
               // this). Just move on.
@@ -210,6 +257,85 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
             })();
           }}
         />
+      </WizardFrame>
+    );
+  }
+
+  // ---- Step 2b: custom search template ---------------------------------
+  if (step.kind === "search-custom-url") {
+    return (
+      <WizardFrame title="Setup · 2/3 · custom search" hint="Esc keep default">
+        <Text dimColor>
+          Paste a search URL template. Use {"{query}"} for the search text (also
+          {" {max} {language} {region}"}), and {"${ENV}"} for secrets. Example:
+        </Text>
+        <Text dimColor>  https://api.example.com/search?q={"{query}"}&amp;key=${"{MY_KEY}"}</Text>
+        <Text>URL template:</Text>
+        <FreeText
+          placeholder="https://…?q={query}"
+          onEscape={() => {
+            summary.current.push("Search → DuckDuckGo (default)");
+            advance("search-key");
+          }}
+          onSubmit={(url) => setStep({ kind: "search-custom-header", url })}
+        />
+      </WizardFrame>
+    );
+  }
+
+  if (step.kind === "search-custom-header") {
+    const saveCustom = (header: string) => {
+      void (async () => {
+        setError(undefined);
+        setStep({ kind: "saving" });
+        try {
+          const trimmed = header.trim();
+          // "Name: value" → a single header; blank → none.
+          const headers: Record<string, string> = {};
+          if (trimmed) {
+            const idx = trimmed.indexOf(":");
+            if (idx > 0) headers[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim();
+          }
+          await patchUserConfig((raw) => {
+            raw.webSearch = {
+              ...(typeof raw.webSearch === "object" && raw.webSearch
+                ? (raw.webSearch as Record<string, unknown>)
+                : {}),
+              provider: "custom",
+              custom: {
+                url: step.url,
+                ...(Object.keys(headers).length ? { headers } : {}),
+              },
+            };
+          });
+          summary.current.push("Search → custom JSON API");
+          setStep({ kind: "image-ask" });
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+          setStep({ kind: "search-custom-header", url: step.url });
+        }
+      })();
+    };
+    return (
+      <WizardFrame title="Setup · 2/3 · custom search" hint="Enter to skip header · Esc default">
+        {error && <Text color={palette.remove}>{error}</Text>}
+        <Text dimColor>
+          Optional auth header as "Name: value" (e.g. Authorization: Bearer ${"{MY_KEY}"}).
+          Leave blank if the URL already carries the key.
+        </Text>
+        <Text>Header:</Text>
+        <FreeText
+          allowEmpty
+          placeholder="Authorization: Bearer ${MY_KEY}"
+          onEscape={() => saveCustom("")}
+          onSubmit={saveCustom}
+        />
+        <Box marginTop={1}>
+          <Text dimColor>
+            Tip: for non-trivial response shapes (resultsPath / field mapping),
+            edit webSearch.custom in ~/.codepilot/config.json.
+          </Text>
+        </Box>
       </WizardFrame>
     );
   }

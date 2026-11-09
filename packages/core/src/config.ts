@@ -240,15 +240,34 @@ export const WebFetchConfigSchema = z
   })
   .strict();
 
+export const CustomSearchTemplateSchema = z
+  .object({
+    method: z.enum(["GET", "POST"]).optional(),
+    url: z.string().min(1),
+    headers: z.record(z.string()).optional(),
+    body: z.string().optional(),
+    resultsPath: z.string().optional(),
+    fields: z
+      .object({
+        title: z.string().optional(),
+        url: z.string().optional(),
+        snippet: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 export const WebSearchConfigSchema = z
   .object({
-    provider: z.enum(["duckduckgo", "brave", "serper", "google"]).optional(),
+    provider: z.enum(["duckduckgo", "brave", "serper", "google", "custom"]).optional(),
     apiKey: z.string().optional(),
     cx: z.string().optional(),
     endpoint: z.string().url().optional(),
     language: z.string().optional(),
     region: z.string().optional(),
     freshness: z.enum(["day", "week", "month", "year"]).optional(),
+    custom: CustomSearchTemplateSchema.optional(),
   })
   .strict();
 

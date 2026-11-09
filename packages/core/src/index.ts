@@ -25,6 +25,7 @@ export type {
   WebFetchConfig,
   WebSearchConfig,
   WebSearchProvider,
+  CustomSearchTemplate,
   ImageGenConfig,
   QuestionSpec,
   QuestionRequest,

@@ -57,6 +57,14 @@ describe("resolveSearchBackend", () => {
       cx: "envcx",
     });
   });
+
+  it("carries the custom template for provider=custom", () => {
+    const b = resolveSearchBackend(
+      { provider: "custom", custom: { url: "https://x/s?q={query}" } },
+      {},
+    );
+    expect(b).toMatchObject({ provider: "custom", custom: { url: "https://x/s?q={query}" } });
+  });
 });
 
 describe("resolveSearchLocale", () => {
@@ -335,6 +343,79 @@ describe("webSearchTool backends", () => {
     expect(r.content).toContain("DDG Title");
     expect(r.content).toContain("https://d.dev");
     expect(r.content).not.toContain("via"); // DDG default shows no "(via …)"
+  });
+
+  it("custom GET: fills url placeholders, interpolates ${ENV} headers, maps nested results", async () => {
+    vi.stubEnv("MY_SEARCH_KEY", "secret-123");
+    let seen: { url: string; headers: Record<string, string>; method?: string } | undefined;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      seen = { url, headers: init.headers as Record<string, string>, method: init.method };
+      return new Response(
+        JSON.stringify({ data: { items: [{ name: "Hit One", link: "https://c.dev/a", desc: "a snip" }] } }),
+        { status: 200 },
+      );
+    });
+    const r = await webSearchTool.execute(
+      { query: "rust async" },
+      ctx({
+        webSearch: {
+          provider: "custom",
+          custom: {
+            url: "https://api.example.com/s?q={query}&n={max}",
+            headers: { Authorization: "Bearer ${MY_SEARCH_KEY}" },
+            resultsPath: "data.items",
+            fields: { title: "name", url: "link", snippet: "desc" },
+          },
+        },
+      }),
+    );
+    expect(r.isError).toBeFalsy();
+    expect(seen?.method ?? "GET").toBe("GET");
+    expect(seen?.url).toBe("https://api.example.com/s?q=rust%20async&n=8");
+    expect(seen?.headers.Authorization).toBe("Bearer secret-123");
+    expect(r.content).toContain("via custom");
+    expect(r.content).toContain("Hit One");
+    expect(r.content).toContain("https://c.dev/a");
+  });
+
+  it("custom POST: fills body placeholders and reads a root-array response", async () => {
+    let body: string | undefined;
+    let method: string | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = init.body as string;
+      method = init.method;
+      return new Response(
+        JSON.stringify([{ title: "P", url: "https://p.io", snippet: "s" }]),
+        { status: 200 },
+      );
+    });
+    const r = await webSearchTool.execute(
+      { query: 'he said "hi"' },
+      ctx({
+        webSearch: {
+          provider: "custom",
+          custom: {
+            method: "POST",
+            url: "https://api.example.com/s",
+            body: '{"q":"{query}","n":{max}}',
+          },
+        },
+      }),
+    );
+    expect(method).toBe("POST");
+    // The query is JSON-escaped inside the body (quotes preserved as valid JSON).
+    expect(JSON.parse(body!)).toEqual({ q: 'he said "hi"', n: 8 });
+    expect(r.content).toContain("https://p.io");
+  });
+
+  it("custom: explicit error when the results array is missing", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ nope: 1 }), { status: 200 }));
+    const r = await webSearchTool.execute(
+      { query: "q" },
+      ctx({ webSearch: { provider: "custom", custom: { url: "https://x/s", resultsPath: "data.items" } } }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("no results array");
   });
 
   it("falls back to Bing HTML when DuckDuckGo is unreachable", async () => {

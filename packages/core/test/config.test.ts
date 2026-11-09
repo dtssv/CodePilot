@@ -121,6 +121,24 @@ describe("validateConfig", () => {
     expect(r.onboardedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 
+  it("accepts a custom web_search template", () => {
+    const r = validateConfig({
+      webSearch: {
+        provider: "custom",
+        custom: {
+          method: "POST",
+          url: "https://api.example.com/search?q={query}",
+          headers: { Authorization: "Bearer ${MY_KEY}" },
+          body: '{"q":"{query}"}',
+          resultsPath: "data.items",
+          fields: { title: "name", url: "link", snippet: "desc" },
+        },
+      },
+    }) as { webSearch?: { provider?: string; custom?: { url?: string } } };
+    expect(r.webSearch?.provider).toBe("custom");
+    expect(r.webSearch?.custom?.url).toContain("{query}");
+  });
+
   it("rejects unknown top-level keys with a readable path", () => {
     let err: Error | undefined;
     try {
