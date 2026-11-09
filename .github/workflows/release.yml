@@ -3,12 +3,12 @@ name: Release
 # Triggered by pushing a tag matching `v*.*.*` (e.g. v2.0.1, v3.0.0).
 # Builds and publishes:
 #   - @codepilot/core, @codepilot/protocol, @codepilot/tui → npm (public)
-#   - codepilot + codepilot-tui binaries (6 targets, built per-OS/arch)
-#     + web SPA tarballs — @yao-pkg/pkg only builds for its host platform
+#   - the unified codepilot binary (6 targets, built per-OS/arch via Bun
+#     --compile; the web SPA is embedded in it)
 #   - codepilot-vscode → GitHub Release as .vsix
 #   - CodePilot IDEA plugin → GitHub Release as .zip
 #   - Desktop app (.dmg / .exe / .AppImage)
-# The CLI/TUI binaries are what scripts/install.{sh,ps1} download — no Node
+# The unified binary is what scripts/install.{sh,ps1} download — no Node
 # needed at runtime. A GitHub Release is created automatically
 # (softprops/action-gh-release) and all artifacts are attached to it.
 
@@ -213,12 +213,10 @@ jobs:
 # CLI + TUI binaries (self-contained — no Node needed at runtime). These
 # are what scripts/install.{sh,ps1} download. Both are built per-OS/arch on
 # arch-native runners:
-#   - CLI: esbuild→CJS→@yao-pkg/pkg, which only builds for its host platform.
-#   - TUI: Bun --compile (ESM + top-level await + native addons). Bun can
-#     cross-compile, but embeds host-arch native addons, so we build on the
-#     native runner for a correct better-sqlite3 (the session index).
-# Each runner also emits the shared web SPA tarball (codepilot-web-<target>.tar.gz)
-# via package:cli; they are identical across targets, one per target is shipped.
+#   - the unified binary: Bun --compile (ESM + top-level await + native addons).
+#     Bun can cross-compile, but embeds host-arch native addons, so we build on
+#     the native runner for a correct better-sqlite3 (the session index).
+# The web SPA is embedded in the binary (no separate web asset).
 # ---------------------------------------------------------------------
   binaries:
     name: Binaries (${{ matrix.target }})
@@ -260,7 +258,7 @@ jobs:
       # GitHub. The action has no retry, so we run it up to three times — a
       # transient upstream 504 usually clears on the next attempt. Pin to a
       # concrete version so resolution doesn't add an extra API call.
-      - name: Install Bun (for the TUI binary)
+      - name: Install Bun (for the unified binary)
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
@@ -296,7 +294,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         env:
-          # This job only builds the CLI (pkg) + TUI (Bun) — never the desktop
+          # This job only builds the unified binary (Bun) — never the desktop
           # app — so it doesn't need Electron's binary. Skipping the download
           # avoids a ~100 MB fetch from github.com/electron/electron/releases,
           # which 504s on Actions runners often enough to break releases.
@@ -312,36 +310,21 @@ jobs:
             pnpm install --frozen-lockfile
           fi
 
-      # @yao-pkg/pkg downloads a ~40 MB pre-built Node.js binary on first run.
-      # Cache it so subsequent runs don't re-download (and potentially stall).
-      - name: Cache pkg Node binaries
-        uses: actions/cache@v4
-        with:
-          path: ~/.pkg-cache
-          key: pkg-cache-${{ matrix.target }}-${{ runner.os }}-v3.6
-
       # PACKAGE_TARGETS cross-compiles all arches for this OS family on a
       # single runner, avoiding slow Intel/ARM-specific runners.
-      - name: Package CLI binary (+ web tarball)
+      - name: Package unified binary
         env:
           PACKAGE_TARGETS: ${{ matrix.package_targets }}
         run: pnpm package:cli
 
-      - name: Package TUI binary
-        env:
-          PACKAGE_TARGETS: ${{ matrix.package_targets }}
-        run: pnpm package:tui
-
-      - name: Collect binaries + web tarball
+      - name: Collect binaries
         shell: bash
         run: |
           mkdir -p artifacts/bin
           find dist/release/cli -maxdepth 1 -type f \( \
             -name "codepilot-darwin-*" -o -name "codepilot-linux-*" \
-            -o -name "codepilot-win-*" -o -name "codepilot-web-*.tar.gz" \
+            -o -name "codepilot-win-*" \
           \) ! -name "*.tgz" -exec cp {} artifacts/bin/ \;
-          find dist/release/tui -maxdepth 1 -type f -name "codepilot-tui-*" \
-            ! -name "*.tgz" -exec cp {} artifacts/bin/ \;
           ls -la artifacts/bin/
 
       - name: Upload binaries
@@ -420,7 +403,6 @@ jobs:
             -o -name "install.sh" -o -name "install.ps1" -o -name "install.cmd" \
             -o -name "codepilot-darwin-*" -o -name "codepilot-linux-*" \
             -o -name "codepilot-win-*" \
-            -o -name "codepilot-tui-*" -o -name "codepilot-web-*.tar.gz" \
           \) ! -name "*.tgz" -exec cp {} assets/ \;
           ls -la assets/
 
@@ -461,8 +443,6 @@ jobs:
             assets/codepilot-darwin-*
             assets/codepilot-linux-*
             assets/codepilot-win-*
-            assets/codepilot-tui-*
-            assets/codepilot-web-*.tar.gz
 
       - name: Release diagnostics
         if: always()

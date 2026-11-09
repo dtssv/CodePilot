@@ -8,7 +8,7 @@
 # No Node.js or npm required — the binaries embed their own runtime.
 #
 # Install from a local build (for testing a release before it is published):
-#   PACKAGE_TARGETS=mac corepack pnpm package:cli && corepack pnpm package:tui
+#   PACKAGE_TARGETS=mac corepack pnpm package:cli
 #   CODEPILOT_DIST_DIR=dist/release scripts/install.sh
 #
 set -euo pipefail
@@ -19,7 +19,7 @@ BIN_DIR="$PREFIX/bin"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_DL="${GITHUB_DL:-https://github.com}"
 # Point at a local `dist/release` tree to install from a local build instead of
-# a GitHub release (no network). Expects dist/release/{cli,tui}/… layout.
+# a GitHub release (no network). Expects dist/release/cli/… layout.
 DIST_DIR="${CODEPILOT_DIST_DIR:-}"
 
 RED='\033[0;31m'
@@ -116,28 +116,20 @@ download() {
   fi
 }
 
-# Copy a required binary + the shared web/ SPA from a local dist/release tree.
+# Copy the unified binary from a local dist/release tree.
 install_from_dist() {
   detect_target
-  local cli_src tui_src web_src
+  local cli_src
   cli_src="$DIST_DIR/cli/codepilot-${TARGET}${EXE}"
-  tui_src="$DIST_DIR/tui/codepilot-tui-${TARGET}${EXE}"
-  web_src="$DIST_DIR/cli/web"
-  [[ -f "$tui_src" ]] || { echo -e "${RED}Missing ${tui_src} — run: corepack pnpm package:tui${NC}" >&2; exit 1; }
   [[ -f "$cli_src" ]] || { echo -e "${RED}Missing ${cli_src} — run: corepack pnpm package:cli${NC}" >&2; exit 1; }
 
   echo -e "${MUTED}Installing CodePilot ${NC}(local dist, ${TARGET}) ${MUTED}→ ${NC}${PREFIX}"
   mkdir -p "$BIN_DIR"
-  cp "$tui_src" "$BIN_DIR/codepilot-tui${EXE}"
   cp "$cli_src" "$BIN_DIR/codepilot${EXE}"
-  chmod +x "$BIN_DIR/codepilot-tui${EXE}" "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
-  if [[ -d "$web_src" ]]; then
-    rm -rf "$BIN_DIR/web"
-    cp -R "$web_src" "$BIN_DIR/web"
-  fi
+  chmod +x "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
 }
 
-# Download the platform binaries + shared web/ SPA from a GitHub release.
+# Download the unified binary from a GitHub release.
 install_from_release() {
   detect_target
   resolve_tag
@@ -148,22 +140,16 @@ install_from_release() {
 
   echo -e "${MUTED}Installing CodePilot ${NC}${TAG} ${MUTED}(${TARGET}) → ${NC}${PREFIX}"
   local base="${GITHUB_DL}/${REPO}/releases/download/${TAG}"
-  download "${base}/codepilot-tui-${TARGET}${EXE}" "$tmp/codepilot-tui${EXE}"
   download "${base}/codepilot-${TARGET}${EXE}" "$tmp/codepilot${EXE}"
-  download "${base}/codepilot-web-${TARGET}.tar.gz" "$tmp/web.tar.gz"
 
   mkdir -p "$BIN_DIR"
-  cp "$tmp/codepilot-tui${EXE}" "$BIN_DIR/codepilot-tui${EXE}"
   cp "$tmp/codepilot${EXE}" "$BIN_DIR/codepilot${EXE}"
-  chmod +x "$BIN_DIR/codepilot-tui${EXE}" "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
-  rm -rf "$BIN_DIR/web"
-  mkdir -p "$BIN_DIR/web"
-  tar -xzf "$tmp/web.tar.gz" -C "$BIN_DIR/web"
+  chmod +x "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
 }
 
 verify_install() {
-  if [[ ! -x "$BIN_DIR/codepilot-tui${EXE}" ]]; then
-    echo -e "${RED}Install finished but ${BIN_DIR}/codepilot-tui${EXE} is missing or not executable${NC}" >&2
+  if [[ ! -x "$BIN_DIR/codepilot${EXE}" ]]; then
+    echo -e "${RED}Install finished but ${BIN_DIR}/codepilot${EXE} is missing or not executable${NC}" >&2
     exit 1
   fi
   echo -e "${MUTED}Bins:${NC}"
@@ -252,6 +238,7 @@ echo -e "${MUTED}Done. Start with:${NC}"
 if [[ "${PATH_ADDED:-false}" == "true" ]]; then
   echo "  exec \$SHELL   # reload PATH"
 fi
-echo "  codepilot-tui"
+echo "  codepilot          # interactive TUI"
+echo "  codepilot web      # open the web UI"
 echo "  codepilot --help"
 echo ""

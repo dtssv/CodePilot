@@ -20,7 +20,6 @@
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
     "package:npm": "corepack pnpm -C packages/core pack && corepack pnpm -C packages/protocol pack && corepack pnpm -C apps/tui pack",
     "package:cli": "node scripts/package/cli.mjs",
-    "package:tui": "node scripts/package/tui.mjs",
     "package:desktop": "node scripts/package/desktop.mjs",
     "package:all": "node scripts/package/all.mjs",
     "lint": "biome lint packages/ apps/",

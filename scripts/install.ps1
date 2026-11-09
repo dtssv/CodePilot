@@ -7,7 +7,7 @@
 # No Node.js or npm required — the binaries embed their own runtime. Mirrors scripts/install.sh.
 #
 # Install from a local build (for testing a release before it is published):
-#   $env:PACKAGE_TARGETS="win"; corepack pnpm package:cli; corepack pnpm package:tui
+#   $env:PACKAGE_TARGETS="win"; corepack pnpm package:cli
 #   $env:CODEPILOT_DIST_DIR="dist/release"; .\scripts\install.ps1
 
 [CmdletBinding()]
@@ -78,20 +78,11 @@ function Resolve-Tag {
 function Install-FromDist {
   $target = Resolve-Target
   $cliSrc = Join-Path $DistDir "cli\codepilot-$target.exe"
-  $tuiSrc = Join-Path $DistDir "tui\codepilot-tui-$target.exe"
-  $webSrc = Join-Path $DistDir "cli\web"
-  if (-not (Test-Path $tuiSrc)) { Fail "Missing $tuiSrc — run: corepack pnpm package:tui" }
   if (-not (Test-Path $cliSrc)) { Fail "Missing $cliSrc — run: corepack pnpm package:cli" }
 
   Write-Host "Installing CodePilot (local dist, $target) -> $Prefix"
   New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-  Copy-Item $tuiSrc (Join-Path $BinDir "codepilot-tui.exe") -Force
   Copy-Item $cliSrc (Join-Path $BinDir "codepilot.exe") -Force
-  if (Test-Path $webSrc) {
-    $webDst = Join-Path $BinDir "web"
-    if (Test-Path $webDst) { Remove-Item -Recurse -Force $webDst }
-    Copy-Item $webSrc $webDst -Recurse -Force
-  }
 }
 
 function Install-FromRelease {
@@ -103,9 +94,7 @@ function Install-FromRelease {
     Write-Host "Installing CodePilot $tag ($target) -> $Prefix"
     $base = "$GithubDl/$Repo/releases/download/$tag"
     $assets = @{
-      "$base/codepilot-tui-$target.exe"   = Join-Path $tmp "codepilot-tui.exe"
-      "$base/codepilot-$target.exe"       = Join-Path $tmp "codepilot.exe"
-      "$base/codepilot-web-$target.tar.gz" = Join-Path $tmp "web.tar.gz"
+      "$base/codepilot-$target.exe" = Join-Path $tmp "codepilot.exe"
     }
     foreach ($url in $assets.Keys) {
       $out = $assets[$url]
@@ -118,21 +107,16 @@ function Install-FromRelease {
     }
 
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    Copy-Item (Join-Path $tmp "codepilot-tui.exe") (Join-Path $BinDir "codepilot-tui.exe") -Force
     Copy-Item (Join-Path $tmp "codepilot.exe") (Join-Path $BinDir "codepilot.exe") -Force
-    $webDst = Join-Path $BinDir "web"
-    if (Test-Path $webDst) { Remove-Item -Recurse -Force $webDst }
-    New-Item -ItemType Directory -Path $webDst -Force | Out-Null
-    & tar -xzf (Join-Path $tmp "web.tar.gz") -C $webDst
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }
 }
 
 function Confirm-Install {
-  $tui = Join-Path $BinDir "codepilot-tui.exe"
-  if (-not (Test-Path $tui)) {
-    Fail "Install finished but $tui is missing"
+  $cli = Join-Path $BinDir "codepilot.exe"
+  if (-not (Test-Path $cli)) {
+    Fail "Install finished but $cli is missing"
   }
   Write-Host "Bins:"
   Get-ChildItem (Join-Path $BinDir "codepilot*") | ForEach-Object { Write-Host "  $($_.FullName)" }
@@ -155,6 +139,7 @@ Add-ToUserPath
 
 Write-Host ""
 Write-Host "Done. Start with:"
-Write-Host "  codepilot-tui"
+Write-Host "  codepilot          # interactive TUI"
+Write-Host "  codepilot web      # open the web UI"
 Write-Host "  codepilot --help"
 Write-Host ""

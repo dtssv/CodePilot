@@ -10,7 +10,6 @@ import { REPO_ROOT, log, pnpm } from "./_util.mjs";
 
 const steps = [
   ["cli", join(REPO_ROOT, "scripts", "package", "cli.mjs")],
-  ["tui", join(REPO_ROOT, "scripts", "package", "tui.mjs")],
   ["desktop", join(REPO_ROOT, "scripts", "package", "desktop.mjs")],
   ["vscode", join(REPO_ROOT, "scripts", "package", "vscode.mjs")],
   ["idea", join(REPO_ROOT, "scripts", "package", "idea.mjs")],
