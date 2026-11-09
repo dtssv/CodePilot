@@ -626,7 +626,7 @@ async function cmdServeWeb(
   } catch {
     /* optional */
   }
-  await writeServeInfo({
+  const serveInfo = {
     url: handle.url,
     token: handle.token ?? "",
     pid: process.pid,
@@ -634,7 +634,20 @@ async function cmdServeWeb(
     port: handle.port,
     startedAt: new Date().toISOString(),
     version,
-  });
+  };
+  await writeServeInfo(serveInfo);
+  // Re-assert the discovery file while the daemon lives. A racing reader that
+  // momentarily saw a stale pid can delete serve.json (readLiveServeInfo cleans
+  // up dead-pid files); without this, a live daemon would stay undiscoverable
+  // and hold its port with no way for clients to learn its token. Cheap, so
+  // keep it frequent; unref so it never keeps the process alive on its own.
+  const reassert =
+    daemonMode
+      ? setInterval(() => {
+          void writeServeInfo(serveInfo);
+        }, 5_000)
+      : null;
+  reassert?.unref?.();
 
   // Idle / scheduled tasks: run when no live session is busy.
   const { startSchedulerWatcher, createSession } = await import("@codepilot/core");
@@ -689,13 +702,24 @@ async function cmdServeWeb(
       if (shuttingDown) return;
       shuttingDown = true;
       scheduler.stop();
+      if (reassert) clearInterval(reassert);
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;
       }
-      void clearServeInfo().finally(() => {
-        // handle.close → killAllJobs (ws server teardown)
-        void handle.close().then(resolve, () => resolve());
+      // Tear the server down FIRST, then drop the discovery file. Clearing
+      // serve.json before close lets a hung socket (http.close never resolving)
+      // strand a process that still holds the port but is no longer
+      // discoverable — an undiscoverable zombie. A short cap on close ensures
+      // we proceed even if a socket refuses to drain.
+      const closed = Promise.race([
+        handle.close().catch(() => {}),
+        new Promise<void>((r) => {
+          setTimeout(r, 3_000).unref?.();
+        }),
+      ]);
+      void closed.finally(() => {
+        void clearServeInfo().finally(() => resolve());
       });
     };
     process.once("SIGINT", stop);

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { mkdirSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -92,6 +93,42 @@ describe("engineConnect / serve discovery", () => {
     });
     expect(owned).toBe(child);
     expect(info.token).toBe("spawned");
+  });
+
+  it("discoverOrSpawnDaemon reuses a held port without spawning when serve.json reappears", async () => {
+    await clearServeInfo();
+    // A live daemon holds the port but its serve.json is momentarily gone.
+    const server: Server = await new Promise((resolve) => {
+      const s = createServer();
+      s.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    try {
+      // Its re-assert republishes serve.json shortly after discovery starts.
+      setTimeout(() => {
+        void writeServeInfo({
+          url: `ws://127.0.0.1:${port}/rpc`,
+          token: "republished",
+          pid: process.pid,
+          host: "127.0.0.1",
+          port,
+          startedAt: new Date().toISOString(),
+        });
+      }, 40);
+      const spawn = vi.fn() as unknown as Spawner;
+      const { info, owned } = await discoverOrSpawnDaemon({
+        command: "node",
+        args: ["serve", "--daemon", "--port", String(port)],
+        waitMs: 2000,
+        spawner: spawn,
+      });
+      expect(spawn).not.toHaveBeenCalled();
+      expect(owned).toBeNull();
+      expect(info.token).toBe("republished");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
   it("writeServeInfo also writes server.json alias", async () => {

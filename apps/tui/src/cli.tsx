@@ -198,6 +198,48 @@ async function tryLoadCore(): Promise<typeof import("@codepilot/core") | null> {
   }
 }
 
+/** Fixed port the shared daemon binds (and clients discover via serve.json). */
+const SHARED_DAEMON_PORT = 18765;
+
+/**
+ * Resolve how to spawn the shared daemon from THIS runtime:
+ * - Unified binary: re-exec ourselves (`<self> serve --daemon`); the command
+ *   router dispatches `serve` to the protocol CLI.
+ * - Source / npm (node + cli.js): run the protocol CLI entry directly so we do
+ *   not depend on the TUI's own argv routing.
+ */
+function resolveDaemonLaunch(cwd: string): {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+} {
+  const base = ["serve", "--daemon", "--port", String(SHARED_DAEMON_PORT)];
+  const env: NodeJS.ProcessEnv = { ...process.env, CODEPILOT_CLIENT: "tui" };
+  const unified = (globalThis as { __CODEPILOT_UNIFIED__?: boolean }).__CODEPILOT_UNIFIED__ === true;
+  const isBunCompiled = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+  if (unified && isBunCompiled) {
+    return { command: process.execPath, args: base, env };
+  }
+  // Source/npm: resolve the protocol CLI entry and run it under node.
+  try {
+    const cliEntry = resolve(
+      fileURLToPath(new URL("../../..", import.meta.url)),
+      "packages",
+      "protocol",
+      "dist",
+      "cli.js",
+    );
+    if (existsSync(cliEntry)) return { command: process.execPath, args: [cliEntry, ...base], env };
+  } catch {
+    /* fall through */
+  }
+  // Last resort: re-exec the current entry (works when argv[1] is the cli).
+  const entry = process.argv[1];
+  return entry
+    ? { command: process.execPath, args: [entry, ...base], env }
+    : { command: process.execPath, args: base, env };
+}
+
 async function main(): Promise<void> {
   const rawArgv = process.argv.slice(2);
   // Route protocol CLI commands (web / serve / run / …) to the protocol CLI so
@@ -249,17 +291,24 @@ async function main(): Promise<void> {
   const questionBridge = createQuestionBridge();
   const goalBridge = createGoalBridge();
 
- // Attach to a running `serve` when one is live locally, so the TUI FOLLOWS
- // the same session the web (or any client) is driving — events stream in
- // real time and prompts here drive the shared server session. `--local`
- // forces the standalone in-process engine. Skipped for --mock and --print
- // (print wants a self-contained one-shot run).
+ // Attach to the shared `serve` daemon so every client (desktop, web, IDE,
+ // terminal) drives ONE local server. If none is running, the terminal spawns
+ // the shared daemon itself and then connects — so whoever starts first owns
+ // the server and the rest attach to it. `--local` forces a standalone
+ // in-process engine instead. Skipped for --mock and --print (print wants a
+ // self-contained one-shot run).
   let attached = false;
   let currentRemote: import("./remoteSession.js").RemoteSession | null = null;
   if (!args.mock && !args.local && !args.print) {
     try {
-      const { readLiveServeInfo } = await import("@codepilot/protocol/serve-info");
-      const info = await readLiveServeInfo();
+      const { discoverOrSpawnDaemon } = await import("@codepilot/protocol");
+      const launch = resolveDaemonLaunch(args.cwd);
+      const { info } = await discoverOrSpawnDaemon({
+        command: launch.command,
+        args: launch.args,
+        cwd: args.cwd,
+        env: launch.env,
+      });
       if (info) {
         const { RemoteSession } = await import("./remoteSession.js");
         const remote = await RemoteSession.connect({
@@ -289,7 +338,7 @@ async function main(): Promise<void> {
         );
       }
     } catch (err) {
-      process.stderr.write(`[tui] could not attach to serve (${(err as Error).message}); starting a local engine.\n`);
+      process.stderr.write(`[tui] could not reach the shared serve (${(err as Error).message}); starting a local engine.\n`);
     }
   }
 
