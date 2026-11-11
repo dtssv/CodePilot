@@ -748,8 +748,19 @@ export interface CodepilotConfig {
    * - `"prompt"` / `true` — small model judges feature vs code correctness
    * - `"tests"` — run a detected project test command when present
    * - `"off"` / `false` / omit — disabled (user Stop hooks still run)
+   *
+   * By default the judge/tests result is **advisory**: when it is not satisfied
+   * the concern is surfaced as a non-blocking notice and the turn still ends.
+   * The object form `{ mode, forceContinue: true }` opts into the older
+   * block->re-run behaviour, where a negative result forces another full model
+   * turn (bounded by `stopHookBlockCap`, or a lower default when unset).
    */
-  stopVerify?: boolean | "off" | "prompt" | "tests";
+  stopVerify?:
+    | boolean
+    | "off"
+    | "prompt"
+    | "tests"
+    | { mode: "off" | "prompt" | "tests"; forceContinue?: boolean };
   /** Expose the `harness_bridge` tool (external agent CLI subprocess). Default off. */
   enableHarnessBridge?: boolean;
   /** Auto-apply model `suggest_mode` switches without re-asking. Default off. */

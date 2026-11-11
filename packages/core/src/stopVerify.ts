@@ -5,10 +5,17 @@
  // - "prompt" — small-model judge: structure checks ≠ behaviour correctness
  // - "tests"  — run a detected project test command when one exists; else allow
  // - true     — alias for "prompt"
+ // - { mode, forceContinue } — object form; `forceContinue: true` restores the
+ //   block->re-run gate (default is advisory).
  //
  // Default is "off": a post-completion judge call shares the same provider
  // TPM budget as the main run, so after a long task it often 429s, fails open,
  // and adds latency/noise for no effect. Opt in with stopVerify: "prompt".
+ //
+ // Even when enabled, the verdict is ADVISORY by default: a negative result is
+ // surfaced as a non-blocking notice and the turn still ends, so a false
+ // negative cannot turn a finished task into a cap-exhausting re-run loop.
+ // `{ mode: "prompt", forceContinue: true }` opts into the block->continue gate.
 
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,13 +27,34 @@ import { isTransientError } from "./transientError.js";
 
 export type StopVerifyMode = "off" | "prompt" | "tests";
 
+/** Config shape for the built-in Stop gate (object form). */
+export interface StopVerifyObject {
+  mode: StopVerifyMode;
+  /** When true, a negative result blocks and re-runs the turn (bounded by the
+   * continue cap). When false/unset the result is advisory: a non-blocking
+   * notice is surfaced and the turn still ends. */
+  forceContinue?: boolean;
+}
+
+export type StopVerifyConfig = boolean | StopVerifyMode | StopVerifyObject;
+
 export function resolveStopVerifyMode(
-  value: boolean | StopVerifyMode | undefined,
+  value: StopVerifyConfig | undefined,
 ): StopVerifyMode {
+  if (value && typeof value === "object") return value.mode;
   if (value === true || value === "prompt") return "prompt";
   if (value === "tests") return "tests";
   // false | "off" | undefined → off (no closing judge request)
   return "off";
+}
+
+/** Whether a negative built-in verdict should force a continue (re-run the
+ * turn) rather than stay advisory. Only the object form can turn this on; the
+ * string/boolean forms are always advisory. Default false. */
+export function resolveStopVerifyForceContinue(
+  value: StopVerifyConfig | undefined,
+): boolean {
+  return !!(value && typeof value === "object" && value.forceContinue === true);
 }
 
 /**
@@ -44,7 +72,7 @@ export function resolveStopVerifyMode(
  */
 export function effectiveStopVerifyMode(args: {
   /** Raw config value; an explicit `false`/"off" is honoured as off, same as unset. */
-  configured: boolean | StopVerifyMode | undefined;
+  configured: StopVerifyConfig | undefined;
 }): StopVerifyMode {
   return resolveStopVerifyMode(args.configured);
 }
@@ -125,14 +153,34 @@ Respond with JSON only — no markdown:
 or
 {"decision":"block","reason":"one short sentence the agent should act on"}`;
 
-/** Run the built-in Stop verifier for the configured mode. */
+/** Prefix stamped on the advisory warning carrying the built-in verifier's
+ * concern when `forceContinue` is off. The session surfaces these as
+ * non-blocking notices (they do not re-run the turn). */
+export const STOP_VERIFY_ADVICE_PREFIX = "stopVerify advice: ";
+
+/** Run the built-in Stop verifier for the configured mode. When `forceContinue`
+ * is false (the default), a negative verdict is downgraded from a `block` to an
+ * `allow` carrying the concern as an advisory warning, so the turn still ends
+ * and the model/user simply see the note. When true, a negative verdict blocks
+ * and the session re-runs the turn (bounded by the continue cap). */
 export async function runBuiltinStopVerify(
   mode: StopVerifyMode,
   ctx: StopVerifyContext,
+  opts: { forceContinue?: boolean } = {},
 ): Promise<PreHookResult> {
   if (mode === "off") return { action: "allow", warnings: [] };
-  if (mode === "tests") return runTestsVerify(ctx);
-  return runPromptVerify(ctx);
+  const raw = mode === "tests" ? await runTestsVerify(ctx) : await runPromptVerify(ctx);
+  if (raw.action === "block" && opts.forceContinue !== true) {
+    // Advise, don't gate: keep the concern but let the turn end.
+    return {
+      action: "allow",
+      warnings: [
+        ...raw.warnings,
+        `${STOP_VERIFY_ADVICE_PREFIX}${raw.reason ?? "verification looked incomplete"}`,
+      ],
+    };
+  }
+  return raw;
 }
 
 async function runPromptVerify(ctx: StopVerifyContext): Promise<PreHookResult> {

@@ -8,6 +8,7 @@ import {
   buildStopTranscriptHint,
   effectiveStopVerifyMode,
   resolveStopVerifyMode,
+  resolveStopVerifyForceContinue,
   runBuiltinStopVerify,
 } from "../src/stopVerify.js";
 import { HookEngine } from "../src/hooks.js";
@@ -44,6 +45,24 @@ describe("effectiveStopVerifyMode", () => {
     expect(effectiveStopVerifyMode({ configured: "tests" })).toBe("tests");
     expect(effectiveStopVerifyMode({ configured: true })).toBe("prompt");
   });
+  it("reads the mode from the object form", () => {
+    expect(effectiveStopVerifyMode({ configured: { mode: "tests" } })).toBe("tests");
+    expect(effectiveStopVerifyMode({ configured: { mode: "prompt", forceContinue: true } })).toBe("prompt");
+  });
+});
+
+describe("resolveStopVerifyForceContinue", () => {
+  it("is false for string/boolean forms (always advisory)", () => {
+    expect(resolveStopVerifyForceContinue("prompt")).toBe(false);
+    expect(resolveStopVerifyForceContinue("tests")).toBe(false);
+    expect(resolveStopVerifyForceContinue(true)).toBe(false);
+    expect(resolveStopVerifyForceContinue(undefined)).toBe(false);
+  });
+  it("is true only when the object form opts in", () => {
+    expect(resolveStopVerifyForceContinue({ mode: "prompt", forceContinue: true })).toBe(true);
+    expect(resolveStopVerifyForceContinue({ mode: "prompt" })).toBe(false);
+    expect(resolveStopVerifyForceContinue({ mode: "prompt", forceContinue: false })).toBe(false);
+  });
 });
 
 describe("buildStopTranscriptHint", () => {
@@ -76,7 +95,28 @@ describe("buildStopTranscriptHint", () => {
 });
 
 describe("runBuiltinStopVerify", () => {
-  it("prompt mode blocks when the judge returns block JSON", async () => {
+  it("prompt mode blocks when forceContinue and the judge returns block JSON", async () => {
+    const r = await runBuiltinStopVerify(
+      "prompt",
+      {
+        cwd: tmpdir(),
+        reason: "prompt_completed",
+        stop_hook_active: false,
+        stop_continue_count: 0,
+        stop_continue_cap: 8,
+        session_id: "s",
+        transcript_hint: "user: make a button\nassistant: wrote Button.tsx",
+        resolvers: {
+          prompt: async () => JSON.stringify({ decision: "block", reason: "no visual check" }),
+        },
+      },
+      { forceContinue: true },
+    );
+    expect(r.action).toBe("block");
+    expect(r.reason).toMatch(/no visual check/);
+  });
+
+  it("prompt mode ADVISES (allow + note) by default when the judge blocks", async () => {
     const r = await runBuiltinStopVerify("prompt", {
       cwd: tmpdir(),
       reason: "prompt_completed",
@@ -89,8 +129,8 @@ describe("runBuiltinStopVerify", () => {
         prompt: async () => JSON.stringify({ decision: "block", reason: "no visual check" }),
       },
     });
-    expect(r.action).toBe("block");
-    expect(r.reason).toMatch(/no visual check/);
+    expect(r.action).toBe("allow");
+    expect(r.warnings.some((w) => w.includes("no visual check"))).toBe(true);
   });
 
   it("prompt mode allows when judge says allow", async () => {
@@ -163,16 +203,20 @@ describe("runBuiltinStopVerify", () => {
         }),
         "utf8",
       );
-      const r = await runBuiltinStopVerify("tests", {
-        cwd: dir,
-        reason: "prompt_completed",
-        stop_hook_active: false,
-        stop_continue_count: 0,
-        stop_continue_cap: 8,
-        session_id: "s",
-        transcript_hint: "",
-        resolvers: {},
-      });
+      const r = await runBuiltinStopVerify(
+        "tests",
+        {
+          cwd: dir,
+          reason: "prompt_completed",
+          stop_hook_active: false,
+          stop_continue_count: 0,
+          stop_continue_cap: 8,
+          session_id: "s",
+          transcript_hint: "",
+          resolvers: {},
+        },
+        { forceContinue: true },
+      );
       expect(r.action).toBe("block");
       expect(r.reason).toMatch(/test/);
     } finally {
@@ -239,7 +283,7 @@ describe("runBuiltinStopVerify", () => {
         }),
         "utf8",
       );
-      const r = await runBuiltinStopVerify("tests", testsCtx(dir));
+      const r = await runBuiltinStopVerify("tests", testsCtx(dir), { forceContinue: true });
       expect(r.action).toBe("block");
       expect(r.reason).toMatch(/test:unit/);
     } finally {
@@ -276,7 +320,7 @@ describe("Session built-in stopVerify", () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it("continues the turn when prompt verify blocks once", async () => {
+  it("continues the turn when prompt verify blocks once (forceContinue)", async () => {
     dir = mkdtempSync(join(tmpdir(), "sv-sess-"));
     let streamCalls = 0;
     let judgeCalls = 0;
@@ -302,7 +346,7 @@ describe("Session built-in stopVerify", () => {
         autoCompact: false,
         maxRetries: 0,
         retryAbortOnDelayMs: 1,
-        stopVerify: "prompt",
+        stopVerify: { mode: "prompt", forceContinue: true },
         stopHookBlockCap: 8,
       },
       model: "mock-model",
@@ -341,6 +385,65 @@ describe("Session built-in stopVerify", () => {
         m.content.some((b) => b.type === "text" && b.text.includes("missing verification")),
       ),
     ).toBe(false);
+  });
+
+  it("does NOT re-run on a block when advisory (default); surfaces a notice instead", async () => {
+    dir = mkdtempSync(join(tmpdir(), "sv-advise-"));
+    let streamCalls = 0;
+    let judgeCalls = 0;
+    const provider: ChatProvider = {
+      name: "mock",
+      defaultModel: "mock",
+      smallModel: "mock",
+      async *stream(): AsyncIterable<StreamEvent> {
+        streamCalls += 1;
+        yield { kind: "text_delta", messageId: `m${streamCalls}`, text: `pass ${streamCalls}` };
+        yield { kind: "done", finishReason: "stop" };
+      },
+    };
+
+    session = new Session(`test_sv_advise_${Date.now()}`, {
+      cwd: dir,
+      config: {
+        provider: "openai",
+        model: "mock-model",
+        apiKey: "x",
+        permissionMode: "yolo",
+        sandbox: { mode: "off" },
+        autoCompact: false,
+        maxRetries: 0,
+        retryAbortOnDelayMs: 1,
+        // Plain "prompt" is advisory by default.
+        stopVerify: "prompt",
+      },
+      model: "mock-model",
+      provider,
+      pluginRuntimes: false,
+    });
+    await session.init();
+    await session.setTitle("sv");
+    session["hooks"].setResolvers({
+      prompt: async () => {
+        judgeCalls += 1;
+        return JSON.stringify({ decision: "block", reason: "missing verification" });
+      },
+    });
+
+    const events: Event[] = [];
+    session.subscribe((e) => events.push(e));
+
+    await session.prompt("ship the UI");
+
+    // The turn ended after one model pass — no forced re-run.
+    expect(streamCalls).toBe(1);
+    expect(judgeCalls).toBe(1);
+    expect(events.some((e) => e.type === "stop_continue")).toBe(false);
+    // The concern is surfaced as a (recoverable) advisory notice.
+    const advice = events.find(
+      (e) => e.type === "error" && e.message.includes("missing verification"),
+    );
+    expect(advice).toBeTruthy();
+    expect(advice && advice.type === "error" && advice.message.includes("advisory")).toBe(true);
   });
 });
 

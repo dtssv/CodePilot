@@ -150,7 +150,9 @@ import { HookEngine } from "./hooks.js";
 import {
   buildStopTranscriptHint,
   effectiveStopVerifyMode,
+  resolveStopVerifyForceContinue,
   runBuiltinStopVerify,
+  STOP_VERIFY_ADVICE_PREFIX,
 } from "./stopVerify.js";
 import { estimateTokens, estimateCostUSD, lookupContextWindow, resolveCompactionThreshold } from "./tokens.js";
 import { analyzeCacheWaste, type CacheTurn, type CacheWasteReport } from "./cacheStats.js";
@@ -190,6 +192,12 @@ import {
  /** Max consecutive Stop-hook continues before the session forces an end.
  * `0` disables continues entirely. */
 const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
+
+/** Default continue cap for a FORCED built-in stopVerify (stopVerify.forceContinue
+ * = true) when stopHookBlockCap is unset. Deliberately low: a false negative at
+ * the completion boundary should re-run at most a couple of times, not spin to
+ * the full user Stop-hook cap. */
+const DEFAULT_STOP_VERIFY_FORCE_CAP = 2;
 
 /** Checkpoint fires at this fraction of the compaction hard trigger, so it
  * always snapshots pre-compaction state (checkpoint ≤ compaction) no matter
@@ -1057,6 +1065,15 @@ export class Session {
         const stopMode = effectiveStopVerifyMode({
           configured: this.config.stopVerify,
         });
+        // By default the built-in verdict is advisory (non-blocking notice). Only
+        // the object form `{ mode, forceContinue: true }` re-runs the turn on a
+        // negative verdict, and then with a lower default cap so a false negative
+        // still can't spin to the full Stop-hook cap.
+        const stopForceContinue = resolveStopVerifyForceContinue(this.config.stopVerify);
+        const builtinStopCap =
+          typeof this.config.stopHookBlockCap === "number" && this.config.stopHookBlockCap >= 0
+            ? this.config.stopHookBlockCap
+            : DEFAULT_STOP_VERIFY_FORCE_CAP;
         const hasUserStop = this.hooks.hasHooks("Stop");
         if (stopMode === "off" && !hasUserStop) break;
 
@@ -1064,7 +1081,7 @@ export class Session {
           reason: stopContinueCount === 0 ? "prompt_completed" : "stop_hook_continue",
           stop_hook_active: stopHookActive,
           stop_continue_count: stopContinueCount,
-          stop_continue_cap: stopCap,
+          stop_continue_cap: stopForceContinue ? builtinStopCap : stopCap,
           session_id: this.id,
           transcript_hint: buildStopTranscriptHint(this.events),
         };
@@ -1073,11 +1090,15 @@ export class Session {
         let stopResult: import("./hooks.js").PreHookResult =
           stopMode === "off"
             ? { action: "allow", warnings: [] }
-            : await runBuiltinStopVerify(stopMode, {
-                cwd: this.cwd,
-                ...stopPayload,
-                resolvers: this.hooks.getResolvers(),
-              }).catch((): import("./hooks.js").PreHookResult => ({
+            : await runBuiltinStopVerify(
+                stopMode,
+                {
+                  cwd: this.cwd,
+                  ...stopPayload,
+                  resolvers: this.hooks.getResolvers(),
+                },
+                { forceContinue: stopForceContinue },
+              ).catch((): import("./hooks.js").PreHookResult => ({
                 action: "allow",
                 warnings: ["built-in stopVerify threw; ignored"],
               }));
@@ -1094,7 +1115,13 @@ export class Session {
         for (const w of stopResult.warnings) {
           // Soft skips / rate-limit noise from stopVerify stay off the transcript.
           if (/rate.?limit|\b429\b|skipped|no prompt resolver/i.test(w)) continue;
-          const ev: Event = { type: "error", message: w, recoverable: true };
+          // Advisory verdicts (forceContinue off) are notices, not failures:
+          // the turn still ended; surface the concern for the user to act on.
+          const isAdvice = w.startsWith(STOP_VERIFY_ADVICE_PREFIX);
+          const message = isAdvice
+            ? `${w} (advisory — the turn ended; set stopVerify.forceContinue to re-run instead)`
+            : w;
+          const ev: Event = { type: "error", message, recoverable: true };
           this.events.push(ev);
           await this.persistEvent(ev).catch(() => undefined);
           this.notify(ev);
@@ -1102,11 +1129,14 @@ export class Session {
 
         if (stopResult.action !== "block") break;
 
-        if (stopContinueCount >= stopCap) {
+        // Forced continues use the lower built-in cap; user Stop hooks use the
+        // full configured cap.
+        const effectiveCap = stopForceContinue ? builtinStopCap : stopCap;
+        if (stopContinueCount >= effectiveCap) {
           const ev: Event = {
             type: "error",
             message:
-              `Stop verify kept blocking after ${stopCap} continue(s); ending the turn ` +
+              `Stop verify kept blocking after ${effectiveCap} continue(s); ending the turn ` +
               `(set stopHookBlockCap to raise the limit, or stopVerify: "off").`,
             recoverable: true,
           };
@@ -1125,7 +1155,7 @@ export class Session {
         this.notify({
           type: "stop_continue",
           count: stopContinueCount,
-          cap: stopCap,
+          cap: effectiveCap,
           reason,
         });
         turnText =

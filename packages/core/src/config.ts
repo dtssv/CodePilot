@@ -469,9 +469,22 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
         ttlHours: z.number().positive().max(24 * 365).optional(),
       })
       .optional(),
-    // Built-in Stop validity gate (default off). See types.ts.
+    // Built-in Stop validity gate (default off). See types.ts. The object form
+    // adds `forceContinue`: by default the judge/tests result is advisory (a
+    // non-blocking notice), and the turn still ends; `forceContinue: true` opts
+    // into the older block->re-run behaviour (bounded by stopHookBlockCap, or a
+    // lower default when unset).
     stopVerify: z
-      .union([z.boolean(), z.enum(["off", "prompt", "tests"])])
+      .union([
+        z.boolean(),
+        z.enum(["off", "prompt", "tests"]),
+        z
+          .object({
+            mode: z.enum(["off", "prompt", "tests"]),
+            forceContinue: z.boolean().optional(),
+          })
+          .strict(),
+      ])
       .optional(),
     // Opt-in: expose the `harness_bridge` tool (invoke claude/codex/custom
     // external agent CLIs as sandboxed subprocesses). Default off.
