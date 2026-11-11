@@ -184,6 +184,13 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ maxReadBytes: 1.5 as never })).toThrow();
   });
 
+  it("accepts a grep backend and rejects an unknown one", () => {
+    const r = validateConfig({ grep: { backend: "rg" } }) as { grep?: { backend?: string } };
+    expect(r.grep?.backend).toBe("rg");
+    expect(() => validateConfig({ grep: { backend: "fast" } as never })).toThrow();
+    expect(() => validateConfig({ grep: { unknown: 1 } as never })).toThrow();
+  });
+
   it("accepts plugin tool-discovery controls", () => {
     const r = validateConfig({
       pluginToolDiscovery: "lazy",

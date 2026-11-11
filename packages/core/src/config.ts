@@ -467,6 +467,16 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // never affected. Line-window parameters do not bypass it — a window still
     // requires reading the whole file, so the gate is on total size.
     maxReadBytes: z.number().int().min(4096).optional(),
+    // `grep` search backend. "walker" (default) uses the dependency-free
+    // built-in file walker. "rg" always shells out to ripgrep on PATH (falling
+    // back to the walker if it is absent or fails). "auto" uses the walker but
+    // tries ripgrep first when it is on PATH, since on a large tree the native
+    // scan is much faster. No native dependency is bundled; the rg path is used
+    // only when the binary is already installed.
+    grep: z
+      .object({ backend: z.enum(["walker", "rg", "auto"]).optional() })
+      .strict()
+      .optional(),
     // Instruction-file discovery. By default the hierarchical walk for
     // CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
     // toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to

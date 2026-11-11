@@ -735,6 +735,11 @@ export interface CodepilotConfig {
   * larger than this is refused before its contents are read, so a huge file
   * cannot OOM the process. Default 64 MiB; line windows do not bypass it. */
   maxReadBytes?: number;
+ /** `grep` search backend. "walker" (default) uses the built-in file walker
+  * (no native dependency). "rg" shells out to ripgrep on PATH (walker fallback
+  * if absent/failed); "auto" prefers ripgrep when installed for speed on large
+  * trees, else the walker. */
+  grep?: { backend?: "walker" | "rg" | "auto" };
  /** Auto-compaction trigger as a fraction of the context window (0–1).
  * Default 0.92. Checked before each model turn during a long tool loop,
  * not only after the prompt ends. Set `autoCompact: false` to disable

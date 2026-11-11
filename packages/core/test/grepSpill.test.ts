@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { grepTool } from "../src/tools/grep.js";
+import { grepTool, parseRipgrep } from "../src/tools/grep.js";
 import { resolveSandbox } from "../src/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -97,5 +97,80 @@ describe("grep tool include / path", () => {
     expect(inDir.content).toContain("notes.md:1");
     const inFile = await grepTool.execute({ pattern: "subscribe", path: "packages/a/src/server.ts" }, ctx());
     expect(inFile.content).toContain("server.ts:1");
+  });
+});
+
+describe("grep backend selection", () => {
+  let dir: string;
+  const ctx = (backend?: "walker" | "rg" | "auto"): ToolContext => ({
+    cwd: dir,
+    artifact: async () => "art_0",
+    readArtifact: async () => "",
+    sandbox: resolveSandbox({ mode: "off" }, dir),
+    ...(backend ? { config: { grep: { backend } } as never } : {}),
+  });
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "grep-be-"));
+    await writeFile(join(dir, "a.txt"), "needle one\nplain\nneedle two\n");
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // rg may or may not be installed in CI. "auto"/"rg" fall back to the walker
+  // when rg is absent or errors, so the results must be correct either way.
+  it("returns matches under the walker backend", async () => {
+    const res = await grepTool.execute({ pattern: "needle" }, ctx("walker"));
+    expect(res.content).toContain("a.txt:1");
+    expect(res.content).toContain("a.txt:3");
+  });
+
+  it("returns matches under the auto backend (rg or walker fallback)", async () => {
+    const res = await grepTool.execute({ pattern: "needle" }, ctx("auto"));
+    expect(res.content).toContain("a.txt:1");
+    expect(res.content).toContain("a.txt:3");
+  });
+
+  it("returns matches under the rg backend (rg or walker fallback)", async () => {
+    const res = await grepTool.execute({ pattern: "needle" }, ctx("rg"));
+    expect(res.content).toContain("a.txt:1");
+    expect(res.content).toContain("a.txt:3");
+  });
+});
+
+describe("parseRipgrep", () => {
+  it("parses match lines into base-relative hits", () => {
+    const out = "src/a.ts:10:const x = 1;\nsrc/b.ts:3:const y = 2;\n";
+    const hits = parseRipgrep(out, "/work", 0, 100);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]).toMatchObject({ file: "src/a.ts", line: 9, text: "const x = 1;" });
+    expect(hits[1]).toMatchObject({ file: "src/b.ts", line: 2, text: "const y = 2;" });
+  });
+
+  it("collapses a context group (match + surrounding ctx lines) into one hit", () => {
+    // rg --context output: context lines use `-`, match lines use `:`, groups
+    // split by `--`.
+    const out =
+      "f.ts-9-before\nf.ts:10:MATCH here\nf.ts-11-after\n--\ng.ts:2:other MATCH\n";
+    const hits = parseRipgrep(out, "/work", 1, 100);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]!.file).toBe("f.ts");
+    expect(hits[0]!.line).toBe(9); // the match line (10) → 0-based 9
+    expect(hits[0]!.text).toContain("before");
+    expect(hits[0]!.text).toContain("MATCH here");
+    expect(hits[0]!.text).toContain("after");
+    expect(hits[1]).toMatchObject({ file: "g.ts", line: 1 });
+  });
+
+  it("strips the base prefix from absolute rg paths", () => {
+    const hits = parseRipgrep("/work/src/a.ts:1:hi\n", "/work", 0, 100);
+    expect(hits[0]!.file).toBe("src/a.ts");
+  });
+
+  it("respects the cap", () => {
+    const out = Array.from({ length: 50 }, (_, i) => `f.ts:${i + 1}:m${i}`).join("\n");
+    const hits = parseRipgrep(out, "/work", 0, 10);
+    expect(hits).toHaveLength(10);
   });
 });
