@@ -389,6 +389,11 @@ export async function runTeam(
  // per-member: members with separate worktrees could not see each
  // other's work, which defeats the point of a shared goal.
     isolation: "none",
+    // When a shared worktree was created, members run inside it (cwd ===
+    // memberCwd). Pass it so the runner re-anchors each member's sandbox /
+    // delivery roots to the shared checkout — otherwise writes outside the
+    // parent cwd would be rejected even though the cwd points at the worktree.
+    sharedWorktreePath: worktree && cwd === memberCwd ? worktree.path : undefined,
   });
 
  // --- shared worktree ---------------------------------------------------

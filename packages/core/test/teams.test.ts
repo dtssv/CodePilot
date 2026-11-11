@@ -3,6 +3,10 @@
 // merge strategies, team_message narration — not about model behaviour.
 
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   runTeam,
@@ -538,6 +542,48 @@ describe("runTeam", () => {
     );
     expect(held).toBe(0); // every permit released
     expect(track.max).toBe(2);
+  });
+
+  it("passes the shared worktree path to each member so writes are re-anchored", async () => {
+    // A real git repo so createWorktree succeeds.
+    const repo = mkdtempSync(join(tmpdir(), "team-wt-"));
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+    const git = (args: string[]) =>
+      execFileSync("git", args, { cwd: repo, env, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      git(["init", "-q", "-b", "main"]);
+      git(["config", "user.name", "test"]);
+      git(["config", "user.email", "test@test"]);
+      writeFileSync(join(repo, "README.md"), "# demo\n");
+      git(["add", "README.md"]);
+      git(["commit", "-q", "-m", "init"]);
+
+      const runner = fakeRunner({ fallback: "done" });
+      const result = await runTeam(
+        {
+          objective: "g",
+          shared_worktree: true,
+          members: [
+            { role: "worker", name: "a", objective: "work a" },
+            { role: "worker", name: "b", objective: "work b" },
+          ],
+        },
+        { runner, cwd: repo },
+      );
+      // The shared worktree was created.
+      expect(result.worktree).toBeDefined();
+      const wtPath = result.worktree!.path;
+      // Every member ran in the worktree AND carried it as sharedWorktreePath so
+      // the runner re-anchors its sandbox / delivery roots there.
+      expect(runner.calls.length).toBeGreaterThanOrEqual(2);
+      for (const spec of runner.calls) {
+        expect(spec.cwd).toBe(wtPath);
+        expect(spec.sharedWorktreePath).toBe(wtPath);
+        expect(spec.isolation).toBe("none");
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it("notes a shared worktree that could not be created", async () => {

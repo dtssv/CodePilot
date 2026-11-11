@@ -252,6 +252,14 @@ export interface SubagentRunSpec {
   * progress events, the persisted transcript, and the returned
   * `session_id` all match. When omitted the runner generates one. */
   ownerId?: string;
+  /** A pre-created shared worktree the sub-agent should run inside WITHOUT
+   * creating its own (used by `team` with `shared_worktree`: all members share
+   * one checkout). When set, the runner re-anchors the sub-agent's sandbox and
+   * delivery roots to this path — the same re-anchoring the `isolation:
+   * "worktree"` path does — so a member's writes to the shared checkout (which
+   * sits outside the parent cwd) are not rejected as out-of-root. `isolation`
+   * stays "none": no per-member tree is created. Ignored when empty. */
+  sharedWorktreePath?: string;
 }
 
 /** Sub-agent filesystem isolation modes. */

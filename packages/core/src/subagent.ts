@@ -179,7 +179,7 @@ export function createSubagentRunner(
   factoryOpts: SubagentFactoryOptions
 ): SubagentRunner {
   return {
-    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId }) {
+    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath }) {
       const live = factoryOpts.getEndpoint?.();
       const opts: SubagentFactoryOptions = live
         ? { ...factoryOpts, config: live.config, model: live.model }
@@ -268,6 +268,23 @@ export function createSubagentRunner(
             `file writes are isolated — coordinate or avoid editing the same files, and report ` +
             `exactly which files you changed in your conclusion.`;
         }
+      }
+
+      // A shared worktree supplied by the caller (team `shared_worktree`): run
+      // inside it without creating a per-member tree. Re-anchor sandbox and
+      // delivery roots to it — the same re-anchoring the `isolation: "worktree"`
+      // path does — so a member's writes to the shared checkout (outside the
+      // parent cwd) are not rejected as out-of-root. Skip when the isolation
+      // path already created a worktree (they are mutually exclusive by design).
+      if (!worktreeHandle && sharedWorktreePath && sharedWorktreePath.trim().length > 0) {
+        effectiveCwd = sharedWorktreePath;
+        const reanchored = resolveWorktreeRoots({
+          worktreePath: effectiveCwd,
+          baseSandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, cwd),
+          parentDeliveryRoots: opts.getDeliveryRoots?.() ?? [],
+        });
+        worktreeSandbox = reanchored.sandbox;
+        worktreeDeliveryRoots = reanchored.deliveryRoots;
       }
 
       try {
