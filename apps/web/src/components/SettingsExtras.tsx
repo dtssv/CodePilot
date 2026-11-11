@@ -1545,6 +1545,8 @@ export function SettingsExtras({
               >
                 <option value="ask">{t("Ask every time")}</option>
                 <option value="auto-edit">{t("Auto-edit")}</option>
+                <option value="auto">{t("Auto (classifier)")}</option>
+                <option value="dont-ask">{t("Don't ask (deny unprompted)")}</option>
                 <option value="yolo">{t("Full access (YOLO)")}</option>
               </select>
             </GeneralRow>

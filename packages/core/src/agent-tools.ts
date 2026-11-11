@@ -185,7 +185,84 @@ export async function runOneTool(
  // Set when the host declines WITH a correction message — surfaced to the
  // model as the tool result so a denial becomes steering, not a dead end.
   let denyFeedback: string | undefined;
+ // True when `denyFeedback` is a complete system-authored message (dont-ask /
+ // auto classifier) rather than a human's correction, so it is surfaced to the
+ // model verbatim instead of wrapped in "the user declined …".
+  let denyFeedbackIsSystem = false;
+ // Set by a non-interactive mode (dont-ask / auto classifier) that resolves a
+ // would-be prompt without the UI, so the interactive block below is skipped.
+  let resolvedWithoutPrompt = false;
   if (check === "ask") {
+ // Non-interactive permission modes resolve a would-be prompt without the UI.
+ // `dont-ask` denies every ask (there is no matching rule, and it is configured
+ // not to block on a prompt). `auto` routes SOFT asks (nothing matched, no hard
+ // floor) to a background classifier; HARD-floor asks (dangerous commands,
+ // sensitive/.git writes, sandbox escalation, out-of-sandbox writes, explicit
+ // ask rules) still prompt — the classifier must never silently allow those.
+    const permMode = deps.permissions.getMode();
+    if (permMode === "dont-ask") {
+      decision = "deny";
+      if (deps.config.dontAskFeedback !== false) {
+        denyFeedback =
+          `This session is configured to run without permission prompts (dont-ask mode). ` +
+          `\`${tc.name}\` has no matching allow rule, so it was refused. ` +
+          `Work with what is already permitted, or report that an allow rule is needed.`;
+        denyFeedbackIsSystem = true;
+      }
+      resolvedWithoutPrompt = true;
+    } else if (
+      permMode === "auto" &&
+      deps.permissionClassifier &&
+      deps.permissions.askSeverity(tool, effectiveInput) === "soft" &&
+      !deps.permissions.classifierShouldDefer()
+    ) {
+      const classifySpan = tracer.enabled
+        ? tracer.startSpan("codepilot.permission_classify", {
+            parentSpanId: toolSpan?.spanId ?? deps.parentSpan?.spanId,
+            attributes: { "codepilot.tool_name": tc.name },
+          })
+        : undefined;
+      const req = deps.permissions.buildRequest(
+        `perm_${randomUUID()}`,
+        tool,
+        effectiveInput,
+      );
+      const { buildClassificationInput } = await import("./permissionClassifier.js");
+      const { primaryArgOf } = await import("./permissions.js");
+      const verdict = await deps.permissionClassifier
+        .classify(
+          buildClassificationInput(
+            tool,
+            primaryArgOf(tc.name, effectiveInput),
+            deps.cwd,
+            req.reason,
+          ),
+          deps.signal,
+        )
+        .catch(() => ({ decision: "uncertain" as const }));
+      if (classifySpan) {
+        classifySpan.attributes["codepilot.decision"] = verdict.decision;
+        tracer.end(classifySpan);
+      }
+      if (verdict.decision === "allow") {
+        deps.permissions.recordClassifierVerdict(false);
+        decision = "allow";
+        resolvedWithoutPrompt = true;
+      } else if (verdict.decision === "deny") {
+        deps.permissions.recordClassifierVerdict(true);
+        decision = "deny";
+        denyFeedback =
+          `Auto-permission classifier refused \`${tc.name}\`: ${verdict.reason} ` +
+          `Adjust the approach instead of re-issuing the same call.`;
+        denyFeedbackIsSystem = true;
+        resolvedWithoutPrompt = true;
+      } else {
+        // uncertain → reset the streak (not a denial) and fall through to a prompt.
+        deps.permissions.recordClassifierVerdict(false);
+      }
+    }
+  }
+  if (check === "ask" && !resolvedWithoutPrompt) {
  // Telemetry: one child span per interactive permission request.
     const permSpan = tracer.enabled
       ? tracer.startSpan("codepilot.permission_request", {
@@ -275,19 +352,24 @@ export async function runOneTool(
       permSpan.attributes["codepilot.decision"] = decision;
       tracer.end(permSpan);
     }
-  } else {
+  } else if (check !== "ask") {
+    // preflight returned a concrete allow/deny — carry it through. (A resolved
+    // ask keeps the decision set by the non-interactive path above.)
     decision = check.decision;
   }
 
   if (decision === "deny") {
     endToolSpan(new Error(`permission denied for tool ${tc.name}`));
-    // Decline-with-feedback: hand the user's correction to the model so it can
-    // adapt (e.g. edit a different file) instead of just seeing "denied".
+    // Decline-with-feedback: hand the correction to the model so it can adapt
+    // (e.g. edit a different file) instead of just seeing "denied". A
+    // system-authored message (dont-ask / auto classifier) is already a complete
+    // instruction and is surfaced verbatim; a human's correction is wrapped.
     if (denyFeedback && denyFeedback.trim().length > 0) {
       return {
-        content:
-          `The user declined \`${tc.name}\` and left this instruction: ${denyFeedback.trim()}\n` +
-          `Follow it instead of re-issuing the same call.`,
+        content: denyFeedbackIsSystem
+          ? denyFeedback.trim()
+          : `The user declined \`${tc.name}\` and left this instruction: ${denyFeedback.trim()}\n` +
+            `Follow it instead of re-issuing the same call.`,
         isError: true,
       };
     }

@@ -46,7 +46,7 @@ export interface CustomAgent {
  /** Max agentic turns. */
   maxTurns?: number;
  /** Permission mode override for this sub-agent. */
-  permissionMode?: "ask" | "auto-edit" | "yolo";
+  permissionMode?: import("./types.js").PermissionMode;
  /** Full markdown body (frontmatter stripped). */
   body: string;
  /** Absolute path to the .md file on disk. */
@@ -242,9 +242,17 @@ function toStringArray(v: unknown): string[] | undefined {
   return undefined;
 }
 
-function asPermissionMode(v: unknown): "ask" | "auto-edit" | "yolo" | undefined {
+function asPermissionMode(v: unknown): import("./types.js").PermissionMode | undefined {
   if (typeof v !== "string") return undefined;
-  if (v === "ask" || v === "auto-edit" || v === "yolo") return v;
+  if (
+    v === "ask" ||
+    v === "auto-edit" ||
+    v === "yolo" ||
+    v === "auto" ||
+    v === "dont-ask"
+  ) {
+    return v;
+  }
   return undefined;
 }
 

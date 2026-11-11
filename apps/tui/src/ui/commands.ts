@@ -79,8 +79,8 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "setup", description: "Run the first-run setup guide (provider · search · images)" },
   { name: "model", description: "Pick a model (↑↓ + Enter)", args: "[provider/model]" },
   { name: "provider", description: "Pick a provider preset (↑↓ + Enter)", args: "[id]" },
-  { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo]" },
-  { name: "preset", description: "Pick a permission preset (mode + sandbox)", args: "[safe|standard|full-access]" },
+  { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo|auto|dont-ask]" },
+  { name: "preset", description: "Pick a permission preset (mode + sandbox)", args: "[safe|standard|full-access|supervised-auto]" },
   { name: "agent", description: "Pick collaboration mode (↑↓ + Enter)", args: "[chat|plan|agent]" },
   { name: "theme", description: "Pick a colour palette (↑↓ + Enter)", args: "[default|nord|solarized|high-contrast]" },
   { name: "plan", description: "Show the current plan" },
@@ -107,8 +107,8 @@ export const COMMANDS: readonly CommandInfo[] = [
 ];
 
 const AGENT_MODES: readonly AgentMode[] = ["chat", "plan", "agent"];
-const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo"];
-const PRESET_NAMES: readonly PermissionPresetName[] = ["safe", "standard", "full-access"];
+const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo", "auto", "dont-ask"];
+const PRESET_NAMES: readonly PermissionPresetName[] = ["safe", "standard", "full-access", "supervised-auto"];
 
 export const HELP_TEXT = `Available commands:
   /help                              Show this help

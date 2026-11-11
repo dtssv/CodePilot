@@ -124,6 +124,11 @@ export interface AgentDeps {
  /** Permission request handler. May return a plain decision or a
   * decline-with-feedback object (see PermissionResolution). */
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionResolution>;
+ /** Background classifier for the `auto` permission mode. When set and the
+  * mode is `auto`, a soft (non-floor) ask is adjudicated by this classifier
+  * before any prompt: allow → run; deny → refuse with the reason; uncertain →
+  * fall back to the interactive prompt. Omitted → `auto` behaves like `ask`. */
+  permissionClassifier?: import("./permissionClassifier.js").PermissionClassifier;
  /** Maximum number of assistant turns per prompt. */
   maxTurns?: number;
  /** Soft convergence ceiling applied even when maxTurns is unlimited. After

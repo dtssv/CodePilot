@@ -3554,6 +3554,11 @@ function defaultDecision(mode: PermissionMode): PermissionDecision {
     case "yolo":
     case "auto-edit":
       return "allow";
+    // `auto` / `dont-ask` resolve soft asks inside the agent (classifier /
+    // immediate deny); if a request still reaches here with no handler, fail
+    // closed like `ask`.
+    case "auto":
+    case "dont-ask":
     case "ask":
     default:
       return "deny";

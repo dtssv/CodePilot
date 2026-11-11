@@ -231,10 +231,19 @@ export function sameCwd(a: string | undefined, b: string | undefined): boolean {
   return normalizeCwd(a) === normalizeCwd(b);
 }
 
-/** Tool permission posture for new connections (ask / auto-edit / yolo). */
+/** Tool permission posture for new connections (ask / auto-edit / yolo / auto /
+ * dont-ask). */
 export function loadPermissionMode(): PermissionMode {
   const v = read(localStorage, PERMISSION_MODE_KEY);
-  if (v === "ask" || v === "auto-edit" || v === "yolo") return v;
+  if (
+    v === "ask" ||
+    v === "auto-edit" ||
+    v === "yolo" ||
+    v === "auto" ||
+    v === "dont-ask"
+  ) {
+    return v;
+  }
   return "ask";
 }
 

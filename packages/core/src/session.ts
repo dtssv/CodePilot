@@ -26,6 +26,10 @@ import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { type AgentDeps } from "./agent.js";
+import {
+  createPromptPermissionClassifier,
+  type PermissionClassifier,
+} from "./permissionClassifier.js";
 import { INTERRUPTED_RESULT } from "./agent-messages.js";
 import { runtimeRegistry, type AgentRuntime, type PluginToolDef } from "./runtime.js";
 import { BoundedSinkQueue } from "./sessionSink.js";
@@ -294,6 +298,8 @@ export class Session {
   private toolRegistry: ToolRegistry;
   private artifacts: ArtifactStore;
   private permissions: PermissionEngine;
+ /** Lazily-built small-model classifier for `auto` permission mode. */
+  private permissionClassifier?: PermissionClassifier;
   private sandbox: ResolvedSandbox;
  /** True when sandbox mode is active but no OS backend is available and
  * fallback is "deny". Bash commands will be refused; surfaced as a
@@ -473,6 +479,7 @@ export class Session {
       permissionMode: this.config.permissionMode,
       autoApprove: this.config.autoApprove,
       permissions: this.config.permissions,
+      permissionAuto: this.config.permissionAuto,
     });
     this.sandbox = resolveSandbox(this.config.sandbox, this.cwd);
  // Determine whether an OS sandbox backend actually enforces the policy.
@@ -974,6 +981,9 @@ export class Session {
           }
         },
         onPermissionRequest: this.onPermissionRequest,
+        // Background classifier for `auto` permission mode. Built lazily and
+        // reused; only consulted by agent-tools when the mode is `auto`.
+        permissionClassifier: this.getPermissionClassifier(),
         onAskUser: this.onAskUser,
         onUsage: (u) => {
           this.usageTotal.input += u.input ?? 0;
@@ -2738,6 +2748,38 @@ export class Session {
     }
 
     this.wireHookResolvers(task.runner);
+  }
+
+  /**
+   * Build (once) the small-model classifier used by the `auto` permission
+   * mode. Reuses the same small-model wiring as the Stop verifier's prompt
+   * resolver; any failure in the underlying call maps to `uncertain`, so the
+   * engine falls back to an interactive prompt rather than silently allowing.
+   */
+  private getPermissionClassifier(): PermissionClassifier {
+    if (this.permissionClassifier) return this.permissionClassifier;
+    this.permissionClassifier = createPromptPermissionClassifier(
+      async (policy, payload, signal) => {
+        const provider = buildSmallProvider(this.config);
+        const model = this.config.smallModel ?? provider.smallModel ?? this.model;
+        const body =
+          `${policy}\n\n` +
+          `Respond with a single JSON object only.\n\n` +
+          `Call:\n${JSON.stringify(payload).slice(0, 8_000)}`;
+        let out = "";
+        for await (const ev of provider.stream({
+          model,
+          messages: [{ role: "user", content: [{ type: "text", text: body }] }],
+          maxTokens: 512,
+          signal,
+        })) {
+          if (ev.kind === "text_delta") out += ev.text;
+          if (ev.kind === "error") throw new Error(ev.message);
+        }
+        return out.trim();
+      },
+    );
+    return this.permissionClassifier;
   }
 
   /**

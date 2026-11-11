@@ -107,7 +107,7 @@ Usage:
                                          (+ server.json); exits after last client
                                          + 30s idle grace
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
-                       [--yolo] [--permission-mode ask|auto-edit|yolo]
+                       [--yolo] [--permission-mode ask|auto-edit|yolo|auto|dont-ask]
                        [--json] [--quiet]
   codepilot goal "<objective>" [--max-rounds N]
   codepilot agent [DIR] [--port N] [--no-open]

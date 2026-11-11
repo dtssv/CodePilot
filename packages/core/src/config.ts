@@ -306,7 +306,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     apiKey: z.string().optional(),
     baseURL: z.string().url().optional(),
     azureApiVersion: z.string().min(1).optional(),
-    permissionMode: z.enum(["ask", "auto-edit", "yolo"]).optional(),
+    permissionMode: z.enum(["ask", "auto-edit", "yolo", "auto", "dont-ask"]).optional(),
     agentMode: z.enum(["chat", "plan", "agent"]).optional(),
     maxTokens: z.number().int().positive().optional(),
     // Reasoning / thinking controls. These were part of the public config
@@ -333,6 +333,19 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // still over the hard trigger. A manual /compact can still run and, if it
     // gets back under budget, re-enables auto-compaction.
     autoCompactMaxConsecutiveFailures: z.number().int().min(1).max(100).optional(),
+    // Tuning for the `auto` permission mode's background classifier. Consecutive
+    // / total classifier denials past these caps fall back to an interactive
+    // prompt so a misfiring classifier can hand control back to the human.
+    permissionAuto: z
+      .object({
+        maxConsecutiveDenials: z.number().int().min(1).max(100).optional(),
+        maxTotalDenials: z.number().int().min(0).max(10_000).optional(),
+      })
+      .strict()
+      .optional(),
+    // `dont-ask` mode: attach a short standard feedback note to a denied soft
+    // ask (default true) instead of a bare "permission denied".
+    dontAskFeedback: z.boolean().optional(),
     // Inline (Tab) code completion for the editor plugins. Off by default; runs
     // on the user's provider/apiKey but gated to a lightweight model (see
     // docs/design/G-inline-completion.md). Ignored by non-editor clients.
@@ -936,7 +949,14 @@ export function readEnvOverrides(): Partial<CodepilotConfig> {
   const azureApiVersion = process.env.CODEPILOT_AZURE_API_VERSION;
   if (azureApiVersion && azureApiVersion.length > 0) out.azureApiVersion = azureApiVersion;
   const perm = process.env.CODEPILOT_PERMISSION_MODE;
-  if (perm && (perm === "ask" || perm === "auto-edit" || perm === "yolo")) {
+  if (
+    perm &&
+    (perm === "ask" ||
+      perm === "auto-edit" ||
+      perm === "yolo" ||
+      perm === "auto" ||
+      perm === "dont-ask")
+  ) {
     out.permissionMode = perm;
   }
   const profile = process.env.CODEPILOT_PROFILE;

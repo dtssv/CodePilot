@@ -308,12 +308,31 @@ export interface TeamMessageEvent {
  */
 export type AgentMode = "chat" | "plan" | "agent";
 
-export type PermissionMode = "ask" | "auto-edit" | "yolo";
+/**
+ * How tool invocations that are not covered by an explicit rule are resolved.
+ *
+ * - `ask` — prompt for every write/dangerous call (the default).
+ * - `auto-edit` — auto-approve write-tier file edits; still prompt for bash and
+ *   dangerous calls.
+ * - `yolo` — never prompt (dangerous commands still ask).
+ * - `auto` — an unmatched soft ask is routed to a background classifier that
+ *   either allows it, denies it with a reason the model sees, or (when
+ *   uncertain, or after too many consecutive classifier denials) falls back to
+ *   an interactive prompt. Hard floors (dangerous commands, sensitive paths,
+ *   sandbox escalation, out-of-sandbox writes) are never silently allowed — they
+ *   still prompt. Use for long, mostly-unattended runs that should not stall on
+ *   every benign call but must not quietly do something destructive.
+ * - `dont-ask` — an unmatched soft ask is denied immediately (optionally with a
+ *   standard feedback note) instead of blocking on a prompt; explicit allow
+ *   rules and read/network defaults still pass. Interactive and headless share
+ *   this semantics.
+ */
+export type PermissionMode = "ask" | "auto-edit" | "yolo" | "auto" | "dont-ask";
 
 /** Named permission presets: a single knob that bundles a permission mode with
  * a sandbox mode, so a user can switch overall posture in one step instead of
  * configuring the two dimensions separately. */
-export type PermissionPresetName = "safe" | "standard" | "full-access";
+export type PermissionPresetName = "safe" | "standard" | "full-access" | "supervised-auto";
 
 /** The (permissionMode, sandboxMode) each preset applies. Sandbox values match
  * `ResolvedSandbox["mode"]`. Kept as data so clients can render a picker and
@@ -328,6 +347,13 @@ export const PERMISSION_PRESETS: Record<
   standard: { permissionMode: "auto-edit", sandbox: "workspace-write", description: "workspace-write sandbox, auto-approve edits" },
   // No sandbox, never prompt: trusted, unattended runs.
   "full-access": { permissionMode: "yolo", sandbox: "off", description: "no sandbox, never prompt (trusted/unattended)" },
+  // Mostly-unattended with a safety net: a background classifier lets benign
+  // calls through and prompts (or denies) risky ones, inside a workspace jail.
+  "supervised-auto": {
+    permissionMode: "auto",
+    sandbox: "workspace-write",
+    description: "workspace-write sandbox, classifier auto-approves benign calls and prompts for risky ones",
+  },
 };
 
 /**
@@ -626,6 +652,24 @@ export interface CodepilotConfig {
   * A manual `/compact` can still run and, if it gets back under budget,
   * re-enables auto-compaction. Default 3. */
   autoCompactMaxConsecutiveFailures?: number;
+ /** Tuning for the `auto` permission mode's background classifier (see
+  * {@link PermissionMode}). Only consulted when the mode is `auto`. */
+  permissionAuto?: {
+   /** Consecutive classifier denials before the engine stops trusting the
+    * classifier and falls back to an interactive prompt for the current ask.
+    * A misfiring classifier must be able to hand control back to the human.
+    * Default 3. */
+   maxConsecutiveDenials?: number;
+   /** Total classifier denials in a session before every subsequent soft ask
+    * falls back to an interactive prompt (regardless of the consecutive
+    * streak). 0 disables the total cap. Default 10. */
+   maxTotalDenials?: number;
+  };
+ /** For `dont-ask` mode: when true, a denied soft ask carries a short standard
+  * feedback note to the model ("configured to run without prompts — add an
+  * allow rule to enable this") instead of a bare "permission denied". Default
+  * true. */
+  dontAskFeedback?: boolean;
  /** Inline (Tab) code completion for the editor plugins (VSCode / IntelliJ).
   * Off by default. Runs on the user's existing provider + apiKey but is gated
   * to a lightweight model: completion uses `completion.model` if set, else the

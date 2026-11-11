@@ -14,6 +14,7 @@ import type {
   AgentMode,
   ContentBlock,
   Event,
+  PermissionMode,
   PlanStep,
   QuestionRequest,
   TeamMessageEvent,
@@ -79,7 +80,7 @@ export interface TuiState {
   model: string | undefined;
  /** Named provider preset id when known. */
   providerId?: string;
-  permissionMode: "ask" | "auto-edit" | "yolo";
+  permissionMode: PermissionMode;
  /** Collaboration mode (which tools the model can call). */
   agentMode: AgentMode;
   status: UiStatus;

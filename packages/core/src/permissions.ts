@@ -66,9 +66,20 @@ export class PermissionEngine {
  * detecting out-of-root writes that need a sandbox-expand prompt.
  * `osEnforced` is true only when an OS backend actually jails bash. */
   private sandbox?: { policy: ResolvedSandbox; cwd: string; osEnforced: boolean };
+ /** `auto`-mode classifier denial tracking. A misfiring classifier must be able
+  * to hand control back to the human: once the consecutive or total denial cap
+  * is crossed, {@link classifierShouldDefer} returns true and the caller prompts
+  * instead of trusting the classifier. */
+  private classifierConsecutiveDenials = 0;
+  private classifierTotalDenials = 0;
+  private readonly autoMaxConsecutiveDenials: number;
+  private readonly autoMaxTotalDenials: number;
 
   constructor(
-    config: Pick<CodepilotConfig, "permissionMode" | "autoApprove" | "permissions"> = {}
+    config: Pick<
+      CodepilotConfig,
+      "permissionMode" | "autoApprove" | "permissions" | "permissionAuto"
+    > = {},
   ) {
     this.mode = config.permissionMode ?? "ask";
     this.configRules = {
@@ -77,6 +88,39 @@ export class PermissionEngine {
       deny: [...(config.permissions?.deny ?? [])],
     };
     this.sessionRules = { allow: [], ask: [], deny: [] };
+    this.autoMaxConsecutiveDenials = config.permissionAuto?.maxConsecutiveDenials ?? 3;
+    this.autoMaxTotalDenials = config.permissionAuto?.maxTotalDenials ?? 10;
+  }
+
+  /** True when the `auto` classifier has denied enough that we should stop
+   * trusting it and prompt the human instead. Checked before consulting the
+   * classifier for a soft ask. */
+  classifierShouldDefer(): boolean {
+    if (this.classifierConsecutiveDenials >= this.autoMaxConsecutiveDenials) return true;
+    if (this.autoMaxTotalDenials > 0 && this.classifierTotalDenials >= this.autoMaxTotalDenials) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Record a classifier verdict for denial tracking. A deny advances both the
+   * consecutive and total counters; any non-deny (allow / uncertain / a human
+   * override) resets the consecutive streak. */
+  recordClassifierVerdict(denied: boolean): void {
+    if (denied) {
+      this.classifierConsecutiveDenials += 1;
+      this.classifierTotalDenials += 1;
+    } else {
+      this.classifierConsecutiveDenials = 0;
+    }
+  }
+
+  /** Test/introspection: current classifier denial counters. */
+  classifierDenialState(): { consecutive: number; total: number } {
+    return {
+      consecutive: this.classifierConsecutiveDenials,
+      total: this.classifierTotalDenials,
+    };
   }
 
  /**
@@ -360,6 +404,72 @@ export class PermissionEngine {
     return "ask";
   }
 
+  /**
+   * Classify WHY {@link preflight} would ask for a given call, so the `auto`
+   * and `dont-ask` modes can treat the two cases differently:
+   *
+   * - `"hard"` — a safety floor forced the ask: a dangerous command, a write to
+   *   a sensitive/credential path or `.git`, a per-command sandbox escalation,
+   *   a write outside the sandbox writable roots, or an explicit `ask` rule the
+   *   user authored. The `auto` classifier must NEVER silently allow these; they
+   *   still require an interactive confirmation (or stay denied under
+   *   `dont-ask`).
+   * - `"soft"` — nothing matched and no floor applies (e.g. an ordinary write
+   *   outside auto-edit, a user-scope memory write). The `auto` classifier may
+   *   adjudicate these; `dont-ask` denies them.
+   *
+   * Only meaningful when {@link preflight} returns `"ask"`; callers that already
+   * have an allow/deny decision should not consult this.
+   */
+  askSeverity(tool: ToolDef, input: unknown): "hard" | "soft" {
+    const primary = extractPrimaryArg(tool.name, input);
+    const bash = tool.name === "bash" && primary !== undefined ? parseCommand(primary) : undefined;
+    const cwd = this.sandbox?.cwd ?? process.cwd();
+
+    // Per-command sandbox escalation is always a hard floor.
+    if (bash && isSandboxEscalation(input)) return "hard";
+
+    // Sensitive / git-metadata write floor (file tools).
+    if (tool.permission === "write" && tool.name !== "bash") {
+      const writePaths = extractWritePaths(tool.name, input);
+      const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+      for (const p of candidates) {
+        if (sensitivePathHit(p, "write", cwd) || gitMetadataWriteHit(p, cwd)) return "hard";
+      }
+    }
+
+    // Bash command touching a sensitive system root with a mutating/dangerous verb.
+    if (bash && primary) {
+      for (const root of ["/etc", "/boot", "/System", "/usr/bin", "/usr/sbin", "/bin", "/sbin"]) {
+        if (new RegExp(`(^|\\s|=|"|')${root}(/|\\s|$)`).test(primary)) {
+          const danger = checkDangerousCommand(primary);
+          if (!isReadOnlyCommand(primary) || danger.dangerous) return "hard";
+          break;
+        }
+      }
+    }
+
+    // Out-of-sandbox write (needs an explicit folder grant).
+    {
+      const writePaths = extractWritePaths(tool.name, input);
+      const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
+      for (const p of candidates) {
+        if (this.sandboxExpandFor(tool, p)) return "hard";
+      }
+    }
+
+    // An explicit `ask` rule the user authored is their deliberate intent.
+    const ask = bash
+      ? firstSegmentMatch(this.rules().ask, primary!, bash)
+      : firstMatch(this.rules().ask, tool.name, primary, input);
+    if (ask) return "hard";
+
+    // Any dangerous command is a hard floor, matched allow rule or not.
+    if (bash && primary && checkDangerousCommand(primary).dangerous) return "hard";
+
+    return "soft";
+  }
+
   /** Build a permission request to send to the user / frontend. */
   buildRequest(requestId: string, tool: ToolDef, input: unknown): PermissionRequest {
     const primary = extractPrimaryArg(tool.name, input);
@@ -601,6 +711,13 @@ export function isSandboxEscalation(input: unknown): boolean {
     typeof input === "object" &&
     (input as Record<string, unknown>).escalate_sandbox === true
   );
+}
+
+/** Public wrapper over the internal primary-argument extractor, for callers
+ * (e.g. the permission classifier) that need the command / path / url / query a
+ * call centres on without re-implementing the per-tool field mapping. */
+export function primaryArgOf(toolName: string, input: unknown): string | undefined {
+  return extractPrimaryArg(toolName, input);
 }
 
 /** Tools' primary argument extractor. */
