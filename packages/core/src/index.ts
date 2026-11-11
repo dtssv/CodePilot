@@ -38,6 +38,7 @@ export type {
   CodepilotConfig,
   McpServerConfig,
   SessionOptions,
+  SessionLockOwnerInfo,
   SessionSummary,
   ImageAttachment,
   PromptFile,
@@ -316,6 +317,14 @@ export type {
 // session-utils.ts (standalone helpers). Both are re-exported here so the
 // public API is unchanged.
 export { Session } from "./session.js";
+export {
+  acquireSessionLock,
+  readSessionLock,
+  liveSessionLockOwner,
+  sessionLockPath,
+  SessionLockedError,
+} from "./sessionLock.js";
+export type { SessionLockOwner, SessionLease } from "./sessionLock.js";
 export { openSessionIndex } from "./sessionIndex.js";
 export type { SessionIndex, SuspendedSession } from "./sessionIndex.js";
 export {

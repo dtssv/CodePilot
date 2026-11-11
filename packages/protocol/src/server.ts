@@ -43,6 +43,8 @@ import type {
 import {
   createSession,
   driveGoalRounds,
+  SessionLockedError,
+  liveSessionLockOwner,
   listSessions as coreListSessions,
   setSessionPinned as coreSetSessionPinned,
   setSessionArchived as coreSetSessionArchived,
@@ -221,11 +223,19 @@ export interface SessionNewParams {
 
 export interface SessionResumeParams {
   sessionId: string;
+  /** Open read-only when another process holds the write lease: no lease is
+   * taken and no events are appended. Used to inspect a session owned
+   * elsewhere. When false/absent and a live owner holds the lease, resume
+   * fails with a SESSION_LOCKED error carrying the owner's attach info. */
+  readOnly?: boolean;
 }
 
 export interface SessionResumeResult {
   sessionId: string;
   events: Event[];
+  /** True when the session was opened read-only (another process owns the
+   * write lease); prompts and persisted edits are inert for this handle. */
+  readOnly?: boolean;
 }
 
 export interface SessionListResult {
@@ -529,6 +539,7 @@ export function registerServer(
     pendingGoals: new Map(),
     activeGoalLoops: new Set(),
     remoteGrant: opts.remoteGrant,
+    ...(opts.lockIdentity ? { lockIdentity: opts.lockIdentity } : {}),
     terminals: new TerminalHost(),
   };
 
@@ -1132,6 +1143,13 @@ export interface ServerOptions {
    * (config, updates, workspace write, minting new QR, etc.) are denied.
    */
   remoteGrant?: RemoteGrant;
+  /**
+   * Identity recorded in each session's write-lease lock file so a second
+   * opener (another process) can be redirected to attach to THIS daemon as a
+   * subscriber instead of opening a competing writer. The web/daemon entry
+   * passes its own discovery url + token here.
+   */
+  lockIdentity?: { host?: string; url?: string; token?: string };
 }
 
 /** Methods a scoped remote grant may call, keyed by required capability. */
@@ -1308,6 +1326,9 @@ interface ServerContext {
   activeGoalLoops: Set<string>;
   /** Present when this connection authenticated via QR remote grant. */
   remoteGrant?: RemoteGrant;
+  /** Daemon identity recorded in each session's write-lease lock file so a
+   * second opener can be redirected to attach here. */
+  lockIdentity?: { host?: string; url?: string; token?: string };
   /** Interactive PTYs owned by this connection. */
   terminals: TerminalHost;
 }
@@ -1787,6 +1808,7 @@ async function handleSessionNew(
     model: params?.model ?? config?.model,
     systemPromptExtra: params?.systemPromptExtra,
     agentMode: params?.agentMode ?? effectiveConfig.agentMode,
+    ...(ctx.lockIdentity ? { lockIdentity: ctx.lockIdentity } : {}),
     onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
     onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
@@ -2386,21 +2408,42 @@ async function handleSessionResume(
   const cwd = ctx.defaultCwd;
   const config = await loadConfigSafe(cwd);
   const effectiveConfig = mergePermissionMode(config, ctx.defaultPermissionMode);
-  const session = await createSession({
-    cwd,
-    config: effectiveConfig,
-    sessionId: params.sessionId,
-    onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
-    onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
-    onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
-    onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
-  });
+  let session: Session;
+  try {
+    session = await createSession({
+      cwd,
+      config: effectiveConfig,
+      sessionId: params.sessionId,
+      ...(params.readOnly ? { readOnly: true } : {}),
+      ...(ctx.lockIdentity ? { lockIdentity: ctx.lockIdentity } : {}),
+      onPermissionRequest: (req) => requestPermissionFromClient(ctx, session, req),
+      onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
+      onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
+      onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
+    });
+  } catch (err) {
+    // Another live process holds the write lease. Surface the owner's attach
+    // info so the client can attach to the holding daemon as a subscriber or
+    // re-open read-only (session/resume with readOnly:true).
+    if (err instanceof SessionLockedError) {
+      throw new RpcError(
+        ErrorCode.SessionLocked,
+        err.message,
+        { sessionId: err.sessionId, owner: err.owner },
+      );
+    }
+    throw err;
+  }
   registerSession(ctx, session);
  // A session loaded from disk may have been sealed from a crash-interrupted
  // run during init (reconcileStaleStatus) — before this client could subscribe.
  // Forward the recovery advisory now that the client is attached.
   setImmediate(() => forwardInterruptedRecovery(ctx, session));
-  return { sessionId: session.id, events: session.getHistory() };
+  return {
+    sessionId: session.id,
+    events: session.getHistory(),
+    ...(params.readOnly ? { readOnly: true } : {}),
+  };
 }
 
 /** Push the one-shot crash-recovery advisory to the resuming client, if the
@@ -2455,6 +2498,13 @@ async function handleSessionList(
       ? params.cwd
       : undefined,
   );
+  // Enrich with the live writer pid (if any) so a UI can mark a session as
+  // actively owned by a process. Reads the per-session lock file; fail-soft per
+  // session so a bad lock never breaks the list.
+  const enrich = (s: RichSessionSummary): RichSessionSummary => {
+    const owner = liveSessionLockOwner(s.id);
+    return owner ? { ...s, liveWriterPid: owner.pid } : s;
+  };
   // A scoped QR remote grant authorizes only a specific set of workspaces
   // (grant.cwds). Without this filter, a phone that paired for 2 workspaces
   // would see EVERY session on the daemon (the client never passes a cwd), a
@@ -2464,10 +2514,12 @@ async function handleSessionList(
   if (grant) {
     const allowed = grantAllowedCwds(grant);
     return {
-      sessions: sessions.filter((s) => s.cwd && allowed.has(normalizeCwd(s.cwd))),
+      sessions: sessions
+        .filter((s) => s.cwd && allowed.has(normalizeCwd(s.cwd)))
+        .map(enrich),
     };
   }
-  return { sessions };
+  return { sessions: sessions.map(enrich) };
 }
 
 /** Normalized set of workspaces a remote grant authorizes. */

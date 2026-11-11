@@ -54,6 +54,10 @@ export interface RichSessionSummary extends SessionSummary {
   pinned?: boolean;
   /** Archived: hidden from the main list, shown under an "Archived" section. */
   archived?: boolean;
+  /** Pid of a live process currently holding the single-writer lease, or
+   * absent when the session is free. Lets a UI mark a session as being actively
+   * written (and whether THIS process is the writer). Enriched on demand. */
+  liveWriterPid?: number;
 }
 
 /** Per-session UI state persisted in a `<id>.state` sidecar (JSON). Separate
@@ -531,9 +535,33 @@ export function sameCwd(a: string | undefined, b: string | undefined): boolean {
   return normalizeCwd(a) === normalizeCwd(b);
 }
 
-/** Delete a session's persisted file + sidecar. Useful for test cleanup. */
-export async function deleteSession(id: string): Promise<void> {
-  for (const p of [sessionPath(id), titleSidecarPath(id), cwdSidecarPath(id), stateSidecarPath(id), historyArchivePath(id)]) {
+/** Delete a session's persisted file + sidecars. Refuses while a live process
+ * holds the single-writer lease (another daemon / CLI is actively writing it),
+ * unless `force` is set — a crashed owner's stale lock does not block deletion.
+ * Also removes the lock file so a reclaimed-but-orphaned lock is not left
+ * behind. Useful for test cleanup (pass force to bypass the live-writer guard). */
+export async function deleteSession(
+  id: string,
+  opts?: { force?: boolean },
+): Promise<void> {
+  if (!opts?.force) {
+    const { liveSessionLockOwner } = await import("./sessionLock.js");
+    const owner = liveSessionLockOwner(id);
+    if (owner) {
+      throw new Error(
+        `cannot delete session ${id}: owned by live pid ${owner.pid}`,
+      );
+    }
+  }
+  const { sessionLockPath } = await import("./sessionLock.js");
+  for (const p of [
+    sessionPath(id),
+    titleSidecarPath(id),
+    cwdSidecarPath(id),
+    stateSidecarPath(id),
+    historyArchivePath(id),
+    sessionLockPath(id),
+  ]) {
     try {
       await unlink(p);
     } catch {

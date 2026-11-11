@@ -293,7 +293,7 @@ vi.mock("@codepilot/core", async (importOriginal) => {
 });
 
 // Now we can import the modules under test.
-import { createSession, listSessions, loadConfig } from "@codepilot/core";
+import { createSession, listSessions, loadConfig, SessionLockedError } from "@codepilot/core";
 import {
   PROTOCOL_VERSION,
   registerServer,
@@ -1307,6 +1307,33 @@ describe("server / protocol handlers", () => {
     >("session/resume", { sessionId });
     expect(res.sessionId).toBe(sessionId);
     expect(JSON.stringify(res.events)).toContain("produced-after-open");
+  });
+
+  it("session/resume maps a write-lease conflict to a SESSION_LOCKED error carrying the owner", async () => {
+    registerServer(server, { defaultCwd: "/work" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    // A disk-load resume (id not live in memory) whose createSession throws
+    // because another live process holds the write lease.
+    const owner = { pid: 4242, acquiredAt: Date.now(), url: "ws://127.0.0.1:9/rpc", token: "tok" };
+    const mockCreate = createSession as unknown as ReturnType<typeof vi.fn>;
+    mockCreate.mockImplementationOnce(async () => {
+      throw new SessionLockedError("locked-elsewhere", owner);
+    });
+    try {
+      await client.request("session/resume", { sessionId: "locked-elsewhere" });
+      throw new Error("expected SESSION_LOCKED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(RpcError);
+      const rpc = err as RpcError;
+      expect(rpc.code).toBe(-32002); // ErrorCode.SessionLocked
+      expect((rpc.data as { owner: { pid: number } }).owner.pid).toBe(4242);
+      expect((rpc.data as { sessionId: string }).sessionId).toBe("locked-elsewhere");
+    }
   });
 
   it("session/fork creates a new session", async () => {

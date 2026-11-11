@@ -531,9 +531,20 @@ async function cmdServeWeb(
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
 
+  // Identity recorded in each session's write-lease lock file so a second
+  // process trying to open the same session can be redirected to attach to THIS
+  // daemon as a subscriber. The url is filled in after the handle resolves (it
+  // needs the bound port); the lock identity object is shared by reference with
+  // the server options, which acceptConnection reads fresh per connection.
+  const lockIdentity: { host?: string; url?: string; token?: string } = {
+    host: "daemon",
+    ...(token ? { token } : {}),
+  };
+
   let handle: Awaited<ReturnType<typeof startWebSocketServer>>;
   try {
     handle = await startWebSocketServer({
+      lockIdentity,
       port,
       host,
       // In daemon mode, when bound beyond loopback (e.g. desktop LAN access
@@ -596,6 +607,11 @@ async function cmdServeWeb(
         handle.token,
       )
     : undefined;
+
+  // Now that the port is bound, record this daemon's attach url in the shared
+  // lock-identity object so session lock files written from here carry a usable
+  // redirect target.
+  lockIdentity.url = handle.url;
 
   process.stdout.write(`${handle.url}\n`);
   process.stderr.write(

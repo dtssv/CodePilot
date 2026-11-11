@@ -479,8 +479,14 @@ export class CodepilotClient {
     return sessionId;
   }
 
-  async resumeSession(sessionId: string): Promise<SessionResumeResult> {
-    return this.call<SessionResumeResult>("session/resume", { sessionId });
+  async resumeSession(
+    sessionId: string,
+    opts?: { readOnly?: boolean },
+  ): Promise<SessionResumeResult> {
+    return this.call<SessionResumeResult>("session/resume", {
+      sessionId,
+      ...(opts?.readOnly ? { readOnly: true } : {}),
+    });
   }
 
   async listWorkspace(path = ".", cwd?: string): Promise<{ path: string; entries: Array<{ name: string; path: string; kind: "file" | "directory"; size?: number }> }> {

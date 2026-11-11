@@ -74,6 +74,10 @@ export const ErrorCode = {
   ProtocolVersionMismatch: -32602, // reused (PROTOCOL.md says -32602)
   SessionNotFound: -32000,
   PermissionDenied: -32001,
+  /** The session's write lease is held by a live process. The error `data`
+   * carries the owner's attach info ({ pid, url, token }) so the client can
+   * attach to the holding daemon as a subscriber or re-open read-only. */
+  SessionLocked: -32002,
 } as const;
 
 /** Structured error thrown / sent over the wire. */

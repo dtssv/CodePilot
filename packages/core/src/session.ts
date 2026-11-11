@@ -89,6 +89,7 @@ import {
   normalizeRoot,
 } from "./deliveryRoots.js";
 import type { McpManager } from "./mcp.js";
+import { acquireSessionLock, type SessionLease } from "./sessionLock.js";
 import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod } from "./session-mcp.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
 import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
@@ -360,6 +361,17 @@ export class Session {
   * reconcile sealed it to idle. Lets a host that attaches after init — and the
   * boot-time recovery sweep — retrieve the recovery outcome. */
   private interruptedRecovery?: InterruptedRunInfo;
+ /** True for a read-only open: the single-writer lease is not acquired and no
+  * event is ever appended to the JSONL (prompt / persisted mode-model changes /
+  * reconcile seal are all inert). */
+  private readonly readOnly: boolean;
+ /** Held single-writer lease (null for a read-only open). Acquired at the top
+  * of init() before any load/append, released in dispose(). A crashed owner's
+  * lock is reclaimed by the next acquirer via a pid-liveness check. */
+  private writerLease: SessionLease | null = null;
+ /** Lock-file identity (daemon url/token) recorded in the lease so a second
+  * opener can be redirected to attach to this owner as a subscriber. */
+  private readonly lockIdentity?: SessionOptions["lockIdentity"];
  /** Turn-boundary pre-compaction cache. After a turn ends with tokens over a
  * soft threshold (but below the hard trigger), we compact in the background
  * while the user reads / thinks, and stash the result here keyed by a
@@ -486,6 +498,8 @@ export class Session {
     this.runtimeName = opts.runtime ?? opts.config?.runtime;
     this.pluginSkillDirs = opts.pluginSkillDirs ?? [];
     this.pluginAgentDirs = opts.pluginAgentDirs ?? [];
+    this.readOnly = opts.readOnly === true;
+    this.lockIdentity = opts.lockIdentity;
     this.mode = opts.agentMode ?? opts.config.agentMode ?? "agent";
     this.autoAcceptModeSuggestions = opts.config.autoAcceptModeSuggestions === true;
     this.hostSurface = opts.hostSurface ?? "cli";
@@ -537,6 +551,36 @@ export class Session {
 
   /** Load from disk and configure registries. */
   async init(): Promise<void> {
+ // Cross-process single-writer lease. Acquire BEFORE loading — loadFromDisk is
+ // read-only but reconcileStaleStatus below appends a seal/idle, and every
+ // later prompt appends, so the lease must already be held. A read-only open
+ // skips the lease entirely and never writes. Throws SessionLockedError if a
+ // live owner (another daemon / CLI) already holds it; the error carries the
+ // owner's identity so a caller can redirect the client to attach there.
+    if (!this.readOnly) {
+      this.writerLease = acquireSessionLock(this.id, {
+        ...(this.lockIdentity?.host ? { host: this.lockIdentity.host } : {}),
+        ...(this.lockIdentity?.url ? { url: this.lockIdentity.url } : {}),
+        ...(this.lockIdentity?.token ? { token: this.lockIdentity.token } : {}),
+      });
+    }
+    try {
+      await this.initAfterLease();
+    } catch (err) {
+      // A later init step failed after the lease was taken — release it so the
+      // id is not left wedged by a half-constructed session that is never
+      // disposed.
+      try {
+        this.writerLease?.release();
+      } catch {
+        /* reclaim handles a leftover lock */
+      }
+      this.writerLease = null;
+      throw err;
+    }
+  }
+
+  private async initAfterLease(): Promise<void> {
     await ensureProjectState(this.cwd, { sessionId: this.id });
     await this.artifacts.init();
     await this.startNetProxyIfConfigured();
@@ -2667,6 +2711,15 @@ export class Session {
       const { releaseSharedMcp } = await import("./mcp-pool.js");
       await releaseSharedMcp(mcp);
     }
+    // Release the single-writer lease last, after all writes are done, so the id
+    // becomes acquirable by another process. A crash (no dispose) leaves a stale
+    // lock that the next acquirer reclaims via a pid-liveness check.
+    try {
+      this.writerLease?.release();
+    } catch {
+      /* best-effort — a crashed-owner reclaim handles a leftover lock */
+    }
+    this.writerLease = null;
   }
 
  // -- internals ----------------------------------------------------------
@@ -3102,6 +3155,9 @@ export class Session {
  * the user can prompt again. No-op for cleanly-finished sessions.
  */
   private async reconcileStaleStatus(): Promise<void> {
+    // Read-only open holds no write lease — leave the stale status as-is rather
+    // than sealing it; only the lease-holding writer may seal.
+    if (this.readOnly) return;
     let lastStatus: string | null = null;
     let lastClaim: Extract<Event, { type: "status" }>["claim"] | undefined;
     for (const e of this.events) {
@@ -3253,6 +3309,10 @@ export class Session {
   }
 
   private async persistEvent(e: Event): Promise<void> {
+    // Read-only open: never touch the JSONL. The in-memory transcript is still
+    // maintained by callers (they push to this.events); only the durable write
+    // is suppressed, since this process does not hold the write lease.
+    if (this.readOnly) return;
     // Refresh branch occasionally (cheap spawn); keep last known value on miss.
     if (this.persisted.length % 25 === 0) {
       this.gitBranchCache = readGitBranch(this.cwd) ?? this.gitBranchCache;

@@ -1156,6 +1156,25 @@ export interface SessionOptions {
  /** Extra custom-agent directories (plugins' `agents/` dirs) to merge into
   * discovery during `init()`. Set by `createSession` from discovered plugins. */
   pluginAgentDirs?: string[];
+ /** Read-only open: do NOT acquire the single-writer lease and never append to
+  * the JSONL. Used to inspect a session already owned by another process (or
+  * for pure read tooling). A read-only session that attempts a write-path
+  * action (prompt, mode/model change persist, reconcile seal) is inert. */
+  readOnly?: boolean;
+ /** Identity recorded in the write-lease lock file so a second opener can be
+  * redirected to attach to this owner as a subscriber. A daemon passes its
+  * discovery url + token here. Ignored for read-only opens. */
+  lockIdentity?: { host?: string; url?: string; token?: string };
+}
+
+/** Owner recorded in a session's write-lease lock file, re-exported on the
+ * SessionLockedError a write-open throws when a live owner already holds it. */
+export interface SessionLockOwnerInfo {
+  pid: number;
+  acquiredAt: number;
+  host?: string;
+  url?: string;
+  token?: string;
 }
 
 export interface GoalRunOptions extends SessionOptions {
