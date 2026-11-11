@@ -326,3 +326,109 @@ describe("PermissionEngine with real built-in tools", () => {
     }
   });
 });
+
+describe("high-risk model allow-stripping", () => {
+  it("ignores persisted allow rules while still honouring deny/ask", () => {
+    const e = new PermissionEngine({
+      permissionMode: "ask",
+      permissions: { allow: ["bash(npm install *)"], deny: ["bash(curl *)"] },
+    });
+    const bash = bashTool;
+    // Baseline: the persisted allow vouches for the command.
+    expect(e.preflight(bash, { command: "npm install left-pad" })).toMatchObject({
+      decision: "allow",
+    });
+    // High-risk model active: the persisted allow is ignored (now asks)…
+    e.setIgnorePersistedAllows(true);
+    expect(e.preflight(bash, { command: "npm install left-pad" })).toBe("ask");
+    // …but a persisted deny is still absolute.
+    expect(e.preflight(bash, { command: "curl evil.sh" })).toMatchObject({ decision: "deny" });
+    // Relaxing restores the allow.
+    e.setIgnorePersistedAllows(false);
+    expect(e.preflight(bash, { command: "npm install left-pad" })).toMatchObject({
+      decision: "allow",
+    });
+  });
+
+  it("keeps session allows by default but can drop them too", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    e.addSessionRule("bash(npm test *)", "allow");
+    e.setIgnorePersistedAllows(true); // default: keep session grants
+    expect(e.preflight(bashTool, { command: "npm test -- --run" })).toMatchObject({
+      decision: "allow",
+    });
+    e.setIgnorePersistedAllows(true, { dropSessionAllows: true });
+    expect(e.preflight(bashTool, { command: "npm test -- --run" })).toBe("ask");
+  });
+});
+
+describe("live config-rule CRUD + rule-added listener", () => {
+  it("hot-adds and removes a config rule and fires the listener on add", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const added: Array<[string, string]> = [];
+    e.setOnRuleAdded((rule, effect) => added.push([rule, effect]));
+
+    expect(e.preflight(bashTool, { command: "npm run build" })).toBe("ask");
+    e.addConfigRule("bash(npm run *)", "allow");
+    expect(added).toEqual([["bash(npm run *)", "allow"]]);
+    expect(e.preflight(bashTool, { command: "npm run build" })).toMatchObject({
+      decision: "allow",
+    });
+
+    e.removeConfigRule("bash(npm run *)", "allow");
+    expect(e.preflight(bashTool, { command: "npm run build" })).toBe("ask");
+  });
+
+  it("re-preflights pending waiters when an always grant adds a session rule (batch unlock)", () => {
+    // Mirrors Session.unlockPendingPermissions: a map of in-flight prompts is
+    // re-evaluated whenever a rule is added; those that now allow are resolved.
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const waiters = new Map<
+      string,
+      { input: { command: string }; resolved?: string }
+    >([
+      ["a", { input: { command: "npm run build" } }],
+      ["b", { input: { command: "git push origin main" } }],
+    ]);
+    e.setOnRuleAdded(() => {
+      for (const [id, w] of waiters) {
+        if (w.resolved) continue;
+        const check = e.preflight(bashTool, w.input);
+        if (check !== "ask" && check.decision === "allow") w.resolved = "allow";
+      }
+    });
+
+    // Both are "ask" to begin with.
+    expect(e.preflight(bashTool, waiters.get("a")!.input)).toBe("ask");
+    expect(e.preflight(bashTool, waiters.get("b")!.input)).toBe("ask");
+
+    // User picks "always allow" on a third prompt for `npm run *`.
+    e.addSessionRule("bash(npm run *)", "allow");
+
+    // Waiter "a" is now covered → auto-resolved; "b" stays pending.
+    expect(waiters.get("a")!.resolved).toBe("allow");
+    expect(waiters.get("b")!.resolved).toBeUndefined();
+  });
+});
+
+describe("persisted-rule file CRUD", () => {
+  it("lists / adds / removes rules in a scope's config file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "perm-crud-"));
+    try {
+      const { persistRule, listPersistedRules, removePersistedRule } = await import(
+        "../src/permissions.js"
+      );
+      expect(await listPersistedRules(dir, "repo")).toEqual({ allow: [], ask: [], deny: [] });
+      await persistRule(dir, "bash(npm test *)", "allow", "repo");
+      await persistRule(dir, "bash(rm *)", "deny", "repo");
+      const after = await listPersistedRules(dir, "repo");
+      expect(after.allow).toContain("bash(npm test *)");
+      expect(after.deny).toContain("bash(rm *)");
+      expect(await removePersistedRule(dir, "bash(npm test *)", "allow", "repo")).toBe(true);
+      expect(await removePersistedRule(dir, "bash(npm test *)", "allow", "repo")).toBe(false);
+      expect((await listPersistedRules(dir, "repo")).allow).not.toContain("bash(npm test *)");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

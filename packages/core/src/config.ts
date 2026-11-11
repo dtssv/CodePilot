@@ -346,6 +346,11 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // `dont-ask` mode: attach a short standard feedback note to a denied soft
     // ask (default true) instead of a bare "permission denied".
     dontAskFeedback: z.boolean().optional(),
+    // Models to treat as high-risk: when the active model id matches one of
+    // these (substring, case-insensitive), persisted allow rules are ignored
+    // during permission matching (deny/ask + floors still apply).
+    highRiskModels: z.array(z.string().min(1)).optional(),
+    highRiskDropSessionAllows: z.boolean().optional(),
     // Inline (Tab) code completion for the editor plugins. Off by default; runs
     // on the user's provider/apiKey but gated to a lightweight model (see
     // docs/design/G-inline-completion.md). Ignored by non-editor clients.

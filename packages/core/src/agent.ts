@@ -1321,6 +1321,10 @@ export async function runAgent(
       runCall,
     );
     const planOnlyTurn = toolCalls.every((tc) => tc.name === "plan_update");
+    // "Deny & stop": a permission handler aborted the turn. The denied results
+    // are still recorded below so the transcript shows what was refused, then
+    // the loop ends cleanly (no further model turns, no fake user message).
+    const abortedByPermission = toolResults.some((r) => r.aborted);
     for (let i = 0; i < toolCalls.length; i++) {
       const tc = toolCalls[i]!;
       const r = toolResults[i]!;
@@ -1462,6 +1466,9 @@ export async function runAgent(
     } else if (toolCalls.length > 0) {
       turnsSinceNoProgress++;
     }
+    // "Deny & stop" ends the prompt cleanly after this turn's results are
+    // recorded — like a user Stop, but the session is not cleared.
+    if (abortedByPermission) break;
   }
 
   // Turn-cap stops: main-session runs surface a recoverable error so the UI

@@ -55,7 +55,7 @@ export interface PermissionCheckResult {
   reason: string;
 }
 
-type RuleEffect = "allow" | "ask" | "deny";
+export type RuleEffect = "allow" | "ask" | "deny";
 
 export class PermissionEngine {
   private mode: PermissionMode;
@@ -74,6 +74,13 @@ export class PermissionEngine {
   private classifierTotalDenials = 0;
   private readonly autoMaxConsecutiveDenials: number;
   private readonly autoMaxTotalDenials: number;
+ /** When true, persisted (config / project) allow rules are IGNORED during
+  * matching — only deny / ask rules and the hard floors apply. Set for a
+  * high-risk model so a broad allow a human saved for everyday work cannot
+  * silently vouch for a destructive call the risky model issues. Session
+  * "always" allows are additionally dropped when `alsoDropSessionAllows`. */
+  private ignorePersistedAllows = false;
+  private alsoDropSessionAllows = false;
 
   constructor(
     config: Pick<
@@ -150,13 +157,43 @@ export class PermissionEngine {
     return this.mode;
   }
 
- /** Snapshot of all active rules (config + session), for UI display. */
+ /** Snapshot of all active rules (config + session), for UI display. Always
+  * shows the full set regardless of high-risk stripping — the display tells the
+  * user what is configured; {@link matchRules} is what preflight evaluates. */
   rules(): Required<PermissionRules> {
     return {
       allow: [...this.sessionRules.allow, ...this.configRules.allow],
       ask: [...this.sessionRules.ask, ...this.configRules.ask],
       deny: [...this.sessionRules.deny, ...this.configRules.deny],
     };
+  }
+
+  /** Rule set used for preflight MATCHING. deny/ask are always the full set.
+   * allow is stripped of persisted (config/project) rules — and optionally of
+   * session "always" rules too — when a high-risk model is active, so a saved
+   * blanket allow cannot vouch for the risky model's calls. */
+  private matchRules(): Required<PermissionRules> {
+    if (!this.ignorePersistedAllows) return this.rules();
+    const allow = this.alsoDropSessionAllows ? [] : [...this.sessionRules.allow];
+    return {
+      allow,
+      ask: [...this.sessionRules.ask, ...this.configRules.ask],
+      deny: [...this.sessionRules.deny, ...this.configRules.deny],
+    };
+  }
+
+  /** Mark the active model as high-risk: persisted allow rules are ignored
+   * during matching (deny/ask + floors still apply). `dropSessionAllows` also
+   * ignores this-session "always allow" grants. Idempotent; call when the model
+   * changes. */
+  setIgnorePersistedAllows(ignore: boolean, opts?: { dropSessionAllows?: boolean }): void {
+    this.ignorePersistedAllows = ignore;
+    this.alsoDropSessionAllows = ignore && !!opts?.dropSessionAllows;
+  }
+
+  /** Whether persisted allow rules are currently ignored (high-risk model). */
+  isIgnoringPersistedAllows(): boolean {
+    return this.ignorePersistedAllows;
   }
 
  /** Record an "always"-style decision as a session rule. When the user
@@ -169,6 +206,45 @@ export class PermissionEngine {
  * preflight and are absolute. */
   addSessionRule(rule: string, effect: RuleEffect = "allow"): void {
     this.sessionRules[effect].push(rule);
+    if (this.onRuleAdded) {
+      try {
+        this.onRuleAdded(rule, effect);
+      } catch {
+        /* a listener must never break rule bookkeeping */
+      }
+    }
+  }
+
+ /** Listener fired whenever a session rule is added (via an "always" grant or a
+  * CRUD hot-load). Lets the owner re-evaluate in-flight permission prompts that
+  * the new rule now covers — the pending-batch unlock. At most one listener. */
+  private onRuleAdded?: (rule: string, effect: RuleEffect) => void;
+  setOnRuleAdded(fn: ((rule: string, effect: RuleEffect) => void) | undefined): void {
+    this.onRuleAdded = fn;
+  }
+
+ /** Add a config-scoped rule to the LIVE engine (hot-apply a CRUD edit). Fires
+  * the rule-added listener so pending prompts a new allow covers unlock. The
+  * caller persists it to disk separately; this only updates the in-memory set. */
+  addConfigRule(rule: string, effect: RuleEffect): void {
+    if (!this.configRules[effect].includes(rule)) {
+      this.configRules[effect].push(rule);
+    }
+    if (this.onRuleAdded) {
+      try {
+        this.onRuleAdded(rule, effect);
+      } catch {
+        /* a listener must never break rule bookkeeping */
+      }
+    }
+  }
+
+ /** Remove a config-scoped rule from the LIVE engine (hot-apply a CRUD delete).
+  * No-op when absent. */
+  removeConfigRule(rule: string, effect: RuleEffect): void {
+    const arr = this.configRules[effect];
+    const i = arr.indexOf(rule);
+    if (i >= 0) arr.splice(i, 1);
   }
 
  /** Remove the last `count` session rules of the given effect (LIFO).
@@ -303,9 +379,12 @@ export class PermissionEngine {
 
  // 3. allow rules. A scoped bash rule vouches for the command it names,
  // so every chained command must be covered by a rule or be read-only.
+ // `matchRules` strips persisted allows under a high-risk model so a saved
+ // blanket grant cannot auto-approve the risky model's calls.
+    const matchAllow = this.matchRules().allow;
     const allow = bash
-      ? bashAllowRule(this.rules().allow, primary!, bash)
-      : firstMatch(this.rules().allow, tool.name, primary, input);
+      ? bashAllowRule(matchAllow, primary!, bash)
+      : firstMatch(matchAllow, tool.name, primary, input);
     if (allow) {
  // Dangerous commands (rm -rf, force-push, drop-table, curl|sh, …) still
  // prompt under a blanket or prefix grant. Only a single command matched
@@ -928,6 +1007,64 @@ export async function persistRule(
   await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, JSON.stringify(json, null, 2) + "\n", "utf-8");
   return path;
+}
+
+/** Config file path for a persisted-rule scope. */
+function configPathFor(cwd: string, scope: "repo" | "user"): string {
+  return scope === "user"
+    ? join(homedir(), ".codepilot", "config.json")
+    : join(cwd, ".codepilot", "config.json");
+}
+
+/**
+ * Remove a persisted rule from `permissions.<effect>` in the scope's config
+ * file. Returns true when a rule was removed, false when it was not present (or
+ * the file is missing). Mirrors {@link persistRule}; throws on malformed JSON.
+ */
+export async function removePersistedRule(
+  cwd: string,
+  rule: string,
+  effect: RuleEffect = "allow",
+  scope: "repo" | "user" = "repo",
+): Promise<boolean> {
+  const path = configPathFor(cwd, scope);
+  let json: Record<string, unknown> = {};
+  try {
+    json = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(`cannot edit rules: ${path} is not valid JSON`);
+  }
+  const perms = (json.permissions ?? {}) as Record<string, unknown>;
+  const list = Array.isArray(perms[effect]) ? (perms[effect] as string[]) : [];
+  const next = list.filter((r) => r !== rule);
+  if (next.length === list.length) return false;
+  perms[effect] = next;
+  json.permissions = perms;
+  await writeFile(path, JSON.stringify(json, null, 2) + "\n", "utf-8");
+  return true;
+}
+
+/** The persisted permission rules in a scope's config file (empty when the file
+ * is missing). Throws on malformed JSON. */
+export async function listPersistedRules(
+  cwd: string,
+  scope: "repo" | "user" = "repo",
+): Promise<Required<PermissionRules>> {
+  const path = configPathFor(cwd, scope);
+  let json: Record<string, unknown> = {};
+  try {
+    json = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { allow: [], ask: [], deny: [] };
+    }
+    throw new Error(`cannot read rules: ${path} is not valid JSON`);
+  }
+  const perms = (json.permissions ?? {}) as Record<string, unknown>;
+  const pick = (k: RuleEffect): string[] =>
+    Array.isArray(perms[k]) ? (perms[k] as string[]).filter((r) => typeof r === "string") : [];
+  return { allow: pick("allow"), ask: pick("ask"), deny: pick("deny") };
 }
 
 function describeReason(

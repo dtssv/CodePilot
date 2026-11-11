@@ -10,7 +10,8 @@
  * Keys: 1 / y → allow once · 2 / a → always allow (this session) ·
  * 3 / p → always allow + remember in project config · 4 / n / Esc → deny ·
  * 5 / f → deny with feedback (type a correction the model sees instead of a
- * bare "denied") · ↑↓ + ↵ for mouse-free selection.
+ * bare "denied") · 6 / s → deny & stop (refuse this call and end the turn) ·
+ * ↑↓ + ↵ for mouse-free selection.
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";
@@ -25,13 +26,14 @@ export interface PermissionPromptProps {
   onDecide: (resolution: PermissionResolution) => void;
 }
 
-type OptionAction = "allow" | "always" | "always-project" | "deny" | "deny-feedback";
+type OptionAction = "allow" | "always" | "always-project" | "deny" | "deny-feedback" | "abort";
 const OPTIONS: { label: string; keyHint: string; action: OptionAction; hint: string }[] = [
   { label: "Allow once", keyHint: "1/y", action: "allow", hint: "Approve this invocation only." },
   { label: "Always allow", keyHint: "2/a", action: "always", hint: "Approve matching calls (e.g. same command prefix) for this session." },
   { label: "Always (project)", keyHint: "3/p", action: "always-project", hint: "Also save the rule to this project's config for future sessions." },
   { label: "Deny", keyHint: "4/n", action: "deny", hint: "Reject this invocation." },
   { label: "Deny w/ feedback", keyHint: "5/f", action: "deny-feedback", hint: "Reject and tell the model what to do instead." },
+  { label: "Deny & stop", keyHint: "6/s", action: "abort", hint: "Reject this call and end the whole turn." },
 ];
 
 export function PermissionPrompt(props: PermissionPromptProps): React.ReactElement {
@@ -47,6 +49,10 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
     (action: OptionAction) => {
       if (action === "deny-feedback") {
         setFeedbackMode(true);
+        return;
+      }
+      if (action === "abort") {
+        onDecide({ decision: "abort" });
         return;
       }
       onDecide(action);
@@ -79,6 +85,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
       else if (ch === "3" || ch === "p" || ch === "P") onDecide("always-project");
       else if (ch === "4" || ch === "n" || ch === "N") onDecide("deny");
       else if (ch === "5" || ch === "f" || ch === "F") act("deny-feedback");
+      else if (ch === "6" || ch === "s" || ch === "S") onDecide({ decision: "abort" });
     },
     { isActive: true },
   );
@@ -135,7 +142,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
           </Box>
           <Box marginTop={1}>
             <Text color={color.faint}>
-              ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} 1/y once {glyph.dot} 2/a always {glyph.dot} 3/p project {glyph.dot} 4/n deny {glyph.dot} 5/f deny+feedback
+              ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} 1/y once {glyph.dot} 2/a always {glyph.dot} 3/p project {glyph.dot} 4/n deny {glyph.dot} 5/f deny+feedback {glyph.dot} 6/s deny+stop
             </Text>
           </Box>
         </>

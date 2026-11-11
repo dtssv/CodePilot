@@ -1224,16 +1224,45 @@ export class CodepilotClient {
 
   async respondPermission(
     requestId: string,
-    decision: PermissionDecision,
+    decision: PermissionDecision | "abort",
     feedback?: string,
   ): Promise<void> {
     // Decline-with-feedback: a deny may carry a correction the model sees as
-    // the tool result. Only sent on deny with non-empty text.
+    // the tool result. Only sent on deny with non-empty text. `abort` = "deny &
+    // stop": refuse this call and end the whole prompt/turn.
     const params =
       decision === "deny" && feedback && feedback.trim().length > 0
         ? { requestId, decision, feedback: feedback.trim() }
         : { requestId, decision };
     await this.call("permission/respond", params);
+  }
+
+  /** Persisted permission rules for a scope (repo default). */
+  async listPermissions(
+    sessionId: string,
+    scope: "repo" | "user" = "repo",
+  ): Promise<{ scope: "repo" | "user"; allow: string[]; ask: string[]; deny: string[] }> {
+    return this.call("permissions/list", { sessionId, scope });
+  }
+
+  /** Persist a permission rule and hot-apply it to the live session. */
+  async addPermission(
+    sessionId: string,
+    rule: string,
+    effect: "allow" | "ask" | "deny",
+    scope: "repo" | "user" = "repo",
+  ): Promise<{ path: string }> {
+    return this.call("permissions/add", { sessionId, rule, effect, scope });
+  }
+
+  /** Delete a persisted permission rule and hot-apply the removal. */
+  async removePermission(
+    sessionId: string,
+    rule: string,
+    effect: "allow" | "ask" | "deny",
+    scope: "repo" | "user" = "repo",
+  ): Promise<{ removed: boolean }> {
+    return this.call("permissions/remove", { sessionId, rule, effect, scope });
   }
 
   async respondQuestion(

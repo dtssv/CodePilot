@@ -198,9 +198,10 @@ export class RemoteSession {
     peer.onRequest("permission/request", async (p: unknown) => {
       const req = p as { requestId: string; toolName: string; input: unknown; reason: string };
       const resolution = await opts.onPermissionRequest(req);
-      // Flatten a decline-with-feedback object onto the wire shape the server's
-      // `permission/respond` understands ({ decision, feedback }).
+      // Flatten a decline-with-feedback / abort object onto the wire shape the
+      // server's `permission/respond` understands ({ decision, feedback }).
       if (typeof resolution === "string") return { decision: resolution };
+      if (resolution.decision === "abort") return { decision: "abort" };
       return { decision: resolution.decision, feedback: resolution.feedback };
     });
     peer.onRequest("question/request", async (p: unknown) => {

@@ -147,9 +147,17 @@ class MockSessionImpl implements SessionShape {
       this.emit({ type: "tool_call", id: toolCallId, name: "bash", input: req.input });
       this.emit({ type: "status", status: "waiting_permission" });
       const resolution = this.yolo ? "allow" : await this.bridge.waitDecision(req);
-      // Normalize a decline-with-feedback object to its decision + message.
-      const decision: PermissionDecision = typeof resolution === "string" ? resolution : resolution.decision;
-      const feedback = typeof resolution === "string" ? undefined : resolution.feedback;
+      // Normalize a decline-with-feedback / abort object to its decision + message.
+      const decision: PermissionDecision =
+        typeof resolution === "string"
+          ? resolution
+          : resolution.decision === "abort"
+            ? "deny"
+            : resolution.decision;
+      const feedback =
+        typeof resolution === "string" || resolution.decision === "abort"
+          ? undefined
+          : resolution.feedback;
       this.emit({ type: "status", status: "running" });
       if (decision === "deny") {
         this.emit({

@@ -1108,6 +1108,14 @@ export function PermissionCard({
             <button type="button" onClick={() => setFeedbackMode(true)} className="cp-btn-ghost">
               {t("Deny with feedback")}
             </button>
+            <button
+              type="button"
+              onClick={() => onDecide({ decision: "abort" })}
+              title={t("Refuse this call and stop the whole turn")}
+              className="cp-btn-ghost"
+            >
+              {t("Deny & stop")}
+            </button>
             <button type="button" onClick={() => onDecide("deny")} className="cp-btn-danger">
               {t("Deny")}
             </button>

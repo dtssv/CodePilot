@@ -188,3 +188,28 @@ describe("dont-ask permission mode", () => {
     expect(toolResult?.content).toBe("permission denied for tool bash");
   });
 });
+
+describe("deny & stop (abort) resolution", () => {
+  it("records the denial and ends the prompt without a further model turn", async () => {
+    const provider = new BashThenDone("npm test");
+    const onPermissionRequest = vi.fn(async () => ({ decision: "abort" as const }));
+    const r = await runAgent(
+      { history: [], userText: "go" },
+      // Plain "ask" mode: the handler aborts the whole turn.
+      makeDeps(cwd, provider, "auto" as never, {
+        config: { model: "m", permissionMode: "ask" } as never,
+        permissions: new PermissionEngine({ permissionMode: "ask" }),
+        onPermissionRequest,
+      }),
+    );
+    expect(onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(ran).toEqual([]); // the call never ran
+    // Only ONE provider stream call: the turn ended after the abort, so the
+    // model was never asked to continue.
+    expect(provider.calls.length).toBe(1);
+    const toolResult = r.events.find(
+      (e): e is Extract<typeof e, { type: "tool_result" }> => e.type === "tool_result",
+    );
+    expect(toolResult?.content).toMatch(/stopped the turn/i);
+  });
+});

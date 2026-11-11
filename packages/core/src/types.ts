@@ -453,16 +453,23 @@ export interface PermissionRequest {
 export type PermissionDecision = "allow" | "deny" | "always" | "always-project";
 
 /**
- * What a host's permission handler may return. Either a plain
- * {@link PermissionDecision}, or a deny that carries a `feedback` message the
- * model sees as the tool result — "decline-with-feedback". This turns a
- * dead-end denial into steering ("don't edit that file, edit this one")
- * instead of a canned "permission denied". Backward-compatible: handlers that
- * return a bare string still work.
+ * What a host's permission handler may return:
+ *
+ * - a plain {@link PermissionDecision} (allow / deny / always / always-project);
+ * - a deny that carries a `feedback` message the model sees as the tool
+ *   result — "decline-with-feedback" — turning a dead-end denial into steering
+ *   ("don't edit that file, edit this one") instead of a canned "permission
+ *   denied";
+ * - `{ decision: "abort" }` — cancel the whole current prompt/turn (the user hit
+ *   "deny & stop"), not just this one call. The turn ends cleanly with no fake
+ *   user message in the transcript; the session is NOT cleared.
+ *
+ * Backward-compatible: handlers that return a bare string still work.
  */
 export type PermissionResolution =
   | PermissionDecision
-  | { decision: "deny"; feedback: string };
+  | { decision: "deny"; feedback: string }
+  | { decision: "abort" };
 
 /** A structured question posed to the user via the host UI. */
 export interface QuestionSpec {
@@ -670,6 +677,17 @@ export interface CodepilotConfig {
   * allow rule to enable this") instead of a bare "permission denied". Default
   * true. */
   dontAskFeedback?: boolean;
+ /** Models to treat as HIGH-RISK: when the active model id matches one of these
+  * (substring, case-insensitive), persisted (config/project) allow rules are
+  * IGNORED during permission matching — deny / ask rules and the hard safety
+  * floors still apply — so a broad allow a human saved for everyday work cannot
+  * silently vouch for a destructive call the risky model issues. Session
+  * "always" grants are kept unless `highRiskDropSessionAllows` is set. */
+  highRiskModels?: string[];
+ /** When true, a high-risk model (see {@link highRiskModels}) additionally
+  * ignores this-session "always allow" grants, not only persisted ones.
+  * Default false. */
+  highRiskDropSessionAllows?: boolean;
  /** Inline (Tab) code completion for the editor plugins (VSCode / IntelliJ).
   * Off by default. Runs on the user's existing provider + apiKey but is gated
   * to a lightweight model: completion uses `completion.model` if set, else the

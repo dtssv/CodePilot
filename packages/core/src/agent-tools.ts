@@ -81,6 +81,10 @@ export interface ToolExecResult {
   artifactRef?: string;
   blocks?: import("./types.js").ContentBlock[];
   images?: { mediaType: string; base64: string }[];
+ /** Set when the user chose "deny & stop": the whole prompt/turn should end
+  * cleanly after recording this (denied) result, with no further model turns.
+  * The agent loop treats it like a user Stop, but the session is not cleared. */
+  aborted?: boolean;
 }
 
 /** Execute a single tool call: permission check → PreToolUse hooks → Zod
@@ -189,6 +193,8 @@ export async function runOneTool(
  // auto classifier) rather than a human's correction, so it is surfaced to the
  // model verbatim instead of wrapped in "the user declined …".
   let denyFeedbackIsSystem = false;
+ // Set when the user chose "deny & stop": deny this call AND end the prompt.
+  let abortTurn = false;
  // Set by a non-interactive mode (dont-ask / auto classifier) that resolves a
  // would-be prompt without the UI, so the interactive block below is skipped.
   let resolvedWithoutPrompt = false;
@@ -290,6 +296,10 @@ export async function runOneTool(
         );
         if (typeof resolution === "string") {
           decision = resolution;
+        } else if (resolution.decision === "abort") {
+          // "Deny & stop": refuse this call and end the whole prompt/turn.
+          decision = "deny";
+          abortTurn = true;
         } else {
           // Decline-with-feedback: a deny carrying a correction message.
           decision = "deny";
@@ -360,6 +370,14 @@ export async function runOneTool(
 
   if (decision === "deny") {
     endToolSpan(new Error(`permission denied for tool ${tc.name}`));
+    // "Deny & stop": record the denial AND signal the loop to end the prompt.
+    if (abortTurn) {
+      return {
+        content: `The user denied \`${tc.name}\` and stopped the turn.`,
+        isError: true,
+        aborted: true,
+      };
+    }
     // Decline-with-feedback: hand the correction to the model so it can adapt
     // (e.g. edit a different file) instead of just seeing "denied". A
     // system-authored message (dont-ask / auto classifier) is already a complete

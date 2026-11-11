@@ -650,8 +650,12 @@ export function useCodepilot(): Codepilot {
       dispatch({ type: "permission-resolved" });
       try {
         // Split a decline-with-feedback object into decision + message.
+        // `{ decision: "abort" }` carries no feedback.
         const decision = typeof resolution === "string" ? resolution : resolution.decision;
-        const feedback = typeof resolution === "string" ? undefined : resolution.feedback;
+        const feedback =
+          typeof resolution === "string" || resolution.decision === "abort"
+            ? undefined
+            : resolution.feedback;
         await client.respondPermission(req.requestId, decision, feedback);
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });

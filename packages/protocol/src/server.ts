@@ -411,7 +411,8 @@ export interface PromptCancelParams {
 
 export interface PermissionRespondParams {
   requestId: string;
-  decision: PermissionDecision;
+ /** `abort` = "deny & stop": refuse this call and end the whole prompt/turn. */
+  decision: PermissionDecision | "abort";
  /** Decline-with-feedback: when `decision` is `"deny"`, an optional correction
   * message that is surfaced to the model as the tool result instead of a
   * canned "permission denied". Ignored for allow/always. */
@@ -436,6 +437,37 @@ export interface SessionForkParams {
 export interface SessionSetModeParams {
   sessionId: string;
   mode: AgentMode;
+}
+
+/** Scope of a persisted permission rule: project (`repo`) or global (`user`). */
+export type PermissionRuleScope = "repo" | "user";
+export type PermissionRuleEffect = "allow" | "ask" | "deny";
+
+/** `permissions/list`: read persisted permission rules for a scope. */
+export interface PermissionsListParams {
+  sessionId: string;
+  scope?: PermissionRuleScope;
+}
+export interface PermissionsListResult {
+  scope: PermissionRuleScope;
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+/** `permissions/add` / `permissions/remove`: CRUD a persisted rule. The change
+ * is written to the scope's config file AND hot-applied to the live session. */
+export interface PermissionsEditParams {
+  sessionId: string;
+  rule: string;
+  effect: PermissionRuleEffect;
+  scope?: PermissionRuleScope;
+}
+export interface PermissionsAddResult {
+  path: string;
+}
+export interface PermissionsRemoveResult {
+  removed: boolean;
 }
 
 /** Wire params for the reverse request we send to the client. */
@@ -520,6 +552,18 @@ export function registerServer(
   peer.onRequest<SessionSetModeParams, Record<string, never>>(
     "session/setMode",
     (p) => handleSessionSetMode(ctx, p),
+  );
+  peer.onRequest<PermissionsListParams, PermissionsListResult>(
+    "permissions/list",
+    (p) => handlePermissionsList(ctx, p),
+  );
+  peer.onRequest<PermissionsEditParams, PermissionsAddResult>(
+    "permissions/add",
+    (p) => handlePermissionsAdd(ctx, p),
+  );
+  peer.onRequest<PermissionsEditParams, PermissionsRemoveResult>(
+    "permissions/remove",
+    (p) => handlePermissionsRemove(ctx, p),
   );
   peer.onRequest<SessionSetModelParams, { model: string; providerId?: string }>(
     "session/setModel",
@@ -2258,6 +2302,56 @@ function isSupportedMode(value: unknown): value is AgentMode {
   );
 }
 
+function assertRuleEffect(effect: unknown): PermissionRuleEffect {
+  if (effect === "allow" || effect === "ask" || effect === "deny") return effect;
+  throw new RpcError(ErrorCode.InvalidParams, `invalid effect: ${String(effect)}`);
+}
+
+/** `permissions/list`: persisted rules for a scope (repo default). */
+async function handlePermissionsList(
+  ctx: ServerContext,
+  params: PermissionsListParams,
+): Promise<PermissionsListResult> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  const session = requireSession(ctx, params.sessionId);
+  const scope: PermissionRuleScope = params.scope === "user" ? "user" : "repo";
+  const rules = await session.listSavedPermissionRules(scope);
+  return { scope, allow: rules.allow, ask: rules.ask, deny: rules.deny };
+}
+
+/** `permissions/add`: persist a rule and hot-apply it to the live session. */
+async function handlePermissionsAdd(
+  ctx: ServerContext,
+  params: PermissionsEditParams,
+): Promise<PermissionsAddResult> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  const session = requireSession(ctx, params.sessionId);
+  const effect = assertRuleEffect(params.effect);
+  const rule = (params.rule ?? "").trim();
+  if (!rule) throw new RpcError(ErrorCode.InvalidParams, "rule required");
+  const scope: PermissionRuleScope = params.scope === "user" ? "user" : "repo";
+  const path = await session.addSavedPermissionRule(rule, effect, scope);
+  return { path };
+}
+
+/** `permissions/remove`: delete a persisted rule and hot-apply the removal. */
+async function handlePermissionsRemove(
+  ctx: ServerContext,
+  params: PermissionsEditParams,
+): Promise<PermissionsRemoveResult> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  const session = requireSession(ctx, params.sessionId);
+  const effect = assertRuleEffect(params.effect);
+  const rule = (params.rule ?? "").trim();
+  if (!rule) throw new RpcError(ErrorCode.InvalidParams, "rule required");
+  const scope: PermissionRuleScope = params.scope === "user" ? "user" : "repo";
+  const removed = await session.removeSavedPermissionRule(rule, effect, scope);
+  return { removed };
+}
+
 async function handleSessionResume(
   ctx: ServerContext,
   params: SessionResumeParams,
@@ -3542,7 +3636,11 @@ function liveFor(ctx: ServerContext, session: Session): LiveSession {
 /** Build a core `PermissionResolution` from a wire decision + optional
  * feedback. Feedback only matters on a deny; allow/always pass through as the
  * bare decision string. */
-function toResolution(decision: PermissionDecision, feedback?: string): PermissionResolution {
+function toResolution(
+  decision: PermissionDecision | "abort",
+  feedback?: string,
+): PermissionResolution {
+  if (decision === "abort") return { decision: "abort" };
   if (decision === "deny" && feedback && feedback.trim().length > 0) {
     return { decision: "deny", feedback };
   }

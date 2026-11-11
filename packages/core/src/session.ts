@@ -49,7 +49,7 @@ import type {
   SessionSummary,
 } from "./types.js";
 import { PERMISSION_PRESETS } from "./types.js";
-import { ToolRegistry, zodToJsonSchema } from "./tools/types.js";
+import { ToolRegistry, zodToJsonSchema, type ToolDef } from "./tools/types.js";
 import { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 import { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
@@ -300,6 +300,13 @@ export class Session {
   private permissions: PermissionEngine;
  /** Lazily-built small-model classifier for `auto` permission mode. */
   private permissionClassifier?: PermissionClassifier;
+ /** In-flight permission prompts awaiting a host decision, keyed by requestId.
+  * When one is resolved with always/always-project the new rule re-preflights
+  * the others; any now-allowed waiter auto-resolves (pending-batch unlock). */
+  private pendingPermissionWaiters = new Map<
+    string,
+    { tool: ToolDef; input: unknown; resolve: (r: PermissionResolution) => void }
+  >();
   private sandbox: ResolvedSandbox;
  /** True when sandbox mode is active but no OS backend is available and
  * fallback is "deny". Bash commands will be refused; surfaced as a
@@ -499,6 +506,11 @@ export class Session {
  // writablePaths. Bash auto-allow still requires OS enforcement inside
  // PermissionEngine (osEnforced flag).
     this.permissions.setSandbox(this.sandbox, this.cwd);
+    // Pending-batch unlock: when an always grant (or CRUD hot-load) adds a
+    // session rule, re-preflight the other in-flight permission prompts.
+    this.permissions.setOnRuleAdded(() => this.unlockPendingPermissions());
+    // High-risk model gate: a risky active model ignores persisted allow rules.
+    this.applyHighRiskModelGate();
     this.hooks = new HookEngine(this.config.hooks, this.cwd);
  // Opt-in: run command hooks under the same OS sandbox as `bash`.
     if (this.config.hookSandbox) {
@@ -980,7 +992,11 @@ export class Session {
             }
           }
         },
-        onPermissionRequest: this.onPermissionRequest,
+        // Wrapped so an always/always-project grant unlocks other in-flight
+        // permission prompts the new rule now covers (pending-batch unlock).
+        onPermissionRequest: this.onPermissionRequest
+          ? (req) => this.onPermissionRequestWithBatch(req)
+          : undefined,
         // Background classifier for `auto` permission mode. Built lazily and
         // reused; only consulted by agent-tools when the mode is `auto`.
         permissionClassifier: this.getPermissionClassifier(),
@@ -1330,6 +1346,7 @@ export class Session {
     this.model = applied.model;
     this.config = applied.config;
     if (applied.providerId) this.activeProviderId = applied.providerId;
+    this.applyHighRiskModelGate();
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
   }
@@ -1382,6 +1399,7 @@ export class Session {
     this.config = config;
     this.model = model;
     this.activeProviderId = providerId;
+    this.applyHighRiskModelGate();
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
   }
@@ -2355,6 +2373,48 @@ export class Session {
     return this.permissions.rules();
   }
 
+ /** True when the active model is high-risk and persisted allow rules are being
+  * ignored during matching (deny / ask + floors still apply). Lets a UI surface
+  * a "saved allow rules bypassed" badge so the stricter posture is visible. */
+  isIgnoringPersistedAllows(): boolean {
+    return this.permissions.isIgnoringPersistedAllows();
+  }
+
+ /** Persisted permission rules by scope (repo / user), for the saved-rule
+  * management surface. Reads the config files directly — the on-disk source of
+  * truth for durable rules — not the in-memory merged set. */
+  async listSavedPermissionRules(scope: "repo" | "user" = "repo") {
+    const { listPersistedRules } = await import("./permissions.js");
+    return listPersistedRules(this.cwd, scope);
+  }
+
+ /** Add a persisted permission rule in a scope and hot-apply it to the live
+  * engine (so it takes effect this session and unlocks any pending prompt it
+  * covers). Returns the config path written. */
+  async addSavedPermissionRule(
+    rule: string,
+    effect: "allow" | "ask" | "deny",
+    scope: "repo" | "user" = "repo",
+  ): Promise<string> {
+    const { persistRule } = await import("./permissions.js");
+    const path = await persistRule(this.cwd, rule, effect, scope);
+    this.permissions.addConfigRule(rule, effect);
+    return path;
+  }
+
+ /** Remove a persisted permission rule from a scope and hot-apply the removal
+  * to the live engine. Returns true when a rule was removed. */
+  async removeSavedPermissionRule(
+    rule: string,
+    effect: "allow" | "ask" | "deny",
+    scope: "repo" | "user" = "repo",
+  ): Promise<boolean> {
+    const { removePersistedRule } = await import("./permissions.js");
+    const removed = await removePersistedRule(this.cwd, rule, effect, scope);
+    if (removed) this.permissions.removeConfigRule(rule, effect);
+    return removed;
+  }
+
  /**
  * Aggregated token usage for this session plus an estimated USD cost
  * (undefined when the model is not in the price table).
@@ -2748,6 +2808,72 @@ export class Session {
     }
 
     this.wireHookResolvers(task.runner);
+  }
+
+  /**
+   * Host permission handler wrapper that implements the pending-batch unlock:
+   * tracks each in-flight prompt so that when one is answered always /
+   * always-project (adding a session rule), the others are re-preflighted and
+   * any now-allowed waiter auto-resolves. Falls back to the raw host handler
+   * when none is configured.
+   */
+  private onPermissionRequestWithBatch(
+    req: PermissionRequest,
+  ): Promise<PermissionResolution> {
+    const host = this.onPermissionRequest;
+    if (!host) return Promise.resolve("deny" as PermissionResolution);
+    const tool = this.toolRegistry.get(req.toolName);
+    return new Promise<PermissionResolution>((resolve) => {
+      let settled = false;
+      const done = (r: PermissionResolution): void => {
+        if (settled) return;
+        settled = true;
+        this.pendingPermissionWaiters.delete(req.requestId);
+        resolve(r);
+      };
+      // Only track waiters we can re-preflight (need the ToolDef + input).
+      if (tool) {
+        this.pendingPermissionWaiters.set(req.requestId, {
+          tool,
+          input: req.input,
+          resolve: done,
+        });
+      }
+      host(req).then(done, () => done("deny" as PermissionResolution));
+    });
+  }
+
+  /**
+   * Re-preflight every still-pending permission waiter against the current
+   * engine rules; auto-resolve those that now evaluate to allow. Called after a
+   * session rule is added (an always grant or a CRUD hot-load). The waiter that
+   * triggered the grant has already been removed, so this only unlocks the rest.
+   */
+  private unlockPendingPermissions(): void {
+    if (this.pendingPermissionWaiters.size === 0) return;
+    for (const [id, w] of Array.from(this.pendingPermissionWaiters)) {
+      const check = this.permissions.preflight(w.tool, w.input);
+      if (check !== "ask" && check.decision === "allow") {
+        this.pendingPermissionWaiters.delete(id);
+        w.resolve("allow");
+      }
+    }
+  }
+
+  /**
+   * Re-evaluate the high-risk-model gate against the active model and tell the
+   * permission engine whether to ignore persisted allow rules. Idempotent; call
+   * whenever the model changes so a switch to (or away from) a high-risk model
+   * tightens (or relaxes) matching immediately.
+   */
+  private applyHighRiskModelGate(): void {
+    const list = this.config.highRiskModels ?? [];
+    const model = (this.model ?? "").toLowerCase();
+    const highRisk =
+      !!model && list.some((m) => model.includes(m.toLowerCase()));
+    this.permissions.setIgnorePersistedAllows(highRisk, {
+      dropSessionAllows: this.config.highRiskDropSessionAllows,
+    });
   }
 
   /**
