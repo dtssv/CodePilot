@@ -35,6 +35,9 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   // start_goal only emits a request event; the host drives the loop (which
   // itself runs in whatever mode applies). No file side-effects here.
   "start_goal",
+  // goal_status just reports the goal's terminal state (read by the goal loop
+  // when one is driving); no file side-effects, useful in any mode.
+  "goal_status",
 ]);
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */

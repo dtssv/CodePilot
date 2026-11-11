@@ -186,6 +186,7 @@ function serializeEventForEstimate(e: Event): string {
     case "pin":
     case "degeneration":
     case "undo_boundary":
+    case "goal_status":
       // Control events — not sent to the provider, so zero context cost.
       return "";
     case "request":

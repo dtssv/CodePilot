@@ -82,21 +82,22 @@ export const goalPromptBody = `You are running in a long-horizon goal loop. Each
 4. Verify the step's deliverable (run a test, a build, a lint, or the acceptance check the OBJECTIVE implies). Do not mark a step \`completed\` until verification passes. Do not emit \`completed\` for the whole OBJECTIVE until a verify step has succeeded.
 5. Update the plan: mark the just-finished step \`completed\`, advance the cursor.
 6. Decide whether the OBJECTIVE is fully satisfied:
-   - If YES, end your turn with EXACTLY this line and nothing else after it:
+   - If YES, call the \`goal_status\` tool with \`status: "completed"\` (and a one-line reason). As a fallback you may instead end your turn with EXACTLY this line and nothing else after it:
      <goal_status>completed</goal_status>
-   - If NO, but you are blocked on something that cannot be resolved in this loop (missing credentials, an external service, an ambiguity that only the user can resolve), end your turn with:
+   - If NO, but you are blocked on something that cannot be resolved in this loop (missing credentials, an external service, an ambiguity that only the user can resolve), call \`goal_status\` with \`status: "blocked"\` and a one-line reason — or, as a fallback, end your turn with:
      <goal_status>blocked</goal_status>
      <goal_blocked_reason>one short sentence explaining the blocker</goal_blocked_reason>
-   - Otherwise, do not emit any <goal_status> tag. The loop will keep prompting you.
+   - Otherwise, do not report a status. The loop will keep prompting you.
 
 Additional rules:
+- Prefer the \`goal_status\` tool over the text marker: it is the structured, reliable channel the loop trusts first. The text marker still works as a fallback.
 - Keep plans lean (3-8 steps). If a plan grows past that, collapse completed clusters.
 - Persist durable project facts future sessions would benefit from via \`memory_write\` (silent, project scope — prefer a \`section\`/\`topic\` so progressive memory stays navigable). Do not persist one-off procedures or push to user/global scope on your own.
 - Do not commit, push, or perform other destructive operations unless the user explicitly asked.
 - Prefer \`task\` for parallel exploration; do not serialise independent reads.
 - If a step has been \`in_progress\` for more than two rounds without progress, mark it \`blocked\` and stop.
 
-The loop will continue until you emit one of the status markers or it hits the round cap.`;
+The loop will continue until you report a status (via the \`goal_status\` tool or the text marker) or it hits the round cap.`;
 
 /**
  * Extra goal-loop guidance injected ONLY when this project has a spec folder
@@ -202,16 +203,24 @@ export async function driveGoalRounds(
     const events = session.getEvents();
     const roundEvents = events.slice(beforeCount);
     const lastAssistant = lastAssistantText(events);
-    const found = lastAssistant ? scanForStatus(lastAssistant) : null;
+    // Dual-channel completion. Trust the structured `goal_status` tool event
+    // (format-drift-proof) first; fall back to scanning the assistant text for
+    // the `<goal_status>` markers. The last signal this round wins if both are
+    // present (the tool already carries its own reason).
+    const structured = lastStructuredStatus(roundEvents);
+    const found = structured?.status ?? (lastAssistant ? scanForStatus(lastAssistant) : null);
     if (found === "completed") {
       status = "completed";
-      reason = extractCompletedReason(lastAssistant) ?? "model reported completed";
+      reason =
+        structured?.reason ??
+        extractCompletedReason(lastAssistant) ??
+        "model reported completed";
       await fireCheckpoint(round, "completed", reason);
       break;
     }
     if (found === "blocked") {
       status = "blocked";
-      blockedReason = extractBlockedReason(lastAssistant);
+      blockedReason = structured?.reason ?? extractBlockedReason(lastAssistant);
       reason = blockedReason ?? "model reported blocked";
       await fireCheckpoint(round, "blocked", reason, blockedReason);
       break;
@@ -322,6 +331,20 @@ function completedStepCount(events: Event[]): number {
     }
   }
   return 0;
+}
+
+/** The most recent structured `goal_status` event in this round's events, or
+ * null when none. Preferred over scanning assistant text for the markers. */
+function lastStructuredStatus(
+  roundEvents: Event[]
+): { status: "completed" | "blocked"; reason?: string } | null {
+  for (let i = roundEvents.length - 1; i >= 0; i--) {
+    const e = roundEvents[i]!;
+    if (e.type === "goal_status") {
+      return { status: e.status, reason: e.reason };
+    }
+  }
+  return null;
 }
 
 function lastAssistantText(events: Event[]): string {  for (let i = events.length - 1; i >= 0; i--) {

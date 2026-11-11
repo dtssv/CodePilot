@@ -261,6 +261,56 @@ describe("driveGoalRounds — harness-level stall detection", () => {
     expect(result.status).toBe("round_limit");
     expect(onStall).toEqual([]);
   });
+
+  it("stops on a structured goal_status event (dual channel, no text marker)", async () => {
+    const { driveGoalRounds } = await import("../src/goal.js");
+    // The round carries NO <goal_status> text marker — only the structured
+    // goal_status event the tool emits. The loop must still complete.
+    const rounds: Array<Array<Record<string, unknown>>> = [
+      [
+        { type: "goal_status", status: "completed", reason: "verified green" },
+        assistant("done, summary follows"),
+      ],
+    ];
+    const { session } = fakeStallSession(rounds);
+    const result = await driveGoalRounds(session, {
+      objective: "do the thing",
+      maxRounds: 10,
+    });
+    expect(result.status).toBe("completed");
+    expect(result.reason).toBe("verified green");
+  });
+
+  it("still completes via the text marker when no goal_status event is present", async () => {
+    const { driveGoalRounds } = await import("../src/goal.js");
+    const rounds: Array<Array<Record<string, unknown>>> = [
+      [assistant("<goal_status>completed</goal_status>")],
+    ];
+    const { session } = fakeStallSession(rounds);
+    const result = await driveGoalRounds(session, {
+      objective: "do the thing",
+      maxRounds: 10,
+    });
+    expect(result.status).toBe("completed");
+  });
+
+  it("a structured blocked event carries its reason into the result", async () => {
+    const { driveGoalRounds } = await import("../src/goal.js");
+    const rounds: Array<Array<Record<string, unknown>>> = [
+      [
+        { type: "goal_status", status: "blocked", reason: "needs GH_TOKEN" },
+        assistant("blocked, see reason"),
+      ],
+    ];
+    const { session } = fakeStallSession(rounds);
+    const result = await driveGoalRounds(session, {
+      objective: "do the thing",
+      maxRounds: 10,
+    });
+    expect(result.status).toBe("blocked");
+    const withReason = result as typeof result & { blockedReason?: string };
+    expect(withReason.blockedReason).toBe("needs GH_TOKEN");
+  });
 });
 
 describe("extractBlockedReason via goalPromptBody behaviour", () => {

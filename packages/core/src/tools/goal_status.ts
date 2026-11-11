@@ -1,0 +1,73 @@
+// goal_status: the structured, format-drift-proof channel for reporting the
+// terminal state of a long-horizon goal loop.
+//
+// Why a tool alongside the text markers
+// -------------------------------------
+// The goal loop decides "done" by looking for a `<goal_status>completed</…>` /
+// `<goal_status>blocked</…>` marker in the assistant's text. Text scanning is
+// fragile: a reworded marker, a marker buried mid-paragraph, or stray output can
+// cause a miss (loop keeps spinning) or a false positive (loop stops early).
+//
+// This tool gives the model a second, authoritative channel: a structured call
+// the host trusts AHEAD of the text scan. It emits a `goal_status` event (via a
+// JSON block the agent loop parses, mirroring `start_goal`'s `goal_request`),
+// which the goal loop reads before falling back to the text markers. The text
+// markers stay fully supported — this is additive, not a replacement.
+//
+// Outside a goal loop (ordinary agent/chat turns, or a host that never drives
+// rounds) nothing reads the event, so the tool is a harmless, explanatory no-op:
+// it does not start a loop, change modes, or end the turn on its own.
+
+import { z } from "zod";
+import type { ToolDef } from "./types.js";
+
+const schema = z.object({
+  status: z
+    .enum(["completed", "blocked"])
+    .describe(
+      "The goal's terminal state. `completed`: the objective is fully satisfied " +
+        "and a verification has passed. `blocked`: something outside this loop " +
+        "must be resolved first (missing credentials, an external service, an " +
+        "ambiguity only the user can settle).",
+    ),
+  reason: z
+    .string()
+    .optional()
+    .describe(
+      "One short sentence: for `completed`, what was achieved; for `blocked`, " +
+        "the blocker. Surfaced in the goal result and the per-round checkpoint.",
+    ),
+});
+
+export const goalStatusTool: ToolDef<typeof schema> = {
+  name: "goal_status",
+  description:
+    "Report the terminal state of the current long-horizon goal loop: `completed` once the " +
+    "objective is fully done and verified, or `blocked` when something outside the loop must be " +
+    "resolved first. This is the preferred, structured way to end a goal loop — the host trusts it " +
+    "ahead of the `<goal_status>` text marker (which still works as a fallback). Call it at most " +
+    "once per round, only when the goal truly reaches one of these states; it does nothing outside " +
+    "a goal loop. It does not end your turn — finish any closing summary normally after calling it.",
+  inputSchema: schema,
+  permission: "read",
+  async execute(input, _ctx) {
+    return {
+      content:
+        `Recorded goal_status: ${input.status}` +
+        (input.reason ? ` (${input.reason})` : "") +
+        ". If a goal loop is driving this session it will stop this round; otherwise this is a no-op.",
+      blocks: [
+        {
+          type: "text",
+          // The agent loop parses this into a `goal_status` event the goal loop
+          // reads ahead of the text markers.
+          text: JSON.stringify({
+            type: "goal_status",
+            status: input.status,
+            ...(input.reason ? { reason: input.reason } : {}),
+          }),
+        },
+      ],
+    };
+  },
+};

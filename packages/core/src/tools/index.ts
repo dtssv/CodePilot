@@ -42,6 +42,7 @@ export { suggestModeTool } from "./suggest_mode.js";
 export type { SuggestModeTool } from "./suggest_mode.js";
 export { startGoalTool, DEFAULT_MODEL_GOAL_ROUNDS } from "./start_goal.js";
 export type { StartGoalTool, StartGoalHandle } from "./start_goal.js";
+export { goalStatusTool } from "./goal_status.js";
 export { codeModeTool } from "./code_mode.js";
 export { ArtifactStore } from "./artifacts.js";
 export { skillTool, createSkillTool, StaticSkillStore } from "./skill.js";

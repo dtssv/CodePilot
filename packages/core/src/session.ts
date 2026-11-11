@@ -135,6 +135,7 @@ import {
   startNewTaskTool,
   suggestModeTool,
   startGoalTool,
+  goalStatusTool,
   makeMcpMetaTool,
   makeToolCatalogTool,
   filterToolsByModeFromRegistry,
@@ -3029,6 +3030,10 @@ export class Session {
       });
     };
     this.toolRegistry.register(startGoal);
+    // goal_status: structured channel for reporting a goal loop's terminal
+    // state. Emits a `goal_status` event (parsed in the agent loop) the goal
+    // loop trusts ahead of the text markers; a no-op outside a goal loop.
+    this.toolRegistry.register(goalStatusTool);
     this.toolRegistry.register(memoryWrite);
     const skillHandle = createSkillTool();
     this.skillToolHandle = skillHandle;

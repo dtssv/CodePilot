@@ -291,6 +291,12 @@ type EventBody =
   * long-horizon goal loop. The host picks this up and drives rounds via
   * `runGoal` on this session. Nothing auto-fires in core. */
   | { type: "goal_request"; objective: string; maxRounds?: number; reason?: string }
+  /** The model reported the goal's status via the structured `goal_status`
+   * tool — the authoritative, format-drift-proof channel the goal loop trusts
+   * ahead of scanning assistant text for `<goal_status>` markers. Only
+   * meaningful inside an active goal loop; a no-op otherwise. Never sent to the
+   * model. */
+  | { type: "goal_status"; status: "completed" | "blocked"; reason?: string }
  /** Per-round progress of an active goal loop, surfaced for UIs. Mirrors the
   * data in `GoalCheckpointInfo`: round index, status, optional reason/blocker.
   * Emitted by the host while driving `driveGoalRounds` (via its onRound /

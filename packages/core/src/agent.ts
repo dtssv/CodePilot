@@ -1428,6 +1428,7 @@ export async function runAgent(
                 rememberAuto?: boolean;
                 objective?: string;
                 maxRounds?: number;
+                status?: string;
               };
               if (parsed.type === "plan" && Array.isArray(parsed.steps)) {
                 const steps = parsed.steps as { id: string; status?: string }[];
@@ -1477,6 +1478,18 @@ export async function runAgent(
                   type: "goal_request",
                   objective: parsed.objective,
                   ...(typeof parsed.maxRounds === "number" ? { maxRounds: parsed.maxRounds } : {}),
+                  ...(parsed.reason ? { reason: parsed.reason } : {}),
+                });
+              } else if (
+                parsed.type === "goal_status" &&
+                (parsed.status === "completed" || parsed.status === "blocked")
+              ) {
+                // goal_status: the model reported the goal's terminal state via
+                // the structured tool. Surface it as a goal_status event the
+                // goal loop reads ahead of the text markers.
+                await emit({
+                  type: "goal_status",
+                  status: parsed.status,
                   ...(parsed.reason ? { reason: parsed.reason } : {}),
                 });
               }
