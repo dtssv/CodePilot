@@ -142,7 +142,10 @@ export const bashTool: ToolDef<typeof schema> = {
       stderr = r.stderr;
       code = r.code;
       signal = r.signal;
-      timedOut = false;
+      // A timeout or output-overflow termination means the command did not run
+      // to completion → an error. A user/host abort stays non-error (see the
+      // isError note below), matching the persistent-shell path.
+      timedOut = r.reason === "timeout";
     }
     let content = stdout;
     if (stderr.length > 0) {
@@ -252,6 +255,11 @@ interface RunResult {
   stderr: string;
   code: number | null;
   signal: NodeJS.Signals | null;
+  /** Why the command stopped. "ok": ran to completion (any exit code).
+   * "timeout": the timeout timer or the output soft-cap terminated it (the
+   * command did NOT finish — an error). "abort": the caller's AbortSignal
+   * cancelled it (a user/host soft-cancel — not an error). */
+  reason: "ok" | "timeout" | "abort";
 }
 
 function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
@@ -271,6 +279,10 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
     });
     let killed = false;
     let settled = false;
+    // Why the command was terminated, when it was. Set by whichever path fires
+    // terminate() first so the result can distinguish a timeout / output
+    // overflow (an error) from a user/host abort (not an error).
+    let termCause: "timeout" | "abort" | null = null;
     const pgid = child.pid;
 
  // Signal the whole process group; fall back to the single child when the
@@ -303,13 +315,17 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
         stderr: Buffer.concat(errChunks).toString("utf-8"),
         code,
         signal,
+        reason: termCause ?? "ok",
       });
     };
 
  // SIGTERM the group, then SIGKILL after a short grace period, then resolve
  // regardless (don't trust `close` for a wedged tree).
-    const terminate = (): void => {
+    const terminate = (cause: "timeout" | "abort"): void => {
       killed = true;
+      // First cause wins (a timeout mid-kill isn't reclassified by a later
+      // abort, and vice versa).
+      if (termCause === null) termCause = cause;
       killGroup("SIGTERM");
       if (graceTimer) return;
       graceTimer = setTimeout(() => {
@@ -319,10 +335,10 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
       }, 2000);
     };
 
-    const timer = setTimeout(terminate, opts.timeout);
+    const timer = setTimeout(() => terminate("timeout"), opts.timeout);
 
     const onAbort = (): void => {
-      terminate();
+      terminate("abort");
     };
     if (opts.signal) {
       if (opts.signal.aborted) onAbort();
@@ -336,7 +352,10 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
     child.stdout.on("data", (b: Buffer) => {
       totalOut += b.length;
       if (totalOut > SOFT_CAP) {
-        terminate();
+        // Output overflow: the command produced more than we will buffer and is
+        // terminated without finishing — treat like a timeout (an error), not a
+        // clean completion.
+        terminate("timeout");
         return;
       }
       outChunks.push(b);
@@ -344,7 +363,7 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
     child.stderr.on("data", (b: Buffer) => {
       totalOut += b.length;
       if (totalOut > SOFT_CAP) {
-        terminate();
+        terminate("timeout");
         return;
       }
       errChunks.push(b);
@@ -360,6 +379,7 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
         stderr: err.message,
         code: 1,
         signal: null,
+        reason: termCause ?? "ok",
       });
     });
     child.on("close", (code, signal) => {

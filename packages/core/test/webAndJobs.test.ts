@@ -143,7 +143,39 @@ describe("bash background jobs", () => {
  // timeout plus the SIGKILL grace window, not hang.
     expect(elapsed).toBeLessThan(6000);
     expect(res.content).toMatch(/\[exit (timeout|\?|null|137|143)\]/i);
+    // A timeout means the command did not run to completion → an error.
+    expect(res.isError).toBe(true);
   }, 15000);
+
+  it("marks a plain foreground timeout as an error", async () => {
+    // No grandchildren, just a sleep that outlasts the timeout — the one-shot
+    // runCommand path. Before the fix this returned isError:false because the
+    // kill used SIGTERM and timedOut was hardcoded false.
+    const res = await bashTool.execute(
+      { command: "sleep 30", timeout: 500 },
+      sandboxOffCtx(),
+    );
+    expect(res.isError).toBe(true);
+  }, 15000);
+
+  it("a successful foreground command is not an error", async () => {
+    const res = await bashTool.execute(
+      { command: "echo hi", timeout: 5000 },
+      sandboxOffCtx(),
+    );
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toContain("hi");
+  });
+
+  it("a non-zero exit (no timeout) is data, not an error", async () => {
+    const res = await bashTool.execute(
+      { command: "exit 3", timeout: 5000 },
+      sandboxOffCtx(),
+    );
+    // Non-zero exit is surfaced but not flagged as a tool error.
+    expect(res.isError).toBeFalsy();
+    expect(res.content).toMatch(/\[exit 3\]/);
+  });
 });
 
 describe("bash exit-code vs isError", () => {
