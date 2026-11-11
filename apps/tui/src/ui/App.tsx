@@ -1046,7 +1046,7 @@ export function App(props: AppProps): React.ReactElement {
               const r = await session.undo();
               dispatch({
                 type: "set-notice",
-                text: `Undid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}.`,
+                text: `Undid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}. (Tracked files only — shell/MCP/remote side effects are not undone.)`,
               });
             } catch (err: unknown) {
               dispatch({
@@ -1065,7 +1065,7 @@ export function App(props: AppProps): React.ReactElement {
               const r = await session.redo();
               dispatch({
                 type: "set-notice",
-                text: `Redid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}.`,
+                text: `Redid ${r.label}: restored ${r.restored.length}, deleted ${r.deleted.length}. (Tracked files only — shell/MCP/remote side effects are not replayed.)`,
               });
             } catch (err: unknown) {
               dispatch({

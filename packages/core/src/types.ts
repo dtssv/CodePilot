@@ -333,6 +333,18 @@ type EventBody =
   * the in-memory event. The last-writer-wins so a later unpin overrides.
   */
   | { type: "pin"; messageId: string; pinned: boolean }
+  /** A turn-boundary snapshot pair pushed onto (or moved between) the undo/redo
+   * stacks, so `/undo` survives a reload. `action` replays the stack mutation on
+   * load: `"push"` appends an undo entry (and clears redo), `"undo"` moves the
+   * top undo entry to redo, `"redo"` moves it back. A control event — never sent
+   * to the provider and absent from the live transcript's model view. */
+  | {
+      type: "undo_boundary";
+      action: "push" | "undo" | "redo";
+      baselineId: string;
+      afterId: string;
+      label: string;
+    }
   /** The live streaming-degeneration guard stopped a turn because the output
    * collapsed into a short repeating unit. Informational telemetry for tuning
    * the detector thresholds (and spotting false positives on legitimately

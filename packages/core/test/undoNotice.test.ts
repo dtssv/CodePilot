@@ -101,6 +101,8 @@ describe("undo/redo append a model-visible reconciliation notice", () => {
     expect(undoText).toContain("<undo_notice>");
     expect(undoText).toContain("note.txt");
     expect(undoText.toLowerCase()).toContain("stale");
+    // Non-filesystem side effects are called out as not undone.
+    expect(undoText.toLowerCase()).toMatch(/shell\/mcp\/network|not undone/);
 
     // The notice is persisted to the JSONL (survives resume), not live-only.
     const persisted = readFileSync(join(getSessionsDir(), `${session.id}.jsonl`), "utf-8");
@@ -119,5 +121,55 @@ describe("undo/redo append a model-visible reconciliation notice", () => {
       redoNotice?.content.map((b) => (b.type === "text" ? b.text : "")).join("") ?? "";
     expect(redoText).toContain("<redo_notice>");
     expect(redoText).toContain("note.txt");
+    expect(redoText.toLowerCase()).toMatch(/not replayed|shell\/mcp\/network/);
+  });
+
+  it("rebuilds the undo stack from persisted boundaries so /undo works after a reload", async () => {
+    // Own model + workDir: the shared fakeModel's call counter and note.txt
+    // from the first test would otherwise interfere.
+    const { server: ownModel, url: ownUrl } = await fakeModel("note.txt");
+    const ownDir = mkdtempSync(join(tempHome, "undo-reload-"));
+    try {
+      const sessionId = `undo-reload-${Math.random().toString(36).slice(2, 8)}`;
+      const mkConfig = () =>
+        ({
+          sandbox: { mode: "off" },
+          permissionMode: "yolo",
+          providers: { fake: { provider: "openai", baseURL: ownUrl, apiKey: "x", model: "fake", models: ["fake"] } },
+        }) as never;
+      const session = await createSession({
+        cwd: ownDir,
+        sessionId,
+        model: "fake",
+        config: mkConfig(),
+      });
+
+      await session.prompt("create note.txt");
+      const target = join(ownDir, "note.txt");
+      expect(existsSync(target)).toBe(true);
+      expect(session.undoDepth()).toBeGreaterThan(0);
+
+      // A boundary was persisted to the JSONL.
+      const persisted = readFileSync(join(getSessionsDir(), `${sessionId}.jsonl`), "utf-8");
+      expect(persisted).toContain('"undo_boundary"');
+
+      // Simulate "close the TUI and reopen": a fresh Session for the same id.
+      const reloaded = await createSession({
+        cwd: ownDir,
+        sessionId,
+        model: "fake",
+        config: mkConfig(),
+      });
+      // The stack was rebuilt from the persisted boundary.
+      expect(reloaded.undoDepth()).toBeGreaterThan(0);
+
+      // Undo on the reloaded session still reverts the file.
+      const undoResult = await reloaded.undo();
+      expect(undoResult.deleted).toContain("note.txt");
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      ownModel.close();
+      rmSync(ownDir, { recursive: true, force: true });
+    }
   });
 });

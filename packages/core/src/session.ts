@@ -1321,12 +1321,16 @@ export class Session {
       ) {
         try {
           const afterId = await this.snapshot(`post-turn-${Date.now()}`);
-          this.undoStack.push({
+          const entry = {
             baselineId: this.turnBaselineId,
             afterId,
             label: `turn ${this.undoStack.length + 1}`,
-          });
+          };
+          this.undoStack.push(entry);
           this.redoStack = [];
+          // Persist the boundary so `/undo` survives a reload. A control event:
+          // not sent to the model, not shown in the transcript.
+          await this.persistUndoBoundary("push", entry);
         } catch {
           /* ignore snapshot failures */
         }
@@ -1942,6 +1946,18 @@ export class Session {
   }
 
   /** Undo the last agent turn's file edits. */
+  /** Append (and persist) an `undo_boundary` control event so the undo/redo
+   * stacks can be rebuilt after a reload. Not notified to subscribers and not a
+   * model-visible event. */
+  private async persistUndoBoundary(
+    action: "push" | "undo" | "redo",
+    entry: { baselineId: string; afterId: string; label: string },
+  ): Promise<void> {
+    const ev: Event = { type: "undo_boundary", action, ...entry };
+    this.events.push(ev);
+    await this.persistEvent(ev).catch(() => undefined);
+  }
+
   async undo(): Promise<{ restored: string[]; deleted: string[]; label: string }> {
     const entry = this.undoStack.pop();
     if (!entry) throw new Error("Nothing to undo.");
@@ -1981,6 +1997,7 @@ export class Session {
       /* best-effort */
     }
     this.redoStack.push(entry);
+    await this.persistUndoBoundary("undo", entry);
     // The file system has been rolled back to the turn baseline, but the
     // transcript still carries this turn's tool_results claiming those writes
     // happened. Left unreconciled, the model's next turn rebuilds provider
@@ -2003,7 +2020,9 @@ export class Session {
             `The working tree is back to its pre-turn state. Affected paths: ${fileList}. ` +
             `Any earlier tool_result in this conversation that reported writing or editing ` +
             `these files is now STALE — the changes no longer exist on disk. Re-read any file ` +
-            `before assuming its contents.\n` +
+            `before assuming its contents. Note: only tracked workspace files are restored — ` +
+            `side effects of shell/MCP/network operations (commands run, git pushes, API calls, ` +
+            `deletes outside the tracked set) are NOT undone.\n` +
             `</undo_notice>`,
         },
       ],
@@ -2020,6 +2039,7 @@ export class Session {
     if (!entry) throw new Error("Nothing to redo.");
     const result = await rewindToSnapshot(this.cwd, entry.afterId);
     this.undoStack.push(entry);
+    await this.persistUndoBoundary("redo", entry);
     // Symmetric to undo: the edits are back on disk, so a prior undo_notice in
     // the transcript (which told the model the changes were gone) is now itself
     // stale. Append a reconciling notice so the next turn sees current state.
@@ -2037,7 +2057,8 @@ export class Session {
             `The previously undone turn's file edits were re-applied by the user (/redo: ${entry.label}). ` +
             `Those changes are back on disk. Affected paths: ${fileList}. If an earlier undo_notice ` +
             `said these files were reverted, that is no longer true. Re-read any file before ` +
-            `assuming its contents.\n` +
+            `assuming its contents. Note: only tracked workspace files are re-applied — ` +
+            `side effects of shell/MCP/network operations are not replayed.\n` +
             `</redo_notice>`,
         },
       ],
@@ -3290,6 +3311,39 @@ export class Session {
     }
   }
 
+  /**
+   * Rebuild the undo/redo stacks from persisted `undo_boundary` events so
+   * `/undo` works after a reload. Replays each action in order (push appends an
+   * undo entry and clears redo; undo moves the top undo entry to redo; redo moves
+   * it back). An entry whose snapshot directories no longer exist on disk is
+   * dropped — its file state can't be restored, so offering it would fail.
+   */
+  private rebuildUndoStacks(): void {
+    const snapshotsDir = projectStatePath(this.cwd, "snapshots");
+    const snapshotExists = (id: string): boolean =>
+      existsSync(pathResolve(snapshotsDir, id, "manifest.json"));
+    const undo: Array<{ baselineId: string; afterId: string; label: string }> = [];
+    const redo: Array<{ baselineId: string; afterId: string; label: string }> = [];
+    for (const e of this.persisted) {
+      if (e.type !== "undo_boundary") continue;
+      const entry = { baselineId: e.baselineId, afterId: e.afterId, label: e.label };
+      if (e.action === "push") {
+        undo.push(entry);
+        redo.length = 0;
+      } else if (e.action === "undo") {
+        if (undo.length > 0) undo.pop();
+        redo.push(entry);
+      } else {
+        // redo
+        if (redo.length > 0) redo.pop();
+        undo.push(entry);
+      }
+    }
+    // Drop entries whose snapshots are gone (both ids must be restorable).
+    this.undoStack = undo.filter((e) => snapshotExists(e.baselineId) && snapshotExists(e.afterId));
+    this.redoStack = redo.filter((e) => snapshotExists(e.baselineId) && snapshotExists(e.afterId));
+  }
+
   private async loadFromDisk(): Promise<void> {
     try {
       const path = sessionPath(this.id);
@@ -3327,6 +3381,8 @@ export class Session {
       // Reapply compaction anchors: the latest `pin` per message id wins
       // (append-only safe — the original message line is never rewritten).
       this.applyPersistedPins();
+      // Rebuild undo/redo stacks so `/undo` survives a reload.
+      this.rebuildUndoStacks();
       for (let i = this.persisted.length - 1; i >= 0; i--) {
         const link = linkIdForEvent(this.persisted[i]!);
         if (link) {
