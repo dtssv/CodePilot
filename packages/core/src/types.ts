@@ -999,6 +999,16 @@ export interface CodepilotConfig {
     | { mode: "off" | "prompt" | "tests"; forceContinue?: boolean };
   /** Expose the `harness_bridge` tool (external agent CLI subprocess). Default off. */
   enableHarnessBridge?: boolean;
+  /** harness_bridge backend tuning. The CLI (stdout-scrape) path is the default
+   * and the fallback; opt in here to allow the official-protocol backend for a
+   * harness that ships one (currently `codex` via its app-server JSON-RPC). */
+  harnessBridge?: {
+    /** Permit the protocol backend when a tool call asks for it. Default false
+     * → only the CLI path is used. */
+    allowProtocol?: boolean;
+    /** Override the codex app-server launch argv. Default `["codex", "app-server"]`. */
+    codexAppServerCommand?: string[];
+  };
   /** Auto-apply model `suggest_mode` switches without re-asking. Default off. */
   autoAcceptModeSuggestions?: boolean;
   /**

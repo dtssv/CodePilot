@@ -623,6 +623,24 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // Opt-in: expose the `harness_bridge` tool (invoke claude/codex/custom
     // external agent CLIs as sandboxed subprocesses). Default off.
     enableHarnessBridge: z.boolean().optional(),
+    // harness_bridge backend tuning. By default the bridge drives an external
+    // harness through its one-shot CLI and scrapes stdout. Opt in here to allow
+    // the official-protocol backend for a harness that ships one (currently
+    // `codex` via its app-server JSON-RPC-over-stdio protocol), which gives a
+    // structured final answer instead of scraped text. The CLI path stays the
+    // default and the fallback; the protocol path is only taken when
+    // `allowProtocol` is set AND the tool call asks for `backend: "protocol"`.
+    harnessBridge: z
+      .object({
+        // Permit the protocol backend to be selected. Default false → only the
+        // CLI path is ever used, regardless of a tool call's `backend`.
+        allowProtocol: z.boolean().optional(),
+        // Override the codex app-server launch command (argv). Default
+        // `["codex", "app-server"]`. For testing or a pinned binary path.
+        codexAppServerCommand: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
     // When true, suggest_mode switches apply without re-asking the user
     // (the model proposes, the switch happens). Default off → user confirms.
     autoAcceptModeSuggestions: z.boolean().optional(),

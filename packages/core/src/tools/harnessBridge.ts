@@ -19,6 +19,7 @@ import { z } from "zod";
 import { spawn } from "node:child_process";
 import type { ToolDef } from "./types.js";
 import { wrapCommand, resolveSandbox } from "../sandbox.js";
+import { runCodexAppServerTurn } from "./harnessCodexProto.js";
 
 /** Hard cap on combined stdout+stderr returned to the model. */
 const MAX_OUTPUT_CHARS = 100 * 1024; // 100 KB
@@ -59,6 +60,16 @@ const schema = z.object({
     .array(z.string())
     .optional()
     .describe("Additional arguments for a custom harness, inserted before the prompt."),
+  backend: z
+    .enum(["cli", "protocol"])
+    .optional()
+    .describe(
+      "Transport for the harness. \"cli\" (default) runs the one-shot CLI and " +
+        "returns its output. \"protocol\" drives the harness's official protocol " +
+        "(currently only \"codex\" via its app-server) for a structured final " +
+        "answer; it is only honoured when enabled in config and falls back to " +
+        "\"cli\" otherwise.",
+    ),
 });
 
 /** Shell-quote a single argument for `/bin/sh -c` (single-quote style). */
@@ -255,7 +266,11 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
     "returns stdout. \"custom\" runs `custom_command custom_args... <prompt>` and " +
     "returns stdout. Output is truncated at 100KB; the default timeout is 2 " +
     "minutes (max 10). The subprocess inherits this session's OS sandbox " +
-    "restrictions (write access confined to the workspace).",
+    "restrictions (write access confined to the workspace).\n" +
+    "Backend: by default the CLI is scraped. Set backend=\"protocol\" with " +
+    "harness=\"codex\" to drive its app-server protocol for a structured final " +
+    "answer; this is only honoured when enabled in config and otherwise falls " +
+    "back to the CLI.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -275,12 +290,61 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
         isError: true,
       };
     }
+    const cwd = input.cwd ?? ctx.cwd;
+    const timeout = Math.min(input.timeout_ms ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+
+    // Official-protocol backend (opt-in). Only `codex` ships one here, and only
+    // when config allows it; otherwise we fall through to the CLI path. The
+    // model asks for it via `backend: "protocol"`.
+    const bridgeCfg = ctx.config?.harnessBridge;
+    if (input.backend === "protocol") {
+      if (input.harness === "codex" && bridgeCfg?.allowProtocol) {
+        const res = await runCodexAppServerTurn(input.prompt, {
+          command: bridgeCfg.codexAppServerCommand,
+          cwd,
+          env: process.env,
+          timeoutMs: timeout,
+          signal: ctx.signal,
+        });
+        if (res.timedOut) {
+          return {
+            content: `harness_bridge: codex app-server timed out after ${timeout}ms.`,
+            isError: true,
+          };
+        }
+        if (!res.ok || res.finalText.length === 0) {
+          // Fall back to the CLI path rather than failing outright — the
+          // protocol backend is best-effort and the CLI is the safety net.
+          const note =
+            res.diagnostics.length > 0
+              ? `[protocol backend unavailable: ${res.diagnostics.join("; ")}; using CLI]\n`
+              : "[protocol backend produced no answer; using CLI]\n";
+          const cli = await runCliHarness(input, cwd, timeout, ctx);
+          return { ...cli, content: note + cli.content };
+        }
+        return { content: res.finalText, isError: false };
+      }
+      // Protocol requested but not available → transparent CLI fallback.
+    }
+
+    const cli = await runCliHarness(input, cwd, timeout, ctx);
+    return cli;
+  },
+};
+
+/** Run the external harness through its one-shot CLI (the default and the
+ * fallback). Extracted so both the direct path and the protocol-fallback path
+ * share one implementation. */
+async function runCliHarness(
+  input: { harness: HarnessKind; prompt: string; custom_command?: string; custom_args?: string[] },
+  cwd: string,
+  timeout: number,
+  ctx: Parameters<NonNullable<typeof harnessBridgeTool.execute>>[1],
+): Promise<{ content: string; isError: boolean }> {
     const built = buildHarnessCommand(input);
     if (!built.ok) {
       return { content: built.error, isError: true };
     }
-    const cwd = input.cwd ?? ctx.cwd;
-    const timeout = Math.min(input.timeout_ms ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
 
  // Sandbox parity with bash: wrap the harness command in the session's
  // OS sandbox policy (no persistent shell — one-shot subprocess).
@@ -326,8 +390,7 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
       content: output,
       isError: r.code !== 0 || spawnFailed,
     };
-  },
-};
+}
 
 function truncate(s: string): string {
   if (s.length <= MAX_OUTPUT_CHARS) return s;
