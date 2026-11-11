@@ -1,12 +1,22 @@
 // Skill system.
 //
 // A "skill" is a folder containing a SKILL.md file with YAML frontmatter and a
-// markdown body of instructions. CodePilot discovers skills from three sources
+// markdown body of instructions. CodePilot discovers skills from these sources
 // (highest priority first):
 //
 // 1. <cwd>/.codepilot/skills/*/SKILL.md (project-local)
 // 2. ~/.codepilot/skills/*/SKILL.md (user-global)
-// 3. packages/core/skills/*/SKILL.md (built-in, shipped with the package)
+// 3. Ecosystem-compatible roots (so skills authored for other tools are picked
+//    up as-is): <cwd>/.claude/skills, <cwd>/.agents/skills,
+//    <cwd>/.opencode/skills, ~/.claude/skills, ~/.agents/skills,
+//    ~/.config/opencode/skills. Marked source "compat"; opt out with
+//    `includeCompatDirs: false`.
+// 4. Extra roots passed as `extraDirs` (installed plugins' `skills/` dirs and
+//    `config.skills.dirs`).
+// 5. packages/core/skills/*/SKILL.md (built-in, shipped with the package)
+//
+// `config.skills.enabled: false` disables discovery entirely; names in
+// `config.skills.disabled` (and the user config's disabled list) are omitted.
 //
 // The system prompt advertises only the skill name + a one-line description for
 // every discovered skill. The body is loaded on demand through the `skill`

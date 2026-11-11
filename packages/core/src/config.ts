@@ -110,7 +110,12 @@ export const ProvidersConfigSchema = z
 /** Skill discovery configuration. */
 export const SkillsConfigSchema = z
   .object({
+    /** Master switch: `false` disables skill discovery entirely (no skills
+     * advertised or loadable). Default on. */
     enabled: z.boolean().optional(),
+    /** Extra skill root directories to scan, in addition to the default
+     * project / user / built-in / ecosystem-compat roots. Relative paths
+     * resolve against the session cwd. */
     dirs: z.array(z.string().min(1)).optional(),
     /** Skill names that stay on disk but are not advertised / loadable. */
     disabled: z.array(z.string().min(1)).optional(),

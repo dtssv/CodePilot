@@ -40,6 +40,36 @@ describe("Session", () => {
     expect(prompt).toMatch(/`skill`/);
   });
 
+  it("does not advertise skills when config.skills.enabled is false", async () => {
+    const skillDir = join(workDir, ".codepilot", "skills", "commit");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: commit\ndescription: write a good commit message\n---\n\nbody\n",
+      "utf-8",
+    );
+    const session = await createSession({ cwd: workDir, config: { skills: { enabled: false } } });
+    const prompt = session.getSystemPrompt()?.full ?? "";
+    // Discovery disabled entirely — no skills catalog at all.
+    expect(prompt).not.toContain("<skills>");
+    expect(prompt).not.toContain("`commit`");
+  });
+
+  it("discovers skills from config.skills.dirs (extra roots)", async () => {
+    const extra = join(workDir, "team-skills");
+    const skillDir = join(extra, "deploy");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: deploy\ndescription: ship the build\n---\n\nbody\n",
+      "utf-8",
+    );
+    const session = await createSession({ cwd: workDir, config: { skills: { dirs: ["./team-skills"] } } });
+    const prompt = session.getSystemPrompt()?.full ?? "";
+    expect(prompt).toContain("`deploy`");
+    expect(prompt).toContain("ship the build");
+  });
+
   it("persists events as JSONL", async () => {
     const session = await createSession({ cwd: workDir });
     const seen: Event[] = [];

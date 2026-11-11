@@ -653,9 +653,21 @@ export class Session {
     // installed skill can actually be loaded on demand (previously the tool
     // was never registered — skills were dead). Plugin skill dirs are merged
     // in as extraDirs so an installed plugin's skills reach the session too.
-    this.discoveredSkills = await discoverSkills(this.cwd, {
-      extraDirs: this.pluginSkillDirs,
-    }).catch(() => []);
+    // Honour `config.skills`: `enabled: false` disables discovery entirely;
+    // `dirs` adds extra skill roots; `disabled` omits named skills (unioned
+    // with the user config's disabled list inside discoverSkills).
+    const skillsCfg = this.config.skills;
+    if (skillsCfg?.enabled === false) {
+      this.discoveredSkills = [];
+    } else {
+      const configuredDirs = (skillsCfg?.dirs ?? []).filter(
+        (d): d is string => typeof d === "string" && d.trim().length > 0,
+      );
+      this.discoveredSkills = await discoverSkills(this.cwd, {
+        extraDirs: [...this.pluginSkillDirs, ...configuredDirs],
+        ...(skillsCfg?.disabled ? { disabledNames: skillsCfg.disabled } : {}),
+      }).catch(() => []);
+    }
     this.skillToolHandle?.setStore(new StaticSkillStore(this.discoveredSkills));
     await this.rebuildSystemPrompt();
     this.checkpointHook = makeCheckpointHook(this.cwd, this.id);

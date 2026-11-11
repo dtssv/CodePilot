@@ -39,6 +39,14 @@ describe("compat skill dirs", () => {
     expect(skills.find((s) => s.name === "from-claude")?.source).toBe("compat");
     rmSync(cwd, { recursive: true, force: true });
   });
+
+  it("discovers .opencode/skills (ecosystem-compatible root)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "sk-oc-"));
+    writeSkill(join(cwd, ".opencode", "skills"), "from-oc", "body", "name: from-oc\ndescription: oc");
+    const skills = await discoverSkills(cwd, { includeCompatDirs: true, builtinDir: join(cwd, "_nobuiltin") });
+    expect(skills.find((s) => s.name === "from-oc")?.source).toBe("compat");
+    rmSync(cwd, { recursive: true, force: true });
+  });
 });
 
 describe("parseSkillMd", () => {

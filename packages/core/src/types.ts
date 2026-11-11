@@ -1027,6 +1027,14 @@ export interface CodepilotConfig {
  * set. Unlike plans, specs default INSIDE the repo so they are reviewed and
  * versioned with the code they describe. */
   specDirectory?: string;
+  /** Skill discovery configuration. `enabled: false` disables discovery
+   * entirely; `dirs` adds extra skill root directories (relative to cwd);
+   * `disabled` omits named skills (kept on disk, not advertised/loadable). */
+  skills?: {
+    enabled?: boolean;
+    dirs?: string[];
+    disabled?: string[];
+  };
  /** web_fetch configuration: per-domain allowlist + cache TTL. */
   webFetch?: WebFetchConfig;
  /** web_search backend selection (duckduckgo | brave | serper | google). */
