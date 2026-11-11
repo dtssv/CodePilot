@@ -459,6 +459,14 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       })
       .strict()
       .optional(),
+    // Hard upper bound on how many bytes `read_file` will pull into memory for a
+    // single read. A file larger than this is refused (with a hint to narrow the
+    // read with bash/grep or raise the limit) BEFORE its contents are buffered,
+    // so a giant log/data file can't OOM the process or block for a long time.
+    // The default is deliberately wide (64 MiB) so ordinary source files are
+    // never affected. Line-window parameters do not bypass it — a window still
+    // requires reading the whole file, so the gate is on total size.
+    maxReadBytes: z.number().int().min(4096).optional(),
     // Instruction-file discovery. By default the hierarchical walk for
     // CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
     // toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to

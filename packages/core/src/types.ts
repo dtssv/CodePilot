@@ -731,6 +731,10 @@ export interface CodepilotConfig {
  * accumulate. Default 24; set 0 to fold all old results. The budget-based
  * fold still applies regardless. */
   maxToolResultsInContext?: number;
+ /** Hard upper bound on bytes `read_file` buffers for a single read. A file
+  * larger than this is refused before its contents are read, so a huge file
+  * cannot OOM the process. Default 64 MiB; line windows do not bypass it. */
+  maxReadBytes?: number;
  /** Auto-compaction trigger as a fraction of the context window (0–1).
  * Default 0.92. Checked before each model turn during a long tool loop,
  * not only after the prompt ends. Set `autoCompact: false` to disable

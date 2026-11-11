@@ -67,6 +67,38 @@ describe("read_file", () => {
     expect(r.content.length).toBeLessThan(4000);
   });
 
+  it("refuses a file over the read-size limit before buffering it", async () => {
+    await writeFile(join(dir, "big.txt"), "x".repeat(2000) + "\n");
+    // A tiny configured limit → the file is over it and refused.
+    const r = await readFileTool.execute(
+      { path: "big.txt" },
+      ctx({ config: { maxReadBytes: 500 } as never }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/file too large/);
+    expect(r.content).toMatch(/maxReadBytes/);
+  });
+
+  it("a line window does not bypass the read-size limit", async () => {
+    await writeFile(join(dir, "big2.txt"), "a\nb\nc\nd\n".repeat(500));
+    const r = await readFileTool.execute(
+      { path: "big2.txt", startLine: 0, maxLines: 1 },
+      ctx({ config: { maxReadBytes: 100 } as never }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/file too large/);
+  });
+
+  it("reads a file under the limit normally", async () => {
+    await writeFile(join(dir, "ok.txt"), "line1\nline2\n");
+    const r = await readFileTool.execute(
+      { path: "ok.txt" },
+      ctx({ config: { maxReadBytes: 1_000_000 } as never }),
+    );
+    expect(r.isError).toBeUndefined();
+    expect(r.content).toContain("line1");
+  });
+
   it("sandbox guard blocks writes outside cwd (write_file) and reads of secrets", async () => {
     const sandboxed = ctx({ sandbox: resolveSandbox({ mode: "workspace-write" }, dir) });
     const w = await writeFileTool.execute({ path: "/etc/cptest-evil", content: "x" }, sandboxed);

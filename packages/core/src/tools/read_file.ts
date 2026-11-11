@@ -31,12 +31,19 @@ const SPILL_THRESHOLD = 60_000;
  * cannot blow up the context. */
 const MAX_LINE_CHARS = 2000;
 
+/** Default hard ceiling on how many bytes a single read pulls into memory.
+ * Deliberately wide (64 MiB) so ordinary source files are never affected; a
+ * file above this is refused before its contents are buffered so a giant
+ * log/data file can't OOM the process. Overridable via `config.maxReadBytes`. */
+const DEFAULT_MAX_READ_BYTES = 64 * 1024 * 1024;
+
 export const readFileTool: ToolDef<typeof schema> = {
   name: "read_file",
   description:
     "Read a text file (`N→line` numbering). Prefer `grep`/`glob` for discovery; don't " +
     "re-read unchanged files. Window large files with `startLine`/`maxLines`; >~60KB " +
-    "spills to an artifact (`read_artifact`). Required before editing.",
+    "spills to an artifact (`read_artifact`). Files over the read-size limit (default " +
+    "64 MiB) are refused — use bash (`head`/`sed`/`grep`) for those. Required before editing.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
@@ -51,6 +58,23 @@ export const readFileTool: ToolDef<typeof schema> = {
     }
     if (st.isDirectory()) {
       return { content: `EISDIR: ${p} is a directory`, isError: true };
+    }
+    // Size gate BEFORE buffering: refuse a file larger than the limit rather
+    // than pulling it entirely into memory. A line window (startLine/maxLines)
+    // does not help here — the whole file must still be read to slice it — so
+    // the check is on total size, and the message points at IO-bounded tools.
+    const maxReadBytes = ctx.config?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
+    if (st.size > maxReadBytes) {
+      const mib = (n: number) => (n / (1024 * 1024)).toFixed(1);
+      return {
+        content:
+          `file too large: ${p} is ${st.size.toLocaleString()} bytes ` +
+          `(${mib(st.size)} MiB), over the read limit of ${maxReadBytes.toLocaleString()} bytes ` +
+          `(${mib(maxReadBytes)} MiB). A line window does not reduce the read cost — the whole ` +
+          `file is buffered to slice it. Use bash instead (e.g. \`head\`/\`sed\`/\`grep\` on the ` +
+          `path) to pull only what you need, or raise \`maxReadBytes\` in config.`,
+        isError: true,
+      };
     }
     const buf = await readFile(p);
     if (isBinary(buf)) {      return {

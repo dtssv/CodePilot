@@ -177,6 +177,13 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ degeneration: { unknown: 1 } as never })).toThrow();
   });
 
+  it("accepts a maxReadBytes limit and rejects a too-small one", () => {
+    const r = validateConfig({ maxReadBytes: 1_000_000 }) as { maxReadBytes?: number };
+    expect(r.maxReadBytes).toBe(1_000_000);
+    expect(() => validateConfig({ maxReadBytes: 100 })).toThrow();
+    expect(() => validateConfig({ maxReadBytes: 1.5 as never })).toThrow();
+  });
+
   it("accepts plugin tool-discovery controls", () => {
     const r = validateConfig({
       pluginToolDiscovery: "lazy",
