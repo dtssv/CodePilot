@@ -72,4 +72,16 @@ describe("formatContext", () => {
     // Deferred row is shown but marked not counted (no percentage share).
     expect(out).toMatch(/MCP tools \(deferred\): 9,000 tok \(on demand, not counted\)/);
   });
+
+  it("shows deferred plugin tools separately and excludes them from the send total", () => {
+    const c = base();
+    c.byCategory = [
+      { category: "system", tokens: 4000 },
+      { category: "tools", tokens: 1000 },
+      { category: "plugin_deferred", tokens: 7000, isDeferred: true },
+    ];
+    const out = formatContext(c);
+    expect(out).toMatch(/by category \(≈5,000 tok sent per turn\)/);
+    expect(out).toMatch(/plugin tools \(deferred\): 7,000 tok \(on demand, not counted\)/);
+  });
 });

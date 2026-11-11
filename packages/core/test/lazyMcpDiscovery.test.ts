@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { buildProviderToolDefs, decideLazyMcp, listAdvertisedToolNames } from "../src/agent-messages.js";
-import { makeMcpMetaTool } from "../src/tools/mcp_tool.js";
+import { makeMcpMetaTool, makeToolCatalogTool } from "../src/tools/mcp_tool.js";
 import { ToolRegistry, type ToolDef } from "../src/tools/types.js";
 
 function builtin(name: string): ToolDef {
@@ -32,6 +32,22 @@ function mcpTool(name: string, server = "feishu"): ToolDef {
     lastArgs: () => called,
   };
   return tool;
+}
+
+function pluginTool(name: string): ToolDef & { lastArgs?: () => Record<string, unknown> | null } {
+  let called: Record<string, unknown> | null = null;
+  return {
+    name,
+    description: `plugin tool ${name}`,
+    inputSchema: z.object({ q: z.string().optional() }),
+    permission: "execute",
+    source: "plugin",
+    async execute(input) {
+      called = input as Record<string, unknown>;
+      return { content: `ran ${name}` };
+    },
+    lastArgs: () => called,
+  };
 }
 
 describe("lazy MCP tool discovery", () => {
@@ -109,6 +125,91 @@ describe("lazy MCP tool discovery", () => {
       toolExposure,
     });
     expect(kept).toContain("code_mode");
+  });
+
+  it("listAdvertisedToolNames hides plugin tools under lazyPlugin, keeps the catalog", () => {
+    const reg = new ToolRegistry();
+    reg.register(builtin("bash"));
+    reg.register(builtin("tool_catalog")); // the meta-tool (non-plugin source)
+    reg.register(pluginTool("plugin_a"));
+    reg.register(pluginTool("plugin_b"));
+
+    // Eager: plugin tools advertised directly.
+    const eager = listAdvertisedToolNames(reg, "agent", { lazyPlugin: false });
+    expect(eager).toContain("plugin_a");
+    expect(eager).toContain("plugin_b");
+    expect(eager).toEqual(
+      buildProviderToolDefs(reg, "agent", { lazyPlugin: false }).map((t) => t.name),
+    );
+
+    // Lazy: individual plugin tools dropped, tool_catalog kept.
+    const lazy = listAdvertisedToolNames(reg, "agent", { lazyPlugin: true });
+    expect(lazy).toContain("bash");
+    expect(lazy).toContain("tool_catalog");
+    expect(lazy).not.toContain("plugin_a");
+    expect(lazy).not.toContain("plugin_b");
+    expect(lazy).toEqual(
+      buildProviderToolDefs(reg, "agent", { lazyPlugin: true }).map((t) => t.name),
+    );
+  });
+
+  it("tool_catalog meta-tool lists, describes, calls, and batches plugin tools", async () => {
+    const reg = new ToolRegistry();
+    const a = pluginTool("plugin_search");
+    const b = pluginTool("plugin_fetch");
+    reg.register(builtin("bash"));
+    reg.register(a);
+    reg.register(b);
+    const catalog = makeToolCatalogTool(() => reg, (t) => t.source === "plugin");
+
+    const list = await catalog.execute({ action: "list" } as never, { cwd: "/" } as never);
+    expect(list.content).toContain("plugin_search");
+    expect(list.content).toContain("plugin_fetch");
+    expect(list.content).not.toContain("bash"); // only plugin tools listed
+
+    const desc = await catalog.execute(
+      { action: "describe", name: "plugin_search" } as never,
+      { cwd: "/" } as never,
+    );
+    expect(desc.content).toContain("Input schema");
+
+    const call = await catalog.execute(
+      { action: "call", name: "plugin_search", args: { q: "hi" } } as never,
+      { cwd: "/" } as never,
+    );
+    expect(call.content).toContain("ran plugin_search");
+    expect(a.lastArgs?.()).toEqual({ q: "hi" });
+
+    const batch = await catalog.execute(
+      {
+        action: "batch",
+        calls: [
+          { name: "plugin_search", args: { q: "x" } },
+          { name: "plugin_fetch", args: {} },
+        ],
+      } as never,
+      { cwd: "/" } as never,
+    );
+    expect(batch.content).toContain("ran plugin_search");
+    expect(batch.content).toContain("ran plugin_fetch");
+    expect(batch.isError).toBeFalsy();
+  });
+
+  it("tool_catalog errors clearly on unknown tool / missing name", async () => {
+    const reg = new ToolRegistry();
+    reg.register(pluginTool("plugin_x"));
+    const catalog = makeToolCatalogTool(() => reg, (t) => t.source === "plugin");
+
+    const noName = await catalog.execute({ action: "describe" } as never, { cwd: "/" } as never);
+    expect(noName.isError).toBe(true);
+    expect(noName.content).toMatch(/requires `name`/);
+
+    const unknown = await catalog.execute(
+      { action: "call", name: "nope" } as never,
+      { cwd: "/" } as never,
+    );
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content).toMatch(/Unknown tool/);
   });
 
   it("mcp meta-tool lists, describes, and calls MCP tools", async () => {

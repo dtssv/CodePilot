@@ -59,7 +59,7 @@ export function decideLazyMcp(
 export function buildProviderToolDefs(
   tools: ToolRegistry,
   mode: AgentMode,
-  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] } = {},
+  opts: TurnToolFilterOptions = {},
 ): ProviderToolDef[] {
   return filterToolsForTurn(tools, mode, opts).map((t) => ({
     name: t.name,
@@ -68,19 +68,33 @@ export function buildProviderToolDefs(
   }));
 }
 
+/** Options for the per-turn tool filter chain. `lazyMcp` / `lazyPlugin` hide
+ * the individual schemas of that source (reached on demand through the `mcp` /
+ * `tool_catalog` meta-tool, which are themselves built-ins and stay visible). */
+export interface TurnToolFilterOptions {
+  lazyMcp?: boolean;
+  lazyPlugin?: boolean;
+  model?: string;
+  toolExposure?: ToolExposureRule[];
+}
+
 /** The exact filter chain that decides which tools ride a turn: mode → lazy
- * MCP (drop individual `mcp__*`, keep the `mcp` meta-tool) → per-model
+ * MCP (drop individual `mcp__*`, keep the `mcp` meta-tool) → lazy plugin (drop
+ * `source:"plugin"` tools, keep the `tool_catalog` meta-tool) → per-model
  * `toolExposure` downgrade. Shared so the provider tool table and anything that
  * must mirror it (the system-prompt advertisement, the `/context` tool row) all
  * start from one source of truth. */
 function filterToolsForTurn(
   tools: ToolRegistry,
   mode: AgentMode,
-  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] },
+  opts: TurnToolFilterOptions,
 ): ToolDef[] {
   let visible = filterToolsByMode(tools.all(), mode);
   if (opts.lazyMcp) {
     visible = visible.filter((t) => t.source !== "mcp");
+  }
+  if (opts.lazyPlugin) {
+    visible = visible.filter((t) => t.source !== "plugin");
   }
   if (opts.model && opts.toolExposure && opts.toolExposure.length > 0) {
     visible = filterToolsByModel(visible, opts.model, opts.toolExposure);
@@ -90,12 +104,12 @@ function filterToolsForTurn(
 
 /** Names the model is told it can call this turn — the same filter chain
  * `buildProviderToolDefs` uses, so the system-prompt advertisement never lists
- * a tool the provider request omits (or hides the `mcp` meta-tool that replaces
- * the individual MCP schemas under lazy discovery). */
+ * a tool the provider request omits (or hides a meta-tool's deferred schemas
+ * under lazy discovery). */
 export function listAdvertisedToolNames(
   tools: ToolRegistry,
   mode: AgentMode,
-  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] } = {},
+  opts: TurnToolFilterOptions = {},
 ): string[] {
   return filterToolsForTurn(tools, mode, opts).map((t) => t.name);
 }

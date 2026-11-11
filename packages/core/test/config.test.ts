@@ -177,6 +177,18 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ degeneration: { unknown: 1 } as never })).toThrow();
   });
 
+  it("accepts plugin tool-discovery controls", () => {
+    const r = validateConfig({
+      pluginToolDiscovery: "lazy",
+      pluginLazyThreshold: 12,
+    }) as { pluginToolDiscovery?: string; pluginLazyThreshold?: number };
+    expect(r.pluginToolDiscovery).toBe("lazy");
+    expect(r.pluginLazyThreshold).toBe(12);
+    expect(() => validateConfig({ pluginToolDiscovery: "sometimes" as never })).toThrow();
+    expect(() => validateConfig({ pluginLazyThreshold: 0 })).toThrow();
+    expect(() => validateConfig({ pluginLazyThreshold: 9999 })).toThrow();
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {

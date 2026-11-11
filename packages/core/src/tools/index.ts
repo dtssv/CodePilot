@@ -45,7 +45,7 @@ export type { StartGoalTool, StartGoalHandle } from "./start_goal.js";
 export { codeModeTool } from "./code_mode.js";
 export { ArtifactStore } from "./artifacts.js";
 export { skillTool, createSkillTool, StaticSkillStore } from "./skill.js";
-export { makeMcpMetaTool } from "./mcp_tool.js";
+export { makeMcpMetaTool, makeToolCatalogTool } from "./mcp_tool.js";
 export type { SkillStore, SkillToolHandle } from "./skill.js";
 export {
   filterToolsByMode,

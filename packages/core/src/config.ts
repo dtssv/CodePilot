@@ -424,6 +424,14 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .optional(),
     mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
     mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
+    // Progressive disclosure for plugin-contributed tools, mirroring the MCP
+    // controls above. Defaults to "eager" (every plugin tool schema is sent),
+    // so the default behaviour is unchanged. Set "lazy" (or "auto" with a
+    // threshold) when a plugin registers so many tools that their schemas crowd
+    // the per-turn tool list: the individual schemas are then hidden and reached
+    // on demand through the `tool_catalog` meta-tool (list/describe/call/batch).
+    pluginToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
+    pluginLazyThreshold: z.number().int().min(1).max(1000).optional(),
     // Context gauge precision. "off" (default) uses the local heuristic/usage
     // estimate for `/context`. "on-demand" lets `/context --precise` (or a UI
     // action) call the provider's token-count API once for an exact count;

@@ -14,7 +14,7 @@
 
 import { z } from "zod";
 import type { ToolDef, ToolContext, ToolResult } from "./types.js";
-import type { ToolRegistry } from "./types.js";
+import { ToolRegistry, zodToJsonSchema } from "./types.js";
 
 const schema = z.object({
   action: z
@@ -150,6 +150,101 @@ export function makeMcpMetaTool(getRegistry: () => ToolRegistry): ToolDef<typeof
       }
       if (input.action === "describe") {
         const raw = target.mcpMeta?.jsonSchema ?? {};
+        return {
+          content:
+            `${target.name}\n${target.description}\n\nInput schema (JSON):\n` +
+            "```json\n" + JSON.stringify(raw, null, 2) + "\n```",
+        };
+      }
+      // action === "call"
+      return target.execute((input.args ?? {}) as never, ctx);
+    },
+  };
+}
+
+/** Build a generic `tool_catalog` meta-tool bound to a registry lookup and a
+ * source predicate. It mirrors the `mcp` meta-tool but for any deferred tool
+ * surface (today: plugin tools): the individual tool schemas are hidden from
+ * the per-turn tool list and reached on demand through list/describe/call/batch.
+ * The registry is read lazily on each call so tools registered after boot are
+ * visible, and `describe` renders the tool's JSON schema from its Zod schema
+ * (plugin tools carry no raw-schema metadata). */
+export function makeToolCatalogTool(
+  getRegistry: () => ToolRegistry,
+  isDeferred: (tool: ToolDef) => boolean,
+): ToolDef<typeof schema> {
+  const deferredTools = () => getRegistry().all().filter(isDeferred);
+
+  return {
+    name: "tool_catalog",
+    description:
+      "Access additional tools on demand (they are not listed individually to save context). " +
+      "`action:\"list\"` (optionally with `query` to search) to see available tools, " +
+      "`action:\"describe\"` + `name` for a tool's input schema, `action:\"call\"` + `name` + `args` to invoke one, " +
+      "or `action:\"batch\"` + `calls:[{name,args}]` to invoke several in parallel in one step (prefer over many sequential calls).",
+    inputSchema: schema,
+    permission: "execute",
+    async execute(input, ctx: ToolContext): Promise<ToolResult> {
+      const tools = deferredTools();
+      if (input.action === "list") {
+        if (tools.length === 0) return { content: "No additional tools are available." };
+        const ranked = rankTools(
+          tools.map((t) => ({ name: t.name, description: t.description })),
+          input.query,
+        );
+        if (ranked.length === 0) {
+          return { content: `No tools match "${input.query}". Omit \`query\` to list all.` };
+        }
+        const out: string[] = [];
+        let used = 0;
+        let shown = 0;
+        for (const t of ranked) {
+          const line = `- ${t.name}: ${t.description}`;
+          if (used + line.length > LIST_CHAR_BUDGET && shown > 0) break;
+          out.push(line);
+          used += line.length + 1;
+          shown += 1;
+        }
+        const omitted = ranked.length - shown;
+        const header = input.query
+          ? `Tools matching "${input.query}" (${ranked.length}):`
+          : `Available tools (${tools.length}):`;
+        const footer =
+          omitted > 0 ? `\n…and ${omitted} more — narrow with \`action:"list"\` + \`query\`.` : "";
+        return { content: `${header}\n${out.join("\n")}${footer}` };
+      }
+      if (input.action === "batch") {
+        const calls = input.calls ?? [];
+        if (calls.length === 0) {
+          return { content: "`batch` requires a non-empty `calls` array.", isError: true };
+        }
+        const results = await Promise.all(
+          calls.map(async (c, i) => {
+            const t = tools.find((x) => x.name === c.name);
+            if (!t) return { i, name: c.name, ok: false, out: `unknown tool: ${c.name}` };
+            try {
+              const r = await t.execute((c.args ?? {}) as never, ctx);
+              return { i, name: c.name, ok: !r.isError, out: r.content };
+            } catch (err) {
+              return { i, name: c.name, ok: false, out: (err as Error).message };
+            }
+          }),
+        );
+        const anyError = results.some((r) => !r.ok);
+        const body = results
+          .map((r) => `### [${r.i}] ${r.name} ${r.ok ? "(ok)" : "(FAILED)"}\n${r.out}`)
+          .join("\n\n");
+        return { content: body, isError: anyError };
+      }
+      if (!input.name) {
+        return { content: `\`${input.action}\` requires \`name\`. Run action:"list" first.`, isError: true };
+      }
+      const target = tools.find((t) => t.name === input.name);
+      if (!target) {
+        return { content: `Unknown tool: ${input.name}. Run action:"list" to see valid names.`, isError: true };
+      }
+      if (input.action === "describe") {
+        const raw = zodToJsonSchema(target.inputSchema);
         return {
           content:
             `${target.name}\n${target.description}\n\nInput schema (JSON):\n` +

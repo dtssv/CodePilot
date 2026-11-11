@@ -135,6 +135,7 @@ import {
   suggestModeTool,
   startGoalTool,
   makeMcpMetaTool,
+  makeToolCatalogTool,
   filterToolsByModeFromRegistry,
   filterToolsByModel,
 } from "./tools/index.js";
@@ -1747,15 +1748,22 @@ export class Session {
     let toolTokens = 0;
     let mcpTokens = 0;
     let mcpDeferredTokens = 0;
+    let pluginDeferredTokens = 0;
     const mcpToolCount = this.toolRegistry.all().filter((t) => t.source === "mcp").length;
     const lazyMcp = decideLazyMcp(
       mcpToolCount,
       this.config.mcpToolDiscovery,
       this.config.mcpLazyThreshold,
     );
-    // Start mode-filtered (keeps MCP tools visible so the deferred bucket can be
-    // estimated), then apply the per-model toolExposure downgrade so a tool the
-    // provider request drops is not counted toward the send total.
+    const pluginToolCount = this.toolRegistry.all().filter((t) => t.source === "plugin").length;
+    const lazyPlugin = decideLazyMcp(
+      pluginToolCount,
+      this.config.pluginToolDiscovery ?? "eager",
+      this.config.pluginLazyThreshold,
+    );
+    // Start mode-filtered (keeps MCP/plugin tools visible so the deferred buckets
+    // can be estimated), then apply the per-model toolExposure downgrade so a
+    // tool the provider request drops is not counted toward the send total.
     let visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
     if (this.config.toolExposure && this.config.toolExposure.length > 0) {
       visibleTools = filterToolsByModel(visibleTools, this.model, this.config.toolExposure);
@@ -1772,6 +1780,11 @@ export class Session {
         // not the per-turn request, so they are deferred (shown, not counted).
         if (lazyMcp) mcpDeferredTokens += tok;
         else mcpTokens += tok;
+      } else if (t.source === "plugin") {
+        // Under lazy plugin discovery these ride the `tool_catalog` meta-tool on
+        // demand, so they are deferred (shown, not counted toward the total).
+        if (lazyPlugin) pluginDeferredTokens += tok;
+        else toolTokens += tok;
       } else {
         toolTokens += tok;
       }
@@ -1796,6 +1809,9 @@ export class Session {
       // Deferred MCP schemas: reachable via the `mcp` meta-tool on demand, not
       // sent each turn — shown for visibility but excluded from the total.
       { category: "mcp_deferred", tokens: mcpDeferredTokens, isDeferred: true },
+      // Deferred plugin schemas: reachable via the `tool_catalog` meta-tool on
+      // demand — shown for visibility but excluded from the total.
+      { category: "plugin_deferred", tokens: pluginDeferredTokens, isDeferred: true },
       { category: "conversation", tokens: conversationRest },
       { category: "lastMessage", tokens: lastMessageTokens },
       { category: "subagent", tokens: subagentTokens },
@@ -2982,6 +2998,18 @@ export class Session {
     if (hasMcp) {
       this.toolRegistry.register(makeMcpMetaTool(() => this.toolRegistry));
     }
+    // `tool_catalog` meta-tool for on-demand access to plugin tools whose
+    // schemas are hidden under lazy discovery. Only registered when plugin lazy
+    // discovery is opted into ("lazy"/"auto"); the default ("eager") sends every
+    // plugin schema directly, so the meta-tool is absent and the default
+    // behaviour is unchanged. Reads the registry lazily so plugin tools that
+    // register after boot are reachable.
+    const pluginDiscovery = this.config.pluginToolDiscovery ?? "eager";
+    if (pluginDiscovery === "lazy" || pluginDiscovery === "auto") {
+      this.toolRegistry.register(
+        makeToolCatalogTool(() => this.toolRegistry, (t) => t.source === "plugin"),
+      );
+    }
 
  // Wire the memory sink (MEMORY.md + progressive index/topic mirror).
     memoryWrite.sink = new FileMemorySink(this.cwd, {
@@ -3663,18 +3691,25 @@ export class Session {
     }
     const plan = extractPlan(this.events);
  // The system prompt advertises exactly the tool set the provider request
- // will carry this turn — the same filter chain (mode → lazy MCP →
- // toolExposure) as buildProviderToolDefs — so the model never expects a tool
- // the request omits, and under lazy MCP it sees the `mcp` meta-tool rather than
- // individual `mcp__*` schemas.
+ // will carry this turn — the same filter chain (mode → lazy MCP → lazy plugin
+ // → toolExposure) as buildProviderToolDefs — so the model never expects a tool
+ // the request omits, and under lazy discovery it sees the `mcp` / `tool_catalog`
+ // meta-tool rather than the individual schemas.
     const mcpCount = this.toolRegistry.all().filter((t) => t.source === "mcp").length;
     const lazyMcp = decideLazyMcp(
       mcpCount,
       this.config.mcpToolDiscovery,
       this.config.mcpLazyThreshold,
     );
+    const pluginCount = this.toolRegistry.all().filter((t) => t.source === "plugin").length;
+    const lazyPlugin = decideLazyMcp(
+      pluginCount,
+      this.config.pluginToolDiscovery ?? "eager",
+      this.config.pluginLazyThreshold,
+    );
     const toolNames = listAdvertisedToolNames(this.toolRegistry, this.mode, {
       lazyMcp,
+      lazyPlugin,
       model: this.model,
       toolExposure: this.config.toolExposure,
     });

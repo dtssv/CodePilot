@@ -697,16 +697,24 @@ export async function runAgent(
       pendingProviderResume = null;
       providerOnlyTrailing++;
     }
-    // Decide whether to lazily surface MCP tools (hide their schemas, expose the
-    // `mcp` meta-tool) based on config + how many MCP tools exist this turn.
+    // Decide whether to lazily surface MCP / plugin tools (hide their schemas,
+    // expose the `mcp` / `tool_catalog` meta-tool) based on config + how many
+    // tools of that source exist this turn.
     const mcpToolCount = deps.tools.all().filter((t) => t.source === "mcp").length;
     const lazyMcp = decideLazyMcp(
       mcpToolCount,
       deps.config.mcpToolDiscovery,
       deps.config.mcpLazyThreshold,
     );
+    const pluginToolCount = deps.tools.all().filter((t) => t.source === "plugin").length;
+    const lazyPlugin = decideLazyMcp(
+      pluginToolCount,
+      deps.config.pluginToolDiscovery ?? "eager",
+      deps.config.pluginLazyThreshold,
+    );
     const providerTools = buildProviderToolDefs(deps.tools, agentMode, {
       lazyMcp,
+      lazyPlugin,
       model: deps.config.model,
       toolExposure: deps.config.toolExposure,
     });

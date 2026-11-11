@@ -245,6 +245,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   tools: "tool definitions",
   mcp: "MCP tools",
   mcp_deferred: "MCP tools (deferred)",
+  plugin_deferred: "plugin tools (deferred)",
   conversation: "conversation",
   lastMessage: "current message",
   subagent: "sub-agents",

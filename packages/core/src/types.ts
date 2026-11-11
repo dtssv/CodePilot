@@ -827,6 +827,14 @@ export interface CodepilotConfig {
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
  /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
   mcpLazyThreshold?: number;
+ /** Progressive disclosure for plugin-contributed tools, mirroring the MCP
+  * controls. "eager" (default) advertises every plugin tool schema each turn;
+  * "lazy" (or "auto" past `pluginLazyThreshold`) hides the individual schemas
+  * and exposes a single `tool_catalog` meta-tool (list/describe/call/batch).
+  * Default behaviour is unchanged (eager). */
+  pluginToolDiscovery?: "auto" | "lazy" | "eager";
+ /** Tool-count threshold for plugin `auto` to switch to lazy. Default 8. */
+  pluginLazyThreshold?: number;
  /** Context-gauge precision. "off" (default) uses the local estimate for
   * `/context`. "on-demand" allows `/context --precise` (or a UI action) to call
   * the provider's token-count API once for an exact count; precise counting is
