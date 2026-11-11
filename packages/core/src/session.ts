@@ -92,6 +92,7 @@ import {
 import type { McpManager } from "./mcp.js";
 import { acquireSessionLock, type SessionLease } from "./sessionLock.js";
 import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod } from "./session-mcp.js";
+import type { McpServerRequestHandler } from "./mcp-types.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
 import { getTracer } from "./telemetry.js";
 import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
@@ -248,6 +249,10 @@ export class Session {
   * never routes a server reverse request to this disposed session. */
   private mcpUnregisterRequestHandler: (() => void) | null = null;
   private mcpUnregisterToolsChanged: (() => void) | null = null;
+ /** This session's own MCP reverse-request handler, used to tag direct
+  * `mgr.invoke` calls (the `mcp` meta-tool path) for per-call reverse-request
+  * affinity on a shared manager. */
+  private mcpRequestHandler: McpServerRequestHandler | null = null;
   private readonly diagnosticsProvider?: SessionOptions["diagnosticsProvider"];
   /** Deployment-configured extra redaction patterns, compiled once from
    * `config.redact.patterns`. Applied on top of the built-in secret floor. */
@@ -625,6 +630,7 @@ export class Session {
         if (this.disposed) {
           this.mcpUnregisterRequestHandler?.();
           this.mcpUnregisterRequestHandler = null;
+          this.mcpRequestHandler = null;
           this.mcpUnregisterToolsChanged?.();
           this.mcpUnregisterToolsChanged = null;
           const { releaseSharedMcp } = await import("./mcp-pool.js");
@@ -2924,6 +2930,7 @@ export class Session {
     // would route a later server reverse request to this disposed session.
     this.mcpUnregisterRequestHandler?.();
     this.mcpUnregisterRequestHandler = null;
+    this.mcpRequestHandler = null;
     this.mcpUnregisterToolsChanged?.();
     this.mcpUnregisterToolsChanged = null;
     if (mcp) {
@@ -3292,7 +3299,7 @@ export class Session {
         const server = colon > 0 ? serverTool.slice(0, colon) : "";
         const tool = colon > 0 ? serverTool.slice(colon + 1) : serverTool;
         if (!server || !tool) throw new Error(`invalid mcp tool id: ${serverTool}`);
-        const r = await mgr.invoke(server, tool, args);
+        const r = await mgr.invoke(server, tool, args, this.mcpRequestHandler);
         return (r.content ?? "").trim() || JSON.stringify(r);
       },
     });
@@ -3307,6 +3314,9 @@ export class Session {
       withToolRegistry: (fn) => fn(this.toolRegistry),
       setMcpRequestHandlerCleanup: (unregister) => {
         this.mcpUnregisterRequestHandler = unregister;
+      },
+      setMcpRequestHandler: (handler) => {
+        this.mcpRequestHandler = handler;
       },
       setMcpToolsChangedCleanup: (unregister) => {
         this.mcpUnregisterToolsChanged = unregister;

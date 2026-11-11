@@ -101,4 +101,84 @@ describe("McpManager reverse-request routing (shared manager)", () => {
       mock.cleanup();
     }
   });
+
+  it("routes a reverse request to the session that invoked the tool (per-call affinity)", async () => {
+    const mock = writeElicitingServer();
+    const mgr = new McpManager({ mock: { command: process.execPath, args: [mock.path] } });
+    try {
+      await mgr.startAll();
+
+      // Two sessions share the manager. A registered first, B second (so B is
+      // the "newest" and would win without affinity).
+      const handlerA = async () => ({ who: "session-A" });
+      const handlerB = async () => ({ who: "session-B" });
+      const unregA = mgr.setServerRequestHandler(handlerA);
+      const unregB = mgr.setServerRequestHandler(handlerB);
+
+      // Session A invokes the tool, tagging the call with ITS handler. The
+      // reverse request the server initiates during the call must route to A,
+      // not to the newest-registered B.
+      const r = await mgr.invoke("mock", "ask", {}, handlerA);
+      expect(r.content).toContain("answered-by:session-A");
+
+      unregA();
+      unregB();
+    } finally {
+      await mgr.stopAll().catch(() => {});
+      mock.cleanup();
+    }
+  });
+
+  it("interleaved reverse requests land on each invoking session (two servers)", async () => {
+    // Two servers, two sessions. Each session invokes on a different server;
+    // each server's in-call reverse request must land on the session that
+    // triggered it — even though both handlers are registered on the shared
+    // manager at once and are interleaved in time.
+    const mock1 = writeElicitingServer();
+    const mock2 = writeElicitingServer();
+    const mgr = new McpManager({
+      one: { command: process.execPath, args: [mock1.path] },
+      two: { command: process.execPath, args: [mock2.path] },
+    });
+    try {
+      await mgr.startAll();
+
+      // Barrier so both invocations are genuinely in flight at the same time
+      // before either reverse request is answered.
+      let releaseA: () => void = () => {};
+      let releaseB: () => void = () => {};
+      const gateA = new Promise<void>((res) => (releaseA = res));
+      const gateB = new Promise<void>((res) => (releaseB = res));
+
+      const handlerA = async () => {
+        releaseA();
+        await gateB; // wait until B is also mid-call
+        return { who: "session-A" };
+      };
+      const handlerB = async () => {
+        releaseB();
+        await gateA; // wait until A is also mid-call
+        return { who: "session-B" };
+      };
+      const unregA = mgr.setServerRequestHandler(handlerA);
+      const unregB = mgr.setServerRequestHandler(handlerB);
+
+      const [rA, rB] = await Promise.all([
+        mgr.invoke("one", "ask", {}, handlerA),
+        mgr.invoke("two", "ask", {}, handlerB),
+      ]);
+
+      // Despite both handlers being registered and both calls overlapping, each
+      // server's reverse request routed back to the session that invoked it.
+      expect(rA.content).toContain("answered-by:session-A");
+      expect(rB.content).toContain("answered-by:session-B");
+
+      unregA();
+      unregB();
+    } finally {
+      await mgr.stopAll().catch(() => {});
+      mock1.cleanup();
+      mock2.cleanup();
+    }
+  });
 });

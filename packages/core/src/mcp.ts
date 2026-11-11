@@ -132,6 +132,18 @@ export class McpManager {
   * registered last — and kept pointing at it even after that session was
   * disposed. Each session registers on acquire and unregisters on release. */
   private readonly requestHandlers = new Set<McpServerRequestHandler>();
+ /** Per-server reverse-request affinity. While a session is invoking a tool on
+  * a server, its own reverse-request handler is recorded here (ref-counted for
+  * concurrent calls from the same session) so a reverse request the server
+  * initiates DURING that call (elicitation / sampling) routes back to the
+  * session that triggered it — not merely to the newest registered handler.
+  * MCP reverse requests carry no session identity, so this in-flight-call
+  * association is the correlation. Entries clear when the triggering call ends;
+  * a reverse request with no live affinity falls back to newest-first. */
+  private readonly serverAffinity = new Map<
+    string,
+    Array<{ handler: McpServerRequestHandler; count: number }>
+  >();
  /** The dispatcher actually installed on every client. Stable identity so we
   * only wire it once per client. */
   private readonly dispatch: McpServerRequestHandler = async (server, method, params) => {
@@ -139,11 +151,35 @@ export class McpManager {
     if (handlers.length === 0) {
       throw new Error(`no handler registered for MCP reverse request ${method} from ${server}`);
     }
-    // Newest handler first (the active session), falling back to earlier ones.
-    let lastErr: unknown;
+    // Build the dispatch order: the session actively invoking a tool on THIS
+    // server first (per-call affinity), then the remaining handlers newest-
+    // first. Affinity handlers must still be live (registered) to be preferred;
+    // a stale one (its session disposed mid-call) is skipped. When there is no
+    // live affinity we fall back to pure newest-first — the prior behaviour.
+    const affinity = this.serverAffinity.get(server);
+    const ordered: McpServerRequestHandler[] = [];
+    const added = new Set<McpServerRequestHandler>();
+    if (affinity) {
+      // Most recently entered in-flight call first.
+      for (let i = affinity.length - 1; i >= 0; i--) {
+        const h = affinity[i]!.handler;
+        if (!added.has(h) && this.requestHandlers.has(h)) {
+          ordered.push(h);
+          added.add(h);
+        }
+      }
+    }
     for (let i = handlers.length - 1; i >= 0; i--) {
+      const h = handlers[i]!;
+      if (!added.has(h)) {
+        ordered.push(h);
+        added.add(h);
+      }
+    }
+    let lastErr: unknown;
+    for (const h of ordered) {
       try {
-        return await handlers[i]!(server, method, params);
+        return await h(server, method, params);
       } catch (err) {
         lastErr = err;
       }
@@ -252,11 +288,49 @@ export class McpManager {
   async invoke(
     server: string,
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    /** The calling session's reverse-request handler. When provided, any
+     * reverse request the server initiates during this call routes back to this
+     * handler first (per-call session affinity). Omit for calls with no session
+     * (e.g. internal probes) — routing then falls back to newest-first. */
+    affinityHandler?: McpServerRequestHandler | null,
   ): Promise<McpInvokeResult> {
     const c = this.clients.get(server);
     if (!c) throw new Error(`unknown MCP server: ${server}`);
-    return c.invokeTool({ name, arguments: args });
+    if (!affinityHandler) return c.invokeTool({ name, arguments: args });
+    this.enterAffinity(server, affinityHandler);
+    try {
+      return await c.invokeTool({ name, arguments: args });
+    } finally {
+      this.exitAffinity(server, affinityHandler);
+    }
+  }
+
+  /** Record a session's handler as the active reverse-request target for a
+   * server while one of its tool calls is in flight. Ref-counted so concurrent
+   * calls from the same session on the same server nest correctly. */
+  private enterAffinity(server: string, handler: McpServerRequestHandler): void {
+    let list = this.serverAffinity.get(server);
+    if (!list) {
+      list = [];
+      this.serverAffinity.set(server, list);
+    }
+    const existing = list.find((e) => e.handler === handler);
+    if (existing) existing.count++;
+    else list.push({ handler, count: 1 });
+  }
+
+  /** Drop one in-flight reference for a server/handler pair, removing it (and
+   * the server entry when empty) once no call from that session is in flight. */
+  private exitAffinity(server: string, handler: McpServerRequestHandler): void {
+    const list = this.serverAffinity.get(server);
+    if (!list) return;
+    const idx = list.findIndex((e) => e.handler === handler);
+    if (idx === -1) return;
+    const entry = list[idx]!;
+    entry.count--;
+    if (entry.count <= 0) list.splice(idx, 1);
+    if (list.length === 0) this.serverAffinity.delete(server);
   }
 
   async readResource(

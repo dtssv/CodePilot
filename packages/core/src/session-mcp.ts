@@ -14,6 +14,7 @@ import {
   normalizeMcpToolName,
 } from "./mcp.js";
 import { acquireSharedMcp } from "./mcp-pool.js";
+import type { McpServerRequestHandler } from "./mcp-types.js";
 import type { ToolRegistry } from "./tools/types.js";
 import type { CodepilotConfig, SessionOptions } from "./types.js";
 
@@ -31,6 +32,10 @@ export interface SessionMcpHost {
   * unregistering, a disposed session's handler stays registered and a server
   * reverse request would be routed to a dead session. */
   setMcpRequestHandlerCleanup?(unregister: () => void): void;
+ /** Stash the session's own reverse-request handler so the session can tag its
+  * own direct `mgr.invoke` calls (e.g. the `mcp` meta-tool path) with it for
+  * per-call reverse-request affinity. Null when the session has no handler. */
+  setMcpRequestHandler?(handler: McpServerRequestHandler | null): void;
  /** Stash the unregister fn for the tools-changed handler (see
   * setMcpRequestHandlerCleanup — a separate slot so both cleanups survive). */
   setMcpToolsChangedCleanup?(unregister: () => void): void;
@@ -65,14 +70,22 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
       openAuthUrl: host.onMcpOpenAuthUrl ?? null,
     });
     if (!mcp) return null;
+    // The session's reverse-request handler. Captured here so the tool wrappers
+    // can tag their invocations with it, giving a server's reverse request
+    // (elicitation / sampling) per-call affinity back to THIS session even when
+    // the manager is shared across concurrent sessions.
+    let sessionRequestHandler:
+      | ((server: string, method: string, params: unknown) => Promise<unknown>)
+      | null = null;
     if (host.onMcpServerRequest) {
-      const unregister = mcp.setServerRequestHandler(
-        async (server, method, params) => host.onMcpServerRequest!(server, method, params)
-      );
+      sessionRequestHandler = async (server, method, params) =>
+        host.onMcpServerRequest!(server, method, params);
+      const unregister = mcp.setServerRequestHandler(sessionRequestHandler);
       host.setMcpRequestHandlerCleanup?.(unregister);
+      host.setMcpRequestHandler?.(sessionRequestHandler);
     }
     const mgr = mcp;
-    for (const t of mgr.listAllTools()) registerMcpTool(host, mgr, t);
+    for (const t of mgr.listAllTools()) registerMcpTool(host, mgr, t, sessionRequestHandler);
     // A server may add/remove tools mid-session (`notifications/tools/list_changed`).
     // When that happens the manager has already refreshed its cached list; we
     // drop this server's old wrapper tools and re-register the new set so the
@@ -86,7 +99,7 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
         }
       });
       for (const t of mgr.listAllTools()) {
-        if (t.server === server) registerMcpTool(host, mgr, t);
+        if (t.server === server) registerMcpTool(host, mgr, t, sessionRequestHandler);
       }
     });
     host.setMcpToolsChangedCleanup?.(unregisterChanged);
@@ -105,6 +118,7 @@ function registerMcpTool(
   host: SessionMcpHost,
   mgr: McpManager,
   t: { server: string; name: string; description: string; inputSchema: Record<string, unknown> },
+  requestHandler?: ((server: string, method: string, params: unknown) => Promise<unknown>) | null,
 ): void {
  // Normalize the tool name to fit provider limits (64 chars) and prevent
  // collisions between long names. The original (server, name) pair is
@@ -120,7 +134,9 @@ function registerMcpTool(
       mcpMeta: { server: t.server, toolName: t.name, jsonSchema: t.inputSchema },
       execute: async (input) => {
         const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
-        const r = await mgr.invoke(t.server, t.name, args);
+        // Pass this session's reverse-request handler so a reverse request the
+        // server initiates during this call routes back to this session.
+        const r = await mgr.invoke(t.server, t.name, args, requestHandler ?? null);
         return { content: r.content, isError: r.isError };
       },
     })
