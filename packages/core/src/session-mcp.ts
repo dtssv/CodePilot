@@ -39,6 +39,53 @@ export interface SessionMcpHost {
  /** Stash the unregister fn for the tools-changed handler (see
   * setMcpRequestHandlerCleanup — a separate slot so both cleanups survive). */
   setMcpToolsChangedCleanup?(unregister: () => void): void;
+ /** Called when an allowlisted MCP server notification should be delivered into
+  * the session (the opt-in inbound channel). The host synthesizes a user-role
+  * message describing the notification. Only invoked when
+  * `config.inboundChannels.enabled` and the notification matches the allowlist.
+  */
+  onMcpInboundNotification?(server: string, method: string, params: unknown): void;
+ /** Stash the unregister fn for the inbound-notification handler so the session
+  * can detach it on dispose (same rationale as the reverse-request cleanup). */
+  setMcpNotificationCleanup?(unregister: () => void): void;
+}
+
+/** Whether an inbound MCP notification matches the allowlist. An entry matches
+ * by exact `server:method`, bare `method`, or bare `server`. An empty allowlist
+ * matches nothing (fail-safe: delivery requires an explicit allowlist). */
+export function inboundNotificationAllowed(
+  allow: string[],
+  server: string,
+  method: string,
+): boolean {
+  if (allow.length === 0) return false;
+  const full = `${server}:${method}`;
+  for (const entry of allow) {
+    if (entry === full || entry === method || entry === server) return true;
+  }
+  return false;
+}
+
+/** Render an inbound MCP notification as a short user-visible message for the
+ * session's steering queue. Params are JSON-encoded and truncated so an
+ * oversized payload can't blow up a turn's context. */
+export function formatInboundNotification(
+  server: string,
+  method: string,
+  params: unknown,
+): string {
+  let detail = "";
+  try {
+    if (params !== undefined && params !== null) {
+      const json = JSON.stringify(params);
+      if (json && json !== "{}" && json !== "null") {
+        detail = `\n${json.length > 1000 ? json.slice(0, 1000) + "…" : json}`;
+      }
+    }
+  } catch {
+    /* non-serializable params → omit detail */
+  }
+  return `Inbound notification from MCP server "${server}" (${method}).${detail}`;
 }
 
 /** Start configured MCP servers (shared process-wide) and register tools.
@@ -103,6 +150,19 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
       }
     });
     host.setMcpToolsChangedCleanup?.(unregisterChanged);
+    // Opt-in inbound channel: when enabled, relay allowlisted server
+    // notifications (that the client does not act on internally) into the
+    // session as a synthesized user message. Default off → no handler wired.
+    const inbound = host.config.inboundChannels;
+    if (inbound?.enabled && host.onMcpInboundNotification) {
+      const allow = inbound.allow ?? [];
+      const unregisterNotif = mgr.setNotificationHandler((server, method, params) => {
+        if (inboundNotificationAllowed(allow, server, method)) {
+          host.onMcpInboundNotification!(server, method, params);
+        }
+      });
+      host.setMcpNotificationCleanup?.(unregisterNotif);
+    }
     return mcp;
   } catch (err) {
     process.stderr.write(

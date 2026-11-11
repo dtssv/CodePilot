@@ -67,6 +67,14 @@ export abstract class BaseJsonRpcClient implements McpClient {
   * client's cached tool list has been refreshed, so the handler can read the
   * new `listTools()`. */
   protected toolsChangedHandler: ((server: string) => void) | null = null;
+ /** Optional handler for server notifications this client does NOT act on
+  * internally (i.e. anything other than the list_changed cache refreshes).
+  * The consumer decides what to do with them (e.g. an opt-in inbound channel
+  * that turns an allowlisted notification into a session message). Fired with
+  * the raw method and params; never with the internally-handled notifications. */
+  protected notificationHandler:
+    | ((server: string, method: string, params: unknown) => void)
+    | null = null;
 
  /** Install a handler for server-initiated requests. Pass `null` to
  * disable. When unset, such requests are rejected with code -32601
@@ -80,6 +88,14 @@ export abstract class BaseJsonRpcClient implements McpClient {
   * the handler runs. Pass `null` to disable. */
   setToolsChangedHandler(h: ((server: string) => void) | null): void {
     this.toolsChangedHandler = h;
+  }
+
+ /** Install a handler for server notifications this client does not act on
+  * internally. Pass `null` to disable. See {@link notificationHandler}. */
+  setNotificationHandler(
+    h: ((server: string, method: string, params: unknown) => void) | null,
+  ): void {
+    this.notificationHandler = h;
   }
 
   abstract start(): Promise<void>;
@@ -179,7 +195,7 @@ export abstract class BaseJsonRpcClient implements McpClient {
     }
  // Server notification (method, no id).
     if (msg.method !== undefined && (msg.id === undefined || msg.id === null)) {
-      this.handleServerNotification(msg.method);
+      this.handleServerNotification(msg.method, msg.params);
       return;
     }
  // Response with no id we can't correlate — ignore.
@@ -238,9 +254,10 @@ export abstract class BaseJsonRpcClient implements McpClient {
   * `notifications/tools/list_changed`: re-list the server's tools so a server
   * that adds/removes tools mid-session is reflected, then fire the optional
   * tools-changed handler so the consumer (the session) can re-register. Other
-  * `list_changed` notifications refresh their caches too. Unknown
-  * notifications are ignored. */
-  protected handleServerNotification(method: string): void {
+  * `list_changed` notifications refresh their caches too. Any notification we
+  * do NOT act on internally is forwarded to the optional notification handler
+  * (e.g. an opt-in inbound channel); with no handler installed it is ignored. */
+  protected handleServerNotification(method: string, params?: unknown): void {
     if (method === "notifications/tools/list_changed") {
       void this.refreshTools()
         .then(() => this.toolsChangedHandler?.(this.serverName))
@@ -255,6 +272,8 @@ export abstract class BaseJsonRpcClient implements McpClient {
       void this.refreshPrompts().catch(() => undefined);
       return;
     }
+    // Not internally handled → forward to the consumer's notification handler.
+    this.notificationHandler?.(this.serverName, method, params);
   }
 
  /** Run the standard `initialize` handshake + capability probe. Subclasses

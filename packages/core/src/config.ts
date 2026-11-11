@@ -435,6 +435,23 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // note is logged). Intended for a managed/enterprise layer to pin the set
     // of MCP servers that can run regardless of per-project config.
     mcpAllowedServers: z.array(z.string().min(1)).optional(),
+    // Opt-in inbound channels: allow allowlisted MCP server notifications to be
+    // delivered into the session as a synthesized user message. Default OFF —
+    // with no config here, server notifications the client does not act on
+    // internally are ignored. When `enabled`, only notifications whose
+    // `server:method` (or bare `method`, or bare `server`) matches `allow` are
+    // relayed; everything else stays ignored. This is a narrow, auditable relay,
+    // NOT a general permission bridge.
+    inboundChannels: z
+      .object({
+        enabled: z.boolean().optional(),
+        // Allowlist entries match a notification by `server:method`, bare
+        // `method`, or bare `server`. Empty/omitted with `enabled: true` relays
+        // nothing (fail-safe: an explicit allowlist is required to deliver).
+        allow: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
     // Progressive disclosure for plugin-contributed tools, mirroring the MCP
     // controls above. Defaults to "eager" (every plugin tool schema is sent),
     // so the default behaviour is unchanged. Set "lazy" (or "auto" with a

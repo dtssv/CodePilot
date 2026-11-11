@@ -91,7 +91,7 @@ import {
 } from "./deliveryRoots.js";
 import type { McpManager } from "./mcp.js";
 import { acquireSessionLock, type SessionLease } from "./sessionLock.js";
-import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod } from "./session-mcp.js";
+import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod, formatInboundNotification } from "./session-mcp.js";
 import type { McpServerRequestHandler } from "./mcp-types.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
 import { getTracer } from "./telemetry.js";
@@ -249,6 +249,9 @@ export class Session {
   * never routes a server reverse request to this disposed session. */
   private mcpUnregisterRequestHandler: (() => void) | null = null;
   private mcpUnregisterToolsChanged: (() => void) | null = null;
+ /** Unregister fn for the opt-in inbound-notification handler (detached on
+  * dispose, same rationale as the reverse-request cleanup). */
+  private mcpUnregisterNotification: (() => void) | null = null;
  /** This session's own MCP reverse-request handler, used to tag direct
   * `mgr.invoke` calls (the `mcp` meta-tool path) for per-call reverse-request
   * affinity on a shared manager. */
@@ -633,6 +636,8 @@ export class Session {
           this.mcpRequestHandler = null;
           this.mcpUnregisterToolsChanged?.();
           this.mcpUnregisterToolsChanged = null;
+          this.mcpUnregisterNotification?.();
+          this.mcpUnregisterNotification = null;
           const { releaseSharedMcp } = await import("./mcp-pool.js");
           await releaseSharedMcp(mcp);
           return null;
@@ -2933,6 +2938,8 @@ export class Session {
     this.mcpRequestHandler = null;
     this.mcpUnregisterToolsChanged?.();
     this.mcpUnregisterToolsChanged = null;
+    this.mcpUnregisterNotification?.();
+    this.mcpUnregisterNotification = null;
     if (mcp) {
       const { releaseSharedMcp } = await import("./mcp-pool.js");
       await releaseSharedMcp(mcp);
@@ -3320,6 +3327,12 @@ export class Session {
       },
       setMcpToolsChangedCleanup: (unregister) => {
         this.mcpUnregisterToolsChanged = unregister;
+      },
+      onMcpInboundNotification: (server, method, params) => {
+        this.steerSystem(formatInboundNotification(server, method, params));
+      },
+      setMcpNotificationCleanup: (unregister) => {
+        this.mcpUnregisterNotification = unregister;
       },
     });
   }

@@ -111,6 +111,12 @@ export interface McpClient {
   * before the handler runs so `listTools()` returns the new set. Optional:
   * transports that cannot receive notifications may omit it. */
   setToolsChangedHandler?(h: ((server: string) => void) | null): void;
+ /** Install a handler for server notifications the client does not act on
+  * internally (i.e. not the list_changed cache refreshes). Optional:
+  * transports that cannot receive notifications may omit it. */
+  setNotificationHandler?(
+    h: ((server: string, method: string, params: unknown) => void) | null,
+  ): void;
 }
 
 // ---------------------------------------------------------------------------

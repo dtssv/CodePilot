@@ -204,6 +204,28 @@ export class McpManager {
     }
   };
 
+ /** Registered handlers for server notifications NOT handled internally (an
+  * opt-in inbound channel turns an allowlisted one into a session message).
+  * Same fan-out shape as toolsChanged so multiple sessions on a shared manager
+  * each hear the notification. */
+  private readonly notificationHandlers = new Set<
+    (server: string, method: string, params: unknown) => void
+  >();
+ /** Stable fan-out installed on every client; calls each live handler. */
+  private readonly notificationDispatch = (
+    server: string,
+    method: string,
+    params: unknown,
+  ): void => {
+    for (const h of this.notificationHandlers) {
+      try {
+        h(server, method, params);
+      } catch {
+ /* a broken listener must not break the others */
+      }
+    }
+  };
+
  /**
  * @param configs Either the legacy `Record<string, McpServerConfig>` map
  * (all entries treated as stdio) or the richer
@@ -414,6 +436,31 @@ export class McpManager {
     };
   }
 
+ /** Register a handler fired for any server notification the client does not
+  * act on internally (anything other than the list_changed refreshes).
+  * Used by the opt-in inbound channel to turn an allowlisted notification into
+  * a session message. Returns an unregister fn; the consumer MUST call it on
+  * dispose for a shared manager. */
+  setNotificationHandler(
+    h: ((server: string, method: string, params: unknown) => void) | null,
+  ): () => void {
+    if (!h) return () => {};
+    this.notificationHandlers.add(h);
+    for (const c of this.clients.values()) this.wireNotification(c);
+    return () => {
+      this.notificationHandlers.delete(h);
+      if (this.notificationHandlers.size === 0) {
+        for (const c of this.clients.values()) {
+          try {
+            c.setNotificationHandler?.(null);
+          } catch {
+ /* ignore */
+          }
+        }
+      }
+    };
+  }
+
  /** Internal: ensure newly-built clients inherit the fan-out dispatcher when
   * at least one handler is registered. */
   private wireHandler(c: McpClient): void {
@@ -425,6 +472,7 @@ export class McpManager {
       }
     }
     this.wireToolsChanged(c);
+    this.wireNotification(c);
   }
 
  /** Internal: route a client's tool-list-change notifications through our
@@ -433,6 +481,18 @@ export class McpManager {
     if (this.toolsChangedHandlers.size > 0) {
       try {
         c.setToolsChangedHandler?.(this.toolsChangedDispatch);
+      } catch {
+ /* ignore */
+      }
+    }
+  }
+
+ /** Internal: route a client's non-internal notifications through our fan-out
+  * when at least one notification handler is registered. Idempotent. */
+  private wireNotification(c: McpClient): void {
+    if (this.notificationHandlers.size > 0) {
+      try {
+        c.setNotificationHandler?.(this.notificationDispatch);
       } catch {
  /* ignore */
       }

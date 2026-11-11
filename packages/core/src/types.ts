@@ -847,6 +847,16 @@ export interface CodepilotConfig {
   * a server whose name is not listed is refused start and a note is logged.
   * Intended for a managed layer to pin which MCP servers may run. */
   mcpAllowedServers?: string[];
+ /** Opt-in inbound channels: deliver allowlisted MCP server notifications into
+  * the session as a synthesized user message. Default off (omitted). A narrow,
+  * auditable relay, not a general permission bridge. */
+  inboundChannels?: {
+    /** Master switch. Default false → no inbound delivery. */
+    enabled?: boolean;
+    /** Allowlist entries match a notification by `server:method`, bare `method`,
+     * or bare `server`. Empty/omitted with `enabled` relays nothing. */
+    allow?: string[];
+  };
  /** Language-server configs for the `lsp_navigate` tool. Omit to use the
  * built-in TypeScript/JavaScript default. */
   lsp?: { servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }> };
