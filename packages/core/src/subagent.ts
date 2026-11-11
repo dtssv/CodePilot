@@ -18,7 +18,7 @@ import { buildSystemPrompt } from "./systemPrompt.js";
 import { readMemory, summariseMemory } from "./memory.js";
 import { resolveSandbox, cloneSandbox, addWritableRoot } from "./sandbox.js";
 import type { SubagentRunner } from "./tools/task.js";
-import { createWorktree, removeWorktree, worktreeDiffStat } from "./worktree.js";
+import { createWorktree, removeWorktree, worktreeDiffStat, attachWorktree } from "./worktree.js";
 import { projectStatePath } from "./projectState.js";
 import { SubagentStore } from "./subagentStore.js";
 
@@ -233,40 +233,90 @@ export function createSubagentRunner(
       // undefined unless a worktree is actually created.
       let worktreeSandbox: import("./sandbox.js").ResolvedSandbox | undefined;
       let worktreeDeliveryRoots: string[] | undefined;
+      // Durable transcript store: persists this sub-agent's replayable events
+      // (so it can be CONTINUED) and a small meta sidecar (e.g. which worktree it
+      // ran in, so a continue re-attaches to that checkout).
+      const stateDir = opts.projectStateDir?.();
+      const store = stateDir ? new SubagentStore(stateDir) : null;
+      // A worktree we re-attached to on a continue; its working tree must NOT be
+      // torn down in the finally block (we want to continue in it again).
+      let reusedWorktree = false;
       if (isolation === "worktree") {
-        const wt = await createWorktree({
-          cwd,
-          label: custom?.name ?? agentType ?? "subagent",
-        });
-        if (wt.ok) {
-          worktreeHandle = wt.worktree;
-          effectiveCwd = wt.worktree.path;
-          const reanchored = resolveWorktreeRoots({
-            worktreePath: effectiveCwd,
-            baseSandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, cwd),
-            parentDeliveryRoots: opts.getDeliveryRoots?.() ?? [],
+        // On a continue, try to re-attach to the sub-agent's prior worktree so it
+        // resumes on its own branch (with earlier commits) rather than branching
+        // from a fresh HEAD. Falls through to a fresh worktree if unavailable.
+        let reattached = false;
+        if (isResume && store) {
+          const meta = await store.loadMeta(subagentOwnerId);
+          if (meta.worktree) {
+            const att = await attachWorktree(meta.worktree);
+            if (att.ok) {
+              worktreeHandle = att.worktree;
+              effectiveCwd = att.worktree.path;
+              reusedWorktree = att.reused;
+              reattached = true;
+              const reanchored = resolveWorktreeRoots({
+                worktreePath: effectiveCwd,
+                baseSandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, cwd),
+                parentDeliveryRoots: opts.getDeliveryRoots?.() ?? [],
+              });
+              worktreeSandbox = reanchored.sandbox;
+              worktreeDeliveryRoots = reanchored.deliveryRoots;
+              isolationNote =
+                `\n\n[worktree isolation] You are continuing in your prior git worktree.\n` +
+                `  path: ${att.worktree.path}\n  branch: ${att.worktree.branch}\n` +
+                `  base: ${att.worktree.baseRef}\n` +
+                `Your earlier changes on this branch are present. Edits land in this isolated ` +
+                `checkout and do NOT affect the parent's working tree.`;
+            }
+          }
+        }
+        if (!reattached) {
+          const wt = await createWorktree({
+            cwd,
+            label: custom?.name ?? agentType ?? "subagent",
           });
-          worktreeSandbox = reanchored.sandbox;
-          worktreeDeliveryRoots = reanchored.deliveryRoots;
-          isolationNote =
-            `\n\n[worktree isolation] You are running in a linked git worktree.\n` +
-            `  path: ${wt.worktree.path}\n  branch: ${wt.worktree.branch}\n` +
-            `  base: ${wt.worktree.baseRef}\n` +
-            `Your edits land in this isolated checkout and do NOT affect the parent's working tree. ` +
-            `The worktree is removed automatically when you finish; if you produce commits the branch is kept for the parent to merge.`;
-        } else {
+          if (wt.ok) {
+            worktreeHandle = wt.worktree;
+            effectiveCwd = wt.worktree.path;
+            const reanchored = resolveWorktreeRoots({
+              worktreePath: effectiveCwd,
+              baseSandbox: opts.getSandbox?.() ?? resolveSandbox(opts.config.sandbox, cwd),
+              parentDeliveryRoots: opts.getDeliveryRoots?.() ?? [],
+            });
+            worktreeSandbox = reanchored.sandbox;
+            worktreeDeliveryRoots = reanchored.deliveryRoots;
+            isolationNote =
+              `\n\n[worktree isolation] You are running in a linked git worktree.\n` +
+              `  path: ${wt.worktree.path}\n  branch: ${wt.worktree.branch}\n` +
+              `  base: ${wt.worktree.baseRef}\n` +
+              `Your edits land in this isolated checkout and do NOT affect the parent's working tree. ` +
+              `The worktree is removed automatically when you finish; if you produce commits the branch is kept for the parent to merge.`;
+          } else {
  // Fall back to the parent cwd. Surface the reason prominently in
  // both the sub-agent's prompt and (later) its conclusion, because a
  // parallel fan-out that each asked for worktree isolation and
  // silently got none can have two workers writing the SAME files in
  // the parent tree — clobbering each other with no record.
-          isolationFellBack = true;
-          isolationNote =
-            `\n\n⚠️ [worktree isolation UNAVAILABLE] requested isolation could not be set up ` +
-            `(${wt.reason} — ${wt.message}). You are running directly in the parent's working ` +
-            `tree (${cwd}). If other sub-agents are running in parallel, DO NOT assume your ` +
-            `file writes are isolated — coordinate or avoid editing the same files, and report ` +
-            `exactly which files you changed in your conclusion.`;
+            isolationFellBack = true;
+            isolationNote =
+              `\n\n⚠️ [worktree isolation UNAVAILABLE] requested isolation could not be set up ` +
+              `(${wt.reason} — ${wt.message}). You are running directly in the parent's working ` +
+              `tree (${cwd}). If other sub-agents are running in parallel, DO NOT assume your ` +
+              `file writes are isolated — coordinate or avoid editing the same files, and report ` +
+              `exactly which files you changed in your conclusion.`;
+          }
+        }
+        // Record the worktree so a later continue can re-attach to it.
+        if (worktreeHandle && store) {
+          await store.saveMeta(subagentOwnerId, {
+            worktree: {
+              path: worktreeHandle.path,
+              branch: worktreeHandle.branch,
+              baseRef: worktreeHandle.baseRef,
+              repoRoot: worktreeHandle.repoRoot,
+            },
+          });
         }
       }
 
@@ -361,12 +411,6 @@ export function createSubagentRunner(
         provider: opts.config.provider ?? "anthropic",
         mode: "agent",
       });
-
-      // Durable transcript store: persists this sub-agent's replayable events
-      // so it can be CONTINUED later (parent passes its id as
-      // continue_session_id) and so an interrupted in-flight run survives.
-      const stateDir = opts.projectStateDir?.();
-      const store = stateDir ? new SubagentStore(stateDir) : null;
 
       // Load a prior transcript when continuing an existing sub-agent.
       const priorEvents: Event[] = isResume && store ? await store.load(subagentOwnerId) : [];
@@ -640,7 +684,7 @@ export function createSubagentRunner(
  // already appended to the conclusion above, so the parent has a
  // record of what changed. We keep the branch only if the sub-agent
  // produced commits — detected by comparing HEAD vs the base ref.
-        if (worktreeHandle) {
+        if (worktreeHandle && !reusedWorktree) {
           let keepBranch = false;
           try {
             const { execFile } = await import("node:child_process");

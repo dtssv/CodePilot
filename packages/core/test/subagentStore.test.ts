@@ -77,4 +77,27 @@ describe("SubagentStore", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("persists and merges worktree meta for a continue to re-attach", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sas-"));
+    try {
+      const store = new SubagentStore(dir);
+      expect(await store.loadMeta("sub_w")).toEqual({});
+      await store.saveMeta("sub_w", {
+        worktree: { path: "/tmp/wt", branch: "cp-x-1", baseRef: "HEAD", repoRoot: "/repo" },
+      });
+      const meta = await store.loadMeta("sub_w");
+      expect(meta.worktree?.path).toBe("/tmp/wt");
+      expect(meta.worktree?.branch).toBe("cp-x-1");
+      // A second save merges over the prior (last writer wins per key).
+      await store.saveMeta("sub_w", {
+        worktree: { path: "/tmp/wt2", branch: "cp-x-1", baseRef: "HEAD", repoRoot: "/repo" },
+      });
+      expect((await store.loadMeta("sub_w")).worktree?.path).toBe("/tmp/wt2");
+      // Meta is separate from the transcript.
+      expect(await store.load("sub_w")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

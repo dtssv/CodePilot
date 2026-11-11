@@ -9,6 +9,7 @@ import {
   removeWorktree,
   resolveRepoRoot,
   worktreeDiffStat,
+  attachWorktree,
   isGitAvailable,
 } from "../src/worktree.js";
 
@@ -213,5 +214,75 @@ describe("isolation: parallel worktrees don't collide", () => {
     expect(existsSync(join(b.worktree.path, "only-a.txt"))).toBe(false);
     await removeWorktree(a.worktree);
     await removeWorktree(b.worktree);
+  });
+});
+
+describe("attachWorktree (continue re-attaches to a prior worktree)", () => {
+  beforeEach(() => initRepo(repo));
+
+  it("reuses the existing checkout in place when it is still live", async () => {
+    const created = await createWorktree({ cwd: repo, label: "resume" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const wt = created.worktree;
+    writeFileSync(join(wt.path, "work.txt"), "in-progress\n");
+
+    const att = await attachWorktree({
+      path: wt.path,
+      branch: wt.branch,
+      baseRef: wt.baseRef,
+      repoRoot: wt.repoRoot,
+    });
+    expect(att.ok).toBe(true);
+    if (!att.ok) return;
+    // Same path, reused in place — the in-progress file is still there.
+    expect(att.reused).toBe(true);
+    expect(real(att.worktree.path)).toBe(real(wt.path));
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(att.worktree.path, "work.txt"))).toBe(true);
+    await removeWorktree(att.worktree);
+  });
+
+  it("re-creates from the branch when the checkout is gone but the branch remains", async () => {
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+    const created = await createWorktree({ cwd: repo, label: "resume2" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const wt = created.worktree;
+    // Commit on the branch so there is work to carry over, then remove the
+    // checkout while KEEPING the branch (mirrors the normal end-of-run cleanup).
+    writeFileSync(join(wt.path, "kept.txt"), "committed\n");
+    const git = (args: string[], cwd: string) =>
+      execFileSync("git", args, { cwd, env, stdio: ["ignore", "ignore", "ignore"] });
+    git(["add", "kept.txt"], wt.path);
+    git(["commit", "-q", "-m", "progress"], wt.path);
+    await removeWorktree(wt, { keepBranch: true });
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(wt.path)).toBe(false);
+
+    const att = await attachWorktree({
+      path: wt.path,
+      branch: wt.branch,
+      baseRef: wt.baseRef,
+      repoRoot: wt.repoRoot,
+    });
+    expect(att.ok).toBe(true);
+    if (!att.ok) return;
+    // A fresh checkout at a new path, but on the SAME branch — the committed
+    // file carries over.
+    expect(att.reused).toBe(false);
+    expect(att.worktree.branch).toBe(wt.branch);
+    expect(existsSync(join(att.worktree.path, "kept.txt"))).toBe(true);
+    await removeWorktree(att.worktree);
+  });
+
+  it("fails cleanly when neither the checkout nor the branch exist", async () => {
+    const att = await attachWorktree({
+      path: join(tmp, "gone"),
+      branch: "cp-never-existed-xyz",
+      baseRef: "main",
+      repoRoot: repo,
+    });
+    expect(att.ok).toBe(false);
   });
 });

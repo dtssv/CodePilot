@@ -116,4 +116,47 @@ export class SubagentStore {
     const events = await this.load(sessionId);
     return events.length > 0;
   }
+
+  /** Path to the small JSON sidecar holding non-event metadata (e.g. the
+   * worktree a sub-agent ran in, so a continue can re-attach to it). */
+  private metaPathFor(sessionId: string): string {
+    return join(this.dir, `${safeStem(sessionId)}.meta.json`);
+  }
+
+  /** Persist this sub-agent's metadata (merged over any existing). Best-effort:
+   * a failure just means a continue can't re-attach to the prior worktree. */
+  async saveMeta(sessionId: string, meta: SubagentMeta): Promise<void> {
+    const file = this.metaPathFor(sessionId);
+    try {
+      const prev = await this.loadMeta(sessionId);
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, JSON.stringify({ ...prev, ...meta }, null, 2), "utf-8");
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Load this sub-agent's metadata, or {} when absent/unreadable. */
+  async loadMeta(sessionId: string): Promise<SubagentMeta> {
+    try {
+      const raw = await readFile(this.metaPathFor(sessionId), "utf-8");
+      const parsed = JSON.parse(raw) as SubagentMeta;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+}
+
+/** Non-event metadata persisted alongside a sub-agent's transcript. */
+export interface SubagentMeta {
+  /** The git worktree this sub-agent ran in, so a continue can re-attach to the
+   * same checkout (or re-create from the same branch) instead of branching from
+   * a fresh HEAD. */
+  worktree?: {
+    path: string;
+    branch: string;
+    baseRef: string;
+    repoRoot: string;
+  };
 }

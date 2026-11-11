@@ -155,6 +155,73 @@ export async function createWorktree(
   };
 }
 
+/** Re-attach to a sub-agent's prior worktree on a continue, so it resumes on
+ * its own branch (with its earlier commits) instead of branching from a fresh
+ * HEAD. Resolution order:
+ *  1. If the recorded path still exists AND is a live worktree checked out on
+ *     the recorded branch → reuse it in place.
+ *  2. Else, if the branch still exists → add a fresh worktree checked out on
+ *     that existing branch (so prior commits carry over).
+ *  3. Else → not reusable; the caller creates a brand-new worktree.
+ * Fail-soft: any git error yields { ok: false } and the caller recreates. */
+export async function attachWorktree(prior: {
+  path: string;
+  branch: string;
+  baseRef: string;
+  repoRoot: string;
+}): Promise<{ ok: true; worktree: WorktreeHandle; reused: boolean } | { ok: false; message: string }> {
+  const repoRoot = (await resolveRepoRoot(prior.repoRoot)) ?? prior.repoRoot;
+  // 1. Reuse the existing checkout if it is still a live worktree on the branch.
+  if (existsSync(prior.path)) {
+    try {
+      const { stdout } = await execFileP(
+        "git",
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        { cwd: prior.path, timeout: GIT_TIMEOUT_MS }
+      );
+      if (stdout.trim() === prior.branch) {
+        return {
+          ok: true,
+          reused: true,
+          worktree: { path: prior.path, branch: prior.branch, baseRef: prior.baseRef, repoRoot },
+        };
+      }
+    } catch {
+      /* not a live worktree; fall through to re-create from the branch */
+    }
+  }
+  // 2. Re-create a worktree checked out on the existing branch.
+  const branchExists = await execFileP(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `refs/heads/${prior.branch}`],
+    { cwd: repoRoot, timeout: GIT_TIMEOUT_MS }
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (!branchExists) {
+    return { ok: false, message: `prior branch ${prior.branch} no longer exists` };
+  }
+  const parent = mkdtempSync(join(tmpdir(), "cp-worktree-"));
+  const worktreePath = join(parent, prior.branch);
+  try {
+    // `git worktree add <path> <branch>` checks out the EXISTING branch (no -b),
+    // so the sub-agent's prior commits come back.
+    await execFileP(
+      "git",
+      ["worktree", "add", worktreePath, prior.branch],
+      { cwd: repoRoot, timeout: GIT_TIMEOUT_MS }
+    );
+  } catch (err) {
+    try { rmSync(parent, { recursive: true, force: true }); } catch { /* ignore */ }
+    return { ok: false, message: `git worktree add (reattach) failed: ${(err as Error).message}` };
+  }
+  return {
+    ok: true,
+    reused: false,
+    worktree: { path: worktreePath, branch: prior.branch, baseRef: prior.baseRef, repoRoot },
+  };
+}
+
 /** Remove a worktree and delete its branch. By default this is a forced
  * removal (`--force`) so a sub-agent's uncommitted changes don't block
  * cleanup — the whole point of isolation is that we throw the experiment
