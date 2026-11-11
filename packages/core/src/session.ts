@@ -351,6 +351,15 @@ export class Session {
   private contextChangedForNextTurn = false;
   /** Latest single-request provider `input` tokens (not cumulative). */
   private lastProviderInputTokens = 0;
+  /** Measured context anchor for the hybrid context estimate: the provider's
+   * last reported prompt size paired with the event-log length at that moment.
+   * `contextReport` reads `anchor.input` as ground truth and adds a heuristic
+   * estimate for only the events appended after the anchor, so a large
+   * tool_result landing after the last usage event is reflected immediately
+   * instead of waiting for the next response. Cleared on a model switch and at
+   * a compaction boundary (both re-bill the whole prompt, so the old
+   * measurement no longer anchors anything). */
+  private contextAnchor: { input: number; eventCount: number } | null = null;
  /** Set when the session was loaded with a stale in-flight status (the prior
  * run was interrupted by a crash/restart). Drives a one-shot recovery
  * instruction in the system prompt so the next turn resumes from the
@@ -1034,6 +1043,10 @@ export class Session {
             e.usage.input > 0
           ) {
             this.lastProviderInputTokens = e.usage.input;
+            // Anchor the hybrid context estimate to this measurement: the
+            // provider tokenised everything in the log up to now, so the event
+            // count here is the boundary past which later events are estimated.
+            this.contextAnchor = { input: e.usage.input, eventCount: this.events.length };
           }
  // plan_done approval: leave plan mode. Land in `agent` so the
  // approved plan can be executed — UNLESS the user entered plan mode
@@ -1424,6 +1437,10 @@ export class Session {
     this.model = applied.model;
     this.config = applied.config;
     if (applied.providerId) this.activeProviderId = applied.providerId;
+    // A different model re-bills the whole prompt under its own tokeniser, so
+    // the previous measurement no longer anchors the estimate.
+    this.lastProviderInputTokens = 0;
+    this.contextAnchor = null;
     this.applyHighRiskModelGate();
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
@@ -1477,6 +1494,10 @@ export class Session {
     this.config = config;
     this.model = model;
     this.activeProviderId = providerId;
+    // The endpoint/model changed → the prior provider measurement no longer
+    // anchors the estimate.
+    this.lastProviderInputTokens = 0;
+    this.contextAnchor = null;
     this.applyHighRiskModelGate();
     await this.rebuildSystemPrompt();
     await this.emitModelEvent();
@@ -1595,6 +1616,28 @@ export class Session {
   }
 
  // ---- Context visualization (/context) ----
+
+  /**
+   * Hybrid estimate of the tokens the NEXT send will cost. Prefers the
+   * provider's last measured prompt size as an anchor and adds a heuristic
+   * estimate for only the events appended after that measurement, so a large
+   * tool_result produced this turn (before the next response) is reflected
+   * immediately. With no anchor (before the first response, or just after a
+   * model switch / compaction) `fallback` stands in. Shared by `contextReport`
+   * (gauge) and `ensureContextUnderWindow` (compaction precheck) so both read
+   * the same number.
+   */
+  private effectiveContextTokens(fallback: number): number {
+    const anchor = this.contextAnchor;
+    if (anchor && anchor.input > 0) {
+      const trailing = this.events.slice(anchor.eventCount);
+      const trailingTokens =
+        trailing.length > 0 ? estimateEventTokens(trailing, estimateTokens) : 0;
+      return anchor.input + trailingTokens;
+    }
+    const providerInputTokens = Math.max(0, this.lastProviderInputTokens);
+    return providerInputTokens > 0 ? providerInputTokens : fallback;
+  }
 
  /**
  * Produce a structured breakdown of the session's context usage for the
@@ -1732,12 +1775,12 @@ export class Session {
     // percentage is driven by this grand total — the plain event-log `total`
     // understates real usage by that fixed cost.
     const sentTokens = total + systemTokens + skillsTokens + toolTokens + mcpTokens;
-    // Prefer the provider's own last reported prompt size as ground truth when
-    // we have it; it already accounts for everything the provider actually
-    // tokenised. Before the first response (or on a fresh resume) it is 0 and
-    // the estimate stands in.
+    // Hybrid estimate shared with the compaction precheck: measured anchor plus
+    // an estimate for only the events appended after it (so a large tool_result
+    // produced this turn is reflected immediately), falling back to the full
+    // `sentTokens` estimate when there is no anchor.
     const providerInputTokens = Math.max(0, this.lastProviderInputTokens);
-    const effectiveTotal = providerInputTokens > 0 ? providerInputTokens : sentTokens;
+    const effectiveTotal = this.effectiveContextTokens(sentTokens);
     return {
       // Kept for back-compat: the event-log-only total some callers rely on.
       totalTokens: total,
@@ -3626,11 +3669,17 @@ export class Session {
           e.usage.input > 0
         ) {
           this.lastProviderInputTokens = e.usage.input;
+          this.contextAnchor = { input: e.usage.input, eventCount: i + 1 };
           break;
         }
       }
     }
-    if (this.lastProviderInputTokens >= Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO)) {
+    // Use the hybrid estimate so events appended after the last measurement
+    // (e.g. a large tool_result produced this turn) count toward the trigger —
+    // otherwise a single oversize result could blow the window before the next
+    // measured response ever updates the anchor.
+    const effective = this.effectiveContextTokens(this.lastProviderInputTokens);
+    if (effective >= Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO)) {
       await this.maybeCompact({ force: true });
     }
   }
@@ -3866,6 +3915,10 @@ export class Session {
     this.contextChangedForNextTurn = true;
     // Local estimate no longer reflects the last oversize API call.
     if (force) this.lastProviderInputTokens = 0;
+    // The prompt prefix changed, so the measured anchor is stale: the next send
+    // re-bills a different prompt. Drop it so the estimate rebuilds from the
+    // post-compaction event log.
+    this.contextAnchor = null;
     // Which events in the model-facing result are genuinely NEW (and so must be
     // appended), versus turns already in the append-only log.
     //
@@ -4217,6 +4270,7 @@ export class Session {
 
     this.events = next;
     this.lastProviderInputTokens = 0;
+    this.contextAnchor = null;
     for (const e of next) {
       if (this.persisted.includes(e)) continue;
       await this.persistEvent(e).catch(() => undefined);

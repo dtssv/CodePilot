@@ -98,3 +98,124 @@ describe("Session.contextReport", () => {
     );
   });
 });
+
+describe("Session.contextReport hybrid estimate", () => {
+  let dir: string;
+  let session: Session;
+
+  afterEach(async () => {
+    await session?.dispose().catch(() => undefined);
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("adds a trailing estimate for events appended after the measured anchor", async () => {
+    dir = mkdtempSync(join(tmpdir(), "ctxh-"));
+    // Turn 1 anchors the estimate at a measured 10,000 input tokens. Turn 2
+    // emits a large assistant reply but NO usage event — so the anchor stays at
+    // 10,000 while turn 2's messages are trailing. The gauge must reflect the
+    // trailing cost immediately instead of waiting for the next measurement.
+    const bigReply = "lorem ipsum ".repeat(1500); // ~4.5k tokens of trailing text
+    let turn = 0;
+    const provider: ChatProvider = {
+      name: "mock",
+      defaultModel: "mock-model",
+      smallModel: "mock-model",
+      async *stream(): AsyncIterable<StreamEvent> {
+        turn += 1;
+        if (turn === 1) {
+          yield { kind: "text_delta", messageId: "m1", text: "ok" };
+          yield { kind: "usage", usage: { input: 10_000, output: 5 } };
+          yield { kind: "done", finishReason: "stop" };
+        } else {
+          // No usage event → the anchor is not refreshed; this reply trails it.
+          yield { kind: "text_delta", messageId: "m2", text: bigReply };
+          yield { kind: "done", finishReason: "stop" };
+        }
+      },
+    };
+    session = new Session(`ctxh_${Date.now()}`, {
+      cwd: dir,
+      config: {
+        provider: "openai",
+        model: "mock-model",
+        apiKey: "x",
+        permissionMode: "yolo",
+        sandbox: { mode: "off" },
+        autoCompact: false,
+        maxRetries: 0,
+        stopVerify: "off",
+        contextWindow: 40_000,
+      },
+      model: "mock-model",
+      provider,
+      pluginRuntimes: false,
+    });
+    await session.init();
+    await session.setTitle("ctxh");
+
+    await session.prompt("hi");
+    const afterAnchor = session.contextReport();
+    // Right after the measured turn the effective total equals the anchor.
+    expect(afterAnchor.providerInputTokens).toBe(10_000);
+    const anchorPercent = afterAnchor.usagePercent;
+
+    await session.prompt("say a lot");
+    const afterTool = session.contextReport();
+    // The anchor is unchanged (no new usage), but the large trailing reply
+    // pushes the effective estimate above the bare 10k anchor and the gauge
+    // percentage up with it.
+    expect(afterTool.providerInputTokens).toBe(10_000);
+    expect(afterTool.usagePercent).toBeGreaterThan(anchorPercent);
+    // Sanity: the effective estimate stays well under a blind full re-estimate
+    // that would also recount the 10k prefix from scratch (it reuses the anchor).
+    expect(afterTool.usagePercent).toBeLessThan(
+      Math.round(((10_000 + afterTool.sentTokens) / 40_000) * 100),
+    );
+  });
+
+  it("clears the anchor on a model switch", async () => {
+    dir = mkdtempSync(join(tmpdir(), "ctxm-"));
+    const provider: ChatProvider = {
+      name: "mock",
+      defaultModel: "mock-model",
+      smallModel: "mock-model",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { kind: "text_delta", messageId: "m1", text: "ok" };
+        yield { kind: "usage", usage: { input: 10_000, output: 5 } };
+        yield { kind: "done", finishReason: "stop" };
+      },
+    };
+    session = new Session(`ctxm_${Date.now()}`, {
+      cwd: dir,
+      config: {
+        provider: "openai",
+        model: "mock-model",
+        apiKey: "x",
+        permissionMode: "yolo",
+        sandbox: { mode: "off" },
+        autoCompact: false,
+        maxRetries: 0,
+        stopVerify: "off",
+        contextWindow: 200_000,
+      },
+      model: "mock-model",
+      provider,
+      pluginRuntimes: false,
+    });
+    await session.init();
+    await session.setTitle("ctxm");
+    await session.prompt("hi");
+    expect(session.contextReport().providerInputTokens).toBe(10_000);
+
+    // A different model re-bills the whole prompt, so the measured anchor must
+    // drop and the estimate fall back to the event-log estimate.
+    await session.setModel("mock-model-2");
+    const after = session.contextReport();
+    expect(after.providerInputTokens).toBe(0);
+    // Effective total now reflects only the transcript estimate, not the old
+    // 10k anchor.
+    expect(after.usagePercent).toBeLessThan(
+      Math.round((10_000 / 200_000) * 100) + 1,
+    );
+  });
+});
