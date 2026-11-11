@@ -32,6 +32,22 @@ export const COMPLETION_MARKERS = [
 
 const DEFAULT_MAX_ROUNDS = 50;
 
+/** Consecutive no-progress rounds after which the loop forces `blocked`. A
+ * round counts as progress when it wrote/edited a file, ran a shell command
+ * that succeeded, advanced a plan step to `completed`, or produced a non-empty
+ * reply. Without this, an agent that keeps thinking but never acts can burn
+ * every round up to the cap. */
+const DEFAULT_MAX_STALLS = 3;
+
+/** Tools whose successful call counts as forward progress in a goal round. */
+const PROGRESS_WRITE_TOOLS = new Set([
+  "write_file",
+  "edit_file",
+  "apply_patch",
+  "notebook_edit",
+]);
+const PROGRESS_SHELL_TOOLS = new Set(["bash", "shell"]);
+
 /** Structured data passed to `onCheckpoint` after each round. */
 export interface GoalCheckpointInfo {
   round: number;
@@ -48,6 +64,10 @@ export interface GoalCheckpointInfo {
  */
 export interface GoalRunOptionsEx extends GoalRunOptions {
   onCheckpoint?: (info: GoalCheckpointInfo) => void | Promise<void>;
+  /** Fired once per no-progress round with the current consecutive-stall count
+   * and the configured limit, so a host can surface "idle" progress. The loop
+   * forces `blocked` when the count reaches the limit. */
+  onStall?: (info: { round: number; stalls: number; limit: number }) => void | Promise<void>;
 }
 
 /**
@@ -109,13 +129,15 @@ export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
  */
 export async function driveGoalRounds(
   session: Session,
-  opts: Pick<GoalRunOptionsEx, "objective" | "maxRounds" | "onRound" | "onCheckpoint">
+  opts: Pick<GoalRunOptionsEx, "objective" | "maxRounds" | "maxStalls" | "onRound" | "onCheckpoint" | "onStall">
 ): Promise<GoalRunResult> {
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const maxStalls = opts.maxStalls ?? DEFAULT_MAX_STALLS;
   let round = 0;
   let status: "completed" | "blocked" | "round_limit" = "round_limit";
   let reason: string | undefined;
   let blockedReason: string | undefined;
+  let stalls = 0;
   const sessionId = session.id;
   const cwd = session.cwd;
   const checkpoint = checkpointPath(cwd, sessionId);
@@ -160,6 +182,10 @@ export async function driveGoalRounds(
   for (round = 1; round <= maxRounds; round++) {
     opts.onRound?.(round, "running");
     await fireCheckpoint(round, "running");
+    // Watermark the transcript so we can judge THIS round's progress from only
+    // the events it appends (writes, successful shell, plan advancement).
+    const beforeCount = session.getEvents().length;
+    const completedBefore = completedStepCount(session.getEvents());
     const userText = renderRoundPrompt(round, opts.objective, hasSpec);
     const delivery = await session.prompt(userText);
     // When the session was busy (e.g. a goal loop was escalated from a still-
@@ -174,9 +200,9 @@ export async function driveGoalRounds(
     }
 
     const events = session.getEvents();
+    const roundEvents = events.slice(beforeCount);
     const lastAssistant = lastAssistantText(events);
-    if (!lastAssistant) continue;
-    const found = scanForStatus(lastAssistant);
+    const found = lastAssistant ? scanForStatus(lastAssistant) : null;
     if (found === "completed") {
       status = "completed";
       reason = extractCompletedReason(lastAssistant) ?? "model reported completed";
@@ -189,6 +215,36 @@ export async function driveGoalRounds(
       reason = blockedReason ?? "model reported blocked";
       await fireCheckpoint(round, "blocked", reason, blockedReason);
       break;
+    }
+
+    // No status marker this round: judge progress. A productive round (a write,
+    // a successful shell command, a plan step advanced, or a non-empty reply)
+    // resets the stall counter; an idle round increments it. After maxStalls
+    // consecutive idle rounds, force `blocked` rather than silently burning the
+    // remaining rounds — the loop is making no headway on its own.
+    if (maxStalls > 0) {
+      if (roundMadeProgress(roundEvents, completedBefore)) {
+        stalls = 0;
+      } else {
+        stalls++;
+        if (opts.onStall) {
+          try {
+            await opts.onStall({ round, stalls, limit: maxStalls });
+          } catch {
+            /* listener errors are not fatal */
+          }
+        }
+        if (stalls >= maxStalls) {
+          status = "blocked";
+          blockedReason =
+            `no observable progress for ${stalls} consecutive rounds ` +
+            `(no file writes, successful shell, or plan advancement) — stopping ` +
+            `rather than burning the remaining rounds`;
+          reason = blockedReason;
+          await fireCheckpoint(round, "blocked", reason, blockedReason);
+          break;
+        }
+      }
     }
   }
 
@@ -227,8 +283,48 @@ ${body}
 Resume where you left off. If the previous turn ended without a status marker, it means there is still work to do.`;
 }
 
-function lastAssistantText(events: Event[]): string {
+/**
+ * Did this round make observable progress? True when, among the events the
+ * round appended, there was a successful write/edit tool call, a successful
+ * shell command, or the plan's completed-step count rose above
+ * `completedBefore`. A round that only produced text (narration, re-planning
+ * chatter) with no acted change, or an empty reply, is NOT progress — an agent
+ * can narrate indefinitely without advancing. Tool progress is judged by the
+ * `tool_result` (so a call that errored does not count), paired with its
+ * `tool_call` for the tool name.
+ */
+function roundMadeProgress(roundEvents: Event[], completedBefore: number): boolean {
+  const callNames = new Map<string, string>();
+  let maxCompleted = completedBefore;
+  for (const e of roundEvents) {
+    if (e.type === "tool_call") {
+      callNames.set(e.id, e.name);
+    } else if (e.type === "tool_result") {
+      if (e.isError) continue;
+      const name = e.name ?? callNames.get(e.toolCallId) ?? "";
+      if (PROGRESS_WRITE_TOOLS.has(name) || PROGRESS_SHELL_TOOLS.has(name)) {
+        return true;
+      }
+    } else if (e.type === "plan") {
+      const completed = e.steps.filter((s) => s.status === "completed").length;
+      if (completed > maxCompleted) maxCompleted = completed;
+    }
+  }
+  return maxCompleted > completedBefore;
+}
+
+/** Completed-step count of the most recent `plan` event, or 0 when none. */
+function completedStepCount(events: Event[]): number {
   for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.type === "plan") {
+      return e.steps.filter((s) => s.status === "completed").length;
+    }
+  }
+  return 0;
+}
+
+function lastAssistantText(events: Event[]): string {  for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
     if (e.type === "message" && e.role === "assistant") {
       return e.content

@@ -5,7 +5,7 @@
  * Subcommands:
  * codepilot serve — run the JSON-RPC server over stdio.
  * codepilot run "<task>" [--flags] — one-shot, non-interactive execution.
- * codepilot goal "<objective>" [--max-rounds N] — long-horizon goal loop.
+ * codepilot goal "<objective>" [--max-rounds N] [--max-stalls N] — long-horizon goal loop.
  * codepilot agent [dir] — the agent app (web UI in an app window).
  *
  * The CLI talks directly to @codepilot/core (no protocol overhead) for the
@@ -109,7 +109,7 @@ Usage:
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
                        [--yolo] [--permission-mode ask|auto-edit|yolo|auto|dont-ask]
                        [--json] [--quiet]
-  codepilot goal "<objective>" [--max-rounds N]
+  codepilot goal "<objective>" [--max-rounds N] [--max-stalls N]
   codepilot agent [DIR] [--port N] [--no-open]
                                          — the agent app: task-oriented UI for
                                            working in DIR (default: cwd), opened
@@ -858,11 +858,17 @@ function pickDefaultMode(): PermissionMode {
 
 function resolveGoalFlags(
   flags: Record<string, string | boolean>,
-): RunFlags & { maxRounds?: number } {
+): RunFlags & { maxRounds?: number; maxStalls?: number } {
   const base = resolveRunFlags(flags);
   const max = flags["max-rounds"];
   const maxRounds = typeof max === "string" ? Number(max) : undefined;
-  return { ...base, maxRounds: Number.isFinite(maxRounds) ? maxRounds : undefined };
+  const stalls = flags["max-stalls"];
+  const maxStalls = typeof stalls === "string" ? Number(stalls) : undefined;
+  return {
+    ...base,
+    maxRounds: Number.isFinite(maxRounds) ? maxRounds : undefined,
+    maxStalls: Number.isFinite(maxStalls) ? maxStalls : undefined,
+  };
 }
 
 const prettyRenderers = new WeakMap<NodeJS.WriteStream, PrettyRenderer>();
@@ -1161,6 +1167,7 @@ async function cmdGoal(
       config,
       objective,
       maxRounds: opts.maxRounds,
+      maxStalls: opts.maxStalls,
       onRound,
       onPermissionRequest,
     });

@@ -1293,6 +1293,11 @@ export interface GoalRunOptions extends SessionOptions {
   objective: string;
   maxRounds?: number;
   onRound?: (round: number, status: string) => void;
+  /** Force the loop to `blocked` after this many CONSECUTIVE rounds that made
+   * no observable progress (no write/edit, no successful shell, no plan step
+   * advanced, and an empty or marker-less reply). Any round with progress resets
+   * the counter. Default 3; set 0 to disable stall detection. */
+  maxStalls?: number;
 }
 
 export interface GoalRunResult {
