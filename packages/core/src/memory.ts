@@ -2,8 +2,10 @@
 //
 // Project agent memory lives under `~/.codepilot/projects/<hash>/MEMORY.md`
 // (same project-state root as artifacts/scratch) so runs do not pollute the
-// git working tree. Optional shareable `CODEPILOT.md` / `AGENTS.md` in the
-// workspace are still *read* hierarchically for human-authored context.
+// git working tree. Optional shareable instruction files in the workspace
+// (CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md — see
+// MEMORY_CANDIDATE_NAMES) are still *read* hierarchically for human-authored
+// context; the walk stops at the git toplevel by default.
 // User memory is `~/.codepilot/MEMORY.md`.
 //
 // MEMORY.md files are structured documents with four sections:
@@ -20,6 +22,7 @@
 // one, the entry is appended as a titled block under a best-guess section.
 
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { MemorySink, MemoryWriteOpts } from "./tools/memory_write.js";
@@ -31,11 +34,28 @@ import {
   type AutoMemoryConfig,
 } from "./autoMemory.js";
 import { redactSecrets, type RedactionPattern } from "./redact.js";
+import { resolveRepoRoot } from "./worktree.js";
 
 /** Legacy / shareable name still *read* from the workspace tree. */
 export const PROJECT_MEMORY_NAME = "CODEPILOT.md";
 /** Also recognised as project memory (AGENTS.md). */
 export const AGENTS_MEMORY_NAME = "AGENTS.md";
+
+/**
+ * Instruction-file candidates read at each directory level, in precedence
+ * order (first = highest). Override/local variants win over the formal file
+ * of the same family so an uncommitted tweak layers on top of the committed
+ * instructions. Identical content (by trimmed text) is read only once across
+ * the list so a repo that ships the same body under two names is not injected
+ * twice.
+ */
+export const MEMORY_CANDIDATE_NAMES = [
+  PROJECT_MEMORY_NAME,
+  "AGENTS.override.md",
+  AGENTS_MEMORY_NAME,
+  "CLAUDE.local.md",
+  "CLAUDE.md",
+] as const;
 /** Agent-written project memory filename under the project-state root. */
 export const PROJECT_STATE_MEMORY_NAME = "MEMORY.md";
 export const USER_MEMORY_PATH = join(homedir(), ".codepilot", "MEMORY.md");
@@ -92,39 +112,60 @@ export async function readMemory(cwd: string): Promise<MemoryContents> {
 }
 
 /**
- * Hierarchical project memory: walk from `cwd` up to
- * the user's home directory (inclusive) collecting `CODEPILOT.md` and
- * `AGENTS.md` at each level. Nearer directories take precedence — their
- * content is listed first. The combined markdown annotates each layer with
- * its source path so the model can cite (and update) the right file.
+ * Hierarchical project memory: walk from `cwd` upward collecting instruction
+ * files ({@link MEMORY_CANDIDATE_NAMES}) at each level. Nearer directories take
+ * precedence — their content is listed first. The combined markdown annotates
+ * each layer with its source path so the model can cite (and update) the right
+ * file.
  *
- * Reads stop at the home directory to avoid picking up unrelated memories
- * from parent folders above the user's project space.
+ * The walk stops at the git toplevel for `cwd` (or the cwd itself when not in a
+ * repo) so repo-external parent conventions are not pulled in. Pass
+ * `walkToHome: true` to instead walk up to the user's home directory.
  *
- * `@import` expansion: each layer's content is scanned for `@path` tokens
- *. Imported files are expanded inline, relative to the
- * importing file's directory. Imports chain up to a max depth of 4 hops.
- * The first external import in a project triggers no approval here (the
- * config file is already trusted); approval is the host UI's concern.
+ * At each directory the candidate names are tried in precedence order and the
+ * first non-empty, not-yet-seen content wins; override/local variants therefore
+ * shadow the formal file of the same family, and identical content shared across
+ * names is injected only once.
+ *
+ * `@import` expansion: each layer's content is scanned for `@path` tokens.
+ * Imported files are expanded inline, relative to the importing file's
+ * directory. Imports chain up to a max depth of 4 hops.
  */
-export async function readLayeredProjectMemory(cwd: string): Promise<string | undefined> {
+export async function readLayeredProjectMemory(
+  cwd: string,
+  opts?: { walkToHome?: boolean },
+): Promise<string | undefined> {
   const layers: string[] = [];
   const home = homedir();
-  let dir = resolve(cwd);
+  let start = resolve(cwd);
+  try {
+    // Match git's `--show-toplevel`, which reports the canonical (real) path;
+    // without this the ceiling comparison fails under symlinked temp roots.
+    start = realpathSync(start);
+  } catch {
+    /* cwd may not exist yet — fall back to the resolved path */
+  }
+  const ceiling = opts?.walkToHome ? home : (await resolveRepoRoot(start)) ?? start;
+  // Content already injected (trimmed) — dedup across names and levels.
+  const seen = new Set<string>();
+  let dir = start;
   for (let depth = 0; depth < 32; depth++) {
-    for (const name of [PROJECT_MEMORY_NAME, AGENTS_MEMORY_NAME]) {
+    for (const name of MEMORY_CANDIDATE_NAMES) {
       try {
         const content = await readFile(join(dir, name), "utf-8");
-        if (content.trim().length > 0) {
- // Expand @import tokens (relative to this file's directory).
-          const expanded = await expandImports(content, dir, 0);
-          layers.push(`<!-- from ${join(dir, name)} -->\n${expanded.trim()}`);
-        }
+        const trimmed = content.trim();
+        if (trimmed.length === 0 || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        // Expand @import tokens (relative to this file's directory).
+        const expanded = await expandImports(content, dir, 0);
+        layers.push(`<!-- from ${join(dir, name)} -->\n${expanded.trim()}`);
       } catch {
- /* missing at this level */
+        /* missing at this level */
       }
     }
-    if (dir === home) break;
+    // Stop once we have processed the ceiling directory (git toplevel, or
+    // home when walkToHome). Below the ceiling we always continue upward.
+    if (dir === ceiling || dir === home) break;
     const parent = resolve(dir, "..");
     if (parent === dir) break;
     dir = parent;

@@ -196,6 +196,13 @@ const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
  * how large the output reserve pushes the compaction trigger down. */
 const CHECKPOINT_BELOW_COMPACTION_RATIO = 0.9;
 
+/** A queued mid-run steering message. See `steeringQueue`. */
+interface SteeringItem {
+  source: "user" | "system";
+  text: string;
+  delivery: "steer" | "followup";
+}
+
 export class Session {
   readonly id: string;
   readonly cwd: string;
@@ -255,8 +262,19 @@ export class Session {
   * `user` items are genuine human input and enter the transcript as user
   * messages. `system` items are engine-generated notices (e.g. background
   * job completion) and are injected into the per-turn runtime_context so
-  * they can never be mistaken for — or spoof — a user message. */
-  private steeringQueue: Array<{ source: "user" | "system"; text: string }> = [];
+  * they can never be mistaken for — or spoof — a user message.
+  *
+  * `delivery` controls when a `user` item is consumed:
+  *  - `"steer"`: the model should see it as soon as possible — at the next
+  *    injection boundary within the current logical turn (mid-stream before
+  *    any tool call, or right after a tool batch).
+  *  - `"followup"`: it waits for the next top-level user turn.
+  * `system` notices are always `"steer"`. */
+  private steeringQueue: SteeringItem[] = [];
+ /** Aborts only the in-flight provider SSE so a mid-stream steer can be
+  * injected without cancelling the whole run. Distinct from
+  * `cancelController` (user Stop), so a steer never marks the run cancelled. */
+  private steerController: AbortController | null = null;
  /** Prompts waiting to run after the current busy `prompt()` finishes. */
   private followUpQueue: FollowUpItem[] = [];
  /** Prevents overlapping drainFollowUps kicks. */
@@ -660,6 +678,7 @@ export class Session {
     // A real turn supersedes any pending prompt-cache warm.
     this.cancelCacheWarm();
     this.cancelController = new AbortController();
+    this.steerController = new AbortController();
 
     // Undo baseline: capture pre-turn state of files we already know about.
     this.turnTouchedFiles = new Set();
@@ -827,11 +846,38 @@ export class Session {
         parentSpan: promptSpan,
         dedupCache: this.dedupCache,
         fileObservations: this.fileObservations,
-        drainSteering: () => {
-          const q = this.steeringQueue;
-          this.steeringQueue = [];
-          return q;
+        drainSteering: (opts) => {
+          const scope = opts?.scope ?? "all";
+          // Any drain that consumes user steers rotates the steer controller so
+          // the next provider request starts with a fresh (un-aborted) signal.
+          const rotate = (): void => {
+            if (this.steerController?.signal.aborted) {
+              this.steerController = new AbortController();
+            }
+          };
+          if (scope === "all") {
+            const q = this.steeringQueue;
+            this.steeringQueue = [];
+            rotate();
+            return q;
+          }
+          // scope === "steer": take steer-delivery items + all system notices;
+          // leave followup items queued for the next top-level turn.
+          const take: SteeringItem[] = [];
+          const keep: SteeringItem[] = [];
+          for (const item of this.steeringQueue) {
+            if (item.source === "system" || item.delivery === "steer") take.push(item);
+            else keep.push(item);
+          }
+          this.steeringQueue = keep;
+          rotate();
+          return take;
         },
+        peekSteering: () =>
+          this.steeringQueue.some(
+            (i) => i.source === "user" && i.delivery === "steer",
+          ),
+        getSteerSignal: () => this.steerController?.signal,
         onEvent: async (e) => {
           if (e.type === "retry" || e.type === "activity" || e.type === "edit_delta") {
  // Transient UI notice — never part of the transcript. `edit_delta`
@@ -1878,14 +1924,21 @@ export class Session {
   }
 
  /**
- * Queue a mid-run steering message. It is injected as a user message at
- * the start of the agent's next turn (see `drainSteering` in agent.ts).
- * Safe to call while a prompt is running or idle; messages queued while
- * idle are prepended to the next prompt's transcript.
+ * Queue a mid-run steering message. It is injected as a user message as soon
+ * as the agent reaches an injection boundary — mid-stream before any tool call
+ * starts, or right after the current tool batch — rather than waiting for the
+ * next top-level turn. To make the mid-stream boundary reachable immediately,
+ * this aborts only the in-flight provider stream (never the whole run), so any
+ * text already generated is kept and the model re-samples with the correction
+ * in view. Safe to call while a prompt is running or idle; messages queued
+ * while idle are prepended to the next prompt's transcript.
  */
   steer(text: string): void {
     if (text.trim().length === 0) return;
-    this.steeringQueue.push({ source: "user", text });
+    this.steeringQueue.push({ source: "user", text, delivery: "steer" });
+    // Wake the stream so the correction lands this turn, not the next one.
+    // Harmless when idle (a fresh controller is created on the next prompt).
+    this.steerController?.abort();
   }
 
   /** Snapshot of prompts waiting to run after the current busy turn. */
@@ -2005,7 +2058,7 @@ export class Session {
   */
   private steerSystem(text: string): void {
     if (text.trim().length === 0) return;
-    this.steeringQueue.push({ source: "system", text });
+    this.steeringQueue.push({ source: "system", text, delivery: "steer" });
   }
 
  /** The long-lived shell for foreground bash, started inside the sandbox.
@@ -2992,7 +3045,9 @@ export class Session {
     const memory = summariseMemory(await readMemory(this.cwd));
  // Hierarchical shareable docs (CODEPILOT.md / AGENTS.md in the tree) plus
  // agent-written project-state MEMORY.md (already in memory.project).
-    const layered = await readLayeredProjectMemory(this.cwd);
+    const layered = await readLayeredProjectMemory(this.cwd, {
+      walkToHome: this.config.memory?.walkToHome === true,
+    });
     if (layered) {
       memory.project = memory.project
         ? `${memory.project.trim()}\n\n---\n\n${layered}`

@@ -659,6 +659,11 @@ export interface CodepilotConfig {
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
  /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
   mcpLazyThreshold?: number;
+ /** Instruction-file discovery. By default the hierarchical walk for
+  * CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
+  * toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to the
+  * user's home directory instead. */
+  memory?: { walkToHome?: boolean };
  /** Tool names or bash command regexes that auto-approve.
  * @deprecated prefer `permissions.allow` (same rule syntax). */
   autoApprove?: string[];

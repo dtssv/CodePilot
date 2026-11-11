@@ -111,8 +111,8 @@ async function safeGitStatus(cwd: string): Promise<GitStatus | undefined> {
  /* detached HEAD */
     }
     // Intentionally skip `git status`: dirty paths are not injected into the
-    // system prompt (peer harnesses omit them), so a per-turn status walk is
-    // wasted work and used to nudge models into re-running git for no reason.
+    // system prompt, so a per-turn status walk is wasted work and used to nudge
+    // models into re-running git for no reason.
     try {
       const { stdout } = await execFileP(
         "git",

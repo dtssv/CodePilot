@@ -165,6 +165,7 @@ export {
   PROJECT_MEMORY_NAME,
   PROJECT_STATE_MEMORY_NAME,
   AGENTS_MEMORY_NAME,
+  MEMORY_CANDIDATE_NAMES,
   USER_MEMORY_PATH,
 } from "./memory.js";
 export type { MemoryContents } from "./memory.js";

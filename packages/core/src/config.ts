@@ -367,6 +367,16 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .optional(),
     mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
     mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
+    // Instruction-file discovery. By default the hierarchical walk for
+    // CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
+    // toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to
+    // the user's home directory instead.
+    memory: z
+      .object({
+        walkToHome: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
     autoApprove: z.array(z.string().min(1)).optional(),
     permissions: PermissionRulesSchema.optional(),
     sandbox: SandboxConfigSchema.optional(),

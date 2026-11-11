@@ -279,9 +279,7 @@ export class PermissionEngine {
  // MEMORY.md); never prompt — same posture as other read-tier bookkeeping
  // tools. Writing USER scope (global ~/.codepilot/MEMORY.md) is different:
  // it is a cross-project rule the agent would otherwise persist silently and
- // re-inject into every future session. Other harnesses gate this (codex's
- // ad_hoc_note only writes "after the user explicitly asks to remember";
- // Claude Code's `#` asks which scope), so require interactive confirmation
+ // re-inject into every future session, so require interactive confirmation
  // for user-scope writes. yolo mode still auto-allows (see below).
     if (tool.name === "memory_write") {
       const scope = (input as { scope?: unknown } | null)?.scope;

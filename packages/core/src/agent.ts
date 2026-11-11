@@ -186,8 +186,25 @@ export interface AgentDeps {
  * etc.) and are surfaced via the per-turn runtime_context instead, so they
  * can never be mistaken for — or spoof — user input. Lets a host queue
  * mid-run guidance without cancelling the run.
+ *
+ * `scope: "steer"` drains only steer-delivery items (plus all system notices)
+ * and leaves follow-up items queued for the next top-level turn; `"all"` (the
+ * default) drains everything. Repeatable within a turn.
  */
-  drainSteering?: () => Array<{ source: "user" | "system"; text: string }>;
+  drainSteering?: (opts?: { scope?: "steer" | "all" }) => Array<{
+    source: "user" | "system";
+    text: string;
+  }>;
+ /** True when a `user` steer-delivery item is pending. Lets the stream loop
+  * cut the current provider request at a safe boundary (before any tool call)
+  * so a mid-run correction lands in the same turn. */
+  peekSteering?: () => boolean;
+ /** Returns the signal that aborts only the in-flight provider SSE for a
+  * mid-stream steer. Read per request (not captured once) so the host can
+  * rotate the underlying controller after a steer is consumed. Distinct from
+  * `signal` (user Stop): a steer abort keeps partial text and does NOT mark the
+  * run cancelled. */
+  getSteerSignal?: () => AbortSignal | undefined;
  /**
  * Collaboration mode. Filters the tool table sent to the
  * provider. Defaults to "agent" (no filtering).
@@ -716,6 +733,11 @@ export async function runAgent(
     // text kept): tells the post-stream logic to re-enter the outer turn loop
     // with INTERRUPT_RESUME instead of treating the partial stop as final.
     let interruptedForResume = false;
+    // Set when the stream was cut by a mid-stream user steer (B1). The partial
+    // text is kept; after persisting it we re-enter the outer turn loop so the
+    // steer is drained (as a user message) and the model re-samples with the
+    // correction in view.
+    let steeredMidStream = false;
     // Whether we've already force-compacted this turn due to a context-overflow
     // error, and how many proportional shrink steps we've applied (prevents an
     // infinite compact→overflow→compact loop).
@@ -729,8 +751,10 @@ export async function runAgent(
       toolCalls = [];
       sawError = null;
       finishReason = "stop";
+      steeredMidStream = false;
       const streamed = await streamTurn(messageId);
       sawError = streamed.error;
+      steeredMidStream = streamed.steeredMidStream;
       if (!sawError || deps.signal?.aborted) break;
  // Context-overflow is recoverable by shrinking, not by regenerating.
  // On the first overflow force a compaction; on each subsequent overflow
@@ -844,9 +868,14 @@ export async function runAgent(
       if (!(await sleepUnlessAborted(delayMs, deps.signal))) break;
     }
 
-    async function streamTurn(id: string): Promise<{ error: string | null; callIds: Set<string> }> {
+    async function streamTurn(id: string): Promise<{ error: string | null; callIds: Set<string>; steeredMidStream: boolean }> {
       const callIds = new Set<string>();
       let error: string | null = null;
+      let steeredMidStream = false;
+      // Snapshot the steer signal for THIS request. The host may rotate the
+      // underlying controller after a steer is consumed, so each request reads
+      // the current one.
+      const steerSignal = deps.getSteerSignal?.();
  // Live degeneration guard: a weak model can lock into looping one clause
  // ("I call X, I execute X, …") and fill the whole output ceiling. Waiting
  // for the turn to finish wastes the entire output budget, so we watch the
@@ -896,8 +925,9 @@ export async function runAgent(
       );
       let degenerated = false;
       try {
-        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, toolChoice: lockToolsThisTurn ? "none" : undefined })) {
+        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, toolChoice: lockToolsThisTurn ? "none" : undefined, steerSignal })) {
           if (deps.signal?.aborted) break;
+          if (steerSignal?.aborted) { steeredMidStream = true; break; }
           switch (ev.kind) {
             case "text_delta": {
               markFirstToken();
@@ -987,18 +1017,45 @@ export async function runAgent(
               finishReason = ev.finishReason;
               break;
           }
+          // Mid-stream steer (B1): a user correction arrived while the model
+          // was still emitting THIS turn. If no tool call has started yet, cut
+          // the stream at this safe boundary so the correction is drained and
+          // the model re-samples with it in view — keeping the partial text
+          // already produced. Once a tool_call has begun streaming we do NOT
+          // preempt (a half-streamed call is ambiguous); the steer then lands
+          // at the post-tool-batch boundary (B2) instead.
+          if (
+            !steeredMidStream &&
+            callIds.size === 0 &&
+            toolCalls.length === 0 &&
+            deps.peekSteering?.() === true
+          ) {
+            steeredMidStream = true;
+            break;
+          }
           // A detected repetition loop ends the stream immediately; the error
           // is surfaced below like any other turn failure.
           if (degenerated) break;
         }
       } catch (err) {
-        // User cancel / send-now aborts the fetch/SSE — that is not a failure.
-        if (deps.signal?.aborted || isAbortError(err)) {
+        // User cancel / send-now / mid-stream steer aborts the fetch/SSE —
+        // none of these is a turn failure. A steer abort additionally keeps the
+        // partial text (handled by the steeredMidStream path below).
+        if (deps.signal?.aborted || steerSignal?.aborted || isAbortError(err)) {
           error = null;
+          if (steerSignal?.aborted) steeredMidStream = true;
         } else {
           error = (err as Error).message;
           if (llmSpan) tracer.recordError(llmSpan, err as Error);
         }
+      }
+
+      // The provider may also have returned cleanly in response to the steer
+      // abort (a well-behaved stream stops yielding instead of throwing). Catch
+      // that here so the partial text is still salvaged and re-sampled.
+      if (!steeredMidStream && steerSignal?.aborted && !deps.signal?.aborted) {
+        steeredMidStream = true;
+        error = null;
       }
 
       if (llmSpan) {
@@ -1025,7 +1082,7 @@ export async function runAgent(
         outputTokens: llmUsage.output || undefined,
         ok: !error && !deps.signal?.aborted,
       });
-      return { error, callIds };
+      return { error, callIds, steeredMidStream };
     }
 
     const assistantContent: ContentBlock[] = [];
@@ -1086,6 +1143,17 @@ export async function runAgent(
     if (interruptedForResume) {
       interruptedForResume = false;
       resumedText += assistantText.join("");
+      continue;
+    }
+
+    // Mid-stream steer (B1): the partial text is now persisted as its own
+    // assistant message (part of the transcript). Re-enter the outer turn loop:
+    // the next iteration's B0 drain turns the queued user steer into a user
+    // message, and the model samples a fresh response with the correction in
+    // view. We only reach here with no started tool call (the peek guard), so
+    // nothing was executed. The partial is NOT folded into resumedText — this is
+    // a new response to new input, not a continuation of the same answer.
+    if (steeredMidStream) {
       continue;
     }
 

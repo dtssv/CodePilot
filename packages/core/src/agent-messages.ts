@@ -381,6 +381,8 @@ export async function* streamOnce(
     onRetry?: StreamChatOptions["onRetry"];
  /** Tool-call policy for this turn (see StreamChatOptions.toolChoice). */
     toolChoice?: StreamChatOptions["toolChoice"];
+ /** Per-request mid-stream steer signal (see AgentDeps.getSteerSignal). */
+    steerSignal?: AbortSignal;
   } = {},
 ): AsyncIterable<StreamEvent> {
   const sys = deps.systemPrompt;
@@ -444,12 +446,16 @@ export async function* streamOnce(
     effectiveMessages = [{ role: "system", content: [{ type: "text", text: `<runtime_context>\n${dynamicSuffix}\n</runtime_context>` }] }];
   }
   void messageId;
+  // Either a user Stop (`deps.signal`) or a mid-stream steer (`deps.steerSignal`)
+  // cuts the provider SSE. The caller distinguishes them after the stream ends:
+  // a steer keeps partial text and re-samples; a Stop ends the run.
+  const streamSignal = combineAbortSignals(deps.signal, extra.steerSignal);
   yield* provider.stream({
     model: deps.config.model ?? provider.defaultModel,
     messages: effectiveMessages,
     tools,
     systemPrompt: systemBlock,
-    signal: deps.signal,
+    signal: streamSignal,
     maxTokens: deps.config.maxTokens,
     reasoningEffort: deps.config.reasoningEffort,
     thinkingBudget: deps.config.thinkingBudget,
@@ -458,4 +464,27 @@ export async function* streamOnce(
     onRetry: extra.onRetry,
     toolChoice: extra.toolChoice,
   });
+}
+
+/** Combine abort signals so the result aborts when any input aborts. Returns
+ * the single defined signal when only one is present, or undefined when none
+ * are. */
+function combineAbortSignals(
+  ...signals: Array<AbortSignal | undefined>
+): AbortSignal | undefined {
+  const present = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  const anyFn = (AbortSignal as unknown as { any?: (s: Iterable<AbortSignal>) => AbortSignal }).any;
+  if (typeof anyFn === "function") return anyFn(present);
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort();
+  for (const s of present) {
+    if (s.aborted) {
+      controller.abort();
+      break;
+    }
+    s.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
 }
