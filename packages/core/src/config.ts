@@ -429,6 +429,12 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .optional(),
     mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
     mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
+    // Allowlist of MCP server names that may start. Empty/omitted = no
+    // restriction (every configured, non-disabled server starts). When
+    // non-empty, a server whose name is NOT listed is refused start (and a
+    // note is logged). Intended for a managed/enterprise layer to pin the set
+    // of MCP servers that can run regardless of per-project config.
+    mcpAllowedServers: z.array(z.string().min(1)).optional(),
     // Progressive disclosure for plugin-contributed tools, mirroring the MCP
     // controls above. Defaults to "eager" (every plugin tool schema is sent),
     // so the default behaviour is unchanged. Set "lazy" (or "auto" with a

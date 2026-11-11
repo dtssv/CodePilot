@@ -842,6 +842,11 @@ export interface CodepilotConfig {
   * `~/.codepilot/audit/`; an object may set a custom `dir`. Default off. */
   audit?: boolean | { dir?: string };
   mcpServers?: Record<string, McpServerConfig>;
+ /** Allowlist of MCP server names permitted to start. Empty/omitted = no
+  * restriction (every configured, non-disabled server starts). When non-empty,
+  * a server whose name is not listed is refused start and a note is logged.
+  * Intended for a managed layer to pin which MCP servers may run. */
+  mcpAllowedServers?: string[];
  /** Language-server configs for the `lsp_navigate` tool. Omit to use the
  * built-in TypeScript/JavaScript default. */
   lsp?: { servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }> };

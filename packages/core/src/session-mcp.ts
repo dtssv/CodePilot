@@ -40,8 +40,22 @@ export interface SessionMcpHost {
  * Errors are non-fatal so a broken server can't block the session. */
 export async function startMcp(host: SessionMcpHost): Promise<McpManager | null> {
   if (!host.config.mcpServers) return null;
+  // Allowlist: when non-empty, only listed server names may start. A configured
+  // server not on the list is refused (and noted), regardless of its own config.
+  const allowed = host.config.mcpAllowedServers;
+  const hasAllowlist = Array.isArray(allowed) && allowed.length > 0;
+  const allowSet = hasAllowlist ? new Set(allowed) : null;
   const active = Object.fromEntries(
-    Object.entries(host.config.mcpServers).filter(([, cfg]) => !cfg?.disabled),
+    Object.entries(host.config.mcpServers).filter(([name, cfg]) => {
+      if (cfg?.disabled) return false;
+      if (allowSet && !allowSet.has(name)) {
+        process.stderr.write(
+          `[session] MCP server "${name}" is not in mcpAllowedServers — refusing to start\n`,
+        );
+        return false;
+      }
+      return true;
+    }),
   );
   if (Object.keys(active).length === 0) return null;
   let mcp: McpManager | null = null;
