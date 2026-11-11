@@ -280,10 +280,26 @@ function nowNano(): string {
 // ---------------------------------------------------------------------------
 
 let _tracer: Tracer | null = null;
+let _exitHookRegistered = false;
+
+/** Register a one-time `beforeExit` hook that flushes the global tracer's
+ * buffered spans, so a fast process exit never drops the last batch (the
+ * buffer flushes at ~64 spans or every 5s otherwise). Best-effort: a flush
+ * failure is swallowed — telemetry must never break shutdown. */
+function registerExitFlush(): void {
+  if (_exitHookRegistered) return;
+  _exitHookRegistered = true;
+  process.on("beforeExit", () => {
+    void _tracer?.flush().catch(() => undefined);
+  });
+}
 
 /** Get the global tracer (lazily initialized from env). */
 export function getTracer(): Tracer {
-  if (!_tracer) _tracer = new Tracer();
+  if (!_tracer) {
+    _tracer = new Tracer();
+    if (_tracer.enabled) registerExitFlush();
+  }
   return _tracer;
 }
 

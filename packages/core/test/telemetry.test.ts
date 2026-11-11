@@ -401,6 +401,24 @@ describe("flush() OTLP export", () => {
     expect(tracer.bufferedCount()).toBe(0);
   });
 
+  it("Session.dispose flushes buffered spans so a fast exit never drops the last batch", async () => {
+    const { createSession } = await import("../src/session.js");
+    const tracer = new Tracer(enabledConfig(endpoint));
+    setTracer(tracer);
+    try {
+      const session = await createSession({ cwd: process.cwd() });
+      // Buffer a span through the global tracer without hitting the batch cap.
+      tracer.end(tracer.startSpan("codepilot.prompt"));
+      expect(tracer.bufferedCount()).toBe(1);
+      await session.dispose();
+      // dispose() flushed the buffer and the batch reached the server.
+      expect(tracer.bufferedCount()).toBe(0);
+      expect(requests.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      setTracer(null);
+    }
+  });
+
   it("auto-flushes when the batch reaches maxBatchSize (64)", async () => {
     const tracer = new Tracer(enabledConfig(endpoint));
     for (let i = 0; i < 64; i++) {

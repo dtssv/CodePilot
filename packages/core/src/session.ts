@@ -93,6 +93,7 @@ import type { McpManager } from "./mcp.js";
 import { acquireSessionLock, type SessionLease } from "./sessionLock.js";
 import { startMcp as startMcpImpl, resolveSessionMcpReferences, jsonSchemaToZod } from "./session-mcp.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
+import { getTracer } from "./telemetry.js";
 import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
 import {
   resolveModelAlias,
@@ -2863,6 +2864,9 @@ export class Session {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.followUpQueue = [];
+    // Flush any buffered telemetry spans so a clean shutdown never drops the
+    // last batch (spans otherwise flush at ~64 or every 5s). Best-effort.
+    await getTracer().flush().catch(() => undefined);
     // Flush an in-flight background checkpoint so a clean shutdown never drops
     // it. Only a true crash (no dispose) can lose one, and the next session at
     // the same threshold simply rewrites it. Fail-soft: the task already logs.
