@@ -785,6 +785,11 @@ export interface CodepilotConfig {
   * cap) at ~90% of the cache TTL, but only when expected savings beat the
   * warm's own cost. Default false. */
   cacheWarming?: boolean;
+ /** Prompt-cache breakpoint lifetime (Anthropic). "5m" (default) uses the
+  * standard ephemeral TTL; "1h" asks for the extended one-hour TTL (lower miss
+  * rate after long idle gaps, higher cache-write price). Endpoints that do not
+  * support the extended TTL silently fall back to 5m. */
+  promptCache?: { ttl?: "5m" | "1h" };
  /** When true, attempt to load the optional pure-JS `gpt-tokenizer` for
   * provider-accurate token counts (falls back to the built-in heuristic
   * when the package is not installed). Default false. */

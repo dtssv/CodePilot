@@ -386,6 +386,14 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // a 1-token output cap at ~90% of the cache TTL — but only when the
     // expected savings beat the warm's own cost (see cacheWarmer). Default off.
     cacheWarming: z.boolean().optional(),
+    // Prompt-cache breakpoint lifetime (Anthropic). "5m" (default) uses the
+    // standard ephemeral TTL; "1h" asks for the extended one-hour TTL, which
+    // reduces misses after long idle gaps at a higher cache-write price.
+    // Endpoints that do not support the extended TTL silently fall back to 5m.
+    promptCache: z
+      .object({ ttl: z.enum(["5m", "1h"]).optional() })
+      .strict()
+      .optional(),
     // When true, createSession attempts to load the optional pure-JS
     // `gpt-tokenizer` package for provider-accurate token counts; falls back
     // to the built-in heuristic when the package is not installed.

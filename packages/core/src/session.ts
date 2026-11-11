@@ -2533,7 +2533,10 @@ export class Session {
   * a zero-cost (but still token-counted) miss.
   */
   getCacheWaste(): CacheWasteReport {
-    return analyzeCacheWaste(this.cacheTurns);
+    return analyzeCacheWaste(
+      this.cacheTurns,
+      cacheTtlMs(this.model, this.config.promptCache?.ttl) ?? undefined,
+    );
   }
 
  /** The MCP manager (null when no servers are configured). For `/mcp`. */
@@ -3782,7 +3785,7 @@ export class Session {
     if (this.config.cacheWarming !== true) return; // opt-in
     const decision = decideCacheWarm({
       model: this.model,
-      ttlMs: cacheTtlMs(this.model),
+      ttlMs: cacheTtlMs(this.model, this.config.promptCache?.ttl),
       prefixTokens: candidate.prefixTokens,
       continuationProbability: this.cacheWarmContinuationProb,
       // A budget-derived thinking block changes with max_tokens; capping output

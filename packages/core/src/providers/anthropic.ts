@@ -31,11 +31,23 @@ export interface AnthropicProviderOptions {
   * it has no effect when caching is disabled.
   */
   cacheControlOnTools?: boolean;
+  /**
+   * Lifetime for the `cache_control` breakpoints. "5m" (default) uses
+   * Anthropic's standard ephemeral TTL and emits no `ttl` field (back-compat).
+   * "1h" asks for the extended one-hour TTL — it adds `ttl: "1h"` to every
+   * breakpoint and sends the extended-cache-ttl beta header. Endpoints that do
+   * not support the extended TTL ignore the field and fall back to 5m; no
+   * separate eligibility probe is needed.
+   */
+  cacheTtl?: "5m" | "1h";
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const API_VERSION = "2023-06-01";
 const BETA_PROMPT_CACHING = "prompt-caching-2024-07-31";
+// Opt-in one-hour cache lifetime. Sent only when cacheTtl is "1h"; endpoints
+// that do not recognise it ignore the `ttl` field and keep the 5m default.
+const BETA_EXTENDED_CACHE_TTL = "extended-cache-ttl-2025-04-11";
 // Lets the model think between tool calls (not just before the first
 // response). Required for extended thinking to interleave with tool use.
 const BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14";
@@ -78,6 +90,11 @@ export class AnthropicProvider implements ChatProvider {
   readonly smallModel: string;
   private readonly enableCaching: boolean;
   private readonly cacheControlOnTools: boolean;
+  /** The `cache_control` object attached at every breakpoint. Carries `ttl:
+   * "1h"` only when the extended TTL is configured; otherwise the bare
+   * ephemeral form (API default 5m). */
+  private readonly cacheControl: { type: "ephemeral"; ttl?: "1h" };
+  private readonly extendedTtl: boolean;
 
   constructor(opts: AnthropicProviderOptions = {}) {
     const key = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -92,6 +109,10 @@ export class AnthropicProvider implements ChatProvider {
     this.smallModel = opts.smallModel ?? "claude-haiku-4-5";
     this.enableCaching = opts.enableCaching ?? true;
     this.cacheControlOnTools = opts.cacheControlOnTools ?? true;
+    this.extendedTtl = opts.cacheTtl === "1h";
+    this.cacheControl = this.extendedTtl
+      ? { type: "ephemeral", ttl: "1h" }
+      : { type: "ephemeral" };
   }
 
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
@@ -109,6 +130,7 @@ export class AnthropicProvider implements ChatProvider {
       messages: markConversationCache(
         mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage)),
         this.enableCaching,
+        this.cacheControl,
       ),
       max_tokens: maxTokens,
       stream: true,
@@ -122,7 +144,7 @@ export class AnthropicProvider implements ChatProvider {
           {
             type: "text",
             text: opts.systemPrompt,
-            cache_control: { type: "ephemeral" },
+            cache_control: this.cacheControl,
           },
         ];
       } else {
@@ -134,6 +156,7 @@ export class AnthropicProvider implements ChatProvider {
         toAnthropicTool(
           t,
           this.enableCaching && this.cacheControlOnTools && i === arr.length - 1,
+          this.cacheControl,
         )
       );
       // Keep tool defs in the request (cache-prefix stable) but forbid calling
@@ -150,6 +173,9 @@ export class AnthropicProvider implements ChatProvider {
     };
     if (this.enableCaching) {
       headers["anthropic-beta"] = BETA_PROMPT_CACHING;
+      if (this.extendedTtl) {
+        headers["anthropic-beta"] += `,${BETA_EXTENDED_CACHE_TTL}`;
+      }
     }
     if (thinkingOn) {
       // Append so we keep prompt-caching when both are active.
@@ -304,7 +330,8 @@ export class AnthropicProvider implements ChatProvider {
 
 function toAnthropicTool(
   tool: ProviderToolDef,
-  attachCacheControl: boolean
+  attachCacheControl: boolean,
+  cacheControl: { type: "ephemeral"; ttl?: "1h" },
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {
     name: tool.name,
@@ -312,7 +339,7 @@ function toAnthropicTool(
     input_schema: tool.inputSchema,
   };
   if (attachCacheControl) {
-    out.cache_control = { type: "ephemeral" };
+    out.cache_control = cacheControl;
   }
   return out;
 }
@@ -370,6 +397,7 @@ function toAnthropicMessage(m: ProviderMessage): Record<string, unknown> {
 function markConversationCache(
   messages: Array<Record<string, unknown>>,
   enabled: boolean,
+  cacheControl: { type: "ephemeral"; ttl?: "1h" },
 ): Array<Record<string, unknown>> {
   if (!enabled || messages.length < 2) return messages;
   const isVolatile = (m: Record<string, unknown>): boolean => {
@@ -388,7 +416,7 @@ function markConversationCache(
   const last = content[content.length - 1]!;
   // Only text/tool_result/tool_use blocks accept cache_control.
   if (last.type === "text" || last.type === "tool_result" || last.type === "tool_use") {
-    content[content.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+    content[content.length - 1] = { ...last, cache_control: cacheControl };
   }
   return messages;
 }

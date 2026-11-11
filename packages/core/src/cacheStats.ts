@@ -67,10 +67,11 @@ export interface CacheWasteReport {
 }
 
 /**
- * Anthropic's default `ephemeral` cache lifetime. A gap longer than this
- * between turns means the previous turn's cached prefix has expired, so the
- * next turn pays full price again. (The 1h tier exists but CodePilot uses the
- * 5-minute default.)
+ * The standard `ephemeral` cache lifetime (Anthropic default). A gap longer
+ * than the active TTL between turns means the previous turn's cached prefix has
+ * expired, so the next turn pays full price again. `analyzeCacheWaste` takes the
+ * configured TTL (5m default, or the extended 1h tier via `promptCache.ttl`);
+ * this constant is the 5m fallback when no TTL is supplied.
  */
 export const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
 

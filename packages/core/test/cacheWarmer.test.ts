@@ -33,6 +33,12 @@ describe("cacheTtlMs", () => {
     expect(cacheTtlMs("gemini-2.5-pro")).toBeUndefined();
     expect(cacheTtlMs(undefined)).toBeUndefined();
   });
+  it("returns the extended one-hour TTL for Anthropic when configured", () => {
+    expect(cacheTtlMs("claude-sonnet-4-5", "1h")).toBe(60 * 60_000);
+    expect(cacheTtlMs("claude-sonnet-4-5", "5m")).toBe(5 * 60_000);
+    // Non-Anthropic stays undefined regardless of ttl.
+    expect(cacheTtlMs("gpt-5", "1h")).toBeUndefined();
+  });
 });
 
 describe("decideCacheWarm", () => {

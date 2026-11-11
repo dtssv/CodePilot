@@ -246,6 +246,7 @@ export function buildSingleProvider(config: CodepilotConfig): ChatProvider {
         baseURL: config.baseURL,
         defaultModel: config.model,
         smallModel: config.smallModel ?? config.model,
+        cacheTtl: config.promptCache?.ttl,
       });
   }
 }

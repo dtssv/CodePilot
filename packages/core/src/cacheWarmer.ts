@@ -60,12 +60,17 @@ export const CACHE_WARM_TTL_FRACTION = 0.9;
 /**
  * The prompt-cache lifetime for a model, in ms, or undefined when the model has
  * no inline cache we warm. Only Anthropic exposes an explicit `ephemeral`
- * breakpoint cache (5-minute default) that a replay can refresh; OpenAI/Gemini
- * caches are implicit and provider-managed, so warming them is not meaningful.
+ * breakpoint cache that a replay can refresh; OpenAI/Gemini caches are implicit
+ * and provider-managed, so warming them is not meaningful. The configured
+ * breakpoint TTL (`promptCache.ttl`) selects the 5-minute default or the
+ * extended one-hour lifetime; attribution and warm timing read the same value.
  */
-export function cacheTtlMs(model: string | undefined): number | undefined {
+export function cacheTtlMs(
+  model: string | undefined,
+  ttl?: "5m" | "1h",
+): number | undefined {
   const id = (model ?? "").toLowerCase();
-  if (id.includes("claude")) return 5 * 60_000;
+  if (id.includes("claude")) return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
   return undefined;
 }
 

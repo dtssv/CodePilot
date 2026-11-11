@@ -93,3 +93,67 @@ describe("AnthropicProvider tool cache breakpoint", () => {
     for (const t of tools) expect(t.cache_control).toBeUndefined();
   });
 });
+
+describe("AnthropicProvider cache TTL", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function captureRequest(
+    opts: ConstructorParameters<typeof AnthropicProvider>[0],
+  ): Promise<{ body: Record<string, unknown>; headers: Record<string, string> }> {
+    let body: Record<string, unknown> = {};
+    let headers: Record<string, string> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      headers = init.headers as Record<string, string>;
+      return sseResponse(MINIMAL_STREAM);
+    });
+    const p = new AnthropicProvider({ apiKey: "k", ...opts });
+    await drain(
+      p.stream({
+        model: "claude-sonnet-4-5",
+        systemPrompt: "you are helpful",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "first" }] },
+          { role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+          { role: "system", content: [{ type: "text", text: "<runtime_context>\nnow\n</runtime_context>" }] },
+          { role: "user", content: [{ type: "text", text: "now please" }] },
+        ],
+        tools: TOOLS,
+      }),
+    );
+    return { body, headers };
+  }
+
+  it("emits no ttl field and no extended beta by default (5m)", async () => {
+    const { body, headers } = await captureRequest({});
+    const sys = body.system as Array<Record<string, unknown>>;
+    expect(sys[0]!.cache_control).toEqual({ type: "ephemeral" });
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[tools.length - 1]!.cache_control).toEqual({ type: "ephemeral" });
+    expect(headers["anthropic-beta"]).not.toContain("extended-cache-ttl");
+  });
+
+  it("attaches ttl:1h to every breakpoint and sends the extended beta header", async () => {
+    const { body, headers } = await captureRequest({ cacheTtl: "1h" });
+    // System block.
+    const sys = body.system as Array<Record<string, unknown>>;
+    expect(sys[0]!.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Last tool.
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools[tools.length - 1]!.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Stable conversation-history breakpoint (on the assistant turn before the
+    // volatile runtime_context + current user turn).
+    const msgs = body.messages as Array<{ content?: Array<Record<string, unknown>> }>;
+    const marked = msgs.flatMap((m) => m.content ?? []).filter((c) => c.cache_control);
+    expect(marked.length).toBeGreaterThanOrEqual(1);
+    for (const c of marked) expect(c.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    // Beta header advertises the extended TTL alongside prompt caching.
+    expect(headers["anthropic-beta"]).toContain("extended-cache-ttl-2025-04-11");
+    expect(headers["anthropic-beta"]).toContain("prompt-caching-2024-07-31");
+  });
+
+  it("sends no extended beta header when caching is disabled even with ttl:1h", async () => {
+    const { headers } = await captureRequest({ cacheTtl: "1h", enableCaching: false });
+    expect(headers["anthropic-beta"]).toBeUndefined();
+  });
+});

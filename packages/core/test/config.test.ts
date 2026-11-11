@@ -129,6 +129,15 @@ describe("validateConfig", () => {
     expect(r.sessions?.autoResumeAfterCrash).toBe(true);
   });
 
+  it("accepts the promptCache ttl block", () => {
+    const r = validateConfig({ promptCache: { ttl: "1h" } }) as {
+      promptCache?: { ttl?: string };
+    };
+    expect(r.promptCache?.ttl).toBe("1h");
+    expect(validateConfig({ promptCache: { ttl: "5m" } })).toBeTruthy();
+    expect(() => validateConfig({ promptCache: { ttl: "2h" } })).toThrow();
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {
