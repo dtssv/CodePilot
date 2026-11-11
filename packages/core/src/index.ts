@@ -899,7 +899,7 @@ export { BoundedSinkQueue } from "./sessionSink.js";
 export type { SessionEventSink, BoundedSinkQueueOptions } from "./sessionSink.js";
 export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
 export type { BuiltinCommand, BuiltinCommandScope } from "./builtinCommands.js";
-export { FileObservationStore } from "./fsObservation.js";
+export { FileObservationStore, hashFileContent } from "./fsObservation.js";
 export type { FileObservation, FreshnessResult } from "./fsObservation.js";
 
 // ---- Keyless transcript replay (test mode, no API key needed) ----

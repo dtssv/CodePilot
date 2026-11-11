@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { ToolContext, ToolResult } from "./types.js";
 import { assertPathAllowed, assertPathAllowedAsync } from "../sandbox.js";
+import { hashFileContent } from "../fsObservation.js";
 import {
   isUnderDeliveryRoots,
   mergeDeliveryRoots,
@@ -267,14 +268,40 @@ async function adoptDeliveryRoot(
  * `currentStat` is the pre-write stat of the file, or null if it does not
  * exist yet (a create, which is always allowed). Pass the stat the tool
  * already obtained to avoid an extra syscall.
+ *
+ * `currentContent` is the file's current on-disk bytes (or text) when the tool
+ * already has them in hand; it enables the content-equality fallback so a
+ * jittered mtime does not block an edit to unchanged content. A tool that does
+ * NOT already hold the content (e.g. an overwrite) may instead pass a lazy
+ * `readCurrent` reader; it is invoked ONLY when the mtime/size gate first
+ * reports stale, so the common fast path never re-reads the whole file. Omit
+ * both to keep the pure mtime/size decision.
  */
-export function guardFreshWrite(
+export async function guardFreshWrite(
   ctx: ToolContext,
   absPath: string,
   currentStat: { mtimeMs: number; size: number } | null,
-): ToolResult | null {
+  currentContent?: Buffer | string,
+  readCurrent?: () => Promise<Buffer | string | null>,
+): Promise<ToolResult | null> {
   if (!ctx.checkFileFresh) return null;
-  const res = ctx.checkFileFresh(absPath, currentStat);
+  const toHash = (c: Buffer | string): string =>
+    hashFileContent(Buffer.isBuffer(c) ? c : Buffer.from(c, "utf-8"));
+  const eagerHash = currentContent === undefined ? undefined : toHash(currentContent);
+  const res = ctx.checkFileFresh(absPath, currentStat, eagerHash);
   if (res.ok) return null;
+  // Only a stale verdict on an existing file can be rescued by content equality.
+  // Lazily read the current bytes (if a reader was supplied) and re-check.
+  if (res.reason === "stale" && eagerHash === undefined && readCurrent) {
+    try {
+      const bytes = await readCurrent();
+      if (bytes !== null) {
+        const retry = ctx.checkFileFresh(absPath, currentStat, toHash(bytes));
+        if (retry.ok) return null;
+      }
+    } catch {
+      /* fall through to the stale error */
+    }
+  }
   return { content: res.message, isError: true };
 }

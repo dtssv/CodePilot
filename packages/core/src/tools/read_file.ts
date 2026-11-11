@@ -6,6 +6,7 @@ import { stat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardPath } from "./_shared.js";
+import { hashFileContent } from "../fsObservation.js";
 
 const schema = z.object({
   path: z.string().describe("Path to the file (absolute or relative to cwd)."),
@@ -88,7 +89,9 @@ export const readFileTool: ToolDef<typeof schema> = {
     }
     // Record the observation so a later edit_file/write_file/apply_patch can
     // assert read-before-write and detect a stale (externally changed) file.
-    ctx.observeFile?.(p, { mtimeMs: st.mtimeMs, size: st.size });
+    // The content hash lets a subsequent write survive a jittered mtime when
+    // the bytes are actually unchanged.
+    ctx.observeFile?.(p, { mtimeMs: st.mtimeMs, size: st.size }, hashFileContent(buf));
     return { content, artifactRef };
   },
 };

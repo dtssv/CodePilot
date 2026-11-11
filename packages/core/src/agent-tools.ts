@@ -469,13 +469,13 @@ export async function runOneTool(
     addDeliveryRoot: deps.addDeliveryRoot,
     expandSandboxWritable: deps.expandSandboxWritable,
     observeFile: deps.fileObservations
-      ? (p, s) => deps.fileObservations!.observe(p, s)
+      ? (p, s, h) => deps.fileObservations!.observe(p, s, h)
       : undefined,
     checkFileFresh: deps.fileObservations
-      ? (p, s) => deps.fileObservations!.checkFresh(p, s)
+      ? (p, s, h) => deps.fileObservations!.checkFresh(p, s, h)
       : undefined,
     reobserveFile: deps.fileObservations
-      ? (p, s) => deps.fileObservations!.reobserveAfterWrite(p, s)
+      ? (p, s, h) => deps.fileObservations!.reobserveAfterWrite(p, s, h)
       : undefined,
   };
 

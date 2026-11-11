@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileObservationStore } from "../src/fsObservation.js";
+import { FileObservationStore, hashFileContent } from "../src/fsObservation.js";
 import { detectLineEnding, editFileTool, applyEdit } from "../src/tools/edit_file.js";
 import { writeFileTool } from "../src/tools/write_file.js";
 import { readFileTool } from "../src/tools/read_file.js";
@@ -22,9 +22,9 @@ function ctxWith(dir: string, store: FileObservationStore): ToolContext {
     cwd: dir,
     artifact: async () => "art_test",
     readArtifact: async () => "",
-    observeFile: (p, s) => store.observe(p, s),
-    checkFileFresh: (p, s) => store.checkFresh(p, s),
-    reobserveFile: (p, s) => store.reobserveAfterWrite(p, s),
+    observeFile: (p, s, h) => store.observe(p, s, h),
+    checkFileFresh: (p, s, h) => store.checkFresh(p, s, h),
+    reobserveFile: (p, s, h) => store.reobserveAfterWrite(p, s, h),
   } as ToolContext;
 }
 
@@ -53,6 +53,64 @@ describe("FileObservationStore (read-before-write + staleness)", () => {
     const res = store.checkFresh("/x/a.ts", { mtimeMs: 200, size: 12 });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toBe("stale");
+  });
+
+  it("allows a stale-looking edit when the content hash is unchanged (false mtime)", () => {
+    const store = new FileObservationStore();
+    const hash = hashFileContent(Buffer.from("const x = 1;\n", "utf-8"));
+    // Observed with a content hash; mtime later jitters but size stays.
+    store.observe("/x/a.ts", { mtimeMs: 100, size: 13 }, hash);
+    // mtime moved (would be stale by mtime), but the current content hashes the
+    // same → rescued to ok.
+    expect(
+      store.checkFresh("/x/a.ts", { mtimeMs: 500, size: 13 }, hash),
+    ).toEqual({ ok: true });
+  });
+
+  it("still blocks when the content hash actually differs", () => {
+    const store = new FileObservationStore();
+    const oldHash = hashFileContent(Buffer.from("const x = 1;\n", "utf-8"));
+    const newHash = hashFileContent(Buffer.from("const x = 2;\n", "utf-8"));
+    store.observe("/x/a.ts", { mtimeMs: 100, size: 13 }, oldHash);
+    const res = store.checkFresh("/x/a.ts", { mtimeMs: 500, size: 13 }, newHash);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe("stale");
+  });
+
+  it("keeps the mtime/size decision when no hash was recorded (older observation)", () => {
+    const store = new FileObservationStore();
+    // Observed without a content hash.
+    store.observe("/x/a.ts", { mtimeMs: 100, size: 10 });
+    // Even if a current hash is offered, there is nothing to compare against →
+    // stale verdict stands.
+    const res = store.checkFresh("/x/a.ts", { mtimeMs: 200, size: 10 }, "f:deadbeef");
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe("stale");
+  });
+});
+
+describe("hashFileContent", () => {
+  it("is stable for identical content and differs for changed content", () => {
+    const a = hashFileContent(Buffer.from("hello world", "utf-8"));
+    const b = hashFileContent(Buffer.from("hello world", "utf-8"));
+    const c = hashFileContent(Buffer.from("hello worlD", "utf-8"));
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+  });
+
+  it("samples large files (size + head + tail) rather than hashing in full", () => {
+    const big = Buffer.alloc(512 * 1024, 0x41); // 512 KiB of 'A'
+    const h = hashFileContent(big);
+    expect(h.startsWith("s:")).toBe(true);
+    // A change only in the middle (between the sampled ends) is not detected —
+    // the sampling is an intentional cost/coverage tradeoff for huge files.
+    const middleChanged = Buffer.from(big);
+    middleChanged[256 * 1024] = 0x42;
+    expect(hashFileContent(middleChanged)).toBe(h);
+    // A change within the head sample IS detected.
+    const headChanged = Buffer.from(big);
+    headChanged[0] = 0x42;
+    expect(hashFileContent(headChanged)).not.toBe(h);
   });
 });
 
@@ -103,6 +161,27 @@ describe("edit_file read-before-write guard (end to end)", () => {
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/changed on disk/);
   });
+
+  it("allows the edit when only mtime moved but content is identical", async () => {
+    const dir = tmp();
+    const p = join(dir, "a.ts");
+    writeFileSync(p, "const x = 1;\n");
+    const store = new FileObservationStore();
+    const ctx = ctxWith(dir, store);
+    await readFileTool.execute({ path: "a.ts" }, ctx);
+    // Rewrite identical bytes and bump the mtime far into the future — the
+    // mtime gate would flag stale, but the content hash rescues it.
+    const future = new Date(Date.now() + 60_000);
+    writeFileSync(p, "const x = 1;\n");
+    const { utimesSync } = await import("node:fs");
+    utimesSync(p, future, future);
+    const res = await editFileTool.execute(
+      { path: "a.ts", search: "const x = 1;", replace: "const x = 2;" },
+      ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("const x = 2;\n");
+  });
 });
 
 describe("write_file overwrite guard", () => {
@@ -127,6 +206,24 @@ describe("write_file overwrite guard", () => {
     );
     expect(res.isError).toBe(true);
     expect(readFileSync(p, "utf-8")).toBe("old\n");
+  });
+
+  it("allows an overwrite when only mtime moved but content is identical (lazy reader)", async () => {
+    const dir = tmp();
+    const p = join(dir, "a.ts");
+    writeFileSync(p, "old\n");
+    const store = new FileObservationStore();
+    const ctx = ctxWith(dir, store);
+    await readFileTool.execute({ path: "a.ts" }, ctx);
+    // Identical bytes, future mtime → mtime gate would flag stale; the lazy
+    // content read rescues it and the overwrite proceeds.
+    const future = new Date(Date.now() + 60_000);
+    writeFileSync(p, "old\n");
+    const { utimesSync } = await import("node:fs");
+    utimesSync(p, future, future);
+    const res = await writeFileTool.execute({ path: "a.ts", content: "new\n" }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("new\n");
   });
 });
 

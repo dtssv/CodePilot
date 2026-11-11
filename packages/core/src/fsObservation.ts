@@ -14,13 +14,45 @@
 //   - the path was observed this session (read-before-write), and
 //   - the on-disk mtime/size still match what was observed (no stale write).
 //
-// It is deliberately coarse (mtime+size, not a content hash): cheap, no extra
-// I/O beyond a stat the tools already do, and good enough to catch the real
-// "changed since I read it" case. A session owns one store; it is passed to
-// tools via ToolContext.observeFile / checkFileFresh. Absent in minimal test
-// contexts — tools must treat it as optional and degrade to current behaviour.
+// The primary gate is coarse (mtime+size): cheap, no extra I/O beyond a stat
+// the tools already do, and good enough to catch the real "changed since I
+// read it" case. But some filesystems jitter mtime or round it coarsely, so a
+// content-equal file can look stale (a false positive) — e.g. a formatter that
+// rewrites identical bytes, or a `touch`. To avoid blocking a safe edit, the
+// store also records a content hash at read time; when mtime/size says stale
+// but the current content hashes to the same value, the write is allowed. When
+// no hash is available (older observation, hash not supplied) the mtime/size
+// decision stands unchanged. A session owns one store; it is passed to tools
+// via ToolContext.observeFile / checkFileFresh. Absent in minimal test contexts
+// — tools must treat it as optional and degrade to current behaviour.
 
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
+
+/** Large files only hash a head+tail sample (plus size) to stay cheap; smaller
+ * files hash in full. The boundary is well above typical source files. */
+const FULL_HASH_LIMIT = 256 * 1024;
+/** Head/tail sample size for large-file hashing. */
+const SAMPLE_BYTES = 64 * 1024;
+
+/**
+ * Fast content hash for the stale-write fallback. Full SHA-1 for files up to
+ * `FULL_HASH_LIMIT`; for larger files a hash of size + head + tail sample, so a
+ * real edit anywhere near the ends (the common case) is still caught while the
+ * cost stays bounded. Equal hashes mean "very likely identical", used only to
+ * rescue a false-positive mtime — never to declare a file changed.
+ */
+export function hashFileContent(buf: Buffer): string {
+  const h = createHash("sha1");
+  if (buf.length <= FULL_HASH_LIMIT) {
+    h.update(buf);
+    return `f:${h.digest("hex")}`;
+  }
+  h.update(String(buf.length));
+  h.update(buf.subarray(0, SAMPLE_BYTES));
+  h.update(buf.subarray(buf.length - SAMPLE_BYTES));
+  return `s:${h.digest("hex")}`;
+}
 
 export interface FileObservation {
   /** Absolute, resolved path. */
@@ -29,6 +61,10 @@ export interface FileObservation {
   mtimeMs: number;
   /** Byte size at observation time. */
   size: number;
+  /** Content hash at observation time (hashFileContent), when the reader
+   * supplied it. Used only to rescue a false-positive mtime; absent on older
+   * observations, in which case the mtime/size decision stands. */
+  contentHash?: string;
   /** Wall-clock of the observation (for diagnostics only). */
   observedAt: number;
 }
@@ -45,12 +81,19 @@ export type FreshnessResult =
 export class FileObservationStore {
   private readonly observations = new Map<string, FileObservation>();
 
-  /** Record that `absPath` was just read, using a fresh stat. */
-  observe(absPath: string, stat: Pick<Stats, "mtimeMs" | "size">): void {
+  /** Record that `absPath` was just read, using a fresh stat. An optional
+   * `contentHash` (from hashFileContent on the bytes just read) enables the
+   * content-equality fallback in checkFresh. */
+  observe(
+    absPath: string,
+    stat: Pick<Stats, "mtimeMs" | "size">,
+    contentHash?: string,
+  ): void {
     this.observations.set(absPath, {
       path: absPath,
       mtimeMs: stat.mtimeMs,
       size: stat.size,
+      contentHash,
       observedAt: Date.now(),
     });
   }
@@ -66,12 +109,19 @@ export class FileObservationStore {
    *
    * - File does not exist (new file) → allowed; the caller is creating it.
    * - File exists but was never observed → "unobserved" (read-before-write).
-   * - File exists and observed, but mtime/size differ → "stale".
+   * - File exists and observed, but mtime/size differ → normally "stale", BUT
+   *   if both the observation and `currentContentHash` are present and equal,
+   *   the content is unchanged (false-positive mtime) → ok.
    * - File exists, observed, unchanged → ok.
+   *
+   * `currentContentHash` (from hashFileContent on the current on-disk bytes) is
+   * optional: tools may supply it so a jittered mtime does not block an edit to
+   * identical content. When omitted, the mtime/size decision stands.
    */
   checkFresh(
     absPath: string,
     currentStat: Pick<Stats, "mtimeMs" | "size"> | null,
+    currentContentHash?: string,
   ): FreshnessResult {
     // Creating a brand-new file: nothing to be stale against.
     if (currentStat === null) return { ok: true };
@@ -93,6 +143,16 @@ export class FileObservationStore {
     const mtimeChanged = Math.abs(currentStat.mtimeMs - obs.mtimeMs) > 1;
     const sizeChanged = currentStat.size !== obs.size;
     if (mtimeChanged || sizeChanged) {
+      // Content-equality fallback: if we recorded a hash at read time and the
+      // current content hashes the same, the mtime moved but the bytes did not
+      // (formatter rewrite, touch, FS mtime precision) — allow the edit.
+      if (
+        obs.contentHash !== undefined &&
+        currentContentHash !== undefined &&
+        obs.contentHash === currentContentHash
+      ) {
+        return { ok: true };
+      }
       return {
         ok: false,
         reason: "stale",
@@ -110,9 +170,14 @@ export class FileObservationStore {
   /**
    * Re-observe after a successful write so a subsequent edit in the same
    * session sees the just-written state as fresh (not stale against the
-   * pre-write observation).
+   * pre-write observation). Carries an optional content hash of the bytes just
+   * written.
    */
-  reobserveAfterWrite(absPath: string, stat: Pick<Stats, "mtimeMs" | "size">): void {
-    this.observe(absPath, stat);
+  reobserveAfterWrite(
+    absPath: string,
+    stat: Pick<Stats, "mtimeMs" | "size">,
+    contentHash?: string,
+  ): void {
+    this.observe(absPath, stat, contentHash);
   }
 }

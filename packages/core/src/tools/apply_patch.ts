@@ -29,6 +29,7 @@ import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../fsObservation.js";
 
 const schema = z.object({
   patch: z
@@ -291,8 +292,9 @@ export const applyPatchTool: ToolDef<typeof schema> = {
           };
         }
         // Read-before-write + staleness: an update must target a file read
-        // this session that has not changed on disk since.
-        const fresh = guardFreshWrite(ctx, p, preStat);
+        // this session that has not changed on disk since. We already hold the
+        // current content, so pass it for the content-equality fallback.
+        const fresh = await guardFreshWrite(ctx, p, preStat, originals.get(op.path));
         if (fresh) return fresh;
       }
     }
@@ -340,7 +342,11 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         await writeFile(p, w.content, "utf-8");
         try {
           const s = await stat(p);
-          ctx.reobserveFile?.(p, { mtimeMs: s.mtimeMs, size: s.size });
+          ctx.reobserveFile?.(
+            p,
+            { mtimeMs: s.mtimeMs, size: s.size },
+            hashFileContent(Buffer.from(w.content, "utf-8")),
+          );
         } catch {
           /* best-effort */
         }

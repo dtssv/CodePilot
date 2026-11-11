@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { join, isAbsolute } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../fsObservation.js";
 
 // ---------------------------------------------------------------------------
 // Notebook JSON types (minimal subset of nbformat v4)
@@ -164,7 +165,12 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     } catch {
       preStat = null;
     }
-    const fresh = guardFreshWrite(ctx, path, preStat);
+    // Supply a lazy reader so a jittered mtime on unchanged bytes does not
+    // block the edit; the raw file is read only if the mtime/size gate reports
+    // stale.
+    const fresh = await guardFreshWrite(ctx, path, preStat, undefined, () =>
+      readFile(path).catch(() => null),
+    );
     if (fresh) return fresh;
 
     let nb: Notebook;
@@ -235,8 +241,9 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     }
 
     if (mutated) {
+      const serialized = serializeNotebook(nb);
       try {
-        await writeFile(path, serializeNotebook(nb), "utf-8");
+        await writeFile(path, serialized, "utf-8");
       } catch (err) {
         return { content: `Cell edited in memory but failed to write notebook: ${(err as Error).message}`, isError: true };
       }
@@ -244,7 +251,11 @@ export const notebookEditTool: ToolDef<typeof schema> = {
       // just-written state as fresh (not stale against the pre-write stat).
       try {
         const s = await stat(path);
-        ctx.reobserveFile?.(path, { mtimeMs: s.mtimeMs, size: s.size });
+        ctx.reobserveFile?.(
+          path,
+          { mtimeMs: s.mtimeMs, size: s.size },
+          hashFileContent(Buffer.from(serialized, "utf-8")),
+        );
       } catch {
         /* best-effort */
       }

@@ -95,12 +95,21 @@ export interface ToolContext {
    * after. Absent in minimal test contexts — tools MUST treat it as optional
    * and fall back to their prior behaviour (no guard).
    */
-  observeFile?: (absPath: string, stat: { mtimeMs: number; size: number }) => void;
+  observeFile?: (
+    absPath: string,
+    stat: { mtimeMs: number; size: number },
+    contentHash?: string,
+  ) => void;
   checkFileFresh?: (
     absPath: string,
     currentStat: { mtimeMs: number; size: number } | null,
+    currentContentHash?: string,
   ) => import("../fsObservation.js").FreshnessResult;
-  reobserveFile?: (absPath: string, stat: { mtimeMs: number; size: number }) => void;
+  reobserveFile?: (
+    absPath: string,
+    stat: { mtimeMs: number; size: number },
+    contentHash?: string,
+  ) => void;
 }
 
 export interface ToolResult {

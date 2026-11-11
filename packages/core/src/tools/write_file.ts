@@ -1,10 +1,11 @@
 // write_file: write text content to a file. Auto-creates parent dirs.
 
 import { z } from "zod";
-import { mkdir, writeFile, stat } from "node:fs/promises";
+import { mkdir, writeFile, stat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../fsObservation.js";
 
 const schema = z.object({
   path: z
@@ -63,13 +64,21 @@ export const writeFileTool: ToolDef<typeof schema> = {
     // defeat the point of building a large file incrementally. Creating a new
     // file is always allowed (preStat null → guard passes).
     if (!appending) {
-      const fresh = guardFreshWrite(ctx, p, preStat);
+      // Overwrite does not read the file first, so supply a lazy reader: the
+      // current bytes are read ONLY if the mtime/size gate reports stale, to
+      // rescue a false-positive mtime on unchanged content without re-reading
+      // on the fast path.
+      const fresh = await guardFreshWrite(ctx, p, preStat, undefined, () =>
+        readFile(p).catch(() => null),
+      );
       if (fresh) return fresh;
     }
     await writeFile(p, input.content, { encoding: "utf-8", flag: appending ? "a" : "w" });
     try {
       const s = await stat(p);
-      ctx.reobserveFile?.(p, { mtimeMs: s.mtimeMs, size: s.size });
+      // After an append we don't hold the full file, so only hash on overwrite.
+      const hash = appending ? undefined : hashFileContent(Buffer.from(input.content, "utf-8"));
+      ctx.reobserveFile?.(p, { mtimeMs: s.mtimeMs, size: s.size }, hash);
     } catch {
       /* best-effort */
     }

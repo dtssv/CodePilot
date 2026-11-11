@@ -15,6 +15,7 @@ import { readFile, writeFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../fsObservation.js";
 
 /** Detect the dominant line ending so we can restore it after editing. */
 export function detectLineEnding(text: string): "\r\n" | "\n" {
@@ -274,7 +275,9 @@ export const editFileTool: ToolDef<typeof schema> = {
 
     // Read-before-write + staleness guard: edit_file always targets an
     // existing file, so an unobserved or externally-changed file is blocked.
-    const fresh = guardFreshWrite(ctx, p, preStat);
+    // We already hold the current content, so pass it for the content-equality
+    // fallback (a jittered mtime on unchanged bytes does not block the edit).
+    const fresh = await guardFreshWrite(ctx, p, preStat, original);
     if (fresh) return fresh;
 
     // Preserve the file's dominant line ending — the edit strategies are a
@@ -320,12 +323,17 @@ export const editFileTool: ToolDef<typeof schema> = {
     }
 
     const normalized = working.replace(/\r\n/g, "\n");
-    await writeFile(p, eol === "\r\n" ? normalized.replace(/\n/g, "\r\n") : normalized, "utf-8");
+    const written = eol === "\r\n" ? normalized.replace(/\n/g, "\r\n") : normalized;
+    await writeFile(p, written, "utf-8");
     // Re-observe so a follow-up edit this session isn't flagged stale against
-    // our own write.
+    // our own write. Carry the written content's hash for the fallback.
     try {
       const st = await stat(p);
-      ctx.reobserveFile?.(p, { mtimeMs: st.mtimeMs, size: st.size });
+      ctx.reobserveFile?.(
+        p,
+        { mtimeMs: st.mtimeMs, size: st.size },
+        hashFileContent(Buffer.from(written, "utf-8")),
+      );
     } catch {
       /* best-effort */
     }
