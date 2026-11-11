@@ -15,9 +15,10 @@
 //
 // A skill is a self-contained
 // markdown file with simple frontmatter (`name`, `description`, optional
-// `tools` list, optional `when` hint), and a body that the model can follow
-// verbatim. We deliberately do not implement a full YAML parser — only the
-// small subset above is recognised — so the dependency footprint stays at zero.
+// `tools` list, optional `when` hint, optional `user-invocable-only`), and a
+// body that the model can follow verbatim. We deliberately do not implement a
+// full YAML parser — only the small subset above is recognised — so the
+// dependency footprint stays at zero.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -46,6 +47,12 @@ export interface Skill {
   source: SkillSource;
  /** Full markdown body (frontmatter stripped). */
   body: string;
+ /** When true, the skill is discovered and still loadable by name (via the
+ * `skill` tool / slash / RPC), but is NOT advertised in the `<skills>` prompt
+ * section — it does not occupy the model's description budget and the model
+ * will not pick it on its own. Default false. Orthogonal to
+ * `config.skills.disabled` (which omits the skill entirely). */
+  userInvocableOnly?: boolean;
 }
 
 export type SkillSource = "project" | "user" | "builtin" | "compat";
@@ -75,8 +82,9 @@ export interface DiscoverOptions {
 /**
  * Parse a SKILL.md file's text into `{ frontmatter, body }`. The frontmatter
  * is a simple `key: value` block delimited by `---` lines at the top of the
- * file. Only the keys we recognise (`name`, `description`, `when`, `tools`)
- * are returned; everything else is silently ignored.
+ * file. Only the keys we recognise (`name`, `description`, `when`, `tools`,
+ * `user-invocable-only` / its `disable-model-invocation` alias) are returned;
+ * everything else is silently ignored.
  *
  * Implementation notes:
  * - We split on the first two `---` lines. Anything after the closing
@@ -89,12 +97,13 @@ export interface DiscoverOptions {
  */
 export function parseSkillMd(
   text: string
-): { name?: string; description?: string; when?: string; tools?: string[] } {
+): { name?: string; description?: string; when?: string; tools?: string[]; userInvocableOnly?: boolean } {
   const out: {
     name?: string;
     description?: string;
     when?: string;
     tools?: string[];
+    userInvocableOnly?: boolean;
   } = {};
  // Detect leading frontmatter: must start with `---` on its own line.
   const lines = text.split(/\r?\n/);
@@ -134,7 +143,11 @@ export function parseSkillMd(
     if (key === "name") out.name = stripQuotes(value);
     else if (key === "description") out.description = stripQuotes(value);
     else if (key === "when") out.when = stripQuotes(value);
-    else if (key === "tools") {
+    else if (key === "user-invocable-only" || key === "disable-model-invocation") {
+      // Both spellings mean the same thing: discover + user-loadable, but keep
+      // it out of the model-facing <skills> catalog. Accepts true/yes/1.
+      out.userInvocableOnly = /^(true|yes|1)$/i.test(stripQuotes(value));
+    } else if (key === "tools") {
  // Either flow list `[a, b, c]` or a single bare value.
       const flow = value.match(/^\[(.*)\]$/);
       if (flow) {
@@ -226,6 +239,7 @@ async function scanDirForSkills(
       dir: skillDir,
       source,
       body,
+      userInvocableOnly: fm.userInvocableOnly,
     });
   }
   return out;
@@ -249,6 +263,7 @@ function builtinSkillObjects(): Skill[] {
       dir: join(dir, b.name),
       source: "builtin",
       body: stripFrontmatter(b.markdown),
+      userInvocableOnly: fm.userInvocableOnly,
     });
   }
   return out;
@@ -416,7 +431,11 @@ export function matchSkill(skills: Skill[], query: string): Skill | null {
  * can fetch it on demand without bloating the static prefix.
  */
 export function skillsPromptSection(skills: Skill[]): string {
-  if (skills.length === 0) return "";
+  // Skills flagged user-invocable-only are discovered and still loadable by
+  // name, but omitted from the model-facing catalog so they do not occupy the
+  // description budget and the model will not pick them on its own.
+  const advertised = skills.filter((s) => !s.userInvocableOnly);
+  if (advertised.length === 0) return "";
   const lines: string[] = [];
   lines.push(`<skills>`);
   lines.push(
@@ -426,7 +445,7 @@ export function skillsPromptSection(skills: Skill[]): string {
       "loaded body replaces the abstract description and gives you the exact " +
       "checklist, commands, or output format the skill requires."
   );
-  for (const s of skills) {
+  for (const s of advertised) {
     const when = s.when ? ` — when: ${s.when}` : "";
     const tools = s.tools && s.tools.length > 0 ? ` [tools: ${s.tools.join(", ")}]` : "";
     lines.push(`- \`${s.name}\`: ${s.description || "(no description)"}${when}${tools}`);

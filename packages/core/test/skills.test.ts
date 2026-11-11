@@ -82,6 +82,14 @@ describe("parseSkillMd", () => {
     expect(fm.description).toBe("with quote");
   });
 
+  it("parses user-invocable-only (and the disable-model-invocation alias)", () => {
+    expect(parseSkillMd("---\nname: a\nuser-invocable-only: true\n---\nb").userInvocableOnly).toBe(true);
+    expect(parseSkillMd("---\nname: a\ndisable-model-invocation: true\n---\nb").userInvocableOnly).toBe(true);
+    expect(parseSkillMd("---\nname: a\nuser-invocable-only: false\n---\nb").userInvocableOnly).toBe(false);
+    // Absent → undefined (default behaviour: advertised).
+    expect(parseSkillMd("---\nname: a\n---\nb").userInvocableOnly).toBeUndefined();
+  });
+
   it("ignores unknown keys", () => {
     const fm = parseSkillMd(
       "---\nname: a\nsomething: ignored\n---\nbody"
@@ -279,6 +287,31 @@ describe("skillsPromptSection", () => {
     expect(out).toMatch(/when: user says commit/);
     expect(out).toMatch(/\[tools: bash\]/);
   });
+
+  it("omits user-invocable-only skills from the model-facing catalog", () => {
+    const advertised: Skill = {
+      name: "commit",
+      description: "Commit the current change",
+      path: "/p",
+      dir: "/d",
+      source: "user",
+      body: "",
+    };
+    const hidden: Skill = {
+      name: "secret-runbook",
+      description: "Internal runbook, user-loaded only",
+      path: "/p2",
+      dir: "/d2",
+      source: "user",
+      body: "",
+      userInvocableOnly: true,
+    };
+    const out = skillsPromptSection([advertised, hidden]);
+    expect(out).toMatch(/`commit`/);
+    expect(out).not.toMatch(/secret-runbook/);
+    // When every skill is user-invocable-only, the section is empty entirely.
+    expect(skillsPromptSection([hidden])).toBe("");
+  });
 });
 
 describe("defaultBuiltinSkillsDir", () => {
@@ -317,6 +350,36 @@ describe("skill tool", () => {
     expect(r.isError).toBeFalsy();
     expect(r.content).toContain("do the thing");
     expect(r.content).toMatch(/^# skill: commit/);
+  });
+
+  it("still loads a user-invocable-only skill by exact name", async () => {
+    const skill: Skill = {
+      name: "runbook",
+      description: "internal",
+      path: "/p/r/SKILL.md",
+      dir: "/p/r",
+      source: "user",
+      body: "the runbook steps",
+      userInvocableOnly: true,
+    };
+    const handle = createSkillTool();
+    handle.setStore(new StaticSkillStore([skill]));
+    const r = await handle.tool.execute(
+      { name: "runbook" },
+      {
+        cwd: "/tmp",
+        async artifact() {
+          return "ref";
+        },
+        async readArtifact() {
+          return "";
+        },
+      }
+    );
+    // Not advertised to the model, but an explicit by-name load still works.
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("the runbook steps");
+    expect(skillsPromptSection([skill])).toBe("");
   });
 
   it("returns an error for an unknown skill", async () => {
