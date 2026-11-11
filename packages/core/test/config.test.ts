@@ -121,6 +121,14 @@ describe("validateConfig", () => {
     expect(r.onboardedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 
+  it("accepts the sessions reconcile block", () => {
+    const r = validateConfig({
+      sessions: { reconcileOnBoot: false, autoResumeAfterCrash: true },
+    }) as { sessions?: { reconcileOnBoot?: boolean; autoResumeAfterCrash?: boolean } };
+    expect(r.sessions?.reconcileOnBoot).toBe(false);
+    expect(r.sessions?.autoResumeAfterCrash).toBe(true);
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {

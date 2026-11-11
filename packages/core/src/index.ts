@@ -348,7 +348,7 @@ export {
   persistSessionCwd,
   buildSingleProvider,
 } from "./session-utils.js";
-export type { RecoveredSession } from "./session-utils.js";
+export type { RecoveredSession, ReconcileSummary } from "./session-utils.js";
 
 // ---- Goal ----
 export { runGoal, driveGoalRounds } from "./goal.js";

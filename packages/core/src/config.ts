@@ -146,6 +146,23 @@ export const UsageConfigSchema = z
   .strict()
   .optional();
 
+/** Session-lifecycle tuning for a long-lived daemon. */
+export const SessionsConfigSchema = z
+  .object({
+    // When the daemon starts, sweep the sessions directory for any session
+    // whose last recorded status is in-flight (a run interrupted by a crash or
+    // kill) and seal each to a clean idle before anyone reopens it. Default
+    // true; set false to defer sealing until the session is next opened.
+    reconcileOnBoot: z.boolean().optional(),
+    // After the boot sweep seals an interrupted session, re-enter the agent
+    // loop to continue its last turn. Default false — seal-and-idle only, since
+    // a prior run's side-effecting tools may already have executed and a blind
+    // resume risks double execution.
+    autoResumeAfterCrash: z.boolean().optional(),
+  })
+  .strict()
+  .optional();
+
 export const McpServerConfigSchema = z.union([
  // stdio transport (default; `type` may be omitted for back-compat)
   z
@@ -537,6 +554,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     logging: LoggingConfigSchema,
     telemetry: TelemetryConfigSchema,
     usage: UsageConfigSchema,
+    sessions: SessionsConfigSchema,
     webFetch: WebFetchConfigSchema.optional(),
     webSearch: WebSearchConfigSchema.optional(),
     imageGen: ImageGenConfigSchema.optional(),

@@ -987,6 +987,20 @@ export interface CodepilotConfig {
   * been shown the first-launch setup guide — whether they completed it or
   * skipped it — so the TUI never auto-opens the guide again. User-scope only. */
   onboardedAt?: string;
+ /** Session-lifecycle tuning for a long-lived daemon. */
+  sessions?: SessionsConfig;
+}
+
+/** Session-lifecycle tuning for a long-lived daemon. */
+export interface SessionsConfig {
+ /** When the daemon starts, sweep the sessions directory for any session whose
+  * last recorded status is in-flight (a run interrupted by a crash or kill) and
+  * seal each to a clean idle before anyone reopens it. Default true. */
+  reconcileOnBoot?: boolean;
+ /** After the boot sweep seals an interrupted session, re-enter the agent loop
+  * to continue its last turn. Default false — seal-and-idle only, since a prior
+  * run's side-effecting tools may already have executed. */
+  autoResumeAfterCrash?: boolean;
 }
 
 export interface StatusLineConfig {

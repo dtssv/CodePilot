@@ -845,6 +845,21 @@ export interface RecoveredSession {
   recovery: InterruptedRunInfo;
 }
 
+/** Outcome of a boot-time reconcile sweep. Carries the sealed sessions plus
+ * telemetry counters so a host can log how many in-flight sessions were found
+ * vs. actually sealed. */
+export interface ReconcileSummary {
+  /** Sessions that were sealed to idle (their load appended a recovery seal). */
+  recovered: RecoveredSession[];
+  /** Candidates whose last status was in-flight when the sweep started. */
+  scanned: number;
+  /** Candidates actually sealed this sweep. Equals `recovered.length`. */
+  sealed: number;
+  /** Candidates skipped — already clean when loaded, or isolated by a
+   * per-session error (a live writer's lease, an unreadable file). */
+  skipped: number;
+}
+
 /** Scan the sessions directory for sessions whose last status is in-flight
  * (running / waiting_permission) — the de-facto crash-suspended marker — when
  * the SQLite index is unavailable. Reads each JSONL fully but only extracts the
@@ -901,13 +916,14 @@ async function suspendedSessionsFullScan(): Promise<
  *
  * Fail-soft: uses the SQLite index's `suspended()` fast path when available and
  * falls back to a bounded full scan otherwise. Per-session errors are isolated
- * so one bad session cannot abort the whole sweep. Returns what it recovered.
+ * so one bad session cannot abort the whole sweep. Returns a summary carrying
+ * the sealed sessions plus scanned / sealed / skipped telemetry counters.
  */
 export async function recoverSuspendedSessions(opts?: {
   /** Config applied to each recovered session's load (model resolution, etc.).
    * The recovery itself does not run the agent, so most config is irrelevant. */
   config?: CodepilotConfig;
-}): Promise<RecoveredSession[]> {
+}): Promise<ReconcileSummary> {
   await mkdir(SESSIONS_DIR, { recursive: true });
   let candidates: Array<{ id: string; cwd: string }>;
   const index = getSessionIndex();
@@ -922,6 +938,7 @@ export async function recoverSuspendedSessions(opts?: {
   }
 
   const recovered: RecoveredSession[] = [];
+  let skipped = 0;
   for (const c of candidates) {
     try {
       const session = await createSession({
@@ -933,15 +950,26 @@ export async function recoverSuspendedSessions(opts?: {
         const recovery = session.getInterruptedRecovery();
         // The index/scan can lag the on-disk truth (a session may have been
         // cleanly idled since). Only report sessions the load actually sealed.
-        if (recovery) recovered.push({ id: c.id, cwd: c.cwd, recovery });
+        if (recovery) {
+          recovered.push({ id: c.id, cwd: c.cwd, recovery });
+        } else {
+          skipped += 1; // already clean when loaded
+        }
       } finally {
         await session.dispose();
       }
     } catch {
-      /* isolate per-session failure — keep sweeping the rest */
+      // Isolate per-session failure — keep sweeping the rest. A live writer's
+      // lease (another process owns recovery) or an unreadable file lands here.
+      skipped += 1;
     }
   }
-  return recovered;
+  return {
+    recovered,
+    scanned: candidates.length,
+    sealed: recovered.length,
+    skipped,
+  };
 }
 
 /**

@@ -162,15 +162,18 @@ describe("recoverSuspendedSessions boot sweep", () => {
       { type: "status", status: "idle" },
     ]);
 
-    const recovered = await recoverSuspendedSessions();
+    const summary = await recoverSuspendedSessions();
 
     // The suspended session is reported with its claim + sealed count.
-    const mine = recovered.find((r) => r.id === suspendedId);
+    const mine = summary.recovered.find((r) => r.id === suspendedId);
     expect(mine).toBeDefined();
     expect(mine!.recovery.sealedToolCalls).toBe(1);
     expect(mine!.recovery.claim?.executionId).toBe("exec_x");
     // The clean session is NOT reported.
-    expect(recovered.some((r) => r.id === cleanId)).toBe(false);
+    expect(summary.recovered.some((r) => r.id === cleanId)).toBe(false);
+    // Telemetry: at least one sealed; sealed count matches the reported list.
+    expect(summary.sealed).toBe(summary.recovered.length);
+    expect(summary.sealed).toBeGreaterThanOrEqual(1);
 
     // On disk, the suspended session is now sealed: orphan tool_result + idle.
     const sealed = readPersisted(suspendedId);
@@ -196,9 +199,9 @@ describe("recoverSuspendedSessions boot sweep", () => {
     ]);
 
     const first = await recoverSuspendedSessions();
-    expect(first.some((r) => r.id === id)).toBe(true);
+    expect(first.recovered.some((r) => r.id === id)).toBe(true);
 
     const second = await recoverSuspendedSessions();
-    expect(second.some((r) => r.id === id)).toBe(false);
+    expect(second.recovered.some((r) => r.id === id)).toBe(false);
   });
 });

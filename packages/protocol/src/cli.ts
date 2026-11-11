@@ -670,17 +670,20 @@ async function cmdServeWeb(
   // orphaned tool calls get a side-effect-safe result, a trailing idle status,
   // and a one-shot recovery instruction for the next prompt). Seal-and-idle
   // only — we do NOT auto-re-enter the agent loop (a prior run's side-effecting
-  // tools may already have executed). Fail-soft and off the hot path: run once,
-  // in the background, so a slow sweep never delays the daemon coming up.
+  // tools may already have executed). Gated on sessions.reconcileOnBoot
+  // (default true). Fail-soft and off the hot path: run once, in the background,
+  // so a slow sweep never delays the daemon coming up.
   void (async () => {
     try {
-      const { recoverSuspendedSessions } = await import("@codepilot/core");
-      const recovered = await recoverSuspendedSessions();
-      if (recovered.length > 0) {
+      const { loadConfig, recoverSuspendedSessions } = await import("@codepilot/core");
+      const cfg = await loadConfig(process.cwd()).catch(() => undefined);
+      if (cfg?.sessions?.reconcileOnBoot === false) return;
+      const summary = await recoverSuspendedSessions({ config: cfg });
+      if (summary.sealed > 0) {
         process.stderr.write(
-          `recovered ${recovered.length} interrupted session(s): ${recovered
-            .map((r) => r.id)
-            .join(", ")}\n`,
+          `[serve] reconcile: sealed ${summary.sealed} interrupted session(s)` +
+            ` (scanned ${summary.scanned}, skipped ${summary.skipped}): ` +
+            `${summary.recovered.map((r) => r.id).join(", ")}\n`,
         );
       }
     } catch {
