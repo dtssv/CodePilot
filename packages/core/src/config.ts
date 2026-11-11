@@ -638,6 +638,15 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
         // Override the codex app-server launch command (argv). Default
         // `["codex", "app-server"]`. For testing or a pinned binary path.
         codexAppServerCommand: z.array(z.string().min(1)).optional(),
+        // Child-process credential scrubbing. By default the spawned harness
+        // does NOT inherit env vars whose names look like secrets (API keys,
+        // tokens, passwords, cloud creds). `envKeep` adds exact key names back
+        // (e.g. a key the harness legitimately needs); `envScrub` force-removes
+        // additional exact key names. Set `scrubSecrets: false` to inherit the
+        // full parent env (not recommended).
+        scrubSecrets: z.boolean().optional(),
+        envKeep: z.array(z.string().min(1)).optional(),
+        envScrub: z.array(z.string().min(1)).optional(),
       })
       .strict()
       .optional(),

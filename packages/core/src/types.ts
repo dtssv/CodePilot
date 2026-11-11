@@ -1008,6 +1008,13 @@ export interface CodepilotConfig {
     allowProtocol?: boolean;
     /** Override the codex app-server launch argv. Default `["codex", "app-server"]`. */
     codexAppServerCommand?: string[];
+    /** Scrub secret-looking env keys from the spawned harness's environment.
+     * Default true. Set false to inherit the full parent env (not recommended). */
+    scrubSecrets?: boolean;
+    /** Exact env key names to KEEP despite looking like secrets. */
+    envKeep?: string[];
+    /** Exact env key names to force-REMOVE in addition to the secret patterns. */
+    envScrub?: string[];
   };
   /** Auto-apply model `suggest_mode` switches without re-asking. Default off. */
   autoAcceptModeSuggestions?: boolean;

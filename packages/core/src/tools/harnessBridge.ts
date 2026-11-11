@@ -31,6 +31,68 @@ const MAX_TIMEOUT_MS = 600_000; // 10 min
 export const HARNESS_KINDS = ["claude-code", "codex", "custom"] as const;
 export type HarnessKind = (typeof HARNESS_KINDS)[number];
 
+/** Env key-name substrings that mark a value as secret-looking. Matched
+ * case-insensitively against the whole key. Deliberately broad: a spawned
+ * external harness should not inherit the parent's credentials by default. */
+const SECRET_KEY_PATTERNS = [
+  "KEY",
+  "SECRET",
+  "TOKEN",
+  "PASSWORD",
+  "PASSWD",
+  "CREDENTIAL",
+  "CRED",
+  "AUTH",
+  "SESSION",
+  "PRIVATE",
+  "PASSPHRASE",
+  "SIGNATURE",
+  "APIKEY",
+  "ACCESS_KEY",
+] as const;
+
+export interface ChildEnvScrubOptions {
+  /** Master switch. Default true → secret-looking keys are removed. */
+  scrubSecrets?: boolean;
+  /** Exact key names to keep despite matching a secret pattern. */
+  envKeep?: string[];
+  /** Exact key names to force-remove in addition to the patterns. */
+  envScrub?: string[];
+}
+
+/** Whether an env key name looks like a secret. */
+export function isSecretEnvKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return SECRET_KEY_PATTERNS.some((p) => upper.includes(p));
+}
+
+/**
+ * Build the environment for a spawned harness. By default every env var whose
+ * NAME looks like a secret is dropped so the child cannot read the parent's
+ * credentials; `envKeep` adds specific keys back and `envScrub` removes more.
+ * With `scrubSecrets: false` the full parent env is inherited unchanged.
+ */
+export function scrubChildEnv(
+  base: NodeJS.ProcessEnv,
+  opts: ChildEnvScrubOptions = {},
+): NodeJS.ProcessEnv {
+  if (opts.scrubSecrets === false) return { ...base };
+  const keep = new Set(opts.envKeep ?? []);
+  const forceScrub = new Set(opts.envScrub ?? []);
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (value === undefined) continue;
+    if (forceScrub.has(key)) continue;
+    if (keep.has(key)) {
+      out[key] = value;
+      continue;
+    }
+    if (isSecretEnvKey(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 const schema = z.object({
   harness: z
     .enum(HARNESS_KINDS)
@@ -147,7 +209,7 @@ interface RunHarnessResult {
 /** Spawn the harness with no stdin, piped output, timeout + abort wiring. */
 function runHarnessCommand(
   cmd: string,
-  opts: { cwd: string; timeout: number; signal?: AbortSignal }
+  opts: { cwd: string; timeout: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
 ): Promise<RunHarnessResult> {
   return new Promise((resolve) => {
     // detached so we can kill the whole process group (sh -c sleep … leaves
@@ -158,7 +220,7 @@ function runHarnessCommand(
     const shellArgs = isWin ? ["/d", "/s", "/c", cmd] : ["-c", cmd];
     const child = spawn(shell, shellArgs, {
       cwd: opts.cwd,
-      env: process.env,
+      env: opts.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"], // no stdin: prevent interactive hangs
       detached: true,
     });
@@ -297,12 +359,20 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
     // when config allows it; otherwise we fall through to the CLI path. The
     // model asks for it via `backend: "protocol"`.
     const bridgeCfg = ctx.config?.harnessBridge;
+    // Scrub secret-looking env keys from the child's environment by default so
+    // the spawned harness can't read the parent's credentials. Shared by both
+    // backends; overlay via config (scrubSecrets / envKeep / envScrub).
+    const childEnv = scrubChildEnv(process.env, {
+      scrubSecrets: bridgeCfg?.scrubSecrets,
+      envKeep: bridgeCfg?.envKeep,
+      envScrub: bridgeCfg?.envScrub,
+    });
     if (input.backend === "protocol") {
       if (input.harness === "codex" && bridgeCfg?.allowProtocol) {
         const res = await runCodexAppServerTurn(input.prompt, {
           command: bridgeCfg.codexAppServerCommand,
           cwd,
-          env: process.env,
+          env: childEnv,
           timeoutMs: timeout,
           signal: ctx.signal,
         });
@@ -319,7 +389,7 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
             res.diagnostics.length > 0
               ? `[protocol backend unavailable: ${res.diagnostics.join("; ")}; using CLI]\n`
               : "[protocol backend produced no answer; using CLI]\n";
-          const cli = await runCliHarness(input, cwd, timeout, ctx);
+          const cli = await runCliHarness(input, cwd, timeout, ctx, childEnv);
           return { ...cli, content: note + cli.content };
         }
         return { content: res.finalText, isError: false };
@@ -327,7 +397,7 @@ export const harnessBridgeTool: ToolDef<typeof schema> = {
       // Protocol requested but not available → transparent CLI fallback.
     }
 
-    const cli = await runCliHarness(input, cwd, timeout, ctx);
+    const cli = await runCliHarness(input, cwd, timeout, ctx, childEnv);
     return cli;
   },
 };
@@ -340,6 +410,7 @@ async function runCliHarness(
   cwd: string,
   timeout: number,
   ctx: Parameters<NonNullable<typeof harnessBridgeTool.execute>>[1],
+  childEnv?: NodeJS.ProcessEnv,
 ): Promise<{ content: string; isError: boolean }> {
     const built = buildHarnessCommand(input);
     if (!built.ok) {
@@ -355,6 +426,7 @@ async function runCliHarness(
       cwd,
       timeout,
       signal: ctx.signal,
+      env: childEnv,
     });
 
     if (r.timedOut) {
@@ -370,9 +442,14 @@ async function runCliHarness(
  // sh, or a child "error" event message in stderr.
     const spawnFailed =
       r.stderr.includes("ENOENT") || r.stderr.includes("command not found") || r.code === 127;
+    const failed = r.code !== 0 || spawnFailed;
 
     let output = extractHarnessOutput(input.harness, r.stdout);
-    if (r.stderr.length > 0) {
+    // Result contract: on SUCCESS the model sees only the harness's final
+    // output — stderr is the harness's own diagnostics/log noise and is NOT
+    // merged in. On FAILURE, stderr is the safe diagnostic needed to explain
+    // the error, so it is included (behind an [exit] marker).
+    if (failed && r.stderr.length > 0) {
       output += (output.length > 0 ? "\n" : "") + `[stderr]\n${r.stderr}`;
     }
     if (wrapped.warning) {
@@ -388,7 +465,7 @@ async function runCliHarness(
 
     return {
       content: output,
-      isError: r.code !== 0 || spawnFailed,
+      isError: failed,
     };
 }
 

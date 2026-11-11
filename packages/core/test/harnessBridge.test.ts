@@ -11,6 +11,8 @@ import {
   harnessBridgeTool,
   buildHarnessCommand,
   extractHarnessOutput,
+  scrubChildEnv,
+  isSecretEnvKey,
 } from "../src/tools/harnessBridge.js";
 import { resolveSandbox } from "../src/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
@@ -94,6 +96,65 @@ describe("extractHarnessOutput", () => {
   it("returns raw stdout for codex and custom", () => {
     expect(extractHarnessOutput("codex", "raw codex out")).toBe("raw codex out");
     expect(extractHarnessOutput("custom", "raw custom out")).toBe("raw custom out");
+  });
+});
+
+describe("scrubChildEnv", () => {
+  it("drops secret-looking keys by default, keeps the rest", () => {
+    const env = {
+      PATH: "/usr/bin",
+      HOME: "/home/x",
+      OPENAI_API_KEY: "sk-secret",
+      AWS_SECRET_ACCESS_KEY: "aws-secret",
+      GITHUB_TOKEN: "ghp_x",
+      DB_PASSWORD: "p",
+      MY_CREDENTIAL: "c",
+      SESSION_SECRET: "s",
+      LANG: "en_US.UTF-8",
+    };
+    const out = scrubChildEnv(env);
+    expect(out.PATH).toBe("/usr/bin");
+    expect(out.HOME).toBe("/home/x");
+    expect(out.LANG).toBe("en_US.UTF-8");
+    expect(out.OPENAI_API_KEY).toBeUndefined();
+    expect(out.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(out.GITHUB_TOKEN).toBeUndefined();
+    expect(out.DB_PASSWORD).toBeUndefined();
+    expect(out.MY_CREDENTIAL).toBeUndefined();
+    expect(out.SESSION_SECRET).toBeUndefined();
+  });
+
+  it("envKeep adds specific secret-looking keys back", () => {
+    const out = scrubChildEnv(
+      { OPENAI_API_KEY: "sk", OTHER_TOKEN: "t" },
+      { envKeep: ["OPENAI_API_KEY"] },
+    );
+    expect(out.OPENAI_API_KEY).toBe("sk");
+    expect(out.OTHER_TOKEN).toBeUndefined();
+  });
+
+  it("envScrub force-removes additional non-secret-looking keys", () => {
+    const out = scrubChildEnv(
+      { PATH: "/usr/bin", INTERNAL_URL: "http://x" },
+      { envScrub: ["INTERNAL_URL"] },
+    );
+    expect(out.PATH).toBe("/usr/bin");
+    expect(out.INTERNAL_URL).toBeUndefined();
+  });
+
+  it("scrubSecrets: false inherits the full env unchanged", () => {
+    const env = { PATH: "/usr/bin", OPENAI_API_KEY: "sk" };
+    const out = scrubChildEnv(env, { scrubSecrets: false });
+    expect(out.OPENAI_API_KEY).toBe("sk");
+    expect(out.PATH).toBe("/usr/bin");
+  });
+
+  it("isSecretEnvKey flags secret-looking names", () => {
+    expect(isSecretEnvKey("OPENAI_API_KEY")).toBe(true);
+    expect(isSecretEnvKey("token")).toBe(true);
+    expect(isSecretEnvKey("PASSWORD")).toBe(true);
+    expect(isSecretEnvKey("PATH")).toBe(false);
+    expect(isSecretEnvKey("HOME")).toBe(false);
   });
 });
 
@@ -261,5 +322,73 @@ describe("harness_bridge execution", () => {
     );
     expect(r.isError).toBeFalsy();
     expect(r.content).toContain("shim says hi");
+  });
+
+  it("does not leak secret-looking env vars into the spawned harness", async () => {
+    // Set a secret-looking var in the parent; the custom harness echoes it. The
+    // scrubbed child env must not carry it (empty expansion).
+    process.env.CP_TEST_LEAK_TOKEN = "super-secret-xyz";
+    try {
+      const r = await harnessBridgeTool.execute(
+        {
+          harness: "custom",
+          custom_command: "sh",
+          custom_args: ["-c", 'printf "TOKEN=[%s]" "$CP_TEST_LEAK_TOKEN"'],
+          prompt: "",
+        },
+        ctx(),
+      );
+      expect(r.content).toContain("TOKEN=[]");
+      expect(r.content).not.toContain("super-secret-xyz");
+    } finally {
+      delete process.env.CP_TEST_LEAK_TOKEN;
+    }
+  });
+
+  it("keeps a secret-looking env var when config envKeep lists it", async () => {
+    process.env.CP_TEST_KEEP_TOKEN = "kept-value-123";
+    try {
+      const r = await harnessBridgeTool.execute(
+        {
+          harness: "custom",
+          custom_command: "sh",
+          custom_args: ["-c", 'printf "TOKEN=[%s]" "$CP_TEST_KEEP_TOKEN"'],
+          prompt: "",
+        },
+        { ...ctx(), config: { harnessBridge: { envKeep: ["CP_TEST_KEEP_TOKEN"] } } as never },
+      );
+      expect(r.content).toContain("TOKEN=[kept-value-123]");
+    } finally {
+      delete process.env.CP_TEST_KEEP_TOKEN;
+    }
+  });
+
+  it("omits stderr from the model output on success but includes it on failure", async () => {
+    // Success: stderr is harness log noise → not surfaced.
+    const ok = await harnessBridgeTool.execute(
+      {
+        harness: "custom",
+        custom_command: "sh",
+        custom_args: ["-c", "echo noise >&2; echo answer; exit 0"],
+        prompt: "",
+      },
+      ctx(),
+    );
+    expect(ok.isError).toBeFalsy();
+    expect(ok.content).toContain("answer");
+    expect(ok.content).not.toContain("noise");
+
+    // Failure: stderr is the safe diagnostic → included.
+    const bad = await harnessBridgeTool.execute(
+      {
+        harness: "custom",
+        custom_command: "sh",
+        custom_args: ["-c", "echo why >&2; exit 2"],
+        prompt: "",
+      },
+      ctx(),
+    );
+    expect(bad.isError).toBe(true);
+    expect(bad.content).toContain("why");
   });
 });
