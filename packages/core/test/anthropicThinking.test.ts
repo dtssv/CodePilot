@@ -222,14 +222,18 @@ describe("AnthropicProvider extended thinking", () => {
       }),
     );
     const msgs = body?.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
-    // The stable history (the assistant "earlier answer") carries the cache
-    // breakpoint; the runtime_context/current turn do not.
+    // Budgeted placement caches the stable history (both "earlier question" and
+    // "earlier answer") but never the volatile runtime_context or current turn.
     const hasCache = (m: { content: Array<Record<string, unknown>> }) =>
       m.content.some((c) => c.cache_control);
     const cached = msgs.filter(hasCache);
-    expect(cached).toHaveLength(1);
-    expect(JSON.stringify(cached[0]!.content)).toContain("earlier answer");
-    expect(JSON.stringify(cached[0]!.content)).not.toContain("<runtime_context>");
-    expect(JSON.stringify(cached[0]!.content)).not.toContain("new question");
+    expect(cached.length).toBeGreaterThanOrEqual(1);
+    // The newest stable message (assistant "earlier answer") is cached.
+    expect(cached.some((m) => JSON.stringify(m.content).includes("earlier answer"))).toBe(true);
+    // The volatile runtime_context and the current turn are NOT cached.
+    for (const m of cached) {
+      expect(JSON.stringify(m.content)).not.toContain("<runtime_context>");
+      expect(JSON.stringify(m.content)).not.toContain("new question");
+    }
   });
 });

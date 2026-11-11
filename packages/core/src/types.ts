@@ -61,6 +61,10 @@ export interface UsageInfo {
   cacheRead?: number;
   cacheWrite?: number;
   costUSD?: number;
+  /** Number of prompt-cache breakpoints the request placed (Anthropic inline
+   * cache_control). Telemetry only; undefined for providers that do not place
+   * inline markers (OpenAI/Gemini implicit caching). */
+  cacheBreakpoints?: number;
 }
 
 export type TextDelta = { type: "text"; text: string };

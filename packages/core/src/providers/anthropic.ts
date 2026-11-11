@@ -125,13 +125,31 @@ export class AnthropicProvider implements ChatProvider {
       ? Math.max(baseMaxTokens, budget + ANSWER_HEADROOM)
       : baseMaxTokens;
 
+    // Budgeted prompt-cache breakpoint placement: Anthropic allows up to 4
+    // `cache_control` breakpoints. Fill them by priority — system block, last
+    // tool, then the stable conversation-history tail — counting what the first
+    // two use so history gets the remainder (never exceeding the cap, never
+    // marking the volatile runtime_context / current turn). Breakpoint count is
+    // reported as usage telemetry below.
+    const BREAKPOINT_CAP = 4;
+    const systemCached = !!opts.systemPrompt && this.enableCaching;
+    const toolCached =
+      !!opts.tools && opts.tools.length > 0 && this.enableCaching && this.cacheControlOnTools;
+    const fixedBreakpoints = (systemCached ? 1 : 0) + (toolCached ? 1 : 0);
+    const historyBudget = Math.max(0, BREAKPOINT_CAP - fixedBreakpoints);
+
+    const anthropicMessages = mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage));
+    const historyBreakpoints = markConversationCache(
+      anthropicMessages,
+      this.enableCaching,
+      this.cacheControl,
+      historyBudget,
+    );
+    const cacheBreakpoints = fixedBreakpoints + historyBreakpoints;
+
     const body: Record<string, unknown> = {
       model: opts.model,
-      messages: markConversationCache(
-        mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage)),
-        this.enableCaching,
-        this.cacheControl,
-      ),
+      messages: anthropicMessages,
       max_tokens: maxTokens,
       stream: true,
     };
@@ -205,7 +223,7 @@ export class AnthropicProvider implements ChatProvider {
     }
 
     const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
-    const accumUsage: UsageInfo = { input: 0, output: 0 };
+    const accumUsage: UsageInfo = { input: 0, output: 0, cacheBreakpoints };
     let stopReason = "stop";
     const blocks = new Map<number, { type: string; id?: string; name?: string; inputJson: string; text: string }>();
 
@@ -383,42 +401,53 @@ function toAnthropicMessage(m: ProviderMessage): Record<string, unknown> {
 }
 
 /**
- * Add a 3rd prompt-cache breakpoint on the conversation-history prefix so
+ * Place prompt-cache breakpoints on the conversation-history prefix so
  * multi-turn chats reuse the cached message history — not just system + tools.
- * Anthropic allows 4 breakpoints; CodePilot already caches the last tool and
- * the system block, leaving room here.
+ * Anthropic allows up to 4 `cache_control` breakpoints per request; this fills
+ * whatever the system + tool breakpoints left unused with breakpoints on the
+ * newest STABLE messages (walking backward from the current turn).
  *
- * The breakpoint goes on the last content block of the newest STABLE message —
- * i.e. before the per-turn volatile tail (the `<runtime_context>` message and
- * the current user turn), which change every turn and must stay outside the
- * cached prefix. We skip the trailing run of volatile/current messages and mark
- * the block just before them.
+ * Breakpoints go on the last cacheable block of each chosen message, skipping
+ * the per-turn volatile tail — the `<runtime_context>` message and the current
+ * user turn — which change every turn and must stay outside the cached prefix.
+ * Marking the last few stable messages (not just one) means a change deep in
+ * history only invalidates from its breakpoint forward, keeping earlier spans
+ * cached. Returns the number of history breakpoints actually placed.
  */
 function markConversationCache(
   messages: Array<Record<string, unknown>>,
   enabled: boolean,
   cacheControl: { type: "ephemeral"; ttl?: "1h" },
-): Array<Record<string, unknown>> {
-  if (!enabled || messages.length < 2) return messages;
+  budget: number,
+): number {
+  if (!enabled || budget <= 0 || messages.length < 2) return 0;
   const isVolatile = (m: Record<string, unknown>): boolean => {
     const content = m.content as Array<{ type?: string; text?: string }> | undefined;
     return Array.isArray(content) && content.some((c) => c.type === "text" && c.text?.includes("<runtime_context>"));
   };
-  // Find the last message that is neither the current turn (the final message)
-  // nor the volatile runtime_context. Everything up to and including it is the
-  // stable history prefix we want cached.
+  const markOne = (m: Record<string, unknown>): boolean => {
+    const content = m.content as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(content) || content.length === 0) return false;
+    const last = content[content.length - 1]!;
+    // Only text/tool_result/tool_use blocks accept cache_control.
+    if (last.type === "text" || last.type === "tool_result" || last.type === "tool_use") {
+      if (last.cache_control) return false; // already marked — do not double-spend
+      content[content.length - 1] = { ...last, cache_control: cacheControl };
+      return true;
+    }
+    return false;
+  };
+  // Walk backward from the current turn (the final message), skipping the
+  // volatile tail, and mark up to `budget` stable messages.
+  let placed = 0;
   let idx = messages.length - 1; // skip the current turn
-  while (idx >= 0 && (idx === messages.length - 1 || isVolatile(messages[idx]!))) idx--;
-  if (idx < 0) return messages;
-  const target = messages[idx]!;
-  const content = target.content as Array<Record<string, unknown>> | undefined;
-  if (!Array.isArray(content) || content.length === 0) return messages;
-  const last = content[content.length - 1]!;
-  // Only text/tool_result/tool_use blocks accept cache_control.
-  if (last.type === "text" || last.type === "tool_result" || last.type === "tool_use") {
-    content[content.length - 1] = { ...last, cache_control: cacheControl };
+  idx--;
+  while (idx >= 0 && placed < budget) {
+    const m = messages[idx]!;
+    if (!isVolatile(m) && markOne(m)) placed += 1;
+    idx--;
   }
-  return messages;
+  return placed;
 }
 
 /**

@@ -157,3 +157,114 @@ describe("AnthropicProvider cache TTL", () => {
     expect(headers["anthropic-beta"]).toBeUndefined();
   });
 });
+
+describe("AnthropicProvider budgeted breakpoint placement", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function run(
+    opts: ConstructorParameters<typeof AnthropicProvider>[0],
+    streamOpts: Parameters<AnthropicProvider["stream"]>[0],
+  ): Promise<{ body: Record<string, unknown>; usage: { cacheBreakpoints?: number } }> {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse(MINIMAL_STREAM);
+    });
+    const p = new AnthropicProvider({ apiKey: "k", ...opts });
+    let usage: { cacheBreakpoints?: number } = {};
+    for await (const ev of p.stream(streamOpts)) {
+      if (ev.kind === "usage") usage = ev.usage;
+    }
+    return { body, usage };
+  }
+
+  function countBreakpoints(body: Record<string, unknown>): number {
+    let n = 0;
+    const sys = body.system as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(sys)) n += sys.filter((s) => s.cache_control).length;
+    const tools = body.tools as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(tools)) n += tools.filter((t) => t.cache_control).length;
+    const msgs = body.messages as Array<{ content?: Array<Record<string, unknown>> }> | undefined;
+    if (Array.isArray(msgs)) {
+      for (const m of msgs) n += (m.content ?? []).filter((c) => c.cache_control).length;
+    }
+    return n;
+  }
+
+  it("fills remaining slots on the stable history tail (system + tool + 2 history = 4)", async () => {
+    const { body, usage } = await run(
+      {},
+      {
+        model: "claude-sonnet-4-5",
+        systemPrompt: "sys",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "u1" }] },
+          { role: "assistant", content: [{ type: "text", text: "a1" }] },
+          { role: "user", content: [{ type: "text", text: "u2" }] },
+          { role: "assistant", content: [{ type: "text", text: "a2" }] },
+          { role: "system", content: [{ type: "text", text: "<runtime_context>now</runtime_context>" }] },
+          { role: "user", content: [{ type: "text", text: "current" }] },
+        ],
+        tools: TOOLS,
+      },
+    );
+    // system(1) + last tool(1) + up to 2 stable history = cap 4.
+    expect(countBreakpoints(body)).toBe(4);
+    expect(usage.cacheBreakpoints).toBe(4);
+  });
+
+  it("never exceeds the cap of 4 across many stable turns", async () => {
+    const many = [];
+    for (let i = 0; i < 12; i++) {
+      many.push({ role: i % 2 === 0 ? "user" : "assistant", content: [{ type: "text" as const, text: `m${i}` }] });
+    }
+    many.push({ role: "system" as const, content: [{ type: "text" as const, text: "<runtime_context>now</runtime_context>" }] });
+    many.push({ role: "user" as const, content: [{ type: "text" as const, text: "current" }] });
+    const { body, usage } = await run(
+      {},
+      { model: "claude-sonnet-4-5", systemPrompt: "sys", messages: many, tools: TOOLS },
+    );
+    expect(countBreakpoints(body)).toBeLessThanOrEqual(4);
+    expect(usage.cacheBreakpoints).toBe(countBreakpoints(body));
+  });
+
+  it("spends all 4 slots on history when there is no system/tools", async () => {
+    const { body, usage } = await run(
+      {},
+      {
+        model: "claude-sonnet-4-5",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "u1" }] },
+          { role: "assistant", content: [{ type: "text", text: "a1" }] },
+          { role: "user", content: [{ type: "text", text: "u2" }] },
+          { role: "assistant", content: [{ type: "text", text: "a2" }] },
+          { role: "user", content: [{ type: "text", text: "u3" }] },
+          { role: "assistant", content: [{ type: "text", text: "a3" }] },
+          { role: "system", content: [{ type: "text", text: "<runtime_context>now</runtime_context>" }] },
+          { role: "user", content: [{ type: "text", text: "current" }] },
+        ],
+      },
+    );
+    // No system/tool breakpoints → history may take the full budget of 4.
+    expect(countBreakpoints(body)).toBe(4);
+    expect(usage.cacheBreakpoints).toBe(4);
+  });
+
+  it("places zero breakpoints when caching is disabled", async () => {
+    const { body, usage } = await run(
+      { enableCaching: false },
+      {
+        model: "claude-sonnet-4-5",
+        systemPrompt: "sys",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "u1" }] },
+          { role: "assistant", content: [{ type: "text", text: "a1" }] },
+          { role: "user", content: [{ type: "text", text: "current" }] },
+        ],
+        tools: TOOLS,
+      },
+    );
+    expect(countBreakpoints(body)).toBe(0);
+    expect(usage.cacheBreakpoints).toBe(0);
+  });
+});
