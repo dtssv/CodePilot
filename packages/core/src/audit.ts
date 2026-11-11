@@ -6,14 +6,16 @@
 // instrumenting the tool hot path: a session subscribes it to its events, so
 // it captures every tool call/result across all code paths with no risk of
 // missing an early return. Secrets never reach it — the agent loop redacts
-// tool results before they become events, and we only keep a short,
-// primary-argument summary of inputs (not the full object).
+// tool results before they become events, and the short primary-argument
+// summary we keep of inputs (and any error message) is run through the secret
+// floor before it is written.
 
 import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { Event } from "./types.js";
+import { redactSecrets, type RedactionPattern } from "./redact.js";
 
 /** One structured audit record (JSONL line). */
 export interface AuditRecord {
@@ -69,11 +71,14 @@ export class AuditLogger {
   private readonly sessionId: string;
   private readonly file: string;
   private warned = false;
+  /** Deployment redaction patterns applied on top of the built-in floor. */
+  private readonly redactPatterns?: readonly RedactionPattern[];
  /** Remembers tool names by call id so tool_result records can name the tool. */
   private readonly callNames = new Map<string, string>();
 
-  constructor(sessionId: string, opts: { dir?: string; file?: string } = {}) {
+  constructor(sessionId: string, opts: { dir?: string; file?: string; redactPatterns?: readonly RedactionPattern[] } = {}) {
     this.sessionId = sessionId;
+    this.redactPatterns = opts.redactPatterns;
     this.file = opts.file ?? (opts.dir ? join(opts.dir, `${new Date().toISOString().slice(0, 10)}.jsonl`) : auditFileFor());
   }
 
@@ -83,12 +88,21 @@ export class AuditLogger {
     if (rec) void this.write(rec);
   };
 
+  /** Apply the built-in secret floor (plus any deployment patterns) to a
+   * short audit string. The primary-argument summary can carry a credential
+   * embedded in a command (e.g. an Authorization header), so it is never
+   * written raw. */
+  private redact(text: string | undefined): string | undefined {
+    if (text === undefined) return undefined;
+    return redactSecrets(text, this.redactPatterns);
+  }
+
   private toRecord(e: Event): AuditRecord | null {
     const ts = new Date().toISOString();
     switch (e.type) {
       case "tool_call":
         this.callNames.set(e.id, e.name);
-        return { ts, sessionId: this.sessionId, type: "tool_call", tool: e.name, toolCallId: e.id, input: summariseInput(e.input) };
+        return { ts, sessionId: this.sessionId, type: "tool_call", tool: e.name, toolCallId: e.id, input: this.redact(summariseInput(e.input)) };
       case "tool_result":
         return {
           ts,
@@ -100,7 +114,7 @@ export class AuditLogger {
           resultChars: typeof e.content === "string" ? e.content.length : undefined,
         };
       case "error":
-        return { ts, sessionId: this.sessionId, type: "error", message: e.message.slice(0, 500) };
+        return { ts, sessionId: this.sessionId, type: "error", message: this.redact(e.message.slice(0, 500)) };
       case "compaction":
         return { ts, sessionId: this.sessionId, type: "compaction" };
       default:

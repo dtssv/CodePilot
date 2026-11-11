@@ -341,7 +341,15 @@ export async function runOneTool(
     cwd: deps.cwd,
     sessionId: deps.sessionId,
     signal: deps.signal,
-    artifact: async (blob, hint) => deps.artifacts.write(blob, hint),
+    artifact: async (blob, hint) =>
+      // Redact secrets before anything reaches disk. Text blobs spilled by
+      // tools (spillHeadTail and friends) would otherwise persist raw
+      // credentials into `.codepilot/artifacts`, replayable via read_artifact.
+      // Binary blobs (Uint8Array) are passed through unchanged.
+      deps.artifacts.write(
+        typeof blob === "string" ? redactSecrets(blob, deps.redactPatterns) : blob,
+        hint,
+      ),
     readArtifact: async (ref) => deps.artifacts.read(ref),
     sandbox: deps.sandbox,
     askUser: deps.onAskUser,

@@ -186,6 +186,24 @@ describe("validateConfig", () => {
     });
     expect(cfg.mcpServers?.["http-srv"].url).toBe("https://mcp.example.com/mcp");
   });
+
+  it("accepts OAuth fields on an HTTP/SSE MCP transport", () => {
+    const cfg = validateConfig({
+      mcpServers: {
+        "oauth-srv": {
+          type: "http",
+          url: "https://mcp.example.com/mcp",
+          oauthClientId: "client-123",
+          oauthClientSecret: "secret-abc",
+          oauthScopes: ["openid", "profile"],
+        },
+      },
+    });
+    const srv = cfg.mcpServers?.["oauth-srv"];
+    expect(srv?.oauthClientId).toBe("client-123");
+    expect(srv?.oauthClientSecret).toBe("secret-abc");
+    expect(srv?.oauthScopes).toEqual(["openid", "profile"]);
+  });
 });
 
 describe("loadConfigWithSources layered merge", () => {

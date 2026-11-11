@@ -85,6 +85,30 @@ describe("AuditLogger", () => {
     expect(call?.input?.length).toBeLessThanOrEqual(120);
     expect(call?.input?.endsWith("…")).toBe(true);
   });
+
+  it("redacts a secret embedded in the primary-argument summary", async () => {
+    const log = new AuditLogger("sess-5", { dir });
+    const token = "sk-ant-abcdef0123456789abcdef0123";
+    log.onEvent({
+      type: "tool_call",
+      id: "t1",
+      name: "bash",
+      input: { command: `curl -H "Authorization: Bearer ${token}"` },
+    });
+    await flush();
+    const raw = readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf-8")).join("");
+    expect(raw).not.toContain(token);
+    expect(raw).toContain("REDACTED");
+  });
+
+  it("redacts a secret in an error message", async () => {
+    const log = new AuditLogger("sess-6", { dir });
+    const token = "sk-ant-abcdef0123456789abcdef0123";
+    log.onEvent({ type: "error", message: `auth failed with key ${token}`, recoverable: true });
+    await flush();
+    const raw = readdirSync(dir).map((f) => readFileSync(join(dir, f), "utf-8")).join("");
+    expect(raw).not.toContain(token);
+  });
 });
 
 describe("readAuditLog", () => {

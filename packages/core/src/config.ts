@@ -163,6 +163,11 @@ export const McpServerConfigSchema = z.union([
       type: z.enum(["http", "sse"]),
       url: z.string().min(1),
       headers: z.record(z.string(), z.string()).optional(),
+      // OAuth 2.1 (Authorization Code + PKCE) client fields. Optional: omitting
+      // them leaves the transport on static headers / dynamic registration.
+      oauthClientId: z.string().min(1).optional(),
+      oauthClientSecret: z.string().min(1).optional(),
+      oauthScopes: z.array(z.string().min(1)).optional(),
       disabled: z.boolean().optional(),
     })
     .strict(),

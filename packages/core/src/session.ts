@@ -603,7 +603,7 @@ export class Session {
     // history on resume. Fire-and-forget; never throws into the loop.
     if (this.config.audit) {
       const dir = typeof this.config.audit === "object" ? this.config.audit.dir : undefined;
-      const logger = new AuditLogger(this.id, dir ? { dir } : {});
+      const logger = new AuditLogger(this.id, { ...(dir ? { dir } : {}), redactPatterns: this.redactPatterns });
       this.listeners.add(logger.onEvent);
     }
   }
