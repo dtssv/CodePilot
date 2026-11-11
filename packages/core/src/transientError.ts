@@ -59,3 +59,59 @@ export function isTransientError(message: string): boolean {
   }
   return TRANSIENT_PATTERNS.some((re) => re.test(message));
 }
+
+/** Coarse failure class for a provider request, from its error message.
+ *  - "payload_too_large": the request bytes/size were rejected (413 or an
+ *    explicit "payload/request too large"), WITHOUT token/context-window
+ *    semantics. Recover by shrinking the request body (fold the largest tool
+ *    results, drop inline images, head+tail a single oversize message) rather
+ *    than compacting the whole transcript.
+ *  - "context_overflow": too many tokens for the model's context window.
+ *    Recover by compacting the transcript and shrinking the send budget.
+ *  - "transient": network blip / rate-limit / gateway overload — retry.
+ *  - "fatal": a deterministic error (auth, bad request) — fail fast. */
+export type ProviderFailureKind =
+  | "payload_too_large"
+  | "context_overflow"
+  | "transient"
+  | "fatal";
+
+/** Phrasings that indicate a byte/size-level payload rejection (as opposed to
+ * a token-count rejection). */
+const PAYLOAD_PATTERNS: RegExp[] = [
+  /payload too large|request entity too large|request too large|body too large/i,
+  /maximum (?:request|payload|body) size|exceeds the maximum size/i,
+];
+
+/** Phrasings that mean "too many tokens for the context window". Mirrors
+ * {@link isContextOverflowError} in agent.ts; kept here so the structured
+ * classifier can tell an ambiguous 413 apart from a real token overflow. */
+const CONTEXT_PATTERNS: RegExp[] = [
+  /context[_ ]length|maximum context|too (?:long|many tokens)/i,
+  /exceeds? the (?:model'?s )?(?:maximum )?context|prompt is too long/i,
+  /reduce the length|input length|context window (?:exceeded|too)/i,
+];
+
+/**
+ * Classify a provider failure from its error message. Structured signal (the
+ * framed HTTP status) is consulted first; 413 is split by whether the body also
+ * carries context/window semantics (then overflow) or only size semantics (then
+ * payload). Non-413 messages fall back to pattern families.
+ */
+export function classifyProviderFailure(message: string): ProviderFailureKind {
+  const statusMatch = STATUS_TOKEN.exec(message);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const hasContext = CONTEXT_PATTERNS.some((re) => re.test(message));
+  const hasPayload = PAYLOAD_PATTERNS.some((re) => re.test(message));
+
+  // A 413 is the canonical payload rejection, but some gateways return 413 for a
+  // token overflow too — if the body talks about context/window, treat it as
+  // overflow so we compact instead of only shrinking bytes.
+  if (status === 413) {
+    return hasContext ? "context_overflow" : "payload_too_large";
+  }
+  if (hasContext) return "context_overflow";
+  if (hasPayload) return "payload_too_large";
+  if (isTransientError(message)) return "transient";
+  return "fatal";
+}

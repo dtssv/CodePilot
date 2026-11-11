@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isTransientError } from "../src/transientError.js";
+import { classifyProviderFailure, isTransientError } from "../src/transientError.js";
 import { isTransientError as fromAgent } from "../src/agent.js";
 import { isTransientJudgeFailure } from "../src/stopVerify.js";
 
@@ -81,5 +81,43 @@ describe("isTransientError (shared classifier)", () => {
     expect(isTransientJudgeFailure("fetch failed")).toBe(true);
     expect(isTransientJudgeFailure("request timed out")).toBe(true);
     expect(isTransientJudgeFailure('tokens limit (访问限制)')).toBe(true);
+  });
+});
+
+describe("classifyProviderFailure", () => {
+  it("classifies a byte/size rejection as payload_too_large", () => {
+    for (const msg of [
+      "OpenAI 413: Payload Too Large",
+      "413 Request Entity Too Large",
+      "request too large for the gateway",
+      "exceeds the maximum size allowed",
+    ]) {
+      expect(classifyProviderFailure(msg), msg).toBe("payload_too_large");
+    }
+  });
+
+  it("classifies a token/context rejection as context_overflow", () => {
+    for (const msg of [
+      "This model's maximum context length is 128000 tokens",
+      "prompt is too long",
+      "context_length_exceeded",
+      "please reduce the length of the messages",
+    ]) {
+      expect(classifyProviderFailure(msg), msg).toBe("context_overflow");
+    }
+  });
+
+  it("treats an ambiguous 413 that mentions context/window as overflow, else payload", () => {
+    expect(
+      classifyProviderFailure("OpenAI 413: request exceeds the model's maximum context length"),
+    ).toBe("context_overflow");
+    expect(classifyProviderFailure("OpenAI 413: payload too large")).toBe("payload_too_large");
+  });
+
+  it("falls back to transient / fatal for everything else", () => {
+    expect(classifyProviderFailure("fetch failed")).toBe("transient");
+    expect(classifyProviderFailure("Anthropic 529: overloaded_error")).toBe("transient");
+    expect(classifyProviderFailure("OpenAI 401: invalid api key")).toBe("fatal");
+    expect(classifyProviderFailure("Model not found: gpt-nonexistent")).toBe("fatal");
   });
 });

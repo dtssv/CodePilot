@@ -207,4 +207,60 @@ describe("runAgent context window enforcement", () => {
     expect(r.events.some((e) => e.type === "error")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("recovers a payload-too-large error by shrinking the body, NOT compacting", async () => {
+    // A 413 size rejection is not a token overflow: the agent must shrink the
+    // request body (fold tool results, drop inline images) and retry, without
+    // calling compactNow. After the shrink the second stream succeeds.
+    const provider = new ScriptedProvider([
+      [{ kind: "error", message: "OpenAI 413: Payload Too Large" }],
+      [
+        { kind: "text_delta", messageId: "m2", text: "recovered" },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ]);
+    const compactNow = vi.fn(async () => [
+      { type: "compaction" as const, kind: "summary" as const, summary: "summarised" },
+    ]);
+    const { deps, dir } = makeDeps(provider, { compactNow });
+    const r = await runAgent(
+      {
+        history: [],
+        userText: "describe this",
+        images: [{ base64: "AAAA", mediaType: "png" }],
+      },
+      deps,
+    );
+    // Payload path: no compaction, one retry, recovered.
+    expect(compactNow).not.toHaveBeenCalled();
+    expect(provider.calls.length).toBe(2);
+    expect(r.finalText).toContain("recovered");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    // The retried request dropped the inline image from the send view.
+    const retriedMsgs = provider.calls[1]!.messages;
+    const hasImage = retriedMsgs.some((m) =>
+      Array.isArray(m.content) &&
+      m.content.some((b) => (b as { type?: string }).type === "image"),
+    );
+    expect(hasImage).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not loop forever on a persistent payload rejection", async () => {
+    const provider = new ScriptedProvider([
+      [{ kind: "error", message: "413 Request Entity Too Large" }],
+      [{ kind: "error", message: "413 Request Entity Too Large" }],
+      [{ kind: "error", message: "413 Request Entity Too Large" }],
+      [{ kind: "error", message: "413 Request Entity Too Large" }],
+      [{ kind: "error", message: "413 Request Entity Too Large" }],
+    ]);
+    const compactNow = vi.fn(async () => []);
+    const { deps, dir } = makeDeps(provider, { compactNow });
+    const r = await runAgent({ history: [], userText: "go" }, deps);
+    expect(compactNow).not.toHaveBeenCalled();
+    // Bounded by the payload shrink ladder (3 steps) + initial attempt.
+    expect(provider.calls.length).toBeLessThanOrEqual(4);
+    expect(r.events.some((e) => e.type === "error")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

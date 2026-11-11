@@ -91,6 +91,11 @@ export function buildProviderMessages(
     maxUnfoldedToolResults?: number;
  /** Invoked when micro-compaction folds ≥1 tool_result (observability). */
     onFolded?: (foldedCount: number) => void;
+ /** Drop every inline image from the send view (both the prompt's images and
+  * any carried on message / tool_result events). Used by the payload-too-large
+  * recovery path: images are the usual cause of a byte-size rejection and
+  * cannot be token-compacted. */
+    dropImages?: boolean;
   } = {},
 ): ProviderMessage[] {
   const all = [...history, ...newEvents];
@@ -112,7 +117,23 @@ export function buildProviderMessages(
   const runUser = newEvents.find(
     (e): e is Extract<Event, { type: "message" }> => e.type === "message" && e.role === "user",
   );
-  return compactTranscriptToProviderMessages(folded, userText, images, runUser?.id);
+  const sendEvents = opts.dropImages ? folded.map(stripEventImages) : folded;
+  return compactTranscriptToProviderMessages(
+    sendEvents,
+    userText,
+    opts.dropImages ? undefined : images,
+    runUser?.id,
+  );
+}
+
+/** Return a copy of `e` with any inline images removed (the image block on a
+ * message/tool_result). Non-image events pass through unchanged. */
+function stripEventImages(e: Event): Event {
+  if ((e.type === "message" || e.type === "tool_result") && "images" in e && e.images) {
+    const { images: _drop, ...rest } = e;
+    return rest as Event;
+  }
+  return e;
 }
 
 /**

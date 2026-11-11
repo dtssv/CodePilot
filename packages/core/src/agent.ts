@@ -52,7 +52,7 @@ import {
 import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO, compactionGeometry } from "./compaction.js";
 // Message-based transient classifier (shared SoT). Re-exported below for
 // existing `from "./agent.js"` callers.
-import { isTransientError } from "./transientError.js";
+import { classifyProviderFailure, isTransientError } from "./transientError.js";
 export { isTransientError } from "./transientError.js";
 import { renderPlanBlock } from "./systemPrompt.js";
 import { estimateTokens, lookupContextWindow } from "./tokens.js";
@@ -743,6 +743,10 @@ export async function runAgent(
     // infinite compact→overflow→compact loop).
     let overflowCompacted = false;
     let overflowAttempt = 0;
+    // Byte/size payload rejections use their own aggressive body-shrink ladder
+    // (fold every tool result, drop inline images, tighten the send budget)
+    // rather than the token-overflow compaction ladder. Bounded separately.
+    let payloadAttempt = 0;
 
     for (let attempt = 0; ; attempt++) {
       messageId = `msg_${randomUUID()}`;
@@ -756,13 +760,67 @@ export async function runAgent(
       sawError = streamed.error;
       steeredMidStream = streamed.steeredMidStream;
       if (!sawError || deps.signal?.aborted) break;
+      const failureKind = classifyProviderFailure(sawError);
+      // Helper: drop THIS turn's discarded partial output before rebuilding the
+      // send view smaller (shared by both recovery ladders).
+      const dropDiscardedPartial = (): void => {
+        for (let i = produced.length - 1; i >= 0; i--) {
+          const e = produced[i]!;
+          if ((e.type === "message_delta" && e.messageId === messageId) ||
+              (e.type === "tool_call" && streamed.callIds.has(e.id))) {
+            produced.splice(i, 1);
+          }
+        }
+      };
+
+      // Payload-too-large (byte/size rejection): shrink the REQUEST BODY, not
+      // the transcript's token count. Fold every tool result, drop inline
+      // images, and tighten the send budget hard — compaction would not help a
+      // size rejection. Kept on its own bounded ladder so it cannot loop.
+      if (
+        failureKind === "payload_too_large" &&
+        payloadAttempt < PAYLOAD_SHRINK_STEPS.length
+      ) {
+        const step = PAYLOAD_SHRINK_STEPS[payloadAttempt]!;
+        payloadAttempt += 1;
+        try {
+          dropDiscardedPartial();
+          providerMessages = buildProviderMessages(
+            input.history,
+            produced,
+            input.userText,
+            userImages,
+            {
+              contextBudget,
+              hardBudget: Math.max(3_000, Math.floor(sendHardBudget * step)),
+              // Fold ALL tool results (keep none unfolded) so the largest
+              // bodies are replaced by artifact pointers, and drop inline images
+              // from the send view — both are the usual cause of a size
+              // rejection and neither is fixed by token compaction.
+              maxUnfoldedToolResults: 0,
+              dropImages: true,
+            },
+          );
+          await emitAux({
+            type: "retry",
+            attempt: attempt + 1,
+            maxAttempts: turnRetries,
+            delayMs: 0,
+            reason: `request too large — shrinking the request body to ${Math.round(step * 100)}% and retrying`,
+          });
+          continue;
+        } catch {
+          /* body shrink failed — fall through to normal error handling */
+        }
+      }
+
  // Context-overflow is recoverable by shrinking, not by regenerating.
  // On the first overflow force a compaction; on each subsequent overflow
  // shrink the send budget by the next proportional step.
  // `OVERFLOW_SHRINK_STEPS` bounds how far we go so a model that overflows
  // no matter what can't loop forever.
       if (
-        isContextOverflowError(sawError) &&
+        failureKind === "context_overflow" &&
         deps.config.autoCompact !== false &&
         overflowAttempt < OVERFLOW_SHRINK_STEPS.length
       ) {
@@ -777,13 +835,7 @@ export async function runAgent(
             if (next) input = { ...input, history: next };
           }
           // Drop this turn's discarded partial output, then rebuild smaller.
-          for (let i = produced.length - 1; i >= 0; i--) {
-            const e = produced[i]!;
-            if ((e.type === "message_delta" && e.messageId === messageId) ||
-                (e.type === "tool_call" && streamed.callIds.has(e.id))) {
-              produced.splice(i, 1);
-            }
-          }
+          dropDiscardedPartial();
           providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages, {
             contextBudget,
             hardBudget: Math.max(3_000, Math.floor(sendHardBudget * step)),
@@ -802,7 +854,7 @@ export async function runAgent(
         }
       }
  // A transient failure (dropped connection, overloaded gateway).
-      if (attempt >= turnRetries || !isTransientError(sawError)) break;
+      if (attempt >= turnRetries || failureKind !== "transient") break;
       const delayMs = Math.min(8000, 1500 * 2 ** attempt);
 
       // Continuation path: the stream dropped AFTER the model had already
@@ -1553,6 +1605,12 @@ const MAX_PLAN_SOFT_RESUMES = 1;
  * errors: first compact, then shrink to these fractions of the computed hard
  * budget. Bounded so overflow can't loop. */
 const OVERFLOW_SHRINK_STEPS = [0.6, 0.4, 0.25];
+
+/** Payload-too-large (byte/size) recovery shrink the SEND budget harder and
+ * drop inline images / fold every tool result. Distinct from the token-overflow
+ * ladder: a size rejection is not fixed by compacting the transcript's tokens,
+ * only by shrinking the request body. Bounded so it can't loop. */
+const PAYLOAD_SHRINK_STEPS = [0.5, 0.3, 0.2];
 
 const TRUNCATION_RESUME =
   "[system] Your previous reply was cut off by the output-token limit. Continue exactly where it " +
