@@ -13,7 +13,7 @@ import type {
   StreamChatOptions,
   StreamEvent,
 } from "./providers/types.js";
-import { ToolRegistry, type ToolContext } from "./tools/types.js";
+import { ToolRegistry, type ToolContext, type ToolDef } from "./tools/types.js";
 import { zodToJsonSchema } from "./tools/types.js";
 import type {
   AgentDeps,
@@ -61,6 +61,23 @@ export function buildProviderToolDefs(
   mode: AgentMode,
   opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] } = {},
 ): ProviderToolDef[] {
+  return filterToolsForTurn(tools, mode, opts).map((t) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: zodToJsonSchema(t.inputSchema),
+  }));
+}
+
+/** The exact filter chain that decides which tools ride a turn: mode → lazy
+ * MCP (drop individual `mcp__*`, keep the `mcp` meta-tool) → per-model
+ * `toolExposure` downgrade. Shared so the provider tool table and anything that
+ * must mirror it (the system-prompt advertisement, the `/context` tool row) all
+ * start from one source of truth. */
+function filterToolsForTurn(
+  tools: ToolRegistry,
+  mode: AgentMode,
+  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] },
+): ToolDef[] {
   let visible = filterToolsByMode(tools.all(), mode);
   if (opts.lazyMcp) {
     visible = visible.filter((t) => t.source !== "mcp");
@@ -68,11 +85,19 @@ export function buildProviderToolDefs(
   if (opts.model && opts.toolExposure && opts.toolExposure.length > 0) {
     visible = filterToolsByModel(visible, opts.model, opts.toolExposure);
   }
-  return visible.map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: zodToJsonSchema(t.inputSchema),
-  }));
+  return visible;
+}
+
+/** Names the model is told it can call this turn — the same filter chain
+ * `buildProviderToolDefs` uses, so the system-prompt advertisement never lists
+ * a tool the provider request omits (or hides the `mcp` meta-tool that replaces
+ * the individual MCP schemas under lazy discovery). */
+export function listAdvertisedToolNames(
+  tools: ToolRegistry,
+  mode: AgentMode,
+  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] } = {},
+): string[] {
+  return filterToolsForTurn(tools, mode, opts).map((t) => t.name);
 }
 
 // ---------------------------------------------------------------------------

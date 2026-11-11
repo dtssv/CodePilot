@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { buildProviderToolDefs, decideLazyMcp } from "../src/agent-messages.js";
+import { buildProviderToolDefs, decideLazyMcp, listAdvertisedToolNames } from "../src/agent-messages.js";
 import { makeMcpMetaTool } from "../src/tools/mcp_tool.js";
 import { ToolRegistry, type ToolDef } from "../src/tools/types.js";
 
@@ -62,6 +62,53 @@ describe("lazy MCP tool discovery", () => {
     expect(lazy).toContain("bash");
     expect(lazy).not.toContain("mcp__feishu__a");
     expect(lazy).not.toContain("mcp__feishu__b");
+  });
+
+  it("listAdvertisedToolNames mirrors the provider tool set under lazy/eager MCP", () => {
+    const reg = new ToolRegistry();
+    reg.register(builtin("bash"));
+    reg.register(builtin("mcp")); // the meta-tool (non-mcp source)
+    reg.register(mcpTool("mcp__feishu__a"));
+    reg.register(mcpTool("mcp__feishu__b"));
+
+    // Eager: advertisement lists the individual MCP tools, not relying on meta.
+    const eager = listAdvertisedToolNames(reg, "agent", { lazyMcp: false });
+    expect(eager).toContain("mcp__feishu__a");
+    expect(eager).toContain("mcp__feishu__b");
+    expect(eager).toEqual(
+      buildProviderToolDefs(reg, "agent", { lazyMcp: false }).map((t) => t.name),
+    );
+
+    // Lazy: advertisement keeps the `mcp` meta-tool and drops the individuals.
+    const lazy = listAdvertisedToolNames(reg, "agent", { lazyMcp: true });
+    expect(lazy).toContain("mcp");
+    expect(lazy).not.toContain("mcp__feishu__a");
+    expect(lazy).not.toContain("mcp__feishu__b");
+    expect(lazy).toEqual(
+      buildProviderToolDefs(reg, "agent", { lazyMcp: true }).map((t) => t.name),
+    );
+  });
+
+  it("listAdvertisedToolNames drops tools downgraded by toolExposure", () => {
+    const reg = new ToolRegistry();
+    reg.register(builtin("bash"));
+    reg.register(builtin("code_mode"));
+    const toolExposure = [{ models: ["weak-*"], drop: ["code_mode"] }];
+
+    // A matching model drops code_mode from the advertisement.
+    const dropped = listAdvertisedToolNames(reg, "agent", {
+      model: "weak-1",
+      toolExposure,
+    });
+    expect(dropped).toContain("bash");
+    expect(dropped).not.toContain("code_mode");
+
+    // A non-matching model keeps it.
+    const kept = listAdvertisedToolNames(reg, "agent", {
+      model: "strong-1",
+      toolExposure,
+    });
+    expect(kept).toContain("code_mode");
   });
 
   it("mcp meta-tool lists, describes, and calls MCP tools", async () => {

@@ -30,7 +30,7 @@ import {
   createPromptPermissionClassifier,
   type PermissionClassifier,
 } from "./permissionClassifier.js";
-import { INTERRUPTED_RESULT, decideLazyMcp, buildProviderMessages, buildProviderToolDefs } from "./agent-messages.js";
+import { INTERRUPTED_RESULT, decideLazyMcp, buildProviderMessages, buildProviderToolDefs, listAdvertisedToolNames } from "./agent-messages.js";
 import { runtimeRegistry, type AgentRuntime, type PluginToolDef } from "./runtime.js";
 import { BoundedSinkQueue } from "./sessionSink.js";
 import type {
@@ -136,6 +136,7 @@ import {
   startGoalTool,
   makeMcpMetaTool,
   filterToolsByModeFromRegistry,
+  filterToolsByModel,
 } from "./tools/index.js";
 import { onJobCompletion, readJobLog } from "./tools/bashJobs.js";
 import type { OutputStyle } from "./systemPrompt.js";
@@ -1746,13 +1747,19 @@ export class Session {
     let toolTokens = 0;
     let mcpTokens = 0;
     let mcpDeferredTokens = 0;
-    const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
     const mcpToolCount = this.toolRegistry.all().filter((t) => t.source === "mcp").length;
     const lazyMcp = decideLazyMcp(
       mcpToolCount,
       this.config.mcpToolDiscovery,
       this.config.mcpLazyThreshold,
     );
+    // Start mode-filtered (keeps MCP tools visible so the deferred bucket can be
+    // estimated), then apply the per-model toolExposure downgrade so a tool the
+    // provider request drops is not counted toward the send total.
+    let visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
+    if (this.config.toolExposure && this.config.toolExposure.length > 0) {
+      visibleTools = filterToolsByModel(visibleTools, this.model, this.config.toolExposure);
+    }
     for (const t of visibleTools) {
       const def = {
         name: t.name,
@@ -3655,10 +3662,22 @@ export class Session {
       memory.progressive = autoIndex;
     }
     const plan = extractPlan(this.events);
- // The system prompt advertises the *mode-filtered* tool list, so the
- // model doesn't expect tools that aren't actually available.
-    const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
-    const toolNames = visibleTools.map((t) => t.name);
+ // The system prompt advertises exactly the tool set the provider request
+ // will carry this turn — the same filter chain (mode → lazy MCP →
+ // toolExposure) as buildProviderToolDefs — so the model never expects a tool
+ // the request omits, and under lazy MCP it sees the `mcp` meta-tool rather than
+ // individual `mcp__*` schemas.
+    const mcpCount = this.toolRegistry.all().filter((t) => t.source === "mcp").length;
+    const lazyMcp = decideLazyMcp(
+      mcpCount,
+      this.config.mcpToolDiscovery,
+      this.config.mcpLazyThreshold,
+    );
+    const toolNames = listAdvertisedToolNames(this.toolRegistry, this.mode, {
+      lazyMcp,
+      model: this.model,
+      toolExposure: this.config.toolExposure,
+    });
  // Sandbox posture is part of the prompt so the model knows its boundaries.
     const sb = this.sandbox;
     // Structured sandbox posture: a clear header line plus one writable root
