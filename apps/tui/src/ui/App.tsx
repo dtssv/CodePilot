@@ -1257,6 +1257,26 @@ export function App(props: AppProps): React.ReactElement {
             }
             return;
           }
+          case "gc-artifacts": {
+            try {
+              const { gcProjectArtifacts } = await import("@codepilot/core");
+              const res = await gcProjectArtifacts(cwd);
+              const kb = (res.bytesReclaimed / 1024).toFixed(1);
+              dispatch({
+                type: "set-notice",
+                text:
+                  res.removed.length === 0
+                    ? `Artifacts: nothing to reclaim (${res.scanned} on disk, ${res.referenced} referenced).`
+                    : `Reclaimed ${res.removed.length} artifact${res.removed.length === 1 ? "" : "s"} (${kb} KB); ${res.referenced} still referenced.`,
+              });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+            return;
+          }
           case "export": {
             try {
               const body = await exportSession(session.id, result.format);

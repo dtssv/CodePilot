@@ -45,6 +45,7 @@ import {
   driveGoalRounds,
   SessionLockedError,
   liveSessionLockOwner,
+  gcProjectArtifacts,
   listSessions as coreListSessions,
   setSessionPinned as coreSetSessionPinned,
   setSessionArchived as coreSetSessionArchived,
@@ -650,6 +651,23 @@ export function registerServer(
     if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
     await requireSession(ctx, p.sessionId).compact();
     return { ok: true };
+  });
+  peer.onRequest<
+    { sessionId: string; dryRun?: boolean },
+    { removed: number; bytesReclaimed: number; scanned: number; referenced: number }
+  >("session/gc-artifacts", async (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    // GC is per-project (the artifact store is shared across a project's
+    // sessions), so resolve the session's cwd and sweep that project's store.
+    const cwd = requireSession(ctx, p.sessionId).getCwd();
+    const res = await gcProjectArtifacts(cwd, { dryRun: p.dryRun === true });
+    return {
+      removed: res.removed.length,
+      bytesReclaimed: res.bytesReclaimed,
+      scanned: res.scanned,
+      referenced: res.referenced,
+    };
   });
   peer.onRequest<{ sessionId: string; reason?: string }, { cleared: boolean }>("session/clear-context", async (p) => {
     assertInitialized(ctx);

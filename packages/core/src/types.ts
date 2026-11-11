@@ -184,6 +184,30 @@ type EventBody =
  */
       keepFrom?: number;
     }
+ /**
+  * A large payload was moved out of the inline transcript into the
+  * content-addressed artifact store, leaving a short head+tail stub (carrying
+  * the artifactRef) in the owning event. This durable record exists so:
+  *  - a fork can replicate the exact replacement instead of re-spilling;
+  *  - artifact GC can walk referenced refs from the JSONL (source of truth);
+  *  - an audit can account for every offload (what, how big, where it went).
+  * NOT sent to the model (the owning event's inline stub already carries the
+  * head+tail + ref) and rendered quietly by UIs, like a micro-fold.
+  */
+  | {
+      type: "content_replacement";
+      /** The event whose content was offloaded: the owning tool_call id for a
+       * tool_result, or the message id for an offloaded image. */
+      ownerId: string;
+      /** What kind of payload was replaced. */
+      target: "tool_result" | "image";
+      /** The content-addressed artifact ref the full payload now lives at. */
+      artifactRef: string;
+      /** Size of the replaced payload in bytes (pre-offload). */
+      bytes: number;
+      /** Originating tool name, when the payload came from a tool_result. */
+      tool?: string;
+    }
   | {
       type: "status";
       status: "idle" | "running" | "waiting_permission" | "compacting";

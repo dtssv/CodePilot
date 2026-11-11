@@ -22,7 +22,7 @@
 // The helpers moved to session-utils are re-exported at the bottom of this
 // file so existing `import { ... } from "./session.js"` callers keep working.
 
-import { appendFile, mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile, stat, truncate } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { type AgentDeps } from "./agent.js";
@@ -361,6 +361,10 @@ export class Session {
   * reconcile sealed it to idle. Lets a host that attaches after init — and the
   * boot-time recovery sweep — retrieve the recovery outcome. */
   private interruptedRecovery?: InterruptedRunInfo;
+ /** Count of torn-tail repairs this session performed on load (a crash left an
+  * incomplete final JSONL line that was truncated back to the last complete
+  * record). Surfaced for observability; normally 0. */
+  private tornTailRepairs = 0;
  /** True for a read-only open: the single-writer lease is not acquired and no
   * event is ever appended to the JSONL (prompt / persisted mode-model changes /
   * reconcile seal are all inert). */
@@ -2430,6 +2434,13 @@ export class Session {
     return this.interruptedRecovery;
   }
 
+ /** How many torn-tail repairs this session performed on load (a crash-left
+  * incomplete final JSONL line truncated to the last complete record). Normally
+  * 0; non-zero indicates a prior crash during an append. */
+  getTornTailRepairs(): number {
+    return this.tornTailRepairs;
+  }
+
   /**
    * Apply a named permission preset: a single switch that sets BOTH the
    * permission mode and the sandbox mode. Composes the two existing live
@@ -3097,6 +3108,16 @@ export class Session {
     try {
       const path = sessionPath(this.id);
       const text = await readFile(path, "utf-8");
+      // Physical integrity: if the process crashed mid-append, the final line
+      // can be a torn (incomplete) JSON fragment with no trailing newline. We
+      // skip it when parsing (below), but a torn tail also poisons the NEXT
+      // append — appendFile would concatenate the new line onto the fragment,
+      // producing one corrupt line. So repair the file on load (write-open
+      // only): truncate back to the last complete `\n` boundary. A fully blank
+      // or newline-terminated file needs no repair.
+      if (!this.readOnly) {
+        await this.repairTornTail(path, text).catch(() => undefined);
+      }
       const lines = text.split("\n").filter((l) => l.trim().length > 0);
       // Parse synchronously and only `await` the image rehydration for the few
       // events that actually carry offloaded images. Awaiting every event (most
@@ -3144,6 +3165,43 @@ export class Session {
  // Hydrate title from sidecar (if any).
     const t = await loadTitleFromDisk(this.id);
     if (t) this.title = t;
+  }
+
+ /**
+  * Repair a torn JSONL tail left by a crash mid-append. `text` is the full
+  * file contents already read by loadFromDisk. If the file is non-empty and its
+  * final line is a torn (incomplete) JSON fragment — the file does NOT end in a
+  * newline AND that trailing fragment does not parse as JSON — truncate the
+  * file back to the last complete newline boundary. This keeps the log
+  * self-consistent and, critically, prevents the next append from concatenating
+  * a new line onto the fragment (appendFile does not insert a separator). A
+  * file that already ends in a newline, is empty, or whose trailing fragment
+  * happens to be valid JSON is left untouched. Best-effort and write-open only.
+  */
+  private async repairTornTail(path: string, text: string): Promise<void> {
+    if (text.length === 0) return;
+    // A trailing newline means the last record was fully flushed — nothing torn.
+    if (text.endsWith("\n")) return;
+    const lastNl = text.lastIndexOf("\n");
+    // The bytes after the final newline (or the whole file, if there is none)
+    // are the un-terminated trailing fragment.
+    const tail = text.slice(lastNl + 1);
+    if (tail.trim().length === 0) return;
+    try {
+      JSON.parse(tail);
+      // The fragment is valid JSON that merely lacks a trailing newline. Don't
+      // drop a good record — restore the missing separator so the next append
+      // starts on its own line.
+      await appendFile(path, "\n", "utf-8");
+      return;
+    } catch {
+      /* genuinely torn — fall through to truncate */
+    }
+    // Truncate to the last complete record. lastNl < 0 means the file is a
+    // single torn line with no prior complete record → truncate to empty.
+    const keep = lastNl >= 0 ? lastNl + 1 : 0;
+    await truncate(path, keep);
+    this.tornTailRepairs += 1;
   }
 
  /**
@@ -3333,7 +3391,7 @@ export class Session {
     // 5 MB screenshot no longer bloats the session log (or gets re-read on every
     // resume). The in-memory `stamped`/`this.persisted` copies keep their base64;
     // only the on-disk line is slimmed. Rehydrated in `loadFromDisk`.
-    const forDisk = await this.offloadEventImages(stamped);
+    const { event: forDisk, offloads } = await this.offloadEventImages(stamped);
     const line = JSON.stringify(forDisk);
     await appendFile(path, line + "\n", "utf-8");
     // Additive mirror: hand the exact JSONL line to an optional external sink
@@ -3341,32 +3399,93 @@ export class Session {
     // fail-soft — it never blocks or fails this write (JSONL is the source of
     // truth). No-op when no plugin/host registered a sink.
     this.eventSink?.enqueue(this.id, line);
+    // Record every large-payload offload as a durable content_replacement so a
+    // fork can replicate it and artifact GC / audit can walk referenced refs
+    // from the JSONL. Covers both image offload (just done above) and a
+    // tool_result whose large content was spilled upstream (it arrives here
+    // already carrying an artifactRef). These records never go to the model and
+    // are rendered quietly. Skipped while persisting a content_replacement
+    // itself, so there is no recursion.
+    if (stamped.type !== "content_replacement") {
+      await this.recordContentReplacements(stamped, offloads);
+    }
+  }
+
+ /** Append a `content_replacement` audit record for each payload moved to the
+  * artifact store while persisting `e`: the images just offloaded (passed in),
+  * plus a tool_result that already carries an `artifactRef` from an upstream
+  * spill. Best-effort — a failed audit never blocks the canonical write. */
+  private async recordContentReplacements(
+    e: Event,
+    imageOffloads: Array<{ ref: string; bytes: number }>,
+  ): Promise<void> {
+    const records: Array<Extract<Event, { type: "content_replacement" }>> = [];
+    for (const off of imageOffloads) {
+      records.push({
+        type: "content_replacement",
+        ownerId: (e as { id?: string }).id ?? this.id,
+        target: "image",
+        artifactRef: off.ref,
+        bytes: off.bytes,
+      });
+    }
+    if (e.type === "tool_result" && e.artifactRef) {
+      // The full payload's authoritative size is the stored artifact's size;
+      // the inline content is only the head+tail stub.
+      const bytes =
+        (await this.artifacts.size(e.artifactRef)) ??
+        Buffer.byteLength(e.content, "utf-8");
+      records.push({
+        type: "content_replacement",
+        ownerId: e.toolCallId,
+        target: "tool_result",
+        artifactRef: e.artifactRef,
+        bytes,
+        tool: e.name,
+      });
+    }
+    for (const rec of records) {
+      this.events.push(rec);
+      // persistEvent again — but the content_replacement short-circuits the
+      // recursion guard above, so this just appends the audit line.
+      await this.persistEvent(rec).catch(() => undefined);
+      // Notify subscribers so a live UI can render it quietly. Non-model, not a
+      // transcript row — clients surface it as an advisory (like micro-fold).
+      this.notify(rec);
+    }
   }
 
   /** Threshold above which an inline image is offloaded to an artifact. */
   private static readonly IMAGE_OFFLOAD_BYTES = 8 * 1024;
 
   /** Return a disk-serialisable copy of `e` with large `images[].base64`
-   * replaced by `{ mediaType, ref }`. Small images stay inline. Non-image
-   * events pass through unchanged (by reference — no copy cost). */
-  private async offloadEventImages(e: Event): Promise<Event> {
+   * replaced by `{ mediaType, ref }`, plus the list of offloads performed (ref
+   * + original byte size) so the caller can record content_replacement audit
+   * events. Small images stay inline. Non-image events pass through unchanged
+   * (by reference — no copy cost) with an empty offload list. */
+  private async offloadEventImages(
+    e: Event,
+  ): Promise<{ event: Event; offloads: Array<{ ref: string; bytes: number }> }> {
     const imgs = (e as { images?: ImageAttachment[] }).images;
-    if (!Array.isArray(imgs) || imgs.length === 0) return e;
+    if (!Array.isArray(imgs) || imgs.length === 0) return { event: e, offloads: [] };
     let changed = false;
+    const offloads: Array<{ ref: string; bytes: number }> = [];
     const mapped = await Promise.all(
       imgs.map(async (img) => {
         if (!img.base64 || img.base64.length < Session.IMAGE_OFFLOAD_BYTES) return img;
         try {
+          const bytes = Buffer.byteLength(img.base64, "utf-8");
           const ref = await this.artifacts.write(img.base64, `image/${img.mediaType}`);
           changed = true;
+          offloads.push({ ref, bytes });
           return { mediaType: img.mediaType, ref } as unknown as ImageAttachment;
         } catch {
           return img; // best-effort: keep inline if the store write fails
         }
       }),
     );
-    if (!changed) return e;
-    return { ...e, images: mapped } as Event;
+    if (!changed) return { event: e, offloads: [] };
+    return { event: { ...e, images: mapped } as Event, offloads };
   }
 
   /** Rehydrate any offloaded `{ mediaType, ref }` images back to base64 after

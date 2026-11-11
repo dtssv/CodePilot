@@ -4,7 +4,7 @@
 // read_artifact.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, stat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 export class ArtifactStore {
@@ -14,10 +14,17 @@ export class ArtifactStore {
     await mkdir(this.rootDir, { recursive: true });
   }
 
+  /** Normalise a ref ("art_<hash>" or a bare hash) to the bare hash, or null
+   * when it is not a valid artifact reference. */
+  static hashOf(ref: string): string | null {
+    const hash = ref.startsWith("art_") ? ref.slice(4) : ref;
+    return /^[a-f0-9]{16,128}$/.test(hash) ? hash : null;
+  }
+
   private pathFor(ref: string): string {
  // Accept either a raw hash or a "art_<hash>" id; normalise to bare hash.
-    const hash = ref.startsWith("art_") ? ref.slice(4) : ref;
-    if (!/^[a-f0-9]{16,128}$/.test(hash)) {
+    const hash = ArtifactStore.hashOf(ref);
+    if (!hash) {
       throw new Error(`Invalid artifact reference: ${ref}`);
     }
     return join(this.rootDir, `${hash}.txt`);
@@ -56,6 +63,57 @@ export class ArtifactStore {
   async read(ref: string): Promise<string> {
     const buf = await readFile(this.pathFor(ref));
     return buf.toString("utf-8");
+  }
+
+ /** Byte size of the stored artifact, or null when absent/invalid. Fail-soft:
+  * used to record the authoritative full-payload size in a content_replacement
+  * audit event without re-reading the content. */
+  async size(ref: string): Promise<number | null> {
+    try {
+      const st = await stat(this.pathFor(ref));
+      return st.size;
+    } catch {
+      return null;
+    }
+  }
+
+ /** All artifact refs ("art_<hash>") currently stored. Used by GC to diff the
+  * on-disk set against the set still referenced by live sessions. Fail-soft:
+  * returns [] when the store dir is missing/unreadable. */
+  async list(): Promise<string[]> {
+    try {
+      const names = await readdir(this.rootDir);
+      const out: string[] = [];
+      for (const n of names) {
+        if (!n.endsWith(".txt")) continue; // skip .meta sidecars and others
+        const hash = n.slice(0, -4);
+        if (/^[a-f0-9]{16,128}$/.test(hash)) out.push(`art_${hash}`);
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+ /** Delete an artifact (and its .meta sidecar). Returns the bytes reclaimed
+  * (0 when the artifact was already gone). Fail-soft. Used by GC only — never
+  * delete an artifact still referenced by a live session. */
+  async remove(ref: string): Promise<number> {
+    let reclaimed = 0;
+    try {
+      const p = this.pathFor(ref);
+      try {
+        const st = await stat(p);
+        reclaimed = st.size;
+      } catch {
+        /* already gone */
+      }
+      await unlink(p).catch(() => undefined);
+      await unlink(p + ".meta").catch(() => undefined);
+    } catch {
+      /* invalid ref — nothing to do */
+    }
+    return reclaimed;
   }
 
  /** Read and JSON-parse an artifact. Throws if parsing fails. */

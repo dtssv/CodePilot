@@ -52,6 +52,7 @@ export type CommandResult =
   | { kind: "remote-qr" }
   | { kind: "open-web" }
   | { kind: "schedule-list" }
+  | { kind: "gc-artifacts" }
   | {
       kind: "custom-command";
       prompt: string;
@@ -103,6 +104,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "web", description: "Open the web UI in your browser (shares this session)" },
   { name: "remote", description: "Mint a one-time QR for phone remote control" },
   { name: "schedule", description: "List scheduled / idle tasks" },
+  { name: "gc-artifacts", description: "Reclaim unreferenced spilled artifacts for this project" },
   { name: "exit", description: "Exit CodePilot" },
 ];
 
@@ -255,6 +257,8 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "remote-qr" };
     case "schedule":
       return { kind: "schedule-list" };
+    case "gc-artifacts":
+      return { kind: "gc-artifacts" };
     case "clear":
       return { kind: "clear" };
     case "exit":
@@ -294,6 +298,7 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "web",
   "remote",
   "schedule",
+  "gc-artifacts",
   "exit",
   "quit",
   "retry",

@@ -325,6 +325,12 @@ export {
   SessionLockedError,
 } from "./sessionLock.js";
 export type { SessionLockOwner, SessionLease } from "./sessionLock.js";
+export {
+  gcProjectArtifacts,
+  collectSessionArtifactRefs,
+  sessionIdsInProject,
+} from "./artifactGc.js";
+export type { ArtifactGcResult } from "./artifactGc.js";
 export { openSessionIndex } from "./sessionIndex.js";
 export type { SessionIndex, SuspendedSession } from "./sessionIndex.js";
 export {

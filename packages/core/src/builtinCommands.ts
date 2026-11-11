@@ -47,6 +47,7 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommand[] = [
   { name: "redo", description: "Redo last undone file edits", scope: "shared" },
   { name: "init", description: "Scaffold AGENTS.md for this project", argumentHint: "[--force]", scope: "shared" },
   { name: "schedule", description: "List scheduled / idle tasks", scope: "shared" },
+  { name: "gc-artifacts", description: "Reclaim unreferenced spilled artifacts for this project", scope: "shared" },
   // Terminal-only affordances — not advertised to GUI clients.
   { name: "connect", description: "Interactively add a model provider (API key)", scope: "tui-only" },
   { name: "remote", description: "Mint a one-time QR for phone remote control", scope: "tui-only" },

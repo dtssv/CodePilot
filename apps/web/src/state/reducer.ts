@@ -716,6 +716,13 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
       };
     }
 
+    case "content_replacement":
+ // A large payload (tool output / image) was moved to the artifact store,
+ // leaving a head+tail stub inline. Durable audit record for fork/GC; the
+ // model never sees it and the user has nothing to act on, so render it
+ // quietly — the owning tool_result row already shows the stub + ref.
+      return state;
+
     default:
  // Unknown / future event types must never corrupt the store. Returning
  // the state unchanged keeps the reducer total — a missing case used to

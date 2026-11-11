@@ -539,10 +539,14 @@ export function sameCwd(a: string | undefined, b: string | undefined): boolean {
  * holds the single-writer lease (another daemon / CLI is actively writing it),
  * unless `force` is set — a crashed owner's stale lock does not block deletion.
  * Also removes the lock file so a reclaimed-but-orphaned lock is not left
- * behind. Useful for test cleanup (pass force to bypass the live-writer guard). */
+ * behind. After the session file is gone, runs an artifact mark-and-sweep for
+ * that project so the deleted session's now-unreferenced spilled artifacts are
+ * reclaimed (a sibling session referencing the same content keeps it). Pass
+ * `skipGc` to suppress the sweep (test cleanup); pass `force` to bypass the
+ * live-writer guard. */
 export async function deleteSession(
   id: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; skipGc?: boolean },
 ): Promise<void> {
   if (!opts?.force) {
     const { liveSessionLockOwner } = await import("./sessionLock.js");
@@ -553,6 +557,9 @@ export async function deleteSession(
       );
     }
   }
+  // Resolve the session's project BEFORE unlinking its cwd sidecar, so a
+  // post-delete artifact sweep can find the right per-project store.
+  const sessionCwd = await loadCwdFromDisk(id);
   const { sessionLockPath } = await import("./sessionLock.js");
   for (const p of [
     sessionPath(id),
@@ -566,6 +573,18 @@ export async function deleteSession(
       await unlink(p);
     } catch {
  /* ignore */
+    }
+  }
+  // Reclaim artifacts this session referenced that no sibling session in the
+  // project still points at. Fail-soft and off the critical path — a GC failure
+  // never fails the delete. Skipped when the cwd is unknown (we cannot resolve
+  // the project store) or when the caller opts out.
+  if (!opts?.skipGc && sessionCwd) {
+    try {
+      const { gcProjectArtifacts } = await import("./artifactGc.js");
+      await gcProjectArtifacts(sessionCwd);
+    } catch {
+ /* ignore — GC is best-effort */
     }
   }
 }

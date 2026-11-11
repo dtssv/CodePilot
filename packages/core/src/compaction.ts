@@ -180,6 +180,7 @@ function serializeEventForEstimate(e: Event): string {
     case "activity":
     case "stop_continue":
     case "interrupted_run":
+    case "content_replacement":
     case "subagent":
     case "followup":
     case "pin":

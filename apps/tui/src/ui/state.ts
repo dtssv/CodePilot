@@ -707,6 +707,11 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             notice: `Previous run was interrupted — you can continue${sealed}`,
           };
         }
+        case "content_replacement":
+ // A large payload was offloaded to the artifact store (durable audit
+ // record for fork/GC). Non-model, nothing for the user to act on — the
+ // owning tool row already shows the stub + ref, so render it quietly.
+          return state;
         default:
           return state;
       }
