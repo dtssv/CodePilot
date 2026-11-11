@@ -252,6 +252,48 @@ describe("buildSeatbeltProfile", () => {
     expect(profile).toContain(`(subpath ${JSON.stringify(realpathSync(join(base, "real")))})`);
     expect(profile).toContain('(literal "/dev/null")');
   });
+
+  it("carves a resolved .git directory out as read-only (protectGit default on)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-git-"));
+    await mkdir(join(base, ".git"));
+    const real = realpathSync(base);
+    const gitDir = join(real, ".git");
+    const p = resolveSandbox(undefined, base);
+    expect(p.protectedSubpaths.some((x) => realpathSync(x) === gitDir)).toBe(true);
+    const profile = buildSeatbeltProfile(p);
+    expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(gitDir)}))`);
+    // The deny must come AFTER the root allow so it wins for that subpath.
+    const allowIdx = profile.indexOf(`(allow file-write* (subpath ${JSON.stringify(real)}))`);
+    const denyIdx = profile.indexOf(`(deny file-write* (subpath ${JSON.stringify(gitDir)}))`);
+    expect(allowIdx).toBeGreaterThanOrEqual(0);
+    expect(denyIdx).toBeGreaterThan(allowIdx);
+  });
+
+  it("does not carve .git when protectGit is false", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-git-off-"));
+    await mkdir(join(base, ".git"));
+    const p = resolveSandbox({ protectGit: false }, base);
+    expect(p.protectedSubpaths).toEqual([]);
+    const profile = buildSeatbeltProfile(p);
+    expect(profile).not.toContain(`${join(realpathSync(base), ".git")}"))`);
+  });
+
+  it("follows a linked-worktree .git file to its gitdir and protects both", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-wt-"));
+    const real = realpathSync(base);
+    // A linked worktree: `.git` is a FILE pointing at the shared metadata dir.
+    const gitdir = join(real, "shared", ".git", "worktrees", "wt");
+    await mkdir(gitdir, { recursive: true });
+    await writeFile(join(base, ".git"), `gitdir: ${gitdir}\n`, "utf8");
+    const p = resolveSandbox(undefined, base);
+    // The pointer file, the worktree gitdir, and the shared …/.git common dir.
+    const reals = p.protectedSubpaths.map((x) => {
+      try { return realpathSync(x); } catch { return x; }
+    });
+    expect(reals).toContain(realpathSync(join(base, ".git")));
+    expect(reals).toContain(gitdir);
+    expect(reals.some((x) => x.endsWith(`${join("shared", ".git")}`))).toBe(true);
+  });
 });
 
 describe("checkDangerousCommand", () => {

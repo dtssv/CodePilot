@@ -233,6 +233,9 @@ export const SandboxConfigSchema = z
       .optional(),
     writablePaths: z.array(z.string().min(1)).optional(),
     fallback: z.enum(["deny", "allow-unsandboxed"]).optional(),
+    // Carve resolved `.git` out of the writable roots as OS-level read-only.
+    // Default true. See types.ts SandboxConfig.protectGit.
+    protectGit: z.boolean().optional(),
   })
   .strict();
 

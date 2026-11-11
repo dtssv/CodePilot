@@ -375,6 +375,14 @@ export interface SandboxConfig {
  /** Extra absolute paths that are writable in workspace-write mode. */
   writablePaths?: string[];
   fallback?: "deny" | "allow-unsandboxed";
+ /**
+  * Carve repository metadata (the resolved `.git` directory, including a linked
+  * worktree's gitdir) out of the writable roots as read-only at the OS layer,
+  * so an approved bash command cannot rewrite hooks/config/objects even though
+  * the workspace is writable. File tools still gate `.git` writes separately.
+  * Default true; set false to allow direct `.git` writes under the sandbox.
+  */
+  protectGit?: boolean;
 }
 
 /**

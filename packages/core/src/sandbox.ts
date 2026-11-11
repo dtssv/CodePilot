@@ -38,7 +38,7 @@
 // This module is dependency-free and never throws from detection: the
 // environment is probed once and cached.
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
@@ -63,6 +63,11 @@ export interface ResolvedSandbox {
   fallback: "deny" | "allow-unsandboxed";
  /** Absolute paths that file tools may write to (cwd + tmp + extras). */
   writableRoots: string[];
+ /** Absolute paths carved out of the writable roots as read-only at the OS
+  * layer, even though they sit inside a writable root. Protects repository
+  * metadata (resolved `.git` directories) so an approved bash command cannot
+  * rewrite hooks/config/objects. Empty when `protectGit` is disabled. */
+  protectedSubpaths: string[];
  /** Loopback proxy URL (http://127.0.0.1:PORT) when a "proxy" network policy
   * is active and the proxy has been started. Injected into bash as
   * HTTP(S)_PROXY. Absent until the host starts the proxy and sets it. */
@@ -114,6 +119,7 @@ export function resolveSandbox(
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];
   const networkPolicy = normalizeNetworkPolicy(config?.network);
+  const protectGit = config?.protectGit !== false;
   return {
     mode,
     network: networkPolicy.mode !== "off",
@@ -121,7 +127,51 @@ export function resolveSandbox(
     writablePaths: (config?.writablePaths ?? []).map((p) => resolve(p)),
     fallback: config?.fallback ?? "deny",
     writableRoots,
+    protectedSubpaths: protectGit ? resolveProtectedGitPaths(writableRoots) : [],
   };
+}
+
+/**
+ * For each writable root, resolve the repository metadata directory that must
+ * stay read-only at the OS layer. A plain checkout has `<root>/.git` as a
+ * directory; a linked worktree (or submodule) has `<root>/.git` as a *file*
+ * whose `gitdir: <path>` line points at the real metadata directory elsewhere.
+ * Both the in-tree `.git` and the pointed-at gitdir are protected so a write
+ * cannot reach hooks/config/objects through either path. Returns absolute,
+ * deduplicated paths that actually exist.
+ */
+function resolveProtectedGitPaths(writableRoots: string[]): string[] {
+  const out = new Set<string>();
+  for (const root of writableRoots) {
+    const dotGit = join2(root, ".git");
+    let stat: ReturnType<typeof statSync> | null = null;
+    try {
+      stat = statSync(dotGit);
+    } catch {
+      continue; // no .git here
+    }
+    if (stat.isDirectory()) {
+      out.add(dotGit);
+      continue;
+    }
+    // `.git` is a file (linked worktree / submodule) — follow the gitdir pointer.
+    out.add(dotGit); // the pointer file itself must not be rewritten
+    try {
+      const text = readFileSync(dotGit, "utf8");
+      const m = text.match(/^gitdir:\s*(.+)\s*$/m);
+      if (m && m[1]) {
+        const target = m[1].trim();
+        const abs = target.startsWith("/") ? resolve(target) : resolve(root, target);
+        // Protect the worktree's own gitdir and the shared common dir (…/.git).
+        out.add(abs);
+        const commonIdx = abs.lastIndexOf(`${sep}.git${sep}`);
+        if (commonIdx >= 0) out.add(abs.slice(0, commonIdx + `${sep}.git`.length));
+      }
+    } catch {
+      /* unreadable pointer — the pointer file is still protected above */
+    }
+  }
+  return [...out];
 }
 
 /** Normalize the boolean/object network config into a single shape.
@@ -270,6 +320,20 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
     lines.push(`(allow file-write* (subpath ${JSON.stringify(root)}))`);
     lines.push(`(allow file-write* (literal ${JSON.stringify(root)}))`);
   }
+  // Carve protected metadata (resolved `.git`) back out as read-only, AFTER the
+  // writable-root allow so the deny wins for those subpaths. Listed under both
+  // the given and realpath'd form (Seatbelt matches resolved paths).
+  for (const p of policy.protectedSubpaths) {
+    const forms = new Set<string>([p]);
+    try {
+      forms.add(realpathSync(p));
+    } catch {
+      /* may not resolve — the literal form still applies */
+    }
+    for (const form of forms) {
+      lines.push(`(deny file-write* (subpath ${JSON.stringify(form)}))`);
+    }
+  }
  // `>/dev/null`, `2>&1 | tee /dev/stderr` etc. are not real writes.
   lines.push(
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") ' +
@@ -377,6 +441,12 @@ export function wrapCommand(
     for (const root of wslRoots) {
       args.push("--bind", root, root);
     }
+    // Re-bind protected metadata read-only so hooks/config/objects can't be
+    // rewritten through an approved shell command.
+    for (const p of policy.protectedSubpaths) {
+      const wp = winPathToWsl(p);
+      args.push("--ro-bind", wp, wp);
+    }
     if (!policy.network) args.push("--unshare-net");
     args.push("--", "/bin/sh", "-c", `cd ${shellQuote(wslCwd)} && ${command}`);
     return {
@@ -391,6 +461,10 @@ export function wrapCommand(
   const args: string[] = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
   for (const root of policy.writableRoots) {
     if (existsSync(root)) args.push("--bind", root, root);
+  }
+  // Re-bind protected metadata read-only (after the rw binds, so this wins).
+  for (const p of policy.protectedSubpaths) {
+    if (existsSync(p)) args.push("--ro-bind", p, p);
   }
   if (!policy.network) args.push("--unshare-net");
   args.push("--", "/bin/sh", "-c", command);
@@ -557,6 +631,7 @@ export function cloneSandbox(policy: ResolvedSandbox): ResolvedSandbox {
     },
     writablePaths: [...policy.writablePaths],
     writableRoots: [...policy.writableRoots],
+    protectedSubpaths: [...policy.protectedSubpaths],
   };
 }
 
