@@ -612,6 +612,12 @@ export interface CodepilotConfig {
  * auto-compacts regardless of token pressure; the user must invoke
  * `/compact` explicitly. Default true. */
   autoCompact?: boolean;
+ /** Consecutive failed/ineffective auto-compactions before the circuit breaker
+  * disables auto-compaction for the session. A failure is a throw, a no-change
+  * result, or a success that left the transcript still over the hard trigger.
+  * A manual `/compact` can still run and, if it gets back under budget,
+  * re-enables auto-compaction. Default 3. */
+  autoCompactMaxConsecutiveFailures?: number;
  /** Inline (Tab) code completion for the editor plugins (VSCode / IntelliJ).
   * Off by default. Runs on the user's existing provider + apiKey but is gated
   * to a lightweight model: completion uses `completion.model` if set, else the

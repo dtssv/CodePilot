@@ -324,6 +324,12 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
+    // Consecutive failed/ineffective auto-compactions before the circuit
+    // breaker disables auto-compaction for the session (default 3). A failure
+    // is a throw, a no-change result, or a success that left the transcript
+    // still over the hard trigger. A manual /compact can still run and, if it
+    // gets back under budget, re-enables auto-compaction.
+    autoCompactMaxConsecutiveFailures: z.number().int().min(1).max(100).optional(),
     // Inline (Tab) code completion for the editor plugins. Off by default; runs
     // on the user's provider/apiKey but gated to a lightweight model (see
     // docs/design/G-inline-completion.md). Ignored by non-editor clients.

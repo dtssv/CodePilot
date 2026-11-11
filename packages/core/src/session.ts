@@ -196,6 +196,10 @@ const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
  * how large the output reserve pushes the compaction trigger down. */
 const CHECKPOINT_BELOW_COMPACTION_RATIO = 0.9;
 
+/** Default number of consecutive failed/ineffective auto-compactions before the
+ * circuit breaker disables auto-compaction for the session. */
+const DEFAULT_AUTOCOMPACT_MAX_FAILURES = 3;
+
 /** A queued mid-run steering message. See `steeringQueue`. */
 interface SteeringItem {
   source: "user" | "system";
@@ -337,6 +341,16 @@ export class Session {
   private precompact: { fingerprint: string; result: CompactionResult } | null = null;
  /** Guards against two overlapping background pre-compactions. */
   private precompactInFlight = false;
+ /** Auto-compaction circuit breaker. `compactFailStreak` counts consecutive
+  * failed compactions (threw or made no change); `compactNoopStreak` counts
+  * compactions that succeeded but left the live transcript still at/over the
+  * hard trigger ("compacted but still full" — real thrashing). When either
+  * reaches `autoCompactMaxConsecutiveFailures`, auto-compaction (and its
+  * precompute) is disabled for the rest of the session; a successful MANUAL
+  * `/compact` that gets back under budget clears the breaker. */
+  private compactFailStreak = 0;
+  private compactNoopStreak = 0;
+  private autoCompactDisabled = false;
  /** Guards against two overlapping background memory-pipeline runs. */
   private memoryPipelineInFlight = false;
  /** Set when a background consolidation rewrote the progressive-memory index.
@@ -3202,6 +3216,9 @@ export class Session {
    * next user message has already changed the transcript. */
   private async precomputeCompaction(): Promise<void> {
     if (this.config.autoCompact === false) return;
+    // Honour the circuit breaker: when auto-compaction is tripped, do not spend
+    // the small model on a background summary either.
+    if (this.autoCompactDisabled) return;
     if (this.precompactInFlight || this.precompact) return;
     const modelWindow = lookupContextWindow(this.model);
     const window = this.config.contextWindow ?? modelWindow.contextWindow;
@@ -3332,6 +3349,11 @@ export class Session {
  // Master toggle: when autoCompact is explicitly false, the session
  // never auto-compacts (the user must invoke /compact manually).
     if (this.config.autoCompact === false) return;
+    const force = opts.force === true;
+    // Circuit breaker: once auto-compaction has thrashed, stop auto attempts so
+    // we don't burn API calls in a compact→still-full→compact loop. A manual
+    // `/compact` (force) always runs and can clear the breaker.
+    if (this.autoCompactDisabled && !force) return;
     const modelWindow = lookupContextWindow(this.model);
     const window = this.config.contextWindow ?? modelWindow.contextWindow;
  // Effective trigger point via the shared geometry (single source of truth
@@ -3345,7 +3367,7 @@ export class Session {
       maxTokens: this.config.maxTokens,
       maxOutputTokens: modelWindow.maxOutputTokens,
     }).hardTrigger;
-    if (!opts.force) {
+    if (!force) {
       const decision = shouldCompact(this.events, { contextWindow: trigger });
       if (!decision.shouldCompact) return;
     }
@@ -3362,13 +3384,28 @@ export class Session {
       );
       return;
     }
-    const result = await this.runCompaction(trigger, opts.force === true);
-    if (result.events === this.events) return; // no change
+    let result: CompactionResult;
+    try {
+      result = await this.runCompaction(trigger, force);
+    } catch (err) {
+      // A thrown compaction counts as a failure toward the breaker. Manual
+      // compaction surfaces the error to the caller; auto swallows it (the run
+      // continues, possibly oversize, and the breaker may trip).
+      this.recordCompactionFailure(trigger, `error: ${(err as Error).message}`, force);
+      if (force) throw err;
+      return;
+    }
+    if (result.events === this.events) {
+      // No change: compaction could not shrink anything. Treated as a failure
+      // so a genuinely stuck transcript trips the breaker instead of looping.
+      this.recordCompactionFailure(trigger, "no-change", force);
+      return;
+    }
     // The prompt prefix just changed, so the next turn's input re-bill is
     // expected content, not broken caching — flag it for cache-waste attribution.
     this.contextChangedForNextTurn = true;
     // Local estimate no longer reflects the last oversize API call.
-    if (opts.force) this.lastProviderInputTokens = 0;
+    if (force) this.lastProviderInputTokens = 0;
     // Which events in the model-facing result are genuinely NEW (and so must be
     // appended), versus turns already in the append-only log.
     //
@@ -3437,6 +3474,63 @@ export class Session {
       ? compactionEvent.summary
       : "";
     await this.hooks.runPostCompact("auto", summary).catch(() => undefined);
+
+    // Breaker evaluation on a successful compaction: if the live transcript is
+    // still at/over the hard trigger, the compaction did not actually get us
+    // under budget — real thrashing. Count it and trip the breaker at the
+    // threshold. Otherwise the compaction worked: clear both streaks (and
+    // re-enable auto when a manual /compact rescued the session).
+    const after = estimateEventTokens(this.events, estimateTokens);
+    if (after >= trigger) {
+      this.compactNoopStreak++;
+      const limit = this.config.autoCompactMaxConsecutiveFailures ?? DEFAULT_AUTOCOMPACT_MAX_FAILURES;
+      if (this.compactNoopStreak >= limit) {
+        this.tripAutoCompactBreaker(
+          `thrashing: still over budget after compact (${after} ≥ ${trigger})`,
+          { streak: this.compactNoopStreak, before: trigger, after },
+        );
+      }
+    } else {
+      this.compactFailStreak = 0;
+      this.compactNoopStreak = 0;
+      this.autoCompactDisabled = false;
+    }
+  }
+
+  /** Record a failed auto/manual compaction and trip the breaker at the limit.
+   * A failure is a throw, a no-change result, or (evaluated by the caller) a
+   * success that left the transcript still over budget. */
+  private recordCompactionFailure(trigger: number, reason: string, force: boolean): void {
+    this.compactFailStreak++;
+    const limit = this.config.autoCompactMaxConsecutiveFailures ?? DEFAULT_AUTOCOMPACT_MAX_FAILURES;
+    if (!force && this.compactFailStreak >= limit) {
+      this.tripAutoCompactBreaker(`compaction failing (${reason})`, {
+        streak: this.compactFailStreak,
+        before: trigger,
+        after: trigger,
+      });
+    }
+  }
+
+  /** Disable auto-compaction for the rest of the session and surface why. A
+   * manual `/compact` can still run and re-enable auto if it gets back under
+   * budget. */
+  private tripAutoCompactBreaker(
+    reason: string,
+    detail: { streak: number; before: number; after: number },
+  ): void {
+    if (this.autoCompactDisabled) return;
+    this.autoCompactDisabled = true;
+    // Drop any staged precompute so the breaker also halts background summary.
+    this.precompact = null;
+    this.notify({
+      type: "error",
+      message:
+        `Auto-compaction disabled: ${reason}. Run /compact manually, trim the ` +
+        `conversation, or raise the context budget. (streak ${detail.streak}, ` +
+        `tokens ${detail.before}→${detail.after})`,
+      recoverable: true,
+    });
   }
 
   private async maybeCheckpoint(): Promise<void> {
