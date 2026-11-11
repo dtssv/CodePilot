@@ -387,6 +387,76 @@ describe("loadConfigWithSources layered merge", () => {
   });
 });
 
+describe("managed config lockdown", () => {
+  let managedPath: string;
+  let managedDir: string;
+
+  beforeEach(() => {
+    managedDir = mkdtempSync(join(tmpdir(), "cfg-managed-"));
+    managedPath = join(managedDir, "managed.json");
+    process.env.CODEPILOT_MANAGED_CONFIG = managedPath;
+  });
+  afterEach(() => {
+    delete process.env.CODEPILOT_MANAGED_CONFIG;
+    rmSync(managedDir, { recursive: true, force: true });
+  });
+
+  function writeManaged(obj: unknown) {
+    writeFileSync(managedPath, JSON.stringify(obj), "utf-8");
+  }
+
+  it("locks policy-critical keys so user/caller cannot override them", async () => {
+    writeManaged({
+      permissionMode: "ask",
+      provider: "anthropic",
+      sandbox: { mode: "read-only", network: false, fallback: "deny" },
+      mcpAllowedServers: ["github"],
+    });
+    const dir = mkdtempSync(join(tmpdir(), "cfg-managed-cwd-"));
+    try {
+      // A user/caller tries to weaken every locked key — all must be ignored.
+      const result = await loadConfigWithSources(dir, {
+        permissionMode: "yolo",
+        provider: "openai",
+        sandbox: { mode: "off", network: true, fallback: "allow-unsandboxed" },
+        mcpAllowedServers: ["anything"],
+      });
+      expect(result.config.permissionMode).toBe("ask");
+      expect(result.config.provider).toBe("anthropic");
+      expect(result.config.sandbox).toEqual({ mode: "read-only", network: false, fallback: "deny" });
+      expect(result.config.mcpAllowedServers).toEqual(["github"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves non-locked keys as soft managed defaults the user can override", async () => {
+    // model is NOT a lock-key: managed sets a default, the caller overrides it.
+    writeManaged({ model: "managed-model", permissionMode: "ask" });
+    const dir = mkdtempSync(join(tmpdir(), "cfg-managed-cwd-"));
+    try {
+      const result = await loadConfigWithSources(dir, { model: "my-model" });
+      expect(result.config.model).toBe("my-model"); // soft default overridden
+      expect(result.config.permissionMode).toBe("ask"); // lock-key still enforced
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not lock a key the managed layer did not set", async () => {
+    // managed sets only provider; permissionMode is free for the caller.
+    writeManaged({ provider: "anthropic" });
+    const dir = mkdtempSync(join(tmpdir(), "cfg-managed-cwd-"));
+    try {
+      const result = await loadConfigWithSources(dir, { permissionMode: "yolo" });
+      expect(result.config.provider).toBe("anthropic"); // locked
+      expect(result.config.permissionMode).toBe("yolo"); // not set by managed → free
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("useProvider", () => {
   it("switches to a named preset", () => {
     const cfg = {

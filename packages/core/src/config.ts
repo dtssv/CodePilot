@@ -759,11 +759,14 @@ export function getRepoConfigPath(cwd: string): string {
  * On Linux: /etc/codepilot/managed.json
  * On Windows: C:\ProgramData\CodePilot\managed.json
  *
- * The managed layer sits between `defaults` and `user` — it lets IT
- * administrators enforce policies (e.g. restrict providers, set sandbox
- * mode, deny specific tools) that users cannot override in their personal
- * config. The env and caller layers still take precedence, so CI/CD and
- * programmatic callers can override managed settings when needed.
+ * The managed layer sits between `defaults` and `user`. For most keys it acts
+ * as an administrator-set DEFAULT that later layers (user / repo / env / caller
+ * / profile / patch) may override. For a small set of policy-critical
+ * LOCK-KEYS (see {@link MANAGED_LOCK_KEYS}), a value present in the managed
+ * layer is ENFORCED: no later layer can override it. This makes
+ * "users cannot override" literally true for the keys enterprises most need to
+ * pin (sandbox, permission mode, provider, MCP allowlist), while leaving every
+ * other key as a soft managed default.
  *
  * Override the path with the `CODEPILOT_MANAGED_CONFIG` env var for testing.
  */
@@ -779,6 +782,25 @@ export function getManagedConfigPath(): string {
       return "/etc/codepilot/managed.json";
   }
 }
+
+/**
+ * Policy-critical config keys that the managed (enterprise/MDM) layer ENFORCES:
+ * when the managed config sets one of these, no later layer (user / repo / env
+ * / caller / profile / patch) may override it. Every other key stays a soft
+ * managed default. Keep this list narrow — it is the hard-lockdown surface.
+ *
+ * - `sandbox` — the OS sandbox policy (mode / network / fallback). Locked as a
+ *   whole so a user cannot weaken any field (e.g. flip network back on).
+ * - `permissionMode` — the ask/auto/yolo gate for tool side effects.
+ * - `provider` — the model provider, for data-governance / egress control.
+ * - `mcpAllowedServers` — the MCP server allowlist (see mcpAllowedServers).
+ */
+export const MANAGED_LOCK_KEYS = [
+  "sandbox",
+  "permissionMode",
+  "provider",
+  "mcpAllowedServers",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Environment variable interpolation
@@ -1132,9 +1154,11 @@ export async function loadConfigWithSources(
  // 1b) enterprise/MDM managed config — sits between defaults and user.
  // IT administrators use this to enforce policies users cannot override.
   const managedPath = getManagedConfigPath();
+  let managedLayer: Record<string, unknown> | undefined;
   if (readFiles && existsSync(managedPath)) {
     const parsed = await readAndParse(managedPath);
     if (parsed !== undefined) {
+      managedLayer = parsed as Record<string, unknown>;
       sources.push({ name: "managed", source: managedPath, value: parsed });
     }
   }
@@ -1215,6 +1239,18 @@ export async function loadConfigWithSources(
   if (options.patch && Object.keys(options.patch).length > 0) {
     resolved = applyConfigPatch(resolved, options.patch);
     sources.push({ name: "patch", source: "<inline>", value: resolved });
+  }
+
+ // 8) Managed lock-keys: re-assert the managed layer's value for any
+ // policy-critical key it set, so no later layer (user / repo / env / caller /
+ // profile / patch) could have overridden it. This is what makes "users cannot
+ // override" literally true for the lockdown surface.
+  if (managedLayer) {
+    for (const key of MANAGED_LOCK_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(managedLayer, key)) {
+        (resolved as Record<string, unknown>)[key] = managedLayer[key];
+      }
+    }
   }
 
  // Interpolate env references inside the merged value.
