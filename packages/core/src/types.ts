@@ -823,7 +823,14 @@ export interface CodepilotConfig {
   * CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
   * toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to the
   * user's home directory instead. */
-  memory?: { walkToHome?: boolean };
+  memory?: {
+    walkToHome?: boolean;
+    /** Query-time progressive recall of relevant memory topic files into the
+     * volatile per-turn context. Default on; skipped when auto-memory is off. */
+    autoRecall?: boolean;
+    /** Max topic files recalled per turn. Default 5. */
+    recallMax?: number;
+  };
  /** Tool names or bash command regexes that auto-approve.
  * @deprecated prefer `permissions.allow` (same rule syntax). */
   autoApprove?: string[];

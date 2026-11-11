@@ -196,6 +196,8 @@ export {
   extractSessionMemory,
   maybeConsolidateMemory,
 } from "./memoryConsolidation.js";
+export { recallRelevantMemories, DEFAULT_RECALL_MAX } from "./memoryRecall.js";
+export type { RecallOptions } from "./memoryRecall.js";
 export type {
   MemoryConsolidationConfig,
   MemoryPipelineDeps,

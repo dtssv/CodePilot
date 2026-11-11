@@ -147,6 +147,16 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ context: { preciseCount: "always" } })).toThrow();
   });
 
+  it("accepts the memory recall block", () => {
+    const r = validateConfig({ memory: { autoRecall: false, recallMax: 3 } }) as {
+      memory?: { autoRecall?: boolean; recallMax?: number };
+    };
+    expect(r.memory?.autoRecall).toBe(false);
+    expect(r.memory?.recallMax).toBe(3);
+    expect(() => validateConfig({ memory: { recallMax: 0 } })).toThrow();
+    expect(() => validateConfig({ memory: { recallMax: 99 } })).toThrow();
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {

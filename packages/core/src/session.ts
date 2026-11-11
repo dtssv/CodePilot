@@ -73,6 +73,7 @@ import { createSkillTool, StaticSkillStore, type SkillToolHandle } from "./tools
 import { LspManager } from "./lsp.js";
 import { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 import { loadAutoMemoryIndex, type AutoMemoryConfig } from "./autoMemory.js";
+import { recallRelevantMemories } from "./memoryRecall.js";
 import {
   extractSessionMemory,
   maybeConsolidateMemory,
@@ -349,6 +350,10 @@ export class Session {
  /** True when the context changed (compaction/branch) just before the next
   * recorded usage turn, so its re-bill is counted as expected, not waste. */
   private contextChangedForNextTurn = false;
+  /** Query-relevant memory notes selected for the current turn (progressive
+   * recall). Set at the start of `prompt()` and consumed when building the
+   * agent-loop deps; rides the volatile per-turn context only, never persisted. */
+  private pendingRelevantMemories: string | null = null;
   /** Latest single-request provider `input` tokens (not cumulative). */
   private lastProviderInputTokens = 0;
   /** Measured context anchor for the hybrid context estimate: the provider's
@@ -784,6 +789,8 @@ export class Session {
     const resume = opts?.resume === true;
     // A real turn supersedes any pending prompt-cache warm.
     this.cancelCacheWarm();
+    // Reset per-turn recall; recomputed below for a fresh prompt, absent on resume.
+    this.pendingRelevantMemories = null;
     this.cancelController = new AbortController();
     this.steerController = new AbortController();
 
@@ -893,6 +900,13 @@ export class Session {
         return "started";
       }
     }
+
+    // Query-time progressive recall: pick the memory topic files most relevant
+    // to this query and stash their truncated bodies for the volatile per-turn
+    // context. Fail-soft and non-blocking — recall never holds up the turn.
+    this.pendingRelevantMemories = await this.recallRelevantMemories(effectivePrompt).catch(
+      () => null,
+    );
     } // end preprocessing (skipped on resume)
 
     try {
@@ -974,6 +988,7 @@ export class Session {
         parentSpan: promptSpan,
         dedupCache: this.dedupCache,
         fileObservations: this.fileObservations,
+        relevantMemories: this.pendingRelevantMemories ?? undefined,
         drainSteering: (opts) => {
           const scope = opts?.scope ?? "all";
           // Any drain that consumes user steers rotates the steer controller so
@@ -3711,6 +3726,39 @@ export class Session {
       mode: this.mode,
       outputStyle: this.outputStyle,
     });
+  }
+
+  /**
+   * Query-time progressive recall: select the memory topic files most relevant
+   * to `query` and return a `<relevant_memories>` block (truncated, capped) for
+   * the volatile per-turn context, or null. Gated on auto-memory being on and
+   * `memory.autoRecall` (default true). Skips topic files already read this
+   * session (visible in the transcript). Fail-soft — never throws, never blocks.
+   */
+  private async recallRelevantMemories(query: string): Promise<string | null> {
+    if (this.config.autoMemoryEnabled === false) return null;
+    if (this.config.memory?.autoRecall === false) return null;
+    if (!query || query.trim().length === 0) return null;
+    try {
+      const alreadyRead = new Set<string>();
+      for (const e of this.events) {
+        if (e.type === "tool_call" && (e as { name?: string }).name === "read_file") {
+          const p = (e as { input?: { path?: string } }).input?.path;
+          if (typeof p === "string") alreadyRead.add(p);
+        }
+      }
+      return await recallRelevantMemories({
+        provider: buildSmallProvider(this.config),
+        smallModel: this.config.smallModel,
+        cwd: this.cwd,
+        query,
+        recallMax: this.config.memory?.recallMax,
+        alreadyRead,
+        signal: this.cancelController?.signal,
+      });
+    } catch {
+      return null;
+    }
   }
 
   /**

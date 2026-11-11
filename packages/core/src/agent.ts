@@ -254,6 +254,14 @@ export interface AgentDeps {
    * request). Set by the Session from a plugin runtime; omitted → no-op.
    */
   contextTransform?: (view: ProviderMessage[]) => ProviderMessage[];
+  /**
+   * Query-relevant memory notes selected at turn start (progressive recall).
+   * Injected into the volatile per-turn context (`<relevant_memories>`) so a
+   * relevant note is not missed, without persisting it to the transcript or
+   * busting the cached system prefix. Set by the Session for the turn; omitted →
+   * no recall block.
+   */
+  relevantMemories?: string;
 }
 
 export interface AgentRunInput {
@@ -702,7 +710,7 @@ export async function runAgent(
       model: deps.config.model,
       toolExposure: deps.config.toolExposure,
     });
-    const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices });
+    const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices, relevantMemories: deps.relevantMemories });
 
  // Consistency assertion: verify the non-folded tail of the provider
  // messages matches the persisted event log, catching bugs where what the
@@ -1741,7 +1749,7 @@ function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> 
 export function buildLiveContext(
   all: Event[],
   produced: Event[],
-  opts: { planStalled?: boolean; systemNotices?: string[] } = {},
+  opts: { planStalled?: boolean; systemNotices?: string[]; relevantMemories?: string } = {},
 ): string {
   const parts: string[] = [];
   const planBlock = renderPlanBlock(extractPlan(all));
@@ -1749,6 +1757,9 @@ export function buildLiveContext(
   const ledger = buildProgressLedger(produced);
   if (ledger) parts.push(ledger);
   if (opts.planStalled) parts.push(PLAN_STALL_NOTICE);
+  if (opts.relevantMemories && opts.relevantMemories.trim().length > 0) {
+    parts.push(opts.relevantMemories.trim());
+  }
   for (const notice of opts.systemNotices ?? []) {
     parts.push(`<system_notice>\n${notice}\n</system_notice>`);
   }

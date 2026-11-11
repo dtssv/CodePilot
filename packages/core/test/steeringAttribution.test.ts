@@ -62,6 +62,14 @@ describe("buildLiveContext system notices", () => {
   it("adds nothing when there are no notices", () => {
     expect(buildLiveContext([], [], {})).not.toContain("system_notice");
   });
+
+  it("includes the relevant-memories block verbatim when provided", () => {
+    const block = "<relevant_memories>\n## /m/testing.md\npnpm test\n</relevant_memories>";
+    const out = buildLiveContext([], [], { relevantMemories: block });
+    expect(out).toContain(block);
+    // Absent by default.
+    expect(buildLiveContext([], [], {})).not.toContain("relevant_memories");
+  });
 });
 
 describe("runAgent steering attribution", () => {

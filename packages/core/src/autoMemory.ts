@@ -253,7 +253,7 @@ async function appendTopicFooter(indexText: string, dir: string): Promise<string
   return indexText.trimEnd() + "\n" + footer;
 }
 
-async function listTopicFiles(dir: string): Promise<string[]> {
+export async function listTopicFiles(dir: string): Promise<string[]> {
   const entries = await safeReaddir(dir);
   return entries.filter((f) => f.endsWith(".md") && f !== "MEMORY.md").sort();
 }

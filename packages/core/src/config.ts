@@ -440,6 +440,13 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     memory: z
       .object({
         walkToHome: z.boolean().optional(),
+        // Query-time progressive recall: before a turn, pick the few memory
+        // topic files most relevant to the query and attach their (truncated)
+        // bodies to the volatile per-turn context so a relevant note is not
+        // missed. Default on; disabled when auto-memory is off.
+        autoRecall: z.boolean().optional(),
+        // Max topic files recalled per turn. Default 5.
+        recallMax: z.number().int().positive().max(20).optional(),
       })
       .strict()
       .optional(),
