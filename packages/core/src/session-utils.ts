@@ -664,10 +664,17 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
       // existence-checked) and can never abort session creation or disable
       // another plugin.
       try {
+        // Load the plugin content-trust store so sensitive components (hooks /
+        // MCP servers / runtime) of a plugin whose on-disk content drifted from
+        // the approved fingerprint are skipped until the user re-confirms.
+        const { PluginTrustStore } = await import("./plugins-trust.js");
+        const trust = new PluginTrustStore();
+        await trust.load().catch(() => {});
         const merged = mergePluginConfig(
           config as Record<string, unknown>,
           init.plugins,
           (m) => log.warn(m),
+          trust,
         ) as typeof config;
         // mergePluginConfig may also resolve a plugin runtime default from the
         // MANIFEST alone — but `initPluginRuntimes` already chose the default

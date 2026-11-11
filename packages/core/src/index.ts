@@ -936,6 +936,11 @@ export {
   pluginPermissionReport,
   PLUGIN_PERMISSIONS,
 } from "./plugins.js";
+export {
+  PluginTrustStore,
+  pluginContentHash,
+  defaultPluginTrustPath,
+} from "./plugins-trust.js";
 export type {
   PluginManifest,
   PluginProviderTemplate,

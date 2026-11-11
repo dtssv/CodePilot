@@ -22,6 +22,7 @@ import {
   type PluginManifest,
   type MarketplaceEntry,
 } from "../src/plugins.js";
+import { PluginTrustStore, pluginContentHash } from "../src/plugins-trust.js";
 import { resetCatalogMemoryForTests } from "../src/remoteCatalog.js";
 
 // ---------------------------------------------------------------------------
@@ -503,6 +504,73 @@ describe("mergePluginConfig", () => {
     const hooks = merged.hooks as Record<string, unknown[]>;
     expect(hooks.PreToolUse).toHaveLength(2);
   });
+
+  // --- content-trust re-approval gate ---
+
+  /** A minimal in-memory trust gate: trusts a plugin only when its current hash
+   * equals the recorded one; an un-recorded plugin is trusted (legacy). */
+  function gate(recorded: Record<string, string>) {
+    return {
+      isTrusted(name: string, currentHash: string) {
+        const rec = recorded[name];
+        return rec === undefined ? true : rec === currentHash;
+      },
+    };
+  }
+
+  it("skips hooks and mcpServers when content drifted from the approved hash", () => {
+    const p = fakePlugin("p1", {
+      hooks: { PreToolUse: [{ command: "a" }] },
+      mcpServers: { s: { command: "node" } },
+    });
+    const plugins = new Map<string, Plugin>([["p1", p]]);
+    // Record a DIFFERENT hash than the plugin's current content → drifted.
+    const warns: string[] = [];
+    const merged = mergePluginConfig({}, plugins, (m) => warns.push(m), gate({ p1: "stale-hash" }));
+    // Neither sensitive component was merged.
+    expect(merged.hooks).toBeUndefined();
+    expect(merged.mcpServers).toBeUndefined();
+    expect(warns.join("\n")).toMatch(/has changed on disk since you approved it/);
+  });
+
+  it("merges normally when the current content matches the approved hash", () => {
+    const p = fakePlugin("p1", {
+      hooks: { PreToolUse: [{ command: "a" }] },
+      mcpServers: { s: { command: "node" } },
+    });
+    const plugins = new Map<string, Plugin>([["p1", p]]);
+    const good = pluginContentHash(p.manifest);
+    const merged = mergePluginConfig({}, plugins, () => {}, gate({ p1: good }));
+    expect((merged.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+    expect(Object.keys(merged.mcpServers as Record<string, unknown>)).toEqual(["s"]);
+  });
+
+  it("does not gate a plugin with no recorded hash (legacy-compatible)", () => {
+    const p = fakePlugin("p1", { hooks: { PreToolUse: [{ command: "a" }] } });
+    const plugins = new Map<string, Plugin>([["p1", p]]);
+    // Empty recorded set → never fingerprinted → not gated.
+    const merged = mergePluginConfig({}, plugins, () => {}, gate({}));
+    expect((merged.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+  });
+
+  it("only the sensitive components change the fingerprint", () => {
+    const base = fakePlugin("p1", {
+      hooks: { PreToolUse: [{ command: "a" }] },
+      description: "one",
+    });
+    // Changing description (non-sensitive) keeps the same hash...
+    const sameDesc = fakePlugin("p1", {
+      hooks: { PreToolUse: [{ command: "a" }] },
+      description: "two",
+    });
+    expect(pluginContentHash(sameDesc.manifest)).toBe(pluginContentHash(base.manifest));
+    // ...changing a hook command (sensitive) changes it.
+    const changedHook = fakePlugin("p1", {
+      hooks: { PreToolUse: [{ command: "evil" }] },
+      description: "one",
+    });
+    expect(pluginContentHash(changedHook.manifest)).not.toBe(pluginContentHash(base.manifest));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -580,6 +648,21 @@ describe("installPlugin", () => {
     await expect(
       installPlugin(emptySrc, { installDir: join(base, "target") })
     ).rejects.toThrow(/no plugin\.json/);
+  });
+
+  it("records the sensitive-content fingerprint on install", async () => {
+    const trustFile = join(base, "trust.json");
+    const store = new PluginTrustStore(trustFile);
+    await installPlugin(srcDir, { installDir: installRoot, trustStore: store });
+    // The recorded hash matches the installed manifest's sensitive content.
+    const fresh = new PluginTrustStore(trustFile);
+    await fresh.load();
+    const manifest = JSON.parse(
+      await import("node:fs/promises").then((fs) =>
+        fs.readFile(join(installRoot, "plugin.json"), "utf-8")
+      )
+    );
+    expect(fresh.recorded("source-plugin")).toBe(pluginContentHash(manifest));
   });
 
   it("throws when source directory does not exist", async () => {
@@ -1147,5 +1230,50 @@ describe("plugin permissions", () => {
       const merged = mergePluginConfig({}, plugins);
       expect(merged.runtime).toBe("rt");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PluginTrustStore (content-trust persistence)
+// ---------------------------------------------------------------------------
+
+describe("PluginTrustStore", () => {
+  let dir: string;
+  let file: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "plugin-trust-"));
+    file = join(dir, "trust.json");
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("records, persists, and reloads a hash; isTrusted compares it", async () => {
+    const s = new PluginTrustStore(file);
+    await s.record("p", "hash-1");
+    // A fresh store reads the same value from disk.
+    const s2 = new PluginTrustStore(file);
+    await s2.load();
+    expect(s2.recorded("p")).toBe("hash-1");
+    expect(s2.isTrusted("p", "hash-1")).toBe(true);
+    expect(s2.isTrusted("p", "hash-2")).toBe(false);
+    // An un-recorded plugin is trusted (not gated).
+    expect(s2.isTrusted("other", "anything")).toBe(true);
+  });
+
+  it("forget drops a recorded hash", async () => {
+    const s = new PluginTrustStore(file);
+    await s.record("p", "hash-1");
+    await s.forget("p");
+    const s2 = new PluginTrustStore(file);
+    await s2.load();
+    expect(s2.recorded("p")).toBeNull();
+  });
+
+  it("loads empty on a missing/corrupt file (fail-soft)", async () => {
+    const s = new PluginTrustStore(join(dir, "does-not-exist.json"));
+    await s.load();
+    expect(s.recorded("p")).toBeNull();
+    expect(s.isTrusted("p", "x")).toBe(true);
   });
 });

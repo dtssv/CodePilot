@@ -32,8 +32,16 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runtimeRegistry, type RuntimeFactory, type RuntimeRegistry } from "./runtime.js";
 import { PROVIDER_NAMES, type ProviderName } from "./types.js";
+import { pluginContentHash } from "./plugins-trust.js";
+import { PluginTrustStore } from "./plugins-trust.js";
 
 const execFileAsync = promisify(execFile);
+
+/** The subset of PluginTrustStore mergePluginConfig needs. Defined here (not
+ * imported as the class) to keep the dependency one-directional. */
+export interface PluginTrustGate {
+  isTrusted(name: string, currentHash: string): boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -541,12 +549,31 @@ export function mergePluginConfig(
   config: Record<string, unknown>,
   plugins: Map<string, Plugin>,
   onWarn: (message: string) => void = () => {},
+  /** Optional content-trust gate. When provided, a plugin whose sensitive
+   * content (hooks / mcpServers / runtime) has DRIFTED from the hash recorded at
+   * install consent has those components skipped until re-confirmation. A plugin
+   * with no recorded hash is not gated (legacy-compatible). */
+  trust?: PluginTrustGate,
 ): Record<string, unknown> {
   const merged = { ...config };
   const deny = (name: string, cap: PluginPermission): void =>
     onWarn(
       `plugin "${name}" ships ${cap === "mcp" ? "MCP servers" : cap} but did not declare the "${cap}" permission — skipped. Add "${cap}" to the plugin's permissions to allow it.`,
     );
+  // A plugin whose fingerprinted content changed since consent: its sensitive
+  // components are untrusted until re-confirmed. Warn once per plugin.
+  const warnedDrift = new Set<string>();
+  const contentTrusted = (p: Plugin): boolean => {
+    if (!trust) return true;
+    const ok = trust.isTrusted(p.manifest.name, pluginContentHash(p.manifest));
+    if (!ok && !warnedDrift.has(p.manifest.name)) {
+      warnedDrift.add(p.manifest.name);
+      onWarn(
+        `plugin "${p.manifest.name}" has changed on disk since you approved it — its hooks and MCP servers are disabled until you re-confirm the plugin (its sensitive content no longer matches the approved fingerprint).`,
+      );
+    }
+    return ok;
+  };
 
  // Merge hooks (gated by the "hooks" permission).
   const hooks = { ...(merged.hooks as Record<string, unknown[]> ?? {}) };
@@ -557,6 +584,7 @@ export function mergePluginConfig(
       deny(p.manifest.name, "hooks");
       continue;
     }
+    if (!contentTrusted(p)) continue;
     for (const [event, entries] of Object.entries(p.manifest.hooks)) {
       if (Array.isArray(entries)) {
         hooks[event] = [...(hooks[event] ?? []), ...entries];
@@ -574,6 +602,7 @@ export function mergePluginConfig(
       deny(p.manifest.name, "mcp");
       continue;
     }
+    if (!contentTrusted(p)) continue;
     for (const [name, cfg] of Object.entries(p.manifest.mcpServers)) {
       mcpServers[name] = cfg;
       mcpChanged = true;
@@ -590,6 +619,9 @@ export function mergePluginConfig(
       deny(p.manifest.name, "runtime");
       continue;
     }
+    // A runtime-bearing plugin whose content drifted is also untrusted — its
+    // runtime replaces the agent loop, the most sensitive component of all.
+    if (p.manifest.runtime !== undefined && !contentTrusted(p)) continue;
     runtimeAllowed.set(key, p);
   }
   const pluginDefault = pluginDefaultRuntime(runtimeAllowed, merged.runtime as string | undefined);
@@ -761,6 +793,10 @@ export interface InstallOptions {
   installDir?: string;
  /** Force re-install if the plugin already exists. */
   force?: boolean;
+ /** Trust store to record the plugin's sensitive-content fingerprint into at
+  * install-consent time. Defaults to the shared `~/.codepilot/plugins/.trust.json`
+  * store; override for tests. */
+  trustStore?: PluginTrustStore;
 }
 
 /**
@@ -799,6 +835,18 @@ export async function installPlugin(
   if (!existsSync(manifestPath)) {
     await rm(target, { recursive: true, force: true });
     throw new Error(`installed source has no plugin.json — not a valid plugin`);
+  }
+ // Record the sensitive-content fingerprint at install-consent time. Reaching
+ // here means the caller consented (after inspectPluginSource). A later on-disk
+ // change to the plugin's hooks / MCP servers / runtime will no longer match
+ // this hash, and mergePluginConfig skips those components until the user
+ // re-confirms. Best-effort: a trust-file write failure must not fail install.
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, "utf-8")) as PluginManifest;
+    const store = opts.trustStore ?? new PluginTrustStore();
+    await store.record(manifest.name, pluginContentHash(manifest));
+  } catch {
+ /* non-fatal: content trust is defence-in-depth, not install-critical */
   }
   return target;
 }
@@ -883,6 +931,13 @@ export async function uninstallPlugin(name: string): Promise<boolean> {
   const target = join(homedir(), ".codepilot", "plugins", name);
   if (!existsSync(target)) return false;
   await rm(target, { recursive: true, force: true });
+  // Drop the recorded content fingerprint so a future re-install re-approves
+  // from scratch rather than matching a stale hash. Best-effort.
+  try {
+    await new PluginTrustStore().forget(name);
+  } catch {
+    /* non-fatal */
+  }
   return true;
 }
 
