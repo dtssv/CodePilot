@@ -17,6 +17,7 @@ export type {
   ToolInputJsonDelta,
   AgentMode,
   PermissionMode,
+  PermissionPresetName,
   PermissionRules,
   SandboxConfig,
   HooksConfig,
@@ -47,6 +48,7 @@ export type {
 } from "./types.js";
 // Runtime value: the single source of truth for supported provider names.
 export { PROVIDER_NAMES } from "./types.js";
+export { PERMISSION_PRESETS } from "./types.js";
 
 // ---- Config ----
 export { loadConfig, mergeConfig } from "./config.js";
@@ -102,6 +104,7 @@ export {
   filterToolsByMode,
   filterToolsByModeFromRegistry,
   filterToolNames,
+  filterToolsByModel,
 } from "./tools/index.js";
 export type {
   ToolDef,
@@ -874,8 +877,6 @@ export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
 export type { BuiltinCommand, BuiltinCommandScope } from "./builtinCommands.js";
 export { FileObservationStore } from "./fsObservation.js";
 export type { FileObservation, FreshnessResult } from "./fsObservation.js";
-export { checkCitations, buildCitationNotice, extractCitations, observedPaths } from "./citationGuard.js";
-export type { Citation, CitationCheck } from "./citationGuard.js";
 
 // ---- Keyless transcript replay (test mode, no API key needed) ----
 export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";

@@ -10,7 +10,7 @@
 // Designed to be a few thousand tokens. Identical
 // across turns for a given (mode, model, tool-list).
 //
-// - DYNAMIC SUFFIX : environment, git status, memory summaries, current
+// - DYNAMIC SUFFIX : environment, git identity, memory summaries, current
 // plan, available tool list, current mode. Refreshed
 // on every rebuild and excluded from cache.
 //
@@ -239,7 +239,7 @@ These rules exist because the single most damaging failure mode is confidently s
 - **Comparisons are two-sided.** When comparing this project to another tool, "the other tool has capability X" does NOT imply "this project lacks X". Before writing "we are missing X", grep THIS repo for X and cite what you found (file:line) or confirm its genuine absence. A gap claim without a this-repo search is a guess, not a finding — present it as a hypothesis to verify, never as a conclusion.
 - **Follow the user's explicit constraints exactly.** If the user names a path, directory, branch, file, or command, use that one — do not substitute a more convenient alternative (e.g. cloning to \`/tmp\` when a path was given). If a constraint collides with the sandbox or permissions, request the needed access (or ask), rather than silently routing around it.
 - **Say "I don't know" / "unverified".** When you are uncertain, state the uncertainty and either verify it or flag it. A precise "I didn't check the Windows path" beats a confident wrong claim. Trust evidence over speculation; if a finding contradicts an earlier claim (yours or the user's), surface the discrepancy and go with the evidence.
-- **Self-check before you conclude — in that order.** Gather and verify your evidence *first*, then deliver once. Before writing an analysis, a gap report, or a "done" claim, re-read your own assertions and confirm each has backing (a run command, a test, a file you read). Do not deliver a result and only then go back to check it: a first answer followed by a verification pass and a near-identical second answer wastes a turn and confuses the reader. If you find yourself about to re-verify after presenting, you presented too early. Deliver the verification, not just the conclusion.`);
+- **Verify before you conclude — then stop.** Cheap local checks belong *before* the answer, not after. Once you have enough evidence to answer, deliver and stop — do not open a second verification pass that re-greps the same ground and restates the same conclusion. If something is still unchecked, say "unverified" rather than looping to chase certainty.`);
 
   push("code-conventions", `## Code Conventions
 
@@ -521,10 +521,10 @@ function outputStyleGuidance(style: OutputStyle): string {
 
 /**
  * Split the dynamic context into a byte-stable tier (environment identity +
- * memory index + tool list) and a volatile tier (current time, git working
- * tree, live plan). The stable tier is appended to the cached system block so
- * it is sent once and then served from the provider's prompt cache; only the
- * volatile tier rides each turn's last user message.
+ * git identity + memory index + skills) and a volatile tier (current time +
+ * plan). The stable tier is appended to the cached system block so it is sent
+ * once and then served from the provider's prompt cache; only the volatile
+ * tier rides each turn's last user message.
  */
 async function buildTieredSuffix(
   ctx: SystemPromptContext,
@@ -559,8 +559,8 @@ delivery_roots: ${(ctx.deliveryRoots && ctx.deliveryRoots.length > 0
     : env.cwd)}
 timezone: ${env.timezone}
 </environment>`);
-  // Git identity (repo/branch/last-commit) is stable; the dirty working-tree
-  // count is volatile and rendered below.
+  // Git identity only (repo/branch/last-commit). Dirty paths are not injected —
+  // peers omit them; the agent runs git status/diff when a task needs them.
   stableOut.push(renderGitIdentityBlock(env.git));
   stableOut.push(renderMemoryBlock(ctx.memory));
   // Advertise installed skills (one line each) so the model can load them on
@@ -577,15 +577,20 @@ timezone: ${env.timezone}
   // --- Volatile tier: refreshed every turn.
   const volatileOut: string[] = [];
   volatileOut.push(`<runtime>
-now: ${env.now}${renderGitWorkingTree(env.git)}
+now: ${env.now}
 </runtime>`);
-  volatileOut.push(renderPlanBlock(ctx.plan));
+  // Inject <plan> only when a plan already exists. An empty "no plan yet /
+  // send plan_update" stub nudged models to open a plan on every task; the
+  // planning section above still covers when to create one. Mid-run updates
+  // ride buildLiveContext once plan_update has produced steps.
+  const planBlock = renderPlanBlock(ctx.plan);
+  if (planBlock) volatileOut.push(planBlock);
 
   return { stable: stableOut.join("\n\n"), volatile: volatileOut.join("\n\n") };
 }
 
-/** Stable git identity: repo / root / branch / last commit. No dirty state —
- * that churns and lives in the volatile `renderGitWorkingTree`. */
+/** Stable git identity: repo / root / branch / last commit. No dirty-tree
+ * paths — peers omit those from the prompt; agents fetch them on demand. */
 function renderGitIdentityBlock(git: EnvironmentSnapshot["git"]): string {
   if (!git || !git.inRepo) {
     return `<git>
@@ -601,19 +606,6 @@ not a git working tree
   return `<git>
 ${lines.join("\n")}
 </git>`;
-}
-
-/** Volatile git working-tree summary (dirty count only, no file list). Returns
- * a leading newline + one line, or "" when not a repo. Runs `git status` for
- * the paths — never dump them every turn. */
-function renderGitWorkingTree(git: EnvironmentSnapshot["git"]): string {
-  if (!git || !git.inRepo || !git.statusShort) return "";
-  const changeLines = git.statusShort
-    .split("\n")
-    .filter((l) => l.trim().length > 0 && !l.startsWith("##"));
-  return changeLines.length === 0
-    ? "\nworking_tree: clean"
-    : `\nworking_tree: ${changeLines.length} changed file(s) — run \`git status\` for the list`;
 }
 
 function renderMemoryBlock(memory: MemoryContents): string {
@@ -659,12 +651,11 @@ ${blocks.join("\n\n")}
 </memory>`;
 }
 
+/** Render the live plan checkbox block, or "" when there is no plan yet.
+ * Callers must omit empty results from the prompt rather than injecting a
+ * "create a plan" stub — that stub caused needless plan_update on small tasks. */
 export function renderPlanBlock(plan: PlanStep[] | undefined): string {
-  if (!plan || plan.length === 0) {
-    return `<plan>
-(no plan yet — only multi-step tasks need one; send plan_update alongside real work)
-</plan>`;
-  }
+  if (!plan || plan.length === 0) return "";
   const lines = plan.map((s) => {
     const mark =
       s.status === "completed"

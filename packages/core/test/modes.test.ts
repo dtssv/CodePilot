@@ -4,6 +4,7 @@ import {
   filterToolsByMode,
   filterToolsByModeFromRegistry,
   filterToolNames,
+  filterToolsByModel,
 } from "../src/tools/modes.js";
 import {
   ToolRegistry,
@@ -293,5 +294,53 @@ describe("filterToolsByModeFromRegistry", () => {
     expect(filterToolsByModeFromRegistry(r, "plan").map((t) => t.name)).toEqual(
       filterToolsByMode(r.all(), "plan").map((t) => t.name)
     );
+  });
+});
+describe("filterToolsByModel", () => {
+  const tools = [readFileTool, bashTool, writeFileTool, applyPatchTool, codeModeTool];
+
+  it("returns every tool unchanged when there are no rules", () => {
+    expect(filterToolsByModel(tools, "glm-5.2", undefined).map((t) => t.name)).toEqual(
+      tools.map((t) => t.name),
+    );
+    expect(filterToolsByModel(tools, "glm-5.2", []).map((t) => t.name)).toEqual(
+      tools.map((t) => t.name),
+    );
+  });
+
+  it("drops the configured tools for a model whose id matches a rule glob", () => {
+    const rules = [{ models: ["glm*", "minimax*"], drop: ["code_mode"] }];
+    const out = filterToolsByModel(tools, "jdcloud/glm-5.2", rules).map((t) => t.name);
+    expect(out).not.toContain("code_mode");
+    expect(out).toContain("bash");
+    expect(out).toContain("apply_patch");
+  });
+
+  it("matches the model id case-insensitively", () => {
+    const rules = [{ models: ["GLM*"], drop: ["code_mode"] }];
+    expect(filterToolsByModel(tools, "glm-5.2", rules).map((t) => t.name)).not.toContain("code_mode");
+  });
+
+  it("matches a bare-name glob against a provider-prefixed id", () => {
+    // `glm*` should match `jdcloud/glm-5.2` without the user spelling the prefix.
+    const rules = [{ models: ["glm*"], drop: ["code_mode"] }];
+    expect(filterToolsByModel(tools, "jdcloud/glm-5.2", rules).map((t) => t.name)).not.toContain(
+      "code_mode",
+    );
+  });
+
+  it("leaves a non-matching model's full set intact", () => {
+    const rules = [{ models: ["glm*"], drop: ["code_mode", "apply_patch"] }];
+    const out = filterToolsByModel(tools, "gpt-4o", rules).map((t) => t.name);
+    expect(out).toEqual(tools.map((t) => t.name));
+  });
+
+  it("unions drops across multiple matching rules and ignores unknown names", () => {
+    const rules = [
+      { models: ["glm*"], drop: ["code_mode"] },
+      { models: ["*5.2"], drop: ["apply_patch", "does_not_exist"] },
+    ];
+    const out = filterToolsByModel(tools, "glm-5.2", rules).map((t) => t.name);
+    expect(out).toEqual(["read_file", "bash", "write_file"]);
   });
 });

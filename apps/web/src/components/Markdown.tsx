@@ -97,7 +97,7 @@ function ThinkingFold({ text, incomplete }: { text: string; incomplete?: boolean
 
 type Align = "left" | "center" | "right" | undefined;
 
-type Block =
+export type Block =
   | { kind: "code"; lang?: string; lines: string[] }
   | { kind: "heading"; level: 1 | 2 | 3 | 4; text: string }
   | { kind: "list"; ordered: boolean; start: number; items: Array<{ text: string; task?: boolean; done?: boolean }> }
@@ -117,10 +117,15 @@ function splitRow(line: string): string[] {
 }
 
 /**
- * Collect a fenced code block. Nested fences (e.g. a ```python example inside
- * a ```python doc) stay in the body: a bare closer only ends the block when
- * nest depth is back to zero. Matches CommonMark's "same or longer" rule for
- * the outer fence length.
+ * Collect a fenced code block. Per CommonMark, the block ends at the FIRST line
+ * that is a *bare* closing fence — backticks >= the opening count and NO info
+ * string. A fence line that carries an info string (```python) inside the body
+ * is content, not a nested open: fences do not nest at the same length. This
+ * matters because models routinely emit a code block whose body contains
+ * ```lang lines (e.g. pasting markdown-about-markdown, or a command that echoes
+ * a fence); treating those as nested opens made the real closer never match, so
+ * every following heading/table/paragraph was swallowed into one giant code
+ * block. Closing on the first bare fence keeps the rest of the message intact.
  */
 function readFence(
   lines: string[],
@@ -131,29 +136,12 @@ function readFence(
   const tick = open[1]!.length;
   const lang = open[2]!.trim() || undefined;
   const body: string[] = [];
-  let depth = 1;
   let i = start + 1;
   while (i < lines.length) {
     const raw = lines[i] ?? "";
-    const trimmed = raw.trim();
-    const fence = trimmed.match(CODE_FENCE);
-    if (fence && fence[1]!.length >= tick) {
-      const info = fence[2]!.trim();
-      if (info) {
- // ```python inside the body — nested open, keep as content.
-        depth++;
-        body.push(raw);
-        i++;
-        continue;
-      }
-      depth--;
-      if (depth === 0) {
-        return { lang, body, end: i };
-      }
- // Closes an inner fence; keep the line so the example stays intact.
-      body.push(raw);
-      i++;
-      continue;
+    const fence = raw.trim().match(CODE_FENCE);
+    if (fence && fence[1]!.length >= tick && fence[2]!.trim() === "") {
+      return { lang, body, end: i };
     }
     body.push(raw);
     i++;
@@ -161,7 +149,7 @@ function readFence(
   return { lang, body, end: Math.max(start, lines.length - 1) };
 }
 
-function parseBlocks(src: string): Block[] {
+export function parseBlocks(src: string): Block[] {
   const lines = src.split("\n");
   const blocks: Block[] = [];
   let i = 0;

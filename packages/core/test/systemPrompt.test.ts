@@ -56,7 +56,7 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Evidence before synthesis/);
     expect(out.staticPrefix).toMatch(/Comparisons are two-sided/);
     expect(out.staticPrefix).toMatch(/Follow the user's explicit constraints exactly/);
-    expect(out.staticPrefix).toMatch(/Self-check before you conclude/);
+    expect(out.staticPrefix).toMatch(/Verify before you conclude/);
   });
 
   it("splits brownfield vs greenfield conventions", async () => {
@@ -268,10 +268,8 @@ describe("buildSystemPrompt dynamic suffix", () => {
             inRepo: true,
             root: "/work",
             branch: "main",
-            dirty: true,
             lastCommit: "abc1234",
             lastCommitSha: "abc1234",
-            statusShort: "## main\n M foo.ts",
           },
         };
       },
@@ -282,8 +280,9 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("branch: main");
     expect(out.dynamicSuffix).toContain("last_commit: abc1234");
     expect(out.dynamicSuffix).toContain("</git>");
-    // Dirty working-tree is volatile now, not in the stable <git> identity.
-    expect(out.volatileSuffix).toContain("working_tree: 1 changed file(s)");
+    // Dirty working-tree is not injected (peer parity); only identity lives in <git>.
+    expect(out.volatileSuffix).not.toContain("working_tree:");
+    expect(out.dynamicSuffix).not.toContain("working_tree:");
   });
 
   it("falls back to a not-a-git message when git.inRepo is false", async () => {
@@ -343,23 +342,21 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).not.toContain(body.trim());
   });
 
-  it("reports git working tree as a count only, never the file list", async () => {
-    const changes = Array.from({ length: 30 }, (_, i) => ` M file${i}.ts`).join("\n");
+  it("does not inject dirty working-tree paths into the prompt", async () => {
     const provider: EnvironmentProvider = {
       async snapshot(cwd) {
         return {
           os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
           now: "t", timezone: "UTC",
-          git: { inRepo: true, root: "/w", branch: "main", dirty: true, statusShort: `## main\n${changes}` },
+          git: { inRepo: true, root: "/w", branch: "main", lastCommitSha: "abc", lastCommit: "wip" },
         };
       },
     };
     const out = await buildSystemPrompt({ ...baseCtx, environmentProvider: provider });
-    expect(out.volatileSuffix).toContain("30 changed file(s)");
-    expect(out.volatileSuffix).toContain("git status");
-    // No individual paths are listed anywhere in the context.
-    expect(out.full).not.toContain("file0.ts");
-    expect(out.full).not.toContain("file29.ts");
+    expect(out.dynamicSuffix).toContain("in_repo: true");
+    expect(out.volatileSuffix).toContain("now: t");
+    expect(out.volatileSuffix).not.toContain("working_tree:");
+    expect(out.full).not.toMatch(/run `git status`/);
   });
 
   it("does not inject a project_tree block in the per-turn suffix", async () => {
@@ -368,14 +365,12 @@ describe("buildSystemPrompt dynamic suffix", () => {
         return {
           os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
           now: "t", timezone: "UTC",
-          directoryTree: "src/\n  a.ts\n  b.ts",
           git: { inRepo: false },
         };
       },
     };
     const out = await buildSystemPrompt({ ...baseCtx, environmentProvider: provider });
     expect(out.dynamicSuffix).not.toContain("<project_tree>");
-    expect(out.dynamicSuffix).not.toContain("a.ts");
   });
 
   it("documents progressive disclosure in the static memory section", async () => {
@@ -408,16 +403,17 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.volatileSuffix).toContain("</plan>");
   });
 
-  it("plan block falls back to a hint when no plan exists", async () => {
+  it("omits the plan block entirely when no plan exists", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, plan: undefined });
-    expect(out.volatileSuffix).toContain("(no plan yet");
+    expect(out.volatileSuffix).not.toContain("<plan>");
+    expect(out.volatileSuffix).not.toContain("plan_update");
+    expect(out.volatileSuffix).toContain("now:");
   });
 
   it("keeps the stable context byte-identical when only volatile state changes", async () => {
-    // Two snapshots differing ONLY in `now`, git dirty count, and plan — the
-    // stable context must stay byte-for-byte identical so the cached system
-    // block (staticPrefix + stableContext) never busts the prompt cache.
-    const mk = (now: string, changed: number, plan: typeof baseCtx.plan) => ({
+    // Two snapshots differing ONLY in `now` and plan — the stable context must
+    // stay byte-for-byte identical so the cached system block never busts.
+    const mk = (now: string, plan: typeof baseCtx.plan) => ({
       ...baseCtx,
       plan,
       environmentProvider: {
@@ -425,24 +421,22 @@ describe("buildSystemPrompt dynamic suffix", () => {
           return {
             os: "x", hostname: "h", user: "u", shell: "/bin/sh", node: "v0", cwd,
             now, timezone: "UTC",
-            git: {
-              inRepo: true, root: "/w", branch: "main",
-              statusShort: `## main\n${Array.from({ length: changed }, (_, i) => ` M f${i}.ts`).join("\n")}`,
-            },
+            git: { inRepo: true, root: "/w", branch: "main", lastCommitSha: "abc", lastCommit: "wip" },
           };
         },
       } as EnvironmentProvider,
     });
-    const a = await buildSystemPrompt(mk("2026-01-01T00:00:00Z", 3, []));
-    const b = await buildSystemPrompt(mk("2026-06-30T23:59:59Z", 41, [
+    const a = await buildSystemPrompt(mk("2026-01-01T00:00:00Z", []));
+    const b = await buildSystemPrompt(mk("2026-06-30T23:59:59Z", [
       { id: "s", title: "work", status: "in_progress" },
     ]));
     expect(a.staticPrefix).toBe(b.staticPrefix);
     expect(a.stableContext).toBe(b.stableContext); // ← the invariant
     // And the volatile tiers DO differ (sanity: we didn't accidentally freeze them).
     expect(a.volatileSuffix).not.toBe(b.volatileSuffix);
-    expect(a.volatileSuffix).toContain("3 changed file(s)");
-    expect(b.volatileSuffix).toContain("41 changed file(s)");
+    expect(a.volatileSuffix).toContain("2026-01-01T00:00:00Z");
+    expect(b.volatileSuffix).toContain("2026-06-30T23:59:59Z");
+    expect(b.volatileSuffix).toContain("work");
   });
 
   it("does not duplicate the tool list in the suffix (names live in §12 + the tools array)", async () => {

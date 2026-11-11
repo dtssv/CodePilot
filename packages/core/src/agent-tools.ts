@@ -223,10 +223,11 @@ export async function runOneTool(
         void err;
       }
       if (decision !== "deny" && req.sandboxExpand && deps.expandSandboxWritable) {
- // Allow once → session-only root; Always → also persist writablePaths.
+ // Allow once → session-only root; Always (either scope) → also persist
+ // writablePaths so the folder grant survives beyond this session.
         try {
           await deps.expandSandboxWritable(req.sandboxExpand.path, {
-            persist: decision === "always",
+            persist: decision === "always" || decision === "always-project",
           });
         } catch (err) {
           endToolSpan(
@@ -242,17 +243,30 @@ export async function runOneTool(
           };
         }
       }
-      if (decision === "always") {
+      if (decision === "always" || decision === "always-project") {
  // Narrow the grant to a rule covering THIS invocation (e.g.
- // "bash(npm test *)") rather than flipping the whole session to
- // allow every call to this tool. The rule is session-scoped: it
- // lives in memory on the PermissionEngine and is never persisted,
- // so it dies with this Session. deny rules still override — they
- // are checked first in preflight and are absolute, even under yolo.
- // For sandbox-expand asks the folder grant above is the durable
- // part; the tool rule is still useful for same-tool retries.
+ // "bash(npm test *)", or the exact command for banned programs like
+ // rm/sudo) rather than flipping the whole session to allow every call
+ // to this tool. The rule is session-scoped: it lives in memory on the
+ // PermissionEngine and is never persisted, so it dies with this
+ // Session. deny rules still override — they are checked first in
+ // preflight and are absolute, even under yolo. For sandbox-expand asks
+ // the folder grant above is the durable part; the tool rule is still
+ // useful for same-tool retries.
         const rule = PermissionEngine.suggestRule(tool, effectiveInput);
         deps.permissions.addSessionRule(rule, "allow");
+ // "always-project" also persists the SAME narrowed rule to the project
+ // config so it auto-applies in future sessions. Best-effort: a write
+ // failure must not fail the tool call — the session grant above already
+ // covers the rest of this session.
+        if (decision === "always-project") {
+          try {
+            const { persistRule } = await import("./permissions.js");
+            await persistRule(deps.cwd, rule, "allow", "repo");
+          } catch {
+ /* persistence is opt-in sugar; never block the tool on it */
+          }
+        }
         decision = "allow";
       }
       await emit({ type: "status", status: "running" });

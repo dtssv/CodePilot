@@ -6,7 +6,7 @@
  * without args — users never have to type the parameter by hand. Passing
  * an explicit argument still works as a shortcut.
  */
-import type { AgentMode, PermissionMode, SlashCommand } from "@codepilot/core";
+import type { AgentMode, PermissionMode, PermissionPresetName, SlashCommand } from "@codepilot/core";
 import { resolveSlashCommand } from "@codepilot/core";
 import type { SessionController } from "./controller.js";
 import { THEME_NAMES, type ThemeName } from "./themes.js";
@@ -20,6 +20,8 @@ export type CommandResult =
   | { kind: "list-models" }
   | { kind: "pick-provider" }
   | { kind: "pick-mode" }
+  | { kind: "pick-preset" }
+  | { kind: "set-preset"; name: PermissionPresetName }
   | { kind: "pick-agent" }
   | { kind: "pick-theme" }
   | { kind: "set-theme"; name: string }
@@ -78,6 +80,7 @@ export const COMMANDS: readonly CommandInfo[] = [
   { name: "model", description: "Pick a model (↑↓ + Enter)", args: "[provider/model]" },
   { name: "provider", description: "Pick a provider preset (↑↓ + Enter)", args: "[id]" },
   { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo]" },
+  { name: "preset", description: "Pick a permission preset (mode + sandbox)", args: "[safe|standard|full-access]" },
   { name: "agent", description: "Pick collaboration mode (↑↓ + Enter)", args: "[chat|plan|agent]" },
   { name: "theme", description: "Pick a colour palette (↑↓ + Enter)", args: "[default|nord|solarized|high-contrast]" },
   { name: "plan", description: "Show the current plan" },
@@ -105,6 +108,7 @@ export const COMMANDS: readonly CommandInfo[] = [
 
 const AGENT_MODES: readonly AgentMode[] = ["chat", "plan", "agent"];
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo"];
+const PRESET_NAMES: readonly PermissionPresetName[] = ["safe", "standard", "full-access"];
 
 export const HELP_TEXT = `Available commands:
   /help                              Show this help
@@ -177,6 +181,13 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
         return { kind: "pick-mode" };
       }
       return { kind: "set-mode", mode: rest as PermissionMode };
+    }
+    case "preset": {
+      if (rest === "") return { kind: "pick-preset" };
+      if (!PRESET_NAMES.includes(rest as PermissionPresetName)) {
+        return { kind: "pick-preset" };
+      }
+      return { kind: "set-preset", name: rest as PermissionPresetName };
     }
     case "agent": {
       if (rest === "") return { kind: "pick-agent" };
@@ -261,6 +272,7 @@ export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   "model",
   "provider",
   "mode",
+  "preset",
   "agent",
   "theme",
   "plan",

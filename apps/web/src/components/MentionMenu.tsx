@@ -126,6 +126,7 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
   const [rows, setRows] = useState<Row[]>([]);
   const [active, setActive] = useState(0);
   const reqId = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!trigger) {
@@ -181,6 +182,13 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
     void run();
   }, [trigger, provider]);
 
+  // Keep the highlighted row scrolled into view as the selection moves past the
+  // visible window (↑/↓ navigation on a list taller than max-h-64).
+  useEffect(() => {
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${active}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [active]);
+
   // Expose keyboard handling to the parent textarea via a window-less ref
   // pattern: parent calls handleKey(e) in its onKeyDown before its own logic.
   (MentionMenu as unknown as { _activeHandler?: (e: KeyboardEvent | React.KeyboardEvent) => boolean })._activeHandler =
@@ -200,6 +208,7 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
 
   return (
     <div
+      ref={listRef}
       className="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-64 overflow-auto rounded-lg border border-[var(--color-edge)] bg-[var(--color-surface)] py-1 shadow-lg"
       role="listbox"
     >
@@ -208,6 +217,7 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
           key={r.insert}
           type="button"
           role="option"
+          data-index={i}
           aria-selected={i === active}
           onMouseDown={(e) => { e.preventDefault(); onPick({ insert: r.insert, keepOpen: r.keepOpen }); }}
           onMouseEnter={() => setActive(i)}

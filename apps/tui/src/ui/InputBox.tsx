@@ -26,7 +26,7 @@ import { color as palette } from "./theme.js";
 import { isEscape } from "./keys.js";
 import type { CommandInfo } from "./commands.js";
 import { listFilesForCompletion } from "./fileComplete.js";
-import { CommandPalette, paletteState } from "./CommandPalette.js";
+import { CommandPalette, paletteState, paletteWindow } from "./CommandPalette.js";
 import { HistorySearch } from "./HistorySearch.js";
 import { tabCompleteCommand } from "./palette.js";
 import {
@@ -128,7 +128,8 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
-  const fileCompletion = menu === null ? deriveFileCompletion(value, cwd) : null;
+  const fileCompletion =
+    menu === null || menu.kind === "files" ? deriveFileCompletion(value, cwd) : null;
 
  // -------------------------------------------------------------------------
  // Menu helpers
@@ -398,21 +399,27 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
     { isActive: true },
   );
 
- // Keep the @file menu in sync with the input.
+  // Keep the @file menu in sync with the input. Opens when an @token appears,
+  // refreshes candidates when the token changes, closes when the token is gone.
+  // Guarded on token/menu.kind (not the candidates array) so it only fires on a
+  // real change: deriveFileCompletion returns a fresh candidates array every
+  // render, so depending on it would re-open the menu each render.
   React.useEffect(() => {
-    if (fileCompletion && menu === null) {
-      setMenu({
-        kind: "files",
-        start: fileCompletion.start,
-        token: fileCompletion.token,
-        candidates: fileCompletion.candidates,
-        selected: 0,
-      });
-    } else if (!fileCompletion && menu?.kind === "files") {
+    if (fileCompletion) {
+      if (menu === null || (menu.kind === "files" && menu.token !== fileCompletion.token)) {
+        setMenu({
+          kind: "files",
+          start: fileCompletion.start,
+          token: fileCompletion.token,
+          candidates: fileCompletion.candidates,
+          selected: 0,
+        });
+      }
+    } else if (menu?.kind === "files") {
       setMenu(null);
     }
- // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileCompletion?.token, fileCompletion?.candidates.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileCompletion?.token, menu?.kind]);
 
  // -------------------------------------------------------------------------
  // Render
@@ -436,19 +443,34 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
           selected={menu.selected}
         />
       ) : null}
-      {menu?.kind === "files" ? (
-        <Box flexDirection="column" marginBottom={0} paddingLeft={2}>
-          <Text dimColor>files — ↑↓ select · ↵/⇥ accept · esc dismiss</Text>
-          {menu.candidates.slice(0, 8).map((c, i) => (
-            <Text key={c} color={i === menu.selected ? palette.accent : undefined} bold={i === menu.selected}>
-              {i === menu.selected ? "▸ " : "  "}@{c}
-            </Text>
-          ))}
-          {menu.candidates.length > 8 ? (
-            <Text dimColor>  …{menu.candidates.length - 8} more</Text>
-          ) : null}
-        </Box>
-      ) : null}
+      {menu?.kind === "files"
+        ? (() => {
+            const total = menu.candidates.length;
+            const { start, end } = paletteWindow(total, menu.selected, 8);
+            const windowed = menu.candidates.slice(start, end);
+            const hiddenAbove = start;
+            const hiddenBelow = total - end;
+            return (
+              <Box flexDirection="column" marginBottom={0} paddingLeft={2}>
+                <Text dimColor>files — ↑↓ select · ↵/⇥ accept · esc dismiss</Text>
+                {hiddenAbove > 0 ? <Text dimColor>  ↑ {hiddenAbove} more</Text> : null}
+                {windowed.map((c, i) => {
+                  const idx = start + i;
+                  return (
+                    <Text
+                      key={c}
+                      color={idx === menu.selected ? palette.accent : undefined}
+                      bold={idx === menu.selected}
+                    >
+                      {idx === menu.selected ? "▸ " : "  "}@{c}
+                    </Text>
+                  );
+                })}
+                {hiddenBelow > 0 ? <Text dimColor>  ↓ {hiddenBelow} more</Text> : null}
+              </Box>
+            );
+          })()
+        : null}
 
       <Box
         flexDirection="column"

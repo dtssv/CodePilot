@@ -1,5 +1,5 @@
 // Execution-reliability guards: read-before-write + staleness (FileObservationStore),
-// CRLF preservation, and citation grounding (citationGuard).
+// CRLF preservation.
 
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
@@ -10,15 +10,7 @@ import { detectLineEnding, editFileTool, applyEdit } from "../src/tools/edit_fil
 import { writeFileTool } from "../src/tools/write_file.js";
 import { readFileTool } from "../src/tools/read_file.js";
 import { notebookEditTool } from "../src/tools/notebook_edit.js";
-import {
-  checkCitations,
-  extractCitations,
-  observedPaths,
-  buildCitationNotice,
-} from "../src/citationGuard.js";
-import { isWaitingForUser } from "../src/agent.js";
 import type { ToolContext } from "../src/tools/types.js";
-import type { Event } from "../src/types.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "cp-exec-rel-"));
@@ -248,93 +240,5 @@ describe("CRLF preservation (G3)", () => {
   it("applyEdit itself normalises to \\n (restore happens in the tool)", () => {
     const r = applyEdit("a\r\nb\r\n", { search: "b", replace: "B" });
     expect(r.ok).toBe(true);
-  });
-});
-
-describe("citationGuard (H5)", () => {
-  const readEvt = (path: string): Event => ({
-    type: "tool_call",
-    id: "t1",
-    name: "read_file",
-    input: { path },
-  });
-
-  it("extracts path:line citations", () => {
-    const cites = extractCitations("See src/agent.ts:42 and ./pkg/b.rs:9-20.");
-    expect(cites.map((c) => c.path)).toContain("src/agent.ts");
-    expect(cites.map((c) => c.path)).toContain("pkg/b.rs");
-  });
-
-  it("flags a citation to a file never observed", () => {
-    const events = [readEvt("src/agent.ts")];
-    const check = checkCitations("src/agent.ts:1 and src/ghost.ts:99 are relevant.", events);
-    expect(check.unverified.map((c) => c.path)).toEqual(["src/ghost.ts"]);
-  });
-
-  it("clears a citation whose file was read (suffix match)", () => {
-    const events = [readEvt("/abs/root/src/agent.ts")];
-    const check = checkCitations("src/agent.ts:10 matters.", events);
-    expect(check.unverified).toHaveLength(0);
-  });
-
-  it("observedPaths collects apply_patch targets", () => {
-    const ev: Event = {
-      type: "tool_call",
-      id: "t2",
-      name: "apply_patch",
-      input: { patch: "*** Begin Patch\n*** Update File: src/x.ts\n*** End Patch" },
-    };
-    expect(observedPaths([ev]).has("src/x.ts")).toBe(true);
-  });
-
-  it("clears a citation under a grep/glob search root", () => {
-    // grep/glob record the search path/pattern; a citation nested under that
-    // root counts as plausibly seen (isObserved directory-root branch).
-    const globEvt: Event = { type: "tool_call", id: "g1", name: "glob", input: { pattern: "src/**/*.ts" } };
-    const grepEvt: Event = { type: "tool_call", id: "g2", name: "grep", input: { path: "packages/core" } };
-    const check = checkCitations("src/deep/nested/file.ts:12 and packages/core/agent.ts:40.", [globEvt, grepEvt]);
-    expect(check.unverified).toHaveLength(0);
-  });
-
-  it("clears a citation by shared basename (relative vs absolute)", () => {
-    // Model wrote a bare basename for a file we opened by absolute path.
-    const events = [readEvt("/abs/root/pkg/widget.ts")];
-    const check = checkCitations("See widget.ts:5 for the bug.", events);
-    expect(check.unverified).toHaveLength(0);
-  });
-
-  it("buildCitationNotice returns null when nothing unverified", () => {
-    expect(buildCitationNotice({ unverified: [] })).toBeNull();
-  });
-
-  it("builds a notice listing unverified citations", () => {
-    const notice = buildCitationNotice({
-      unverified: [{ raw: "src/ghost.ts:99", path: "src/ghost.ts" }],
-    });
-    expect(notice).toMatch(/src\/ghost\.ts:99/);
-    expect(notice).toMatch(/NOT backed by/);
-  });
-
-  // Loop gating (agent.ts:976-990): the citation nudge fires only when the
-  // model is NOT asking the user a question — a question is not a factual
-  // claim, so an unverified path in it must not trigger a retract-or-verify
-  // nudge. This models the exact `!isWaitingForUser(trimmed)` guard.
-  it("does not nudge when the final text is a question to the user", () => {
-    const events = [readEvt("src/agent.ts")];
-    const askingText = "Which file should I patch, src/ghost.ts:99 or the other one?";
-    const notice = buildCitationNotice(checkCitations(askingText, events));
-    // A notice exists (the citation is unverified)…
-    expect(notice).not.toBeNull();
-    // …but the loop would suppress it because the turn is a question.
-    const wouldNudge = notice !== null && !isWaitingForUser(askingText);
-    expect(wouldNudge).toBe(false);
-  });
-
-  it("nudges on a factual claim with an unverified citation (not a question)", () => {
-    const events = [readEvt("src/agent.ts")];
-    const claimText = "The bug is in src/ghost.ts:99.";
-    const notice = buildCitationNotice(checkCitations(claimText, events));
-    const wouldNudge = notice !== null && !isWaitingForUser(claimText);
-    expect(wouldNudge).toBe(true);
   });
 });

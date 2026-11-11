@@ -24,7 +24,7 @@ import type {
   ImageAttachment,
 } from "./types.js";
 import { formatUploadNote } from "./promptFiles.js";
-import { filterToolsByMode } from "./tools/modes.js";
+import { filterToolsByMode, filterToolsByModel, type ToolExposureRule } from "./tools/modes.js";
 import { estimateEventTokens, foldToolResults, trimEventsToBudget } from "./compaction.js";
 import { estimateTokens } from "./tokens.js";
 
@@ -33,17 +33,23 @@ import { estimateTokens } from "./tokens.js";
 // ---------------------------------------------------------------------------
 
 /** Build the provider-facing tool definitions for a turn, filtered by the
- * active collaboration mode. When `lazyMcp` is true, individual MCP tools are
- * dropped from the list (they're reached via the `mcp` meta-tool instead),
- * keeping the per-turn tool schema small when a server exposes many tools. */
+ * active collaboration mode and (optionally) a per-model exposure downgrade.
+ * When `lazyMcp` is true, individual MCP tools are dropped from the list
+ * (they're reached via the `mcp` meta-tool instead), keeping the per-turn tool
+ * schema small when a server exposes many tools. When `model` + `toolExposure`
+ * are given, tools the configured rules downgrade for that model are removed
+ * last (after mode + lazy-MCP filtering). */
 export function buildProviderToolDefs(
   tools: ToolRegistry,
   mode: AgentMode,
-  opts: { lazyMcp?: boolean } = {},
+  opts: { lazyMcp?: boolean; model?: string; toolExposure?: ToolExposureRule[] } = {},
 ): ProviderToolDef[] {
   let visible = filterToolsByMode(tools.all(), mode);
   if (opts.lazyMcp) {
     visible = visible.filter((t) => t.source !== "mcp");
+  }
+  if (opts.model && opts.toolExposure && opts.toolExposure.length > 0) {
+    visible = filterToolsByModel(visible, opts.model, opts.toolExposure);
   }
   return visible.map((t) => ({
     name: t.name,
@@ -369,8 +375,8 @@ export async function* streamOnce(
   tools: ProviderToolDef[],
   messageId: string,
   extra: {
- /** Fresh per-turn context (live plan + progress); replaces the
- * prompt-start `<plan>` block of the dynamic suffix. */
+ /** Fresh per-turn context (live plan when one exists + progress). Replaces
+ * a prompt-start `<plan>` block when present; otherwise appended. */
     liveContext?: string;
     onRetry?: StreamChatOptions["onRetry"];
  /** Tool-call policy for this turn (see StreamChatOptions.toolChoice). */
@@ -385,17 +391,19 @@ export async function* streamOnce(
     ? sys.staticPrefix +
       (sys.stableContext ? `${sys.staticPrefix.endsWith("\n") ? "" : "\n"}\n${sys.stableContext}` : "")
     : undefined;
-  // Per-turn tail = only the volatile context (now / git working-tree / plan).
+  // Per-turn tail = volatile context (now + plan when one exists).
   // Fall back to `dynamicSuffix` for older callers that don't set volatileSuffix.
   let perTurn = sys?.volatileSuffix ?? sys?.dynamicSuffix;
   if (sys && extra.liveContext) {
-    const live = extra.liveContext;
-    perTurn = perTurn?.includes("<plan>")
-      ? perTurn.replace(/<plan>[\s\S]*?<\/plan>/, () => live)
-      : `${perTurn ? `${perTurn}\n\n` : ""}${live}`;
+    const live = extra.liveContext.trim();
+    if (live.length > 0) {
+      perTurn = perTurn?.includes("<plan>")
+        ? perTurn.replace(/<plan>[\s\S]*?<\/plan>/, () => live)
+        : `${perTurn ? `${perTurn}\n\n` : ""}${live}`;
+    }
   }
   // Runtime context is NOT a user message: it's harness-injected per-turn state
-  // (now / git working-tree / plan). Emit it as its own separate `system`-role
+  // (now / live plan / progress). Emit it as its own separate `system`-role
   // message placed JUST BEFORE the current turn (the last user / tool-result
   // message), so background is stated first and the user's actual request stays
   // last — the strongest-attention, closest-to-generation position, and the

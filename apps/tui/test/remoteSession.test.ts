@@ -64,6 +64,30 @@ describe("RemoteSession auto-reconnect", () => {
     await remote.dispose();
   });
 
+  it("seeds the model from the session endpoint on connect (not 'no model yet')", async () => {
+    // First client: fresh session, pin a model on it.
+    const a = await RemoteSession.connect({
+      url: server.url,
+      cwd: process.cwd(),
+      ...noopBridges,
+    });
+    await a.setModel("test-model-xyz");
+    expect(a.getModel()).toBe("test-model-xyz");
+
+    // Second client ATTACHES to the same session id. It must seed its model
+    // from the session's resolved endpoint, not show an empty model.
+    const b = await RemoteSession.connect({
+      url: server.url,
+      cwd: process.cwd(),
+      sessionId: a.id,
+      ...noopBridges,
+    });
+    expect(b.getModel()).toBe("test-model-xyz");
+
+    await a.dispose();
+    await b.dispose();
+  });
+
   it("does not reconnect after an intentional dispose", async () => {
     const states: string[] = [];
     const remote = await RemoteSession.connect({
@@ -78,5 +102,43 @@ describe("RemoteSession auto-reconnect", () => {
     remote.__dropSocketForTest();
     await new Promise((r) => setTimeout(r, 100));
     expect(states.length).toBe(before);
+  });
+
+  it("gives up after a bounded number of attempts when the server stays down", async () => {
+    const banners: string[] = [];
+    const remote = await RemoteSession.connect({
+      url: server.url,
+      cwd: process.cwd(),
+      ...noopBridges,
+      reconnectMaxAttempts: 3,
+      reconnectBackoffMs: 5,
+    });
+    // Collect the transcript error banners (the "Still trying…" / give-up boxes).
+    remote.subscribe((e) => {
+      if ((e as { type?: string }).type === "error") {
+        banners.push((e as { message: string }).message);
+      }
+    });
+
+    // Take the server down so every reconnect attempt fails, then drop the
+    // socket to trigger the auto-reconnect loop.
+    await server.close();
+    remote.__dropSocketForTest();
+
+    // The loop exhausts its attempts and goes quiet.
+    await waitFor(() => banners.some((m) => m.includes("gave up auto-reconnecting")), 5000);
+
+    // It must NOT spam one "Still trying…" box per attempt — at most one.
+    const stillTrying = banners.filter((m) => m.includes("Still trying to reach"));
+    expect(stillTrying.length).toBeLessThanOrEqual(1);
+    const gaveUp = banners.filter((m) => m.includes("gave up auto-reconnecting"));
+    expect(gaveUp.length).toBe(1);
+
+    // After giving up it stays quiet (no further banners accumulate).
+    const count = banners.length;
+    await new Promise((r) => setTimeout(r, 120));
+    expect(banners.length).toBe(count);
+
+    await remote.dispose();
   });
 });

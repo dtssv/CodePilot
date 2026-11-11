@@ -114,6 +114,61 @@ export function filterToolsByModeFromRegistry(
   return filterToolsByMode(registry.all(), mode);
 }
 
+/** One per-model exposure-downgrade rule (see `CodepilotConfig.toolExposure`). */
+export interface ToolExposureRule {
+  models: string[];
+  drop: string[];
+}
+
+/** Anchored glob: `*` → any run, `?` → one char; everything else literal and
+ * case-insensitive (model ids vary in case across gateways). The pattern is
+ * tested against both the full id and the bare name after the last `/`, so a
+ * rule written as `glm*` matches `jdcloud/glm-5.2` without the user having to
+ * know the provider prefix. */
+function modelGlobMatch(pattern: string, modelId: string): boolean {
+  const re =
+    "^" +
+    pattern
+      .split(/(\*|\?)/)
+      .map((part) =>
+        part === "*" ? ".*" : part === "?" ? "." : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      )
+      .join("") +
+    "$";
+  let rx: RegExp;
+  try {
+    rx = new RegExp(re, "i");
+  } catch {
+    return false;
+  }
+  if (rx.test(modelId)) return true;
+  const slash = modelId.lastIndexOf("/");
+  return slash >= 0 && rx.test(modelId.slice(slash + 1));
+}
+
+/**
+ * Apply per-model exposure downgrade on top of the mode-filtered list. For a
+ * model whose id matches any rule's `models` glob, every tool named in that
+ * rule's `drop` is removed. Pure and total: unknown tool names in `drop` are
+ * simply absent; an empty/undefined ruleset returns the input unchanged. This
+ * can only REMOVE tools, never add — it runs after mode filtering.
+ */
+export function filterToolsByModel(
+  tools: readonly ToolDef[],
+  modelId: string,
+  rules: readonly ToolExposureRule[] | undefined,
+): ToolDef[] {
+  if (!rules || rules.length === 0) return tools.slice();
+  const dropped = new Set<string>();
+  for (const rule of rules) {
+    if (rule.models.some((m) => modelGlobMatch(m, modelId))) {
+      for (const name of rule.drop) dropped.add(name);
+    }
+  }
+  if (dropped.size === 0) return tools.slice();
+  return tools.filter((t) => !dropped.has(t.name));
+}
+
 /** Names of tools that would be retained for the given mode. */
 export function filterToolNames(
   tools: readonly ToolDef[],

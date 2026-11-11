@@ -45,6 +45,22 @@ describe("runCommandWithCustom", () => {
     if (r.kind === "set-provider") expect(r.providerId).toBe("deepseek");
   });
 
+  it("/preset with a known name resolves to set-preset", () => {
+    const r = runCommandWithCustom("/preset safe", ctx, []);
+    expect(r.kind).toBe("set-preset");
+    if (r.kind === "set-preset") expect(r.name).toBe("safe");
+  });
+
+  it("bare /preset opens the picker", () => {
+    const r = runCommandWithCustom("/preset", ctx, []);
+    expect(r.kind).toBe("pick-preset");
+  });
+
+  it("/preset with an unknown name falls back to the picker", () => {
+    const r = runCommandWithCustom("/preset bogus", ctx, []);
+    expect(r.kind).toBe("pick-preset");
+  });
+
   it("resolves a custom command with args", () => {
     const custom = [makeCmd()];
     const r = runCommandWithCustom("/review 1234", ctx, custom);

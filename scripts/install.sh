@@ -127,6 +127,18 @@ install_from_dist() {
   mkdir -p "$BIN_DIR"
   cp "$cli_src" "$BIN_DIR/codepilot${EXE}"
   chmod +x "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
+  resign_macos
+}
+
+# A copied binary loses its embedded ad-hoc (linker-linked) signature's path
+# binding, so macOS taskgated SIGKILLs it (exit 137) at the new location.
+# Re-sign ad-hoc in place at the install path. No-op off macOS / without
+# codesign.
+resign_macos() {
+  [[ "$OS_FAMILY" == "mac" ]] || return 0
+  command -v codesign >/dev/null 2>&1 || return 0
+  codesign --remove-signature "$BIN_DIR/codepilot${EXE}" >/dev/null 2>&1 || true
+  codesign -s - --force "$BIN_DIR/codepilot${EXE}" >/dev/null 2>&1 || true
 }
 
 # Download the unified binary from a GitHub release.
@@ -145,6 +157,7 @@ install_from_release() {
   mkdir -p "$BIN_DIR"
   cp "$tmp/codepilot${EXE}" "$BIN_DIR/codepilot${EXE}"
   chmod +x "$BIN_DIR/codepilot${EXE}" 2>/dev/null || true
+  resign_macos
 }
 
 verify_install() {

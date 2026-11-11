@@ -1111,6 +1111,16 @@ export function PermissionCard({
             <button type="button" onClick={() => onDecide("deny")} className="cp-btn-danger">
               {t("Deny")}
             </button>
+            {!req.sandboxExpand ? (
+              <button
+                type="button"
+                onClick={() => onDecide("always-project")}
+                title={t("Save this rule to the project config so it applies in future sessions")}
+                className="cp-btn-ghost"
+              >
+                {t("Always (project)")}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => onDecide("always")}

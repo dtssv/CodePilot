@@ -17,8 +17,10 @@ import {
   type Event,
   type PermissionResolution,
   type PermissionMode,
+  type PermissionPresetName,
   type Session,
   type SlashCommand,
+  PERMISSION_PRESETS,
   killAllJobs,
   discoverSlashCommands,
   describeMcp,
@@ -49,7 +51,7 @@ import { ModelPicker } from "./ModelPicker.js";
 import { SelectMenu, TextPrompt, type SelectOption } from "./SelectMenu.js";
 import { StatusBar } from "./StatusBar.js";
 import { Spinner } from "./Spinner.js";
-import { initialState, reducer, type TuiState } from "./state.js";
+import { initialState, nextAgentMode, reducer, type TuiState } from "./state.js";
 import { CATEGORY_ACTIVE, brand, color, glyph, shortPath, setTheme, activeTheme } from "./theme.js";
 import { THEME_LABELS, THEME_NAMES, loadThemePref, saveThemePref, type ThemeName } from "./themes.js";
 import { groupRows, planProgress, runningTool } from "./transcript.js";
@@ -60,6 +62,12 @@ import {
   BUILTIN_COMMAND_NAMES,
 } from "./commands.js";
 import type { GoalBridge, PermissionBridge, QuestionBridge, SessionController } from "./controller.js";
+
+/** Picker rows for `/preset`, built from the shared preset table so the TUI
+ * never drifts from the core definitions. */
+const PRESET_OPTIONS: SelectOption[] = (
+  Object.keys(PERMISSION_PRESETS) as PermissionPresetName[]
+).map((name) => ({ value: name, label: name, description: PERMISSION_PRESETS[name].description }));
 
 // Apply the saved palette before the first render so a chosen theme is active
 // from the first frame (mutates the shared `color` palette in place).
@@ -76,6 +84,16 @@ export interface AppProps {
   permissionMode: PermissionMode;
   initialAgentMode: AgentMode;
   initialPrompt?: string | undefined;
+  connection?: ConnectionInfo | undefined;
+}
+
+/** How the UI reached its engine, surfaced quietly in the welcome header. */
+export interface ConnectionInfo {
+  /** "shared" — this UI started/joined the shared daemon's new session;
+   *  "following" — it is tailing an existing shared session;
+   *  "local" — a standalone in-process engine drives it. */
+  mode: "shared" | "following" | "local";
+  sessionId?: string;
 }
 
 /**
@@ -106,6 +124,7 @@ export function App(props: AppProps): React.ReactElement {
     permissionMode,
     initialAgentMode,
     initialPrompt,
+    connection,
   } = props;
 
  // Live session can be swapped by /resume without restarting the TUI.
@@ -449,6 +468,30 @@ export function App(props: AppProps): React.ReactElement {
     dispatch({ type: "set-notice", text: `Permission mode: ${mode}` });
   }, []);
 
+  // Apply a named preset: hot-switch BOTH the permission mode and the sandbox
+  // mode on the live session via Session.setPreset, then sync the UI's local
+  // permission-mode state so the status bar and per-prompt posture match.
+  const applyPreset = React.useCallback(
+    (name: PermissionPresetName) => {
+      try {
+        const out = (session as unknown as { setPreset?: (n: PermissionPresetName) => { permissionMode: PermissionMode; sandbox: { mode: string } } }).setPreset?.(name);
+        if (out) {
+          dispatch({ type: "set-mode", mode: out.permissionMode });
+          dispatch({
+            type: "set-notice",
+            text: `Preset ${name}: ${out.permissionMode} · sandbox ${out.sandbox.mode}`,
+          });
+          return;
+        }
+      } catch (err) {
+        dispatch({ type: "set-notice", text: `Preset failed: ${err instanceof Error ? err.message : String(err)}` });
+        return;
+      }
+      dispatch({ type: "set-notice", text: `Preset ${name} is not available on this session` });
+    },
+    [session],
+  );
+
   const applyTheme = React.useCallback((name: ThemeName) => {
     // Mutates the shared `color` palette in place; the set-notice dispatch
     // below forces a reducer state change so every component re-renders and
@@ -776,6 +819,20 @@ export function App(props: AppProps): React.ReactElement {
           }
           case "set-mode":
             applyPermissionMode(result.mode);
+            return;
+          case "pick-preset": {
+            setSelectOverlay({
+              title: "/preset  (permission + sandbox)",
+              options: PRESET_OPTIONS,
+              onPick: (name) => {
+                setSelectOverlay(null);
+                applyPreset(name as PermissionPresetName);
+              },
+            });
+            return;
+          }
+          case "set-preset":
+            applyPreset(result.name);
             return;
           case "pick-agent": {
             setSelectOverlay({
@@ -1279,6 +1336,7 @@ export function App(props: AppProps): React.ReactElement {
       customCommands,
       applyProvider,
       applyPermissionMode,
+      applyPreset,
       applyAgentMode,
       runGoal,
       openSessionPicker,
@@ -1359,6 +1417,12 @@ export function App(props: AppProps): React.ReactElement {
   useInput(
     (_input, key) => {
       const pageSize = 10; // rows per PgUp/PgDn; cheap and predictable
+      // Shift+Tab cycles the collaboration mode (Agent → Plan → Ask → …), the
+      // same control the other clients expose as a mode switch.
+      if (key.tab && key.shift) {
+        void applyAgentMode(nextAgentMode(state.agentMode));
+        return;
+      }
       if (key.pageUp) {
         setScroll((s) => ({
           offset: Math.min(s.offset + pageSize, Math.max(0, state.rows.length - 1)),
@@ -1396,7 +1460,18 @@ export function App(props: AppProps): React.ReactElement {
 
   return (
     <Box flexDirection="column" width="100%" height="100%">
-      <Header cwd={state.cwd} state={state} />
+      {state.rows.length === 0 &&
+      pendingPerm === undefined &&
+      pendingQuestion === undefined &&
+      !showSetup &&
+      !showConnect &&
+      !showModelPicker &&
+      selectOverlay === null &&
+      textOverlay === null ? (
+        <Welcome cwd={state.cwd} state={state} connection={connection} />
+      ) : (
+        <Header cwd={state.cwd} state={state} />
+      )}
 
       {/* Event log */}
       <Box flexDirection="column" flexGrow={1} overflowY="hidden" paddingX={1}>
@@ -1568,6 +1643,71 @@ export function App(props: AppProps): React.ReactElement {
           <Text color={color.faint}> {glyph.dot} Ctrl+C to stop</Text>
         </Box>
       ) : null}
+    </Box>
+  );
+}
+
+/**
+ * Welcome header — shown on the empty first screen, before any messages.
+ * Brand line, active model, working directory, a quiet connection note, and a
+ * couple of starter tips. Replaced by the compact {@link Header} as soon as the
+ * event log has rows.
+ */
+function Welcome({
+  cwd,
+  state,
+  connection,
+}: {
+  cwd: string;
+  state: TuiState;
+  connection?: ConnectionInfo;
+}): React.ReactElement {
+  const version = "1.0.0";
+  const modelLabel = state.model ?? "no model yet";
+  const providerLabel = state.providerId ? `${state.providerId} · ` : "";
+  const modeLabel =
+    state.agentMode === "plan" ? "Plan" : state.agentMode === "chat" ? "Ask" : "Agent";
+  const connectionNote =
+    connection?.mode === "following"
+      ? "following a shared session"
+      : connection?.mode === "shared"
+        ? "on the shared server"
+        : connection?.mode === "local"
+          ? "local engine"
+          : undefined;
+  return (
+    <Box flexDirection="column" paddingX={1} marginY={1}>
+      <Box>
+        <Text bold>
+          <Text color={brand[0]}>{glyph.logo} </Text>
+          <Text color={brand[0]}>Code</Text>
+          <Text color={brand[2]}>Pilot</Text>
+        </Text>
+        <Text color={color.faint}> {glyph.dot} v{version}</Text>
+        {connectionNote ? (
+          <Text color={color.faint}>
+            {"  "}
+            {glyph.running} {connectionNote}
+          </Text>
+        ) : null}
+      </Box>
+      <Box>
+        <Text color={color.faint}>
+          {providerLabel}
+          {modelLabel}
+          {"  "}
+          {glyph.dot} {modeLabel} mode
+        </Text>
+      </Box>
+      <Box>
+        <Text color={color.faint}>{shortPath(cwd)}</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={color.faint}>
+          {glyph.arrow} ⇧⇥ switch mode {glyph.dot} /help commands {glyph.dot} @ add files{" "}
+          {glyph.dot} Ctrl+K palette
+        </Text>
+      </Box>
     </Box>
   );
 }

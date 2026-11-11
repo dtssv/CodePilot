@@ -62,3 +62,49 @@ describe("Session — setSandboxMode (live sandbox switch)", () => {
     rmSync(extra, { recursive: true, force: true });
   });
 });
+
+describe("Session — permission presets (setPreset / setPermissionMode)", () => {
+  let workDir: string;
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tempHome, "preset-"));
+  });
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it("hot-applies a permission mode to the live session", async () => {
+    const s = await createSession({ cwd: workDir });
+    expect(s.setPermissionMode("yolo")).toBe("yolo");
+    expect(s.getPermissionMode()).toBe("yolo");
+    await s.dispose();
+  });
+
+  it("'safe' preset = ask + read-only sandbox", async () => {
+    const s = await createSession({ cwd: workDir });
+    const out = s.setPreset("safe");
+    expect(out.preset).toBe("safe");
+    expect(out.permissionMode).toBe("ask");
+    expect(s.getPermissionMode()).toBe("ask");
+    expect(s.getSandbox().mode).toBe("read-only");
+    await s.dispose();
+  });
+
+  it("'full-access' preset = yolo + sandbox off", async () => {
+    const s = await createSession({ cwd: workDir });
+    const out = s.setPreset("full-access");
+    expect(out.permissionMode).toBe("yolo");
+    expect(s.getPermissionMode()).toBe("yolo");
+    expect(s.getSandbox().mode).toBe("off");
+    await s.dispose();
+  });
+
+  it("'standard' preset = auto-edit + workspace-write, and switching back works", async () => {
+    const s = await createSession({ cwd: workDir });
+    s.setPreset("full-access");
+    const out = s.setPreset("standard");
+    expect(out.permissionMode).toBe("auto-edit");
+    expect(s.getPermissionMode()).toBe("auto-edit");
+    expect(s.getSandbox().mode).toBe("workspace-write");
+    await s.dispose();
+  });
+});

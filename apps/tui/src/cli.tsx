@@ -298,6 +298,10 @@ async function main(): Promise<void> {
  // in-process engine instead. Skipped for --mock and --print (print wants a
  // self-contained one-shot run).
   let attached = false;
+  // How the UI reached its engine, for the welcome header. Left undefined for
+  // mock/print; set to "local" when the shared daemon was unreachable or
+  // `--local` forced a standalone engine.
+  let connection: import("./ui/App.js").ConnectionInfo | undefined;
   let currentRemote: import("./remoteSession.js").RemoteSession | null = null;
   if (!args.mock && !args.local && !args.print) {
     try {
@@ -328,22 +332,21 @@ async function main(): Promise<void> {
         agentMode = remote.getAgentMode();
         model = remote.getModel() || model;
         attached = true;
-        const followNote = args.resume
-          ? `following session ${remote.id} (in sync with other clients on it)`
-          : args.attach
-            ? `following the newest session ${remote.id}`
-            : `started a new session ${remote.id} on the shared server (use --resume <id> to follow an existing one)`;
-        process.stderr.write(
-          `[tui] connected to serve at ${info.url} — ${followNote}. Pass --local for a separate in-process engine.\n`,
-        );
+        connection = {
+          mode: args.resume ? "following" : args.attach ? "following" : "shared",
+          sessionId: remote.id,
+        };
       }
-    } catch (err) {
-      process.stderr.write(`[tui] could not reach the shared serve (${(err as Error).message}); starting a local engine.\n`);
+    } catch {
+      // The shared serve was unreachable; fall through to a local in-process
+      // engine. The welcome header reflects the local mode instead.
     }
   }
 
   if (!args.mock && !attached) {
     core = await tryLoadCore();
+    // Not on the shared daemon — a standalone in-process engine drives this UI.
+    if (!args.print) connection = { mode: "local" };
   }
 
   if (attached) {
@@ -546,6 +549,7 @@ async function main(): Promise<void> {
       permissionMode,
       initialAgentMode: agentMode,
       initialPrompt: args.prompt,
+      connection,
     }),
   );
 

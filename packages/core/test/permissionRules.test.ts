@@ -127,16 +127,42 @@ describe("evaluation order: deny > ask > allow > mode", () => {
 });
 
 describe("session rules (always decisions)", () => {
-  it("always-allow on bash grants EVERY bash command for the session", () => {
+  it("always-allow on bash narrows to the command's safe prefix, not the whole tool", () => {
     const e = new PermissionEngine({ permissionMode: "ask" });
     const t = makeTool("bash", "execute");
     expect(e.preflight(t, { command: "npm test -- --watch" })).toBe("ask");
- // "always allow" → bare tool grant, so any later command is allowed.
+ // "always allow" → prefix grant `bash(npm test *)`, covering the family…
+    expect(PermissionEngine.suggestRule(t, { command: "npm test -- --watch" })).toBe("bash(npm test *)");
     e.addSessionRule(PermissionEngine.suggestRule(t, { command: "npm test -- --watch" }));
-    expect(PermissionEngine.suggestRule(t, { command: "npm test -- --watch" })).toBe("bash");
     expect(e.preflight(t, { command: "npm test" })).toMatchObject({ decision: "allow" });
-    expect(e.preflight(t, { command: "ls -la" })).toMatchObject({ decision: "allow" });
-    expect(e.preflight(t, { command: "node build.js" })).toMatchObject({ decision: "allow" });
+    expect(e.preflight(t, { command: "npm test -- --watch" })).toMatchObject({ decision: "allow" });
+ // …but an unrelated command still prompts.
+    expect(e.preflight(t, { command: "npm run build" })).toBe("ask");
+    expect(e.preflight(t, { command: "node build.js" })).toBe("ask");
+  });
+
+  it("narrows a git subcommand to that subcommand, not every git call", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const t = makeTool("bash", "execute");
+    expect(PermissionEngine.suggestRule(t, { command: "git commit -m x" })).toBe("bash(git commit *)");
+    e.addSessionRule(PermissionEngine.suggestRule(t, { command: "git commit -m x" }));
+    expect(e.preflight(t, { command: "git commit -m y" })).toMatchObject({ decision: "allow" });
+ // A different git subcommand is not covered.
+    expect(e.preflight(t, { command: "git push origin main" })).toBe("ask");
+  });
+
+  it("does NOT widen a banned program (rm) — grants only the exact command", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const t = makeTool("bash", "execute");
+    const rule = PermissionEngine.suggestRule(t, { command: "rm -rf build" });
+ // No ` *` widening: the grant is the exact command line.
+    expect(rule).toBe("bash(rm -rf build)");
+    e.addSessionRule(rule);
+ // The exact command is now allowed (user opted into this one)…
+    expect(e.preflight(t, { command: "rm -rf build" })).toMatchObject({ decision: "allow" });
+ // …but a different rm still prompts — the grant never widened to `rm *`.
+    expect(e.preflight(t, { command: "rm -rf /" })).toBe("ask");
+    expect(e.preflight(t, { command: "rm important.txt" })).toBe("ask");
   });
 
   it("a blanket bash grant still prompts for genuinely dangerous commands", () => {
@@ -161,16 +187,18 @@ describe("session rules (always decisions)", () => {
     expect(PermissionEngine.suggestRule(t, { objective: "x" })).toBe("task");
   });
 
-  it("always-allow on a file tool grants the whole tool, not a single path", () => {
+  it("always-allow on a file tool narrows to the target's directory, not the whole tool", () => {
     const e = new PermissionEngine({ permissionMode: "ask" });
     const t = makeTool("write_file", "write");
- // "always allow" should produce a bare tool-name rule...
-    const rule = PermissionEngine.suggestRule(t, { path: "/repo/a.ts", content: "x" });
-    expect(rule).toBe("write_file");
+ // "always allow" scopes to the containing directory.
+    const rule = PermissionEngine.suggestRule(t, { path: "/repo/src/a.ts", content: "x" });
+    expect(rule).toBe("write_file(/repo/src/*)");
     e.addSessionRule(rule);
- // ...so a DIFFERENT file is no longer asked about.
-    expect(e.preflight(t, { path: "/repo/a.ts", content: "x" })).toMatchObject({ decision: "allow" });
-    expect(e.preflight(t, { path: "/elsewhere/b.ts", content: "y" })).toMatchObject({ decision: "allow" });
+ // A sibling file in the same directory is covered…
+    expect(e.preflight(t, { path: "/repo/src/a.ts", content: "x" })).toMatchObject({ decision: "allow" });
+    expect(e.preflight(t, { path: "/repo/src/b.ts", content: "y" })).toMatchObject({ decision: "allow" });
+ // …but a file in a different directory still prompts.
+    expect(e.preflight(t, { path: "/elsewhere/c.ts", content: "z" })).toBe("ask");
   });
 });
 
@@ -261,5 +289,20 @@ describe("persistRule", () => {
       await readFile(join(dir, ".codepilot", "config.json"), "utf-8")
     );
     expect(again.permissions.allow.filter((r: string) => r === "bash(npm test *)")).toHaveLength(1);
+  });
+
+  it("a narrowed rule persisted to config auto-applies in a fresh engine (future session)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cpperm-"));
+    const t = makeTool("bash", "execute");
+ // What an "always (project)" decision persists: the narrowed rule.
+    const rule = PermissionEngine.suggestRule(t, { command: "npm test -- --watch" });
+    expect(rule).toBe("bash(npm test *)");
+    await persistRule(dir, rule, "allow");
+ // A brand-new engine built from that config (i.e. the next session) honours it…
+    const json = JSON.parse(await readFile(join(dir, ".codepilot", "config.json"), "utf-8"));
+    const next = new PermissionEngine({ permissionMode: "ask", permissions: json.permissions });
+    expect(next.preflight(t, { command: "npm test" })).toMatchObject({ decision: "allow" });
+ // …but the grant stayed narrow — an unrelated command still prompts.
+    expect(next.preflight(t, { command: "npm run build" })).toBe("ask");
   });
 });

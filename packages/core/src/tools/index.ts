@@ -51,4 +51,6 @@ export {
   filterToolsByMode,
   filterToolsByModeFromRegistry,
   filterToolNames,
+  filterToolsByModel,
 } from "./modes.js";
+export type { ToolExposureRule } from "./modes.js";

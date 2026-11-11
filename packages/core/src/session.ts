@@ -36,12 +36,15 @@ import type {
   FollowUpItem,
   ImageAttachment,
   PermissionDecision,
+  PermissionMode,
+  PermissionPresetName,
   PermissionResolution,
   PermissionRequest,
   PromptFile,
   SessionOptions,
   SessionSummary,
 } from "./types.js";
+import { PERMISSION_PRESETS } from "./types.js";
 import { ToolRegistry, zodToJsonSchema } from "./tools/types.js";
 import { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 import { ArtifactStore } from "./tools/artifacts.js";
@@ -2107,8 +2110,10 @@ export class Session {
       // A decline-with-feedback object means "don't widen the jail" — treat it
       // as a plain deny here (the feedback has no tool_result to ride on).
       const decision: PermissionDecision = typeof resolution === "string" ? resolution : "deny";
-      if (decision === "allow" || decision === "always") {
-        await this.expandWritablePath(dir, { persist: decision === "always" });
+      if (decision === "allow" || decision === "always" || decision === "always-project") {
+        await this.expandWritablePath(dir, {
+          persist: decision === "always" || decision === "always-project",
+        });
       }
     }
   }
@@ -2198,6 +2203,44 @@ export class Session {
       unavailable: this._sandboxUnavailable,
       backend: detectSandboxBackend(),
     };
+  }
+
+  /**
+   * Hot-apply a new permission mode to the LIVE session. The engine reads its
+   * mode at every preflight, so this takes effect from the next tool call. Also
+   * updates `config.permissionMode` so anything that re-derives from config
+   * (e.g. a system-prompt rebuild) sees the new posture. Returns the applied
+   * mode. This is the permission-side counterpart of {@link setSandboxMode}.
+   */
+  setPermissionMode(mode: PermissionMode): PermissionMode {
+    this.config = { ...this.config, permissionMode: mode };
+    this.permissions.setMode(mode);
+    return mode;
+  }
+
+  /** Active permission mode. */
+  getPermissionMode(): PermissionMode {
+    return this.permissions.getMode();
+  }
+
+  /**
+   * Apply a named permission preset: a single switch that sets BOTH the
+   * permission mode and the sandbox mode. Composes the two existing live
+   * switches ({@link setPermissionMode} + {@link setSandboxMode}) so a preset
+   * can never drift from the real enforcement. Returns the resolved posture.
+   * The host is responsible for persisting the choice if it wants it to
+   * survive the session (the sandbox half already persists via the
+   * `config/setSandbox` RPC path when driven through the server).
+   */
+  setPreset(name: PermissionPresetName): {
+    preset: PermissionPresetName;
+    permissionMode: PermissionMode;
+    sandbox: ReturnType<Session["getSandboxStatus"]>;
+  } {
+    const spec = PERMISSION_PRESETS[name];
+    this.setPermissionMode(spec.permissionMode);
+    const sandbox = this.setSandboxMode(spec.sandbox);
+    return { preset: name, permissionMode: spec.permissionMode, sandbox };
   }
 
  /** Active permission rules (session + config), for UI display. */

@@ -54,7 +54,6 @@ import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO,
 // existing `from "./agent.js"` callers.
 import { isTransientError } from "./transientError.js";
 export { isTransientError } from "./transientError.js";
-import { checkCitations, buildCitationNotice } from "./citationGuard.js";
 import { renderPlanBlock } from "./systemPrompt.js";
 import { estimateTokens, lookupContextWindow } from "./tokens.js";
 
@@ -127,6 +126,12 @@ export interface AgentDeps {
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionResolution>;
  /** Maximum number of assistant turns per prompt. */
   maxTurns?: number;
+ /** Soft convergence ceiling applied even when maxTurns is unlimited. After
+  * this many turns the loop winds down and hard-disables tool calls for the
+  * final turn so the model must answer from what it has rather than looping
+  * forever. Unset → config.convergenceCap → DEFAULT_CONVERGENCE_CAP; 0 =
+  * disabled. */
+  convergenceCap?: number;
  /** True when this run is a sub-agent (driven by the `task` tool). Turn caps
  * soft-land with a synthesis urge instead of a hard error (the user can't
  * "send another message" to continue a sub-agent). */
@@ -302,6 +307,24 @@ export async function runAgent(
   const configuredMax = deps.maxTurns ?? deps.config.maxTurns;
   const maxTurns =
     configuredMax === undefined || configuredMax === 0 ? Number.POSITIVE_INFINITY : configuredMax;
+  // Soft convergence ceiling, applied even when maxTurns is unlimited. The
+  // exact-signature DoomLoopDetector can't catch a weak model that keeps
+  // re-verifying with slightly different bash/git/python each turn — every
+  // command differs textually but the run is going in circles. When this many
+  // turns pass without the user intervening, the loop winds down and disables
+  // tool calls for the final turn (the same backstop the finite maxTurns path
+  // uses). 0 (config or deps) disables it; otherwise it falls back to
+  // DEFAULT_CONVERGENCE_CAP so the default daemon is always protected.
+  const rawConvergenceCap = deps.convergenceCap ?? deps.config.convergenceCap;
+  const convergenceCap =
+    rawConvergenceCap === 0
+      ? Number.POSITIVE_INFINITY
+      : rawConvergenceCap === undefined
+        ? DEFAULT_CONVERGENCE_CAP
+        : rawConvergenceCap;
+  // The turn at which wind-down (synthesis urge + toolChoice:"none") begins.
+  // Whichever ceiling is lower governs; both can be unlimited.
+  const windDownAt = Math.min(maxTurns, convergenceCap);
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const doomLoop = new DoomLoopDetector(deps.dedupCache);
@@ -312,6 +335,12 @@ export async function runAgent(
  // persisted transcript and misleads anyone replaying the session).
   let planProgressSig = "";
   let turnsSincePlanProgress = 0;
+ // Progress-gated stall counter: turns in a row with no DURABLE progress
+ // (write/edit, a task conclusion, memory_write, or a plan advance). Unlike
+ // turnsSincePlanProgress this works with no plan and in any mode — it is the
+ // backstop for a model that keeps reading / re-running variant bash without
+ // changing state. Reset on durable progress; drives the NO_PROGRESS_* ladder.
+  let turnsSinceNoProgress = 0;
  // Plan mode exists to produce a plan, not to execute — so nudge it toward
  // synthesis sooner (3 stalled turns) than a full agent run (4). Chat mode
  // has no plan to stall on.
@@ -427,9 +456,6 @@ export async function runAgent(
   * yielded with incomplete-intent prose (not a question to the user). */
   let planSoftResumes = 0;
 
-  // Bounded nudges when the final answer cites file:line paths never observed
-  // by a tool this session (possible fabrication).
-  let citationResumes = 0;
   let hitMaxTurns = false;
   /** Sub-agents get one extra synthesis turn after the configured cap so a
    * budget hit becomes "finish writing your conclusion" instead of an error. */
@@ -439,8 +465,16 @@ export async function runAgent(
     if (deps.signal?.aborted) {
       break;
     }
-    if (turn >= maxTurns) {
-      if (deps.isSubagent === true && !subagentSynthesisBonus && Number.isFinite(maxTurns)) {
+    // Absolute ceiling. `maxTurns` is the configured hard cap; `windDownAt`
+    // adds the convergence backstop a few turns of slack above the wind-down
+    // point so that even a provider ignoring `toolChoice:"none"` cannot loop
+    // forever. Whichever fires first stops the run.
+    const hardCeiling = Math.min(
+      maxTurns,
+      Number.isFinite(windDownAt) ? windDownAt + CONVERGENCE_HARD_SLACK : Number.POSITIVE_INFINITY,
+    );
+    if (turn >= hardCeiling) {
+      if (deps.isSubagent === true && !subagentSynthesisBonus && Number.isFinite(hardCeiling)) {
         // Soft landing: allow exactly one more turn dedicated to synthesizing.
         subagentSynthesisBonus = true;
         reachedTurnBudget = true;
@@ -454,6 +488,10 @@ export async function runAgent(
  // Snapshot the plan-progress signature at the start of the turn so we
  // can tell whether this turn's tool calls advanced the plan.
     const planSigBefore = planProgressSig;
+ // Whether this turn changed durable state (a successful write/edit/task/
+ // memory_write, or a plan advance). Set while processing tool results below;
+ // drives the progress-gated stall counter at the end of the turn.
+    let madeDurableProgress = false;
 
  // Drain queued steering. Genuine user input enters the transcript as a
  // user message (so the model acts on it immediately and it persists on
@@ -488,32 +526,73 @@ export async function runAgent(
       planStalled = true;
     }
 
-    // Turn-budget wind-down: when a finite cap is set, urge synthesis before
-    // (and on) the last turns — never rely on a hard error to end the run.
-    // Sub-agents also get a dedicated bonus turn (see subagentSynthesisBonus).
-    // On the final turn we ALSO hard-disable tool calls (`toolChoice:"none"`)
-    // so the model physically cannot start another tool call the prose nudge
-    // asked it to avoid — the nudge is advisory, this is the backstop.
+    // Turn-budget wind-down: as the run approaches the governing ceiling
+    // (`windDownAt` = the lower of maxTurns and the convergence cap), urge
+    // synthesis before (and on) the last turns — never rely on a hard error to
+    // end the run. Sub-agents also get a dedicated bonus turn (see
+    // subagentSynthesisBonus). On the final turn we ALSO hard-disable tool
+    // calls (`toolChoice:"none"`) so the model physically cannot start another
+    // tool call the prose nudge asked it to avoid — the nudge is advisory, this
+    // is the backstop. This fires even when maxTurns is unlimited, which is what
+    // stops a weak model from re-verifying forever.
     let lockToolsThisTurn = false;
-    if (Number.isFinite(maxTurns) && turn > 0) {
-      const remaining = maxTurns - turn;
+    if (Number.isFinite(windDownAt) && turn > 0) {
+      const remaining = windDownAt - turn;
+      const capLabel = Number.isFinite(windDownAt) ? String(windDownAt) : "∞";
       if (subagentSynthesisBonus || remaining <= 1) {
         lockToolsThisTurn = true;
         systemSteerNotices.push(
           deps.isSubagent
-            ? `Turn budget reached (${turn}/${Number.isFinite(maxTurns) ? maxTurns : "∞"}). ` +
+            ? `Turn budget reached (${turn}/${capLabel}). ` +
                 `Do NOT call any more tools. Write your structured conclusion NOW ` +
                 `(### Findings / ### Key references / ### Recommendations, or ### Blocker). ` +
                 `Partial-but-synthesized beats stopping mid-exploration. Note anything left unverified.`
-            : `You are about to reach your turn budget (${turn + 1}/${maxTurns}). Do NOT call any more ` +
-                `tools. Using only what you already have, write your final answer now.`,
+            : `You have reached the turn budget for this task (${turn + 1}/${capLabel}). Do NOT ` +
+                `call any more tools. Using only what you already have, write your final answer now. ` +
+                `If some detail is still unverified, say so explicitly rather than looping to verify it.`,
         );
       } else if (remaining === 2) {
         systemSteerNotices.push(
-          `Two turns left in your budget (${turn + 1}/${maxTurns}). Wrap up tool use soon and ` +
+          `Two turns left in your budget (${turn + 1}/${capLabel}). Wrap up tool use soon and ` +
             `prepare to synthesize your final answer from what you already have.`,
         );
       }
+    }
+
+    // Progress-gated stall ladder: independent of the absolute convergence cap,
+    // this catches a run that keeps calling tools without changing durable state
+    // (the 13:51 pattern: variant git/python re-reading the same logs). We nudge
+    // at NO_PROGRESS_SOFT/STRONG, then at NO_PROGRESS_LOCK reuse the wind-down
+    // lock (toolChoice:"none" + synthesis urge). This is a soft land, not a
+    // failure; any later durable progress resets the streak (see below), so a
+    // genuine long task that keeps writing/editing is never throttled here.
+    if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_LOCK_TURNS) {
+      lockToolsThisTurn = true;
+      systemSteerNotices.push(
+        deps.isSubagent
+          ? `You have gone ${turnsSinceNoProgress} turns without changing any durable state ` +
+              `(no writes, edits, or sub-agent conclusions) — you are re-checking in circles. ` +
+              `Do NOT call any more tools. Write your structured conclusion NOW ` +
+              `(### Findings / ### Key references / ### Recommendations, or ### Blocker) from what ` +
+              `you already have. Note anything left unverified instead of looping to verify it.`
+          : `You have gone ${turnsSinceNoProgress} turns without changing any durable state ` +
+              `(no writes or edits) — you are verifying in circles. Do NOT call any more tools. ` +
+              `Using only what you already have, write your final answer now: what you found, what ` +
+              `is still unverified or unfinished, and the recommended next step. Mark unverified ` +
+              `details as such rather than looping to confirm them.`,
+      );
+    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_STRONG_TURNS) {
+      systemSteerNotices.push(
+        `You have made no durable progress (no writes, edits, or conclusions) for ` +
+          `${turnsSinceNoProgress} turns. Stop re-checking and move to synthesis: decide whether ` +
+          `you already have enough to answer, and if so answer now instead of running more tools.`,
+      );
+    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_SOFT_TURNS) {
+      systemSteerNotices.push(
+        `You have made no durable progress (no writes or edits) for ${turnsSinceNoProgress} turns. ` +
+          `If you keep reading/re-running commands without acting, you are likely spinning — ` +
+          `take a concrete action (edit, write, or answer) rather than gathering more evidence.`,
+      );
     }
 
     await emit({ type: "status", status: "running" });
@@ -595,7 +674,11 @@ export async function runAgent(
     const lazyMcp =
       mcpToolCount > 0 &&
       (discovery === "lazy" || (discovery === "auto" && mcpToolCount > lazyThreshold));
-    const providerTools = buildProviderToolDefs(deps.tools, agentMode, { lazyMcp });
+    const providerTools = buildProviderToolDefs(deps.tools, agentMode, {
+      lazyMcp,
+      model: deps.config.model,
+      toolExposure: deps.config.toolExposure,
+    });
     const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices });
 
  // Consistency assertion: verify the non-folded tail of the provider
@@ -1050,26 +1133,6 @@ export async function runAgent(
         continue;
       }
 
-      // Citation guard: flag file:line references in the final answer that
-      // were never backed by a read/grep/glob/edit this session. One bounded
-      // nudge so the model can verify or retract. Off when disabled or when
-      // the user is being asked a question (not a factual claim).
-      if (
-        (deps.config.citationGuard ?? "notice") !== "off" &&
-        !sawError &&
-        trimmed !== "" &&
-        citationResumes < MAX_CITATION_RESUMES &&
-        !isWaitingForUser(trimmed)
-      ) {
-        const check = checkCitations(finalText, allEvents);
-        const notice = buildCitationNotice(check);
-        if (notice) {
-          citationResumes++;
-          pendingProviderResume = `[system] ${notice}`;
-          continue;
-        }
-      }
-
       // Normal conversational end: yield the turn to the user.
       if (!sawError) await closeFinishedPlan(produced, emit);
       // Offer this turn's exact request as a prompt-cache warm candidate. The
@@ -1136,6 +1199,17 @@ export async function runAgent(
     for (let i = 0; i < toolCalls.length; i++) {
       const tc = toolCalls[i]!;
       const r = toolResults[i]!;
+ // Durable-progress signal for the no-progress stall ladder: a SUCCESSFUL
+ // write-permission tool (write_file/edit_file/apply_patch/…), or a task
+ // conclusion / memory_write (both read-permission but state-changing).
+ // Failed calls do not count — a rejected edit is not progress. Plan advances
+ // are handled separately where the plan event is parsed.
+      if (!r.isError) {
+        const perm = deps.tools.get(tc.name)?.permission;
+        if (perm === "write" || DURABLE_PROGRESS_TOOLS.has(tc.name)) {
+          madeDurableProgress = true;
+        }
+      }
  // Secret redaction: credentials must never reach the transcript, the
  // model context or artifacts (see redact.ts).
       let safeContent = redactSecrets(r.content, deps.redactPatterns);
@@ -1207,6 +1281,8 @@ export async function runAgent(
  // The plan moved — clear any pending stall notice so the
  // next turn's context doesn't keep nagging.
                   planStalled = false;
+ // A plan advance is durable progress for the no-progress ladder.
+                  madeDurableProgress = true;
                 }
               } else if (parsed.type === "exit_plan_mode" && parsed.approved === true) {
                 await emit({
@@ -1253,6 +1329,14 @@ export async function runAgent(
     if (toolCalls.length > 0 && planProgressSig === planSigBefore && planProgressSig !== "") {
       turnsSincePlanProgress++;
     }
+ // Progress-gated stall accounting: a turn that made durable progress resets
+ // the streak; a turn that ran tools without any durable progress extends it.
+ // A turn with no tool calls at all is not counted (the model is answering).
+    if (madeDurableProgress) {
+      turnsSinceNoProgress = 0;
+    } else if (toolCalls.length > 0) {
+      turnsSinceNoProgress++;
+    }
   }
 
   // Turn-cap stops: main-session runs surface a recoverable error so the UI
@@ -1261,13 +1345,25 @@ export async function runAgent(
   // was produced. Emitting an error here made parents treat soft landings as
   // failures ("Reached the sub-agent step budget").
   if (hitMaxTurns && deps.isSubagent !== true) {
-    const cap = Number.isFinite(maxTurns) ? String(maxTurns) : String(configuredMax);
+    // Distinguish which ceiling actually stopped the run so the guidance is
+    // accurate: a user-set maxTurns is raised in config, whereas the
+    // convergence backstop fired because the model kept calling tools even
+    // after tools were disabled for wind-down.
+    const stoppedByMaxTurns = Number.isFinite(maxTurns) && maxTurns <= convergenceCap;
+    const cap = stoppedByMaxTurns
+      ? Number.isFinite(maxTurns)
+        ? String(maxTurns)
+        : String(configuredMax)
+      : String(convergenceCap);
     await emit({
       type: "error",
-      message:
-        `Reached maxTurns (${cap}): the model was still calling tools, so the run ` +
-        `stopped before finishing. Send another message to continue the conversation, ` +
-        `or raise/remove maxTurns in config for long tasks.`,
+      message: stoppedByMaxTurns
+        ? `Reached maxTurns (${cap}): the model was still calling tools, so the run ` +
+          `stopped before finishing. Send another message to continue the conversation, ` +
+          `or raise/remove maxTurns in config for long tasks.`
+        : `Reached the convergence limit (${cap} turns): the model kept calling tools ` +
+          `instead of answering, so the run stopped. Send another message to continue, ` +
+          `or raise/disable convergenceCap in config for genuinely long tasks.`,
       recoverable: true,
     });
   }
@@ -1344,13 +1440,47 @@ export async function runToolsWithBarrier<T>(
   return results;
 }
 
+/** Soft convergence ceiling: when neither maxTurns nor config.convergenceCap is
+ * set, the loop still winds down after this many turns and disables tool calls
+ * for the final turn. This is the backstop against semantic looping that the
+ * exact-signature DoomLoopDetector can't catch — each command differs textually
+ * but the run is going in circles. Chosen high enough that genuine long tasks
+ * finish normally, low enough that a stuck weak model is forced to answer. */
+const DEFAULT_CONVERGENCE_CAP = 60;
+/** Turns of slack between where wind-down starts (tools disabled + synthesis
+ * urge) and the absolute hard break. Gives the model room to actually write its
+ * answer after tools are locked, while still guaranteeing termination if a
+ * provider ignores `toolChoice:"none"`. */
+const CONVERGENCE_HARD_SLACK = 3;
+
+/** Progress-gated stall ladder. The convergence cap above is an *absolute*
+ * ceiling; this catches a much earlier failure mode the exact-signature
+ * DoomLoopDetector can't: a model that keeps calling read-only / variant-bash
+ * tools (git show, python to re-parse the same logs) turn after turn without
+ * ever changing durable state — textually different each time, so neither the
+ * doom loop nor the plan-stall (which needs a plan) fires. We count turns with
+ * no durable progress and escalate: soft nudge, stronger nudge, then reuse the
+ * wind-down path (toolChoice:"none" + synthesis urge). Locking is a soft land —
+ * the model answers from what it has; it is NOT a task failure. A later turn
+ * that makes real progress resets the streak, so genuine long tasks that keep
+ * writing/editing/testing are never throttled. */
+const NO_PROGRESS_SOFT_TURNS = 8;
+const NO_PROGRESS_STRONG_TURNS = 12;
+const NO_PROGRESS_LOCK_TURNS = 16;
+
+/** Tools (by name) whose successful call counts as durable progress even though
+ * their permission is "read": `task` delivers a sub-agent conclusion and
+ * `memory_write` commits durable knowledge. Write-permission tools (write_file,
+ * edit_file, apply_patch, notebook_edit, …) are detected by permission, not
+ * name, so this list stays small. */
+const DURABLE_PROGRESS_TOOLS = new Set(["task", "memory_write"]);
+
 const MAX_TRUNCATION_RESUMES = 3;
 /** Max consecutive mid-stream interrupts resumed by continuation before we
  * give up on continuing and fall back to regenerating the turn. */
 const MAX_INTERRUPT_RESUMES = 3;
 const MAX_EMPTY_STOP_RESUMES = 2;
 const MAX_PLAN_SOFT_RESUMES = 1;
-const MAX_CITATION_RESUMES = 1;
 /** Proportional send-budget shrink steps applied on successive context-overflow
  * errors: first compact, then shrink to these fractions of the computed hard
  * budget. Bounded so overflow can't loop. */
@@ -1474,7 +1604,9 @@ export function buildLiveContext(
   produced: Event[],
   opts: { planStalled?: boolean; systemNotices?: string[] } = {},
 ): string {
-  const parts = [renderPlanBlock(extractPlan(all))];
+  const parts: string[] = [];
+  const planBlock = renderPlanBlock(extractPlan(all));
+  if (planBlock) parts.push(planBlock);
   const ledger = buildProgressLedger(produced);
   if (ledger) parts.push(ledger);
   if (opts.planStalled) parts.push(PLAN_STALL_NOTICE);

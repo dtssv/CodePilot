@@ -393,6 +393,26 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // 0 = unlimited. Positive caps the agent↔tool loop for CI / unattended
     // runs.
     maxTurns: z.number().int().min(0).max(10_000).optional(),
+    // Soft convergence ceiling that applies even when maxTurns is unlimited:
+    // after this many turns the loop winds down and disables tool calls for the
+    // final turn, forcing the model to answer from what it already has instead
+    // of spinning (e.g. a weak model re-verifying forever). 0 = disabled.
+    convergenceCap: z.number().int().min(0).max(10_000).optional(),
+    // Per-model tool-exposure downgrade. Some models serialize structured
+    // tool calls poorly on the more complex tools (e.g. `code_mode`,
+    // `apply_patch`), tripping over the schema instead of using a simpler
+    // tool. Each rule hides the listed tools from models whose id matches any
+    // of `models` (glob over the model id, `*`/`?`). Applied AFTER mode
+    // filtering, so it only ever removes tools, never adds them. Empty/unset =
+    // no downgrade (every model sees the full mode-filtered set).
+    toolExposure: z
+      .array(
+        z.object({
+          models: z.array(z.string().min(1)).min(1),
+          drop: z.array(z.string().min(1)).min(1),
+        }),
+      )
+      .optional(),
     turnRetries: z.number().int().min(0).max(10).optional(),
     // When true, command hooks run under the same OS sandbox as `bash`
     // (Seatbelt / bwrap) instead of unsandboxed. Opt-in; default off.
@@ -442,9 +462,6 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // consistencyCheck: "off" | "warn" (default) | "throw" — verify that the
     // messages sent to the provider match the persisted event log.
     consistencyCheck: z.enum(["off", "warn", "throw"]).optional(),
-    // citationGuard: "off" | "notice" (default) — flag `path:line` references
-    // in the final answer that were never backed by a read/grep this session.
-    citationGuard: z.enum(["off", "notice"]).optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
  // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous

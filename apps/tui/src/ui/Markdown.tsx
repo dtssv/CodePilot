@@ -152,7 +152,7 @@ function renderInline(s: string, key: string): React.ReactNode {
   });
 }
 
-interface Block {
+export interface Block {
   kind: "heading" | "paragraph" | "code" | "ul" | "ol" | "quote" | "table" | "blank";
   level?: number;
   lang?: string;
@@ -168,38 +168,28 @@ function tableCells(line: string): string[] {
   return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
 }
 
-function parseBlocks(md: string): Block[] {
+export function parseBlocks(md: string): Block[] {
   const lines = md.split(/\r?\n/);
   const blocks: Block[] = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
- // Fenced code — nested ```lang inside the body stays in the body;
- // a bare closer only ends the block when nest depth returns to zero.
+ // Fenced code — per CommonMark the block ends at the FIRST *bare* closing
+ // fence (backticks >= the opener, NO info string). A ```lang line inside the
+ // body is content, not a nested open: fences do not nest at the same length.
+ // Models routinely emit a code block whose body contains ```lang lines, and
+ // treating those as nested opens made the real closer never match, swallowing
+ // every following heading/table/paragraph into one giant code block.
     if (line.trimStart().startsWith("```")) {
       const open = line.trim().match(/^(`{3,})([^\n`]*)$/);
       const tick = open?.[1]?.length ?? 3;
       const lang = (open?.[2] ?? "").trim();
       const buf: string[] = [];
-      let depth = 1;
       i++;
       while (i < lines.length) {
         const raw = lines[i]!;
         const fence = raw.trim().match(/^(`{3,})([^\n`]*)$/);
-        if (fence && fence[1]!.length >= tick) {
-          const info = fence[2]!.trim();
-          if (info) {
-            depth++;
-            buf.push(raw);
-            i++;
-            continue;
-          }
-          depth--;
-          if (depth === 0) break;
-          buf.push(raw);
-          i++;
-          continue;
-        }
+        if (fence && fence[1]!.length >= tick && fence[2]!.trim() === "") break;
         buf.push(raw);
         i++;
       }

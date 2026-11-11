@@ -141,16 +141,42 @@ export class PermissionEngine {
   }
 
  /**
- * Derive the rule to add when the user clicks "always allow". The user's
- * intent is "stop asking me about this kind of action for the rest of the
- * session" — so we grant the whole TOOL, not a single command/path. For
- * `bash` that means every subsequent shell command is auto-approved this
- * session; for file tools every write/read. deny rules still override (they
- * are checked first and are absolute), and the grant is session-scoped —
- * it is never persisted to disk, so it dies with this Session.
+ * Derive the rule to add when the user clicks "always allow". The grant is
+ * NARROWED to the invocation, not widened to the whole tool:
+ *
+ * - bash: the leading safe prefix of the command as a prefix glob, e.g.
+ *   `npm test -- --watch` → `bash(npm test *)`. The prefix is the program
+ *   plus (for multi-word CLIs like `npm`/`git`/`cargo`/`pnpm`) its first
+ *   subcommand, so `npm test` and `npm run build` get distinct grants. A
+ *   command whose program is in BANNED_PREFIXES (rm, sudo, `bash -c`,
+ *   interpreters that run arbitrary code, …) is NOT widened at all — it
+ *   returns a wildcard-free rule for the exact command line, so the grant
+ *   covers only this one invocation and can never auto-approve a different
+ *   dangerous command this session.
+ * - file tools: the containing directory, e.g. `write_file(/repo/src/*)`, so
+ *   a sibling file in the same directory is covered but an unrelated path
+ *   still prompts.
+ * - everything else (no primary arg, non-path tools): the bare tool name —
+ *   there is nothing finer to scope to.
+ *
+ * deny rules still override (checked first and absolute). The grant is
+ * session-scoped and never persisted implicitly.
  */
-  static suggestRule(tool: ToolDef, _input?: unknown): string {
-    void _input;
+  static suggestRule(tool: ToolDef, input?: unknown): string {
+    if (tool.name === "bash") {
+      const primary = extractPrimaryArg("bash", input);
+      if (!primary) return "bash";
+      return suggestBashRule(primary);
+    }
+ // File tools scope to the target's directory.
+    if (tool.permission === "write" || tool.permission === "read") {
+      const paths = extractWritePaths(tool.name, input);
+      const target = paths[0] ?? extractPrimaryArg(tool.name, input);
+      if (target && (target.includes("/") || target.includes("\\"))) {
+        const dir = target.replace(/[\\/][^\\/]*$/, "");
+        if (dir) return `${tool.name}(${dir}/*)`;
+      }
+    }
     return tool.name;
   }
 
@@ -519,6 +545,53 @@ export function normalizeBashPrimary(command: string): string {
     break;
   }
   return s;
+}
+
+/**
+ * Programs that must never be widened into a prefix grant. These either run
+ * arbitrary code from an argument (shells / interpreters with `-c`, `eval`),
+ * escalate privilege (`sudo`, `doas`), or destroy data (`rm`), so an "always
+ * allow" on one invocation must not auto-approve a different command sharing
+ * the program. For these, the grant covers only the exact command line.
+ */
+const BANNED_PREFIXES: ReadonlySet<string> = new Set([
+  "rm", "rmdir", "sudo", "doas", "su",
+  "bash", "sh", "zsh", "fish", "dash", "ksh",
+  "eval", "exec", "source", ".",
+  "python", "python3", "python2", "node", "deno", "bun", "ruby", "perl", "php",
+  "env", "xargs", "find", "chmod", "chown", "dd", "mkfs", "kill", "killall",
+]);
+
+/** Multi-word CLIs where the first subcommand is part of the meaningful
+ * prefix (`git status`, `npm run`, not just `git` / `npm`). */
+const SUBCOMMAND_CLIS: ReadonlySet<string> = new Set([
+  "git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "kubectl", "gh",
+  "pip", "pip3", "brew", "apt", "apt-get", "systemctl", "make",
+]);
+
+/** Shell-word split that keeps quoted spans intact. */
+function shellWords(command: string): string[] {
+  return command.match(/'[^']*'|"(?:\\.|[^"\\])*"|\S+/g) ?? [];
+}
+
+/**
+ * Build the session allow rule for an "always allow" on a bash command. Safe
+ * programs widen to a prefix glob (`bash(npm test *)`); banned programs get a
+ * wildcard-free exact rule so only this invocation is covered. The input is
+ * the already-normalised primary (leading `cd`/`echo` stripped).
+ */
+export function suggestBashRule(primary: string): string {
+  const words = shellWords(primary).map((w) => w.replace(/^(['"])([\s\S]*)\1$/, "$2"));
+  const prog = words[0];
+  // No parseable program, or a program that must not widen: grant exactly this
+  // command line (no wildcard → matches only an identical invocation).
+  if (!prog || /^[A-Za-z_][A-Za-z0-9_]*=/.test(prog) || BANNED_PREFIXES.has(prog)) {
+    return `bash(${primary})`;
+  }
+  const prefixWords = SUBCOMMAND_CLIS.has(prog) && words[1] && !words[1].startsWith("-")
+    ? words.slice(0, 2)
+    : [prog];
+  return `bash(${prefixWords.join(" ")} *)`;
 }
 
 /** Whether a bash input requests per-command sandbox escalation (run this one

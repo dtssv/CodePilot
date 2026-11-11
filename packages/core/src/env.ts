@@ -18,12 +18,8 @@ export interface GitStatus {
   root?: string;
  /** Current branch (or "HEAD" if detached). */
   branch?: string;
- /** Short status output of `git status --short --branch`. */
-  statusShort?: string;
  /** Most recent commit subject (short). */
   lastCommit?: string;
- /** True when the working tree is dirty. */
-  dirty?: boolean;
  /** Most recent commit SHA (short). */
   lastCommitSha?: string;
 }
@@ -56,10 +52,6 @@ export interface EnvironmentSnapshot {
   timezone: string;
  /** Git status for the cwd (undefined when not a git work tree). */
   git?: GitStatus;
- /** A short top-level directory listing of the cwd (one line per entry,
- * directories suffixed with `/`). Injected into the system prompt as a short
- * project tree. */
-  directoryTree?: string;
  /** The host surface the agent is running in: "cli" | "tui" | "vscode" | "idea".
  * Lets the prompt tailor advice (e.g. "open the diff in the editor" only
  * makes sense in an IDE). Optional — set by the host. */
@@ -78,7 +70,6 @@ export interface EnvironmentProvider {
 export const defaultEnvironmentProvider: EnvironmentProvider = {
   async snapshot(cwd: string): Promise<EnvironmentSnapshot> {
     const git = await safeGitStatus(cwd);
-    const directoryTree = await safeDirectoryTree(cwd);
     return {
       os: `${process.platform} ${release()} ${process.arch}`,
       platform: process.platform,
@@ -93,7 +84,6 @@ export const defaultEnvironmentProvider: EnvironmentProvider = {
       now: new Date().toISOString(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
       git,
-      directoryTree,
     };
   },
 };
@@ -108,8 +98,6 @@ async function safeGitStatus(cwd: string): Promise<GitStatus | undefined> {
     const root = toplevel.trim();
     if (!root) return { inRepo: false };
     let branch = "HEAD";
-    let statusShort = "";
-    let dirty = false;
     let lastCommit: string | undefined;
     let lastCommitSha: string | undefined;
     try {
@@ -122,20 +110,9 @@ async function safeGitStatus(cwd: string): Promise<GitStatus | undefined> {
     } catch {
  /* detached HEAD */
     }
-    try {
-      const { stdout } = await execFileP(
-        "git",
-        ["status", "--short", "--branch"],
-        { cwd, timeout: 2000 }
-      );
-      statusShort = stdout.trim();
- // `git status --short --branch` first line is `## <branch>... [ahead/behind]`
- // any subsequent line is a working-tree change.
-      const lines = statusShort.split("\n").filter((l) => l.trim().length > 0);
-      dirty = lines.length > 1;
-    } catch {
- /* no status */
-    }
+    // Intentionally skip `git status`: dirty paths are not injected into the
+    // system prompt (peer harnesses omit them), so a per-turn status walk is
+    // wasted work and used to nudge models into re-running git for no reason.
     try {
       const { stdout } = await execFileP(
         "git",
@@ -160,8 +137,6 @@ async function safeGitStatus(cwd: string): Promise<GitStatus | undefined> {
       inRepo: true,
       root,
       branch,
-      statusShort: statusShort || undefined,
-      dirty,
       lastCommit,
       lastCommitSha,
     };
@@ -177,53 +152,4 @@ function shellSafe(): string {
     return process.env.COMSPEC || "cmd.exe";
   }
   return "/bin/sh";
-}
-
-/**
- * Best-effort top-level directory listing for the system-prompt project-tree
- * block. Returns one line per entry, directories suffixed
- * with `/`. Honours a small built-in ignore list (`.git`, `node_modules`,
- * `dist`, `build`, `.next`, `target`, `__pycache__`, `.pnpm-store`,
- * `.codepilot`, `.venv`, `.idea`, `.vscode`) so a monorepo root does not
- * dump hundreds of noise entries into the prompt. Caps at 80 entries.
- */
-const TREE_IGNORE = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  ".next",
-  "target",
-  "__pycache__",
-  ".pnpm-store",
-  ".codepilot",
-  ".venv",
-  "venv",
-  ".idea",
-  ".vscode",
-  ".cache",
-  ".turbo",
-]);
-
-async function safeDirectoryTree(cwd: string): Promise<string | undefined> {
-  try {
-    const { readdir, stat } = await import("node:fs/promises");
-    const entries = await readdir(cwd, { withFileTypes: true });
-    const visible = entries.filter((e) => !TREE_IGNORE.has(e.name));
- // Sort: directories first, then files, both alphabetical.
-    visible.sort((a, b) => {
-      const ad = a.isDirectory() ? 0 : 1;
-      const bd = b.isDirectory() ? 0 : 1;
-      if (ad !== bd) return ad - bd;
-      return a.name.localeCompare(b.name);
-    });
-    const capped = visible.slice(0, 80);
-    const lines = capped.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
-    if (visible.length > capped.length) {
-      lines.push(`... (${visible.length - capped.length} more entries)`);
-    }
-    return lines.join("\n");
-  } catch {
-    return undefined;
-  }
 }

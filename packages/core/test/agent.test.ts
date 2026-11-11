@@ -31,8 +31,18 @@ class MockProvider implements ChatProvider {
   calls: StreamChatOptions[] = [];
   private idx = 0;
 
+  /** When true, a request with toolChoice:"none" yields text instead of the
+   * queued tool call — simulating a provider that honors the tool lockout (real
+   * providers stop emitting tool calls under toolChoice:"none"). */
+  honorToolChoiceNone = false;
+
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
     this.calls.push(opts);
+    if (this.honorToolChoiceNone && opts.toolChoice === "none") {
+      yield { kind: "text_delta", messageId: `locked_${this.idx}`, text: "stopping — here is what I have" };
+      yield { kind: "done", finishReason: "stop" };
+      return;
+    }
     const i = this.idx++;
     if (i >= this.responses.length) {
       yield { kind: "text_delta", messageId: "m", text: "(no more responses)" };
@@ -63,6 +73,9 @@ function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   const tools = new ToolRegistry();
   const echo = makeTool("echo", "read", "echoed!");
   tools.register(echo);
+  // A write-permission tool so tests can simulate durable progress (resets the
+  // no-progress stall streak), mirroring write_file/edit_file.
+  tools.register(makeTool("write_file", "write", "wrote!"));
   const artifacts = new ArtifactStore(join(cwd, ".codepilot", "artifacts"));
   return {
     artifacts,
@@ -81,12 +94,13 @@ function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   };
 }
 
-describe("runAgent maxTurns (unset = unlimited)", () => {
-  it("does not cap turns when maxTurns is unset (unlimited)", async () => {
+describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () => {
+  it("does not cap turns when maxTurns is unset and well under the convergence cap", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
-    // 8 tool turns then a final text reply — would fail under the old default of 50
-    // only if we somehow defaulted low; here we assert unset allows many loops.
+    // 8 tool turns then a final text reply — unset maxTurns allows many loops,
+    // and 9 turns is far below the default convergence cap (60), so the
+    // convergence backstop does not engage here.
     provider.responses = [];
     for (let i = 0; i < 8; i++) {
       provider.responses.push([
@@ -110,7 +124,202 @@ describe("runAgent maxTurns (unset = unlimited)", () => {
     const r = await runAgent({ history: [], userText: "long task" }, deps);
     expect(provider.calls.length).toBe(9);
     expect(r.finalText).toBe("finished");
-    expect(r.events.some((e) => e.type === "error" && /maxTurns/i.test(e.message))).toBe(false);
+    expect(r.events.some((e) => e.type === "error" && /maxTurns|convergence/i.test(e.message))).toBe(false);
+    // No turn should have tools disabled — we never reached wind-down.
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("winds down via the convergence cap even when maxTurns is unlimited", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // A weak-model stand-in that NEVER stops calling tools (slightly different
+    // input each turn, so the exact-signature DoomLoopDetector can't catch it).
+    provider.responses = [];
+    for (let i = 0; i < 40; i++) {
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    // maxTurns unlimited; small convergence cap so the test is fast.
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 4;
+    const r = await runAgent({ history: [], userText: "spin forever" }, deps);
+    // Wind-down starts at turn 3 (windDownAt 4, remaining <= 1), where tools are
+    // disabled; the hard break is CONVERGENCE_HARD_SLACK (3) turns above that.
+    // The run must stop well short of the 40 queued responses.
+    expect(provider.calls.length).toBeLessThanOrEqual(8);
+    // At least one turn before the end must have sent toolChoice:"none".
+    expect(provider.calls.some((c) => c.toolChoice === "none")).toBe(true);
+    // Because this model ignored the lock and kept calling tools, the run hits
+    // the convergence backstop and surfaces a recoverable error naming it.
+    const err = r.events.find((e) => e.type === "error");
+    expect(err && err.type === "error" && err.recoverable).toBe(true);
+    expect(err && err.type === "error" && err.message).toMatch(/convergence limit \(4 turns\)/);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("lets a stuck model land softly on text at the convergence cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // Model keeps calling tools until wind-down disables them, then answers.
+    provider.responses = [];
+    for (let i = 0; i < 3; i++) {
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    // At the wind-down turn (tools disabled) it produces text and stops.
+    provider.responses.push([
+      { kind: "text_delta", messageId: "fin", text: "answered from what I have" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 4;
+    const r = await runAgent({ history: [], userText: "verify forever" }, deps);
+    // Clean landing: an answer, no error, idle.
+    expect(r.finalText).toBe("answered from what I have");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("disables the convergence backstop when convergenceCap is 0", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 70 WRITE turns (above the default cap of 60) then text — each write is
+    // durable progress, so the no-progress ladder never fires; with the absolute
+    // backstop disabled none of these should be capped.
+    provider.responses = [];
+    for (let i = 0; i < 70; i++) {
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: { type: "tool_use", id: `t${i}`, name: "write_file", input: { x: String(i) } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "done", text: "finished long task" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 0;
+    const r = await runAgent({ history: [], userText: "genuinely long task" }, deps);
+    expect(provider.calls.length).toBe(71);
+    expect(r.finalText).toBe("finished long task");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("locks tools after NO_PROGRESS_LOCK_TURNS of read-only spinning (soft land)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // A provider that honors toolChoice:"none" by answering — like a real one
+    // that stops emitting tool calls when the lock is set.
+    provider.honorToolChoiceNone = true;
+    // Model keeps calling a read-only tool with a different input each turn —
+    // textually distinct (so the doom loop can't catch it), no durable progress.
+    // After 16 such turns the stall ladder must lock tools; the model then
+    // answers from what it has. convergenceCap raised high so the ABSOLUTE cap
+    // is not what stops it — this isolates the progress-gated path.
+    provider.responses = [];
+    for (let i = 0; i < 30; i++) {
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: `v${i}` } },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500; // keep the absolute cap out of the way
+    const r = await runAgent({ history: [], userText: "verify in circles" }, deps);
+    // Streak increments at each turn's end; the start-of-turn lock fires once it
+    // reaches 16, so the lock turn is call index 16 → 17 calls total.
+    expect(provider.calls.length).toBe(17);
+    // The locking turn (and only it) sent toolChoice:"none".
+    expect(provider.calls.filter((c) => c.toolChoice === "none").length).toBe(1);
+    expect(provider.calls[16]!.toolChoice).toBe("none");
+    // Soft land: the model answered, no error.
+    expect(r.finalText).toBe("stopping — here is what I have");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not throttle a long task that keeps making durable progress", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 24 turns that alternate: a few read-only probes, then a write. Because a
+    // write resets the no-progress streak before it reaches 16, tools are never
+    // locked and the run proceeds normally to its own text ending.
+    provider.responses = [];
+    for (let i = 0; i < 24; i++) {
+      const isWrite = i % 4 === 3; // write every 4th turn → streak never hits 16
+      provider.responses.push([
+        {
+          kind: "tool_call",
+          messageId: `m${i}`,
+          toolCall: {
+            type: "tool_use",
+            id: `t${i}`,
+            name: isWrite ? "write_file" : "echo",
+            input: { x: `v${i}` },
+          },
+        },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "done", text: "task complete" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500;
+    const r = await runAgent({ history: [], userText: "long implementation task" }, deps);
+    // Ran all 24 tool turns + the final text (no lock, no early stop).
+    expect(provider.calls.length).toBe(25);
+    expect(r.finalText).toBe("task complete");
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    // Tools were never disabled — durable progress kept resetting the streak.
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -226,7 +435,7 @@ describe("runAgent maxTurns (unset = unlimited)", () => {
     // turn 3 (remaining == 1): hard "do NOT call any more tools, write your
     // final answer now" nudge.
     const last = systemText(provider.calls[3]!);
-    expect(last).toMatch(/about to reach your turn budget/);
+    expect(last).toMatch(/reached the turn budget for this task/);
     expect(last).toMatch(/[Dd]o NOT call any more|final answer now/);
     rmSync(dir, { recursive: true, force: true });
   });

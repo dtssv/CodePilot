@@ -50,23 +50,24 @@ describe("defaultEnvironmentProvider", () => {
     }
   });
 
-  it("detects a dirty work tree (best-effort)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "git-dirty-"));
+  it("reports git identity without walking the dirty working tree", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "git-ident-"));
     try {
- // Initialise a fresh git repo and make a commit.
       execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
       execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
       execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
       writeFileSync(join(dir, "a.txt"), "hello", "utf-8");
       execFileSync("git", ["add", "."], { cwd: dir });
       execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
-      const clean = await defaultEnvironmentProvider.snapshot(dir);
-      expect(clean.git?.dirty).toBe(false);
-
- // Now create an unstaged change.
       writeFileSync(join(dir, "a.txt"), "hello world", "utf-8");
-      const dirty = await defaultEnvironmentProvider.snapshot(dir);
-      expect(dirty.git?.dirty).toBe(true);
+      const snap = await defaultEnvironmentProvider.snapshot(dir);
+      expect(snap.git?.inRepo).toBe(true);
+      expect(snap.git?.branch).toBe("main");
+      expect(snap.git?.lastCommit).toBe("init");
+      expect(snap.git?.lastCommitSha).toBeTruthy();
+      // Dirty status is intentionally not collected for the prompt snapshot.
+      expect(snap.git).not.toHaveProperty("dirty");
+      expect(snap.git).not.toHaveProperty("statusShort");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

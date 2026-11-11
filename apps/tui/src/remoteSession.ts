@@ -39,11 +39,25 @@ export interface RemoteSessionOptions {
   onPromptResolved?: (kind: "permission" | "question", requestId: string) => void;
  /** Connection state changes (for a status line while auto-reconnecting). */
   onConnectionChange?: (state: "connected" | "reconnecting" | "lost") => void;
+ /** Consecutive reconnect attempts before the auto-retry loop gives up and
+  * goes quiet (default {@link RECONNECT_MAX_ATTEMPTS}). A later user-driven RPC
+  * still retries. Exposed mainly for tests. */
+  reconnectMaxAttempts?: number;
+ /** Initial reconnect backoff in ms (default 300, capped at 5000, doubling).
+  * Exposed mainly for tests so the give-up path runs fast. */
+  reconnectBackoffMs?: number;
 }
 
 type Listener = (e: Event) => void;
 
 const PROTOCOL_VERSION = 1;
+
+/** How many back-to-back reconnect attempts to make before the auto-retry loop
+ * gives up and goes quiet. At the 5s backoff cap this is ~1 minute of trying;
+ * past that the server is almost certainly down for good (e.g. it was stopped
+ * or restarted), so looping forever only spams the transcript. The session can
+ * still self-heal: the next user-driven RPC calls `reconnect()` again. */
+const RECONNECT_MAX_ATTEMPTS = 12;
 
 function wsUrl(url: string, token?: string): string {
   let u = url.trim();
@@ -83,17 +97,26 @@ export class RemoteSession {
   private opts!: RemoteSessionOptions;
  /** In-flight reconnect, so overlapping failures await one attempt. */
   private reconnecting: Promise<void> | null = null;
+ /** Last connection state surfaced to the UI, so a banner is pushed only on an
+  * actual transition — not re-emitted on every failed reconnect attempt. */
+  private lastConnectionState: "connected" | "reconnecting" | "lost" | "gave-up" | null = null;
 
  /** Emit a connection-state change to both the optional hook and the UI
-  * stream (as a transient recoverable banner the transcript already renders). */
-  private emitConnection(state: "connected" | "reconnecting" | "lost"): void {
-    this.opts.onConnectionChange?.(state);
+  * stream (as a transient recoverable banner the transcript already renders).
+  * The banner is pushed only when the state actually changes, so a long
+  * reconnect does not spam one "Still trying…" box per retry. */
+  private emitConnection(state: "connected" | "reconnecting" | "lost" | "gave-up"): void {
+    this.opts.onConnectionChange?.(state === "gave-up" ? "lost" : state);
+    if (state === this.lastConnectionState) return;
+    this.lastConnectionState = state;
     const text =
       state === "reconnecting"
         ? "Connection to the shared server dropped — reconnecting…"
         : state === "lost"
           ? "Still trying to reach the shared server…"
-          : "Reconnected to the shared server.";
+          : state === "gave-up"
+            ? "Could not reach the shared server — gave up auto-reconnecting. It may have stopped; send a message to retry, or restart it."
+            : "Reconnected to the shared server.";
     // `recoverable: true` renders as a transient banner, cleared on the next turn.
     for (const l of this.listeners) {
       try {
@@ -145,6 +168,11 @@ export class RemoteSession {
       const res = await peer.request<unknown, { sessionId: string }>("session/new", { cwd: opts.cwd });
       self.id = res.sessionId;
     }
+ // Seed the model/provider from the session's RESOLVED endpoint (what the
+ // request path actually uses), not just the flat config — otherwise a fresh
+ // session or an aliased model shows "no model yet" in the status bar until
+ // the first turn streams a `model` event.
+    await self.fetchEndpoint();
     self.opts.onConnectionChange?.("connected");
     return self;
   }
@@ -235,17 +263,38 @@ export class RemoteSession {
     }
   }
 
+ /** Seed model/provider from the session's RESOLVED endpoint (the authoritative
+  * value the request path uses), not the flat config. Keeps the status bar from
+  * showing "no model yet" for a fresh or aliased-model session. Requires
+  * `this.id`; best-effort so a missing RPC never blocks connect. */
+  private async fetchEndpoint(): Promise<void> {
+    if (!this.id) return;
+    try {
+      const ep = await this.peer.request<unknown, { model: string; providerId?: string }>(
+        "session/getEndpoint",
+        { sessionId: this.id },
+      );
+      if (ep.model) this.model = ep.model;
+      if (ep.providerId) this.providerId = ep.providerId;
+    } catch {
+ /* best-effort; the flat-config snapshot already seeded a fallback */
+    }
+  }
+
  /**
   * Re-establish the socket to the same daemon and re-attach to the same
   * session, with capped exponential backoff. Concurrent callers share one
-  * attempt. Resolves once reconnected; stays trying until disposed.
+  * attempt. Resolves once reconnected, or after `RECONNECT_MAX_ATTEMPTS`
+  * consecutive failures (gives up quietly so it does not spam the transcript
+  * forever when the server is gone — a later user-driven RPC retries).
   */
   private reconnect(): Promise<void> {
     if (this.disposed) return Promise.resolve();
     if (this.reconnecting) return this.reconnecting;
     this.emitConnection("reconnecting");
     this.reconnecting = (async () => {
-      let delay = 300;
+      const maxAttempts = this.opts.reconnectMaxAttempts ?? RECONNECT_MAX_ATTEMPTS;
+      let delay = this.opts.reconnectBackoffMs ?? 300;
       for (let attempt = 0; !this.disposed; attempt++) {
         try {
           await this.openPeer();
@@ -260,9 +309,14 @@ export class RemoteSession {
             for (let i = known; i < fresh.length; i++) this.ingest(fresh[i]!);
           }
           await this.fetchConfigSnapshot();
+          await this.fetchEndpoint();
           this.emitConnection("connected");
           return;
         } catch {
+          if (attempt + 1 >= maxAttempts) {
+            this.emitConnection("gave-up");
+            return;
+          }
           this.emitConnection("lost");
           await new Promise((r) => setTimeout(r, delay));
           delay = Math.min(delay * 2, 5_000);

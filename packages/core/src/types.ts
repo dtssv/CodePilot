@@ -310,6 +310,26 @@ export type AgentMode = "chat" | "plan" | "agent";
 
 export type PermissionMode = "ask" | "auto-edit" | "yolo";
 
+/** Named permission presets: a single knob that bundles a permission mode with
+ * a sandbox mode, so a user can switch overall posture in one step instead of
+ * configuring the two dimensions separately. */
+export type PermissionPresetName = "safe" | "standard" | "full-access";
+
+/** The (permissionMode, sandboxMode) each preset applies. Sandbox values match
+ * `ResolvedSandbox["mode"]`. Kept as data so clients can render a picker and
+ * the session can apply a preset through its existing live switches. */
+export const PERMISSION_PRESETS: Record<
+  PermissionPresetName,
+  { permissionMode: PermissionMode; sandbox: "off" | "workspace-write" | "read-only"; description: string }
+> = {
+  // Read-only sandbox + prompt for everything: inspect a repo without risk.
+  safe: { permissionMode: "ask", sandbox: "read-only", description: "read-only sandbox, prompt for every tool" },
+  // The default balance: writes confined to the workspace, prompt for writes.
+  standard: { permissionMode: "auto-edit", sandbox: "workspace-write", description: "workspace-write sandbox, auto-approve edits" },
+  // No sandbox, never prompt: trusted, unattended runs.
+  "full-access": { permissionMode: "yolo", sandbox: "off", description: "no sandbox, never prompt (trusted/unattended)" },
+};
+
 /**
  * Sandbox policy for shell commands and file tools.
  *
@@ -389,7 +409,14 @@ export interface PermissionRequest {
   sandboxExpand?: { path: string };
 }
 
-export type PermissionDecision = "allow" | "deny" | "always";
+/**
+ * A permission decision from the host.
+ *
+ * - `always` grants for the rest of THIS session (in-memory rule, not persisted).
+ * - `always-project` additionally persists the (narrowed) rule to the project
+ *   config (`.codepilot/config.json`), so it auto-applies in future sessions.
+ */
+export type PermissionDecision = "allow" | "deny" | "always" | "always-project";
 
 /**
  * What a host's permission handler may return. Either a plain
@@ -649,6 +676,20 @@ export interface CodepilotConfig {
   * positive number for headless/CI cost bounds.
    */
   maxTurns?: number;
+ /** Soft convergence ceiling that applies even when `maxTurns` is unlimited.
+  * After this many assistant↔tool round trips the loop winds down — it urges
+  * synthesis and hard-disables tool calls for the final turn so the model must
+  * answer from what it already has instead of looping (e.g. a weak model that
+  * keeps re-verifying with slightly different commands, which the exact-match
+  * doom-loop guard can't catch). Unset = a built-in default; `0` disables it.
+  */
+  convergenceCap?: number;
+ /** Per-model tool-exposure downgrade. Each rule hides `drop` tools from any
+  * model whose id glob-matches an entry in `models`. Applied after mode
+  * filtering, so it can only remove tools. Lets a deployment keep the complex
+  * tools (e.g. `code_mode`, `apply_patch`) away from models that serialize
+  * them poorly, without affecting stronger models. Unset = no downgrade. */
+  toolExposure?: { models: string[]; drop: string[] }[];
  /** How many times a turn whose stream failed transiently (dropped
  * connection, overloaded gateway) is regenerated before giving up.
  * Default 2; 0 disables. */
@@ -710,13 +751,6 @@ export interface CodepilotConfig {
    * - `"throw"` — fail the turn loudly (CI/tests)
    */
   consistencyCheck?: "off" | "warn" | "throw";
-  /**
-   * Execution-reliability guard: scan the final answer for `path:line`
-   * citations that were never backed by a read/grep this session.
-   * - `"notice"` — inject a system notice listing unverified citations (default)
-   * - `"off"` — disabled
-   */
-  citationGuard?: "off" | "notice";
  /** When true, command hooks run under the same OS sandbox as `bash`
   * (Seatbelt / bwrap) instead of at full host trust. Opt-in; default off. */
   hookSandbox?: boolean;

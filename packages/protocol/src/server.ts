@@ -3509,7 +3509,8 @@ async function handleShutdown(
  * global uniqueness across concurrent sessions; the client echoes it back
  * unchanged in `permission/respond` and `handlePermissionRespond` matches on
  * that exact string. The returned decision is what core expects
- * (`allow | deny | always`) — the core-level requestId is opaque to the wire.
+ * (`allow | deny | always | always-project`) — the core-level requestId is
+ * opaque to the wire.
  */
 async function requestPermissionFromClient(
   ctx: ServerContext,

@@ -182,6 +182,16 @@ export function initialState(opts: {
   };
 }
 
+/** The collaboration-mode cycle for Shift+Tab, mirroring the other clients'
+ * mode switch. Advances Agent → Plan → Ask → Agent. */
+export const AGENT_MODE_CYCLE: readonly AgentMode[] = ["agent", "plan", "chat"];
+
+/** Next collaboration mode in the Shift+Tab cycle. */
+export function nextAgentMode(mode: AgentMode): AgentMode {
+  const i = AGENT_MODE_CYCLE.indexOf(mode);
+  return AGENT_MODE_CYCLE[(i + 1) % AGENT_MODE_CYCLE.length] ?? "agent";
+}
+
 /** Sum two usage records into a new object. */
 export function addUsage(a: UsageInfo, b: UsageInfo): UsageInfo {
   const out: UsageInfo = {
