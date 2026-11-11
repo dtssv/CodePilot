@@ -1078,12 +1078,19 @@ export class Session {
               : e.mode;
             await this.setAgentMode(target);
           }
- // Track files touched by write/edit/apply_patch for snapshot rewind.
+ // Track files touched by write/edit/apply_patch/notebook_edit for snapshot
+ // rewind.
           if (e.type === "tool_call") {
             const t = e as { type: "tool_call"; name: string; input: unknown };
-            if (t.name === "write_file" || t.name === "edit_file" || t.name === "apply_patch") {
+            if (
+              t.name === "write_file" ||
+              t.name === "edit_file" ||
+              t.name === "apply_patch" ||
+              t.name === "notebook_edit"
+            ) {
               const inp = t.input as Record<string, unknown> | undefined;
-              const path = inp?.path;
+              // notebook_edit names its target `notebook_path`; the others `path`.
+              const path = t.name === "notebook_edit" ? inp?.notebook_path : inp?.path;
               if (typeof path === "string") {
                 this.touchedFiles.add(path);
                 this.turnTouchedFiles.add(path);

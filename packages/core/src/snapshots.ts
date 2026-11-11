@@ -6,10 +6,11 @@
 // files the agent touches, on-demand, keyed by a checkpoint id.
 //
 // Lifecycle:
-// - `createSnapshot(cwd, label)` — records the current content of every
-// file that has been touched so far in the session, returns an id.
-// - `recordFileTouch(cwd, path, contentBefore)` — called by edit/write
-// tools BEFORE they write, so the snapshot stores the pre-edit state.
+// - `createSnapshot(cwd, label)` — reads the CURRENT on-disk content of every
+// file touched so far in the session (the session tracks touched paths and
+// passes them in) and stores it, returning an id. The pre-edit state is
+// captured because a snapshot is taken at a checkpoint boundary, before the
+// next batch of edits.
 // - `rewindToSnapshot(cwd, id)` — restores every tracked file to its
 // state at snapshot creation time. Files created after the snapshot
 // are deleted; files deleted after are restored.
