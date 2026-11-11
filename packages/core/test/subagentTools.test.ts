@@ -35,4 +35,21 @@ describe("buildSubagentToolRegistry", () => {
       }
     }
   });
+
+  it("includes read-only lsp_navigate for every type when a manager is wired", () => {
+    const lsp = { getManager: () => null, getCwd: () => "/work" };
+    for (const type of ["explore", "worker"] as const) {
+      const names = new Set(buildSubagentToolRegistry(type, lsp).all().map((t) => t.name));
+      expect(names.has("lsp_navigate")).toBe(true);
+      // The host-backed diagnostics tool is never granted to sub-agents.
+      expect(names.has("diagnostics")).toBe(false);
+    }
+  });
+
+  it("omits lsp_navigate when no language-server manager is wired", () => {
+    for (const type of ["explore", "worker"] as const) {
+      const names = new Set(buildSubagentToolRegistry(type).all().map((t) => t.name));
+      expect(names.has("lsp_navigate")).toBe(false);
+    }
+  });
 });

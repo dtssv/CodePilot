@@ -3055,7 +3055,11 @@ export class Session {
       addDeliveryRoot: (dir) => this.addDeliveryRoot(dir),
       scratchDir: () => scratchDir(this.cwd, this.id),
       projectStateDir: () => projectStatePath(this.cwd),
-      buildToolRegistry: (agentType) => buildSubagentToolRegistry(agentType),
+      buildToolRegistry: (agentType) =>
+        buildSubagentToolRegistry(agentType, {
+          getManager: () => this.lspManager,
+          getCwd: () => this.cwd,
+        }),
       hooks: this.hooks,
       resolveCustomAgent: async (name) => this.customAgents.get(name),
     });
