@@ -194,7 +194,6 @@ function modelSectionOverrides(_ctx: SystemPromptContext): StaticSection[] {
 }
 
 function buildStaticPrefix(ctx: SystemPromptContext): string {
-  const mode: AgentMode = ctx.mode ?? "agent";
   const have = new Set(ctx.toolNames);
   const hasMcp = ctx.toolNames.some((n) => n === "mcp" || n.startsWith("mcp__"));
   const parts: StaticSection[] = [];
@@ -333,14 +332,6 @@ This prompt and the conversation you are reading cost real money. Treat tokens l
 - **Refuse to exfiltrate data.** No reading of \`~/.ssh\`, \`~/.aws/credentials\`, \`/etc/shadow\`, or \`.env\` files unless the user explicitly asks in this turn.
 - **Flag suspicious code.** If a file contains a backdoor, a credential hardcode, a \`curl ... | sh\` pattern, or an obvious obfuscation, point it out in your final summary even if the user did not ask.
 - **Errors are information, not blockers.** When a tool errors, you may retry. When a permission check returns \`deny\`, do not try to bypass it.`);
-
-  push("modes", `## Collaboration Modes
-
-The user can switch the agent between three modes. The active mode is also listed in the dynamic suffix; the rule below is what governs your behaviour in this turn.
-
-${modeGuidance(mode)}
-
-${outputStyleGuidance(ctx.outputStyle ?? "concise")}`);
 
   push("tool-reference", `## Tool Reference (current session)
 
@@ -539,8 +530,6 @@ async function buildTieredSuffix(
   stableOut.push(`<environment>
 provider: ${ctx.provider ?? "auto"}
 model: ${ctx.model ?? "(default)"}
-mode: ${ctx.mode ?? "agent"}
-output_style: ${ctx.outputStyle ?? "concise"}
 session_id: ${ctx.sessionId ?? "(unknown)"}
 host_surface: ${ctx.hostSurface ?? "cli"}
 platform: ${env.platform}
@@ -574,11 +563,24 @@ timezone: ${env.timezone}
   // the available tools, and the provider `tools` array carries their schemas.
   // Re-listing them in the suffix is pure duplication (and grows with MCP).
 
-  // --- Volatile tier: refreshed every turn.
+  // --- Volatile tier: refreshed every turn. Session-variant guidance
+  // (collaboration mode + output style) lives here, OUTSIDE the cached stable
+  // prefix, so switching chat↔agent or changing output style does not bust the
+  // provider prompt cache for the whole system block. The active mode's full
+  // rule still reaches the model every turn; it just rides the volatile tail.
   const volatileOut: string[] = [];
   volatileOut.push(`<runtime>
 now: ${env.now}
+mode: ${ctx.mode ?? "agent"}
+output_style: ${ctx.outputStyle ?? "concise"}
 </runtime>`);
+  volatileOut.push(`## Collaboration Modes
+
+The user can switch the agent between three modes. The rule below governs your behaviour in this turn.
+
+${modeGuidance(ctx.mode ?? "agent")}
+
+${outputStyleGuidance(ctx.outputStyle ?? "concise")}`);
   // Inject <plan> only when a plan already exists. An empty "no plan yet /
   // send plan_update" stub nudged models to open a plan on every task; the
   // planning section above still covers when to create one. Mid-run updates

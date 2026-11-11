@@ -96,11 +96,14 @@ describe("buildSystemPrompt static prefix", () => {
       "Token Efficiency",
       "Communication Style",
       "Safety and Security",
-      "Collaboration Modes",
       "Tool Reference",
     ]) {
       expect(out.staticPrefix).toContain(heading);
     }
+    // Collaboration Modes is session-variant: it rides the volatile tail so a
+    // mode switch does not bust the cached prefix.
+    expect(out.staticPrefix).not.toContain("Collaboration Modes");
+    expect(out.volatileSuffix).toContain("Collaboration Modes");
   });
 
   it("renders the capability-gated sections only when their tool is exposed", async () => {
@@ -188,9 +191,9 @@ describe("buildSystemPrompt mode paragraphs", () => {
       mode: "chat",
       toolNames: ["read_file"],
     });
-    expect(out.staticPrefix).toMatch(/Mode: `chat`/);
-    expect(out.staticPrefix).toMatch(/read-only/);
-    expect(out.staticPrefix).toMatch(/Do not modify the codebase/);
+    expect(out.volatileSuffix).toMatch(/Mode: `chat`/);
+    expect(out.volatileSuffix).toMatch(/read-only/);
+    expect(out.volatileSuffix).toMatch(/Do not modify the codebase/);
  // Tool list reflects filtered tools.
     expect(out.staticPrefix).toContain("`read_file`");
   });
@@ -201,26 +204,39 @@ describe("buildSystemPrompt mode paragraphs", () => {
       mode: "plan",
       toolNames: ["read_file", "plan_update"],
     });
-    expect(out.staticPrefix).toMatch(/Mode: `plan`/);
-    expect(out.staticPrefix).toMatch(/`plan_update`/);
-    expect(out.staticPrefix).toMatch(/read-only exploration/);
+    expect(out.volatileSuffix).toMatch(/Mode: `plan`/);
+    expect(out.volatileSuffix).toMatch(/`plan_update`/);
+    expect(out.volatileSuffix).toMatch(/read-only exploration/);
   });
 
   it("agent mode adds the full-autonomy guidance", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, mode: "agent", toolNames: ["bash"] });
-    expect(out.staticPrefix).toMatch(/Mode: `agent`/);
-    expect(out.staticPrefix).toMatch(/Principle of least surprise/);
+    expect(out.volatileSuffix).toMatch(/Mode: `agent`/);
+    expect(out.volatileSuffix).toMatch(/Principle of least surprise/);
   });
 
   it("defaults to agent when omitted", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Mode: `agent`/);
+    expect(out.volatileSuffix).toMatch(/Mode: `agent`/);
   });
 
-  it("the mode paragraph is part of the static prefix (cache-friendly)", async () => {
+  it("the mode paragraph rides the volatile tail, not the cached prefix", async () => {
+    // Switching mode must NOT change the cached byte prefix: the active mode's
+    // guidance lives in the volatile suffix, outside staticPrefix/stableContext.
     const out = await buildSystemPrompt({ ...baseCtx, mode: "plan" });
-    expect(out.staticPrefix).toMatch(/Mode: `plan`/);
-    expect(out.dynamicSuffix).not.toMatch(/Mode: `plan`/);
+    expect(out.volatileSuffix).toMatch(/Mode: `plan`/);
+    expect(out.staticPrefix).not.toMatch(/Mode: `plan`/);
+    expect(out.stableContext).not.toMatch(/Mode: `plan`/);
+  });
+
+  it("changing mode leaves the cached prefix byte-identical", async () => {
+    const chat = await buildSystemPrompt({ ...baseCtx, mode: "chat", toolNames: ["read_file"] });
+    const agent = await buildSystemPrompt({ ...baseCtx, mode: "agent", toolNames: ["read_file"] });
+    // Same tool set, different mode → staticPrefix + stableContext unchanged.
+    expect(agent.staticPrefix).toBe(chat.staticPrefix);
+    expect(agent.stableContext).toBe(chat.stableContext);
+    // The volatile tail differs (it carries the active mode).
+    expect(agent.volatileSuffix).not.toBe(chat.volatileSuffix);
   });
 });
 
