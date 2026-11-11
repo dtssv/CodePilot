@@ -10,6 +10,7 @@
 // - opens native diff tabs for file edits (taps the relayed events).
 
 import * as vscode from "vscode";
+import { isAbsolute, join } from "node:path";
 
 import { SettingsStore, StatusBar, modeLabel } from "./config.js";
 import { CompletionProvider } from "./completion.js";
@@ -49,6 +50,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
       onUsage: (usage) => statusBar.addUsage(usage),
     }),
+  );
+
+  // The `diagnostics` tool asks the host for language-server diagnostics. Only
+  // the extension host can read `vscode.languages` (the webview is sandboxed),
+  // so the host answers this reverse request directly and it is never relayed to
+  // the webview.
+  engine.onReverseRequest("diagnostics/request", async (params) =>
+    collectDiagnostics(params as { path?: string }, cwd()),
   );
 
   view = new ChatViewProvider(context, {
@@ -204,6 +213,75 @@ async function promptOnActiveFile(task: string): Promise<void> {
     : "";
   await focusView();
   view?.prompt(`${task}\n\nFile: @${rel}${diag}`, true);
+}
+
+/* ---------------- diagnostics (reverse request) ---------------- */
+
+/** Wire diagnostic shape (mirrors @codepilot/core's Diagnostic). */
+interface WireDiagnostic {
+  line: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+  source?: string;
+  code?: string | number;
+}
+
+/** Map a VS Code diagnostic severity (0=Error … 3=Hint) to the wire enum. */
+function severityName(s: vscode.DiagnosticSeverity): WireDiagnostic["severity"] {
+  switch (s) {
+    case vscode.DiagnosticSeverity.Error:
+      return "error";
+    case vscode.DiagnosticSeverity.Warning:
+      return "warning";
+    case vscode.DiagnosticSeverity.Information:
+      return "info";
+    default:
+      return "hint";
+  }
+}
+
+function toWireDiagnostic(d: vscode.Diagnostic): WireDiagnostic {
+  const code =
+    typeof d.code === "object" && d.code !== null
+      ? (d.code.value as string | number)
+      : (d.code as string | number | undefined);
+  return {
+    line: d.range.start.line + 1,
+    column: d.range.start.character + 1,
+    endLine: d.range.end.line + 1,
+    endColumn: d.range.end.character + 1,
+    severity: severityName(d.severity),
+    message: d.message,
+    ...(d.source ? { source: d.source } : {}),
+    ...(code !== undefined ? { code } : {}),
+  };
+}
+
+/** Answer a `diagnostics/request` from `vscode.languages`. A `path` (relative to
+ * the workspace or absolute) returns that file's diagnostics; otherwise every
+ * file with diagnostics in the workspace. */
+function collectDiagnostics(
+  params: { path?: string },
+  cwd: string,
+): { diagnostics?: WireDiagnostic[]; files?: { path: string; diagnostics: WireDiagnostic[] }[] } {
+  if (params.path) {
+    const uri = isAbsolute(params.path)
+      ? vscode.Uri.file(params.path)
+      : vscode.Uri.file(join(cwd, params.path));
+    return { diagnostics: vscode.languages.getDiagnostics(uri).map(toWireDiagnostic) };
+  }
+  const files: { path: string; diagnostics: WireDiagnostic[] }[] = [];
+  for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+    if (diags.length === 0) continue;
+    files.push({
+      path: vscode.workspace.asRelativePath(uri),
+      diagnostics: diags.map(toWireDiagnostic),
+    });
+  }
+  return { files };
 }
 
 /* ---------------- engine events (tapped) ---------------- */

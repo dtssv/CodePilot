@@ -297,6 +297,20 @@ class CodepilotClient(
         writeChannel.trySend(gson.toJson(frame))
     }
 
+ /**
+  * Reply to a server-initiated reverse request with a non-empty `result`
+  * (the inline-reply form). Used for `diagnostics/request`, which the server
+  * answers from the request's own result rather than a separate `* /respond`.
+  */
+    fun replyServerRequest(id: Long, result: JsonObject) {
+        val frame = JsonObject().apply {
+            addProperty("jsonrpc", "2.0")
+            addProperty("id", id)
+            add("result", result)
+        }
+        writeChannel.trySend(gson.toJson(frame))
+    }
+
     fun forkSession(sessionId: String, atEventIndex: Int? = null): String {
         val args = JsonObject().apply {
             addProperty("sessionId", sessionId)

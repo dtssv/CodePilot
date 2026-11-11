@@ -36,6 +36,7 @@ import {
   type QuestionAnswers,
   type AgentMode,
   type ImageAttachment,
+  type DiagnosticsProvider,
   ReplayProvider,
 } from "@codepilot/core";
 import { randomUUID } from "node:crypto";
@@ -62,6 +63,11 @@ export interface AgentCreateOptions {
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
  /** Structured question handler (for ask_user_question / plan_done). */
   onAskUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
+ /** Language-server diagnostics provider for the `diagnostics` tool. When unset
+  * the tool reports that no LSP is connected and suggests running the checker
+  * via `bash`. Supply one (e.g. backed by an embedded LSP) to return real
+  * diagnostics on demand. */
+  diagnosticsProvider?: DiagnosticsProvider;
  /** Skip loading config files (use only `config` option). */
   noConfigFiles?: boolean;
  /** Replay mode: path to a transcript JSONL for keyless testing. */
@@ -140,6 +146,7 @@ export class Agent {
       hostSurface: "cli",
       onPermissionRequest: opts.onPermissionRequest ?? defaultPermissionHandler,
       onAskUser: opts.onAskUser,
+      diagnosticsProvider: opts.diagnosticsProvider,
       provider: provider,
     });
 

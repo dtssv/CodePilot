@@ -1,10 +1,17 @@
 package com.codepilot.idea
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
+import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.editor.Document
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
@@ -310,6 +317,18 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
                     val answers = askUserQuestions(msg.params.getAsJsonArray("questions"))
                     client?.respondQuestion(requestId, answers)
                 }
+            }
+            "diagnostics/request" -> {
+                // Inline reply (not ack + respond): the server reads the result
+                // of this very request. Always reply, even on failure, or the
+                // server-side promise leaks.
+                val path = msg.params.get("path")?.takeIf { !it.isJsonNull }?.asString
+                val result = try {
+                    collectDiagnostics(path)
+                } catch (e: Throwable) {
+                    JsonObject().apply { addProperty("unavailable", true) }
+                }
+                client?.replyServerRequest(msg.id, result)
             }
             else -> {
                 appendSystem("Unhandled server request: ${msg.method}")
@@ -660,6 +679,87 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
             val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(abs) ?: return@invokeLater
             OpenFileDescriptor(project, vf, ((line ?: 1) - 1).coerceAtLeast(0), 0).navigate(true)
         }
+    }
+
+  /**
+   * Answer a `diagnostics/request` from the IDE's code analyzer. A `path`
+   * (workspace-relative or absolute) returns that file's diagnostics; omitting
+   * it returns diagnostics for every open document. Severities map to the wire
+   * enum (error/warning/info/hint). Runs inside a read action.
+   */
+    private fun collectDiagnostics(path: String?): JsonObject {
+        val cwd = project.basePath ?: System.getProperty("user.dir") ?: "."
+        return ReadAction.compute<JsonObject, RuntimeException> {
+            val result = JsonObject()
+            if (path != null) {
+                val abs = if (File(path).isAbsolute) path else File(cwd, path).path
+                val vf = LocalFileSystem.getInstance().refreshAndFindFileByPath(abs)
+                val arr = JsonArray()
+                if (vf != null) {
+                    val doc = FileDocumentManager.getInstance().getDocument(vf)
+                    if (doc != null) for (d in diagnosticsForDocument(doc)) arr.add(d)
+                }
+                result.add("diagnostics", arr)
+            } else {
+                val files = JsonArray()
+                for (vf in openDocumentFiles()) {
+                    val doc = FileDocumentManager.getInstance().getDocument(vf) ?: continue
+                    val diags = diagnosticsForDocument(doc)
+                    if (diags.isEmpty) continue
+                    val entry = JsonObject()
+                    val rel = vf.path.removePrefix("$cwd/")
+                    entry.addProperty("path", rel)
+                    entry.add("diagnostics", diags)
+                    files.add(entry)
+                }
+                result.add("files", files)
+            }
+            result
+        }
+    }
+
+ /** Files currently open in an editor (best-effort workspace set). */
+    private fun openDocumentFiles(): Set<VirtualFile> {
+        return com.intellij.openapi.fileEditor.FileEditorManager
+            .getInstance(project)
+            .openFiles
+            .toSet()
+    }
+
+ /** Highlights for one document as wire diagnostic objects. */
+    private fun diagnosticsForDocument(doc: Document): JsonArray {
+        val arr = JsonArray()
+        DaemonCodeAnalyzerImpl.processHighlights(
+            doc,
+            project,
+            HighlightSeverity.INFORMATION,
+            0,
+            doc.textLength,
+        ) { info ->
+            val sev = when {
+                info.severity >= HighlightSeverity.ERROR -> "error"
+                info.severity >= HighlightSeverity.WARNING -> "warning"
+                info.severity >= HighlightSeverity.INFORMATION -> "info"
+                else -> "hint"
+            }
+            val description = info.description
+            if (description != null) {
+                val startLine = doc.getLineNumber(info.startOffset)
+                val startCol = info.startOffset - doc.getLineStartOffset(startLine)
+                val endLine = doc.getLineNumber(info.endOffset)
+                val endCol = info.endOffset - doc.getLineStartOffset(endLine)
+                val d = JsonObject()
+                d.addProperty("line", startLine + 1)
+                d.addProperty("column", startCol + 1)
+                d.addProperty("endLine", endLine + 1)
+                d.addProperty("endColumn", endCol + 1)
+                d.addProperty("severity", sev)
+                d.addProperty("message", description)
+                arr.add(d)
+            }
+            true
+        }
+        return arr
     }
 
  // ----- Event normalization from server `event` notifications -----

@@ -60,6 +60,14 @@ export class Engine extends EventEmitter {
     { resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
 
+  // Server→client requests the extension host answers itself (not the webview,
+  // which has no `vscode` API). Keyed by method name. The handler returns the
+  // JSON-RPC `result`; the line is answered here and NOT relayed to the webview.
+  private readonly reverseHandlers = new Map<
+    string,
+    (params: unknown) => Promise<unknown>
+  >();
+
   constructor(
     private readonly settings: () => CodepilotSettings,
     private readonly cwd: () => string,
@@ -120,6 +128,57 @@ export class Engine extends EventEmitter {
         done(() => reject(err instanceof Error ? err : new Error(String(err))));
       }
     });
+  }
+
+  /** Register a handler for a server→client request the extension host owns
+   * directly (e.g. `diagnostics/request`, answered from `vscode.languages`).
+   * Such a request is answered here and is NOT relayed to the webview. */
+  onReverseRequest(method: string, handler: (params: unknown) => Promise<unknown>): void {
+    this.reverseHandlers.set(method, handler);
+  }
+
+  /** Emit a relayed line to listeners, unless it is a server→client request for
+   * a method the host owns — then answer it directly and swallow it so the
+   * webview's client never sees (and can't double-answer) it. Returns true when
+   * the line was consumed. */
+  private emitLine(line: string): void {
+    if (this.reverseHandlers.size > 0 && line.includes('"method"') && line.includes('"id"')) {
+      let msg: { id?: unknown; method?: unknown; params?: unknown };
+      try {
+        msg = JSON.parse(line) as typeof msg;
+      } catch {
+        this.emit("line", line);
+        return;
+      }
+      const handler =
+        typeof msg.method === "string" ? this.reverseHandlers.get(msg.method) : undefined;
+      if (handler && msg.id !== undefined) {
+        const id = msg.id;
+        void handler(msg.params)
+          .then((result) => {
+            try {
+              this.write(JSON.stringify({ jsonrpc: "2.0", id, result }));
+            } catch {
+              /* engine gone — the server times out on its own */
+            }
+          })
+          .catch((err: unknown) => {
+            try {
+              this.write(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id,
+                  error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
+                }),
+              );
+            } catch {
+              /* engine gone */
+            }
+          });
+        return; // consumed — do not relay to the webview
+      }
+    }
+    this.emit("line", line);
   }
 
   private matchHostResponse(line: string): void {
@@ -294,7 +353,7 @@ export class Engine extends EventEmitter {
         if (isBinary) return;
         const text = typeof data === "string" ? data : Buffer.from(data as Buffer).toString("utf8");
         for (const line of text.split("\n")) {
-          if (line.trim()) this.emit("line", line.trim());
+          if (line.trim()) this.emitLine(line.trim());
         }
       });
       ws.on("error", (err) => {
@@ -319,7 +378,7 @@ export class Engine extends EventEmitter {
     while ((nl = this.buffer.indexOf("\n")) >= 0) {
       const line = this.buffer.slice(0, nl).trim();
       this.buffer = this.buffer.slice(nl + 1);
-      if (line) this.emit("line", line);
+      if (line) this.emitLine(line);
     }
   }
 }

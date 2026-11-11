@@ -21,6 +21,7 @@ class FakeSession {
   promptCalls: Array<{ text: string; images?: unknown }> = [];
   permissionHandler?: (req: unknown) => Promise<unknown>;
   askUserHandler?: (req: unknown) => Promise<unknown>;
+  diagnosticsProvider?: { forFile: (p: string) => Promise<unknown>; forWorkspace: () => Promise<unknown> };
   disposeCount = 0;
   model = "claude-sonnet-4-5";
   providerId: string | undefined = undefined;
@@ -103,6 +104,17 @@ class FakeSession {
   }
   async prompt(text: string, images?: unknown): Promise<void> {
     this.promptCalls.push({ text, images });
+    if (text === "diag" && this.diagnosticsProvider) {
+  // Exercise the diagnostics reverse-request path.
+      const diags = (await this.diagnosticsProvider.forFile("a.ts")) as unknown[];
+      this.emit({
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [{ type: "text", text: `diags=${JSON.stringify(diags)}` }],
+      });
+      return;
+    }
     if (text === "ask" && this.askUserHandler) {
  // Exercise the question reverse-request path.
       const req = {
@@ -234,6 +246,7 @@ vi.mock("@codepilot/core", async (importOriginal) => {
       }
       if (opts.onPermissionRequest) s.permissionHandler = opts.onPermissionRequest;
       if (opts.onAskUser) s.askUserHandler = opts.onAskUser;
+      if (opts.diagnosticsProvider) s.diagnosticsProvider = opts.diagnosticsProvider;
       return s;
     }),
     listSessions: vi.fn(async () =>
@@ -819,6 +832,68 @@ describe("server / protocol handlers", () => {
       .map((e) => e.event)
       .find((e) => e?.type === "message" && e.content?.[0]?.text?.includes("answers="));
     expect(final?.content?.[0]?.text).toContain('"confirm":"Yes"');
+  });
+
+  it("diagnostics/request round-trips LSP diagnostics via an inline reply", async () => {
+    registerServer(server, { defaultCwd: "/work", defaultPermissionMode: "ask" });
+
+    let sawDiag = false;
+    client.onRequest<{ sessionId: string; path?: string }, unknown>(
+      "diagnostics/request",
+      async ({ path }) => {
+        sawDiag = true;
+        expect(path).toBe("a.ts");
+        // Inline reply — no separate diagnostics/respond.
+        return {
+          diagnostics: [{ line: 7, severity: "error", message: "boom" }],
+        };
+      },
+    );
+
+    const events: Array<{ event?: { type: string; content?: Array<{ text?: string }> } }> = [];
+    client.onNotification("event", (params) => {
+      events.push(params as never);
+    });
+
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    await client.request("prompt/send", { sessionId, text: "diag" });
+    await settled();
+    expect(sawDiag).toBe(true);
+    const final = events
+      .map((e) => e.event)
+      .find((e) => e?.type === "message" && e.content?.[0]?.text?.includes("diags="));
+    expect(final?.content?.[0]?.text).toContain('"message":"boom"');
+  });
+
+  it("diagnostics provider yields an empty set when the host does not handle the request", async () => {
+    registerServer(server, { defaultCwd: "/work", defaultPermissionMode: "ask" });
+    // No diagnostics/request handler registered → the reverse request rejects
+    // (method not found); the bridge catches it and the provider returns [].
+
+    const events: Array<{ event?: { type: string; content?: Array<{ text?: string }> } }> = [];
+    client.onNotification("event", (params) => {
+      events.push(params as never);
+    });
+
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    await client.request("prompt/send", { sessionId, text: "diag" });
+    await settled();
+    const final = events
+      .map((e) => e.event)
+      .find((e) => e?.type === "message" && e.content?.[0]?.text?.includes("diags="));
+    expect(final?.content?.[0]?.text).toContain("diags=[]");
   });
 
   it("commands/list returns shared built-in commands for the /menu", async () => {

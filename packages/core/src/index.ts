@@ -118,6 +118,8 @@ export type {
   EditOutcome,
   MemorySink,
   SubagentRunner,
+  Diagnostic,
+  DiagnosticsProvider,
 } from "./tools/index.js";
 
 // ---- Permissions ----

@@ -36,6 +36,8 @@ import type {
   PermissionRequest as CorePermissionRequest,
   QuestionAnswers,
   QuestionRequest as CoreQuestionRequest,
+  Diagnostic,
+  DiagnosticsProvider,
   Session,
   SessionSummary,
   UsageInfo,
@@ -504,6 +506,25 @@ export interface QuestionRequestParams {
 export interface PromptResolvedParams {
   sessionId: string;
   requestId: string;
+}
+
+/** Wire params for the reverse `diagnostics/request` the server sends to the
+ * client when the `diagnostics` tool runs. The host (an IDE with a language
+ * server) answers it inline; a host with no LSP replies `unavailable`. */
+export interface DiagnosticsRequestParams {
+  sessionId: string;
+ /** Omit for the whole workspace; present for a single file. */
+  path?: string;
+}
+
+/** Inline result the client returns for `diagnostics/request`. Exactly one of
+ * `diagnostics` (file request) / `files` (workspace request) is populated, or
+ * `unavailable: true` when the host has no language server — then the core tool
+ * prints its "not available, use bash" fallback. */
+export interface DiagnosticsRequestResult {
+  diagnostics?: Diagnostic[];
+  files?: { path: string; diagnostics: Diagnostic[] }[];
+  unavailable?: boolean;
 }
 
 // PROTOCOL_VERSION is defined in the dependency-free rpc module (so browser
@@ -1840,6 +1861,7 @@ async function handleSessionNew(
     onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
     onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
     onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
+    diagnosticsProvider: makeDiagnosticsProvider(ctx, () => session),
   });
   return registerSession(ctx, session);
 }
@@ -2447,6 +2469,7 @@ async function handleSessionResume(
       onAskUser: (req) => requestQuestionFromClient(ctx, session, req),
       onGoalRequest: (req) => recordPendingGoal(ctx, session.id, req),
       onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
+      diagnosticsProvider: makeDiagnosticsProvider(ctx, () => session),
     });
   } catch (err) {
     // Another live process holds the write lease. Surface the owner's attach
@@ -3786,6 +3809,38 @@ async function requestQuestionFromClient(
     live.prompts.set(params.requestId, p);
     for (const h of live.holders) sendPrompt(live, p, h);
   });
+}
+
+/**
+ * Bridge the core `DiagnosticsProvider` contract to a server-initiated
+ * `diagnostics/request`. Unlike permission/question (a user prompt broadcast to
+ * every holder, first answer wins), diagnostics is a direct data fetch from the
+ * one connection that owns the session, so it uses the request's inline reply
+ * rather than a separate `diagnostics/respond`. A host with no language server
+ * replies `unavailable` (or the request rejects, e.g. method-not-found on a
+ * client that doesn't handle it); either way the provider returns an empty set
+ * so the core tool prints its "not available, use bash" guidance.
+ */
+function makeDiagnosticsProvider(ctx: ServerContext, getSession: () => Session): DiagnosticsProvider {
+  const ask = (path?: string): Promise<DiagnosticsRequestResult> => {
+    const params: DiagnosticsRequestParams = {
+      sessionId: getSession().id,
+      ...(path ? { path } : {}),
+    };
+    return ctx.peer
+      .request<DiagnosticsRequestParams, DiagnosticsRequestResult>("diagnostics/request", params)
+      .catch(() => ({ unavailable: true }) as DiagnosticsRequestResult);
+  };
+  return {
+    async forFile(path) {
+      const res = await ask(path);
+      return res.unavailable ? [] : (res.diagnostics ?? []);
+    },
+    async forWorkspace() {
+      const res = await ask();
+      return res.unavailable ? [] : (res.files ?? []);
+    },
+  };
 }
 
 /**

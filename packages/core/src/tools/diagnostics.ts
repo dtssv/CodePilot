@@ -34,6 +34,12 @@ export interface DiagnosticsProvider {
   forWorkspace(): Promise<{ path: string; diagnostics: Diagnostic[] }[]>;
 }
 
+/** Output caps so a provider returning a large set can't flood the turn. The
+ * host may also cap its own results; these are a final safety bound here. */
+const MAX_FILE_ENTRIES = 100;
+const MAX_WORKSPACE_FILES = 50;
+const MAX_WORKSPACE_ENTRIES = 200;
+
 const schema = z.object({
   path: z
     .string()
@@ -89,28 +95,51 @@ export const diagnosticsTool: ToolDef<typeof schema> & {
           return { content: `no ${minSeverity}+ diagnostics in ${input.path}` };
         }
         const filePath = input.path;
-        return {
-          content: filtered
-            .map((d) => format(filePath, d))
-            .sort()
-            .join("\n"),
-        };
+        const rendered = filtered.map((d) => format(filePath, d)).sort();
+        const shown = rendered.slice(0, MAX_FILE_ENTRIES);
+        const omitted = rendered.length - shown.length;
+        const footer =
+          omitted > 0
+            ? `\n…and ${omitted} more (capped at ${MAX_FILE_ENTRIES}; raise the severity filter to narrow).`
+            : "";
+        return { content: shown.join("\n") + footer };
       }
       const groups = await provider.forWorkspace();
       const lines: string[] = [];
       let total = 0;
+      let files = 0;
+      let cappedFiles = false;
+      let cappedEntries = false;
       for (const g of groups) {
         const filtered = g.diagnostics.filter(
           (d) => order[d.severity] <= order[minSeverity]
         );
         if (filtered.length === 0) continue;
-        for (const d of filtered) lines.push(format(g.path, d));
-        total += filtered.length;
+        if (files >= MAX_WORKSPACE_FILES) {
+          cappedFiles = true;
+          break;
+        }
+        files += 1;
+        for (const d of filtered) {
+          total += 1;
+          if (lines.length >= MAX_WORKSPACE_ENTRIES) {
+            cappedEntries = true;
+            continue;
+          }
+          lines.push(format(g.path, d));
+        }
       }
       if (lines.length === 0) {
         return { content: `no ${minSeverity}+ diagnostics in workspace` };
       }
-      return { content: `${total} ${minSeverity}+ diagnostic(s):\n${lines.join("\n")}` };
+      let footer = "";
+      if (cappedFiles || cappedEntries) {
+        footer =
+          `\n…output capped (showing ${lines.length} of ${total}+ ${minSeverity}+ ` +
+          `diagnostics across up to ${MAX_WORKSPACE_FILES} files). Fetch a specific ` +
+          `file with \`path\`, or raise the severity filter.`;
+      }
+      return { content: `${total} ${minSeverity}+ diagnostic(s):\n${lines.join("\n")}${footer}` };
     } catch (err) {
       return {
         content: `failed to fetch diagnostics: ${(err as Error).message}`,

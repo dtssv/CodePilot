@@ -27,6 +27,8 @@ import type {
   InitializeResult,
   PermissionRequestParams,
   QuestionRequestParams,
+  DiagnosticsRequestParams,
+  DiagnosticsRequestResult,
   SessionResumeResult,
 } from "@codepilot/protocol";
 
@@ -91,6 +93,11 @@ export interface ClientCallbacks {
   onWorkspaceChanged?(params: WorkspaceChangedParams): void;
   /** MCP OAuth: open / show this authorization URL (loopback callback pending). */
   onMcpOauthRequired?(params: { name: string; url: string }): void;
+  /** The server's `diagnostics` tool asks the host for LSP diagnostics. A host
+   * with a language server returns them inline; a browser with none should
+   * return `{ unavailable: true }`. When this callback is absent the client
+   * replies `unavailable` so the tool falls back to its "use bash" guidance. */
+  onDiagnosticsRequest?(params: DiagnosticsRequestParams): Promise<DiagnosticsRequestResult>;
 }
 
 export interface WorkspaceChangedParams {
@@ -402,6 +409,18 @@ export class CodepilotClient {
           questions: p.questions,
         });
         return {};
+      },
+    );
+    peer.onRequest<DiagnosticsRequestParams, DiagnosticsRequestResult>(
+      "diagnostics/request",
+      async (p) => {
+        // Diagnostics reply inline (unlike permission/question). A browser has
+        // no language server, so without a host-provided callback we report it
+        // unavailable and let the tool fall back to running the checker in bash.
+        if (this.callbacks.onDiagnosticsRequest) {
+          return this.callbacks.onDiagnosticsRequest(p);
+        }
+        return { unavailable: true };
       },
     );
 
