@@ -1,10 +1,10 @@
 // Tests for web tool helpers (HTML→text, DDG parser) and bash background jobs.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { htmlToText } from "../src/tools/web_fetch.js";
+import { htmlToText, webFetchTool } from "../src/tools/web_fetch.js";
 import { parseBingHtml, parseDuckDuckGoHtml } from "../src/tools/web_search.js";
 import { bashTool, elideBinaryLines } from "../src/tools/bash.js";
 import { bashOutputTool } from "../src/tools/bash_output.js";
@@ -27,6 +27,125 @@ describe("htmlToText", () => {
 
   it("decodes entities and collapses whitespace", () => {
     expect(htmlToText("<p>a &amp; b&nbsp;&nbsp;c</p>")).toBe("a & b c");
+  });
+});
+
+describe("web_fetch domain policy + max_chars", () => {
+  let dir: string;
+  const artifacts = new Map<string, string>();
+  const ctx = (webFetch?: unknown): ToolContext =>
+    ({
+      cwd: dir,
+      artifact: async (blob: string | Uint8Array) => {
+        const ref = `art_${artifacts.size}`;
+        artifacts.set(ref, String(blob));
+        return ref;
+      },
+      readArtifact: async (ref: string) => artifacts.get(ref) ?? "",
+      sandbox: resolveSandbox({ mode: "off" }, dir),
+      ...(webFetch ? { config: { webFetch } as never } : {}),
+    }) as unknown as ToolContext;
+
+  // A fetch stub that returns a body of the given length as text/plain.
+  const stubFetch = (body: string, status = 200): void => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        url: "https://example.com/doc",
+        status,
+        headers: { get: (k: string) => (k === "content-type" ? "text/plain" : null) },
+        body: {
+          getReader() {
+            let done = false;
+            return {
+              async read() {
+                if (done) return { done: true, value: undefined };
+                done = true;
+                return { done: false, value: new TextEncoder().encode(body) };
+              },
+              async cancel() {},
+            };
+          },
+        },
+      })) as unknown as typeof fetch,
+    );
+  };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "wf-"));
+    artifacts.clear();
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("refuses a blocked domain (suffix match) before fetching", async () => {
+    const r = await webFetchTool.execute(
+      { url: "https://api.evil.com/x" },
+      ctx({ blockedDomains: ["evil.com"] }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/blocked by config/);
+  });
+
+  it("refuses a domain not on a non-empty allowlist", async () => {
+    const r = await webFetchTool.execute(
+      { url: "https://other.com/x" },
+      ctx({ allowedDomains: ["example.com"] }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/not on the configured allowedDomains/);
+  });
+
+  it("allows a domain (and sub-domain) on the allowlist", async () => {
+    stubFetch("hello");
+    const r = await webFetchTool.execute(
+      { url: "https://api.example.com/x", no_cache: true },
+      ctx({ allowedDomains: ["example.com"] }),
+    );
+    expect(r.isError).toBe(false);
+    expect(r.content).toContain("hello");
+  });
+
+  it("blocked overrides allowed", async () => {
+    const r = await webFetchTool.execute(
+      { url: "https://example.com/x" },
+      ctx({ allowedDomains: ["example.com"], blockedDomains: ["example.com"] }),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/blocked by config/);
+  });
+
+  it("allows any non-blocked domain when no allowlist is set (default)", async () => {
+    stubFetch("ok");
+    const r = await webFetchTool.execute(
+      { url: "https://anything.example.org/x", no_cache: true },
+      ctx(),
+    );
+    expect(r.isError).toBe(false);
+    expect(r.content).toContain("ok");
+  });
+
+  it("honours max_chars for the inline slice", async () => {
+    stubFetch("x".repeat(5000));
+    const r = await webFetchTool.execute(
+      { url: "https://example.com/doc", no_cache: true, max_chars: 1000 },
+      ctx(),
+    );
+    // Strip the "[HTTP 200]\n\n" header to measure just the body slice.
+    const body = r.content.split("\n\n").slice(1).join("\n\n");
+    expect(body.length).toBeLessThanOrEqual(1000);
+  });
+
+  it("spills a large page to an artifact regardless of max_chars", async () => {
+    stubFetch("y".repeat(200_000));
+    const r = await webFetchTool.execute(
+      { url: "https://example.com/doc", no_cache: true, max_chars: 500 },
+      ctx(),
+    );
+    expect(r.artifactRef).toBeTruthy();
+    expect(r.content).toMatch(/full content saved to artifact/);
   });
 });
 

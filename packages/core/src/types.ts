@@ -1080,12 +1080,11 @@ export interface StatusLineConfig {
 }
 
 export interface WebFetchConfig {
- /** Domains the agent may fetch without an interactive permission prompt.
- * Each entry is matched by suffix (e.g. `github.com` matches
- * `api.github.com` too). When omitted/empty, all domains are asked (the
- * pre-existing behaviour). */
+ /** Hard allowlist of fetchable domains, matched by suffix (e.g. `github.com`
+  * also matches `api.github.com`). When non-empty, a domain not on the list is
+  * refused. When omitted/empty, every non-blocked domain is allowed. */
   allowedDomains?: string[];
- /** Domains always denied (overrides allowedDomains). */
+ /** Domains always denied, matched by suffix (overrides allowedDomains). */
   blockedDomains?: string[];
  /** Cache TTL in minutes (default 15; set 0 to disable caching). */
   cacheTtlMinutes?: number;

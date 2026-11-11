@@ -5,11 +5,12 @@
 // entity decode, whitespace collapse). Large pages spill to an artifact.
 //
 // Two policy levers (driven by `config.webFetch`):
-// - **Per-domain allowlist/blocklist**: domains in `blockedDomains` are
-// always refused; domains in `allowedDomains` are fetched without an
-// interactive prompt (the permission engine still runs, but a matching
-// allow entry short-circuits it). Unlisted domains fall through to the
-// normal permission flow.
+// - **Per-domain allowlist/blocklist** (suffix match, e.g. `github.com` also
+// matches `api.github.com`): domains in `blockedDomains` are always refused.
+// When `allowedDomains` is non-empty it is a hard allowlist — a domain not on
+// it is refused. When `allowedDomains` is empty/absent, every (non-blocked)
+// domain is allowed. The OS sandbox's network policy governs child processes;
+// it does not gate this in-process fetch, so these lists are the control.
 // - **15-minute disk cache**: identical URLs within the TTL return the
 // cached text instead of re-fetching. Cache lives under
 // `~/.codepilot/projects/<hash>/cache/web_fetch/<hash>.json` and is shared across
@@ -114,8 +115,15 @@ async function pruneCache(cwd: string): Promise<void> {
   }
 }
 
-/** Check the per-domain allowlist/blocklist. Returns an error message when
- * the domain is blocked, or null when allowed. */
+/** True when `host` equals `domain` or is a sub-domain of it (suffix match). */
+function hostMatches(host: string, domain: string): boolean {
+  const dl = domain.toLowerCase();
+  return host === dl || host.endsWith("." + dl);
+}
+
+/** Check the per-domain allowlist/blocklist. Returns an error message when the
+ * domain is refused, or null when allowed. `blockedDomains` always wins; a
+ * non-empty `allowedDomains` is a hard allowlist (unlisted domains refused). */
 function domainGate(url: string, cfg?: WebFetchConfig): string | null {
   if (!cfg) return null;
   let host: string;
@@ -124,16 +132,15 @@ function domainGate(url: string, cfg?: WebFetchConfig): string | null {
   } catch {
     return `invalid URL: ${url}`;
   }
-  const blocked = cfg.blockedDomains ?? [];
-  for (const d of blocked) {
-    const dl = d.toLowerCase();
-    if (host === dl || host.endsWith("." + dl)) {
+  for (const d of cfg.blockedDomains ?? []) {
+    if (hostMatches(host, d)) {
       return `domain "${host}" is blocked by config (matched "${d}")`;
     }
   }
- // allowedDomains, when non-empty, is an allowlist. We don't hard-deny
- // unlisted domains here — that's the permission engine's job via an
- // interactive prompt. We only hard-deny blocked domains.
+  const allowed = cfg.allowedDomains ?? [];
+  if (allowed.length > 0 && !allowed.some((d) => hostMatches(host, d))) {
+    return `domain "${host}" is not on the configured allowedDomains list`;
+  }
   return null;
 }
 
@@ -158,7 +165,7 @@ export const webFetchTool: ToolDef<typeof schema> = {
     if (!input.no_cache) {
       const hit = await readCache(ctx.cwd, input.url, ttlMs);
       if (hit) {
-        return renderResult(hit.text, hit.status, hit.finalUrl, hit.url, ctx, true);
+        return renderResult(hit.text, hit.status, hit.finalUrl, hit.url, ctx, true, input.max_chars);
       }
     }
  // 3. Fetch.
@@ -210,7 +217,7 @@ export const webFetchTool: ToolDef<typeof schema> = {
         contentType,
         text,
       });
-      return renderResult(text, res.status, finalUrl, input.url, ctx, false);
+      return renderResult(text, res.status, finalUrl, input.url, ctx, false, input.max_chars);
     } catch (err) {
       const msg = (err as Error).name === "AbortError"
         ? `timed out after ${FETCH_TIMEOUT_MS}ms`
@@ -223,21 +230,24 @@ export const webFetchTool: ToolDef<typeof schema> = {
   },
 };
 
-/** Shared renderer for cached + fresh results. */
+/** Shared renderer for cached + fresh results. `maxChars` caps the inline slice
+ * (default 20_000); content over {@link ARTIFACT_THRESHOLD} always spills in
+ * full to an artifact regardless of the inline cap. */
 async function renderResult(
   text: string,
   status: number,
   finalUrl: string | undefined,
   url: string,
   ctx: { artifact: (b: string | Uint8Array, h?: string) => Promise<string> },
-  cached: boolean
+  cached: boolean,
+  maxChars?: number
 ): Promise<{ content: string; isError: boolean; artifactRef?: string }> {
-  const cap = 20_000;
+  const cap = maxChars ?? 20_000;
   let content = text.slice(0, cap);
   let artifactRef: string | undefined;
   if (text.length > ARTIFACT_THRESHOLD) {
     artifactRef = await ctx.artifact(text, `web_fetch:${url.slice(0, 80)}`);
-    content += `\n\n[${text.length - cap} more chars; full content saved to artifact ${artifactRef}]`;
+    content += `\n\n[${text.length - content.length} more chars; full content saved to artifact ${artifactRef}]`;
   }
   const finalUrlLine = finalUrl ? `\nfinal URL: ${finalUrl}` : "";
   const cacheTag = cached ? " (cached)" : "";
