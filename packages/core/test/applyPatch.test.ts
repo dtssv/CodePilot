@@ -3,6 +3,23 @@ import { parsePatch, pathsFromApplyPatch } from "../src/tools/apply_patch.js";
 import { PermissionEngine } from "../src/permissions.js";
 import { applyPatchTool } from "../src/tools/apply_patch.js";
 import { resolveSandbox } from "../src/sandbox.js";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileObservationStore } from "../src/fsObservation.js";
+import { readFileTool } from "../src/tools/read_file.js";
+import type { ToolContext } from "../src/tools/types.js";
+
+function patchCtx(dir: string, store: FileObservationStore): ToolContext {
+  return {
+    cwd: dir,
+    artifact: async () => "art_test",
+    readArtifact: async () => "",
+    observeFile: (p, s, h) => store.observe(p, s, h),
+    checkFileFresh: (p, s, h) => store.checkFresh(p, s, h),
+    reobserveFile: (p, s, h) => store.reobserveAfterWrite(p, s, h),
+  } as unknown as ToolContext;
+}
 
 const sampleWithoutEndFile = `*** Begin Patch
 *** Update File: /Users/zyf/workspace/web/test/src/vehicle.js
@@ -76,5 +93,71 @@ describe("apply_patch permissions", () => {
 + b
 *** End Patch`;
     expect(e.preflight(applyPatchTool, { patch })).toBe("ask");
+  });
+});
+
+describe("apply_patch Add File overwrite guard", () => {
+  it("creates a new file via Add File", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Add File: new.js
++const x = 1;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    expect(existsSync(join(dir, "new.js"))).toBe(true);
+    expect(readFileSync(join(dir, "new.js"), "utf-8")).toContain("const x = 1;");
+  });
+
+  it("refuses to overwrite an existing, unread file via Add File", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
+    const p = join(dir, "exists.js");
+    writeFileSync(p, "const original = true;\n");
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Add File: exists.js
++const clobbered = true;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/already exists/);
+    // File untouched.
+    expect(readFileSync(p, "utf-8")).toBe("const original = true;\n");
+  });
+
+  it("allows Add File to replace a file observed fresh this session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
+    const p = join(dir, "seen.js");
+    writeFileSync(p, "const original = 1;\n");
+    const store = new FileObservationStore();
+    const ctx = patchCtx(dir, store);
+    // Read it first → observed fresh.
+    await readFileTool.execute({ path: "seen.js" }, ctx);
+    const patch = `*** Begin Patch
+*** Add File: seen.js
++const replaced = 2;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toMatch(/replaced seen\.js/);
+    expect(readFileSync(p, "utf-8")).toContain("const replaced = 2;");
+  });
+
+  it("update behaviour is unchanged (read-before-write still enforced)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
+    const p = join(dir, "u.js");
+    writeFileSync(p, "a\n");
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: u.js
+@@
+-a
++b
+*** End Patch`;
+    // Not read first → update is refused.
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBe(true);
+    expect(readFileSync(p, "utf-8")).toBe("a\n");
   });
 });

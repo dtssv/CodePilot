@@ -253,7 +253,9 @@ export const applyPatchTool: ToolDef<typeof schema> = {
     "*** Update File: path — @@ hunks with ` `/`-`/`+` lines — *** End File\n" +
     "*** End Patch\n" +
     "`*** End File` may be omitted when the next file header or `*** End Patch` follows. " +
-    "Must have read updated files earlier; copy context/`-` lines without line-number prefixes.",
+    "Must have read updated files earlier; copy context/`-` lines without line-number prefixes. " +
+    "Add File only CREATES a new file — if the path already exists it is refused " +
+    "(read it and use Update File instead of blindly overwriting).",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
@@ -277,6 +279,9 @@ export const applyPatchTool: ToolDef<typeof schema> = {
 
  // 2. Read all files that will be updated (so we can roll back cleanly).
     const originals = new Map<string, string>();
+    // Add File targets that already existed but were observed fresh this session
+    // — allowed as a full replace, and reobserved after the write.
+    const existingAddTargets = new Set<string>();
     for (const op of ops) {
       if (op.kind === "update") {
         const p = resolve(ctx.cwd, op.path);
@@ -296,6 +301,41 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         // current content, so pass it for the content-equality fallback.
         const fresh = await guardFreshWrite(ctx, p, preStat, originals.get(op.path));
         if (fresh) return fresh;
+      } else if (op.kind === "add") {
+        // Add File is meant to CREATE a new file, not overwrite an existing one.
+        // If the target already exists, silently clobbering it would discard its
+        // contents based on no read. Allow it only when the file was observed
+        // this session and is still fresh (then it is a full replace, not a blind
+        // overwrite) — reusing the same observation graph as update. Otherwise
+        // refuse and point at Update / write_file.
+        const p = resolve(ctx.cwd, op.path);
+        if (existsSync(p)) {
+          let preStat: { mtimeMs: number; size: number } | null = null;
+          let current: string | null = null;
+          try {
+            const s = await stat(p);
+            preStat = { mtimeMs: s.mtimeMs, size: s.size };
+            current = await readFile(p, "utf-8");
+          } catch {
+            preStat = null;
+          }
+          const fresh =
+            current === null
+              ? ({ content: "", isError: true } as const)
+              : await guardFreshWrite(ctx, p, preStat, current);
+          if (fresh) {
+            return {
+              content:
+                `apply_patch: "Add File ${op.path}" targets a file that already exists. ` +
+                `Add File only creates new files. To change it, read it first and use an ` +
+                `Update File hunk (or write_file) so the edit is based on its current contents, ` +
+                `not a blind overwrite.`,
+              isError: true,
+            };
+          }
+          // Observed + fresh: treat as a full replace and reobserve after write.
+          existingAddTargets.add(op.path);
+        }
       }
     }
 
@@ -335,7 +375,23 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         const p = resolve(ctx.cwd, a.path);
         await mkdir(dirname(p), { recursive: true });
         await writeFile(p, a.content, "utf-8");
-        summary.push(`+ added ${a.path}`);
+        // A full replace of an observed-fresh file re-enters the observation
+        // graph so a later edit this session is not flagged stale against it.
+        if (existingAddTargets.has(a.path)) {
+          try {
+            const s = await stat(p);
+            ctx.reobserveFile?.(
+              p,
+              { mtimeMs: s.mtimeMs, size: s.size },
+              hashFileContent(Buffer.from(a.content, "utf-8")),
+            );
+          } catch {
+            /* best-effort */
+          }
+          summary.push(`~ replaced ${a.path}`);
+        } else {
+          summary.push(`+ added ${a.path}`);
+        }
       }
       for (const w of writes) {
         const p = resolve(ctx.cwd, w.path);
