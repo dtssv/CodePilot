@@ -2,7 +2,9 @@
 //
 // Zero-dependency: uses Node's global fetch. HTML is stripped to text with
 // a small, deterministic pipeline (drop script/style, tags → whitespace,
-// entity decode, whitespace collapse). Large pages spill to an artifact.
+// entity decode, whitespace collapse). A large page spills in full to an
+// artifact and the inline view keeps a head+tail window so a page's trailing
+// conclusion / footnotes survive.
 //
 // Two policy levers (driven by `config.webFetch`):
 // - **Per-domain allowlist/blocklist** (suffix match, e.g. `github.com` also
@@ -230,9 +232,11 @@ export const webFetchTool: ToolDef<typeof schema> = {
   },
 };
 
-/** Shared renderer for cached + fresh results. `maxChars` caps the inline slice
- * (default 20_000); content over {@link ARTIFACT_THRESHOLD} always spills in
- * full to an artifact regardless of the inline cap. */
+/** Shared renderer for cached + fresh results. `maxChars` bounds the inline
+ * budget (default 20_000). A page that fits is returned whole; a larger page
+ * spills in full to an artifact and the inline view keeps a head+tail window
+ * (so a document's trailing conclusion / footnotes survive, unlike a head-only
+ * truncation), with a gap marker pointing at the artifact for the middle. */
 async function renderResult(
   text: string,
   status: number,
@@ -243,11 +247,28 @@ async function renderResult(
   maxChars?: number
 ): Promise<{ content: string; isError: boolean; artifactRef?: string }> {
   const cap = maxChars ?? 20_000;
-  let content = text.slice(0, cap);
+  let content: string;
   let artifactRef: string | undefined;
-  if (text.length > ARTIFACT_THRESHOLD) {
+  // Spill when the body exceeds the inline budget OR the shared artifact
+  // threshold, so full text is always retrievable via read_artifact.
+  if (text.length > cap || text.length > ARTIFACT_THRESHOLD) {
     artifactRef = await ctx.artifact(text, `web_fetch:${url.slice(0, 80)}`);
-    content += `\n\n[${text.length - content.length} more chars; full content saved to artifact ${artifactRef}]`;
+    // Split the inline budget ~2/3 head, ~1/3 tail; the tail carries a page's
+    // conclusion / references that a head-only cut would drop.
+    const head = Math.max(1, Math.floor(cap * 0.67));
+    const tail = Math.max(0, cap - head);
+    const omitted = text.length - head - tail;
+    if (omitted <= 0) {
+      content = text; // budget already covers the whole body
+    } else {
+      content =
+        text.slice(0, head) +
+        `\n\n[... ${omitted.toLocaleString()} chars omitted; full content in artifact ${artifactRef} — ` +
+        `use read_artifact with startLine/maxLines for any slice ...]\n\n` +
+        (tail > 0 ? text.slice(text.length - tail) : "");
+    }
+  } else {
+    content = text;
   }
   const finalUrlLine = finalUrl ? `\nfinal URL: ${finalUrl}` : "";
   const cacheTag = cached ? " (cached)" : "";

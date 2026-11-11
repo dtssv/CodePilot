@@ -1,6 +1,8 @@
-// Unit tests for the shared artifact-spill helper. Several tools (bash,
-// grep, web_fetch, code_mode) rely on a single spill threshold + head+tail
-// shape; this pins the helper's contract so none of them can drift.
+// Unit tests for the shared artifact-spill helper. The tools that keep both
+// ends of their output (bash, code_mode) rely on this single spill threshold +
+// head+tail shape; this pins the helper's contract so they can't drift.
+// (grep keeps a head-only render; web_fetch keeps its own head+tail view
+// bounded by max_chars.)
 
 import { describe, it, expect } from "vitest";
 import { spillHeadTail, ARTIFACT_THRESHOLD } from "../src/tools/_shared.js";

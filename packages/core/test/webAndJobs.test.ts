@@ -127,25 +127,35 @@ describe("web_fetch domain policy + max_chars", () => {
     expect(r.content).toContain("ok");
   });
 
-  it("honours max_chars for the inline slice", async () => {
+  it("honours max_chars as the inline content budget (head+tail)", async () => {
     stubFetch("x".repeat(5000));
     const r = await webFetchTool.execute(
       { url: "https://example.com/doc", no_cache: true, max_chars: 1000 },
       ctx(),
     );
-    // Strip the "[HTTP 200]\n\n" header to measure just the body slice.
-    const body = r.content.split("\n\n").slice(1).join("\n\n");
-    expect(body.length).toBeLessThanOrEqual(1000);
+    // The kept body is a head window + a gap marker + a tail window. Everything
+    // outside the marker is the actual content and must stay within the budget.
+    const outsideMarker = r.content.replace(/\[\.\.\.[\s\S]*?\.\.\.\]/, "").trim();
+    // Drop the "[HTTP 200]" header line too.
+    const kept = outsideMarker.replace(/^\[HTTP \d+\][^\n]*\n*/, "").replace(/\s/g, "");
+    expect(kept.length).toBeLessThanOrEqual(1000);
+    expect(kept.length).toBeGreaterThan(500); // head+tail, not a tiny slice
   });
 
-  it("spills a large page to an artifact regardless of max_chars", async () => {
-    stubFetch("y".repeat(200_000));
+  it("spills a large page to an artifact with a head+tail inline view", async () => {
+    // Distinct head and tail markers so we can prove both survive the window.
+    const body = "HEAD_MARKER" + "y".repeat(200_000) + "TAIL_MARKER";
+    stubFetch(body);
     const r = await webFetchTool.execute(
-      { url: "https://example.com/doc", no_cache: true, max_chars: 500 },
+      { url: "https://example.com/doc", no_cache: true, max_chars: 2000 },
       ctx(),
     );
     expect(r.artifactRef).toBeTruthy();
-    expect(r.content).toMatch(/full content saved to artifact/);
+    expect(r.content).toContain("HEAD_MARKER");
+    expect(r.content).toContain("TAIL_MARKER"); // tail preserved, not head-only
+    expect(r.content).toMatch(/chars omitted; full content in artifact/);
+    // The full body is retrievable from the artifact.
+    expect(artifacts.get(r.artifactRef!)).toBe(body);
   });
 });
 
