@@ -195,6 +195,15 @@ const schema = z
           "branch you can review and merge. Requires a git repo; falls back to the " +
           "parent cwd with a note."
       ),
+    team_board: z
+      .boolean()
+      .optional()
+      .describe(
+        "Seed the shared task_board from the leader's assignments (one claimed task " +
+          "per member). Off by default. Turn on for a long team where members should " +
+          "coordinate mid-run via the existing task_board tool (claim / update / " +
+          "complete); leave off for a short team that just runs its assignments once."
+      ),
   })
   .refine(
     (v) => {
@@ -519,6 +528,7 @@ export const taskTool: ToolDef<typeof schema> & {
             members: input.team,
             merge_strategy: input.merge_strategy,
             shared_worktree: input.shared_worktree,
+            team_board: input.team_board,
           },
           {
             runner: this.runner,
@@ -527,6 +537,7 @@ export const taskTool: ToolDef<typeof schema> & {
             semaphore: sem,
             depth: currentDepth + 1,
             signal: ctx.signal,
+            projectStateDir: ctx.projectStateDir,
           }
         );
         return {

@@ -646,6 +646,50 @@ describe("runTeam", () => {
     }
   });
 
+  it("seeds the task board from assignments only when team_board is on", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "team-board-"));
+    try {
+      const { TaskBoard } = await import("../src/taskBoard.js");
+
+      // team_board OFF (default): no board file / no tasks.
+      const offRunner = fakeRunner({ fallback: "done" });
+      await runTeam(
+        {
+          objective: "g",
+          members: [
+            { role: "worker", name: "a", objective: "work a" },
+            { role: "worker", name: "b", objective: "work b" },
+          ],
+        },
+        { runner: offRunner, cwd: "/repo", projectStateDir: stateDir },
+      );
+      expect(await new TaskBoard(stateDir).list()).toEqual([]);
+
+      // team_board ON: one claimed task per doer.
+      const onRunner = fakeRunner({ fallback: "done" });
+      await runTeam(
+        {
+          objective: "g",
+          team_board: true,
+          members: [
+            { role: "worker", name: "a", objective: "work a" },
+            { role: "worker", name: "b", objective: "work b" },
+          ],
+        },
+        { runner: onRunner, cwd: "/repo", projectStateDir: stateDir },
+      );
+      const tasks = await new TaskBoard(stateDir).list();
+      expect(tasks).toHaveLength(2);
+      // Each task is pre-claimed by its member.
+      const byOwner = new Map(tasks.map((t) => [t.owner, t]));
+      expect(byOwner.get("a")?.status).toBe("claimed");
+      expect(byOwner.get("b")?.status).toBe("claimed");
+      expect(byOwner.get("a")?.title).toMatch(/^a: /);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("notes a shared worktree that could not be created", async () => {
     const runner = fakeRunner({ fallback: "done" });
     const result = await runTeam(

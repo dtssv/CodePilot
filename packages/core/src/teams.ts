@@ -92,6 +92,9 @@ export interface TeamSpec {
  /** Run every member in ONE linked git worktree instead of the parent cwd,
  * so a team that edits files leaves the user's working tree untouched. */
   shared_worktree?: boolean;
+  /** Seed the shared task_board from the leader's assignments (one claimed task
+ * per member) so members can coordinate mid-run. Off by default. */
+  team_board?: boolean;
 }
 
 export interface TeamMemberResult {
@@ -138,6 +141,8 @@ export interface TeamRunDeps {
  /** Nesting depth of the `task` call that created this team. */
   depth?: number;
   signal?: AbortSignal;
+  /** Project state dir for the shared task_board (team_board seeding). */
+  projectStateDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +489,31 @@ export async function runTeam(
       }
     } else if (needAssignment.length > 0) {
       for (const d of needAssignment) objectives.set(d.index, objective);
+    }
+
+    // --- optional task_board seeding ------------------------------------
+    // When team_board is on, seed the shared board with one task per doer,
+    // pre-claimed by that member, so a long team can coordinate mid-run via the
+    // existing task_board tool (claim / update / complete). Off by default:
+    // most short teams just run their assignments once and never need the board.
+    if (spec.team_board === true && deps.projectStateDir) {
+      const { TaskBoard } = await import("./taskBoard.js");
+      const board = new TaskBoard(deps.projectStateDir);
+      for (const d of doers) {
+        const title = `${d.name}: ${objectives.get(d.index) ?? objective}`.slice(0, 200);
+        const created = await board.create(title, d.member.objective?.trim() || undefined);
+        // Pre-claim for the assigned member so ownership is explicit; a worker
+        // can still update/complete it, or create further tasks, as it runs.
+        if (created.ok && created.task) {
+          await board.claim(created.task.id, d.name);
+        }
+      }
+      await emit({
+        from: "team",
+        to: "all",
+        kind: "status",
+        content: `seeded the task board with ${doers.length} task(s)`,
+      });
     }
 
  // --- members in parallel --------------------------------------------
