@@ -29,6 +29,8 @@ import {
   createWorktree,
   removeWorktree,
   worktreeDiffStat,
+  gitTouchedFiles,
+  resolveRepoRoot,
   type WorktreeHandle,
 } from "./worktree.js";
 
@@ -485,6 +487,21 @@ export async function runTeam(
     }
 
  // --- members in parallel --------------------------------------------
+    // Tool-agnostic git evidence: a file changed via bash/sed shows up in
+    // `git status` even though no write-tool call named it. We snapshot the
+    // worktree's dirty set before and after each member and attribute the delta
+    // to that member, so bash-only writes still feed conflict detection. Under
+    // parallelism the windows overlap, so attribution is conservative (it may
+    // over-report a shared file to both members — the safe direction for a
+    // conflict WARNING). No git / not a repo → tool-path evidence only, noted.
+    const memberRepoRoot = await resolveRepoRoot(memberCwd);
+    const gitEvidence = memberRepoRoot !== null;
+    if (!gitEvidence) {
+      notes.push(
+        "git evidence unavailable (members ran outside a git repo); conflict detection used " +
+          "write-tool paths only, so files changed via bash/sed may be under-reported",
+      );
+    }
     const results = await Promise.all(
       doers.map(async (d): Promise<TeamMemberResult> => {
         const memberObjective = objectives.get(d.index) ?? objective;
@@ -495,17 +512,26 @@ export async function runTeam(
             if (p) filesTouched.add(p);
           }
         };
+        const before = gitEvidence ? await gitTouchedFiles(memberCwd) : new Set<string>();
         await emit({
           from: "team",
           to: d.name,
           kind: "status",
           content: `started (${d.member.agent_type ?? d.member.role})`,
         });
+        const collectGitDelta = async (): Promise<void> => {
+          if (!gitEvidence) return;
+          const after = await gitTouchedFiles(memberCwd);
+          for (const f of after) {
+            if (!before.has(f)) filesTouched.add(f);
+          }
+        };
         try {
           const r = await runMember(
             deps,
             runSpec(d.member, d.name, memberObjective, memberCwd, onEvent),
           );
+          await collectGitDelta();
           await emit({
             from: d.name,
             to: hasLeader ? names[leaderIndex]! : "all",
@@ -522,6 +548,7 @@ export async function runTeam(
             filesTouched: [...filesTouched],
           };
         } catch (err) {
+          await collectGitDelta();
           const message = (err as Error).message;
           await emit({
             from: d.name,

@@ -331,7 +331,9 @@ describe("runTeam", () => {
     ]);
     expect(result.mergeStrategy).toBe("leader_summary");
     expect(result.summary).toBe("TEAM REPORT");
-    expect(result.notes).toEqual([]);
+    // The only note (if any) is the git-evidence-unavailable advisory, since
+    // "/repo" is not a git repo; no orchestration notes.
+    expect(result.notes.filter((n) => !/git evidence unavailable/.test(n))).toEqual([]);
 
  // Assignments are addressed to the right members.
     const assignments = teamMessages(events).filter((m) => m.kind === "assignment");
@@ -542,6 +544,64 @@ describe("runTeam", () => {
     );
     expect(held).toBe(0); // every permit released
     expect(track.max).toBe(2);
+  });
+
+  it("detects a conflict when two members change the same file via bash (git evidence)", async () => {
+    // A real git repo with a committed file both members will rewrite via a
+    // runner that writes directly (no write_file tool call — only git sees it).
+    const repo = mkdtempSync(join(tmpdir(), "team-git-"));
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+    const git = (args: string[]) =>
+      execFileSync("git", args, { cwd: repo, env, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      git(["init", "-q", "-b", "main"]);
+      git(["config", "user.name", "t"]);
+      git(["config", "user.email", "t@t"]);
+      writeFileSync(join(repo, "shared.txt"), "base\n");
+      git(["add", "shared.txt"]);
+      git(["commit", "-q", "-m", "init"]);
+
+      // A runner that, for each member, rewrites shared.txt — like a bash/sed
+      // edit. It emits NO write_file tool_call, so only git evidence catches it.
+      const runner: SubagentRunner & { calls: SubagentRunSpec[] } = {
+        calls: [],
+        async run(spec: SubagentRunSpec) {
+          this.calls.push(spec);
+          writeFileSync(join(repo, "shared.txt"), `edited by ${spec.objective}\n`);
+          return { conclusion: "done", steps: 1, ok: true };
+        },
+      };
+
+      const result = await runTeam(
+        {
+          objective: "g",
+          members: [
+            { role: "worker", name: "a", objective: "work a" },
+            { role: "worker", name: "b", objective: "work b" },
+          ],
+        },
+        { runner, cwd: repo },
+      );
+      // shared.txt was changed by both members → flagged as a conflict even
+      // though neither used a write tool.
+      const conflict = result.conflicts.find((c) => c.file === "shared.txt");
+      expect(conflict).toBeDefined();
+      expect(conflict!.members.sort()).toEqual(["a", "b"]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("notes when git evidence is unavailable (members outside a git repo)", async () => {
+    const runner = fakeRunner({ fallback: "done" });
+    const result = await runTeam(
+      {
+        objective: "g",
+        members: [{ role: "worker", name: "a", objective: "work a" }],
+      },
+      { runner, cwd: "/nonexistent-nogit-team-path" },
+    );
+    expect(result.notes.join(" ")).toMatch(/git evidence unavailable/);
   });
 
   it("passes the shared worktree path to each member so writes are re-anchored", async () => {

@@ -302,3 +302,34 @@ export async function isGitAvailable(cwd: string): Promise<boolean> {
   const root = await resolveRepoRoot(cwd);
   return root !== null;
 }
+
+/** The set of files with working-tree changes at `cwd` (staged, unstaged, or
+ * untracked), as repo-root-relative paths from `git status --porcelain`. This
+ * is tool-agnostic git evidence: a file changed via `bash`/`sed -i` shows up
+ * here even though no write-tool call named it. Returns an empty set when `cwd`
+ * is not a git repo or git fails (the caller then relies on tool-path evidence
+ * alone). */
+export async function gitTouchedFiles(cwd: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["status", "--porcelain", "--untracked-files=all"],
+      { cwd, timeout: GIT_TIMEOUT_MS }
+    );
+    for (const line of stdout.split("\n")) {
+      // Porcelain v1: "XY <path>" (or "XY <old> -> <new>" for renames).
+      const trimmed = line.replace(/\r$/, "");
+      if (trimmed.length < 4) continue;
+      let path = trimmed.slice(3).trim();
+      const arrow = path.indexOf(" -> ");
+      if (arrow >= 0) path = path.slice(arrow + 4).trim();
+      // Strip surrounding quotes git adds for paths with special chars.
+      if (path.startsWith('"') && path.endsWith('"')) path = path.slice(1, -1);
+      if (path.length > 0) out.add(path);
+    }
+  } catch {
+    /* not a git repo or git failed — tool-path evidence only */
+  }
+  return out;
+}
