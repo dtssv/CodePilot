@@ -22,6 +22,7 @@ import type {
   AgentMode,
   CodepilotConfig,
   Event,
+  InterruptedRunInfo,
   SessionOptions,
   SessionSummary,
 } from "./types.js";
@@ -787,6 +788,113 @@ async function listSessionsFullScan(
   filtered = filtered.filter((s) => s.messageCount > 0);
   filtered.sort((a, b) => b.updatedAt - a.updatedAt);
   return filtered;
+}
+
+/** A crash-suspended session found by {@link recoverSuspendedSessions}: its id,
+ * cwd, and the recovery outcome from sealing it. */
+export interface RecoveredSession {
+  id: string;
+  cwd: string;
+  recovery: InterruptedRunInfo;
+}
+
+/** Scan the sessions directory for sessions whose last status is in-flight
+ * (running / waiting_permission) — the de-facto crash-suspended marker — when
+ * the SQLite index is unavailable. Reads each JSONL fully but only extracts the
+ * last status + cwd; bounded by the number of sessions on disk. */
+async function suspendedSessionsFullScan(): Promise<
+  Array<{ id: string; cwd: string }>
+> {
+  let entries: string[];
+  try {
+    entries = await readdir(SESSIONS_DIR);
+  } catch {
+    return [];
+  }
+  const out: Array<{ id: string; cwd: string }> = [];
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    const id = name.slice(0, -6);
+    try {
+      const text = await readFile(join(SESSIONS_DIR, name), "utf-8");
+      let lastStatus: string | null = null;
+      let cwd = "(unknown)";
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line) as Event;
+          if (e.type === "status") lastStatus = e.status;
+          if (e.cwd) cwd = e.cwd;
+        } catch {
+          /* skip malformed line */
+        }
+      }
+      if (lastStatus === "running" || lastStatus === "waiting_permission") {
+        out.push({ id, cwd });
+      }
+    } catch {
+      /* unreadable → skip */
+    }
+  }
+  return out;
+}
+
+/**
+ * Boot-time crash-recovery sweep. Finds every session whose JSONL tail is an
+ * in-flight status — a run interrupted by a process crash or daemon kill — and
+ * seals each to a clean idle: any orphaned tool call gets a side-effect-safe
+ * `INTERRUPTED_RESULT`, a trailing `idle` status is appended, and the next
+ * prompt's system prompt carries a one-shot recovery instruction. Sealing
+ * happens as a side effect of loading the session (reconcileStaleStatus runs in
+ * init); we create, read the recovery outcome, and dispose each one.
+ *
+ * Default posture is seal-and-idle: this does NOT auto-re-enter the agent loop.
+ * A prior run's side-effecting tools may already have executed, so blind resume
+ * risks double execution; resumption is left to the host (or a future opt-in).
+ *
+ * Fail-soft: uses the SQLite index's `suspended()` fast path when available and
+ * falls back to a bounded full scan otherwise. Per-session errors are isolated
+ * so one bad session cannot abort the whole sweep. Returns what it recovered.
+ */
+export async function recoverSuspendedSessions(opts?: {
+  /** Config applied to each recovered session's load (model resolution, etc.).
+   * The recovery itself does not run the agent, so most config is irrelevant. */
+  config?: CodepilotConfig;
+}): Promise<RecoveredSession[]> {
+  await mkdir(SESSIONS_DIR, { recursive: true });
+  let candidates: Array<{ id: string; cwd: string }>;
+  const index = getSessionIndex();
+  if (index) {
+    try {
+      candidates = index.suspended().map((s) => ({ id: s.id, cwd: s.cwd }));
+    } catch {
+      candidates = await suspendedSessionsFullScan();
+    }
+  } else {
+    candidates = await suspendedSessionsFullScan();
+  }
+
+  const recovered: RecoveredSession[] = [];
+  for (const c of candidates) {
+    try {
+      const session = await createSession({
+        cwd: c.cwd && c.cwd !== "(unknown)" ? c.cwd : process.cwd(),
+        sessionId: c.id,
+        config: opts?.config,
+      });
+      try {
+        const recovery = session.getInterruptedRecovery();
+        // The index/scan can lag the on-disk truth (a session may have been
+        // cleanly idled since). Only report sessions the load actually sealed.
+        if (recovery) recovered.push({ id: c.id, cwd: c.cwd, recovery });
+      } finally {
+        await session.dispose();
+      }
+    } catch {
+      /* isolate per-session failure — keep sweeping the rest */
+    }
+  }
+  return recovered;
 }
 
 /**

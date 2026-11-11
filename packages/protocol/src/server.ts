@@ -2377,7 +2377,10 @@ async function handleSessionResume(
     retainSession(ctx, existing);
     attachSessionEvents(ctx, existing);
  // After the resume response, so the client has the session open first.
-    setImmediate(() => replayPrompts(ctx, existing.id));
+    setImmediate(() => {
+      replayPrompts(ctx, existing.id);
+      forwardInterruptedRecovery(ctx, existing);
+    });
     return { sessionId: existing.id, events: existing.getHistory() };
   }
   const cwd = ctx.defaultCwd;
@@ -2393,7 +2396,26 @@ async function handleSessionResume(
     onMcpOpenAuthUrl: makeMcpOpenAuthUrl(ctx),
   });
   registerSession(ctx, session);
+ // A session loaded from disk may have been sealed from a crash-interrupted
+ // run during init (reconcileStaleStatus) — before this client could subscribe.
+ // Forward the recovery advisory now that the client is attached.
+  setImmediate(() => forwardInterruptedRecovery(ctx, session));
   return { sessionId: session.id, events: session.getHistory() };
+}
+
+/** Push the one-shot crash-recovery advisory to the resuming client, if the
+ * session was sealed from an interrupted run when it loaded. The in-session
+ * `interrupted_run` event fires during init before any client subscribes, so
+ * we re-derive it from the session and deliver it as an `"event"` here. */
+function forwardInterruptedRecovery(ctx: ServerContext, session: Session): void {
+  // Guard: some session-like objects (test doubles) may not implement this.
+  if (typeof session.getInterruptedRecovery !== "function") return;
+  const recovery = session.getInterruptedRecovery();
+  if (!recovery) return;
+  ctx.peer.notify<EventParams>("event", {
+    sessionId: session.id,
+    event: { type: "interrupted_run", ...recovery },
+  });
 }
 
 /** Merge the session-supplied permission mode into config without overwriting other keys. */

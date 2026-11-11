@@ -68,6 +68,22 @@ export type ReasoningDelta = { type: "reasoning"; text: string };
 export type ToolInputJsonDelta = { type: "tool_input_json"; toolCallId: string; partialJson: string };
 export type MessageDelta = TextDelta | ReasoningDelta | ToolInputJsonDelta;
 
+/** Outcome of sealing a crash-interrupted run: which execution was cut off and
+ * how many orphaned tool calls were closed. Carried by the `interrupted_run`
+ * event and returned by the boot-time recovery sweep. */
+export interface InterruptedRunInfo {
+  sessionId: string;
+  /** The claim the interrupted run held, when one was recorded. */
+  claim?: {
+    executionId: string;
+    turn: number;
+    model: string;
+    startedAt: number;
+  };
+  /** How many orphaned tool calls were sealed during recovery. */
+  sealedToolCalls: number;
+}
+
 type EventBody =
   | {
       type: "message";
@@ -171,8 +187,38 @@ type EventBody =
   | {
       type: "status";
       status: "idle" | "running" | "waiting_permission" | "compacting";
+      /**
+       * Durable-execution claim, attached to the `running` status the Session
+       * writes atomically at the start of a real turn. Its presence in the tail
+       * of a session's JSONL after an unclean shutdown is the signal a crash
+       * recovery sweep keys off: the owning process is gone, so the run can
+       * never complete or be cancelled on its own. Cleared implicitly by the
+       * trailing `idle` status on a normal finish. Absent on the agent loop's
+       * per-step `running` heartbeats (only the opening claim carries it).
+       */
+      claim?: {
+        /** Unique id for this execution attempt (one per prompt/turn start). */
+        executionId: string;
+        /** 1-based turn/prompt counter within the session. */
+        turn: number;
+        /** Model id driving the run. */
+        model: string;
+        /** Fingerprint of the history the run started from (event count +
+         * last link id), so a resumer can tell the transcript apart. */
+        fingerprint: string;
+        /** Epoch ms when the claim was taken. */
+        startedAt: number;
+      };
     }
   | { type: "error"; message: string; recoverable: boolean }
+ /** A prior run for this session was interrupted (process crash / daemon kill)
+  * and has been sealed to a clean idle state by the crash-recovery sweep. The
+  * session is ready to accept a new prompt; this is an advisory the host can
+  * surface ("the previous run was interrupted — you can continue"). NOT
+  * persisted (it is derived from the recovery, not part of the transcript) and
+  * never sent to the model — the model gets its recovery context via the
+  * `<interrupted_run>` system-prompt block instead. */
+  | ({ type: "interrupted_run" } & InterruptedRunInfo)
  /** Transient failure being retried. Not persisted. When `discardMessageId`
  * is set, the partially streamed assistant message with that id was
  * thrown away and will be regenerated, together with the tool calls in

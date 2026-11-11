@@ -694,6 +694,19 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             notice: `Editing ${name} · ${ev.index + 1}/${ev.total}`,
           };
         }
+        case "interrupted_run": {
+ // A prior run for this session was interrupted (crash / daemon kill) and
+ // sealed to a clean idle. Advisory only — surface a notice so the user
+ // knows they can continue.
+          const sealed =
+            ev.sealedToolCalls > 0
+              ? ` (sealed ${ev.sealedToolCalls} tool call${ev.sealedToolCalls === 1 ? "" : "s"})`
+              : "";
+          return {
+            ...state,
+            notice: `Previous run was interrupted — you can continue${sealed}`,
+          };
+        }
         default:
           return state;
       }

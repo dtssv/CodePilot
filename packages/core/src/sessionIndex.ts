@@ -36,7 +36,7 @@ function readSidecar(dir: string, id: string, ext: string): string | null {
   }
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface IndexRow {
   id: string;
@@ -51,11 +51,27 @@ interface IndexRow {
   updated_at: number;
   mtime_ms: number;
   size_bytes: number;
+  /** The last `status` value in the JSONL: "running"/"waiting_permission"
+   * mark a session whose owning process never wrote a trailing idle — i.e. a
+   * crash-suspended run the recovery sweep must seal. */
+  last_status: string | null;
+}
+
+/** A crash-suspended session: its JSONL tail is an in-flight status, so a prior
+ * run was interrupted without a clean idle. Surfaced by {@link SessionIndex} so
+ * a boot sweep can seal+idle only these sessions instead of scanning every one. */
+export interface SuspendedSession {
+  id: string;
+  cwd: string;
+  lastStatus: string;
 }
 
 export interface SessionIndex {
   list(cwd?: string): RichSessionSummary[];
   search(query: string, opts?: { cwd?: string; limit?: number }): RichSessionSummary[];
+  /** Sessions whose last recorded status is in-flight (running /
+   * waiting_permission) — candidates for crash recovery. Reconciles first. */
+  suspended(): SuspendedSession[];
   close(): void;
 }
 
@@ -74,11 +90,13 @@ function parseSession(
   firstUser: string | null;
   pinned: number;
   archived: number;
+  lastStatus: string | null;
 } {
   let firstUserText = "";
   let mode: AgentMode | undefined;
   let model: string | undefined;
   let messageCount = 0;
+  let lastStatus: string | null = null;
   try {
     const text = readFileSync(join(dir, `${id}.jsonl`), "utf-8");
     for (const line of text.split("\n")) {
@@ -94,6 +112,8 @@ function parseSession(
           if (e.role === "assistant" && e.model) model = e.model;
         } else if (e.type === "mode") {
           mode = e.mode;
+        } else if (e.type === "status") {
+          lastStatus = e.status;
         }
       } catch {
         /* skip malformed line */
@@ -126,6 +146,7 @@ function parseSession(
     firstUser: firstUserText ? firstUserText.slice(0, 2000) : null,
     pinned,
     archived,
+    lastStatus,
   };
 }
 
@@ -154,12 +175,12 @@ class SqliteSessionIndex implements SessionIndex {
   ) {
     this.upsert = db.prepare(
       `INSERT INTO sessions
-         (id,title,cwd,mode,model,message_count,first_user,pinned,archived,updated_at,mtime_ms,size_bytes)
-       VALUES (@id,@title,@cwd,@mode,@model,@message_count,@first_user,@pinned,@archived,@updated_at,@mtime_ms,@size_bytes)
+         (id,title,cwd,mode,model,message_count,first_user,pinned,archived,updated_at,mtime_ms,size_bytes,last_status)
+       VALUES (@id,@title,@cwd,@mode,@model,@message_count,@first_user,@pinned,@archived,@updated_at,@mtime_ms,@size_bytes,@last_status)
        ON CONFLICT(id) DO UPDATE SET
          title=@title, cwd=@cwd, mode=@mode, model=@model, message_count=@message_count,
          first_user=@first_user, pinned=@pinned, archived=@archived,
-         updated_at=@updated_at, mtime_ms=@mtime_ms, size_bytes=@size_bytes`,
+         updated_at=@updated_at, mtime_ms=@mtime_ms, size_bytes=@size_bytes, last_status=@last_status`,
     );
     this.del = db.prepare(`DELETE FROM sessions WHERE id = ?`);
     this.selectAll = db.prepare(`SELECT * FROM sessions ORDER BY updated_at DESC`);
@@ -224,6 +245,7 @@ class SqliteSessionIndex implements SessionIndex {
           updated_at: st.updatedAt,
           mtime_ms: st.stamp,
           size_bytes: st.size,
+          last_status: m.lastStatus,
         });
       }
       // Delete rows whose files are gone.
@@ -289,6 +311,18 @@ class SqliteSessionIndex implements SessionIndex {
     return opts.limit ? out.slice(0, opts.limit) : out;
   }
 
+  suspended(): SuspendedSession[] {
+    this.reconcile();
+    return (
+      this.db
+        .prepare(
+          `SELECT id, cwd, last_status FROM sessions
+             WHERE last_status IN ('running','waiting_permission')`,
+        )
+        .all() as Array<{ id: string; cwd: string; last_status: string }>
+    ).map((r) => ({ id: r.id, cwd: r.cwd, lastStatus: r.last_status }));
+  }
+
   close(): void {
     try {
       this.db.close();
@@ -330,10 +364,12 @@ export function openSessionIndex(dir?: string): SessionIndex | null {
         archived      INTEGER NOT NULL DEFAULT 0,
         updated_at    INTEGER NOT NULL,
         mtime_ms      INTEGER NOT NULL,
-        size_bytes    INTEGER NOT NULL
+        size_bytes    INTEGER NOT NULL,
+        last_status   TEXT
       );
       CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at DESC);
       CREATE INDEX IF NOT EXISTS sessions_cwd_idx ON sessions(cwd);
+      CREATE INDEX IF NOT EXISTS sessions_status_idx ON sessions(last_status);
     `);
     return new SqliteSessionIndex(db, sessionsDir);
   } catch {

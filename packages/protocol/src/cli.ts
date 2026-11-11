@@ -649,6 +649,29 @@ async function cmdServeWeb(
       : null;
   reassert?.unref?.();
 
+  // Boot-time crash recovery: any session left with an in-flight status by a
+  // prior daemon that crashed / was killed is sealed to a clean idle now (its
+  // orphaned tool calls get a side-effect-safe result, a trailing idle status,
+  // and a one-shot recovery instruction for the next prompt). Seal-and-idle
+  // only — we do NOT auto-re-enter the agent loop (a prior run's side-effecting
+  // tools may already have executed). Fail-soft and off the hot path: run once,
+  // in the background, so a slow sweep never delays the daemon coming up.
+  void (async () => {
+    try {
+      const { recoverSuspendedSessions } = await import("@codepilot/core");
+      const recovered = await recoverSuspendedSessions();
+      if (recovered.length > 0) {
+        process.stderr.write(
+          `recovered ${recovered.length} interrupted session(s): ${recovered
+            .map((r) => r.id)
+            .join(", ")}\n`,
+        );
+      }
+    } catch {
+      /* fail-soft: recovery is best-effort, never blocks the daemon */
+    }
+  })();
+
   // Idle / scheduled tasks: run when no live session is busy.
   const { startSchedulerWatcher, createSession } = await import("@codepilot/core");
   const { anyLiveSessionBusy } = await import("./server.js");

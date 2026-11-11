@@ -11,6 +11,7 @@ export type {
   PlanStep,
   UsageInfo,
   Event,
+  InterruptedRunInfo,
   TeamMessageEvent,
   MessageDelta,
   TextDelta,
@@ -316,10 +317,11 @@ export type {
 // public API is unchanged.
 export { Session } from "./session.js";
 export { openSessionIndex } from "./sessionIndex.js";
-export type { SessionIndex } from "./sessionIndex.js";
+export type { SessionIndex, SuspendedSession } from "./sessionIndex.js";
 export {
   createSession,
   listSessions,
+  recoverSuspendedSessions,
   resetSessionIndex,
   setSessionPinned,
   setSessionArchived,
@@ -331,6 +333,7 @@ export {
   persistSessionCwd,
   buildSingleProvider,
 } from "./session-utils.js";
+export type { RecoveredSession } from "./session-utils.js";
 
 // ---- Goal ----
 export { runGoal, driveGoalRounds } from "./goal.js";

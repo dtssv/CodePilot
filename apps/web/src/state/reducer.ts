@@ -701,6 +701,21 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
         },
       };
 
+    case "interrupted_run": {
+ // A prior run for this session was interrupted (crash / daemon kill) and
+ // has been sealed to a clean idle. Advisory only — surface a notice so the
+ // user knows they can continue; the transcript already carries the sealed
+ // tool results.
+      const sealed =
+        e.sealedToolCalls > 0
+          ? ` (sealed ${e.sealedToolCalls} interrupted tool call${e.sealedToolCalls === 1 ? "" : "s"})`
+          : "";
+      return {
+        ...state,
+        notice: `${t("Previous run was interrupted — you can continue")}${sealed}`,
+      };
+    }
+
     default:
  // Unknown / future event types must never corrupt the store. Returning
  // the state unchanged keeps the reducer total — a missing case used to

@@ -8,7 +8,7 @@ import { openSessionIndex, type SessionIndex } from "../src/sessionIndex.js";
 function writeSession(
   dir: string,
   id: string,
-  opts: { user?: string; assistant?: string; model?: string; mode?: string; messages?: boolean } = {},
+  opts: { user?: string; assistant?: string; model?: string; mode?: string; messages?: boolean; status?: string } = {},
 ): void {
   const lines: string[] = [];
   if (opts.mode) lines.push(JSON.stringify({ type: "mode", mode: opts.mode }));
@@ -26,6 +26,7 @@ function writeSession(
       }),
     );
   }
+  if (opts.status) lines.push(JSON.stringify({ type: "status", status: opts.status }));
   writeFileSync(join(dir, `${id}.jsonl`), lines.join("\n") + (lines.length ? "\n" : ""), "utf-8");
 }
 
@@ -70,6 +71,20 @@ describe("sessionIndex (SQLite metadata index)", () => {
     writeSession(dir!, "draft", { messages: false });
     writeSession(dir!, "real", { user: "hello" });
     expect(i.list().map((s) => s.id)).toEqual(["real"]);
+  });
+
+  it("suspended() returns only sessions whose last status is in-flight", () => {
+    const i = open();
+    writeSession(dir!, "running", { user: "crashed mid-run", status: "running" });
+    writeSession(dir!, "waiting", { user: "awaiting perm", status: "waiting_permission" });
+    writeSession(dir!, "idle", { user: "finished", status: "idle" });
+    writeSession(dir!, "nostatus", { user: "no status line at all" });
+    writeFileSync(join(dir!, "running.cwd"), "/work/x", "utf-8");
+    const ids = i.suspended().map((s) => s.id).sort();
+    expect(ids).toEqual(["running", "waiting"]);
+    const run = i.suspended().find((s) => s.id === "running")!;
+    expect(run.lastStatus).toBe("running");
+    expect(run.cwd).toBe("/work/x");
   });
 
   it("filters by cwd (strict; unknown excluded)", () => {

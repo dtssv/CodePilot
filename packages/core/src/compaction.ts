@@ -179,6 +179,7 @@ function serializeEventForEstimate(e: Event): string {
     case "retry":
     case "activity":
     case "stop_continue":
+    case "interrupted_run":
     case "subagent":
     case "followup":
     case "pin":

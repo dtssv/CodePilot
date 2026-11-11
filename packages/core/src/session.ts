@@ -39,6 +39,7 @@ import type {
   Event,
   FollowUpItem,
   ImageAttachment,
+  InterruptedRunInfo,
   PermissionDecision,
   PermissionMode,
   PermissionPresetName,
@@ -308,6 +309,10 @@ export class Session {
     { tool: ToolDef; input: unknown; resolve: (r: PermissionResolution) => void }
   >();
   private sandbox: ResolvedSandbox;
+ /** Monotonic prompt/turn counter, stamped into each execution claim so a
+  * resumer can order runs. Starts at the count of user messages already in the
+  * loaded transcript so a resumed session does not restart at 1. */
+  private turnCounter = 0;
  /** True when sandbox mode is active but no OS backend is available and
  * fallback is "deny". Bash commands will be refused; surfaced as a
  * system-prompt note and via getSandboxStatus. */
@@ -351,6 +356,10 @@ export class Session {
  * checkpoint instead of redoing work or drifting out of scope. Cleared
  * after the first prompt completes. */
   private resumedFromInterrupt = false;
+ /** Set during init() when loadFromDisk found a crash-interrupted run and the
+  * reconcile sealed it to idle. Lets a host that attaches after init — and the
+  * boot-time recovery sweep — retrieve the recovery outcome. */
+  private interruptedRecovery?: InterruptedRunInfo;
  /** Turn-boundary pre-compaction cache. After a turn ends with tokens over a
  * soft threshold (but below the hard trigger), we compact in the background
  * while the user reads / thinks, and stash the result here keyed by a
@@ -830,6 +839,27 @@ export class Session {
     } // end preprocessing (skipped on resume)
 
     try {
+ // Durable-execution claim: atomically append a `running` status carrying the
+ // execution identity BEFORE the agent loop starts. If the process dies mid-run
+ // this claim is the tail of the JSONL; the crash-recovery sweep finds it, seals
+ // any orphaned tool call, and flips the session to a clean idle. The agent
+ // loop's own per-step `running` heartbeats are claim-less; only this opening
+ // marker carries the claim, and the trailing `idle` releases it.
+      this.turnCounter += 1;
+      const claimStatus: Event = {
+        type: "status",
+        status: "running",
+        claim: {
+          executionId: `exec_${randomUUID()}`,
+          turn: this.turnCounter,
+          model: this.turnOverrideModel ?? this.model,
+          fingerprint: this.historyFingerprint(),
+          startedAt: Date.now(),
+        },
+      };
+      this.events.push(claimStatus);
+      await this.persistEvent(claimStatus).catch(() => undefined);
+      this.notify(claimStatus);
  // Lazily start the persistent shell (one per session). Its cwd/env
  // persist across foreground bash calls so `cd` / `export` carry over.
       if (!this.persistentShell) {
@@ -2348,6 +2378,14 @@ export class Session {
     return this.permissions.getMode();
   }
 
+ /** Recovery outcome if a crash-interrupted run was sealed to idle when this
+  * session loaded (else undefined). The host can surface it ("the previous run
+  * was interrupted — you can continue") after attaching, since the matching
+  * `interrupted_run` event fires during init before any host subscribes. */
+  getInterruptedRecovery(): InterruptedRunInfo | undefined {
+    return this.interruptedRecovery;
+  }
+
   /**
    * Apply a named permission preset: a single switch that sets BOTH the
    * permission mode and the sandbox mode. Composes the two existing live
@@ -3036,6 +3074,16 @@ export class Session {
           break;
         }
       }
+      // Seed the turn counter from the highest claim turn already recorded (or
+      // the user-message count as a fallback), so a resumed run's claim does not
+      // restart numbering at 1.
+      let maxTurn = 0;
+      let userMessages = 0;
+      for (const e of this.persisted) {
+        if (e.type === "status" && e.claim) maxTurn = Math.max(maxTurn, e.claim.turn);
+        else if (e.type === "message" && e.role === "user") userMessages += 1;
+      }
+      this.turnCounter = Math.max(maxTurn, userMessages);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw err;
@@ -3055,8 +3103,14 @@ export class Session {
  */
   private async reconcileStaleStatus(): Promise<void> {
     let lastStatus: string | null = null;
+    let lastClaim: Extract<Event, { type: "status" }>["claim"] | undefined;
     for (const e of this.events) {
-      if (e.type === "status") lastStatus = e.status;
+      if (e.type === "status") {
+        lastStatus = e.status;
+        // Track the most recent claim so the recovery hint can report which
+        // execution was interrupted. A claim-less heartbeat does not clear it.
+        if (e.claim) lastClaim = e.claim;
+      }
     }
     if (lastStatus === "running" || lastStatus === "waiting_permission") {
  // The prior run was cut off mid-flight. Before flipping to `idle`, seal
@@ -3067,13 +3121,36 @@ export class Session {
  // tool_call forever — breaking export, naive replay, and any consumer
  // that trusts the raw log. Persist the same side-effect-safe
  // same `INTERRUPTED_RESULT` as a real tool_result event.
-      await this.sealOrphanedToolCalls();
+      const sealedToolCalls = await this.sealOrphanedToolCalls();
       const ev: Event = { type: "status", status: "idle" };
       this.events.push(ev);
       await this.persistEvent(ev).catch(() => undefined);
  // Flag it so the next prompt's system prompt carries a recovery
  // instruction (resume from checkpoint, don't redo finished steps).
       this.resumedFromInterrupt = true;
+ // Record the recovery so a host that subscribes after init (and the
+ // boot-time recovery sweep, which creates + inspects + disposes the
+ // session) can retrieve it via getInterruptedRecovery(). The matching
+ // notify below only reaches listeners already attached during init.
+      this.interruptedRecovery = {
+        sessionId: this.id,
+        ...(lastClaim
+          ? {
+              claim: {
+                executionId: lastClaim.executionId,
+                turn: lastClaim.turn,
+                model: lastClaim.model,
+                startedAt: lastClaim.startedAt,
+              },
+            }
+          : {}),
+        sealedToolCalls,
+      };
+ // Advisory for the host: the previous run was interrupted and has been
+ // sealed to a clean idle. NOT persisted and never sent to the model — the
+ // model's recovery context rides on the `<interrupted_run>` system block.
+ // Default posture is seal-and-idle: we do NOT auto-re-enter runAgent.
+      this.notify({ type: "interrupted_run", ...this.interruptedRecovery });
     }
   }
 
@@ -3084,9 +3161,9 @@ export class Session {
    * `tool_call` event or a `tool_use` block inside an assistant message (the log
    * records it both ways); a result from a `tool_result` event. Order of the
    * sealed results does not matter — the message builder keys them by id — but we
-   * emit them in first-seen order for a readable log.
+   * emit them in first-seen order for a readable log. Returns the number sealed.
    */
-  private async sealOrphanedToolCalls(): Promise<void> {
+  private async sealOrphanedToolCalls(): Promise<number> {
     const callNames = new Map<string, string>();
     const answered = new Set<string>();
     for (const e of this.events) {
@@ -3100,6 +3177,7 @@ export class Session {
         answered.add(e.toolCallId);
       }
     }
+    let sealed = 0;
     for (const [id, name] of callNames) {
       if (answered.has(id)) continue;
       const ev: Event = {
@@ -3111,7 +3189,9 @@ export class Session {
       };
       this.events.push(ev);
       await this.persistEvent(ev).catch(() => undefined);
+      sealed += 1;
     }
+    return sealed;
   }
 
   /** Link ids of every event already in the append-only log. */

@@ -158,4 +158,62 @@ describe("Session seals orphaned tool_calls on crash recovery", () => {
     expect(sealed).toHaveLength(0);
     expect(after.length).toBe(before);
   });
+
+  it("surfaces an interrupted-run recovery (claim + sealed count) via getInterruptedRecovery", async () => {
+    dir = mkdtempSync(join(tmpdir(), "seal-claim-"));
+    const id = `seal_${Date.now()}_d`;
+    // A crash transcript whose opening `running` carries a durable-execution
+    // claim and left two tool calls unanswered.
+    seedSession(id, [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
+      {
+        type: "status",
+        status: "running",
+        claim: {
+          executionId: "exec_abc",
+          turn: 1,
+          model: "mock-model",
+          fingerprint: "3:u1",
+          startedAt: 1700000000000,
+        },
+      },
+      {
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call_1", name: "bash", input: {} },
+          { type: "tool_use", id: "call_2", name: "bash", input: {} },
+        ],
+      },
+      { type: "tool_call", id: "call_1", name: "bash", input: {} },
+      { type: "tool_call", id: "call_2", name: "bash", input: {} },
+    ]);
+
+    session = makeSession(id);
+    await session.init();
+
+    const recovery = session.getInterruptedRecovery();
+    expect(recovery).toBeDefined();
+    expect(recovery!.sessionId).toBe(id);
+    expect(recovery!.sealedToolCalls).toBe(2);
+    expect(recovery!.claim).toEqual({
+      executionId: "exec_abc",
+      turn: 1,
+      model: "mock-model",
+      startedAt: 1700000000000,
+    });
+  });
+
+  it("leaves getInterruptedRecovery undefined for a cleanly-idle session", async () => {
+    dir = mkdtempSync(join(tmpdir(), "seal-noclaim-"));
+    const id = `seal_${Date.now()}_e`;
+    seedSession(id, [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "hi" }] },
+      { type: "status", status: "idle" },
+    ]);
+    session = makeSession(id);
+    await session.init();
+    expect(session.getInterruptedRecovery()).toBeUndefined();
+  });
 });
