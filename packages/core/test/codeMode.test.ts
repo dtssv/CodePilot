@@ -33,6 +33,21 @@ function makeCtx(cwd: string): ToolContext {
 }
 
 describe("code_mode", () => {
+  it("describes itself honestly: JS-only, no permission re-prompt on inner calls", () => {
+    const d = codeModeTool.description;
+    // Honest about the in-code permission bypass — not the old "normal
+    // permission/sandbox pipeline" claim.
+    expect(d).not.toMatch(/normal permission\/sandbox pipeline/);
+    expect(d).toMatch(/do NOT re-run the interactive permission prompt/);
+    expect(d).toMatch(/OS sandbox and path guard/);
+    expect(d).toMatch(/agent` mode/);
+    // JavaScript only (no transpile) — not "TypeScript".
+    expect(d).toMatch(/JavaScript/);
+    expect(d).not.toMatch(/TypeScript\/JavaScript/);
+    expect(codeModeTool.inputSchema.shape.code.description).toMatch(/JavaScript/);
+    expect(codeModeTool.inputSchema.shape.code.description).not.toMatch(/TypeScript\/JavaScript/);
+  });
+
   it("executes simple arithmetic and returns the result", async () => {
     const dir = mkdtempSync(join(realTmpdir(), "cm-"));
     const ctx = makeCtx(dir);

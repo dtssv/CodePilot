@@ -1,10 +1,12 @@
-// code_mode: execute model-generated TypeScript/JavaScript in a sandboxed vm
-// context with access to a curated set of tool APIs (readFile, writeFile,
-// editFile, bash, grep, glob, ls). The delegated tools still enforce the OS
-// sandbox + path guard (the real security boundary) — nothing bypasses the
-// sandbox. (In-code calls go straight to each tool's execute(), so they do NOT
+// code_mode: execute model-generated JavaScript in a sandboxed vm context with
+// access to a curated set of tool APIs (readFile, writeFile, editFile, bash,
+// grep, glob, ls). The code is run as plain JavaScript via `vm.Script` with no
+// transpile step — TypeScript-only syntax (type annotations, `as`, interfaces)
+// will fail to parse, so emit JavaScript. The delegated tools still enforce the
+// OS sandbox + path guard (the real security boundary) — nothing bypasses the
+// sandbox. In-code calls go straight to each tool's execute(), so they do NOT
 // re-run the permission-engine ask/deny or hooks; code_mode is execute-tier and
-// only available in `agent` mode, where broad execute is already granted.)
+// only available in `agent` mode, where broad execute is already granted.
 // Large output is spilled to an artifact (head+tail), matching bash/grep/etc.
 
 import { z } from "zod";
@@ -30,9 +32,10 @@ const schema = z.object({
   code: z
     .string()
     .describe(
-      "TypeScript/JavaScript code to execute. Use `await` for async API " +
-        "calls. The last expression value is returned. Use console.log() " +
-        "for intermediate output."
+      "JavaScript code to execute (run as plain JS with no transpile — do not " +
+        "use TypeScript-only syntax such as type annotations). Use `await` for " +
+        "async API calls. The last expression value is returned. Use " +
+        "console.log() for intermediate output."
     ),
   timeout_ms: z
     .number()
@@ -67,9 +70,10 @@ function formatValue(v: unknown): string {
 export const codeModeTool: ToolDef<typeof schema> = {
   name: "code_mode",
   description:
-    "Execute a TypeScript/JavaScript code snippet in a sandboxed environment " +
-    "with access to the SDK's tool API. The following async functions are " +
-    "available inside the sandbox:\n\n" +
+    "Execute a JavaScript code snippet in a sandboxed environment with access " +
+    "to the SDK's tool API. Plain JavaScript only — the code is not transpiled, " +
+    "so TypeScript-only syntax (type annotations, `as`, interfaces) will fail. " +
+    "The following async functions are available inside the sandbox:\n\n" +
     "  readFile(path)                    → read_file tool\n" +
     "  writeFile(path, content)          → write_file tool\n" +
     "  editFile(path, oldStr, newStr)    → edit_file tool\n" +
@@ -77,10 +81,13 @@ export const codeModeTool: ToolDef<typeof schema> = {
     "  grep(pattern, path?)              → grep tool\n" +
     "  glob(pattern)                     → glob tool\n" +
     "  ls(path?)                         → ls tool\n\n" +
-    "All calls go through the normal permission/sandbox pipeline. " +
-    "console.log / console.error output is captured and returned. " +
-    "The value of the last expression (or `return` value at top level) is " +
-    "included in the result.\n\n" +
+    "Each call still enforces the OS sandbox and path guard, but in-code calls " +
+    "do NOT re-run the interactive permission prompt or hooks — this tool is " +
+    "execute-tier and only offered in `agent` mode, where broad execute is " +
+    "already granted. console.log / console.error output is captured and " +
+    "returned. The value of the last expression (or `return` value at top " +
+    "level) is included in the result; large output spills to an artifact " +
+    "(retrieve any slice with read_artifact).\n\n" +
     "When to use: multi-step operations that benefit from control flow " +
     "(loops, conditionals, string manipulation) — e.g. read several files, " +
     "transform content, write results. When NOT to use: single tool calls " +
