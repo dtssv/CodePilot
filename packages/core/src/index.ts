@@ -128,6 +128,7 @@ export {
   wrapCommand,
   buildSeatbeltProfile,
   detectSandboxBackend,
+  slirp4netnsPath,
   assertPathAllowed,
   assertPathAllowedAsync,
   addWritableRoot,

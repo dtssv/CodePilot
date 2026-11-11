@@ -250,6 +250,30 @@ export function detectSandboxBackend(): SandboxBackend {
 /** Test hook: reset the cached probe. */
 export function resetSandboxBackendCache(): void {
   cachedBackend = null;
+  cachedSlirp = null;
+}
+
+let cachedSlirp: string | null | undefined = undefined;
+
+/** Resolve the slirp4netns binary path, or null when it is not installed.
+ * slirp4netns gives an `--unshare-net` namespace a userspace network stack so
+ * egress can be forced through the loopback allowlist proxy (enforced, not
+ * cooperative). Probed the same way as bwrap (fixed install paths) and cached
+ * per process. */
+export function slirp4netnsPath(): string | null {
+  if (cachedSlirp !== undefined) return cachedSlirp;
+  if (process.platform !== "linux") {
+    cachedSlirp = null;
+    return cachedSlirp;
+  }
+  for (const p of ["/usr/bin/slirp4netns", "/bin/slirp4netns", "/usr/local/bin/slirp4netns"]) {
+    if (existsSync(p)) {
+      cachedSlirp = p;
+      return cachedSlirp;
+    }
+  }
+  cachedSlirp = null;
+  return cachedSlirp;
 }
 
 function shellQuote(s: string): string {
@@ -345,10 +369,27 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
 /** Wrap a command for the given policy. Never throws. */
 /** Prefix `export`s that route a sandboxed command's HTTP(S) traffic through
  * the loopback allowlist proxy, when a "proxy" network policy is active and
- * the host has started the proxy (policy.proxyUrl set). No-op otherwise. */
-function withProxyEnv(command: string, policy: ResolvedSandbox): string {
+ * the host has started the proxy (policy.proxyUrl set). No-op otherwise. When
+ * `hostOverride` is given, the proxy host in the exported URLs is rewritten to
+ * it — used by the enforced bwrap path, where the sandbox reaches the host
+ * proxy through the slirp gateway address rather than host loopback. */
+function withProxyEnv(
+  command: string,
+  policy: ResolvedSandbox,
+  hostOverride?: string,
+): string {
   if (policy.networkPolicy.mode !== "proxy" || !policy.proxyUrl) return command;
-  const q = shellQuote(policy.proxyUrl);
+  let url = policy.proxyUrl;
+  if (hostOverride) {
+    try {
+      const u = new URL(policy.proxyUrl);
+      u.hostname = hostOverride;
+      url = u.toString().replace(/\/$/, "");
+    } catch {
+      /* keep the original url if it does not parse */
+    }
+  }
+  const q = shellQuote(url);
   // Set both upper/lowercase forms (tools vary) and clear NO_PROXY so nothing
   // is exempted from the allowlist.
   const exports = [
@@ -362,6 +403,63 @@ function withProxyEnv(command: string, policy: ResolvedSandbox): string {
     `no_proxy=''`,
   ].join(" ");
   return `export ${exports}; ${command}`;
+}
+
+/** The slirp gateway address: from inside the network namespace this host
+ * address NATs to the host's loopback, so the loopback allowlist proxy is
+ * reachable here. slirp binds its real-world outbound sockets to host loopback
+ * (--outbound-addr=127.0.0.1), so a public IP is unroutable from the namespace
+ * — the proxy at this gateway is the only egress that works. */
+const SLIRP_GATEWAY = "10.0.2.2";
+
+/**
+ * Build a self-contained POSIX-shell orchestration that runs `bwrapCmd` (a
+ * fully-formed `bwrap --unshare-net …` command whose inner command blocks on
+ * --block-fd) under a slirp4netns userspace network stack confined to the
+ * loopback proxy. Flow:
+ *   1. Two FIFOs: bwrap reports its namespace child-pid on --info-fd; bwrap's
+ *      inner command blocks on --block-fd until we release it.
+ *   2. Start bwrap in the background; read the child-pid from the info FIFO.
+ *   3. Start slirp4netns targeting that pid, binding outbound to host loopback
+ *      so only the gateway→proxy path can carry traffic; wait for its ready-fd.
+ *   4. Release the inner command (write the block FIFO). It now runs with tap0
+ *      up and proxy env pointed at the gateway.
+ *   5. Wait for bwrap, capture its status, tear slirp down, propagate the code.
+ * All scratch lives under a per-run mktemp dir that is removed on exit. If any
+ * setup step fails the whole thing exits non-zero (fail-closed) rather than
+ * running the command with no network confinement.
+ */
+function buildSlirpOrchestration(bwrapInnerCmd: string, slirp: string): string {
+  const sq = shellQuote;
+  // The inner command, wrapped so bwrap blocks it on fd 3 (fed by the block
+  // FIFO) until slirp is ready. `read` on fd 3 returns once we write the FIFO.
+  const script = [
+    `__sb_dir=$(mktemp -d)`,
+    `__sb_info="$__sb_dir/info"; __sb_block="$__sb_dir/block"; __sb_ready="$__sb_dir/ready"`,
+    `mkfifo "$__sb_info" "$__sb_block" "$__sb_ready"`,
+    `__sb_cleanup() { [ -n "$__sb_slirp" ] && kill "$__sb_slirp" 2>/dev/null; rm -rf "$__sb_dir"; }`,
+    `trap __sb_cleanup EXIT INT TERM`,
+    // bwrap: report child-pid on fd 10 (→info FIFO), block inner cmd on fd 11
+    // (←block FIFO). Backgrounded so we can wire slirp to its namespace.
+    `${bwrapInnerCmd} 10>"$__sb_info" 11<"$__sb_block" & __sb_bwrap=$!`,
+    // Read the namespace child-pid bwrap wrote as JSON {"child-pid":N,...}.
+    `__sb_json=$(cat "$__sb_info")`,
+    `__sb_pid=$(printf '%s' "$__sb_json" | sed -n 's/.*"child-pid":[ ]*\\([0-9][0-9]*\\).*/\\1/p')`,
+    `if [ -z "$__sb_pid" ]; then echo ${sq("[sandbox] enforced-proxy: could not read sandbox pid")} >&2; kill "$__sb_bwrap" 2>/dev/null; exit 126; fi`,
+    // Start slirp4netns on that pid; --outbound-addr pins egress to host
+    // loopback so nothing but the gateway→proxy path is routable. --ready-fd
+    // 3 → ready FIFO signals when tap0 is configured.
+    `${sq(slirp)} --configure --mtu=65520 --disable-dns --outbound-addr=127.0.0.1 --ready-fd=3 "$__sb_pid" tap0 3>"$__sb_ready" >/dev/null 2>&1 & __sb_slirp=$!`,
+    `if ! read __sb_rc <"$__sb_ready"; then echo ${sq("[sandbox] enforced-proxy: slirp4netns failed to start")} >&2; kill "$__sb_bwrap" 2>/dev/null; exit 126; fi`,
+    // Release the inner command now that the network stack is up.
+    `: >"$__sb_block"`,
+    // Wait for the sandboxed command; propagate its exit status.
+    `wait "$__sb_bwrap"; __sb_status=$?`,
+    `exit "$__sb_status"`,
+  ].join("\n");
+  // Run the orchestration in its own sh so the traps/FIFOs are self-contained
+  // regardless of the caller's persistent shell state.
+  return `/bin/sh -c ${sq(script)}`;
 }
 
 /**
@@ -391,16 +489,40 @@ export function modelShellEnv(base: NodeJS.ProcessEnv = process.env): Record<str
 
 export function wrapCommand(
   command: string,
-  policy: ResolvedSandbox
+  policy: ResolvedSandbox,
+  opts?: {
+    /** Test seam: force the backend instead of probing the host. */
+    backend?: SandboxBackend;
+    /** Test seam: force the slirp4netns path (or null for "absent"). */
+    slirpPath?: string | null;
+  },
 ): WrappedCommand {
   if (policy.mode === "off") {
     return { command, sandboxed: false, backend: "none" };
   }
+  const backend = opts?.backend ?? detectSandboxBackend();
+  // Determine whether this is an enforced-proxy bwrap/wsl run. In proxy mode on
+  // Linux bwrap we can give the namespace a userspace network stack (slirp4netns)
+  // confined to the loopback proxy, so a raw socket cannot bypass it. When proxy
+  // mode is requested but slirp4netns is unavailable, we fail closed below
+  // rather than silently running with full network.
+  const proxyMode = policy.networkPolicy.mode === "proxy" && !!policy.proxyUrl;
+  const slirp =
+    proxyMode && backend === "bwrap"
+      ? opts?.slirpPath !== undefined
+        ? opts.slirpPath
+        : slirp4netnsPath()
+      : null;
+  const enforcedBwrapProxy = proxyMode && backend === "bwrap" && !!slirp;
+
   // In "proxy" network mode, force child tools through the loopback proxy by
-  // exporting the standard proxy env vars ahead of the command. Cooperative:
-  // tools that honor HTTP(S)_PROXY are restricted; see netProxy.ts.
-  command = withProxyEnv(command, policy);
-  const backend = detectSandboxBackend();
+  // exporting the standard proxy env vars ahead of the command. Cooperative for
+  // seatbelt's own profile and for best-effort backends; for the enforced bwrap
+  // path the env is instead injected inside the namespace pointing at the slirp
+  // gateway, so skip the host-loopback export here.
+  if (!enforcedBwrapProxy) {
+    command = withProxyEnv(command, policy);
+  }
   if (backend === "none") {
     if (policy.fallback === "allow-unsandboxed") {
       return {
@@ -458,6 +580,21 @@ export function wrapCommand(
     };
   }
  // bwrap: mount / read-only, re-bind writable roots rw, fresh /dev+/proc.
+  // Fail closed: proxy mode was requested but slirp4netns is not installed, so
+  // we cannot enforce egress through the loopback proxy. Refuse rather than run
+  // with full host network (which cooperative env vars alone would allow a raw
+  // socket to bypass).
+  if (proxyMode && !slirp) {
+    return {
+      command: `echo ${shellQuote(
+        `[sandbox] denied: network mode "proxy" requires slirp4netns to enforce ` +
+          `egress through the loopback proxy on Linux, but slirp4netns is not ` +
+          `installed. Install slirp4netns, or set the network mode to "off"/"full".`,
+      )} >&2; exit 126`,
+      sandboxed: false,
+      backend,
+    };
+  }
   const args: string[] = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
   for (const root of policy.writableRoots) {
     if (existsSync(root)) args.push("--bind", root, root);
@@ -465,6 +602,31 @@ export function wrapCommand(
   // Re-bind protected metadata read-only (after the rw binds, so this wins).
   for (const p of policy.protectedSubpaths) {
     if (existsSync(p)) args.push("--ro-bind", p, p);
+  }
+  if (enforcedBwrapProxy && slirp) {
+    // Enforced proxy: isolate the network namespace, then attach a userspace
+    // stack (slirp4netns) whose only routable egress is the loopback proxy.
+    // The inner command is pointed at the slirp gateway. bwrap reports its
+    // namespace pid on --info-fd (fd 10) so slirp can target it, and blocks the
+    // sandbox on --block-fd (fd 11) until the orchestration brings tap0 up.
+    const innerCmd = withProxyEnv(command, policy, SLIRP_GATEWAY);
+    args.push(
+      "--unshare-net",
+      "--info-fd",
+      "10",
+      "--block-fd",
+      "11",
+      "--",
+      "/bin/sh",
+      "-c",
+      innerCmd,
+    );
+    const bwrapInner = args.map(shellQuote).join(" ");
+    return {
+      command: buildSlirpOrchestration(bwrapInner, slirp),
+      sandboxed: true,
+      backend,
+    };
   }
   if (!policy.network) args.push("--unshare-net");
   args.push("--", "/bin/sh", "-c", command);

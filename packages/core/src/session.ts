@@ -4088,11 +4088,16 @@ export class Session {
         allowPorts: pol.allowPorts,
         denyLog: pol.denyLog,
       });
-      // Seatbelt can scope network-outbound to the proxy's loopback port, so
-      // egress is truly forced through the proxy. Other backends (bwrap/wsl
-      // without a userspace net stack) only get the cooperative env vars.
-      const { detectSandboxBackend } = await import("./sandbox.js");
-      const enforced = detectSandboxBackend() === "seatbelt";
+      // The OS sandbox can enforce egress through the proxy for two backends:
+      // seatbelt scopes network-outbound to the proxy's loopback port, and
+      // bwrap with slirp4netns confines the namespace's userspace net stack to
+      // the gateway→proxy path. Either way a child cannot bypass by opening a
+      // raw socket. Other cases (bwrap/wsl without slirp4netns) only get the
+      // cooperative env vars — best-effort.
+      const { detectSandboxBackend, slirp4netnsPath } = await import("./sandbox.js");
+      const backend = detectSandboxBackend();
+      const enforced =
+        backend === "seatbelt" || (backend === "bwrap" && slirp4netnsPath() !== null);
       this.sandbox = {
         ...this.sandbox,
         proxyUrl: `http://127.0.0.1:${this.netProxy.port}`,

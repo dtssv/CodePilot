@@ -491,4 +491,51 @@ describe("wrapCommand", () => {
     expect(w.command).toContain("sandbox-exec");
     expect(w.command).toContain("deny file-write");
   });
+
+  it("enforces proxy egress via slirp4netns under bwrap when available", () => {
+    const p = {
+      ...resolveSandbox({ network: { mode: "proxy", allow: ["*.npmjs.org"] } }, cwd),
+      proxyUrl: "http://127.0.0.1:54321",
+    };
+    const w = wrapCommand("curl https://example.com", p, {
+      backend: "bwrap",
+      slirpPath: "/usr/bin/slirp4netns",
+    });
+    expect(w.sandboxed).toBe(true);
+    expect(w.backend).toBe("bwrap");
+    // The namespace is isolated and given a userspace stack confined to the
+    // loopback proxy: --unshare-net, slirp4netns with loopback-only outbound,
+    // bwrap reporting its pid and blocking until the stack is ready.
+    expect(w.command).toContain("--unshare-net");
+    expect(w.command).toContain("slirp4netns");
+    expect(w.command).toContain("--outbound-addr=127.0.0.1");
+    expect(w.command).toContain("--info-fd");
+    expect(w.command).toContain("--block-fd");
+    // Egress goes to the slirp gateway, not host loopback, inside the namespace.
+    expect(w.command).toContain("10.0.2.2:54321");
+  });
+
+  it("fails closed in proxy mode under bwrap when slirp4netns is absent", () => {
+    const p = {
+      ...resolveSandbox({ network: { mode: "proxy", allow: ["*.npmjs.org"] } }, cwd),
+      proxyUrl: "http://127.0.0.1:54321",
+    };
+    const w = wrapCommand("curl https://example.com", p, {
+      backend: "bwrap",
+      slirpPath: null,
+    });
+    // No enforcement available → refuse rather than run with full network.
+    expect(w.sandboxed).toBe(false);
+    expect(w.command).toContain("exit 126");
+    expect(w.command).toContain("slirp4netns");
+  });
+
+  it("leaves a non-proxy bwrap run as a plain wrap (no slirp orchestration)", () => {
+    const p = resolveSandbox({ mode: "workspace-write", network: true }, cwd);
+    const w = wrapCommand("echo hi", p, { backend: "bwrap", slirpPath: null });
+    expect(w.sandboxed).toBe(true);
+    expect(w.backend).toBe("bwrap");
+    expect(w.command).not.toContain("slirp4netns");
+    expect(w.command).not.toContain("--unshare-net"); // network:true
+  });
 });
