@@ -814,6 +814,11 @@ export interface CodepilotConfig {
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
  /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
   mcpLazyThreshold?: number;
+ /** Context-gauge precision. "off" (default) uses the local estimate for
+  * `/context`. "on-demand" allows `/context --precise` (or a UI action) to call
+  * the provider's token-count API once for an exact count; precise counting is
+  * never automatic and never feeds the compaction threshold. */
+  context?: { preciseCount?: "off" | "on-demand" };
  /** Instruction-file discovery. By default the hierarchical walk for
   * CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
   * toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to the

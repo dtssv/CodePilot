@@ -71,6 +71,8 @@ export type {
   CopilotProviderOptions,
   GeminiProviderOptions,
   ChatProvider,
+  CountTokensOptions,
+  CountTokensResult,
   ProviderMessage,
   ProviderMessageContent,
   ProviderToolDef,

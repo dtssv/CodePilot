@@ -138,6 +138,15 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ promptCache: { ttl: "2h" } })).toThrow();
   });
 
+  it("accepts the context preciseCount block", () => {
+    const r = validateConfig({ context: { preciseCount: "on-demand" } }) as {
+      context?: { preciseCount?: string };
+    };
+    expect(r.context?.preciseCount).toBe("on-demand");
+    expect(validateConfig({ context: { preciseCount: "off" } })).toBeTruthy();
+    expect(() => validateConfig({ context: { preciseCount: "always" } })).toThrow();
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {

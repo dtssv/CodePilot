@@ -30,7 +30,7 @@ import {
   createPromptPermissionClassifier,
   type PermissionClassifier,
 } from "./permissionClassifier.js";
-import { INTERRUPTED_RESULT } from "./agent-messages.js";
+import { INTERRUPTED_RESULT, decideLazyMcp, buildProviderMessages, buildProviderToolDefs } from "./agent-messages.js";
 import { runtimeRegistry, type AgentRuntime, type PluginToolDef } from "./runtime.js";
 import { BoundedSinkQueue } from "./sessionSink.js";
 import type {
@@ -1655,7 +1655,7 @@ export class Session {
     usagePercent: number;
     autoCompactEnabled: boolean;
     byEventType: { type: string; tokens: number; count: number }[];
-    byCategory: { category: string; tokens: number }[];
+    byCategory: { category: string; tokens: number; isDeferred?: boolean }[];
     topFileReads: { path: string; reads: number; tokens: number }[];
     duplicateReads: { path: string; reads: number }[];
   } {
@@ -1724,10 +1724,20 @@ export class Session {
       }
     }
     // Tool definitions sent to the provider this mode. Split MCP out — its
-    // schemas are often the biggest and most surprising contributor.
+    // schemas are often the biggest and most surprising contributor. When lazy
+    // MCP discovery is active, the individual MCP schemas are NOT sent (only the
+    // `mcp` meta-tool is); account for those deferred schemas in a separate
+    // bucket that is visible but does not count toward the context total.
     let toolTokens = 0;
     let mcpTokens = 0;
+    let mcpDeferredTokens = 0;
     const visibleTools = filterToolsByModeFromRegistry(this.toolRegistry, this.mode);
+    const mcpToolCount = this.toolRegistry.all().filter((t) => t.source === "mcp").length;
+    const lazyMcp = decideLazyMcp(
+      mcpToolCount,
+      this.config.mcpToolDiscovery,
+      this.config.mcpLazyThreshold,
+    );
     for (const t of visibleTools) {
       const def = {
         name: t.name,
@@ -1735,8 +1745,14 @@ export class Session {
         inputSchema: zodToJsonSchema(t.inputSchema),
       };
       const tok = estimateTokens(JSON.stringify(def));
-      if (t.source === "mcp") mcpTokens += tok;
-      else toolTokens += tok;
+      if (t.source === "mcp") {
+        // Under lazy discovery these schemas ride the `mcp` meta-tool on demand,
+        // not the per-turn request, so they are deferred (shown, not counted).
+        if (lazyMcp) mcpDeferredTokens += tok;
+        else mcpTokens += tok;
+      } else {
+        toolTokens += tok;
+      }
     }
     // Event-log tokens split into conversation vs sub-agent work.
     let subagentTokens = 0;
@@ -1750,11 +1766,14 @@ export class Session {
     // don't double-count. `lastMessage` only counts when it is genuinely part
     // of the (non-subagent) conversation total.
     const conversationRest = Math.max(0, conversationTokens - lastMessageTokens);
-    const byCategory = [
+    const byCategory: { category: string; tokens: number; isDeferred?: boolean }[] = [
       { category: "system", tokens: systemTokens },
       { category: "skills", tokens: skillsTokens },
       { category: "tools", tokens: toolTokens },
       { category: "mcp", tokens: mcpTokens },
+      // Deferred MCP schemas: reachable via the `mcp` meta-tool on demand, not
+      // sent each turn — shown for visibility but excluded from the total.
+      { category: "mcp_deferred", tokens: mcpDeferredTokens, isDeferred: true },
       { category: "conversation", tokens: conversationRest },
       { category: "lastMessage", tokens: lastMessageTokens },
       { category: "subagent", tokens: subagentTokens },
@@ -1799,6 +1818,49 @@ export class Session {
       topFileReads,
       duplicateReads,
     };
+  }
+
+  /**
+   * Exact prompt token count via the provider's count-tokens API, for the
+   * `/context --precise` opt-in. Gated behind `context.preciseCount: "on-demand"`
+   * and the provider actually implementing `countTokens` (Anthropic). Builds the
+   * same request the next turn would send (system + tools + folded history) and
+   * returns the measured input tokens, or `null` when precise counting is off,
+   * unsupported, or the call fails — callers fall back to the heuristic gauge.
+   * Never runs automatically and never feeds the compaction threshold.
+   */
+  async preciseContextCount(): Promise<{ inputTokens: number } | null> {
+    if (this.disposed) return null;
+    if (this.config.context?.preciseCount !== "on-demand") return null;
+    const provider = this.providerOverride ?? buildProvider(this.config);
+    if (typeof provider.countTokens !== "function") return null;
+    try {
+      if (!this.systemPromptCache) {
+        await this.rebuildSystemPrompt().catch(() => undefined);
+      }
+      const sp = this.systemPromptCache;
+      const systemPrompt = sp?.full ?? undefined;
+      const messages = buildProviderMessages(this.events, [], "");
+      const lazyMcp = decideLazyMcp(
+        this.toolRegistry.all().filter((t) => t.source === "mcp").length,
+        this.config.mcpToolDiscovery,
+        this.config.mcpLazyThreshold,
+      );
+      const tools = buildProviderToolDefs(this.toolRegistry, this.mode, {
+        lazyMcp,
+        model: this.model,
+        toolExposure: this.config.toolExposure,
+      });
+      const res = await provider.countTokens({
+        model: this.model,
+        systemPrompt,
+        messages,
+        tools,
+      });
+      return { inputTokens: res.inputTokens };
+    } catch {
+      return null;
+    }
   }
 
  // ---- Snapshot rewind ----

@@ -233,7 +233,7 @@ export interface ContextSummary {
    * conversation, current message, sub-agent work. Schemas + system prompt live
    * outside the event log but are sent every turn, so they are estimated
    * separately. */
-  byCategory?: { category: string; tokens: number }[];
+  byCategory?: { category: string; tokens: number; isDeferred?: boolean }[];
   topFileReads: { path: string; reads: number; tokens: number }[];
   duplicateReads: { path: string; reads: number }[];
 }
@@ -244,6 +244,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   skills: "skills",
   tools: "tool definitions",
   mcp: "MCP tools",
+  mcp_deferred: "MCP tools (deferred)",
   conversation: "conversation",
   lastMessage: "current message",
   subagent: "sub-agents",
@@ -265,14 +266,20 @@ export function formatContext(c: ContextSummary): string {
     `  auto-compact: ${c.autoCompactEnabled ? "on" : "off"} (trigger at ${c.triggerThreshold.toLocaleString()} = ${(c.triggerFraction * 100).toFixed(0)}%)`,
   ];
   if (c.byCategory && c.byCategory.length > 0) {
-    // Total across categories (schemas + system prompt are outside the event
-    // log, so this exceeds the event-log total and is the real per-turn send).
-    const catTotal = c.byCategory.reduce((n, x) => n + x.tokens, 0);
+    // Counted categories only — deferred MCP schemas are shown separately and do
+    // not ride the per-turn request, so they are excluded from the send total.
+    const counted = c.byCategory.filter((x) => !x.isDeferred);
+    const deferred = c.byCategory.filter((x) => x.isDeferred);
+    const catTotal = counted.reduce((n, x) => n + x.tokens, 0);
     lines.push(`  by category (≈${catTotal.toLocaleString()} tok sent per turn):`);
-    for (const e of c.byCategory) {
+    for (const e of counted) {
       const share = catTotal > 0 ? ((e.tokens / catTotal) * 100).toFixed(1) : "0.0";
       const label = CATEGORY_LABELS[e.category] ?? e.category;
       lines.push(`    ${label}: ${e.tokens.toLocaleString()} tok (${share}%)`);
+    }
+    for (const e of deferred) {
+      const label = CATEGORY_LABELS[e.category] ?? e.category;
+      lines.push(`    ${label}: ${e.tokens.toLocaleString()} tok (on demand, not counted)`);
     }
   }
   if (c.byEventType.length > 0) {

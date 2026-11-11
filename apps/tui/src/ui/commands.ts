@@ -43,7 +43,7 @@ export type CommandResult =
   | { kind: "show-hooks" }
   | { kind: "show-agents" }
   | { kind: "show-skills" }
-  | { kind: "show-context" }
+  | { kind: "show-context"; precise?: boolean }
   | { kind: "show-plugins" }
   | { kind: "export"; format: "markdown" | "jsonl"; outPath?: string }
   | { kind: "undo" }
@@ -229,8 +229,10 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "show-agents" };
     case "skills":
       return { kind: "show-skills" };
-    case "context":
-      return { kind: "show-context" };
+    case "context": {
+      const precise = /(^|\s)(--precise|precise)(\s|$)/.test(rest);
+      return { kind: "show-context", precise };
+    }
     case "plugins":
       return { kind: "show-plugins" };
     case "export": {

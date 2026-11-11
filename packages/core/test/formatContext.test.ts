@@ -55,4 +55,21 @@ describe("formatContext", () => {
     expect(out).not.toMatch(/NaN/);
     expect(out).not.toMatch(/by category/);
   });
+
+  it("shows deferred MCP tools separately and excludes them from the send total", () => {
+    const c = base();
+    c.byCategory = [
+      { category: "system", tokens: 4000 },
+      { category: "tools", tokens: 1000 },
+      { category: "mcp_deferred", tokens: 9000, isDeferred: true },
+    ];
+    const out = formatContext(c);
+    // The per-turn send total counts only non-deferred categories (5,000).
+    expect(out).toMatch(/by category \(≈5,000 tok sent per turn\)/);
+    // Counted shares are against 5,000, not 14,000.
+    expect(out).toMatch(/system prompt: 4,000 tok \(80\.0%\)/);
+    expect(out).toMatch(/tool definitions: 1,000 tok \(20\.0%\)/);
+    // Deferred row is shown but marked not counted (no percentage share).
+    expect(out).toMatch(/MCP tools \(deferred\): 9,000 tok \(on demand, not counted\)/);
+  });
 });

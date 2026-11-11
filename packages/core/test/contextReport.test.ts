@@ -219,3 +219,74 @@ describe("Session.contextReport hybrid estimate", () => {
     );
   });
 });
+
+describe("Session.preciseContextCount", () => {
+  let dir: string;
+  let session: Session;
+
+  afterEach(async () => {
+    await session?.dispose().catch(() => undefined);
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function provider(withCount: boolean): ChatProvider {
+    const p: ChatProvider = {
+      name: "mock",
+      defaultModel: "mock-model",
+      smallModel: "mock-model",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { kind: "text_delta", messageId: "m1", text: "ok" };
+        yield { kind: "usage", usage: { input: 1000, output: 5 } };
+        yield { kind: "done", finishReason: "stop" };
+      },
+    };
+    if (withCount) {
+      p.countTokens = async () => ({ inputTokens: 7777 });
+    }
+    return p;
+  }
+
+  async function makeSession(opts: {
+    preciseCount?: "off" | "on-demand";
+    withCount: boolean;
+  }): Promise<Session> {
+    dir = mkdtempSync(join(tmpdir(), "ctxp-"));
+    const s = new Session(`ctxp_${Date.now()}`, {
+      cwd: dir,
+      config: {
+        provider: "openai",
+        model: "mock-model",
+        apiKey: "x",
+        permissionMode: "yolo",
+        sandbox: { mode: "off" },
+        autoCompact: false,
+        maxRetries: 0,
+        stopVerify: "off",
+        contextWindow: 200_000,
+        context: opts.preciseCount ? { preciseCount: opts.preciseCount } : undefined,
+      },
+      model: "mock-model",
+      provider: provider(opts.withCount),
+      pluginRuntimes: false,
+    });
+    await s.init();
+    await s.setTitle("ctxp");
+    await s.prompt("hi");
+    return s;
+  }
+
+  it("returns null when precise counting is off (default)", async () => {
+    session = await makeSession({ withCount: true });
+    expect(await session.preciseContextCount()).toBeNull();
+  });
+
+  it("returns null when the provider has no count API even on-demand", async () => {
+    session = await makeSession({ preciseCount: "on-demand", withCount: false });
+    expect(await session.preciseContextCount()).toBeNull();
+  });
+
+  it("returns the provider count when on-demand and supported", async () => {
+    session = await makeSession({ preciseCount: "on-demand", withCount: true });
+    expect(await session.preciseContextCount()).toEqual({ inputTokens: 7777 });
+  });
+});

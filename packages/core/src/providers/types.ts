@@ -127,6 +127,27 @@ export interface ChatProvider {
   * completion, never by the agent loop.
   */
   fim?(opts: FimCompletionOptions): Promise<FimCompletionResult>;
+  /**
+   * OPTIONAL exact prompt token count via the provider's count-tokens API
+   * (Anthropic `/v1/messages/count_tokens`). Used ONLY on explicit demand
+   * (`/context --precise`) to show an accurate gauge — never on a hot path and
+   * never to drive compaction. Providers without the API omit this; callers fall
+   * back to the local heuristic.
+   */
+  countTokens?(opts: CountTokensOptions): Promise<CountTokensResult>;
+}
+
+export interface CountTokensOptions {
+  model: string;
+  systemPrompt?: string;
+  messages: ProviderMessage[];
+  tools?: ProviderToolDef[];
+  signal?: AbortSignal;
+}
+
+export interface CountTokensResult {
+  /** Exact input (prompt) tokens the provider counts for this request. */
+  inputTokens: number;
 }
 
 export interface FimCompletionOptions {

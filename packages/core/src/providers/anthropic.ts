@@ -6,6 +6,8 @@ import { fetchWithRetry } from "./retry.js";
 import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
+  CountTokensOptions,
+  CountTokensResult,
   ProviderMessage,
   ProviderMessageContent,
   ProviderToolDef,
@@ -343,6 +345,48 @@ export class AnthropicProvider implements ChatProvider {
       return;
     }
     yield { kind: "done", finishReason: "stop" };
+  }
+
+  /**
+   * Exact prompt token count via Anthropic's `/v1/messages/count_tokens`. A
+   * single non-streaming request; used only on explicit demand to show an
+   * accurate `/context` gauge. Never attaches cache_control (counting is
+   * cache-agnostic) and never drives compaction.
+   */
+  async countTokens(opts: CountTokensOptions): Promise<CountTokensResult> {
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      messages: mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage)),
+    };
+    if (opts.systemPrompt) body.system = opts.systemPrompt;
+    if (opts.tools && opts.tools.length > 0) {
+      body.tools = opts.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+      }));
+    }
+    const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/messages/count_tokens`;
+    const res = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": this.apiKey,
+          "anthropic-version": API_VERSION,
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      },
+      { signal: opts.signal },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`count_tokens ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const json = (await res.json()) as { input_tokens?: number };
+    return { inputTokens: json.input_tokens ?? 0 };
   }
 }
 

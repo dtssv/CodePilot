@@ -32,6 +32,23 @@ import { estimateTokens } from "./tokens.js";
 // Tool-table construction
 // ---------------------------------------------------------------------------
 
+/** Decide whether a turn lazily surfaces MCP tools: hide the individual MCP
+ * tool schemas and expose only the `mcp` meta-tool. "lazy" always defers;
+ * "eager" never does; "auto" (default) defers once the MCP tool count exceeds
+ * the threshold (default 8). Shared by the turn builder and the context gauge so
+ * both agree on which MCP schemas actually ride the request. */
+export function decideLazyMcp(
+  mcpToolCount: number,
+  discovery: "auto" | "lazy" | "eager" | undefined,
+  lazyThreshold: number | undefined,
+): boolean {
+  if (mcpToolCount <= 0) return false;
+  const mode = discovery ?? "auto";
+  if (mode === "lazy") return true;
+  if (mode === "eager") return false;
+  return mcpToolCount > (lazyThreshold ?? 8);
+}
+
 /** Build the provider-facing tool definitions for a turn, filtered by the
  * active collaboration mode and (optionally) a per-model exposure downgrade.
  * When `lazyMcp` is true, individual MCP tools are dropped from the list

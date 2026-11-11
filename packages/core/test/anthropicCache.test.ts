@@ -268,3 +268,45 @@ describe("AnthropicProvider budgeted breakpoint placement", () => {
     expect(usage.cacheBreakpoints).toBe(0);
   });
 });
+
+describe("AnthropicProvider countTokens", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("posts to the count_tokens endpoint and returns the input token count", async () => {
+    let url = "";
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (u: string, init: RequestInit) => {
+      url = u;
+      body = JSON.parse(init.body as string);
+      return new Response(JSON.stringify({ input_tokens: 4242 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const p = new AnthropicProvider({ apiKey: "k" });
+    const res = await p.countTokens({
+      model: "claude-sonnet-4-5",
+      systemPrompt: "you are helpful",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: TOOLS,
+    });
+    expect(res.inputTokens).toBe(4242);
+    expect(url).toContain("/messages/count_tokens");
+    // No cache_control on a count request (counting is cache-agnostic).
+    expect(JSON.stringify(body)).not.toContain("cache_control");
+    expect(body.system).toBe("you are helpful");
+  });
+
+  it("throws on a non-OK response so the caller can fall back", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response("nope", { status: 404 }),
+    );
+    const p = new AnthropicProvider({ apiKey: "k" });
+    await expect(
+      p.countTokens({
+        model: "claude-sonnet-4-5",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    ).rejects.toThrow(/count_tokens 404/);
+  });
+});

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { buildProviderToolDefs } from "../src/agent-messages.js";
+import { buildProviderToolDefs, decideLazyMcp } from "../src/agent-messages.js";
 import { makeMcpMetaTool } from "../src/tools/mcp_tool.js";
 import { ToolRegistry, type ToolDef } from "../src/tools/types.js";
 
@@ -35,6 +35,19 @@ function mcpTool(name: string, server = "feishu"): ToolDef {
 }
 
 describe("lazy MCP tool discovery", () => {
+  it("decideLazyMcp honours mode and threshold", () => {
+    // No MCP tools → never lazy, regardless of mode.
+    expect(decideLazyMcp(0, "lazy", 8)).toBe(false);
+    // Explicit lazy / eager override the count.
+    expect(decideLazyMcp(1, "lazy", 8)).toBe(true);
+    expect(decideLazyMcp(100, "eager", 8)).toBe(false);
+    // auto (default) switches at the threshold.
+    expect(decideLazyMcp(8, "auto", 8)).toBe(false);
+    expect(decideLazyMcp(9, "auto", 8)).toBe(true);
+    expect(decideLazyMcp(9, undefined, undefined)).toBe(true); // default threshold 8
+    expect(decideLazyMcp(8, undefined, undefined)).toBe(false);
+  });
+
   it("hides individual MCP tools from the provider list when lazy", () => {
     const reg = new ToolRegistry();
     reg.register(builtin("bash"));

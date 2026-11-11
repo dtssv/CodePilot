@@ -19,6 +19,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   skills: "Skills",
   tools: "Tool definitions",
   mcp: "MCP tools",
+  mcp_deferred: "MCP tools (deferred)",
   conversation: "Conversation",
   lastMessage: "Current message",
   subagent: "Sub-agents",
@@ -31,6 +32,7 @@ const CATEGORY_TINTS: Record<string, string> = {
   skills: "#8b5cf6",
   tools: "#0ea5e9",
   mcp: "#14b8a6",
+  mcp_deferred: "#94a3b8",
   conversation: "#f59e0b",
   lastMessage: "#ec4899",
   subagent: "#64748b",
@@ -201,7 +203,10 @@ export function ContextGauge({
   const used = effectiveContextTokens(report);
   const sev = contextSeverity(report);
   const ringColor = severityColor(sev);
-  const cats = (report.byCategory ?? []).filter((c) => c.tokens > 0);
+  // Counted categories drive the gauge; deferred MCP schemas are shown as a
+  // separate note (they ride the `mcp` meta-tool on demand, not each turn).
+  const cats = (report.byCategory ?? []).filter((c) => c.tokens > 0 && !c.isDeferred);
+  const deferredCats = (report.byCategory ?? []).filter((c) => c.tokens > 0 && c.isDeferred);
   const catTotal = cats.reduce((n, c) => n + c.tokens, 0);
   const estimated = !(report.providerInputTokens && report.providerInputTokens > 0);
 
@@ -269,6 +274,21 @@ export function ContextGauge({
             );
           })}
         </ul>
+
+        {deferredCats.length > 0 && (
+          <div className="mt-2 border-t border-[var(--color-edge-subtle)] pt-2 text-[10.5px] text-[var(--color-ink-faint)]">
+            {deferredCats.map((c) => (
+              <div key={c.category} className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate">
+                  {t(CATEGORY_LABELS[c.category] ?? c.category)}
+                </span>
+                <span className="shrink-0 tabular-nums">
+                  {formatTokens(c.tokens)} · {t("on demand, not counted")}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {report.duplicateReads.length > 0 && (
           <div className="mt-2.5 border-t border-[var(--color-edge-subtle)] pt-2 text-[10.5px] text-[var(--color-ink-faint)]">

@@ -307,6 +307,10 @@ class MockSessionImpl implements SessionShape {
     return { estimatedTokens: 0, eventCount: this.events.length };
   }
 
+  async preciseContextCount(): Promise<{ inputTokens: number } | null> {
+    return null;
+  }
+
   private cannedReply(prompt: string): string[] {
     const base =
       `Hi! I'm the **mock** CodePilot session — the real core isn't wired in yet.\n\n` +

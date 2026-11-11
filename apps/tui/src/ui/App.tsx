@@ -1006,7 +1006,14 @@ export function App(props: AppProps): React.ReactElement {
           case "show-context": {
             try {
               const report = session.contextReport();
-              dispatch({ type: "set-notice", text: formatContext(report) });
+              let text = formatContext(report);
+              if (result.precise) {
+                const precise = await session.preciseContextCount();
+                text += precise
+                  ? `\n  precise (provider count): ${precise.inputTokens.toLocaleString()} tokens`
+                  : `\n  precise count unavailable (set context.preciseCount: "on-demand" and use a provider that supports it)`;
+              }
+              dispatch({ type: "set-notice", text });
             } catch (err: unknown) {
               dispatch({ type: "set-notice", text: `Failed to query context: ${err instanceof Error ? err.message : String(err)}` });
             }

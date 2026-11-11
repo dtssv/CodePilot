@@ -270,6 +270,7 @@ const CONTEXT_CATEGORY_LABELS: Record<string, string> = {
   skills: "Skills",
   tools: "Tool definitions",
   mcp: "MCP tools",
+  mcp_deferred: "MCP tools (deferred)",
   conversation: "Conversation",
   lastMessage: "Current message",
   subagent: "Sub-agents",
@@ -314,7 +315,10 @@ function ContextSection({
   }, [client, sessionId, refreshKey]);
 
   if (!report || !report.byCategory || report.byCategory.length === 0) return null;
-  const cats = report.byCategory;
+  // Deferred MCP schemas are shown separately and excluded from the counted
+  // per-turn total so the bars reflect what actually rides each request.
+  const cats = report.byCategory.filter((c) => !c.isDeferred);
+  const deferredCats = report.byCategory.filter((c) => c.isDeferred);
   const catTotal = cats.reduce((n, c) => n + c.tokens, 0);
   const used = effectiveContextTokens(report);
   const pct = report.window > 0 ? (used / report.window) * 100 : 0;
@@ -346,6 +350,21 @@ function ContextSection({
           );
         })}
       </div>
+      {deferredCats.length > 0 && (
+        <div className="mt-2 border-t border-[var(--color-edge-subtle)] pt-2">
+          {deferredCats.map((c) => (
+            <div
+              key={c.category}
+              className="flex items-center justify-between text-[11px] text-[var(--color-ink-faint)]"
+            >
+              <span>{t(CONTEXT_CATEGORY_LABELS[c.category] ?? c.category)}</span>
+              <span className="tabular-nums">
+                {formatTokens(c.tokens)} · {t("on demand, not counted")}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </Section>
   );
 }

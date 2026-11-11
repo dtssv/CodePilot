@@ -424,6 +424,15 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .optional(),
     mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
     mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
+    // Context gauge precision. "off" (default) uses the local heuristic/usage
+    // estimate for `/context`. "on-demand" lets `/context --precise` (or a UI
+    // action) call the provider's token-count API once for an exact count;
+    // precise counting never runs automatically (statusline refreshes, gauge
+    // polls) and never feeds the compaction threshold.
+    context: z
+      .object({ preciseCount: z.enum(["off", "on-demand"]).optional() })
+      .strict()
+      .optional(),
     // Instruction-file discovery. By default the hierarchical walk for
     // CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
     // toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to

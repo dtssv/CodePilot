@@ -1,5 +1,7 @@
 export type {
   ChatProvider,
+  CountTokensOptions,
+  CountTokensResult,
   ProviderMessage,
   ProviderMessageContent,
   ProviderToolDef,

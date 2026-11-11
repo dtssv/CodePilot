@@ -16,6 +16,8 @@
 
 import type {
   ChatProvider,
+  CountTokensOptions,
+  CountTokensResult,
   StreamChatOptions,
   StreamEvent,
 } from "./types.js";
@@ -96,5 +98,15 @@ export class FallbackProvider implements ChatProvider {
  // Loop continues with the next provider.
     }
     yield { kind: "error", message: `all providers failed; last error: ${lastError}` };
+  }
+
+  /** Delegate an exact token count to the primary provider when it supports it
+   * (precise counting is an opt-in, non-failover path). */
+  async countTokens(opts: CountTokensOptions): Promise<CountTokensResult> {
+    const primary = this.chain[0]!;
+    if (typeof primary.countTokens !== "function") {
+      throw new Error("primary provider does not support count_tokens");
+    }
+    return primary.countTokens(opts);
   }
 }

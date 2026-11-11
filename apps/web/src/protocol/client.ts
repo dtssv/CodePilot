@@ -64,7 +64,7 @@ export interface ContextReport {
   usagePercent: number;
   autoCompactEnabled: boolean;
   byEventType: { type: string; tokens: number; count: number }[];
-  byCategory?: { category: string; tokens: number }[];
+  byCategory?: { category: string; tokens: number; isDeferred?: boolean }[];
   topFileReads: { path: string; reads: number; tokens: number }[];
   duplicateReads: { path: string; reads: number }[];
 }
@@ -527,6 +527,15 @@ export class CodepilotClient {
    * sub-agents). Used by the context-usage panel. */
   async sessionContextReport(sessionId: string): Promise<ContextReport> {
     return this.call("session/contextReport", { sessionId });
+  }
+
+  /** Exact prompt token count via the server's provider count-tokens API,
+   * returned when `context.preciseCount: "on-demand"` and the provider supports
+   * it; `null` otherwise. Opt-in only — never a hot path. */
+  async sessionContextCountPrecise(
+    sessionId: string,
+  ): Promise<{ inputTokens: number } | null> {
+    return this.call("session/contextCountPrecise", { sessionId });
   }
 
   /** List slash commands for the `/` menu (shared built-ins + md commands). */

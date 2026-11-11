@@ -696,6 +696,14 @@ export function registerServer(
     if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
     return requireSession(ctx, p.sessionId).contextReport();
   });
+  peer.onRequest<
+    { sessionId: string },
+    { inputTokens: number } | null
+  >("session/contextCountPrecise", (p) => {
+    assertInitialized(ctx);
+    if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+    return requireSession(ctx, p.sessionId).preciseContextCount();
+  });
   peer.onRequest<WorkspaceListParams, WorkspaceListResult>("workspace/list", (p) =>
     handleWorkspaceList(ctx, p),
   );
@@ -1176,6 +1184,7 @@ const REMOTE_METHOD_CAPS: Record<string, RemoteGrant["caps"][number] | "any"> = 
   shutdown: "any",
   "session/list": "follow",
   "session/contextReport": "follow",
+  "session/contextCountPrecise": "follow",
   "session/pin": "follow",
   "session/archive": "follow",
   "session/resume": "follow",

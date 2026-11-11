@@ -549,6 +549,20 @@ export class RemoteSession {
     };
   }
 
+  /** Exact prompt token count via the server's provider count-tokens API,
+   * returned when `context.preciseCount: "on-demand"` and the provider supports
+   * it. `null` otherwise (fail-soft). */
+  async preciseContextCount(): Promise<{ inputTokens: number } | null> {
+    try {
+      return await this.peer.request<unknown, { inputTokens: number } | null>(
+        "session/contextCountPrecise",
+        { sessionId: this.id },
+      );
+    } catch {
+      return null;
+    }
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;

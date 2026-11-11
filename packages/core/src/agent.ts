@@ -42,6 +42,7 @@ import { getTracer, type Span } from "./telemetry.js";
 import {
   buildProviderMessages,
   buildProviderToolDefs,
+  decideLazyMcp,
   streamOnce,
 } from "./agent-messages.js";
 import {
@@ -691,11 +692,11 @@ export async function runAgent(
     // Decide whether to lazily surface MCP tools (hide their schemas, expose the
     // `mcp` meta-tool) based on config + how many MCP tools exist this turn.
     const mcpToolCount = deps.tools.all().filter((t) => t.source === "mcp").length;
-    const discovery = deps.config.mcpToolDiscovery ?? "auto";
-    const lazyThreshold = deps.config.mcpLazyThreshold ?? 8;
-    const lazyMcp =
-      mcpToolCount > 0 &&
-      (discovery === "lazy" || (discovery === "auto" && mcpToolCount > lazyThreshold));
+    const lazyMcp = decideLazyMcp(
+      mcpToolCount,
+      deps.config.mcpToolDiscovery,
+      deps.config.mcpLazyThreshold,
+    );
     const providerTools = buildProviderToolDefs(deps.tools, agentMode, {
       lazyMcp,
       model: deps.config.model,
