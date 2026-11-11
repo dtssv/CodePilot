@@ -435,6 +435,48 @@ describe("Session", () => {
     expect(session.getSandbox().writablePaths.some((p) => p.includes(outside))).toBe(true);
   });
 
+  it("sandbox feeds a decline-with-feedback back to the model and does not widen the jail", async () => {
+    const outside = `/opt/cp-fb-${Math.random().toString(36).slice(2, 8)}`;
+    const session = await createSession({
+      cwd: workDir,
+      config: { sandbox: { mode: "workspace-write" }, permissionMode: "ask" },
+      onPermissionRequest: async () => ({
+        decision: "deny" as const,
+        feedback: "Use a path inside the repo instead.",
+      }),
+    });
+    await (session as unknown as {
+      grantSandboxForMentionedRoots(dirs: string[]): Promise<void>;
+    }).grantSandboxForMentionedRoots([outside]);
+    // The jail is NOT widened on a deny.
+    expect(session.getSandbox().writablePaths.some((p) => p.includes(outside))).toBe(false);
+    // The feedback rides into the per-turn steering queue as a system notice.
+    const queue = (session as unknown as {
+      steeringQueue: Array<{ source: string; text: string }>;
+    }).steeringQueue;
+    const notice = queue.find((i) => i.source === "system" && i.text.includes("Use a path inside the repo"));
+    expect(notice).toBeTruthy();
+    expect(notice!.text).toContain(outside);
+  });
+
+  it("sandbox stays silent on a plain deny (no feedback) and does not widen the jail", async () => {
+    const outside = `/opt/cp-deny-${Math.random().toString(36).slice(2, 8)}`;
+    const session = await createSession({
+      cwd: workDir,
+      config: { sandbox: { mode: "workspace-write" }, permissionMode: "ask" },
+      onPermissionRequest: async () => "deny" as const,
+    });
+    await (session as unknown as {
+      grantSandboxForMentionedRoots(dirs: string[]): Promise<void>;
+    }).grantSandboxForMentionedRoots([outside]);
+    expect(session.getSandbox().writablePaths.some((p) => p.includes(outside))).toBe(false);
+    const queue = (session as unknown as {
+      steeringQueue: Array<{ source: string; text: string }>;
+    }).steeringQueue;
+    // No noise injected for a bare deny.
+    expect(queue.some((i) => i.source === "system")).toBe(false);
+  });
+
   it("fork creates an independent session with shared prefix", async () => {
     const id = "fork-test";
     const path = join(getSessionsDir(), `${id}.jsonl`);

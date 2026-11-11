@@ -2460,13 +2460,26 @@ export class Session {
       } catch {
         continue; // host error → leave blocked; per-write prompt still guards
       }
-      // A decline-with-feedback object means "don't widen the jail" — treat it
-      // as a plain deny here (the feedback has no tool_result to ride on).
-      const decision: PermissionDecision = typeof resolution === "string" ? resolution : "deny";
+      // Normalize the resolution. A decline-with-feedback object means "don't
+      // widen the jail, but the user left a correction" — there is no
+      // tool_result to attach it to here (the sandbox grant is pre-emptive, not
+      // a tool call), so surface the feedback to the model as a system notice so
+      // its next step sees the instruction. A plain deny stays silent.
+      const decision: PermissionDecision | "abort" =
+        typeof resolution === "string" ? resolution : resolution.decision;
       if (decision === "allow" || decision === "always" || decision === "always-project") {
         await this.expandWritablePath(dir, {
           persist: decision === "always" || decision === "always-project",
         });
+      } else if (
+        typeof resolution !== "string" &&
+        resolution.decision === "deny" &&
+        resolution.feedback.trim().length > 0
+      ) {
+        this.steerSystem(
+          `The user declined to extend the sandbox's writable roots to “${dir}” and ` +
+            `instructed: ${resolution.feedback.trim()}`,
+        );
       }
     }
   }
