@@ -126,6 +126,40 @@ describe("provider transcript", () => {
     expect(err!.message).toMatch(/repeating loop|degenerated/);
     // And it stopped well before draining all 2000 deltas.
     expect(emitted).toBeLessThan(2000);
+    // It emitted a degeneration telemetry event for tuning / false-positive
+    // spotting.
+    const stopped = events.find((e) => e.type === "degeneration") as
+      | Extract<Event, { type: "degeneration" }>
+      | undefined;
+    expect(stopped).toBeTruthy();
+    expect(stopped!.action).toBe("stopped");
+    expect(stopped!.repeats).toBeGreaterThanOrEqual(6);
+    expect(stopped!.soFarLen).toBeGreaterThan(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not abort the repetition loop when the guard is disabled", async () => {
+    let emitted = 0;
+    const provider = new ScriptedProvider([
+      async function* () {
+        for (let i = 0; i < 300; i++) {
+          emitted++;
+          yield { kind: "text_delta", messageId: "m", text: "I call read_file. I execute read_file. " } as StreamEvent;
+        }
+        yield { kind: "done", finishReason: "stop" } as StreamEvent;
+      },
+    ]);
+    const { deps: d, events, dir } = deps(provider, {
+      config: { provider: "anthropic", degeneration: { enabled: false } },
+    });
+    await runAgent({ history: [], userText: "go" }, d);
+    // No degeneration stop; the whole stream drained.
+    expect(emitted).toBe(300);
+    expect(events.find((e) => e.type === "degeneration")).toBeUndefined();
+    const err = events.find(
+      (e) => e.type === "error" && /repeating loop|degenerated/.test((e as { message: string }).message),
+    );
+    expect(err).toBeUndefined();
     rmSync(dir, { recursive: true, force: true });
   });
 

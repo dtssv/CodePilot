@@ -379,7 +379,8 @@ export function createSubagentRunner(
  // would just burn tokens.
       const maxSubAttempts = Math.max(1, opts.config.turnRetries ?? 2);
       let events: Event[] = [];
-      let outcome = assessSubagentOutcome(events);
+      const degenerationEnabled = opts.config.degeneration?.enabled !== false;
+      let outcome = assessSubagentOutcome(events, { degenerationEnabled });
       let reachedTurnBudget = false;
       const makeDeps = (maxTurns: number): AgentDeps => ({
         provider,
@@ -441,7 +442,7 @@ export function createSubagentRunner(
         }
         outcome = threw
           ? { ok: false, steps: 0, conclusion: `### Blocker\nSub-agent run threw: ${threw.message}` }
-          : assessSubagentOutcome(events);
+          : assessSubagentOutcome(events, { degenerationEnabled });
 
         const lastAttempt = attempt === maxSubAttempts - 1;
         const failureText = threw ? threw.message : outcome.conclusion;
@@ -493,7 +494,7 @@ export function createSubagentRunner(
             };
             break;
           }
-          outcome = assessSubagentOutcome(events);
+          outcome = assessSubagentOutcome(events, { degenerationEnabled });
           if (!reachedTurnBudget) break;
         }
       }
@@ -590,7 +591,9 @@ export function createSubagentRunner(
           finalText = outcome.conclusion;
           break;
         }
-        outcome = assessSubagentOutcome(events);
+        outcome = assessSubagentOutcome(events, {
+          degenerationEnabled: opts.config.degeneration?.enabled !== false,
+        });
         finalText = outcome.conclusion;
         if (outputSchema && outcome.ok) {
           const parsed = extractStructuredJson(finalText);
@@ -811,7 +814,10 @@ export { detectDegenerateText, detectRunawayRepetition };
  * `0 steps` / "no final text" results, so the parent does not keep
  * exploring a failed sub-agent.
  */
-export function assessSubagentOutcome(events: Event[]): {
+export function assessSubagentOutcome(
+  events: Event[],
+  opts: { degenerationEnabled?: boolean } = {},
+): {
   conclusion: string;
   steps: number;
   ok: boolean;
@@ -823,8 +829,10 @@ export function assessSubagentOutcome(events: Event[]): {
 
   // Degenerate output (decoding collapse) is a failure, never a conclusion.
   // Caught before the "has text → ok" path so the garbage is not adopted or
-  // fed back to the parent. Guards the "乱说 / incoherent garbage" form.
-  if (hasText) {
+  // fed back to the parent. Guards the incoherent-garbage form. Honours the
+  // same enable gate as the live streaming guard, so disabling degeneration
+  // detection turns off both checks.
+  if (hasText && opts.degenerationEnabled !== false) {
     const degen = detectDegenerateText(text);
     if (degen) {
       return {
@@ -844,11 +852,10 @@ export function assessSubagentOutcome(events: Event[]): {
     // text it emitted. A sub-agent's job is to DO work (read/search/run) and
     // then report; text produced without any tool call is an announcement of
     // intent ("I'll read the files…"), not a result. Adopting it credits the
-    // child with work it never did. Borrowed from dsh's hard guard
-    // (packages/goal activation.ts): "completed" with no captured work is
+    // child with work it never did. A "completed" run with no captured work is
     // forced to error. We key off the real signal (step count), not a fragile
     // text-pattern match, so it is model- and language-agnostic. Guards the
-    // "提前结束 / premature termination" form.
+    // premature-termination form.
     if (steps === 0) {
       const snippet = text.length > 160 ? `${text.slice(0, 160)}…` : text;
       return {

@@ -76,6 +76,33 @@ describe("assessSubagentOutcome", () => {
     expect(r.conclusion).toMatch(/degenerated into repeated noise/);
   });
 
+  // The degeneration check honours the same enable gate as the live guard: with
+  // detection disabled, a run that did real work (≥1 tool step) is not failed
+  // for collapsing into a repeated unit.
+  it("does not flag degenerate text when degeneration detection is disabled", () => {
+    const garbage = "result: " + "}`".repeat(16000);
+    const events: Event[] = [
+      {
+        type: "tool_call",
+        id: "t1",
+        name: "read_file",
+        input: { path: "a.ts" },
+      } as Event,
+      { type: "tool_result", toolCallId: "t1", content: "ok" } as Event,
+      {
+        type: "message",
+        id: "a1",
+        role: "assistant",
+        content: [{ type: "text", text: garbage }],
+      },
+    ];
+    // Default: flagged as degenerate.
+    expect(assessSubagentOutcome(events).ok).toBe(false);
+    // Disabled: the degenerate text is not treated as a failure (the run did
+    // one tool step, so the 0-step gate does not fire either).
+    expect(assessSubagentOutcome(events, { degenerationEnabled: false }).ok).toBe(true);
+  });
+
   // Regression: sub-agents A/B from the same session — "I'll analyze… read all
   // files in parallel" with ZERO tool steps, previously adopted as ok. The hard
   // rule: 0 tool steps = failure, regardless of text.
@@ -246,6 +273,22 @@ describe("detectRunawayRepetition", () => {
       table += `| ${i} | row-${i} | ${i % 2 === 0 ? "ok" : "pending"} | note number ${i * 2 + 1} here |\n`;
     }
     expect(detectRunawayRepetition(table)).toBeNull();
+  });
+
+  it("honours a longer minRepeats so a shorter loop is not flagged", () => {
+    // A ~40-char clause tiling across the default 2000-char window gives ~50
+    // repeats — enough for the default (minRepeats 6) but not for a config that
+    // demands far more repeats before stopping a turn.
+    const loop = "I call read_file. I execute read_file. ".repeat(200);
+    expect(detectRunawayRepetition(loop)).not.toBeNull();
+    expect(detectRunawayRepetition(loop, { minRepeats: 200 })).toBeNull();
+  });
+
+  it("honours a higher threshold so a near-periodic stream is not flagged", () => {
+    const loop = "正在分析工具子系统，正在读取核心文件。".repeat(150);
+    expect(detectRunawayRepetition(loop)).not.toBeNull();
+    // A threshold above 1 can never be reached → never flags.
+    expect(detectRunawayRepetition(loop, { threshold: 1.01 })).toBeNull();
   });
 });
 

@@ -433,6 +433,24 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .object({ preciseCount: z.enum(["off", "on-demand"]).optional() })
       .strict()
       .optional(),
+    // Live streaming-degeneration guard: aborts a turn when the model's output
+    // collapses into a short repeating unit (a looping clause that would
+    // otherwise exhaust the output budget). Defaults match the built-in
+    // constants. `enabled: false` turns the guard off entirely for deployments
+    // that produce legitimately repetitive output (large tables, repeated
+    // structure) and prefer never to risk a false positive. Orthogonal to the
+    // tool-level doom-loop guard.
+    degeneration: z
+      .object({
+        enabled: z.boolean().optional(),
+        windowChars: z.number().int().min(100).max(100_000).optional(),
+        maxPeriod: z.number().int().min(2).max(10_000).optional(),
+        minRepeats: z.number().int().min(2).max(10_000).optional(),
+        threshold: z.number().min(0.5).max(1).optional(),
+        checkEveryChars: z.number().int().min(100).max(1_000_000).optional(),
+      })
+      .strict()
+      .optional(),
     // Instruction-file discovery. By default the hierarchical walk for
     // CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
     // toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to

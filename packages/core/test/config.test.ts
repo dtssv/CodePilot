@@ -157,6 +157,26 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ memory: { recallMax: 99 } })).toThrow();
   });
 
+  it("accepts the degeneration guard block", () => {
+    const r = validateConfig({
+      degeneration: {
+        enabled: false,
+        windowChars: 4000,
+        maxPeriod: 200,
+        minRepeats: 20,
+        threshold: 0.95,
+        checkEveryChars: 8000,
+      },
+    }) as { degeneration?: { enabled?: boolean; threshold?: number } };
+    expect(r.degeneration?.enabled).toBe(false);
+    expect(r.degeneration?.threshold).toBe(0.95);
+    // Out-of-range values are rejected.
+    expect(() => validateConfig({ degeneration: { threshold: 0.4 } })).toThrow();
+    expect(() => validateConfig({ degeneration: { threshold: 1.5 } })).toThrow();
+    expect(() => validateConfig({ degeneration: { maxPeriod: 1 } })).toThrow();
+    expect(() => validateConfig({ degeneration: { unknown: 1 } as never })).toThrow();
+  });
+
   it("accepts a custom web_search template", () => {
     const r = validateConfig({
       webSearch: {

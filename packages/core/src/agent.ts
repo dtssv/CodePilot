@@ -946,9 +946,13 @@ export async function runAgent(
  // ("I call X, I execute X, …") and fill the whole output ceiling. Waiting
  // for the turn to finish wastes the entire output budget, so we watch the
  // accumulating text and abort the stream the moment it goes periodic. We
- // only re-check every few KB of NEW text to keep it cheap.
+ // only re-check every few KB of NEW text to keep it cheap. All thresholds are
+ // configurable (`degeneration.*`) and the whole guard can be disabled for
+ // deployments with legitimately repetitive output.
+      const degenCfg = deps.config.degeneration;
+      const degenEnabled = degenCfg?.enabled !== false;
       let repetitionCheckedAt = 0;
-      const REPETITION_CHECK_EVERY = 2_000;
+      const REPETITION_CHECK_EVERY = degenCfg?.checkEveryChars ?? 2_000;
  // Per-request timing (persisted as a `request` event for diagnostics).
       const startedAt = Date.now();
       let ttftMs: number | undefined;
@@ -1004,11 +1008,17 @@ export async function runAgent(
                 delta: { type: "text", text: ev.text },
               });
               // Abort a runaway phrase-repetition loop before it exhausts the
-              // output budget. Checked only every few KB of new text.
+              // output budget. Checked only every few KB of new text, and only
+              // when the guard is enabled.
               const soFarLen = assistantText.reduce((n, s) => n + s.length, 0);
-              if (soFarLen - repetitionCheckedAt >= REPETITION_CHECK_EVERY) {
+              if (degenEnabled && soFarLen - repetitionCheckedAt >= REPETITION_CHECK_EVERY) {
                 repetitionCheckedAt = soFarLen;
-                const rep = detectRunawayRepetition(assistantText.join(""));
+                const rep = detectRunawayRepetition(assistantText.join(""), {
+                  windowChars: degenCfg?.windowChars,
+                  maxPeriod: degenCfg?.maxPeriod,
+                  minRepeats: degenCfg?.minRepeats,
+                  threshold: degenCfg?.threshold,
+                });
                 if (rep) {
                   // Say "stopped", not "aborted": this is a deliberate
                   // non-transient stop, and the transient-error classifier keys
@@ -1017,6 +1027,14 @@ export async function runAgent(
                     `output degenerated into a repeating loop ` +
                     `(${JSON.stringify(rep.unit.slice(0, 40))}×${rep.repeats}) — stopped`;
                   degenerated = true;
+                  // Telemetry for tuning thresholds / spotting false positives.
+                  await emitAux({
+                    type: "degeneration",
+                    action: "stopped",
+                    unit: rep.unit.slice(0, 40),
+                    repeats: rep.repeats,
+                    soFarLen,
+                  });
                 }
               }
               break;

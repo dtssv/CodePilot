@@ -184,6 +184,7 @@ function serializeEventForEstimate(e: Event): string {
     case "subagent":
     case "followup":
     case "pin":
+    case "degeneration":
       // Control events — not sent to the provider, so zero context cost.
       return "";
     case "request":

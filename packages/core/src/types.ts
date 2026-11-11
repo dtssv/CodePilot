@@ -332,7 +332,20 @@ type EventBody =
   * on load the latest `pin` for a message id wins and the flag is reapplied to
   * the in-memory event. The last-writer-wins so a later unpin overrides.
   */
-  | { type: "pin"; messageId: string; pinned: boolean };
+  | { type: "pin"; messageId: string; pinned: boolean }
+  /** The live streaming-degeneration guard stopped a turn because the output
+   * collapsed into a short repeating unit. Informational telemetry for tuning
+   * the detector thresholds (and spotting false positives on legitimately
+   * repetitive output) — never sent to the model. `unit` is the detected
+   * repeating snippet (truncated), `repeats` how many times it tiled, and
+   * `soFarLen` the output length when the guard fired. */
+  | {
+      type: "degeneration";
+      action: "stopped";
+      unit: string;
+      repeats: number;
+      soFarLen: number;
+    };
 
 export type Event = EventBody & EventMeta;
 
@@ -819,6 +832,18 @@ export interface CodepilotConfig {
   * the provider's token-count API once for an exact count; precise counting is
   * never automatic and never feeds the compaction threshold. */
   context?: { preciseCount?: "off" | "on-demand" };
+  /** Live streaming-degeneration guard that stops a turn when the output
+   * collapses into a short repeating unit. Defaults match the built-in
+   * constants; `enabled: false` disables the guard entirely. Orthogonal to the
+   * tool-level doom-loop guard. */
+  degeneration?: {
+    enabled?: boolean;
+    windowChars?: number;
+    maxPeriod?: number;
+    minRepeats?: number;
+    threshold?: number;
+    checkEveryChars?: number;
+  };
  /** Instruction-file discovery. By default the hierarchical walk for
   * CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md stops at the git
   * toplevel (or the cwd when not in a repo). `walkToHome: true` walks up to the
