@@ -13,7 +13,10 @@
 // Behaviour
 // ---------
 //  - Headless or `autoAcceptModeSuggestions` on → accept silently and switch.
-//  - Otherwise ask the user (ask_user channel). Accept → switch; decline → stay.
+//  - Otherwise ask the user (ask_user channel). Accept → switch; "Always
+//    switch" also persists the auto-accept preference to config; decline →
+//    stay (free text the user types instead rides into the tool result as a
+//    correction the model can act on).
 // Acceptance reuses the existing `mode_request` → setAgentMode flow (the same
 // path plan_done uses), so no new switching machinery is introduced. The tool
 // result carries a `mode_request` block the agent loop already understands.
@@ -78,8 +81,8 @@ export const suggestModeTool: SuggestModeTool = {
             `Switch to **${input.mode}** mode?\n\n${input.reason}`,
           options: [
             { label: "Switch", description: `Change to ${input.mode} mode.` },
-            { label: "Always switch", description: "Switch, and auto-accept future mode suggestions this session." },
-            { label: "Stay", description: "Keep the current mode." },
+            { label: "Always switch", description: "Switch, and auto-accept future mode suggestions (saved to your config)." },
+            { label: "Stay", description: "Keep the current mode (type your own note to steer instead)." },
           ],
         },
       ],
@@ -89,8 +92,16 @@ export const suggestModeTool: SuggestModeTool = {
     if (answer === "Switch" || answer === "Always switch") {
       return makeResult(input.mode, input.reason, true, answer === "Always switch");
     }
+    // Decline. Anything other than the exact "Switch"/"Always switch" labels —
+    // including free text the user typed instead of picking "Stay" — keeps the
+    // current mode. Free-text (a correction) rides into the tool result so the
+    // model sees the instruction rather than a bare "declined".
+    const correction = answer && answer !== "Stay" ? answer.trim() : "";
+    const base = `Mode suggestion declined — staying in ${current ?? "the current"} mode.`;
     return {
-      content: `Mode suggestion declined — staying in ${current ?? "the current"} mode. Continue the task as-is.`,
+      content: correction
+        ? `${base} The user said: ${correction}`
+        : `${base} Continue the task as-is.`,
     };
   },
 };

@@ -1071,8 +1071,12 @@ export class Session {
  // in which case restore `chat` and let them opt into agent mode.
           if (e.type === "mode_request") {
             // A suggest_mode acceptance may carry "remember" → auto-accept
-            // future suggestions this session (the "Always switch" choice).
-            if (e.rememberAuto) this.autoAcceptModeSuggestions = true;
+            // future suggestions this session (the "Always switch" choice), and
+            // persist the preference to the user config so it survives a restart.
+            if (e.rememberAuto) {
+              this.autoAcceptModeSuggestions = true;
+              void persistAutoAcceptModeSuggestions().catch(() => undefined);
+            }
             const target = e.mode === "agent" && this.prePlanMode === "chat"
               ? "chat"
               : e.mode;
@@ -4492,6 +4496,16 @@ async function persistSandboxWritablePath(dir: string): Promise<void> {
   if (prev.some((p) => resolve(p) === abs)) return;
   sandbox.writablePaths = [...prev, abs];
   raw.sandbox = sandbox;
+  await writeUserConfigFile(raw);
+}
+
+/** Best-effort: write `autoAcceptModeSuggestions: true` to the user config so
+ * the "Always switch" choice survives a restart (the session-memory flag alone
+ * is lost on reload). Mirrors {@link persistSandboxWritablePath}. */
+async function persistAutoAcceptModeSuggestions(): Promise<void> {
+  const { raw } = await readUserConfigFile();
+  if (raw.autoAcceptModeSuggestions === true) return;
+  raw.autoAcceptModeSuggestions = true;
   await writeUserConfigFile(raw);
 }
 

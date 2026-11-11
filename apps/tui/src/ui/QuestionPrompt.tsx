@@ -3,7 +3,8 @@
  *
  * Walks the user through 1–4 questions one at a time:
  * - questions WITH options → arrow-key / number-key selector; Space
- * toggles entries when multiSelect is set; Enter confirms.
+ * toggles entries when multiSelect is set; Enter confirms. Press `t` on a
+ * single-select question to type a custom answer instead of picking one.
  * - questions WITHOUT options → free-text line input; Enter confirms.
  *
  * When the last question is answered, onDone(answers) fires with a map keyed
@@ -22,6 +23,9 @@ export interface QuestionPromptProps {
 export function QuestionPrompt(props: QuestionPromptProps): React.ReactElement {
   const { request, onDone } = props;
   const [qIdx, setQIdx] = React.useState(0);
+  // Per-question "type a custom answer instead of picking" escape hatch, keyed
+  // by question index. Only offered for single-select option questions.
+  const [typing, setTyping] = React.useState(false);
   const answersRef = React.useRef<QuestionAnswers>({});
 
   const question: QuestionSpec | undefined = request.questions[qIdx];
@@ -29,6 +33,7 @@ export function QuestionPrompt(props: QuestionPromptProps): React.ReactElement {
   const advance = React.useCallback(
     (id: string, answer: string | string[]) => {
       answersRef.current = { ...answersRef.current, [id]: answer };
+      setTyping(false);
       if (qIdx + 1 >= request.questions.length) {
         onDone(answersRef.current);
       } else {
@@ -43,6 +48,12 @@ export function QuestionPrompt(props: QuestionPromptProps): React.ReactElement {
     return <Text dimColor>(no question)</Text>;
   }
 
+  const hasOptions = question.options !== undefined && question.options.length > 0;
+  const multiSelect = question.multiSelect === true;
+  // A single-select option question can escape to free text (press `t`); the
+  // default UI still shows the option list so no one is forced to type.
+  const showFreeText = !hasOptions || (typing && !multiSelect);
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={palette.accent} paddingX={1}>
       <Text bold color={palette.accent}>
@@ -53,17 +64,18 @@ export function QuestionPrompt(props: QuestionPromptProps): React.ReactElement {
       </Text>
       <Text>{question.question}</Text>
       <Box marginTop={1}>
-        {question.options !== undefined && question.options.length > 0 ? (
-          <OptionPicker
-            key={question.id}
-            options={question.options}
-            multiSelect={question.multiSelect === true}
-            onPick={(answer) => advance(question.id, answer)}
+        {showFreeText ? (
+          <FreeTextInput
+            key={`${question.id}-text`}
+            onSubmit={(text) => advance(question.id, text)}
           />
         ) : (
-          <FreeTextInput
+          <OptionPicker
             key={question.id}
-            onSubmit={(text) => advance(question.id, text)}
+            options={question.options!}
+            multiSelect={multiSelect}
+            onPick={(answer) => advance(question.id, answer)}
+            onType={multiSelect ? undefined : () => setTyping(true)}
           />
         )}
       </Box>
@@ -75,10 +87,12 @@ interface OptionPickerProps {
   options: Array<{ label: string; description?: string }>;
   multiSelect: boolean;
   onPick: (answer: string | string[]) => void;
+  /** Single-select only: switch to a free-text answer (press `t`). */
+  onType?: () => void;
 }
 
 function OptionPicker(props: OptionPickerProps): React.ReactElement {
-  const { options, multiSelect, onPick } = props;
+  const { options, multiSelect, onPick, onType } = props;
   const [cursor, setCursor] = React.useState(0);
   const [checked, setChecked] = React.useState<Set<number>>(new Set());
 
@@ -102,6 +116,12 @@ function OptionPicker(props: OptionPickerProps): React.ReactElement {
         } else {
           onPick(options[n - 1]!.label);
         }
+        return;
+      }
+ // `t` escapes to a free-text answer (single-select only), so the user can
+ // type a correction when none of the offered options fit.
+      if (onType && (input === "t" || input === "T")) {
+        onType();
         return;
       }
       if (key.return) {
@@ -160,7 +180,9 @@ function OptionPicker(props: OptionPickerProps): React.ReactElement {
       <Text dimColor>
         {multiSelect
           ? "↑/↓ move · Space toggle · 1-9 toggle · Enter confirm"
-          : "↑/↓ select · 1-9 jump · Enter confirm"}
+          : onType
+            ? "↑/↓ select · 1-9 jump · t type · Enter confirm"
+            : "↑/↓ select · 1-9 jump · Enter confirm"}
       </Text>
     </Box>
   );

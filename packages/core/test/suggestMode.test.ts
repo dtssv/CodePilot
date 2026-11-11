@@ -73,4 +73,26 @@ describe("suggest_mode", () => {
     expect(mr?.mode).toBe("plan");
     expect(mr?.rememberAuto).toBe(true);
   });
+
+  it("decline with free-text rides the correction into the tool result", async () => {
+    const tool = { ...suggestModeTool, currentMode: () => "agent" as const };
+    const r = await tool.execute(
+      { mode: "plan", reason: "r" },
+      ctx({ askUser: async () => ({ switch: "Finish the current edit first." }) }),
+    );
+    // No switch, but the user's instruction is surfaced to the model.
+    expect(r.blocks).toBeUndefined();
+    expect(r.content).toMatch(/staying in agent mode/);
+    expect(r.content).toMatch(/The user said: Finish the current edit first\./);
+  });
+
+  it("a bare 'Stay' declines without a correction note", async () => {
+    const tool = { ...suggestModeTool, currentMode: () => "agent" as const };
+    const r = await tool.execute(
+      { mode: "plan", reason: "r" },
+      ctx({ askUser: async () => ({ switch: "Stay" }) }),
+    );
+    expect(r.content).toMatch(/Continue the task as-is/);
+    expect(r.content).not.toMatch(/The user said/);
+  });
 });
