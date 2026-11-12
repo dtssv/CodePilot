@@ -533,6 +533,18 @@ export interface PermissionRules {
   allow?: string[];
   ask?: string[];
   deny?: string[];
+  /**
+   * Policy for reads/writes outside the working set (cwd + extra working
+   * directories + sandbox writable roots + delivery roots). `ask` (default)
+   * prompts and lets the user grant the folder; `deny-write` hard-denies
+   * out-of-boundary writes; `deny-read-write` hard-denies reads and writes.
+   */
+  workspaceBoundary?: "ask" | "deny-write" | "deny-read-write";
+  /**
+   * Extra directories that count as in-boundary alongside cwd. "Allow this
+   * directory" grants persist here.
+   */
+  additionalWorkingDirectories?: string[];
 }
 
 export interface PermissionRequest {

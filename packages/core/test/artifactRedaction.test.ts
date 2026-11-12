@@ -1,4 +1,4 @@
-// K-C4-1: artifacts and the audit input summary must pass through the same
+// artifacts and the audit input summary must pass through the same
 // secret-redaction floor as transcript tool results. Here the tool spills a
 // large secret-bearing body via spillHeadTail; the on-disk artifact must not
 // contain the raw credential.

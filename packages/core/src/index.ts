@@ -137,6 +137,7 @@ export {
   assertPathAllowedAsync,
   addWritableRoot,
   isWriteOutsideSandbox,
+  isInsideWorkingSet,
   writableRootForTarget,
   checkDangerousCommand,
   winPathToWsl,

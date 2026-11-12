@@ -28,7 +28,7 @@
 // first and are absolute.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type {
   CodepilotConfig,
@@ -43,12 +43,19 @@ import {
   assertPathAllowed,
   detectSandboxBackend,
   isWriteOutsideSandbox,
+  isInsideWorkingSet,
   sensitivePathHit,
   gitMetadataWriteHit,
   writableRootForTarget,
   type ResolvedSandbox,
 } from "./sandbox.js";
-import { isReadOnlyCommand, isReadOnlySegment, parseCommand, type ParsedCommand } from "./commandSafety.js";
+import {
+  isReadOnlyCommand,
+  isReadOnlySegment,
+  parseCommand,
+  extractRedirectWriteTargets,
+  type ParsedCommand,
+} from "./commandSafety.js";
 
 export interface PermissionCheckResult {
   decision: PermissionDecision;
@@ -57,11 +64,20 @@ export interface PermissionCheckResult {
 
 export type RuleEffect = "allow" | "ask" | "deny";
 
+/** The three rule lists the engine evaluates. A narrower shape than
+ * {@link PermissionRules} (which also carries the boundary policy + working
+ * directories) so these always-present buckets don't drag the policy fields in. */
+export interface RuleBuckets {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
 export class PermissionEngine {
   private mode: PermissionMode;
-  private configRules: Required<PermissionRules>;
+  private configRules: RuleBuckets;
  /** Rules added at runtime via "always" decisions. Never persisted implicitly. */
-  private sessionRules: Required<PermissionRules>;
+  private sessionRules: RuleBuckets;
  /** Active sandbox policy + cwd. Used for in-root write auto-allow and for
  * detecting out-of-root writes that need a sandbox-expand prompt.
  * `osEnforced` is true only when an OS backend actually jails bash. */
@@ -81,6 +97,14 @@ export class PermissionEngine {
   * "always" allows are additionally dropped when `alsoDropSessionAllows`. */
   private ignorePersistedAllows = false;
   private alsoDropSessionAllows = false;
+ /** Boundary policy for paths outside the working set + the extra working
+  * directories configured for it. The working set the policy tests is cwd ∪
+  * these dirs ∪ sandbox writable roots ∪ delivery roots. */
+  private workspaceBoundary: "ask" | "deny-write" | "deny-read-write" = "ask";
+  private additionalWorkingDirs: string[] = [];
+ /** Delivery roots the session has granted (session.ts owns the list). The
+  * engine keeps a copy so the boundary check counts them as in-set. */
+  private deliveryRoots: string[] = [];
 
   constructor(
     config: Pick<
@@ -97,6 +121,8 @@ export class PermissionEngine {
     this.sessionRules = { allow: [], ask: [], deny: [] };
     this.autoMaxConsecutiveDenials = config.permissionAuto?.maxConsecutiveDenials ?? 3;
     this.autoMaxTotalDenials = config.permissionAuto?.maxTotalDenials ?? 10;
+    this.workspaceBoundary = config.permissions?.workspaceBoundary ?? "ask";
+    this.additionalWorkingDirs = [...(config.permissions?.additionalWorkingDirectories ?? [])];
   }
 
   /** True when the `auto` classifier has denied enough that we should stop
@@ -149,6 +175,38 @@ export class PermissionEngine {
     this.sandbox = { policy, cwd, osEnforced };
   }
 
+  /** Update the delivery roots the engine counts as in-boundary (session owns
+   * the authoritative list; this is a mirror for the boundary check). */
+  setDeliveryRoots(roots: readonly string[]): void {
+    this.deliveryRoots = [...roots];
+  }
+
+  /** Add an extra working directory to the in-boundary set (e.g. a user "allow
+   * this directory" grant). Idempotent. */
+  addWorkingDirectory(dir: string): void {
+    const d = resolve(dir);
+    if (!this.additionalWorkingDirs.some((x) => resolve(x) === d)) {
+      this.additionalWorkingDirs.push(d);
+    }
+  }
+
+  /** The in-boundary roots the `workspaceBoundary` policy tests against (besides
+   * cwd): extra working dirs + sandbox writable roots + delivery roots. */
+  private workingSetRoots(): string[] {
+    const roots: string[] = [...this.additionalWorkingDirs, ...this.deliveryRoots];
+    if (this.sandbox?.policy.writableRoots) roots.push(...this.sandbox.policy.writableRoots);
+    return roots;
+  }
+
+  /** Current workspace-boundary policy (introspection / tests). */
+  getWorkspaceBoundary(): "ask" | "deny-write" | "deny-read-write" {
+    return this.workspaceBoundary;
+  }
+
+  setWorkspaceBoundary(policy: "ask" | "deny-write" | "deny-read-write"): void {
+    this.workspaceBoundary = policy;
+  }
+
   setMode(mode: PermissionMode): void {
     this.mode = mode;
   }
@@ -160,7 +218,7 @@ export class PermissionEngine {
  /** Snapshot of all active rules (config + session), for UI display. Always
   * shows the full set regardless of high-risk stripping — the display tells the
   * user what is configured; {@link matchRules} is what preflight evaluates. */
-  rules(): Required<PermissionRules> {
+  rules(): RuleBuckets {
     return {
       allow: [...this.sessionRules.allow, ...this.configRules.allow],
       ask: [...this.sessionRules.ask, ...this.configRules.ask],
@@ -172,7 +230,7 @@ export class PermissionEngine {
    * allow is stripped of persisted (config/project) rules — and optionally of
    * session "always" rules too — when a high-risk model is active, so a saved
    * blanket allow cannot vouch for the risky model's calls. */
-  private matchRules(): Required<PermissionRules> {
+  private matchRules(): RuleBuckets {
     if (!this.ignorePersistedAllows) return this.rules();
     const allow = this.alsoDropSessionAllows ? [] : [...this.sessionRules.allow];
     return {
@@ -360,13 +418,56 @@ export class PermissionEngine {
       }
     }
 
+    // Workspace-boundary policy. Under `deny-write` / `deny-read-write`, a path
+    // that lands OUTSIDE the working set (cwd ∪ extra working dirs ∪ sandbox
+    // writable roots ∪ delivery roots) is hard-denied with a reason — no prompt,
+    // even under yolo / allow rules. The default `ask` leaves the existing flow
+    // (writes fall through to the sandbox-expand "ask" below). Covers file write
+    // tools, file read tools, and bash output-redirection targets, so bash and
+    // the file tools share one boundary.
+    if (this.workspaceBoundary !== "ask") {
+      const cwd = this.sandbox?.cwd ?? process.cwd();
+      const roots = this.workingSetRoots();
+      const outside = (p: string): boolean => !isInsideWorkingSet(p, cwd, roots);
+      // Writes (both policies deny them). Only write-tier file tools and bash
+      // redirections count — a read tool's `path` is not a write.
+      const writePaths =
+        tool.permission === "write" && tool.name !== "bash"
+          ? extractWritePaths(tool.name, input)
+          : [];
+      const bashWrites = bash && primary ? extractRedirectWriteTargets(primary) : [];
+      for (const p of [...writePaths, ...bashWrites]) {
+        if (outside(p)) {
+          return {
+            decision: "deny",
+            reason: `write outside the workspace boundary (${this.workspaceBoundary}): ${p}`,
+          };
+        }
+      }
+      // Reads (only `deny-read-write`). Bash command text is not scanned for
+      // read paths — too ambiguous; the sandbox read guard still applies.
+      if (this.workspaceBoundary === "deny-read-write" && tool.permission === "read" && primary) {
+        if (outside(primary)) {
+          return {
+            decision: "deny",
+            reason: `read outside the workspace boundary (deny-read-write): ${primary}`,
+          };
+        }
+      }
+    }
+
  // Out-of-sandbox writes always ask (even under yolo / allow rules / auto-edit)
  // so the user can grant the folder before the tool-layer path guard rejects it.
  // apply_patch may touch several paths — any one outside is enough to ask.
+ // A path already inside the working set (cwd / extra working dirs / delivery
+ // roots) is exempt: the user has declared it in-boundary, so don't re-prompt.
     {
+      const cwd = this.sandbox?.cwd ?? process.cwd();
+      const roots = this.workingSetRoots();
       const writePaths = extractWritePaths(tool.name, input);
       const candidates = writePaths.length > 0 ? writePaths : primary ? [primary] : [];
       for (const p of candidates) {
+        if (isInsideWorkingSet(p, cwd, roots)) continue;
         if (this.sandboxExpandFor(tool, p)) return "ask";
       }
     }
@@ -1050,7 +1151,7 @@ export async function removePersistedRule(
 export async function listPersistedRules(
   cwd: string,
   scope: "repo" | "user" = "repo",
-): Promise<Required<PermissionRules>> {
+): Promise<RuleBuckets> {
   const path = configPathFor(cwd, scope);
   let json: Record<string, unknown> = {};
   try {

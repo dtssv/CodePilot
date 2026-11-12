@@ -779,6 +779,27 @@ export function isWriteOutsideSandbox(
   return !assertPathAllowed(inputPath, "write", policy, cwd).ok;
 }
 
+/**
+ * True when `inputPath` is inside the working set — the union of `cwd`, any
+ * extra working directories, and `roots` (typically sandbox writable roots plus
+ * delivery roots). This is the boundary the `workspaceBoundary` policy tests:
+ * a path outside the set is subject to ask / deny depending on policy. Membership
+ * is a prefix check with platform-aware normalization (symlinks are not
+ * resolved here — callers that need that use the async sandbox path guard).
+ */
+export function isInsideWorkingSet(
+  inputPath: string,
+  cwd: string,
+  roots: readonly string[],
+): boolean {
+  const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
+  if (isUnder(abs, cwd)) return true;
+  for (const r of roots) {
+    if (r && isUnder(abs, r)) return true;
+  }
+  return false;
+}
+
 /** Deep-copy a resolved policy so the copy can be mutated (e.g. {@link
  * addWritableRoot}) without widening the original. The nested arrays and the
  * networkPolicy object are copied — a shallow spread would alias the parent's

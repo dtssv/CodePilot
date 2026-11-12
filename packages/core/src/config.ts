@@ -201,6 +201,22 @@ export const PermissionRulesSchema = z
     allow: z.array(z.string().min(1)).optional(),
     ask: z.array(z.string().min(1)).optional(),
     deny: z.array(z.string().min(1)).optional(),
+    /**
+     * Policy for reads/writes that land OUTSIDE the working set (cwd + extra
+     * working directories + sandbox writable roots + delivery roots):
+     * - `ask` (default): prompt, and the user may grant the folder — current
+     *   behaviour.
+     * - `deny-write`: hard-deny out-of-boundary writes (no prompt), with a
+     *   reason; reads are unaffected.
+     * - `deny-read-write`: hard-deny out-of-boundary reads AND writes.
+     */
+    workspaceBoundary: z.enum(["ask", "deny-write", "deny-read-write"]).optional(),
+    /**
+     * Extra directories treated as part of the working set in addition to cwd.
+     * A path under any of these is in-boundary (not asked/denied). "Allow this
+     * directory" UI grants persist here.
+     */
+    additionalWorkingDirectories: z.array(z.string().min(1)).optional(),
   })
   .strict();
 

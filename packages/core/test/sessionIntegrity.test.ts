@@ -1,4 +1,4 @@
-// K-E1-2: JSONL physical integrity (torn-tail repair), content_replacement
+//JSONL physical integrity (torn-tail repair), content_replacement
 // audit events for large-payload offload, and artifact mark-and-sweep GC.
 
 import { afterEach, describe, expect, it } from "vitest";

@@ -565,6 +565,13 @@ export class Session {
  // writablePaths. Bash auto-allow still requires OS enforcement inside
  // PermissionEngine (osEnforced flag).
     this.permissions.setSandbox(this.sandbox, this.cwd);
+    // Seed the engine's view of the in-boundary working set: delivery roots and
+    // any configured extra working directories (the boundary policy itself is
+    // read from config in the engine constructor).
+    this.permissions.setDeliveryRoots(this.deliveryRoots);
+    for (const d of this.config.permissions?.additionalWorkingDirectories ?? []) {
+      this.permissions.addWorkingDirectory(d);
+    }
     // Pending-batch unlock: when an always grant (or CRUD hot-load) adds a
     // session rule, re-preflight the other in-flight permission prompts.
     this.permissions.setOnRuleAdded(() => this.unlockPendingPermissions());
@@ -2469,6 +2476,9 @@ export class Session {
     const merged = mergeDeliveryRoots(this.deliveryRoots, [dir]);
     this.deliveryRoots.length = 0;
     this.deliveryRoots.push(...merged);
+    // Keep the permission engine's boundary check in sync — a delivery root is
+    // part of the in-boundary working set.
+    this.permissions.setDeliveryRoots(this.deliveryRoots);
     void this.rebuildSystemPrompt().catch(() => undefined);
   }
 
@@ -2554,6 +2564,9 @@ export class Session {
       },
     };
     this.permissions.setSandbox(this.sandbox, this.cwd);
+    // The granted folder is now part of the in-boundary working set too (the
+    // boundary policy reads it alongside writable roots).
+    this.permissions.addWorkingDirectory(dir);
     if (this.persistentShell) {
       try {
         this.persistentShell.close();

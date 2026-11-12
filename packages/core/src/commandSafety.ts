@@ -74,6 +74,38 @@ export function parseCommand(command: string): ParsedCommand {
   return { segments, opaque };
 }
 
+/**
+ * File paths a command writes to through output redirection (`>`, `>>`, `&>`,
+ * `n>`, `n>>`). Harmless targets (`/dev/null`, fd duplication like `2>&1`) are
+ * skipped, as are redirections into process/command substitution (those are
+ * `opaque` and judged separately). Quotes around the target are stripped. Used
+ * to apply the workspace-boundary policy to bash writes, which the OS jail would
+ * otherwise be the only thing enforcing. Best-effort: a path built from a
+ * variable or substitution is not resolvable here and is not returned.
+ */
+export function extractRedirectWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+  // Match an optional leading fd, the redirect operator, optional whitespace,
+  // then the target token (a quoted string or a run of non-space, non-operator
+  // characters). `&>`/`&>>` and plain `>`/`>>` both write a file.
+  const re = /(?:^|[\s;&|(])(?:\d*&?)?>{1,2}\s*('[^']*'|"[^"]*"|[^\s;&|<>()]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(command)) !== null) {
+    let raw = m[1]!;
+    raw = raw.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+    if (raw.length === 0) continue;
+    // Skip the harmless sinks and fd duplication (`>&1`, `2>&1` — captured as
+    // a bare digit here) / `/dev/null` / `/dev/stdout` style device writes.
+    if (/^\d+$/.test(raw)) continue;
+    if (/^\/dev\/(null|stdout|stderr|fd\/\d+)$/.test(raw)) continue;
+    // A target containing an unexpanded variable or substitution is not a
+    // resolvable literal path — don't guess.
+    if (/[$`]/.test(raw)) continue;
+    targets.push(raw);
+  }
+  return targets;
+}
+
 /** Programs that only read state, whatever their arguments (barring the
  * per-program exceptions in {@link isReadOnlySegment}). */
 const READ_ONLY_PROGRAMS = new Set([

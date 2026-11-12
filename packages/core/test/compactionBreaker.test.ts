@@ -1,4 +1,4 @@
-// K-A4-2: auto-compaction circuit breaker. After enough consecutive
+//auto-compaction circuit breaker. After enough consecutive
 // ineffective compactions (the transcript stays over budget), auto-compaction
 // disables itself and surfaces an error instead of looping and burning API
 // calls. A manual /compact still runs; a successful one re-enables auto.
