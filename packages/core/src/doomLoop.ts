@@ -133,10 +133,17 @@ const READ_FILE_HEADER = /^\((\d+) lines, \d+ bytes(?:; showing lines (\d+)-(\d+
 /** Re-slice a cached read_file body to the requested window. The cached
  * content is the verbatim tool result (header + numbered lines); when the
  * caller asks for lines [startLine, startLine+maxLines) and the cache holds
- * the full file, we return just those numbered lines with an adjusted
- * header. If anything doesn't parse, fall back to the full cached body —
- * over-serving is safe, under-serving re-triggers the re-read loop. */
-function sliceWindow(cached: string, input: unknown): string {
+ * the full file, we return just those numbered lines with an adjusted header.
+ *
+ * Returns `null` to signal a MISS — the cache cannot answer the request, so
+ * the caller must re-run the real read. A miss happens when the requested
+ * window starts outside the lines the cached body actually covers: serving
+ * the whole (earlier, narrower) body in that case would hand the model the
+ * wrong lines — typically the file header — while claiming they are the
+ * requested window, which is exactly how read offsets drift. If a window IS
+ * requested but the header can't be parsed we also miss rather than guess.
+ * A full-file / no-window request still returns the full cached body. */
+function sliceWindow(cached: string, input: unknown): string | null {
   if (!input || typeof input !== "object") return cached;
   const obj = input as Record<string, unknown>;
   const startLine = typeof obj.startLine === "number" ? obj.startLine : 0;
@@ -144,11 +151,14 @@ function sliceWindow(cached: string, input: unknown): string {
  // No window requested → the full cached body is exactly right.
   if (startLine === 0 && maxLines === undefined) return cached;
 
+ // A window WAS requested but we can't locate it in the cached body — miss
+ // and let the caller re-read, rather than pass off the full body as the
+ // window.
   const nl = cached.indexOf("\n");
-  if (nl < 0) return cached;
+  if (nl < 0) return null;
   const header = cached.slice(0, nl);
   const m = READ_FILE_HEADER.exec(header);
-  if (!m) return cached;
+  if (!m) return null;
   const totalLines = Number(m[1]);
  // 1-based inclusive range the cached body covers (full file when absent).
   const bodyFrom = m[2] ? Number(m[2]) : 1;
@@ -157,9 +167,10 @@ function sliceWindow(cached: string, input: unknown): string {
  // Requested 1-based inclusive range.
   const wantFrom = startLine + 1;
   const wantTo = maxLines === undefined ? totalLines : Math.min(startLine + maxLines, totalLines);
- // Cache doesn't cover the request (e.g. cached a small window, caller wants
- // beyond it) → serve the whole cache rather than fabricate lines.
-  if (wantFrom < bodyFrom || wantFrom > bodyTo) return cached;
+ // Cache doesn't cover the request (cached a narrow window, caller wants a
+ // line outside it) → MISS. The caller re-reads the real window instead of
+ // receiving the wrong lines labelled as the requested ones.
+  if (wantFrom < bodyFrom || wantFrom > bodyTo) return null;
 
  // read_file joins header and body with a blank line ("header\n\nbody"), so
  // strip that separator before splitting — otherwise lines[0] is "" and the
@@ -236,14 +247,23 @@ export class DedupCache {
     if (!pk) return undefined;
     const cached = this.pathResultCache.get(pk);
     if (!cached) return undefined;
-    return { content: sliceWindow(cached.content, input), artifactRef: cached.artifactRef };
+    const sliced = sliceWindow(cached.content, input);
+ // The cache can't cover the requested window → miss, so the caller re-runs
+ // the real read instead of being served the wrong (earlier) window.
+    if (sliced === null) return undefined;
+    return { content: sliced, artifactRef: cached.artifactRef };
   }
 
   cachedResultKind(toolName: string, input: unknown): "exact" | "path" | null {
     if (!this.dedupable.has(toolName)) return null;
     if (this.resultCache.has(signature(toolName, input))) return "exact";
     const pk = pathKey(toolName, input);
-    if (pk && this.pathResultCache.has(pk)) return "path";
+ // Mirror cachedResult: a path entry that can't cover the requested window
+ // is NOT a hit, so the "served from cache" prefix is never shown for it.
+    if (pk) {
+      const cached = this.pathResultCache.get(pk);
+      if (cached && sliceWindow(cached.content, input) !== null) return "path";
+    }
     return null;
   }
 

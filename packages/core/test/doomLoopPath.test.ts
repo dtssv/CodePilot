@@ -170,17 +170,20 @@ describe("DoomLoopDetector path aggregation", () => {
 
   it("replays path-cached read_file across different windows", () => {
     const d = new DoomLoopDetector();
-    d.recordResult(
-      "read_file",
-      { path: "big.ts" },
-      { content: "full file body ".repeat(20), artifactRef: "art_abc" },
-    );
+    // A realistic full-file body: the "(N lines, …)" header lets a later
+    // windowed request be located and re-sliced from the cache.
+    const lines = Array.from({ length: 40 }, (_, i) => `${i + 1}\tline ${i + 1}`);
+    const body = `(40 lines, 400 bytes)\n\n${lines.join("\n")}`;
+    d.recordResult("read_file", { path: "big.ts" }, { content: body, artifactRef: "art_abc" });
+    // A window fully inside the cached body is a genuine path hit, re-sliced.
     expect(d.cachedResultKind("read_file", { path: "big.ts", startLine: 10, maxLines: 20 })).toBe(
       "path",
     );
     const hit = d.cachedResult("read_file", { path: "big.ts", startLine: 10, maxLines: 20 });
     expect(hit?.artifactRef).toBe("art_abc");
-    expect(hit?.content).toContain("full file body");
+    expect(hit?.content).toContain("showing lines 11-30");
+    expect(hit?.content).toContain("11\tline 11");
+    expect(hit?.content).not.toContain("1\tline 1\n");
   });
 
   it("clears path cache on mutation", () => {
@@ -213,12 +216,31 @@ describe("DoomLoopDetector path aggregation", () => {
     expect(full!.content).toBe(body);
   });
 
-  it("serves the whole cache when the window exceeds what was cached", () => {
+  it("misses (re-reads) when the window starts outside what was cached", () => {
     const d = new DoomLoopDetector();
     const body = "(3 lines, 12 bytes)\n\n1\ta\n2\tb\n3\tc";
     d.recordResult("read_file", { path: "s.ts" }, { content: body });
-    const hit = d.cachedResult("read_file", { path: "s.ts", startLine: 10, maxLines: 5 });
-    expect(hit!.content).toBe(body);
+    // Request for lines 11-15: the cached body only covers 1-3. Serving the
+    // whole body here would hand back the wrong lines (the file head) labelled
+    // as the requested window — the read-offset drift we must avoid. Instead
+    // the cache misses so the caller re-runs the real read.
+    expect(
+      d.cachedResult("read_file", { path: "s.ts", startLine: 10, maxLines: 5 }),
+    ).toBeUndefined();
+    // And the prefix logic agrees it is not a path hit.
+    expect(d.cachedResultKind("read_file", { path: "s.ts", startLine: 10, maxLines: 5 })).toBeNull();
+  });
+
+  it("misses when a window is requested but the cached body has no parseable header", () => {
+    const d = new DoomLoopDetector();
+    // A cached body without the "(N lines, …)" header cannot be located, so a
+    // windowed request must re-read rather than guess at the full body.
+    d.recordResult("read_file", { path: "h.ts" }, { content: "no-header-here\n\n1\ta" });
+    expect(
+      d.cachedResult("read_file", { path: "h.ts", startLine: 5, maxLines: 2 }),
+    ).toBeUndefined();
+    // A no-window request still replays the full cached body.
+    expect(d.cachedResult("read_file", { path: "h.ts" })?.content).toContain("no-header-here");
   });
 
   it("never caches fold stubs (would make the blind spot permanent)", () => {
