@@ -1,13 +1,8 @@
 // Parent-only control tools for background sub-agents (`task` with
-// `run: "background"`): list them, wait for one to finish, or interrupt one.
-// These are deliberately NOT a mailbox / parent↔child chat channel — a
-// background sub-agent delivers exactly one completion summary, and to iterate
-// with it the parent uses the existing `continue_session_id` on a new `task`.
-//
-// Each tool carries a `registry` field set per session (mirroring taskTool.runner),
-// so parallel sessions never see each other's background jobs. Sub-agents do not
-// get these tools (nested dispatch is banned), so they are registered only on the
-// parent tool surface.
+// `run: "background"`): list, wait, or interrupt. Not a parent↔child chat
+// channel — iterate via `continue_session_id`. Each tool carries a
+// per-session `registry`; sub-agents don't get these (nested dispatch
+// banned).
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
@@ -24,27 +19,37 @@ function describe(meta: BackgroundSubagentMeta): string {
   return `#${meta.runSeq} ${meta.sessionId} [${meta.status}] ${fmtAge(meta)} — ${obj}`;
 }
 
+// These tools are built per session, closing over that session's registry.
+// They must NOT be module singletons with a mutable `.registry` field: a
+// single process hosts many sessions (the shared daemon), and every session
+// registering its tools would overwrite that one field — last writer wins —
+// so a `subagent_wait` dispatched by session A would resolve against whatever
+// session initialized its tools last, reporting "No background sub-agent with
+// session_id …" for a job that really exists in A's registry.
+
 const listSchema = z.object({});
 
-export const subagentListTool: ToolDef<typeof listSchema> & {
-  registry?: BackgroundSubagentRegistry;
-} = {
-  name: "subagent_list",
-  description:
-    "List the background sub-agents dispatched this session (`task` with " +
-    "`run: \"background\"`), with their status (running / ok / failed / interrupted). " +
-    "Use to check on work you dispatched without blocking.",
-  inputSchema: listSchema,
-  permission: "read",
-  async execute() {
-    const list = this.registry?.list() ?? [];
-    if (list.length === 0) {
-      return { content: "No background sub-agents have been dispatched this session." };
-    }
-    const lines = list.map(describe).join("\n");
-    return { content: `Background sub-agents (${list.length}):\n\n${lines}` };
-  },
-};
+export function makeSubagentListTool(
+  registry: BackgroundSubagentRegistry,
+): ToolDef<typeof listSchema> {
+  return {
+    name: "subagent_list",
+    description:
+      "List the background sub-agents dispatched this session (`task` with " +
+      "`run: \"background\"`), with their status (running / ok / failed / interrupted). " +
+      "Use to check on work you dispatched without blocking.",
+    inputSchema: listSchema,
+    permission: "read",
+    async execute() {
+      const list = registry.list();
+      if (list.length === 0) {
+        return { content: "No background sub-agents have been dispatched this session." };
+      }
+      const lines = list.map(describe).join("\n");
+      return { content: `Background sub-agents (${list.length}):\n\n${lines}` };
+    },
+  };
+}
 
 const waitSchema = z.object({
   session_id: z
@@ -52,34 +57,33 @@ const waitSchema = z.object({
     .describe("The background sub-agent's session_id (from the task result or subagent_list)."),
 });
 
-export const subagentWaitTool: ToolDef<typeof waitSchema> & {
-  registry?: BackgroundSubagentRegistry;
-} = {
-  name: "subagent_wait",
-  description:
-    "Block until a background sub-agent finishes, then return its final status " +
-    "and conclusion. Use when you have reached a point where you need its result.",
-  inputSchema: waitSchema,
-  permission: "read",
-  async execute(input) {
-    if (!this.registry) {
-      return { content: "No background sub-agent registry in this context.", isError: true };
-    }
-    const meta = await this.registry.wait(input.session_id);
-    if (!meta) {
+export function makeSubagentWaitTool(
+  registry: BackgroundSubagentRegistry,
+): ToolDef<typeof waitSchema> {
+  return {
+    name: "subagent_wait",
+    description:
+      "Block until a background sub-agent finishes, then return its final status " +
+      "and conclusion. Use when you have reached a point where you need its result.",
+    inputSchema: waitSchema,
+    permission: "read",
+    async execute(input) {
+      const meta = await registry.wait(input.session_id);
+      if (!meta) {
+        return {
+          content: `No background sub-agent with session_id ${input.session_id}.`,
+          isError: true,
+        };
+      }
+      const summary = meta.summary ?? "(no conclusion)";
+      const header = `sub-agent ${meta.sessionId} finished: ${meta.status} in ${meta.steps ?? 0} step(s).`;
       return {
-        content: `No background sub-agent with session_id ${input.session_id}.`,
-        isError: true,
+        content: `${header}\n\nConclusion:\n\n${summary}`,
+        isError: meta.status === "failed",
       };
-    }
-    const summary = meta.summary ?? "(no conclusion)";
-    const header = `sub-agent ${meta.sessionId} finished: ${meta.status} in ${meta.steps ?? 0} step(s).`;
-    return {
-      content: `${header}\n\nConclusion:\n\n${summary}`,
-      isError: meta.status === "failed",
-    };
-  },
-};
+    },
+  };
+}
 
 const interruptSchema = z.object({
   session_id: z
@@ -87,33 +91,32 @@ const interruptSchema = z.object({
     .describe("The background sub-agent's session_id to interrupt."),
 });
 
-export const subagentInterruptTool: ToolDef<typeof interruptSchema> & {
-  registry?: BackgroundSubagentRegistry;
-} = {
-  name: "subagent_interrupt",
-  description:
-    "Stop a running background sub-agent by session_id. It aborts at its next " +
-    "checkpoint and is marked interrupted; its permit is released for other work.",
-  inputSchema: interruptSchema,
-  permission: "execute",
-  async execute(input) {
-    if (!this.registry) {
-      return { content: "No background sub-agent registry in this context.", isError: true };
-    }
-    const ok = this.registry.interrupt(input.session_id);
-    if (!ok) {
-      const meta = this.registry.get(input.session_id);
-      if (!meta) {
+export function makeSubagentInterruptTool(
+  registry: BackgroundSubagentRegistry,
+): ToolDef<typeof interruptSchema> {
+  return {
+    name: "subagent_interrupt",
+    description:
+      "Stop a running background sub-agent by session_id. It aborts at its next " +
+      "checkpoint and is marked interrupted; its permit is released for other work.",
+    inputSchema: interruptSchema,
+    permission: "execute",
+    async execute(input) {
+      const ok = registry.interrupt(input.session_id);
+      if (!ok) {
+        const meta = registry.get(input.session_id);
+        if (!meta) {
+          return {
+            content: `No background sub-agent with session_id ${input.session_id}.`,
+            isError: true,
+          };
+        }
         return {
-          content: `No background sub-agent with session_id ${input.session_id}.`,
+          content: `sub-agent ${input.session_id} is already ${meta.status} — nothing to interrupt.`,
           isError: true,
         };
       }
-      return {
-        content: `sub-agent ${input.session_id} is already ${meta.status} — nothing to interrupt.`,
-        isError: true,
-      };
-    }
-    return { content: `interrupting background sub-agent ${input.session_id}.` };
-  },
-};
+      return { content: `interrupting background sub-agent ${input.session_id}.` };
+    },
+  };
+}

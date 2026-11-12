@@ -34,9 +34,9 @@ export { taskBoardTool } from "./task_board.js";
 export { taskTool } from "./task.js";
 export type { SubagentRunner } from "./task.js";
 export {
-  subagentListTool,
-  subagentWaitTool,
-  subagentInterruptTool,
+  makeSubagentListTool,
+  makeSubagentWaitTool,
+  makeSubagentInterruptTool,
 } from "./subagentControl.js";
 export {
   BackgroundSubagentRegistry,

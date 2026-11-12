@@ -123,9 +123,9 @@ import {
   makeToolCatalogTool,
   filterToolsByModeFromRegistry,
   filterToolsByModel,
-  subagentListTool,
-  subagentWaitTool,
-  subagentInterruptTool,
+  makeSubagentListTool,
+  makeSubagentWaitTool,
+  makeSubagentInterruptTool,
   BackgroundSubagentRegistry,
   type BackgroundSubagentMeta,
 } from "./tools/index.js";
@@ -3219,17 +3219,15 @@ export class Session {
     // Background sub-agents (`run: "background"`): a per-session registry so a
     // dispatched job can be listed / waited / interrupted, and so its one-time
     // completion summary is steered back to the parent. Shared with the control
-    // tools below.
+    // tools below, which are built per session (NOT module singletons) so a
+    // concurrent session in the same process cannot cross-wire the registry.
     task.backgroundRegistry = this.backgroundSubagents;
     this.backgroundSubagents.onCompletion((meta) => {
       this.deliverBackgroundCompletion(meta);
     });
-    subagentListTool.registry = this.backgroundSubagents;
-    subagentWaitTool.registry = this.backgroundSubagents;
-    subagentInterruptTool.registry = this.backgroundSubagents;
-    this.toolRegistry.register(subagentListTool);
-    this.toolRegistry.register(subagentWaitTool);
-    this.toolRegistry.register(subagentInterruptTool);
+    this.toolRegistry.register(makeSubagentListTool(this.backgroundSubagents));
+    this.toolRegistry.register(makeSubagentWaitTool(this.backgroundSubagents));
+    this.toolRegistry.register(makeSubagentInterruptTool(this.backgroundSubagents));
 
     this.wireHookResolvers(task.runner);
   }

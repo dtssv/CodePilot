@@ -5,9 +5,9 @@
 import { describe, expect, it } from "vitest";
 import { taskTool, type SubagentRunSpec, type SubagentRunResult } from "../src/tools/task.js";
 import {
-  subagentListTool,
-  subagentWaitTool,
-  subagentInterruptTool,
+  makeSubagentListTool,
+  makeSubagentWaitTool,
+  makeSubagentInterruptTool,
 } from "../src/tools/subagentControl.js";
 import { BackgroundSubagentRegistry } from "../src/tools/subagentJobs.js";
 import type { Event } from "../src/types.js";
@@ -178,8 +178,8 @@ describe("task tool — background dispatch", () => {
 describe("background sub-agent control tools", () => {
   it("subagent_list reports running jobs; empty when none", async () => {
     const registry = new BackgroundSubagentRegistry();
-    subagentListTool.registry = registry;
-    const empty = await subagentListTool.execute({} as never, {} as never);
+    const listTool = makeSubagentListTool(registry);
+    const empty = await listTool.execute({} as never, {} as never);
     expect(empty.content).toMatch(/No background sub-agents/);
 
     const mock = makeDeferredRunner();
@@ -190,7 +190,7 @@ describe("background sub-agent control tools", () => {
       controller: new AbortController(),
       done: mock.runner.run({ objective: "crunch", cwd: "/tmp" }),
     });
-    const list = await subagentListTool.execute({} as never, {} as never);
+    const list = await listTool.execute({} as never, {} as never);
     expect(list.content).toMatch(/sub_x/);
     expect(list.content).toMatch(/\[running\]/);
     expect(list.content).toMatch(/crunch/);
@@ -200,7 +200,7 @@ describe("background sub-agent control tools", () => {
 
   it("subagent_wait blocks until done and returns the conclusion", async () => {
     const registry = new BackgroundSubagentRegistry();
-    subagentWaitTool.registry = registry;
+    const waitTool = makeSubagentWaitTool(registry);
     const mock = makeDeferredRunner();
     registry.register({
       sessionId: "sub_w",
@@ -209,7 +209,7 @@ describe("background sub-agent control tools", () => {
       controller: new AbortController(),
       done: mock.runner.run({ objective: "o", cwd: "/tmp" }),
     });
-    const waitP = subagentWaitTool.execute({ session_id: "sub_w" } as never, {} as never);
+    const waitP = waitTool.execute({ session_id: "sub_w" } as never, {} as never);
     mock.finish({ conclusion: "the answer", steps: 2, ok: true });
     const r = await waitP;
     expect(r.content).toMatch(/finished: ok/);
@@ -218,7 +218,7 @@ describe("background sub-agent control tools", () => {
 
   it("subagent_wait reports a failed run as an error", async () => {
     const registry = new BackgroundSubagentRegistry();
-    subagentWaitTool.registry = registry;
+    const waitTool = makeSubagentWaitTool(registry);
     const mock = makeDeferredRunner();
     registry.register({
       sessionId: "sub_f",
@@ -227,7 +227,7 @@ describe("background sub-agent control tools", () => {
       controller: new AbortController(),
       done: mock.runner.run({ objective: "o", cwd: "/tmp" }),
     });
-    const waitP = subagentWaitTool.execute({ session_id: "sub_f" } as never, {} as never);
+    const waitP = waitTool.execute({ session_id: "sub_f" } as never, {} as never);
     mock.finish({ conclusion: "it broke", steps: 0, ok: false });
     const r = await waitP;
     expect(r.isError).toBe(true);
@@ -236,7 +236,7 @@ describe("background sub-agent control tools", () => {
 
   it("subagent_interrupt aborts a running job and marks it interrupted", async () => {
     const registry = new BackgroundSubagentRegistry();
-    subagentInterruptTool.registry = registry;
+    const interruptTool = makeSubagentInterruptTool(registry);
     const controller = new AbortController();
     let aborted = false;
     controller.signal.addEventListener("abort", () => (aborted = true));
@@ -248,7 +248,7 @@ describe("background sub-agent control tools", () => {
       controller,
       done: mock.runner.run({ objective: "o", cwd: "/tmp" }),
     });
-    const r = await subagentInterruptTool.execute(
+    const r = await interruptTool.execute(
       { session_id: "sub_i" } as never,
       {} as never,
     );
@@ -257,7 +257,7 @@ describe("background sub-agent control tools", () => {
     expect(registry.get("sub_i")!.status).toBe("interrupted");
 
     // A second interrupt reports it is already interrupted.
-    const r2 = await subagentInterruptTool.execute(
+    const r2 = await interruptTool.execute(
       { session_id: "sub_i" } as never,
       {} as never,
     );
@@ -268,16 +268,55 @@ describe("background sub-agent control tools", () => {
 
   it("control tools report unknown session_ids", async () => {
     const registry = new BackgroundSubagentRegistry();
-    subagentWaitTool.registry = registry;
-    subagentInterruptTool.registry = registry;
-    const w = await subagentWaitTool.execute({ session_id: "nope" } as never, {} as never);
+    const waitTool = makeSubagentWaitTool(registry);
+    const interruptTool = makeSubagentInterruptTool(registry);
+    const w = await waitTool.execute({ session_id: "nope" } as never, {} as never);
     expect(w.isError).toBe(true);
     expect(w.content).toMatch(/No background sub-agent/);
-    const i = await subagentInterruptTool.execute(
+    const i = await interruptTool.execute(
       { session_id: "nope" } as never,
       {} as never,
     );
     expect(i.isError).toBe(true);
     expect(i.content).toMatch(/No background sub-agent/);
+  });
+
+  it("two sessions' control tools stay bound to their own registry (no cross-wiring)", async () => {
+    // Regression: the control tools were module singletons whose `.registry`
+    // field was overwritten by whichever session initialized its tools last.
+    // In a multi-session process (the shared daemon) that made session A's
+    // `subagent_wait` resolve against session B's registry, reporting "No
+    // background sub-agent with session_id …" for a job that really existed.
+    // Building the tools per session (closing over the registry) fixes it.
+    const regA = new BackgroundSubagentRegistry();
+    const regB = new BackgroundSubagentRegistry();
+    const waitA = makeSubagentWaitTool(regA);
+    const listA = makeSubagentListTool(regA);
+    // Session B initializes its tools AFTER A — under the old singleton bug this
+    // is the write that would hijack A's control tools.
+    makeSubagentWaitTool(regB);
+    makeSubagentListTool(regB);
+
+    const mock = makeDeferredRunner();
+    regA.register({
+      sessionId: "sub_a664",
+      objective: "A job",
+      runSeq: 1,
+      controller: new AbortController(),
+      done: mock.runner.run({ objective: "A job", cwd: "/tmp" }),
+    });
+
+    // A's list sees A's job; B's registry is empty.
+    const listed = await listA.execute({} as never, {} as never);
+    expect(listed.content).toMatch(/sub_a664/);
+    expect(regB.list()).toHaveLength(0);
+
+    // A's wait resolves against A's registry — the job is found, not "unknown".
+    const waitP = waitA.execute({ session_id: "sub_a664" } as never, {} as never);
+    mock.finish({ conclusion: "A result", steps: 1, ok: true });
+    const r = await waitP;
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toMatch(/finished: ok/);
+    expect(r.content).toMatch(/A result/);
   });
 });
