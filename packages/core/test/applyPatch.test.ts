@@ -160,4 +160,27 @@ describe("apply_patch Add File overwrite guard", () => {
     expect(res.isError).toBe(true);
     expect(readFileSync(p, "utf-8")).toBe("a\n");
   });
+
+  it("applies a hunk whose context differs only by typography (curly quotes)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-typo-"));
+    const p = join(dir, "t.js");
+    // Source has REAL curly quotes; the patch context uses straight quotes.
+    writeFileSync(p, 'const a = \u201Chi\u201D;\nconst b = 2;\n');
+    const store = new FileObservationStore();
+    const ctx = patchCtx(dir, store);
+    await readFileTool.execute({ path: "t.js" }, ctx);
+    const patch = `*** Begin Patch
+*** Update File: t.js
+@@
+ const a = "hi";
+-const b = 2;
++const b = 3;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, ctx);
+    expect(res.isError).toBeUndefined();
+    const after = readFileSync(p, "utf-8");
+    expect(after).toContain("const b = 3;");
+    // The curly-quoted line was matched as context and left exactly as it was.
+    expect(after).toContain('const a = \u201Chi\u201D;');
+  });
 });

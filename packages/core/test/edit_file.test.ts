@@ -85,6 +85,51 @@ describe("applyEdit", () => {
     expect(r.strategy).toBe("regex");
   });
 
+  it("typographic match: smart quotes in search, straight quotes in source", () => {
+    // Source has straight quotes; the model copied the line with curly quotes.
+    const original = 'const msg = "hello";\n';
+    const r = applyEdit(original, {
+      search: 'const msg = \u201Chello\u201D;',
+      replace: 'const msg = "hi";',
+    });
+    expect(r.ok).toBe(true);
+    expect(r.strategy).toBe("typographic");
+    expect(r.message).toBe('const msg = "hi";\n');
+  });
+
+  it("typographic match: Unicode dash + non-breaking space", () => {
+    // Source uses ASCII hyphen and a normal space; search has an en-dash and NBSP.
+    const original = "range: 1-10 items\n";
+    const r = applyEdit(original, {
+      search: "range: 1\u201310\u00A0items",
+      replace: "range: 1-20 items",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.strategy).toBe("typographic");
+    expect(r.message).toBe("range: 1-20 items\n");
+  });
+
+  it("typographic match: collapses differing inner whitespace", () => {
+    const original = "foo   bar    baz\n";
+    const r = applyEdit(original, { search: "foo bar baz", replace: "done" });
+    expect(r.ok).toBe(true);
+    expect(r.strategy).toBe("typographic");
+    expect(r.message).toBe("done\n");
+  });
+
+  it("typographic replacement preserves surrounding source bytes", () => {
+    // Only the matched block changes; the original curly quote on line 3 stays.
+    const original = 'a = "x";\nb = \u201Cy\u201D;\nc = "z";\n';
+    const r = applyEdit(original, {
+      search: 'a = \u201Cx\u201D;',
+      replace: "a = 1;",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.strategy).toBe("typographic");
+    // Line 2's real curly quotes are untouched — we only replaced line 1.
+    expect(r.message).toBe('a = 1;\nb = \u201Cy\u201D;\nc = "z";\n');
+  });
+
   it("not found", () => {
     const r = applyEdit("hello", { search: "zzz", replace: "y" });
     expect(r.ok).toBe(false);

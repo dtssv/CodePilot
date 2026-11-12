@@ -3,8 +3,10 @@
 // Match strategies (in order):
 // 1. Exact string match.
 // 2. Trimmed whitespace-tolerant match (ignore leading/trailing whitespace per line).
-// 3. Unique-line match when search is a single line that appears exactly once.
-// 4. Regex literal search using `re` (optional explicit flag).
+// 3. Typographic-tolerant match (fold smart quotes / Unicode dashes / exotic
+//    spaces and collapse inner whitespace, per line).
+// 4. Unique-line match when search is a single line that appears exactly once.
+// 5. Regex literal search (only with the explicit `regex` flag).
 //
 // Multi-edit mode (`edits: [...]`) applies several edits in order and is
 // transactional: if any edit fails, the file is left untouched and the
@@ -152,7 +154,39 @@ export function applyEdit(
     }
   }
 
- // 3. Single-line unique search.
+ // 3. Typographic-tolerant line match: fold smart quotes / Unicode dashes /
+ // exotic spaces and collapse inner whitespace, per line. Located by the
+ // normalized form; the ORIGINAL source lines are what get replaced.
+  {
+    const normSearchLines = args.search.split(/\r?\n/).map(normaliseTypography);
+    const lines = original.split(/\r?\n/);
+    const blocks: { start: number; end: number }[] = [];
+    for (let i = 0; i + normSearchLines.length <= lines.length; i++) {
+      const window = lines.slice(i, i + normSearchLines.length).map(normaliseTypography);
+      if (window.join("\n") === normSearchLines.join("\n")) {
+        blocks.push({ start: i, end: i + normSearchLines.length });
+        if (!global) break;
+      }
+    }
+    if (blocks.length > 0) {
+      if (!global && blocks.length > 1) {
+        return {
+          ok: false,
+          strategy: "typographic",
+          occurrences: blocks.length,
+          message: `ambiguous after typography normalization (${blocks.length} blocks)`,
+        };
+      }
+      return {
+        ok: true,
+        strategy: "typographic",
+        occurrences: blocks.length,
+        message: applyBlockReplacements(original, args.replace, blocks),
+      };
+    }
+  }
+
+ // 4. Single-line unique search.
   if (!args.search.includes("\n")) {
     const lines = original.split(/\r?\n/);
     const idx = lines.findIndex((l) => l === args.search);
@@ -222,6 +256,27 @@ function normaliseLines(s: string): string {
   return s.split(/\r?\n/).map(normaliseLine).join("\n");
 }
 
+/**
+ * Fold the character differences that make a copied-out search string fail to
+ * match otherwise-identical source: smart/curly quotes → straight quotes, the
+ * various Unicode dashes → hyphen-minus, non-breaking / exotic spaces → a plain
+ * space, then collapse inner whitespace runs and trim the ends. This is the
+ * typographic-tolerant tier — used only after exact and trailing/leading-trim
+ * matching have failed, matching the looseness of mature agents' seek routines.
+ * Matching is located by this normalized form, but the replacement is always
+ * spliced into the ORIGINAL source lines, so no source characters change except
+ * the block being replaced.
+ */
+function normaliseTypography(s: string): string {
+  return s
+    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/[\t ]+/g, " ")
+    .replace(/^\s+|\s+$/g, "");
+}
+
 function applyBlockReplacements(
   original: string,
   replacement: string,
@@ -249,9 +304,10 @@ export const editFileTool: ToolDef<typeof schema> = {
     "Search/replace edit on one file (prefer over `write_file`). Understand the target " +
     "behavior (specs, images, failing tests, surrounding code) before editing. Single: " +
     "`search`/`replace`; multi: `edits: [{search, replace}]` applied atomically in order. " +
-    "Matches exact → trimmed-line → unique line → optional `regex`. Ambiguous matches " +
-    "fail unless `global_replace`. Copy search text from `read_file` without line-number " +
-    "prefixes. Must have read the file earlier in this session.",
+    "Matches exact → trimmed-line → typographic (smart quotes / dashes / spaces) → unique " +
+    "line → optional `regex`. Ambiguous matches fail unless `global_replace`. Copy search " +
+    "text from `read_file` without line-number prefixes. Must have read the file earlier in " +
+    "this session.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {

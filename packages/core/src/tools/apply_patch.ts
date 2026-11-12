@@ -176,8 +176,10 @@ export function parsePatch(patch: string): FileOp[] {
 function applyHunk(original: string, hunk: Hunk): string {
   const lines = original.split(/\r?\n/);
  // Build a search signature: the sequence of ctx + del lines (in order).
- // We locate this block in the file, verify del lines match, then splice
- // in the ctx + add lines.
+ // We locate this block in the file, then rebuild it keeping the matched
+ // SOURCE lines for context (so a fuzzy match never rewrites their bytes —
+ // indentation, smart quotes, dashes stay as they are on disk) and applying
+ // only the hunk's add/del operations.
   const searchSig: string[] = [];
   const replacement: string[] = [];
   for (const l of hunk.lines) {
@@ -194,20 +196,34 @@ function applyHunk(original: string, hunk: Hunk): string {
  // Pure insertion — append at end.
     return [...lines, ...replacement].join("\n");
   }
- // Find the search signature as a contiguous block.
-  const start = findSubArray(lines, searchSig);
+ // Find the search signature as a contiguous block: exact, then whitespace-
+ // tolerant, then typographic-tolerant (smart quotes / Unicode dashes / exotic
+ // spaces + collapsed inner whitespace).
+  let start = findSubArray(lines, searchSig);
+  if (start < 0) start = findSubArrayTolerant(lines, searchSig);
+  if (start < 0) start = findSubArrayTypographic(lines, searchSig);
   if (start < 0) {
- // Try whitespace-tolerant match.
-    const startTol = findSubArrayTolerant(lines, searchSig);
-    if (startTol < 0) {
-      throw new Error(
-        `hunk did not apply: context/removed lines not found. ` +
-          `Expected: ${JSON.stringify(searchSig.slice(0, 3))}…`
-      );
-    }
-    return spliceIn(lines, startTol, searchSig.length, replacement).join("\n");
+    throw new Error(
+      `hunk did not apply: context/removed lines not found. ` +
+        `Expected: ${JSON.stringify(searchSig.slice(0, 3))}…`
+    );
   }
-  return spliceIn(lines, start, searchSig.length, replacement).join("\n");
+ // Rebuild the matched block from the hunk, but take context lines verbatim
+ // from the SOURCE (lines[start + k]) rather than from the patch, so a fuzzy
+ // match leaves every unchanged line exactly as it was on disk.
+  const rebuilt: string[] = [];
+  let k = 0;
+  for (const l of hunk.lines) {
+    if (l.type === "ctx") {
+      rebuilt.push(lines[start + k]!);
+      k++;
+    } else if (l.type === "del") {
+      k++;
+    } else {
+      rebuilt.push(l.text);
+    }
+  }
+  return spliceIn(lines, start, searchSig.length, rebuilt).join("\n");
 }
 
 function findSubArray(hay: string[], needle: string[]): number {
@@ -222,6 +238,27 @@ function findSubArray(hay: string[], needle: string[]): number {
 
 function findSubArrayTolerant(hay: string[], needle: string[]): number {
   const norm = (s: string) => s.replace(/\s+$/g, "").replace(/^\s+/g, "");
+  outer: for (let i = 0; i <= hay.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (norm(hay[i + j]!) !== norm(needle[j]!)) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/** Fold smart/curly quotes → straight, Unicode dashes → hyphen-minus, exotic
+ * spaces → plain space, collapse inner whitespace runs, and trim ends, per
+ * line. Used only after exact and whitespace-tolerant matches have failed. */
+function findSubArrayTypographic(hay: string[], needle: string[]): number {
+  const norm = (s: string) =>
+    s
+      .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+      .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+      .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+      .replace(/[\t ]+/g, " ")
+      .replace(/^\s+|\s+$/g, "");
   outer: for (let i = 0; i <= hay.length - needle.length; i++) {
     for (let j = 0; j < needle.length; j++) {
       if (norm(hay[i + j]!) !== norm(needle[j]!)) continue outer;
