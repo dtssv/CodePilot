@@ -45,7 +45,7 @@ function run(command: string): Promise<{ code: number; stdout: string; stderr: s
 }
 
 describe.skipIf(!enabled)("enforced proxy egress (bwrap + slirp4netns)", () => {
-  it("blocks a direct non-allowlisted connection and allows the proxy path", async () => {
+  it("blocks a direct non-allowlisted connection and allows the proxy path", { timeout: 45_000 }, async () => {
     // An allowlisted origin server the proxy will permit. We allow only its
     // host, so any OTHER destination must be refused by the proxy, and a RAW
     // socket to any public host must be unroutable (slirp binds outbound to

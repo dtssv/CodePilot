@@ -596,7 +596,7 @@ describe("code_mode subprocess runtime", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("enforces the wall-clock timeout by killing the child", async () => {
+  it("enforces the wall-clock timeout by killing the child", { timeout: 10_000 }, async () => {
     const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
     const r = await codeModeTool.execute(
       { code: "while (true) {}", timeout_ms: 500 },

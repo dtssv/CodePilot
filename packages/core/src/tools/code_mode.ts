@@ -325,6 +325,7 @@ async function runInSubprocess(
       cwd: ctx.cwd,
       env: modelShellEnv(),
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
     let settled = false;
     let outBuf = "";
@@ -433,9 +434,9 @@ async function runInSubprocess(
 
     const terminate = (): void => {
       try {
-        child.kill("SIGKILL");
+        process.kill(-child.pid!, "SIGKILL");
       } catch {
-        /* already gone */
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
       }
     };
     const onAbort = (): void => {
