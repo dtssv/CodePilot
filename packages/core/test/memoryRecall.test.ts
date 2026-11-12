@@ -74,13 +74,13 @@ describe("recallRelevantMemories", () => {
       "testing.md": "- [project] tests via pnpm test",
       "style.md": "- [project] 2-space indent",
     });
-    // Provider that would THROW if called — proves the model path is skipped.
+    // Provider that errors if called — proves the model path is skipped.
     const provider: ChatProvider = {
       name: "mock",
       defaultModel: "mock",
       smallModel: "mock",
       async *stream(): AsyncIterable<StreamEvent> {
-        throw new Error("model should not be called with few candidates");
+        yield { kind: "error", message: "model should not be called with few candidates" };
       },
     };
     const block = await recallRelevantMemories({
