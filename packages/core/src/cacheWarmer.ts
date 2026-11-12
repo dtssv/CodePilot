@@ -1,24 +1,8 @@
-// Prompt-cache warming decision.
+// Prompt-cache warming decision — a pure cost-gated function plus delay helper.
 //
-// Why this exists
-// ---------------
-// A provider cache entry (Anthropic ephemeral, 5-minute default) lapses after
-// an idle gap. If the user is likely to continue the session within that gap,
-// re-sending the exact last request with a 1-token output cap just before the
-// TTL expires keeps the cached prefix warm — the next real turn then hits the
-// cache instead of re-billing the whole prefix at full input price.
-//
-// But warming is not free: each warm pays a cache-read (and sometimes a small
-// cache-write) itself. It only pays off when the *expected* savings beat the
-// warm's own cost. So this is a cost-gated decision, not an unconditional timer.
-//
-// Design stance (CodePilot): a PURE decision function plus a delay helper. It
-// makes no provider calls and owns no timer — the session schedules the warm
-// and performs the fail-soft replay. Default-safe: with no known model TTL it
-// returns `{ warm: false }` (no warming) rather than guessing. A replay-safety
-// guard refuses to warm when the 1-token replay would change the derived
-// thinking budget and thus write a *different* cache entry (which would waste
-// money and not keep the real prefix warm).
+// Re-sending the last request with a 1-token cap before cache TTL expiry keeps
+// the prefix warm; pays only when expected savings beat the warm cost. Default-
+// safe (`warm: false` when TTL unknown); refuses warm if it'd change the budget.
 
 import { estimateCostUSD } from "./tokens.js";
 
@@ -54,7 +38,7 @@ export interface CacheWarmInput {
 }
 
 /** Fire the warm at 90% of the TTL — late enough to cover the idle gap, early
- * enough to land before the entry lapses. (Matches pi's 0.9·TTL.) */
+ * enough to land before the entry lapses. */
 export const CACHE_WARM_TTL_FRACTION = 0.9;
 
 /**

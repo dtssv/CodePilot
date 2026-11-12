@@ -151,9 +151,9 @@ async function focusView(): Promise<void> {
 
 /* ---------------- editor → prompt ---------------- */
 
-/** Cursor-style "Add to Chat" / "Add to New Chat": drop the selected code into
- * the composer as a reference WITHOUT sending, so the user writes their own
- * prompt around it. `newChat` opens a fresh session first. */
+/** "Add to Chat" / "Add to New Chat": drop the selected code into the composer
+ * as a reference WITHOUT sending, so the user writes their own prompt around
+ * it. `newChat` opens a fresh session first. */
 async function addSelection(newChat: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const selected = editor?.document.getText(editor.selection);

@@ -1,22 +1,11 @@
 /**
- * Mock Session for UI development.
- *
- * Implements the *public* subset of the @codepilot/core Session contract that
- * the TUI depends on, *without* requiring the core package to be installed or
- * built. We deliberately do NOT declare `: Session` here — the real Session
- * class has many private members which we don't want to mirror. Instead the
- * cli.tsx casts this to `Session` at the seam.
- *
- * Behaviors:
- * - subscribe/getEvents — replays a fixed startup event sequence, then
- * accepts events appended via the internal emitter.
- * - prompt(text) — emits a "thinking" status, simulates streaming a canned
- * assistant reply, then emits a final message + tool_call + tool_result
- * cycle so the UI exercises its main render paths.
- * - cancel — aborts the current simulated prompt.
- * - fork, dispose — stubbed.
- * - onPermissionRequest — routed through the bridge so the UI's prompt path
- * is exercised.
+ * Mock Session for UI development: implements the public subset of the
+ * @codepilot/core Session contract the TUI needs, without the core package.
+ * Not declared `: Session` (too many private members); cli.tsx casts at the
+ * seam. subscribe/getEvents replay a fixed startup then accept appended
+ * events; prompt() emits a thinking status, streams a canned reply, then a
+ * tool_call/tool_result cycle; cancel aborts; fork/dispose stubbed;
+ * onPermissionRequest routed through the bridge.
  */
 import { randomUUID } from "node:crypto";
 

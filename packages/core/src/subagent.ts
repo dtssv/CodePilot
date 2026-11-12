@@ -1,10 +1,7 @@
 // Sub-agent runner: a thin wrapper around `runAgent` that runs with a fresh
-// transcript, a restricted tool set, and returns only the final text.
-//
-// The sub-agent gets its own system prompt built on top of the shared
-// `buildSystemPrompt` static prefix, with an additional block that bounds
-// its scope: it is a focused worker, it does not own the user's task, and
-// it returns a structured conclusion.
+// Sub-agent runner: a child agent with its own transcript and restricted tool
+// set that returns only the final text. Built on the shared system prompt with
+// an added scope-bounding block (focused worker, returns a structured conclusion).
 
 import { randomUUID } from "node:crypto";
 import { detectDegenerateText, detectRunawayRepetition } from "./textDegeneration.js";

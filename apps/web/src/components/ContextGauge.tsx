@@ -91,11 +91,10 @@ const SEVERITY_TEXT: Record<ContextSeverity, string> = {
 };
 
 /**
- * Cursor-style live context-window gauge for the composer footer: a compact
- * ring + percentage that is always visible, and opens a detailed per-category
- * breakdown popover on click. The report is pulled over the protocol and
- * refreshed whenever the transcript grows or a run settles, so the gauge tracks
- * usage in real time without a dedicated push channel.
+ * Live context-window gauge for the composer footer: a compact ring +
+ * percentage always visible, opening a per-category breakdown popover on click.
+ * The report is pulled over the protocol and refreshed whenever the transcript
+ * grows or a run settles, so the gauge tracks usage in real time.
  */
 export function ContextGauge({
   client,

@@ -1,23 +1,7 @@
-// SQLite-backed session metadata index (Scheme B — see
-// docs/design/B-sqlite-session-index.md).
-//
-// Purpose: make listSessions / searchSessions O(#sessions) index lookups
-// instead of re-reading + JSON-parsing every session's whole JSONL on every
-// call (the hot `session/list` RPC fires on nearly every UI state change, and
-// the daemon is shared across web/desktop/IDE/phone).
-//
-// Design invariants:
-//  - JSONL is the source of truth. This DB is a *derived* index; it can be
-//    deleted and rebuilt from the JSONL + sidecars at any time. The persistence
-//    model (append-only event sourcing) is unchanged.
-//  - Cross-process safe. The index file is shared by the daemon AND standalone
-//    `codepilot sessions` CLI processes, so we open with WAL + busy_timeout and
-//    wrap reconcile writes in short IMMEDIATE transactions.
-//  - Fail-soft. Any open/engine error makes openSessionIndex return null; the
-//    caller then uses the original full-scan path. Nothing throws to the UI.
-//
-// Search is metadata-only: title + cwd + the first user-message snippet. No
-// full-text search over message bodies (that would be a separate FTS index).
+// SQLite-backed session metadata index.
+// Derived index over the JSONL source of truth: list/search in O(#sessions).
+// Cross-process safe (WAL + busy_timeout); fail-soft (errors → null → full
+// scan). Metadata-only search.
 
 import type Database from "better-sqlite3";
 import { readFileSync, readdirSync, statSync } from "node:fs";

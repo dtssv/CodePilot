@@ -1,60 +1,12 @@
 // MCP OAuth 2.1 client (Authorization Code + PKCE).
 //
-// This module implements the OAuth flow the MCP spec (2025-03-26) requires
-// for remote (HTTP / SSE) servers. Per the spec, a server that needs auth
-// responds to the first request with HTTP 401 and a
-// `WWW-Authenticate: Bearer resource_metadata="<url>"` header. The URL
-// points at a Protected Resource Metadata document (RFC 9728), which lists
-// `authorization_servers`. Each authorization server in turn publishes an
-// Authorization Server Metadata document (RFC 8414) with the endpoints we
-// need: `authorization_endpoint`, `token_endpoint`, and optionally
-// `registration_endpoint` (for Dynamic Client Registration) and
-// `revocation_endpoint`.
-//
-// The flow we run is the Authorization Code grant with PKCE (S256), as
-// mandated by OAuth 2.1:
-//
-// 1. On 401, fetch the resource metadata → pick the first authorization
-// server → fetch its metadata.
-// 2. (Optional) Register a client dynamically if no client_id is
-// configured, so we get a `client_id` (and `client_secret` for
-// confidential clients). We are a public client (no secret on disk by
-// default), so DCR returns just a `client_id`.
-// 3. Generate a PKCE `code_verifier` (43-128 random url-safe chars) and
-// `code_challenge = BASE64URL(SHA256(verifier))`.
-// 4. Build the authorization URL:
-// <authorization_endpoint>
-// ?response_type=code
-// &client_id=...
-// &redirect_uri=http://127.0.0.1:<port>/callback
-// &code_challenge=...
-// &code_challenge_method=S256
-// &state=<random>
-// &scope=<server-advertised or "openid profile">
-// 5. The host (TUI) opens this URL in a browser and spins up a tiny local
-// HTTP server to receive the redirect. The browser redirects to
-// http://127.0.0.1:<port>/callback?code=...&state=...
-// We verify `state` matches, then exchange the code at the
-// `token_endpoint`:
-// grant_type=authorization_code
-// code=...
-// redirect_uri=... (must match)
-// client_id=...
-// code_verifier=... (the original verifier)
-// and receive `{ access_token, token_type, expires_in, refresh_token? }`.
-// 6. Persist the token bundle to disk so subsequent sessions reuse it
-// until it expires (and refresh via `refresh_token` if present).
-// 7. Attach `Authorization: Bearer <access_token>` to every outbound
-// request for that server.
-//
-// Security notes:
-// - `state` is a random 16-byte hex string, checked on callback to
-// prevent CSRF.
-// - The local callback server binds to 127.0.0.1 only and shuts down
-// immediately after the first request (or a 5-minute timeout).
-// - Tokens are stored in `~/.codepilot/projects/<hash>/mcp-tokens/<server>.json` with
-// 0600 permissions.
-// - We never log `access_token` / `refresh_token` values.
+// MCP (2025-03-26) OAuth flow for remote HTTP/SSE servers.
+// Authorization Code grant + PKCE (S256) per OAuth 2.1.
+// On 401, resolve Protected Resource Metadata (RFC 9728) → Authorization
+// Server Metadata (RFC 8414), optionally DCR a client, then run the code
+// exchange via a 127.0.0.1 callback. Tokens persist to
+// `~/.codepilot/projects/<hash>/mcp-tokens/<server>.json` (0600), refreshed
+// via `refresh_token`. Never log token values.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";

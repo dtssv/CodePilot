@@ -728,14 +728,11 @@ async function cmdServeWeb(
       : null;
   reassert?.unref?.();
 
-  // Boot-time crash recovery: any session left with an in-flight status by a
-  // prior daemon that crashed / was killed is sealed to a clean idle now (its
-  // orphaned tool calls get a side-effect-safe result, a trailing idle status,
-  // and a one-shot recovery instruction for the next prompt). Seal-and-idle
-  // only — we do NOT auto-re-enter the agent loop (a prior run's side-effecting
-  // tools may already have executed). Gated on sessions.reconcileOnBoot
-  // (default true). Fail-soft and off the hot path: run once, in the background,
-  // so a slow sweep never delays the daemon coming up.
+  // Boot-time crash recovery: seal sessions left in-flight by a crashed daemon
+  // to clean idle (side-effect-safe results for orphaned tool calls + recovery
+  // hint). Seal-and-idle only — never auto-re-enter the loop (prior tools may
+  // have executed). Gated on sessions.reconcileOnBoot (default true); fail-soft
+  // and background so it never delays startup.
   void (async () => {
     try {
       const { loadConfig, recoverSuspendedSessions } = await import("@codepilot/core");
@@ -754,10 +751,9 @@ async function cmdServeWeb(
     }
   })();
 
-  // Boot-time session housekeeping: delete non-pinned sessions older than
-  // `sessions.retentionDays` (0 = never) and, when `sessions.coldCompress` is
-  // on, compress long-inactive sessions to `.jsonl.br` to reclaim disk. Both are
-  // fail-soft and run once in the background so they never delay startup.
+  // Boot-time housekeeping: delete non-pinned sessions older than
+  // sessions.retentionDays and cold-compress long-inactive ones to .jsonl.br.
+  // Fail-soft, background, run once.
   void (async () => {
     try {
       const { loadConfig, sweepSessionRetention, compressColdSessions } = await import(

@@ -1,28 +1,10 @@
 // Shared catalog of built-in slash commands.
 //
-// This is the single cross-surface source of truth for the built-in `/` menu:
-// the TUI derives its command list from it, and every GUI client (web, vscode,
-// idea) lists the same commands via the `commands/list` RPC. Without it each
-// surface hard-coded its own drifting set.
-//
-// Two orthogonal axes describe a command:
-//
-//   `scope` — WHERE it is meaningful:
-//     - "shared":   works on any surface (model/mode/compact/clear/plan/…).
-//       Advertised to all clients by the RPC.
-//     - "tui-only": only the terminal UI can carry it out (exit, QR remote, the
-//       interactive provider-connect wizard, the first-run setup guide, the
-//       colour-theme picker, launching the web UI). The RPC omits these.
-//
-//   `kind` — WHAT running it does:
-//     - "local":  a client-side action (switch mode, open a picker, compact,
-//       clear, show a panel). It never becomes a model turn. Every built-in is
-//       local — execution lives in each client; this catalog only standardises
-//       discovery + metadata.
-//     - "prompt": the command expands into text sent to the model as a turn.
-//       Built-ins are never "prompt"; custom markdown commands are (they carry a
-//       body template). The field is published so GUI clients can branch on it
-//       without re-deriving the distinction from a hard-coded name list.
+// The single cross-surface source of truth for the built-in `/` menu (TUI +
+// `commands/list` RPC for every GUI client). Two axes: `scope` ("shared" — any
+// surface, RPC-advertised; "tui-only" — terminal-only, RPC-omitted) and `kind`
+// ("local" — client-side action; "prompt" — expands to a model turn; built-ins
+// are always "local", custom markdown commands are "prompt").
 
 export type BuiltinCommandScope = "shared" | "tui-only";
 

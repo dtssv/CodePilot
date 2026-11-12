@@ -1,17 +1,10 @@
 /**
- * Headless / print mode (`--print` / `--output-format`).
- *
- * When the TUI is invoked with `--print`/`-p` (and a prompt), we skip the Ink
- * UI entirely and run a single prompt to completion, writing machine-readable
- * output to stdout. The output contract (the `text` / `json` / `stream-json`
- * formats, the `result` schema, and the format parser) is the shared core
- * contract — every non-interactive entry point produces identical output so a
- * `jq` pipeline or CI script works against any of them unchanged.
- *
- * Headless mode never renders the Ink UI, never prompts interactively for
- * permissions (it requires --yolo or a permission mode that auto-approves,
- * otherwise tool calls that need approval are denied), and exits as soon as
- * the prompt completes (or errors).
+ * Headless / print mode (`--print` / `--output-format`): skip the Ink UI, run
+ * one prompt to completion, write machine-readable stdout. The output contract
+ * (`text`/`json`/`stream-json`, `result` schema) is the shared core contract so
+ * any non-interactive entry point is interchangeable for `jq`/CI. Never renders
+ * the UI; never prompts interactively (needs --yolo/auto-approve, else tool
+ * calls needing approval are denied); exits on completion or error.
  */
 export {
   runHeadless,

@@ -70,14 +70,7 @@ export interface TabCompleteResult {
   closePalette: boolean;
 }
 
-/**
- * Shell-style Tab completion for slash commands.
- *
- * - Unique match (e.g. query `conn` → `connect`): fill `/connect`.
- * - Several matches with a longer shared prefix: extend the query toward it.
- * - Query already equals a full command name: cycle to the next filtered hit.
- * - Otherwise: complete the currently selected row's name.
- */
+/** Shell-style Tab completion for slash commands. */
 export function tabCompleteCommand(
   commands: readonly CommandInfo[],
   query: string,

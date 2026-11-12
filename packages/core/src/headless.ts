@@ -1,26 +1,10 @@
 /**
  * Shared headless (non-interactive / print-mode) output contract.
  *
- * A single prompt runs to completion and machine-readable output is written to
- * a sink. One format set is shared by every non-interactive entry point so a
- * `jq` pipeline or CI script works against any of them unchanged:
- *
- *   text         Plain text — the final assistant message only.
- *   json         A single JSON `result` object emitted once the run finishes.
- *   stream-json  Newline-delimited JSON (NDJSON): one object per line per event
- *                in real time, closed by a final `result` object.
- *
- * The `json` and `stream-json` terminal line is the same rich `HeadlessResult`
- * (subtype + result text + session id + usage + cost + duration + turn count +
- * errors), so the two formats share a schema and only differ in whether the
- * per-event stream precedes the result.
- *
- * Headless mode never prompts interactively for permissions: the caller wires a
- * permission mode / handler that auto-approves or denies. A run is marked
- * `error` only when the prompt call itself throws; recoverable mid-run `error`
- * events are collected in `errors[]` but keep `subtype: "success"` because the
- * run may still have produced a final assistant message.
- *
+ * One prompt runs to completion, output goes to a sink. Formats: `text`
+ * (final assistant message), `json` (single result object), `stream-json`
+ * (NDJSON events + final result). `json`/`stream-json` share the same
+ * `HeadlessResult` schema. Headless mode never prompts interactively.
  * @module headless
  */
 import type { Event, UsageInfo } from "./types.js";

@@ -1,6 +1,6 @@
 /**
- * Named TUI palettes — the codex-style "whole theme" token swap for the
- * terminal, mirroring the web's named palettes in apps/web/src/index.css.
+ * Named TUI palettes — "whole theme" token swap for the terminal, mirroring
+ * the web's named palettes in apps/web/src/index.css.
  *
  * A palette is the eight-colour `TuiPalette` set the UI reads from `theme.ts`.
  * The TUI runs on a single (usually dark) terminal, so — unlike the web — each

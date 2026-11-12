@@ -1,11 +1,8 @@
-// `codepilot connect` — attach the terminal to a RUNNING `codepilot serve`
-// as a protocol client, and follow a live session in real time.
-//
-// Unlike `codepilot chat`, which spins up its own in-process engine (a
-// separate program that only shares the on-disk JSONL), this connects over
-// WebSocket to the same serve the web UI uses. So a task started in the web
-// streams into the terminal live, and prompts typed here drive the same
-// shared session. This is the terminal counterpart of opening the web UI.
+// `codepilot connect`: attach the terminal to a RUNNING `codepilot serve` as
+// a protocol client and follow a live session in real time. Unlike `chat`
+// (own in-process engine), this connects over WebSocket to the same serve the
+// web UI uses — a task started in the web streams here live, and prompts here
+// drive the same shared session.
 
 import * as readline from "node:readline";
 import type { Event } from "@codepilot/core";

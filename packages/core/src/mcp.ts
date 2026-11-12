@@ -1,20 +1,11 @@
 // MCP (Model Context Protocol) client — entry point.
 //
-// This module re-exports the public API split across the transport-specific
-// sub-modules and defines the `McpManager` that owns one client per
-// configured server. Existing call sites that import from `"./mcp.js"`
-// continue to work unchanged; new code may prefer importing from the
-// focused sub-modules (`./mcp-types.js`, `./mcp-names.js`, `./mcp-stdio.js`,
-// `./mcp-sse.js`, `./mcp-http.js`).
-//
-// Module layout:
-// mcp-types.ts — shared types, interfaces, config shapes, type guards
-// mcp-names.ts — tool-name normalization + naming + @mcp: references
-// mcp-jsonrpc.ts — BaseJsonRpcClient (shared JSON-RPC plumbing)
-// mcp-stdio.ts — McpStdioClient (child-process stdio transport)
-// mcp-sse.ts — McpSseClient (HTTP + SSE transport) + SSE parsers
-// mcp-http.ts — McpHttpClient (Streamable HTTP, MCP 2025-03-26)
-// mcp.ts — this file: McpManager + buildClient + re-exports
+// Re-exports the public API split across transport sub-modules and defines
+// the `McpManager` (one client per configured server). Existing "./mcp.js"
+// imports keep working. Module layout:
+// mcp-types.ts (types/config/guards), mcp-names.ts (tool-name normalization),
+// mcp-jsonrpc.ts (JSON-RPC plumbing), mcp-stdio.ts (child-process stdio),
+// mcp-sse.ts (HTTP+SSE), mcp-http.ts (Streamable HTTP), mcp.ts (this file).
 
 import type {
   McpClient,
@@ -123,23 +114,16 @@ export class McpManager {
   private readonly startErrs: McpStartError[] = [];
   private readonly errorListeners = new Set<(e: McpStartError) => void>();
  /** Reverse-request handlers, newest last. A single `McpManager` can be
-  * SHARED across sessions (see mcp-pool.ts), so there can be more than one
-  * live handler at a time — an MCP server's reverse request (elicitation /
-  * sampling) carries no session identity, so we dispatch to the most recently
-  * registered still-live handler (the active session) and fall back to earlier
-  * ones if it declines. Previously this was a single field that each session
-  * OVERWROTE, so a server reverse request was misrouted to whichever session
-  * registered last — and kept pointing at it even after that session was
-  * disposed. Each session registers on acquire and unregisters on release. */
+  * SHARED across sessions (see mcp-pool.ts); more than one handler can be live
+  * at once. MCP reverse requests (elicitation/sampling) carry no session
+  * identity, so dispatch newest-registered-first, falling back to earlier ones
+  * if it declines. Each session registers on acquire, unregisters on release. */
   private readonly requestHandlers = new Set<McpServerRequestHandler>();
- /** Per-server reverse-request affinity. While a session is invoking a tool on
-  * a server, its own reverse-request handler is recorded here (ref-counted for
-  * concurrent calls from the same session) so a reverse request the server
-  * initiates DURING that call (elicitation / sampling) routes back to the
-  * session that triggered it — not merely to the newest registered handler.
-  * MCP reverse requests carry no session identity, so this in-flight-call
-  * association is the correlation. Entries clear when the triggering call ends;
-  * a reverse request with no live affinity falls back to newest-first. */
+ /** Per-server reverse-request affinity. While a session invokes a tool on a
+  * server, its handler is recorded here (ref-counted for concurrent calls) so a
+  * reverse request the server initiates DURING that call routes back to the
+  * triggering session, not just the newest handler. Entries clear when the call
+  * ends; no live affinity → newest-first. */
   private readonly serverAffinity = new Map<
     string,
     Array<{ handler: McpServerRequestHandler; count: number }>
@@ -151,11 +135,9 @@ export class McpManager {
     if (handlers.length === 0) {
       throw new Error(`no handler registered for MCP reverse request ${method} from ${server}`);
     }
-    // Build the dispatch order: the session actively invoking a tool on THIS
-    // server first (per-call affinity), then the remaining handlers newest-
-    // first. Affinity handlers must still be live (registered) to be preferred;
-    // a stale one (its session disposed mid-call) is skipped. When there is no
-    // live affinity we fall back to pure newest-first — the prior behaviour.
+    // Dispatch order: this server's in-flight affinity first, then remaining
+    // handlers newest-first. Stale affinity (session disposed mid-call) is
+    // skipped; no live affinity → pure newest-first (prior behaviour).
     const affinity = this.serverAffinity.get(server);
     const ordered: McpServerRequestHandler[] = [];
     const added = new Set<McpServerRequestHandler>();

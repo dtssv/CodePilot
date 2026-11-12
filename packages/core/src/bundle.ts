@@ -1,26 +1,8 @@
 // Bundle export / import (#28).
 //
-// A "bundle" is a single self-contained JSON file that captures everything
-// a user needs to reproduce their CodePilot setup on another machine:
-//
-// {
-// "version": 1,
-// "config": { ...resolved CodepilotConfig... },
-// "commands": { "review.md": "<markdown content>" },
-// "agents": { "explore.md": "<markdown content>" },
-// "skills": { "pdf/SKILL.md": "<markdown content>" }
-// }
-//
-// - `exportBundle` resolves the layered config for a cwd and snapshots the
-// user-level (~/.codepilot) and project-level (<cwd>/.codepilot) custom
-// commands, agents and skills into the bundle.
-// - `importBundle` does the reverse: it writes the bundle's config to
-// `~/.codepilot/config.json` and materialises the resources under
-// `~/.codepilot/commands`, `~/.codepilot/agents` and `~/.codepilot/skills`.
-//
-// Resource keys are relative file names; `skills` entries may include one
-// path segment (`<name>/SKILL.md`). Keys are validated on import to prevent
-// path traversal outside the target directories.
+// A self-contained JSON file capturing config + custom commands, agents, and
+// skills. `exportBundle` snapshots the layered config; `importBundle` writes
+// back under `~/.codepilot`. Keys are relative paths, traversal-validated.
 
 import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";

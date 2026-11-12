@@ -21,7 +21,7 @@ export interface CodepilotSettings {
   protocolVersion: number;
  /** Default {@link AgentMode} applied to every new session. */
   agentMode: AgentMode;
- /** Inline (Tab) completion. Off by default; see docs/design/G-inline-completion.md. */
+ /** Inline (Tab) completion. Off by default. */
   completion: {
     enabled: boolean;
     debounceMs: number;

@@ -399,9 +399,8 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
 
   // Graceful wind-down (agent.ts:444-461): the budget is not a hard wall — the
   // last turns inject a runtime_context nudge urging synthesis, so the model
-  // lands softly instead of being cut off mid-tool-call. No peer harness does a
-  // GRADED wind-down (opencode has a single-level "steps reached" prompt; codex/
-  // dsh have no turn cap; pi hard-fails). These pin the gradient + its carrier.
+  // lands softly instead of being cut off mid-tool-call. These pin the gradient
+  // + its carrier.
   function systemText(opts: StreamChatOptions): string {
     return opts.messages
       .filter((m) => m.role === "system")
@@ -980,8 +979,8 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
   });
 
   it("auto-continues after a degenerate EMPTY first response (no tools, no text)", async () => {
-    // Borrowed from dsh's EMPTY_RESPONSE class: a provider can return a clean
-    // finishReason:stop with zero content blocks on the VERY FIRST call (no
+    // A provider can return a clean finishReason:stop with zero content blocks
+    // on the VERY FIRST call (no
     // tool use at all). The old empty-stop resume required sawToolCalls, so
     // this degenerate completion slipped through as a silent blank reply to the
     // user/parent. Now it is retried (bounded) like any other empty stop.

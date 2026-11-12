@@ -1,26 +1,8 @@
 /**
- * Plugins — bundled, distributable extensions.
- *
- * A plugin is a directory containing a `plugin.json` manifest plus any
- * combination of skills, agents, commands, hooks, and MCP server configs.
- * Plugins are discovered from:
- *
- * 1. <cwd>/.codepilot/plugins/<name>/ (project-local)
- * 2. ~/.codepilot/plugins/<name>/ (user-global, installed)
- *
- * When a plugin is loaded, its resources are merged into the session's
- * existing discovery paths:
- * - `skills/` → added to the skill discovery path list
- * - `agents/` → added to the custom-agent discovery path list
- * - `commands/` → added to the slash-command discovery path list
- * - `hooks` → merged into the session's hooks config
- * - `mcpServers` → merged into the session's MCP server config
- *
- * Installation: `installPlugin(cwd, source)` clones a git repo (or copies a
- * local directory) into `~/.codepilot/plugins/<name>/`. Uninstallation
- * removes the directory. A simple marketplace registry (JSON index of
- * plugin repos) can be fetched from a URL for `search`/`install` flows.
- *
+ * Plugins — distributable extensions. A plugin dir has a `plugin.json` manifest
+ * plus any of: skills, agents, commands, hooks, MCP configs. Discovered from
+ * <cwd>/.codepilot/plugins/ and ~/.codepilot/plugins/; install clones/copies into
+ * ~/.codepilot/plugins/<name>/.
  * @module plugins
  */
 import { readdir, readFile, stat, rm, mkdir, mkdtemp } from "node:fs/promises";
@@ -79,11 +61,9 @@ export const PLUGIN_PERMISSIONS: readonly PluginPermission[] = [
 
 /**
  * A provider template a plugin may contribute (`plugin.json` `providerTemplates`).
- * This is a plain-data subset of the catalog's `ProviderTemplate` (duplicated
- * here, not imported, so the manifest type stays decoupled from the catalog
- * module). Plugins contribute *templates* — baseURL + model list + protocol —
- * that merge into the provider picker, NOT provider CODE. Running custom
- * transport/OAuth in a plugin is deliberately out of scope (§4.3).
+ * Plain-data subset of the catalog's `ProviderTemplate` (duplicated, not imported,
+ * to keep the manifest decoupled). Plugins contribute templates (baseURL + models
+ * + protocol), NOT provider code; custom transport/OAuth is out of scope (§4.3).
  */
 export interface PluginProviderTemplate {
  /** Stable id; namespaced to the plugin on merge to avoid clashes. */
@@ -120,48 +100,28 @@ export interface PluginManifest {
  /** MCP servers to register (merged into session mcpServers config). */
   mcpServers?: Record<string, unknown>;
  /**
-  * Provider templates to contribute to the provider picker (baseURL + model
-  * list + protocol; NO secrets, NO code). Merged into
-  * {@link listProviderTemplates} via {@link collectPluginProviderTemplates};
-  * each id is namespaced `<plugin>/<id>` so plugins can't shadow built-ins.
-  * This reuses the catalog merge path and never runs plugin provider code —
-  * full custom-transport providers are out of scope (§4.3).
+  * Provider templates for the picker (baseURL + models + protocol; no secrets,
+  * no code). Merged via {@link collectPluginProviderTemplates}; ids namespaced
+  * `<plugin>/<id>`. Never runs plugin provider code (§4.3).
   */
   providerTemplates?: PluginProviderTemplate[];
  /**
-  * Capabilities the plugin declares it needs. Enforcement is opt-in: when
-  * this field is PRESENT, the plugin may only contribute a capability-
-  * bearing resource it declared — undeclared `hooks` / `mcpServers` /
-  * `runtime` are refused at merge time (fail-closed) and a warning is
-  * surfaced. When ABSENT, the plugin keeps the legacy behaviour (no gating),
-  * so existing plugins are unaffected and declaration can roll out
-  * gradually.
-  *
-  * `hooks` / `mcp` / `runtime` gate the matching manifest resource.
-  * `network` / `fileWrite` / `bash` / `tools` are advisory tags surfaced for
-  * consent (`tools` signals the plugin contributes model-callable tools; the
-  * hard gate is `runtime`, since a tool is registered from the plugin's
-  * runtime module — tool-level permissions still gate calls at execute time).
+  * Capabilities the plugin needs. Opt-in enforcement: when present, an
+  * undeclared `hooks`/`mcpServers`/`runtime` is refused at merge (fail-closed)
+  * + warned; when absent, legacy no-gating behaviour. `hooks`/`mcp`/`runtime`
+  * gate the matching resource; `network`/`fileWrite`/`bash`/`tools` are advisory
+  * consent tags (`tools` is advisory — the hard gate is `runtime`).
   */
   permissions?: PluginPermission[];
  /** Whether the plugin is enabled (default true). */
   enabled?: boolean;
  /**
- * Custom agent runtime. Points to a JS module
- * inside the plugin directory that exports a `RuntimeFactory` — either as
- * the default export or as a named `factory` / `runtimeFactory` export:
- *
- * // runtime.mjs
- * export default { name: "my-runtime", create: (deps) => new MyRuntime(deps) };
- *
- * - String form: relative module path; the factory's own `name` is used.
- * - Object form: `module` (path), optional `name` (overrides the factory
- * name), optional `default: true` to claim the session runtime, so a
- * session uses it without any config (see {@link initPluginRuntimes},
- * which `createSession` calls). Only one plugin may claim the default.
- *
- * The module runs in the host process with full Node access — only install
- * plugins from trusted sources. Load via {@link loadPluginRuntimes}.
+ * Custom agent runtime: a JS module exporting a `RuntimeFactory` (default
+ * export, or named `factory`/`runtimeFactory`).
+ * - String form: relative module path (factory's own `name` used).
+ * - Object form: `module` + optional `name` + optional `default: true` to
+ *   claim the session runtime (only one plugin may; see {@link initPluginRuntimes}).
+ * Runs in-host with full Node access — install only trusted plugins.
  */
   runtime?: string | { module: string; name?: string; default?: boolean };
 }
@@ -504,12 +464,10 @@ export function pluginResourcePaths(
 }
 
 /**
- * Collect provider templates declared by discovered plugins. Pure data — no
- * code runs. Each template id is namespaced `<plugin>/<id>` so a plugin can
- * never shadow a built-in or another plugin's template. Templates missing a
- * required field (`id`, `displayName`, `provider`) are skipped. Feed the
- * result to {@link listProviderTemplates} as an overlay so plugin templates
- * compose with the bundled + GitHub-catalog templates.
+ * Collect provider templates from discovered plugins (pure data, no code).
+ * Ids namespaced `<plugin>/<id>`; templates missing `id`/`displayName`/`provider`
+ * or naming an unsupported provider are skipped. Feed to
+ * {@link listProviderTemplates} as an overlay.
  */
 export async function collectPluginProviderTemplates(
   cwd: string,
@@ -630,21 +588,12 @@ export function mergePluginConfig(
 }
 
 /**
- * The runtime name a plugin declared as the session default (manifest
- * `runtime.default === true`), or undefined when no plugin claims one.
- *
- * `existing` is an already-chosen runtime name (from config or an explicit
- * session option). Because two conflicting defaults — or a default that
- * contradicts explicit config — can only be resolved by the user, this
- * throws instead of picking a winner silently. Returns undefined when
- * `existing` is set and no plugin declares a default, so callers can keep
- * their own value.
- *
- * `registered` maps plugin name → the name the runtime was actually
- * registered under (as returned by {@link loadPluginRuntimes}). Pass it
- * whenever the modules have been loaded: a manifest that omits
- * `runtime.name` takes its name from the factory, which is only knowable
- * after the import. Without it, the plugin's own name is the best guess.
+ * The runtime name a plugin declared as session default (`runtime.default
+ * === true`), or undefined. `existing` = already-chosen name (config/session);
+ * conflicting defaults throw rather than pick silently. `registered` (plugin
+ * → registered name, from {@link loadPluginRuntimes}) resolves a manifest
+ * omitting `runtime.name` from the factory (post-import); without it the
+ * plugin name is the best guess.
  */
 export function pluginDefaultRuntime(
   plugins: Map<string, Plugin>,
@@ -680,18 +629,12 @@ export interface PluginRuntimeLoadResult {
 }
 
 /**
- * Dynamically import every discovered plugin's `runtime` module and register
- * its `RuntimeFactory` with the given registry (default: the process-wide
- * {@link runtimeRegistry}).
- *
- * The module may export the factory as the default export, or as a named
- * `factory` / `runtimeFactory` export. The factory's `name` may be overridden
- * by the manifest's `runtime.name`. Loading is per-plugin isolated: one bad
- * module does not prevent other plugins from loading; failures are collected
- * in the returned `errors` map so hosts can surface them (e.g. `/plugins`).
- *
- * Call this AFTER `discoverPlugins` and BEFORE creating a session whose
- * config references a plugin runtime.
+ * Dynamically import each discovered plugin's `runtime` module and register
+ * its `RuntimeFactory` (default: process-wide {@link runtimeRegistry}). Factory
+ * export may be default or named `factory`/`runtimeFactory`; `name` overridable
+ * via manifest `runtime.name`. Per-plugin isolated — failures collected in
+ * `errors` for host surfacing. Call after `discoverPlugins`, before session
+ * creation.
  */
 export async function loadPluginRuntimes(
   plugins: Map<string, Plugin>,
@@ -759,12 +702,9 @@ export interface InitPluginRuntimesOptions extends DiscoverPluginsOptions {
 }
 
 /**
- * Discover plugins for `cwd` and register every runtime they declare, then
- * report which runtime (if any) should become the session default.
- *
- * This is the one call a host needs to make plugin runtimes usable;
- * `createSession` does it automatically. Registration is idempotent, so
- * calling it once per session is fine.
+ * Discover plugins for `cwd`, register their runtimes, and report the session
+ * default runtime if any. The one call hosts need; `createSession` does it
+ * automatically. Idempotent — safe to call once per session.
  */
 export async function initPluginRuntimes(
   cwd: string,
@@ -800,19 +740,11 @@ export interface InstallOptions {
 }
 
 /**
- * Install a plugin from a git URL or local directory.
- *
- * - Git URLs (start with `http` or `git@`): cloned into the plugins dir.
- * - Local paths: copied into the plugins dir.
- *
- * A **monorepo sub-directory** can be selected with a `#subdir` fragment, so a
- * single repository can host many plugins. The repo is cloned to a temp dir
- * and only `<subdir>` is copied into place:
- *   `https://github.com/acme/plugins.git#code-review` → installs `code-review`.
- * The fragment works for git URLs and local paths alike.
- *
- * Returns the installed plugin path. Throws if the plugin already exists
- * (unless `force: true`) or if the source has no `plugin.json`.
+ * Install a plugin from a git URL (cloned) or local path (copied). A `#subdir`
+ * fragment selects a monorepo sub-directory (cloned to temp, only `<subdir>`
+ * copied; works for git URLs and local paths).
+ * Returns the installed path. Throws if it exists (unless `force`) or has no
+ * `plugin.json`.
  */
 export async function installPlugin(
   source: string,

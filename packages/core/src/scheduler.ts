@@ -1,23 +1,8 @@
 /**
- * Scheduled / idle tasks — run prompts when the machine is free, at a wall-clock
- * time, on an interval, or on a 5-field cron expression.
- *
- * Idle tasks: queued with `kind: "idle"`; a watcher runs them when the local
- * engine reports no busy sessions for `idleAfterMs` (default 10 min).
- * Time tasks: one-time (`once`), daily `HH:MM`, weekly (`HH:MM` + weekdays),
- * interval minutes, or `cron` (standard 5-field `min hour dom month dow`).
- * `cron` and `daily`/`weekly` honour an optional IANA `timezone` (e.g.
- * "America/New_York"); without one they use the host's local time.
- *
- * Delivery: each run either opens a fresh one-shot session (default) or posts
- * the prompt as a follow-up into an existing session (`delivery.sessionId`).
- *
- * Lifecycle: a task can be `paused` (kept but never due) and can carry an
- * `endsAt` epoch after which it stops firing (and one-time/`once` auto-disables
- * after it runs).
- *
- * Persistence: `~/.codepilot/scheduled-tasks.json`
- * Execution is host-driven (`startSchedulerWatcher` from CLI/desktop).
+ * Scheduled / idle tasks — run prompts when idle, at a wall-clock time, on an
+ * interval, or on a cron expression. Tasks may be paused or carry an `endsAt`;
+ * `once` tasks auto-disable after running. Persisted to
+ * `~/.codepilot/scheduled-tasks.json`; execution is host-driven.
  */
 
 import { randomUUID } from "node:crypto";

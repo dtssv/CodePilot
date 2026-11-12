@@ -1,11 +1,9 @@
 /**
- * Plugin manager — standalone settings section.
- *
- * Mirrors CustomMcpPanel: browse the GitHub-hosted marketplace (plugins/market),
- * confirm the install source before installing (the trust gate), install from a
- * market entry or an arbitrary git URL / local path, list installed plugins, and
- * uninstall. Installing a plugin runs its code (hooks / MCP / runtime), so every
- * install shows the source and asks for confirmation first.
+ * Plugin manager — standalone settings section. Browse the GitHub-hosted
+ * marketplace (or install from a git URL / local path), confirm the install
+ * source first (trust gate), list/uninstall installed plugins. Installing runs
+ * plugin code (hooks / MCP / runtime), so every install shows the source and
+ * asks for confirmation.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 

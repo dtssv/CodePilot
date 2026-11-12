@@ -1,10 +1,10 @@
 // Inline (Tab) code completion provider.
 //
-// Design: docs/design/G-inline-completion.md. All model/prompt logic lives in
+// All model/prompt logic lives in
 // core/protocol behind the `completion/inline` RPC; this host-side provider is
 // thin: collect capped prefix/suffix → RPC → render ghost text → cancel. The
 // latency machinery (debounce, cancel, client-side LRU cache, prefix/suffix cap)
-// is owned here per §5/§5.1 — the server handler stays stateless.
+// is owned here — the server handler stays stateless.
 
 import * as vscode from "vscode";
 

@@ -94,7 +94,7 @@ describe("foldToolResults", () => {
     // Twelve user/assistant/result triples, each result tiny (< minChars) so
     // the size-based pass folds nothing. The rolling window (cap 3) should
     // still fold the oldest small results down to 3 unfolded, independent of
-    // the token budget — Claude Code `clear_tool_uses` semantics.
+    // the token budget.
     const events: Event[] = [];
     for (let i = 0; i < 12; i++) {
       events.push({ type: "message", id: `u${i}`, role: "user", content: [{ type: "text", text: "p" + i }] });
@@ -210,9 +210,7 @@ describe("foldToolResults", () => {
 
   // Provenance tagging (anti-hallucination): a folded tool_result stub carries
   // a credibility tag so a later summary (or the model) can tell a tool-verified
-  // fact from an external/action/error result. No peer harness tags fold stubs
-  // this way — opencode/dsh/pi only mark role/error/truncation, codex not at
-  // all — so this is a CodePilot-specific guard and worth pinning.
+  // fact from an external/action/error result.
   function foldTagFor(toolName: string, isError = false): string {
     const events: Event[] = [];
     for (let i = 0; i < 4; i++) {

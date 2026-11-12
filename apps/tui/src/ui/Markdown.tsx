@@ -1,17 +1,7 @@
 /**
- * Minimal markdown renderer for Ink.
- *
- * Handles a pragmatic subset well enough for assistant messages:
- * - fenced code blocks ```lang … ```
- * - inline code `…`
- * - **bold** and *italic*
- * - headings (# … ######)
- * - lists (-, *, 1.)
- * - blockquotes (> )
- * - links [text](url)
- * - tables (| a | b |)
- *
- * The renderer is pure (no I/O); colors come from theme.ts.
+ * Minimal markdown renderer for Ink. Handles a pragmatic subset for assistant
+ * messages: fenced and inline code, bold, italic, headings, lists, blockquotes,
+ * links, tables. Pure (no I/O); colors from theme.ts.
  */
 import React from "react";
 import { Text, Box } from "ink";

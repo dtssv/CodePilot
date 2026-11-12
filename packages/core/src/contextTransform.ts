@@ -1,14 +1,8 @@
-// Plugin context transform — a source-safe rewrite of the provider message
-// view, modelled on pi's `context` event (`transformContext(messages) →
-// messages`). A plugin may prune / window / inject-memory into what the model
-// sees for a turn, WITHOUT touching the persisted transcript: the transform
-// runs on a copy of the already-built provider view, after CodePilot's own
-// fold/compaction, and the copy is discarded after the request.
-//
-// Where pi leaves tool_call↔tool_result pairing to the provider, CodePilot
-// validates the returned view and, on ANY problem, falls back to the
-// untransformed view (fail-soft — never send a malformed request). This is the
-// stricter "report-and-ignore" posture that matches CodePilot's safety stance.
+// Plugin context transform: a source-safe rewrite of the provider message
+// view. A plugin may prune / window / inject-memory into what the model sees
+// for a turn without touching the persisted transcript — the transform runs
+// on a copy (after fold/compaction), discarded after the request. The result
+// is validated; on any problem it falls back to the untransformed view.
 
 import type { ProviderMessage, ProviderMessageContent } from "./providers/types.js";
 

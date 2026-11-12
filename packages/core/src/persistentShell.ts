@@ -1,44 +1,12 @@
 // Persistent shell: keep a long-lived PTY so cwd/env survive across bash tool calls.
 //
-// The single biggest agent-capability gap in the original bash tool: every
-// command ran in a fresh `sh -c` child, so `cd`, `export`, and background
-// jobs did NOT persist across calls. This made build/debug loops painful
-// ("cd packages/core && pnpm test" had to be one command) and broke the
-// mental model of "I'm working in a terminal".
-//
-// This module implements a persistent login shell that stays alive for the
-// lifetime of a Session. Each `run` call sends a command to the shell's
-// stdin, then reads stdout/stderr until a unique sentinel marker appears.
-// The shell's cwd and env therefore carry over: a `cd packages/core` in
-// one call means the next call runs in `packages/core`.
-//
-// Design:
-// - One long-running child process: the user's login shell (`$SHELL` or
-// `/bin/bash`), started with `-i` so it sources rc files.
-// - Each command is wrapped: `printf '<sentinel> <exitcode>\n'` is
-// appended after the user's command. We read until we see the
-// sentinel, then parse the exit code from the line.
-// - stdout and stderr are interleaved into one stream (the shell's
-// stdout). This matches how a terminal looks and avoids ordering
-// issues. The caller gets a single `output` string.
-// - A timeout kills the *command* (not the shell): we send SIGINT to
-// the shell's process group, then keep reading for the sentinel. The
-// shell itself stays alive for the next command.
-// - The shell is sandboxed via the same `wrapCommand` policy as the
-// one-shot bash tool — we pass the sandbox wrapper as the shell's
-// argv[0] when a sandbox is configured.
-//
-// Trade-offs vs. a real PTY (node-pty):
-// - No TTY: interactive commands (vim, htop, sudo prompt) won't work.
-// This is acceptable for an agent — it shouldn't be driving vim.
-// - No ANSI rendering: output is plain text. Fine for logs/test output.
-// - Zero native deps: pure Node, no node-pty compile step. This keeps
-// the package dependency-free, matching the rest of the codebase.
-// A future PTY upgrade can swap in node-pty behind the same interface.
-//
-// Lifecycle: the shell is lazily started on the first `run` call. It
-// stays alive until `close` is called (Session.dispose) or the process
-// exits unexpectedly (we respawn on the next call).
+// Persistent login shell: a long-running child process (`$SHELL -i`) that
+// stays alive for the Session's lifetime, so `cd`/`export`/background jobs
+// persist across `run` calls. Each command is followed by a unique sentinel
+// marker carrying the exit code; we read until the sentinel, then parse it.
+// stdout/stderr are interleaved. A timeout SIGINTs the command's process
+// group (not the shell). Sandbox uses the same `wrapCommand` policy as the
+// one-shot bash tool. Lazily started; respawned if it exits unexpectedly.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";

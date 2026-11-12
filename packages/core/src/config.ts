@@ -1,30 +1,9 @@
 // Config loading and validation.
-//
-// The full set of configuration values for @codepilot/core is described by a
-// single zod schema (`CodepilotConfigSchema`) and is loaded from several
-// sources, merged from low to high priority:
-//
-// 1. Built-in defaults (`DEFAULT_CONFIG`)
-// 2. User-level config (`~/.codepilot/config.json`)
-// 3. Repo-level config (`<cwd>/.codepilot/config.json`)
-// 4. Environment variables (`CODEPILOT_PROVIDER` / `CODEPILOT_MODEL` /
-// `CODEPILOT_API_KEY` / `CODEPILOT_BASE_URL` /
-// `CODEPILOT_PERMISSION_MODE` /
-// `CODEPILOT_LOG_LEVEL`)
-// 5. Caller-supplied explicit overrides (e.g. from SessionOptions)
-//
-// On top of merging, every string value is scanned for `${ENV_VAR}` and
-// `${ENV_VAR:-default}` interpolations, so secrets can be referenced
-// without committing them:
-//
-// { "apiKey": "${OPENAI_API_KEY}" }
-// { "baseURL": "${CUSTOM_BASE_URL:-https://api.example.com/v1}" }
-//
-// The original `loadConfig(cwd)` / `mergeConfig(base, override)` API is
-// preserved for backwards compatibility; new code should prefer
-// `loadConfigWithSources` to also see the per-layer source information
-// (useful for the `codepilot config` debug command in the protocol
-// package).
+// Single zod schema (`CodepilotConfigSchema`), merged low→high:
+// 1. built-in defaults 2. ~/.codepilot/config.json 3. <cwd>/.codepilot/config.json
+// 4. env vars (CODEPILOT_PROVIDER/MODEL/API_KEY/BASE_URL/PERMISSION_MODE/LOG_LEVEL)
+// 5. caller overrides. String values support `${ENV_VAR}` / `${ENV_VAR:-default}`
+// interpolation. Prefer `loadConfigWithSources` for per-layer source info.
 
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -348,14 +327,10 @@ export const SandboxConfigSchema = z
     // Unset leaves `.git` writable; set true to carve it. See types.ts
     // SandboxConfig.protectGit.
     protectGit: z.boolean().optional(),
-    // How the git metadata dir is treated at the OS sandbox layer. Richer than
-    // the legacy boolean `protectGit`; when set it wins. See types.ts.
-    //   "protect"       — carve `.git` read-only (same as protectGit:true)
-    //   "allow-git-cli" — leave `.git` writable so `git commit`/`add` work under
-    //                     the sandbox without per-command escalation (the
-    //                     default posture when neither knob is set)
-    //   "ask"           — alias of allow-git-cli at the OS layer; the file-tool
-    //                     `.git` write ask remains the interactive gate
+    // How `.git` is treated at the OS sandbox layer; wins over `protectGit`.
+    //   "protect"       — carve `.git` read-only (= protectGit:true)
+    //   "allow-git-cli" — leave `.git` writable so git CLI works (default)
+    //   "ask"           — same as allow-git-cli; file-tool `.git` write asks
     gitWrite: z.enum(["protect", "allow-git-cli", "ask"]).optional(),
   })
   .strict();
@@ -474,8 +449,8 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     highRiskModels: z.array(z.string().min(1)).optional(),
     highRiskDropSessionAllows: z.boolean().optional(),
     // Inline (Tab) code completion for the editor plugins. Off by default; runs
-    // on the user's provider/apiKey but gated to a lightweight model (see
-    // docs/design/G-inline-completion.md). Ignored by non-editor clients.
+    // on the user's provider/apiKey but gated to a lightweight model.
+    // Ignored by non-editor clients.
     completion: z
       .object({
         enabled: z.boolean().optional(),
@@ -944,22 +919,10 @@ export function getRepoConfigPath(cwd: string): string {
 }
 
 /**
- * Enterprise/MDM managed config path.
- *
- * On macOS: /Library/Application Support/CodePilot/managed.json
- * On Linux: /etc/codepilot/managed.json
- * On Windows: C:\ProgramData\CodePilot\managed.json
- *
- * The managed layer sits between `defaults` and `user`. For most keys it acts
- * as an administrator-set DEFAULT that later layers (user / repo / env / caller
- * / profile / patch) may override. For a small set of policy-critical
- * LOCK-KEYS (see {@link MANAGED_LOCK_KEYS}), a value present in the managed
- * layer is ENFORCED: no later layer can override it. This makes
- * "users cannot override" literally true for the keys enterprises most need to
- * pin (sandbox, permission mode, provider, MCP allowlist), while leaving every
- * other key as a soft managed default.
- *
- * Override the path with the `CODEPILOT_MANAGED_CONFIG` env var for testing.
+ * Enterprise/MDM managed config path (macOS /Library/Application Support/CodePilot,
+ * Linux /etc/codepilot, Windows %ProgramData%\CodePilot). Soft admin default for
+ * most keys; ENFORCED for policy LOCK-KEYS ({@link MANAGED_LOCK_KEYS}).
+ * Override with `CODEPILOT_MANAGED_CONFIG` for testing.
  */
 export function getManagedConfigPath(): string {
   const override = process.env.CODEPILOT_MANAGED_CONFIG;
@@ -1143,20 +1106,9 @@ function mergeOne(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the active profile on top of the base config.
- *
- * Looks up `config.profiles[name]` (where `name` defaults to
- * `config.activeProfile`) and merges it over the base with the same
- * type-aware merge semantics as {@link mergeConfig}. The profile's own
- * `profiles` / `activeProfile` keys are intentionally dropped — profiles
- * are flat (a profile cannot activate another profile), which keeps the
- * composition order easy to reason about:
- *
- * defaults < managed < user < repo < env < caller < profile < patch
- *
- * Returns the input unchanged when no profile is active. Throws a
- * descriptive error listing the known profile names when the requested
- * profile doesn't exist.
+ * Resolve the active profile over the base via {@link mergeConfig}.
+ * Composition: defaults < managed < user < repo < env < caller < profile < patch.
+ * Profiles are flat. Returns input unchanged when none active; throws if unknown.
  */
 export function resolveProfile(
   config: ResolvedCodepilotConfig,
@@ -1299,25 +1251,13 @@ export async function loadConfig(cwd: string): Promise<CodepilotConfig> {
 }
 
 /**
- * Full layered loader. Returns the merged config plus each layer's
- * contribution (for the `codepilot config` debug command).
- *
+ * Full layered loader. Returns the merged config plus each layer's contribution.
  * @param cwd current working directory
- * @param explicit optional caller-supplied overrides (highest priority
- * among the file/env layers; the profile and patch
- * composition steps still run on top of it)
- * @param options.readFiles when false, skip disk reads — useful in tests
- * and in environments where filesystem access is
- * unavailable.
- * @param options.profile profile name to activate (equivalent to the
- * `--profile <name>` CLI flag). Wins over
- * `activeProfile` from any layer.
- * @param options.patch JSON merge-patch applied on top of the fully
- * merged + profile-resolved config (equivalent to
- * the `--config-patch '<json>'` CLI flag).
- * @param options.homeDir override the home directory used to locate the
- * user-level config (defaults to os.homedir).
- * Primarily for tests and bundle export/import.
+ * @param explicit caller overrides; profile and patch still compose on top
+ * @param options.readFiles when false, skip disk reads (tests / no FS access)
+ * @param options.profile profile name to activate (wins over `activeProfile`)
+ * @param options.patch JSON merge-patch applied after profile resolution
+ * @param options.homeDir override the user-config home dir (tests / export-import)
  */
 export async function loadConfigWithSources(
   cwd: string,

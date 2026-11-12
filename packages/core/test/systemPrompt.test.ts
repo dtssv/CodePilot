@@ -564,7 +564,7 @@ describe("buildSystemPrompt C4 contracts", () => {
   });
 });
 
-// C4 step 2: the Section registry enforces (not just documents) uniqueness,
+// The Section registry enforces (not just documents) uniqueness,
 // ordering, and per-model override.
 describe("section registry (assembleSections)", () => {
   const s = (name: string, order: number, text: string, source?: "core" | "model"): StaticSection =>

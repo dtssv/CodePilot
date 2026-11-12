@@ -1,34 +1,10 @@
 // Plugin content-trust: a hash-based re-approval gate for a plugin's sensitive
-// on-disk content (hooks / MCP servers / runtime) AFTER it was installed and
-// consented to.
-//
-// Why this exists
-// ---------------
-// Install already asks for consent: `inspectPluginSource` builds a capability
-// report and the marketplace index is shown before `installPlugin`. What that
-// one-time consent does NOT cover is a plugin whose content is CHANGED on disk
-// afterwards — a later edit (or a repo pull) could swap a hook's command or an
-// MCP server's spawn target without the user ever re-approving. The sensitive
-// components run code / spawn processes, so a silent identity swap there is the
-// risk.
-//
-// Mechanism
-// ---------
-// We hash only the sensitive parts of the manifest (hooks, mcpServers, runtime)
-// and record that hash at install-consent time in a small trust file. On load,
-// `mergePluginConfig` re-hashes the current content; if a plugin has a recorded
-// hash that no longer matches, its hooks and MCP servers are SKIPPED (fail-safe)
-// with a warning until the user re-confirms (which re-records the new hash).
-//
-// Scope and defaults
-// ------------------
-// - Only hooks / mcp / runtime are fingerprinted — the capability-bearing
-//   components. Skills / agents / commands are data read elsewhere and are not
-//   gated here.
-// - A plugin with NO recorded hash is treated as un-fingerprinted (legacy /
-//   never consented through this path): it is NOT gated, preserving existing
-//   behaviour. The gate only ever REVOKES trust for content that drifted from a
-//   recorded baseline — it never newly blocks a plugin that was fine before.
+// Detects whether a plugin's sensitive components (hooks / MCP servers /
+// runtime) changed on disk after install consent. We hash the sensitive
+// manifest parts at consent time; on load, a mismatch skips the plugin's
+// hooks and MCP servers (fail-safe) until re-confirmed. Only hooks/mcp/runtime
+// are fingerprinted; skills/agents/commands are data and not gated. A plugin
+// with no recorded hash is not gated (legacy behaviour preserved).
 
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";

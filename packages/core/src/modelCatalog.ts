@@ -1,17 +1,10 @@
 /**
- * Declarative model-capability catalog.
- *
- * A single static source of truth for the structured capabilities that were
- * previously inferred ad hoc from model-id substrings: which reasoning-effort
- * tiers a model exposes, its input modalities (text / vision), and a sensible
- * companion "small" model. Entries are keyed by an id glob (`*`/`?`, case
- * insensitive, provider prefix tolerant — the same matcher the tool-exposure
- * rules use) and scanned most-specific-first.
- *
- * This table is advisory, not an entitlement gate: a live `/models` probe
- * still wins for the context window and modalities it reports (those flow
- * through `ModelCapabilities` into the flat config), and an id that matches no
- * entry falls back to the id heuristics. Nothing here forces a remote catalog.
+ * Declarative model-capability catalog — a static source of truth for the
+ * structured capabilities previously inferred ad hoc from model-id substrings:
+ * reasoning-effort tiers, input modalities (text/vision), and a companion
+ * "small" model. Keyed by an id glob (`*`/`?`, case-insensitive, provider-prefix
+ * tolerant), scanned most-specific-first. Advisory: a live `/models` probe still
+ * wins; an id matching no entry falls back to id heuristics.
  */
 
 import { modelGlobMatch } from "./tools/modes.js";

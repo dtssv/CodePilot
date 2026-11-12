@@ -1,11 +1,9 @@
-// The CodePilot engine: either a private `codepilot serve` over stdio, or a
-// shared local daemon (`serve --daemon`) reached over WebSocket.
-//
-// Default mode is `shared`: discover ~/.codepilot/serve.json, attach if live,
-// otherwise spawn the bundled CLI (or PATH fallback). The extension does not
-// speak the protocol itself — the chat webview owns the JSON-RPC client; this
-// class only moves newline-delimited lines between the transport and the
-// webview. `tapServerLine` peeks at the relayed traffic for status / diffs.
+// The CodePilot engine: a private `codepilot serve` over stdio, or a shared
+// local daemon (`serve --daemon`) over WebSocket. Default `shared`: discover
+// ~/.codepilot/serve.json, attach if live, else spawn the bundled CLI. The
+// extension does not speak the protocol — the chat webview owns the JSON-RPC
+// client; this class just relays newline-delimited lines. `tapServerLine`
+// peeks at the relayed traffic for status / diffs.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";

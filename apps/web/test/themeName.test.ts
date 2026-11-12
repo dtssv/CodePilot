@@ -1,5 +1,5 @@
 // Named palette (theme-name) persistence + DOM application. The light/dark
-// axis is tested elsewhere; this covers the codex-style named-palette layer.
+// axis is tested elsewhere; this covers the named-palette layer.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 

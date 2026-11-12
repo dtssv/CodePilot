@@ -1,21 +1,10 @@
 /**
  * Status-line rendering: a declarative preset or a custom script.
  *
- * `config.statusLine` drives the status bar. Two shapes:
- *   - `{ type: "preset", … }` — a built-in, declarative status line assembled
- *     from a fixed set of items (model, mode, context gauge, git branch, …).
- *     Users get a useful status bar with zero scripting: pick a named preset
- *     ("default" / "minimal" / "verbose") or list the `items` to show.
- *   - `{ type: "command", … }` — the TUI spawns the configured command on each
- *     update, feeds it a JSON payload on stdin describing the session, and
- *     renders the command's stdout. For arbitrary scripts (custom colors, extra
- *     data) that the preset can't express. ANSI color codes are preserved.
- *
- * The command is spawned with `child_process.spawn` (no shell on Unix). Updates
- * are debounced at the configured interval. If a new update arrives while a
- * script is running, the in-flight process is killed and the new invocation
- * starts immediately.
- *
+ * `config.statusLine` is either a `preset` (named: default/minimal/verbose, or
+ * a fixed item list) or a `command` (TUI spawns it per update, feeds session
+ * JSON on stdin, renders stdout; ANSI preserved). Updates are debounced; an
+ * in-flight script is killed when a new update arrives.
  * @module statusLine
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";

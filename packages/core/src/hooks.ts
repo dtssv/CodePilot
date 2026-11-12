@@ -1,44 +1,11 @@
 // Hook system: user-configured shell/HTTP handlers on agent lifecycle events. user-configured shell commands
-// that run at agent lifecycle points and can observe or block tool execution.
-//
-// Module layout:
-// hooks.ts — this file: types + HookEngine (event registration + run*)
-// hooks-handlers.ts — the five handler types (command/http/mcp_tool/prompt/
-// agent) + decision interpretation (interpretDecision,
-// extractJson, matchDiscriminator)
-// hooks-trust.ts — hash-based command trust store (HookTrustStore)
-//
-// Supported events (with matchers):
-// - SessionStart matcher: source (startup | resume | clear | compact | fork)
-// - UserPromptSubmit matcher: none (fires for every user prompt)
-// - PreToolUse matcher: tool_name regex ("*" matches all)
-// - PostToolUse matcher: tool_name regex
-// - PreCompact matcher: trigger (manual | auto)
-// - PostCompact matcher: trigger (manual | auto)
-// - SubagentStop matcher: agent_type (explore | plan | worker | custom name) —
-//   can BLOCK like Stop (exit 2 / decision JSON); sub-agent continues with
-//   feedback, capped by `stopHookBlockCap`.
-// - Notification matcher: "*" (legacy, fire-and-forget)
-// - Stop matcher: "*" — can BLOCK ending the turn (exit 2 / decision JSON).
-//   Session continues the agent loop with the reason as feedback, capped by
-//   `stopHookBlockCap` (default 8). Payload includes `stop_hook_active`.
-//   Built-in `stopVerify` (default "off"; opt in with "prompt") runs before
-//   user Stop hooks when enabled.
-//
-// Exit codes / JSON decision:
-// - exit 0 = OK (allow / proceed)
-// - exit 2 = BLOCK (PreToolUse blocks the tool call; PreCompact blocks
-// compaction; UserPromptSubmit blocks the prompt; Stop blocks ending the
-// turn). stderr becomes the reason shown to the model.
-// - other non-zero = warning (surfaced in the tool result / event log,
-// never fatal).
-// - STDOUT JSON: hooks may emit a JSON object on stdout for richer
-// control. See `hooks-handlers.ts` `interpretDecision` for the schema.
-// Notable fields: `decision:"block"` + `reason` (block); `feedback`
-// (appended to a tool result); `updatedInput` (PreToolUse: rewrite the
-// tool input); `updatedResult` (PostToolUse: REPLACE the result text the
-// model sees — redact/sanitize/summarize, unlike `feedback` which appends);
-// `prompt` (UserPromptSubmit: rewrite the prompt).
+// Hook engine: external scripts/handlers at agent lifecycle points that can
+// observe or block tool execution. Events: SessionStart, UserPromptSubmit,
+// PreToolUse, PostToolUse, PreCompact, PostCompact, SubagentStop, Stop,
+// Notification. Exit 0 = OK; exit 2 = BLOCK (stderr = reason); other nonzero =
+// warning. Handlers may emit JSON on stdout for richer control (decision,
+// feedback, updatedInput, updatedResult, prompt). See hooks-handlers.ts for
+// the schema and hooks-trust.ts for command trust.
 
 import type { HooksConfig, HookEntryConfig } from "./types.js";
 import { HookTrustStore, hashCommand, trustSubject } from "./hooks-trust.js";

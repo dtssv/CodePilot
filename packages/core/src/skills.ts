@@ -1,34 +1,14 @@
 // Skill system.
 //
-// A "skill" is a folder containing a SKILL.md file with YAML frontmatter and a
-// markdown body of instructions. CodePilot discovers skills from these sources
-// (highest priority first):
-//
-// 1. <cwd>/.codepilot/skills/*/SKILL.md (project-local)
-// 2. ~/.codepilot/skills/*/SKILL.md (user-global)
-// 3. Ecosystem-compatible roots (so skills authored for other tools are picked
-//    up as-is): <cwd>/.claude/skills, <cwd>/.agents/skills,
-//    <cwd>/.opencode/skills, ~/.claude/skills, ~/.agents/skills,
-//    ~/.config/opencode/skills. Marked source "compat"; opt out with
-//    `includeCompatDirs: false`.
-// 4. Extra roots passed as `extraDirs` (installed plugins' `skills/` dirs and
-//    `config.skills.dirs`).
-// 5. packages/core/skills/*/SKILL.md (built-in, shipped with the package)
-//
-// `config.skills.enabled: false` disables discovery entirely; names in
-// `config.skills.disabled` (and the user config's disabled list) are omitted.
-//
-// The system prompt advertises only the skill name + a one-line description for
-// every discovered skill. The body is loaded on demand through the `skill`
-// tool — progressive disclosure that keeps the static prefix small and
-// preserves prompt-cache hits across turns.
-//
-// A skill is a self-contained
-// markdown file with simple frontmatter (`name`, `description`, optional
-// `tools` list, optional `when` hint, optional `user-invocable-only`), and a
-// body that the model can follow verbatim. We deliberately do not implement a
-// full YAML parser — only the small subset above is recognised — so the
-// dependency footprint stays at zero.
+// Skills — a folder with a SKILL.md (YAML frontmatter + markdown body).
+// Discovery (highest priority first):
+// 1. <cwd>/.codepilot/skills/*/SKILL.md  2. ~/.codepilot/skills/*/SKILL.md
+// 3. Ecosystem-compat roots (.claude/.agents/.opencode) — opt out via
+//    `includeCompatDirs: false`.  4. Extra dirs (plugin skills/, config).
+// 5. packages/core/skills/*/SKILL.md (built-in).
+// `config.skills.enabled:false` disables all; `disabled` omits names. The
+// system prompt advertises name + one-line description only; the body loads on
+// demand via the `skill` tool (progressive disclosure, preserves cache hits).
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -90,20 +70,14 @@ export interface DiscoverOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a SKILL.md file's text into `{ frontmatter, body }`. The frontmatter
- * is a simple `key: value` block delimited by `---` lines at the top of the
- * file. Only the keys we recognise (`name`, `description`, `when`, `tools`,
- * `user-invocable-only` / its `disable-model-invocation` alias) are returned;
- * everything else is silently ignored.
+ * Parse a SKILL.md into `{ frontmatter, body }`. Frontmatter is a `key: value`
+ * block delimited by `---` lines; only recognised keys (`name`, `description`,
+ * `when`, `tools`, `user-invocable-only` / alias `disable-model-invocation`)
+ * are returned, the rest ignored.
  *
- * Implementation notes:
- * - We split on the first two `---` lines. Anything after the closing
- * `---` is the body.
- * - We do not handle multi-line values, anchors, or include directives.
- * A full YAML parser would add 100+ KB to the bundle for a feature we
- * don't need.
- * - Lists are parsed as either YAML flow syntax (`[a, b, c]`) or repeated
- * keys at the same indent (`tools:\n - foo\n - bar`).
+ * Split on the first two `---` lines; after the closing `---` is the body. No
+ * multi-line values/anchors/includes (a full YAML parser isn't worth the bundle
+ * size). Lists via YAML flow (`[a, b, c]`) or repeated same-indent keys.
  */
 export function parseSkillMd(
   text: string
@@ -485,11 +459,10 @@ export function findSkill(skills: Skill[], name: string): Skill | null {
 // Built-in skill body (embedded so the package is self-contained).
 // ---------------------------------------------------------------------------
 //
-// The actual SKILL.md files also live in `packages/core/skills/` for users who
-// want to read them on disk, but we embed the markdown here so the discovery
-// path does not depend on the package's installation layout (which can be
-// flattened by pnpm or hoisted by npm). Discovery falls back to the on-disk
-// copy if present and otherwise constructs the Skill object from these.
+// The SKILL.md files also live in `packages/core/skills/` for on-disk reading,
+// but we embed the markdown so discovery doesn't depend on installation layout
+// (pnpm flattening / npm hoisting). Discovery falls back to the on-disk copy
+// if present, else constructs the Skill from these.
 
 export const BUILTIN_SKILLS: ReadonlyArray<{ name: string; markdown: string }> = [
   {

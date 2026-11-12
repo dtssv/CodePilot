@@ -1,22 +1,7 @@
-// Agent runtime abstraction.
-//
-// "Everything is a Plugin" starts here: the agent loop is no longer a
-// hardcoded function call — it is one implementation of the `AgentRuntime`
-// interface, resolved through a registry. Phase 1 shipped the interface, the
-// registry, and `DefaultRuntime` (a thin wrapper around `runAgent`), with
-// NO change to any public API: sessions that never touch the registry behave
-// exactly as before.
-//
-// Phase 2: plugin manifests may declare a `runtime` module whose factory is
-// registered here (see `loadPluginRuntimes` in plugins.ts); `Session` then
-// resolves the runtime by name.
-//
-// Phase 4: every factory receives a {@link RuntimeToolkit} so a custom
-// runtime can delegate to the built-in loop and — crucially — execute tools
-// through the same pipeline the default loop uses (permissions, PreToolUse /
-// PostToolUse hooks, doom-loop detection, Zod validation, telemetry). A
-// runtime that calls `tool.execute` directly would silently bypass all of
-// that, so the toolkit is the supported way to run tools.
+// Agent runtime abstraction. The agent loop is one `AgentRuntime` implementation
+// resolved through a registry. `DefaultRuntime` wraps `runAgent`; plugins may
+// register custom runtimes. Factories get a {@link RuntimeToolkit} so custom
+// runtimes run tools through the same pipeline (permissions, hooks, validation).
 
 import { runAgent } from "./agent.js";
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
@@ -73,13 +58,10 @@ export interface PluginContextMessage {
 }
 
 /**
- * A plugin context transform: given a COPY of the model's message view for one
- * request, return the view to actually send. Runs after CodePilot's own
- * fold/compaction, so a plugin can prune / window / inject-memory WITHOUT
- * touching the persisted transcript. The result is validated (legal roles,
- * tool_use ↔ tool_result pairing, non-empty) and ignored fail-soft on any
- * problem (the untransformed view is sent instead). Modelled on pi's
- * `context` event.
+ * A plugin context transform: given a COPY of the model's message view, return
+ * the view to send. Runs after fold/compaction so a plugin can prune / window /
+ * inject-memory without touching the persisted transcript. The result is
+ * validated and ignored fail-soft on any problem (untransformed view sent).
  */
 export type PluginContextTransform = (
   view: PluginContextMessage[],
@@ -212,13 +194,10 @@ export interface RuntimeToolkitOptions {
 
 /** Build a {@link RuntimeToolkit} bound to the core implementation. */
 export function createRuntimeToolkit(opts: RuntimeToolkitOptions = {}): RuntimeToolkit {
-  // A toolkit instance is long-lived (one per runtime), so give it a single
-  // DoomLoopDetector that persists across `runTool` calls. Without this, a
-  // custom runtime driving tools through the toolkit would get NONE of the
-  // doom-loop refusal / idempotent-dedup the interface promises — the default
-  // loop builds its own detector (agent.ts) and passes it to runOneTool, but a
-  // toolkit caller has no detector of its own. Sharing one across calls is what
-  // makes repeat-call detection meaningful (a per-call detector never trips).
+  // Toolkit is long-lived (one per runtime), so it owns a single
+  // DoomLoopDetector persisting across `runTool` calls. A per-call detector
+  // never trips; sharing one gives toolkit callers the doom-loop refusal /
+  // idempotent-dedup the default loop (agent.ts) provides.
   const doomLoop = new DoomLoopDetector(undefined, opts.doomLoop);
   return {
     version: 4,

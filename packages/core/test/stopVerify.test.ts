@@ -224,10 +224,9 @@ describe("runBuiltinStopVerify", () => {
     }
   });
 
-  // These pin the auto-probe test ladder — the capability unique to CodePilot
-  // among codex/opencode/dsh/pi (none of them probe a project's test command;
-  // where they run tests the command is always explicitly supplied). Without a
-  // contract here the probe order / allow-paths could silently drift.
+  // These pin the auto-probe test ladder: the probe detects a project's test
+  // command and allows it. Without a contract here the probe order / allow-paths
+  // could silently drift.
   function testsCtx(dir: string) {
     return {
       cwd: dir,

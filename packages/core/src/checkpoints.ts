@@ -1,33 +1,11 @@
 // Checkpoint writer — per-session long-term memory file.
 //
-// Why checkpoints?
-// ----------------
-// Compaction shrinks a session's in-memory transcript so the model can keep
-// running. It does not, by itself, let a brand-new session resume the same
-// work: the compacted summary is short and lossy. Checkpoints are the
-// durable, cross-session companion: every time the session crosses a token
-// threshold or completes a goal round, the writer distils the transcript
-// into a 7-section markdown file under
-// `~/.codepilot/projects/<hash>/checkpoints/<id>.md`.
-//
-// When a future session is started with the same id (or the user explicitly
-// "resumes" by passing the same `sessionId` AND a checkpoint exists), we
-// inject the checkpoint's summary into the system prompt instead of
-// replaying the entire JSONL. Compaction still owns in-session memory
+// Cross-session continuity: when a session crosses a token threshold or
+// completes a goal round, the transcript is distilled into a 7-section
+// markdown file under `~/.codepilot/projects/<hash>/checkpoints/<id>.md`. A
+// resumed session injects the checkpoint summary into the system prompt
+// instead of replaying the full JSONL. Compaction owns in-session memory
 // pressure; checkpoints own cross-session continuity.
-//
-// File layout (7 sections, all required to exist, content may be "(none)"):
-// ## Active intent - the user's most recent commitment-style request
-// ## Next action - the single most useful next step
-// ## Task tree - plan steps with status icons
-// ## Current work - in-flight files, commands, results
-// ## Files touched - paths the agent read/edited this checkpoint
-// ## Errors & fixes - bugs and their resolutions
-// ## Decisions - design choices that future sessions need
-//
-// The writer is a thin layer over the filesystem: no concurrency control
-// beyond the in-process mutex, and the file is plain text so humans and
-// tools can read it directly.
 
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { join, dirname } from "node:path";

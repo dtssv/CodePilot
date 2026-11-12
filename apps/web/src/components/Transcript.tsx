@@ -596,12 +596,10 @@ function StepGroup({ tools, live }: { tools: ToolRow[]; live: boolean }): React.
 }
 
 /**
- * A stable, human-distinguishable tag for one sub-agent. The per-`task` `index`
- * restarts at 0 every call, so a bare `#1` repeats and the user sees "all the
- * same id". We prefer the session-global `runSeq` (a true monotonic `#N`) plus
- * a short slice of the sub-agent's own id (`sub_…`) so every dispatch reads
- * differently (e.g. `#3·a9f2`); we fall back to the parent tool-call id prefix
- * when a run predates these fields.
+ * Stable, human-distinguishable tag for one sub-agent. The per-`task` `index`
+ * restarts at 0 each call (bare `#1` repeats), so prefer the session-global
+ * `runSeq` (monotonic `#N`) + a short slice of the sub-agent id
+ * (`#3·a9f2`); fall back to the parent tool-call id prefix for old runs.
  */
 function subagentTag(toolCallId: string, run: { index: number; runSeq?: number; sessionId?: string }): string {
   const seq = run.runSeq ?? run.index + 1;

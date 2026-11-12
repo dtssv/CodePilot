@@ -1,24 +1,8 @@
 // Artifact garbage collection (mark-and-sweep).
 //
-// Artifacts (spilled tool output + offloaded images) live in a per-PROJECT,
-// content-addressed store (`~/.codepilot/projects/<hash>/artifacts/`). The store
-// is shared by every session in that project and dedups identical content by
-// hash, so a single artifact may be referenced by several sessions. Deleting a
-// session therefore must NOT blindly delete the artifacts it referenced — a
-// sibling session may still point at the same hash.
-//
-// The correct, source-of-truth-derived answer is a mark-and-sweep:
-//  1. MARK: scan every session JSONL whose cwd maps to the target project and
-//     collect the full set of still-referenced artifact refs (tool_result
-//     artifactRef, offloaded image `{ref}`, and content_replacement records).
-//  2. SWEEP: list the artifacts physically on disk and delete only those whose
-//     hash is referenced by NO session.
-//
-// This needs no second source of truth (no refcount index to drift): it reads
-// the JSONL logs directly, so it is always correct and safe to re-run. It is
-// fail-soft throughout — an unreadable session is treated as referencing
-// nothing extra is wrong, so a read failure makes us CONSERVATIVE (we keep the
-// artifact) rather than deleting a maybe-referenced one.
+// Artifacts live in a per-project, content-addressed store shared across
+// sessions. MARK: scan session JSONLs for referenced refs; SWEEP: delete
+// unreferenced on-disk artifacts. Fail-soft: unreadable sessions keep all.
 
 import { readFile, readdir } from "node:fs/promises";
 import { ArtifactStore } from "./tools/artifacts.js";

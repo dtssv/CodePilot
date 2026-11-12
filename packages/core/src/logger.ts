@@ -1,24 +1,8 @@
-// Structured logger for @codepilot/core.
-//
-// Goals (modelled on what pino / winston do, but zero-dep):
-// - Per-namespace child loggers via `createLogger(ns)`.
-// - Output to stderr (TUI friendly, only when a sink is enabled and
-// the level passes) and to a daily-rotating NDJSON file under
-// `~/.codepilot/logs/`.
-// - File rotation: when the active file grows past 10 MB, it's
-// renamed to `<base>.1`, the previous `.1` becomes `.2`, etc. We
-// keep up to 3 generations.
-// - Levels: debug < info < warn < error. The default sink writes
-// `warn` and above to stderr (so a TUI never gets spammed), but
-// everything is also captured to the file.
-// - `CODEPILOT_LOG_LEVEL` env var overrides everything; the value
-// from `config.logging.level` wins over the env var when set.
-//
-// All sinks are wired through a single mutable "logger state" so that
-// `initLoggerFromConfig` (or tests) can reconfigure the whole thing
-// without touching call sites. The default state is lazy: nothing is
-// written until either a sink is configured or someone calls
-// `createLogger` (which forces the lazy state to materialise).
+// Structured logger for @codepilot/core (zero-dep).
+// Per-namespace child loggers; output to stderr (warn+) and a daily-rotating
+// NDJSON file under `~/.codepilot/logs/` (10 MB rotate, 3 generations).
+// Levels: debug < info < warn < error. `CODEPILOT_LOG_LEVEL` overrides;
+// `config.logging.level` wins when set. Lazy mutable state; sinks wired at init.
 
 import {
   existsSync,

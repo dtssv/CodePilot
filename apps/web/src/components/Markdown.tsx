@@ -1,12 +1,8 @@
-// Minimal Markdown renderer for assistant messages.
-//
-// No parser dependency: the agent's output is overwhelmingly fenced code,
-// inline code, lists and the odd table, and a small hand-rolled renderer
-// keeps the bundle tiny and the failure mode boring (unknown syntax renders
-// as plain text). Supports: fenced code blocks, headings, bullet / ordered /
-// task lists, blockquotes, GFM tables, horizontal rules, and inline code /
-// bold / italic / strikethrough / links. Raw HTML is escaped by React — it is
-// never interpreted.
+// Minimal Markdown renderer for assistant messages. No parser dependency:
+// a small hand-rolled renderer keeps the bundle tiny and unknown syntax renders
+// as plain text. Supports fenced code, headings, lists (incl. task), blockquotes,
+// GFM tables, hr, inline code/bold/italic/strike/links. Raw HTML is escaped by
+// React — never interpreted.
 
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 

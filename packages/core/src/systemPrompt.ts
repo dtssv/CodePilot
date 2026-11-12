@@ -1,21 +1,8 @@
 // Layered system prompt.
 //
-// The prompt is split into two parts that are kept separate so providers
-// can cache the prefix (Anthropic cache_control, OpenAI automatic prefix
-// caching) and still receive fresh runtime context on every turn:
-//
-// - STATIC PREFIX : identity, tool-use policy, code conventions, planning,
-// testing, git etiquette, memory, token efficiency,
-// communication style, safety, and per-mode guidance.
-// Designed to be a few thousand tokens. Identical
-// across turns for a given (mode, model, tool-list).
-//
-// - DYNAMIC SUFFIX : environment, git identity, memory summaries, current
-// plan, available tool list, current mode. Refreshed
-// on every rebuild and excluded from cache.
-//
-// Splitting the prefix this way is the core of CodePilot's token-efficiency
-// design.
+// STATIC PREFIX (identity, conventions, guidance — identical across turns for a
+// given mode/model/tool-list, provider-cacheable) + DYNAMIC SUFFIX (env, git,
+// memory, plan, tool list, mode — refreshed per rebuild, cache-excluded).
 
 import type { MemoryContents } from "./memory.js";
 import type { Skill } from "./skills.js";
@@ -131,32 +118,22 @@ export async function buildSystemPrompt(
 const STATIC_PREFIX_TARGET_TOKENS = 4500;
 
 // ---------------------------------------------------------------------------
-// Section registry (C4 step 2).
+// Section registry.
 //
-// The static prefix is assembled from named, ordered sections instead of a flat
-// `parts.push` list. The registry enforces the invariants that used to be
-// hand-maintained conventions:
-//   - unique `name` (a duplicate throws — no accidental double-section),
-//   - deterministic order (sort by `order`, then `name`),
-//   - per-model override: a section whose `source: "model"` replaces the core
-//     section of the same `name` (so a model can tune one section without
-//     forking the whole prompt).
-// Rendering joins section `text` with "\n\n", identical to the previous
-// `parts.join("\n\n")`, so the output stays byte-for-byte stable (guarded by
-// the cache-stability contract test).
-// ---------------------------------------------------------------------------
+// Static prefix assembled from named, ordered sections. Registry enforces unique
+// `name`, deterministic order (by `order` then `name`), per-model override
+// (`source: "model"` replaces the core section of the same name). "\n\n"-joined.
 
 export interface StaticSection {
   name: string;
   order: number;
   source?: "core" | "model";
   /**
-   * Tools this section's guidance is *about*. When present, the section is
-   * rendered only if every listed tool is exposed this session — the same
-   * tool-driven gating the Tool-Use Policy PolicyBullet uses, lifted to section granularity.
-   * A section that teaches a tool the current mode did not expose is pure waste
-   * (e.g. the Planning section under `chat` mode, which has no `plan_update`).
-   * Omit for task-execution sections that apply regardless of tool surface.
+   * Tools this section's guidance is *about*. When present, the section renders
+   * only if every listed tool is exposed this session (same gating as the
+   * Tool-Use Policy PolicyBullet, lifted to section granularity). A section
+   * teaching an unexposed tool is waste (e.g. Planning under `chat`, which has
+   * no `plan_update`). Omit for task-execution sections that apply regardless.
    */
   requires?: string[];
   text: string;
@@ -359,18 +336,9 @@ ${ctx.extra.trim()}`);
 // ---------------------------------------------------------------------------
 // Tool-Use Policy.
 //
-// The policy is split into:
-//   - tool-AGNOSTIC bullets: methodology that holds regardless of which tools
-//     are exposed (research cadence, parallelise, recover-don't-give-up,
-//     re-read discipline). Always rendered.
-//   - tool-BOUND bullets: each declares the tool(s) it instructs the model to
-//     use via `requires`. Rendered only when every required tool is exposed, so
-//     the prompt never teaches a tool the current mode/config did not expose.
-//
-// Backtick tool mentions inside a bullet must only name tools listed in
-// `requires` (or always-present read tools) — the tool-consistency contract
-// test enforces this. When adding a mention, add it to `requires`.
-// ---------------------------------------------------------------------------
+// tool-AGNOSTIC bullets always render. tool-BOUND bullets declare `requires` and
+// render only when all required tools are exposed (never teach an unavailable
+// tool). Backtick mentions must name tools in `requires` — contract-enforced.
 
 interface PolicyBullet {
   /** Tools this bullet instructs the model to use; omit for tool-agnostic. */

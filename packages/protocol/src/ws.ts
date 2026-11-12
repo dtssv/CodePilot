@@ -1,32 +1,15 @@
 /**
- * WebSocket transport for the headless protocol.
+ * WebSocket transport for the headless protocol — same JSON-RPC 2.0 as stdio,
+ * only the carrier differs, so browsers can talk to a local CodePilot without a
+ * subprocess. Each connection gets its own `Peer` + server registration.
  *
- * Same JSON-RPC 2.0 protocol as stdio — only the byte
- * carrier differs, so browsers can talk to a local CodePilot without a
- * subprocess. Each connection gets its own `Peer` + server registration, so
- * two browser tabs are two independent clients with independent session maps;
- * a reconnecting tab recovers its state with `session/resume`.
- *
- * ## Security
- *
- * This opens a network port in front of an agent that can run shell commands.
- * Anything that can complete the handshake can run code as the user, so the
- * defaults are deliberately restrictive:
- *
- * - **Loopback only.** Binds `127.0.0.1` unless `host` says otherwise.
- * - **Bearer token.** A random token is generated when none is supplied and
- * every upgrade must present it (`?token=` or `Authorization: Bearer`).
- * Compared in constant time. `auth: "none"` disables this and is only for
- * tests and trusted-network setups.
- * - **Origin allowlist.** WebSocket upgrades are NOT subject to CORS: any
- * web page can open a socket to localhost. Without an origin check, a page
- * the user visits could drive their agent (a token in the URL of a page
- * they opened would be enough). Requests carrying no `Origin` (non-browser
- * clients) pass; a browser origin must be on the allowlist.
- *
- * Rejections happen during the HTTP upgrade with a real status code (401 /
- * 403), so a misconfigured client gets a diagnosable failure instead of an
- * opaque socket close.
+ * Security defaults (opens a port in front of a shell-running agent):
+ * - Loopback only (127.0.0.1) unless `host` overrides.
+ * - Bearer token: random when unset, checked in constant time on every upgrade
+ *   (`?token=` or `Authorization: Bearer`); `auth:"none"` is tests/trusted only.
+ * - Origin allowlist: browsers can open sockets to localhost without CORS, so a
+ *   browser `Origin` must be allowlisted (non-browser clients pass).
+ * Rejections use real HTTP status codes (401/403) during upgrade.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -41,12 +24,9 @@ import { Peer, type RpcTransport } from "./rpc.js";
 import { registerServer, type ServerHandle, type ServerOptions } from "./server.js";
 
 /**
- * `RpcTransport` over a single WebSocket.
- *
- * The wire contract stays NDJSON-shaped: `Peer` writes one JSON document per
- * `write` (with a trailing newline, which we strip — WebSocket already
- * frames messages). Inbound messages are split on newlines so a client that
- * batches several documents into one frame still works.
+ * `RpcTransport` over a single WebSocket. Wire stays NDJSON-shaped: `Peer`
+ * writes one JSON doc per `write` (trailing newline stripped — WS frames
+ * messages); inbound is split on newlines so batched frames still work.
  */
 export class WebSocketTransport implements RpcTransport {
   private readonly queue: string[] = [];
@@ -154,12 +134,9 @@ export interface WebSocketServerOptions extends ServerOptions {
   token?: string;
   auth?: "token" | "none";
  /**
- * Extra browser origins allowed to connect, e.g. a Vite dev server on
- * `http://localhost:5173`. `http://localhost:<port>` and
- * `http://127.0.0.1:<port>` are always allowed. Use `"*"` to accept any
- * origin — that removes the only defence against a malicious page driving
- * this agent, so pair it with `auth: "token"` and a token that never
- * reaches a browser you do not control.
+ * Extra browser origins allowed (localhost + 127.0.0.1 are always allowed).
+ * `"*"` accepts any origin — that removes the only defence against a
+ * malicious page, so pair it with `auth: "token"` and a guarded token.
  */
   allowedOrigins?: string[];
  /** Ping interval in ms for dropping dead sockets. Default 30_000; 0 disables. */

@@ -1,27 +1,10 @@
-// Host bridge: lets the same UI run inside an IDE webview.
-//
-// In VSCode and IntelliJ the page has no socket to a server. Instead the
-// extension/plugin spawns `codepilot serve` (JSON-RPC over stdio) and relays
-// raw protocol lines through the webview message channel:
-//
-// UI → host { type: "rpc", line } one JSON-RPC document
-// { type: "ready" } UI mounted, send host/init
-// { type: "restart" } respawn the engine
-// { type: "openFile", path, line? }
-// { type: "insertText", text } insert at the editor caret
-// host → UI { type: "rpc", line }
-// { type: "host/init", cwd, theme?, locale?, surface? }
-// { type: "host/engine", state: "starting" | "ready" | "stopped", error? }
-// { type: "host/theme", theme }
-// { type: "host/prompt", text, send? }
-// { type: "host/command", name: "new" | "cancel" | "mode", mode? }
-//
-// VSCode exposes `acquireVsCodeApi`; IntelliJ (JCEF) injects
-// `window.__codepilotHostPost(json)` after load and calls
-// `window.__codepilotReceive(json)` to deliver. Messages to the IDE are
-// queued until its channel exists, because JCEF injects after first paint.
-// A host that serves the page itself can preset `window.__codepilotHost`
-// in an inline script so the right kind and theme apply on first paint.
+// Host bridge: lets the same UI run inside an IDE webview. In VSCode and
+// IntelliJ the page has no socket; the extension spawns `codepilot serve`
+// (JSON-RPC over stdio) and relays raw protocol lines over the webview message
+// channel. VSCode exposes `acquireVsCodeApi`; IntelliJ (JCEF) injects
+// `window.__codepilotHostPost`/`__codepilotReceive` after load, so messages to
+// the IDE are queued until the channel exists. A self-serving host can preset
+// `window.__codepilotHost` inline so kind/theme apply on first paint.
 
 import type { AgentMode } from "@codepilot/core";
 import type { RpcTransport } from "@codepilot/protocol/rpc";

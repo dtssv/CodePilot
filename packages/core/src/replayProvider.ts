@@ -1,25 +1,8 @@
 /**
- * Keyless transcript replay — a `ChatProvider` that replays a previously
- * recorded session transcript instead of calling a real model API
- * for deterministic tests.
- *
- * This enables end-to-end agent-loop tests **without an API key**: you
- * record a session once (with a real key), then replay it in CI to verify
- * the tool dispatch, permission engine, event persistence, and context
- * management all behave correctly. The replayed turns are deterministic —
- * the same transcript always yields the same provider output.
- *
- * Usage:
- * const provider = new ReplayProvider("./session.jsonl");
- * const session = new Session({ ..., provider });
- * await session.prompt("anything"); // replays turn 1 from the file
- *
- * The provider maps each `prompt` call to the next assistant `message`
- * event in the transcript. Tool calls embedded in that message are emitted
- * as `tool_call` stream events; the agent loop executes them against real
- * tools (so file/bash side-effects still happen — use a temp dir). When the
- * transcript runs out, the provider emits a terminal text message.
- *
+ * Keyless transcript replay — a `ChatProvider` that replays a recorded
+ * session transcript for deterministic tests without an API key. Each
+ * `prompt` call maps to the next assistant message in the transcript; tool
+ * calls execute against real tools (use a temp dir).
  * @module replayProvider
  */
 import { readFile } from "node:fs/promises";

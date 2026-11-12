@@ -1,32 +1,12 @@
 // Custom sub-agent discovery from `.codepilot/agents/`.
 //
-// A custom agent is a Markdown file with YAML frontmatter. The frontmatter
-// declares the agent's identity, tool allowlist, model, and behaviour; the
-// markdown body is the agent's system-prompt supplement (appended to the
-// shared static prefix when the agent runs).
-//
-// Discovery sources (highest priority first):
-// 1. <cwd>/.codepilot/agents/*.md (project-local, committed to the repo)
-// 2. ~/.codepilot/agents/*.md (user-global)
-//
-// Frontmatter fields (all optional except `name` and `description`):
-// name string required — unique identifier, lowercase + hyphens
-// description string required — the routing signal; the parent agent reads
-// this to decide when to delegate to this agent
-// tools string[] optional — allowlist of tool names; inherits all
-// available sub-agent tools when omitted
-// disallowedTools string[] — denylist, applied after the allowlist
-// model string optional — "sonnet" | "opus" | "haiku" | full model id | "inherit"
-// maxTurns number optional — max agentic turns; omit for unlimited
-// permissionMode string — "ask" | "auto-edit" | "yolo" (default: auto-edit)
-//
-// The body is plain markdown. It is injected as `extra` when the sub-agent
-// runs, so it supplements (not replaces) the shared static prefix.
-//
-// Routing: the parent agent's system prompt advertises custom agents by name
-// + description. The parent calls `task({ agent_type: "<name>", objective: ... })`
-// to delegate. We look up the custom agent by name; if found, we build a
-// sub-agent runner that uses its frontmatter config + body.
+// Custom agents: a Markdown file with YAML frontmatter declaring identity,
+// tool allowlist, model, and behaviour; the body is the agent's system-prompt
+// supplement (appended to the shared prefix when it runs). Discovered from
+// <cwd>/.codepilot/agents/*.md then ~/.codepilot/agents/*.md. Frontmatter:
+// name (required), description (required, the routing signal), tools,
+// disallowedTools, model, maxTurns, permissionMode. The parent delegates via
+// `task({ agent_type: "<name>", objective })`.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve, basename } from "node:path";

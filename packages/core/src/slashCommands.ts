@@ -1,44 +1,11 @@
 // Slash command system: markdown files under `.codepilot/commands/` become `/name` prompts.
 //
-// A "slash command" is a Markdown file with optional YAML frontmatter that
-// becomes a user-invocable `/<name>` command. Typing `/name <args>` in the
-// TUI loads the file's Markdown body as the next user prompt (with argument
-// interpolation) and runs the agent loop from there — exactly as if the user
-// had typed the body themselves.
-//
-// Discovery sources (highest priority first, first-definition-wins like
-// skills):
-//
-// 1. <cwd>/.codepilot/commands/*.md (project-local)
-// 2. ~/.codepilot/commands/*.md (user-global)
-//
-// File name (sans `.md`) becomes the command name. Names must be lowercase,
-// may contain letters, digits, `-`, and `_`. Subdirectories are NOT scanned
-// — only the top-level `commands/` folder (keeps the surface predictable).
-//
-// Frontmatter (all optional):
-//
-// ---
-// description: One-line summary shown in the / autocomplete menu.
-// argument-hint: <hint> # e.g. "[issue-number]" — shown next to the name
-// allowed-tools: [bash, read_file] # pre-approve these tools for THIS turn
-// # (grant clears after the turn; turn-scoped override semantics)
-// model: claude-sonnet-4-5 # override the model for THIS turn
-// # ("inherit" keeps the session model)
-// ---
-//
-// The body is a prompt template. These placeholders are interpolated:
-//
-// $ARGUMENTS → the full argument string the user typed after /name
-// $1, $2, … → positional words from the arguments (1-indexed)
-// $$ → a literal `$`
-//
-// Unknown `$<word>` sequences are left untouched (so `$HOME` etc. survive).
-//
-// Built-in commands (/help, /model, /mode, /agent, /plan, /compact, /resume,
-// /sessions, /goal, /clear, /exit) live in the TUI's commands.ts and are NOT
-// shadowed by custom commands — a custom file with the same name is ignored
-// and a warning is surfaced. This keeps the control surface stable.
+// Slash commands: `/<name>` loads a Markdown file as the next user prompt
+// (with argument interpolation) and runs the agent loop. Discovered from
+// <cwd>/.codepilot/commands/*.md then ~/.codepilot/commands/*.md (first wins).
+// Optional YAML frontmatter: description, argument-hint, allowed-tools
+// (turn-scoped), model. Body placeholders: $ARGUMENTS, $1 $2 …, $$; unknown
+// `$<word>` is left untouched. Built-in commands cannot be shadowed.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";

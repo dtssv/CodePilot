@@ -37,12 +37,10 @@ const MODE_COMMANDS: Record<string, AgentMode> = {
 };
 
 /**
- * Interpret a composer submission. Returns an outcome telling the caller
- * whether the text was handled locally and what (if anything) to still send.
- *
- * `ui` carries the client actions + optional UI hooks (open pickers). All are
- * optional so a minimal host degrades gracefully (unknown local command →
- * treated as not-local → sent as prompt).
+ * Interpret a composer submission: returns whether the text was handled locally
+ * and what (if anything) to still send. `ui` carries client actions + optional
+ * UI hooks; all optional so a minimal host degrades gracefully (unknown local
+ * command → treated as not-local → sent as prompt).
  */
 export async function interpretSlash(
   text: string,

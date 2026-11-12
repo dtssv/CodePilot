@@ -1,25 +1,7 @@
 // Plan file persistence under `~/.codepilot/projects/<hash>/plans/`.
 //
-// When the agent in `plan` mode calls `plan_done`, the plan is written so
-// it survives as a reviewable artifact. Override via `config.plansDirectory`
-// (relative to cwd or absolute) to keep plans inside the repo. The plan
-// file name is derived from the session id + a short slug.
-//
-// On approval, the session restores its previous permission mode
-// and switches to `agent` mode to begin
-// executing the plan.
-//
-// Plan file layout:
-// # Plan: <summary or "(untitled)">
-//
-// _Session: <id> · Created: <date> · Status: approved|rejected|pending_
-//
-// ## Steps
-// - [ ] <id> — <title>
-// ...
-//
-// ## Notes
-// <free text from the plan_done summary>
+// `plan_done` writes the plan as a reviewable artifact (override location via
+// `config.plansDirectory`). On approval, the session switches to `agent` mode.
 
 import { mkdir, writeFile, readFile, readdir, unlink, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
@@ -196,12 +178,10 @@ export async function setPlanFileStatus(
   const path = join(dir, `${slug}.md`);
   try {
     const text = await readFile(path, "utf-8");
- // Rewrite the Status token in place on the `_Session: … · Status: …_`
- // line, touching ONLY that token — the session id, created date and the
- // closing `_` (markdown italic) are preserved. A capture-group `replace`
- // on the whole line is error-prone (it previously clobbered the session id
- // and dropped the trailing `_`), so this line-scoped rewrite is the single
- // source of truth.
+ // Rewrite the Status token in place on the `_Session: … · Status: …_` line,
+ // touching only that token; the session id, created date and closing `_` are
+ // preserved. A line-scoped rewrite avoids the capture-group errors a whole-line
+ // replace caused.
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       if (lines[i]!.startsWith("_Session:")) {

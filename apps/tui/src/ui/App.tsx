@@ -1796,13 +1796,11 @@ function activityLabel(state: TuiState): string {
 }
 
 /**
- * ScrollArea — renders rows in order. We cap the visible window to avoid
- * unbounded memory in long sessions; full history stays in core's session log.
- *
- * `offset` selects which slice of the (already capped) row list is shown:
- * offset 0 renders the tail (live edge), offset N renders the window ending
- * N rows earlier. This is the application's *own* viewport — the terminal
- * scrollback is unusable under Ink's full-screen repaints.
+ * ScrollArea — renders rows in order. Caps the visible window (full history
+ * stays in core's session log) to bound memory. `offset` selects the slice:
+ * 0 = tail (live edge), N = window ending N rows earlier. This is the app's
+ * own viewport — terminal scrollback is unusable under Ink full-screen
+ * repaints.
  */
 const MAX_RENDERED_ROWS = 500;
 

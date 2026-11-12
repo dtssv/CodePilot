@@ -1,22 +1,10 @@
 // Agent Teams: multi-agent collaboration with explicit
-// roles, a shared workspace, conflict detection, and a merge strategy.
-//
-// How this differs from `task`'s fan-out mode, which already runs several
-// sub-agents in parallel:
-//
-// fan-out N independent objectives, N independent conclusions. The
-// parent agent reads all N and figures out what it means.
-// team the members are working on ONE goal. A leader can split the
-// goal into assignments, members can share a worktree, edits
-// to the same file by two members are detected and reported,
-// and the results are merged by a declared strategy.
-//
-// The whole thing is built on the existing `SubagentRunner` — a team member
-// is a sub-agent. What this module adds is orchestration around them:
-// decomposition before, conflict detection during, merge after.
-//
-// Team members are peers, not a hierarchy of processes: every member runs at
-// the same nesting depth, and (like all sub-agents) cannot spawn its own team.
+// Teams: several sub-agents working on ONE goal with roles, a shared workspace,
+// conflict detection, and a merge strategy. Unlike `task`'s fan-out (N
+// independent objectives → N conclusions), team members share one goal; a
+// leader can split it, members can share a worktree, same-file edits are
+// detected, and results are merged. Built on `SubagentRunner` — a team member
+// is a sub-agent. Members are peers (same nesting depth; cannot spawn teams).
 
 import {
   emitParentUsage,

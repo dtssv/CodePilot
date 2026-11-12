@@ -1,23 +1,9 @@
 /**
- * OpenTelemetry-compatible telemetry.
- *
- * Lightweight, dependency-free telemetry that emits OTLP/JSON traces over
- * HTTP when configured. Controlled by standard OTEL environment variables:
- *
- * OTEL_EXPORTER_OTLP_ENDPOINT — the OTLP collector URL (e.g. http://localhost:4318).
- * OTEL_SERVICE_NAME — service name attribute (default: "codepilot").
- * OTEL_RESOURCE_ATTRIBUTES — key=value,key=value resource attributes.
- * OTEL_TRACES_EXPORTER — "otlp" (default) or "none" to disable.
- *
- * When no endpoint is configured, all telemetry calls are no-ops (zero
- * overhead). This keeps the package dependency-free — we hand-roll the
- * OTLP/HTTP-JSON export instead of pulling in @opentelemetry/*.
- *
- * The session wires key lifecycle events into spans:
- * - Each `session.prompt` → a "codepilot.prompt" span
- * - Each provider stream → a "codepilot.llm_call" child span (with usage)
- * - Each tool execution → a "codepilot.tool_call" child span
- * - Errors → span exceptions + error status
+ * OpenTelemetry-compatible telemetry — dependency-free OTLP/JSON traces over
+ * HTTP, controlled by standard OTEL env vars (OTEL_EXPORTER_OTLP_ENDPOINT,
+ * OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES, OTEL_TRACES_EXPORTER). No
+ * endpoint → all calls are no-ops. The session wires lifecycle events into
+ * spans: prompt, llm_call (with usage), tool_call, and errors.
  *
  * @module telemetry
  */

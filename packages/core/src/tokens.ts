@@ -1,25 +1,8 @@
 // Token estimation + per-model context windows.
 //
-// Tokenizer strategy
-// ------------------
-// `estimateTokens` is the single primitive every budget decision routes
-// through. It delegates to a swappable *active tokenizer*:
-//
-// - By default this is `heuristicTokens`, a zero-dependency character-class
-//   scan (below). It needs no model-specific tables and stays within a sane
-//   error band across CJK / English / code / JSON — good enough for
-//   compaction thresholds without shipping a 1MB+ BPE blob.
-// - Hosts that want provider-accurate counts call `tryLoadRealTokenizer()`,
-//   which dynamically imports the optional pure-JS `gpt-tokenizer` package
-//   (o200k_base — GPT-4o / 4.1 / 5) *if it is installed* and installs it as
-//   the active tokenizer. Core does NOT declare that dependency, so the
-//   default build stays single-dependency; the loader is a no-op (keeps the
-//   heuristic) when the package is absent.
-// - `setTokenizer` / `resetTokenizer` let embedders plug in any counter
-//   (e.g. a provider's own tokenizer) or restore the default.
-//
-// The heuristic is intentionally monotonic (longer text → equal-or-more
-// tokens) and rounds up so a one-character string claims at least 1 token.
+// `estimateTokens` delegates to a swappable active tokenizer: a zero-dependency
+// heuristic by default, or `gpt-tokenizer` (o200k_base) if installed via
+// `tryLoadRealTokenizer()`. The heuristic is monotonic and rounds up.
 
 /** A single estimator. Pure, total, no allocation beyond locals. */
 export type TokenEstimator = (text: string) => number;

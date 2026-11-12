@@ -1,31 +1,12 @@
 // Permission engine: decides whether a tool invocation is auto-allowed,
-// auto-denied, or must be asked interactively.
-//
-// Permission rule syntax:
-//
-// "read_file" — bare tool name: matches every invocation
-// "mcp__github__*" — `*` wildcard over tool names
-// "bash(npm test *)" — glob/prefix match on the tool's PRIMARY
-// argument (bash→command, read_file/
-// write_file/edit_file→path, web_fetch→url,
-// web_search→query; default: JSON of input)
-// "bash(/^git (status|diff)/)" — regex match on the primary argument
-//
-// Evaluation order (first match wins):
-//
-// 1. deny rules (session + config) — apply in EVERY mode, incl. yolo
-// 2. ask rules — force an interactive prompt
-// 3. allow rules (session + config + legacy autoApprove)
-// 4. mode defaults: yolo → allow; read-tier → allow;
-// write-tier + auto-edit → allow
-// 5. dangerous-command scan (bash) — forces "ask" even under yolo
-// 6. otherwise → "ask"
-//
-// "always" decisions from the UI add a session rule scoped to the
-// invocation's primary argument (e.g. `bash(git status *)`), so only
-// matching commands are auto-allowed for the rest of the session — not
-// every call to that tool. deny rules still override — they are checked
-// first and are absolute.
+// Permission rules: decide whether a tool call is allowed, denied, or asked.
+// Syntax: "read_file" (bare name); "mcp__github__*" (wildcard);
+// "bash(npm test *)" (glob on primary arg); "bash(/^git (status|diff)/)"
+// (regex on primary arg).
+// Evaluation (first match wins): 1. deny (always, even yolo) 2. ask 3. allow
+// 4. mode defaults (yolo/read-tier/auto-edit → allow) 5. dangerous-command scan
+// (bash → ask even under yolo) 6. otherwise → ask. UI "always" adds a session
+// rule scoped to the primary arg; deny still overrides.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -254,14 +235,11 @@ export class PermissionEngine {
     return this.ignorePersistedAllows;
   }
 
- /** Record an "always"-style decision as a session rule. When the user
- * picks "always allow", the caller narrows the grant to a rule covering
- * THIS invocation (e.g. `bash(npm test *)` via `suggestRule`) rather than
- * a bare tool name — so only matching calls are auto-allowed for the rest
- * of this session, not every call to that tool. The rule never persists
- * to disk; it lives only as long as this PermissionEngine (i.e. this
- * Session). deny rules still override — they are checked first in
- * preflight and are absolute. */
+  /** Record an "always"-style decision as a narrowed session rule (e.g.
+  * `bash(npm test *)` via {@link suggestRule}, not a bare tool name), so only
+  * matching calls are auto-allowed this session. Never persisted; lives only as
+  * long as this PermissionEngine/Session. deny rules still override (checked
+  * first, absolute). */
   addSessionRule(rule: string, effect: RuleEffect = "allow"): void {
     this.sessionRules[effect].push(rule);
     if (this.onRuleAdded) {
@@ -305,12 +283,9 @@ export class PermissionEngine {
     if (i >= 0) arr.splice(i, 1);
   }
 
- /** Remove the last `count` session rules of the given effect (LIFO).
- * Used by the Session's turn-scoped override cleanup: slash-command
- * `allowed-tools` grants are pushed onto the allow list for one turn
- * and popped here so the next prompt resumes the normal permission
- * posture. If `count` exceeds the number of session rules of that
- * effect, all of them are removed (no error). */
+  /** Remove the last `count` session rules of `effect` (LIFO) — used by the
+  * Session's turn-scoped override cleanup (`allowed-tools` grants live one
+  * turn). Removes all of that effect if `count` exceeds the count (no error). */
   removeLastSessionRules(effect: RuleEffect, count: number): void {
     if (count <= 0) return;
     const arr = this.sessionRules[effect];
@@ -318,28 +293,15 @@ export class PermissionEngine {
     arr.splice(arr.length - toRemove, toRemove);
   }
 
- /**
- * Derive the rule to add when the user clicks "always allow". The grant is
- * NARROWED to the invocation, not widened to the whole tool:
- *
- * - bash: the leading safe prefix of the command as a prefix glob, e.g.
- *   `npm test -- --watch` → `bash(npm test *)`. The prefix is the program
- *   plus (for multi-word CLIs like `npm`/`git`/`cargo`/`pnpm`) its first
- *   subcommand, so `npm test` and `npm run build` get distinct grants. A
- *   command whose program is in BANNED_PREFIXES (rm, sudo, `bash -c`,
- *   interpreters that run arbitrary code, …) is NOT widened at all — it
- *   returns a wildcard-free rule for the exact command line, so the grant
- *   covers only this one invocation and can never auto-approve a different
- *   dangerous command this session.
- * - file tools: the containing directory, e.g. `write_file(/repo/src/*)`, so
- *   a sibling file in the same directory is covered but an unrelated path
- *   still prompts.
- * - everything else (no primary arg, non-path tools): the bare tool name —
- *   there is nothing finer to scope to.
- *
- * deny rules still override (checked first and absolute). The grant is
- * session-scoped and never persisted implicitly.
- */
+  /**
+  * Derive the "always allow" grant rule, NARROWED to the invocation:
+  * - bash: safe leading prefix as a glob (`npm test -- --watch` →
+  *   `bash(npm test *)`; program + first subcommand for multi-word CLIs).
+  *   BANNED_PREFIXES programs (rm/sudo/`bash -c`/interpreters) get a
+  *   wildcard-free exact rule so they never auto-approve a different command.
+  * - file tools: containing directory (`write_file(/repo/src/*)`).
+  * - else: bare tool name. deny overrides; session-scoped, never persisted.
+  */
   static suggestRule(tool: ToolDef, input?: unknown): string {
     if (tool.name === "bash") {
       const primary = extractPrimaryArg("bash", input);
@@ -557,14 +519,10 @@ export class PermissionEngine {
       }
     }
 
- // Sandbox-confined bash: when an OS sandbox is active, a shell command is
- // already jailed (writes limited to the workspace, sensitive paths denied,
- // network per policy). Prompting for every command is friction without
- // added safety — the sandbox is the safety. So auto-allow ordinary
- // commands and STILL prompt only for genuinely dangerous ones (rm -rf,
- // force-push, drop-table, curl|sh, …), which can do damage even inside the
- // jail (e.g. deleting the workspace). Without a sandbox we stay cautious
- // and fall through to "ask".
+ // Sandbox-confined bash: an OS-sandboxed command is already jailed, so
+ // prompting adds friction without safety. Auto-allow ordinary commands and
+ // still prompt genuinely dangerous ones (rm -rf, force-push, …), which can
+ // damage even inside the jail. Without a sandbox, fall through to "ask".
     if (
       tool.name === "bash" &&
       this.sandbox?.osEnforced &&
@@ -585,21 +543,13 @@ export class PermissionEngine {
   }
 
   /**
-   * Classify WHY {@link preflight} would ask for a given call, so the `auto`
-   * and `dont-ask` modes can treat the two cases differently:
-   *
-   * - `"hard"` — a safety floor forced the ask: a dangerous command, a write to
-   *   a sensitive/credential path or `.git`, a per-command sandbox escalation,
-   *   a write outside the sandbox writable roots, or an explicit `ask` rule the
-   *   user authored. The `auto` classifier must NEVER silently allow these; they
-   *   still require an interactive confirmation (or stay denied under
-   *   `dont-ask`).
-   * - `"soft"` — nothing matched and no floor applies (e.g. an ordinary write
-   *   outside auto-edit, a user-scope memory write). The `auto` classifier may
-   *   adjudicate these; `dont-ask` denies them.
-   *
-   * Only meaningful when {@link preflight} returns `"ask"`; callers that already
-   * have an allow/deny decision should not consult this.
+   * Classify WHY {@link preflight} would ask, so `auto`/`dont-ask` can differ:
+   * - `"hard"` — a safety floor forced the ask (dangerous command, sensitive/
+   *   `.git` path, sandbox escalation, out-of-root write, or explicit `ask`
+   *   rule). `auto` must never silently allow; `dont-ask` stays denied.
+   * - `"soft"` — no floor applies (e.g. ordinary write outside auto-edit).
+   *   `auto` may adjudicate; `dont-ask` denies.
+   * Only meaningful when preflight returns `"ask"`.
    */
   askSeverity(tool: ToolDef, input: unknown): "hard" | "soft" {
     const primary = extractPrimaryArg(tool.name, input);

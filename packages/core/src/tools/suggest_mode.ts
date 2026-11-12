@@ -4,11 +4,10 @@
 //
 // Why a tool, not a heuristic
 // ---------------------------
-// Auto-switching mode by guessing "task complexity" (step count, file count,
+// Auto-switching by guessing "task complexity" (step count, file count,
 // keywords) is a scenario-specific heuristic that misfires. Instead the MODEL
-// — which actually understands the request — proposes a switch via its own
-// semantic judgement, and the user confirms. This mirrors how Cursor surfaces
-// Plan mode (suggest → user accepts/clicks Build), not a silent auto-switch.
+// — which understands the request — proposes a switch via its own semantic
+// judgement, and the user confirms, not a silent auto-switch.
 //
 // Behaviour
 // ---------

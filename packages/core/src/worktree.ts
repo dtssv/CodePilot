@@ -1,34 +1,12 @@
 // Git worktree isolation for sub-agents.
 //
-// When a sub-agent runs with `isolation: "worktree"`, we create a *linked*
-// git worktree from the current branch/HEAD. The sub-agent then operates on
-// its own checkout — a full filesystem copy of the repo at the same commit,
-// sharing the same .git object database. Edits land in the worktree's
-// working tree (and index), completely isolated from the parent's tree.
-//
-// Benefits:
-// - Parallel `tasks: [...]` fan-outs can each mutate files without
-// stomping on each other or on the parent's working tree.
-// - A sub-agent experiment that goes wrong is `git worktree remove`'d
-// with one call — no cleanup of half-edited files in the real tree.
-// - The parent can later `git diff`/merge the worktree's branch if the
-// sub-agent produced something worth keeping.
-//
-// Non-goals:
-// - We do NOT auto-merge or cherry-pick the worktree's changes back.
-// left to the user/parent. We surface the worktree
-// path + branch name in the conclusion so the parent can decide.
-// - We do NOT sandbox the sub-agent's bash calls beyond the existing
-// sandbox policy — worktree isolation is about filesystem separation,
-// not process confinement.
-//
-// Failure modes (all fail-soft):
-// - cwd is not a git repo → returns { ok: false, reason: "not-a-repo" }.
-// The caller falls back to running the sub-agent in the original cwd.
-// - `git` is not on PATH → same "not-a-repo"-style failure.
-// - worktree creation fails (disk full, permissions, dirty index that
-// blocks checkout) → returns the error; caller falls back.
-// - removal failures are swallowed and logged — never fatal.
+// Creates a linked git worktree for `isolation: "worktree"` sub-agents, so
+// parallel fan-outs can each mutate files without stomping each other or the
+// parent tree. Shares the .git object database; edits land in the worktree's
+// own working tree. We do NOT auto-merge back (the parent decides) nor sandbox
+// beyond the existing policy. Fail-soft: not-a-repo / missing git / creation
+// failure → returns { ok: false } and the caller falls back to the original
+// cwd. Removal failures are swallowed and logged.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

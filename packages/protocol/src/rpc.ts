@@ -1,19 +1,9 @@
 /**
- * Minimal JSON-RPC 2.0 over NDJSON transport.
- *
- * The transport is line-based: each message is exactly one line of UTF-8 JSON
- * terminated by `\n`. We intentionally do not parse framed batches here —
- * CodePilot's headless protocol sends one message per
- * line and keeps things simple.
- *
- * Design notes:
- * - `Peer` represents one side of the conversation (client or server).
- * - Each peer exposes `request`, `notify`, `onRequest`, `onNotification`.
- * - Outgoing writes go through `transport.write(line)`; incoming lines come
- * from `transport.readLine`.
- * - Server→client *requests* (e.g. `permission/request`) are correlated with
- * the client's `permission/respond` reply via the request `id`.
- * - Pending request promises reject on transport end or peer-initiated cancel.
+ * Minimal JSON-RPC 2.0 over NDJSON: one UTF-8 JSON document per `\n`-terminated
+ * line (no framed batches). `Peer` is one side of the conversation exposing
+ * `request`/`notify`/`onRequest`/`onNotification`; I/O goes through
+ * `transport.write`/`readLine`. Reverse requests (e.g. `permission/request`)
+ * correlate by `id`; pending promises reject on transport end or cancel.
  */
 
 /**

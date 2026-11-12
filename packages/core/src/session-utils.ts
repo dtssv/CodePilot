@@ -649,23 +649,19 @@ export async function deleteSession(
 }
 
 /**
- * Resolve a "sticky" model from session history. Priority:
- * 1. On resume (`sessionId` given): the model that session last used.
- * 2. Otherwise: the newest session in the SAME cwd that recorded a model.
- * 3. Otherwise: the newest session in ANY cwd that recorded a model.
- * Returns undefined when no session history carries a model (caller then
- * falls back to the config default). Best-effort — never throws.
+ * Resolve a "sticky" model from session history: (1) resumed session's last
+ * model, (2) newest session in the SAME cwd, (3) newest in ANY cwd. Returns
+ * undefined (→ config default) when none. Best-effort — never throws.
  */
 async function resolveSessionModel(
   cwd: string,
   sessionId?: string,
 ): Promise<string | undefined> {
   try {
-    // Resume fast path: we only need THIS session's model. Reading the one
-    // file directly avoids `listSessions()`, which on a cold SQLite index
-    // reconciles by synchronously parsing EVERY session's JSONL — the single
-    // biggest stall on first-time resume. Fall through to the full scan only
-    // if this session has no recorded model yet (e.g. never got a reply).
+    // Resume fast path: read THIS session's file directly to avoid
+    // `listSessions()`, which parses every session's JSONL on a cold index
+    // (the biggest first-resume stall). Fall through to the full scan only if
+    // this session recorded no model yet.
     if (sessionId) {
       const self = await extractTitleAndMeta(sessionPath(sessionId), sessionId).catch(
         () => undefined,
@@ -797,7 +793,7 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
   return session;
 }
 
-// SQLite metadata index (Scheme B). Opened lazily and cached per process. The
+// SQLite metadata index. Opened lazily and cached per process. The
 // daemon and standalone CLI each hold their own handle to the shared index.db;
 // cross-process safety comes from WAL + busy_timeout inside sessionIndex.ts.
 // `null` means "index unavailable" → callers use the full-scan path below.
@@ -975,22 +971,14 @@ async function suspendedSessionsFullScan(): Promise<
 }
 
 /**
- * Boot-time crash-recovery sweep. Finds every session whose JSONL tail is an
- * in-flight status — a run interrupted by a process crash or daemon kill — and
- * seals each to a clean idle: any orphaned tool call gets a side-effect-safe
- * `INTERRUPTED_RESULT`, a trailing `idle` status is appended, and the next
- * prompt's system prompt carries a one-shot recovery instruction. Sealing
- * happens as a side effect of loading the session (reconcileStaleStatus runs in
- * init); we create, read the recovery outcome, and dispose each one.
+ * Boot-time crash-recovery sweep. Finds sessions whose JSONL tail is an
+ * in-flight status (interrupted run) and seals each to a clean idle: orphaned
+ * tool calls get `INTERRUPTED_RESULT`, a trailing `idle` is appended, and the
+ * next prompt carries a one-shot recovery instruction.
  *
- * Default posture is seal-and-idle: this does NOT auto-re-enter the agent loop.
- * A prior run's side-effecting tools may already have executed, so blind resume
- * risks double execution; resumption is left to the host (or a future opt-in).
- *
- * Fail-soft: uses the SQLite index's `suspended()` fast path when available and
- * falls back to a bounded full scan otherwise. Per-session errors are isolated
- * so one bad session cannot abort the whole sweep. Returns a summary carrying
- * the sealed sessions plus scanned / sealed / skipped telemetry counters.
+ * Seal-and-idle only — does NOT auto-resume (prior side-effecting tools may
+ * already have run; double-execution risk). Uses the SQLite `suspended()` fast
+ * path with a bounded full-scan fallback; per-session errors are isolated.
  */
 export async function recoverSuspendedSessions(opts?: {
   /** Config applied to each recovered session's load (model resolution, etc.).
@@ -1057,7 +1045,7 @@ export async function searchSessions(
 ): Promise<SessionSummary[]> {
   // Fast path: metadata-only search via the index (title / cwd / first user
   // message). Does not scan full message bodies — a deliberate scope choice
-  // (Scheme B). When the index is off, the full-corpus fallback below runs.
+  // When the index is off, the full-corpus fallback below runs.
   const index = getSessionIndex();
   if (index) {
     try {

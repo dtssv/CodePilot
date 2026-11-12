@@ -1,21 +1,11 @@
 // Built-in Stop verification — validity gate at the completion boundary.
-//
- // Modes (config `stopVerify`):
- // - "off"    — disabled (default). No extra request at turn end.
- // - "prompt" — small-model judge: structure checks ≠ behaviour correctness
- // - "tests"  — run a detected project test command when one exists; else allow
- // - true     — alias for "prompt"
- // - { mode, forceContinue } — object form; `forceContinue: true` restores the
- //   block->re-run gate (default is advisory).
- //
- // Default is "off": a post-completion judge call shares the same provider
- // TPM budget as the main run, so after a long task it often 429s, fails open,
- // and adds latency/noise for no effect. Opt in with stopVerify: "prompt".
- //
- // Even when enabled, the verdict is ADVISORY by default: a negative result is
- // surfaced as a non-blocking notice and the turn still ends, so a false
- // negative cannot turn a finished task into a cap-exhausting re-run loop.
- // `{ mode: "prompt", forceContinue: true }` opts into the block->continue gate.
+// Built-in Stop gate: an optional post-completion check before the turn ends.
+// Modes (config `stopVerify`): "off" (default), "prompt" (small-model judge),
+// "tests" (run a detected project test command), true (alias for "prompt"),
+// or { mode, forceContinue }. Default is "off" because the judge shares the
+// provider's TPM budget and often 429s after a long task. Even when enabled,
+// the verdict is advisory by default; `forceContinue: true` opts into the
+// block→continue gate.
 
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";

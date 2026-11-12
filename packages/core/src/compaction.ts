@@ -1,8 +1,7 @@
 // Layered compaction:
-// 1. Fold old tool_result blocks into a short summary + artifactRef.
-// This is a pure local pass — no model call needed.
-// 2. If token estimate is still above the threshold, ask the small model
-// to summarise the dropped history into a single "compaction" event.
+// Context compaction: keeps the transcript under the token threshold.
+// 1. Fold old tool_result blocks into a summary + artifactRef (local pass).
+// 2. If still over, ask the small model to summarise dropped history.
 // 3. Plan steps and the most recent N turns are always kept verbatim.
 
 import type {

@@ -78,7 +78,7 @@ export const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
 /**
  * Tokens below this are breakpoint-granularity noise, not a real miss: a cache
  * boundary never lands exactly on the token, so a hit still re-bills a small
- * remainder. Matching pi's 1024-token floor.
+ * remainder.
  */
 export const CACHE_MISS_NOISE_FLOOR = 1024;
 

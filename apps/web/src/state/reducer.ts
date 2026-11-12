@@ -146,26 +146,20 @@ export function reducer(state: AppState, action: Action): AppState {
         plan: [],
         usage: { input: 0, output: 0 },
         subagents: undefined,
-        // Per-session state must be cleared when switching/resuming into another
-        // session, or the previous session's queued follow-ups and last-request
-        // timing leak into the new session's composer (they live in the single
-        // global AppState, not keyed by sessionId). `session-closed` already
-        // resets these — `session-opened` has to as well, or a queued message
-        // from session A shows up in session B. Any follow-ups genuinely
-        // belonging to the opened session arrive via its replayed `followup`
-        // events below.
+        // Per-session state lives in the single global AppState (not keyed by
+        // sessionId), so switching/resuming must clear it here or session A's
+        // queued follow-ups / last-request leak into session B's composer.
+        // Genuine follow-ups arrive via the replayed `followup` events below.
         followUps: undefined,
         lastRequest: undefined,
         permission: undefined,
         question: undefined,
       };
- // Replaying history runs the SAME per-event logic as the live path
- // (`applyEvent`), but with `replay=true` so each event folds into one
- // private `rows` accumulator in place instead of spread-copying the whole
- // growing array per event. That turns an O(N²) resume (every streamed
- // `message_delta` re-copying+filtering all prior rows) into O(N). The
- // accumulator is never shared outside this fold, so in-place mutation is
- // safe; the one-time retry-banner cleanup runs once at the end.
+ // Replay runs the same per-event logic (`applyEvent`) with `replay=true`,
+ // folding each event into one private `rows` accumulator in place instead of
+ // re-copying the whole growing array — O(N) not O(N²). The accumulator is
+ // never shared, so in-place mutation is safe; retry-banner cleanup runs once
+ // at the end.
       let replayed = base;
       for (const event of action.history ?? []) {
         replayed = applyEvent(replayed, event, true);
@@ -173,9 +167,8 @@ export function reducer(state: AppState, action: Action): AppState {
       replayed = { ...replayed, rows: clearTransientRetryRows(replayed.rows) };
       return showPrompts(replayed, state.pending, false);
     }
- // The prompt itself is not added here: `agent.ts` appends the user message
- // to the transcript, so it arrives as an `event` like everything else.
- // Adding an optimistic row too would show every prompt twice.
+ // The prompt is not added here: `agent.ts` appends the user message as an
+ // `event` like everything else, so an optimistic row would double it.
     case "sending":
       return { ...state, status: "thinking", notice: undefined };
     case "permission": {

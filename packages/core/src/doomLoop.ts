@@ -1,39 +1,11 @@
 // Doom-loop detection: when the agent calls the same tool
-// with the same input repeatedly without making progress, we surface a
-// warning and (after a threshold) inject a steering message telling the
-// model it's stuck.
-//
-// Three layers of detection:
-//
-// 1. Per-signature counting (exact (tool, input) repetition):
-// - On the 3rd identical call we inject a tool-result warning.
-// - On the 4th identical call we refuse the tool call entirely.
-//
-// 2. Sequence-level detection (the rotating-loop case): we keep a sliding
-// window of recent call signatures and detect when the model re-issues
-// a whole batch of calls it already made.
-//
-// 3. Path-level detection for `read_file`: re-reading the same path with
-// an OVERLAPPING `startLine`/`maxLines` window (the fold-induced spiral,
-// where the model thinks folded content is "gone" and re-fetches ground
-// it already read) counts toward a soft path budget and WARNS. A
-// non-overlapping, advancing window (legitimate paging through a large
-// file: lines 1-500, 500-1000, 1000-1500 …) is progress — it resets the
-// budget and is never penalised. This layer never refuses a read on path
-// count — doing so false-positives on paging. Path-keyed
-// result replay still serves a second windowed read of an already-fetched
-// file from cache instead of another disk hit.
-//
-// DELIBERATELY REMOVED — "mutation burst": a former layer that warned then
-// refused after N consecutive edits to the same path(s) without an intervening
-// verify (test/build/lint) command. It was dropped on purpose and should not be
-// re-added: it contradicted layer 3's own rule that a count must never
-// hard-deny (legitimate iteration — building a large file section by section —
-// is indistinguishable from a loop by edit count alone); and even as a warning
-// it poisoned context,
-// since weaker models tend to believe the "you're looping" message and abandon
-// productive work. Exact-repetition (layer 1) and rotating batches (layer 2)
-// still catch genuine no-progress loops without this false-positive-prone brake.
+// Detects when the agent loops (repeats calls without progress) and steers it
+// back. Three layers:
+// 1. Per-signature: 3rd identical call → tool-result warning; 4th → refuse.
+// 2. Sequence-level: sliding window detects re-issued batches of calls.
+// 3. Path-level (read_file): overlapping startLine/maxLines windows warn toward
+//    a soft budget (the fold-induced spiral); advancing non-overlapping windows
+//    are legitimate paging and reset the budget. Never hard-denies a read.
 
 /** Signature of a single tool call: tool name + stable input hash. */
 function signature(toolName: string, input: unknown): string {

@@ -1,18 +1,10 @@
 /**
- * Shared path-reference parsing — the single source of truth for turning a
- * string that appears in assistant text (or a tool result) into something a
- * client can open.
- *
- * The important case this centralises is the `path:line[:col]` anchor. That is
- * the exact form grep emits (`grep.ts` renders `file:line: snippet`) and the
- * form the system prompt tells the model to cite (`src/foo.ts:42`). Clients and
- * the `workspace/resolve` handler used to pass that whole string — colon,
- * digits and all — straight into a filesystem resolve, which always produced a
- * non-existent path, so a link that rendered as "openable" would not open.
- *
- * Keeping this here (in the dependency-light protocol surface, with no Node
- * `fs`/`path` imports) means the server resolver and every client surface
- * (web, VSCode, IntelliJ, Electron) parse the anchor identically.
+ * Shared path-reference parsing — single source of truth for turning a string
+ * from assistant text/tool results into an openable path + optional anchor.
+ * Centralises the `path:line[:col]` anchor (grep's `file:line: snippet` form,
+ * the model's `src/foo.ts:42` cite form) so clients no longer resolve the
+ * whole string and get a non-existent path. Lives in the dependency-light
+ * protocol surface so server + every client parse identically.
  */
 
 export interface ParsedReference {

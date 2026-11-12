@@ -1,11 +1,9 @@
 // CodePilot Agent: a desktop window around the shared web UI's agent layout.
-//
-// The engine is the *shared* local daemon (`codepilot serve --daemon`), the
-// same one the web client and IDE plugins attach to — so sessions and the
-// open workspace stay in sync across every surface. The window loads the
-// built SPA over `file://` and connects to the daemon over WebSocket via the
-// `?ws=&token=` auto-connect params. The preload adds a native folder picker
-// and "open with default app".
+// The engine is the shared local daemon (`codepilot serve --daemon`) that the
+// web client and IDE plugins also attach to, so sessions and the open workspace
+// stay in sync across surfaces. The window loads the SPA over `file://` and
+// connects via `?ws=&token=`; the preload adds a native folder picker and
+// "open with default app".
 
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, shell } from "electron";
 import { spawn } from "node:child_process";
@@ -55,11 +53,10 @@ function daemonLaunch(): { command: string; args: string[]; env: NodeJS.ProcessE
   const cliEntry = resolve(require.resolve("@codepilot/protocol/package.json"), "..", "dist", "cli.js");
   const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1", CODEPILOT_CLIENT: "desktop" };
   const args = [cliEntry, "serve", "--daemon", "--port", String(DAEMON_PORT)];
-  // Serve the bundled SPA over plain HTTP so a paired phone can load the UI:
-  // the /remote/pair redirect sends the phone to `GET /?token=…`, which only
-  // works when the daemon has a static web root. Without this the phone hits
-  // the "requires a WebSocket upgrade" page. The CLI auto-detect can't find
-  // the app's resources/web, so pass it explicitly.
+  // Serve the SPA over HTTP so a paired phone can load it: /remote/pair
+  // redirects to `GET /?token=…`, which needs a static web root or the phone
+  // hits the "requires a WebSocket upgrade" page. The CLI auto-detect can't
+  // find the app's resources/web, so pass it explicitly.
   const webRoot = webRootPath ?? resolveWebRoot();
   if (webRoot) args.push("--web-root", webRoot);
   // LAN access (opt-in): bind all interfaces so a phone on the same Wi‑Fi can
@@ -147,17 +144,16 @@ async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
 }
 
 /**
- * Stop the shared daemon we launched and start a fresh one that reflects the
- * current settings (chiefly the LAN bind). Because the token is minted per
- * start, the renderer must reconnect with the NEW serve.json — so after the
- * daemon republishes its lockfile we reload every window with a fresh page URL
- * (new token, same loopback host). Returns false if no new daemon came up.
+ * Restart the shared daemon to reflect current settings (chiefly the LAN bind).
+ * The token is minted per start, so after the daemon republishes its lockfile
+ * every window reloads with a fresh page URL (new token, same loopback host).
+ * Returns false if no new daemon came up.
  */
 async function restartDaemon(): Promise<boolean> {
   if (!webRootPath) return false;
-  // Kill the daemon we know about and wait for the port to actually free, so
-  // the new daemon does not lose the bind race (EADDRINUSE). Fall back to any
-  // live serve.info pid if our handle is stale.
+  // Kill the daemon and wait for the port to free, so the new daemon doesn't
+  // lose the bind race (EADDRINUSE). Fall back to a live serve.info pid if our
+  // handle is stale.
   const live = daemon ?? (await readLiveServeInfo());
   if (live) {
     try {
@@ -178,8 +174,7 @@ async function restartDaemon(): Promise<boolean> {
     return false;
   }
 
-  // Reload each window against the fresh daemon so the SPA auto-connects with
-  // the new token instead of retrying the stale one.
+  // Reload each window so the SPA auto-connects with the new token.
   for (const win of BrowserWindow.getAllWindows()) {
     void win.loadURL(pageUrl(webRootPath, daemon, currentFolder));
   }
@@ -202,10 +197,10 @@ function portInUse(port: number, host = "127.0.0.1"): Promise<boolean> {
 }
 
 /**
- * Terminate whatever process holds `port` (a stale CodePilot daemon left after
- * an upgrade whose serve.json was cleared). Best-effort and cross-platform:
- * finds the listening PID and sends SIGTERM (then SIGKILL on POSIX). Never
- * throws — the caller re-polls the port and falls back to the EADDRINUSE path.
+ * Terminate whatever holds `port` (a stale daemon left after an upgrade whose
+ * serve.json was cleared). Best-effort, cross-platform: find the listening PID,
+ * SIGTERM (then SIGKILL on POSIX). Never throws — caller re-polls the port and
+ * falls back to the EADDRINUSE path.
  */
 async function freeStaleDaemonPort(port: number): Promise<void> {
   const { execFile } = await import("node:child_process");
@@ -216,7 +211,7 @@ async function freeStaleDaemonPort(port: number): Promise<void> {
   try {
     const pids = new Set<number>();
     if (process.platform === "win32") {
-      // netstat → PID in the last column for the LISTENING line on this port.
+      // netstat → PID is the last column of the LISTENING line for this port.
       const out = await run("netstat", ["-ano", "-p", "tcp"]);
       for (const line of out.split(/\r?\n/)) {
         if (line.includes(`:${port} `) && /LISTENING/i.test(line)) {
@@ -258,11 +253,10 @@ function lanIp(): string | undefined {
 
 /**
  * Does the running daemon's bind match the current LAN-access preference?
- * serve.json always advertises loopback (so local discovery works), so we
- * cannot read the bind from it — instead we probe the LAN IP directly. A
- * loopback-only daemon refuses the LAN connection; a 0.0.0.0 daemon accepts it.
- * When LAN access is off, any reachable daemon is acceptable (we don't force a
- * restart just to narrow the bind). Returns true when no change is needed.
+ * serve.json always advertises loopback (so local discovery works), so probe
+ * the LAN IP directly: a loopback-only daemon refuses it, a 0.0.0.0 daemon
+ * accepts. When LAN access is off, any bind is fine. Returns true if no change
+ * is needed.
  */
 async function daemonBindMatchesPref(): Promise<boolean> {
   if (!settings.lanAccess) return true; // off: don't care about the bind

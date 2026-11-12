@@ -1,26 +1,8 @@
 // Cross-process single-writer lease for a session's JSONL log.
 //
-// The same session id must never be appended by two processes at once (a
-// standalone CLI + a daemon, or two daemons) — interleaved appends corrupt the
-// append-only event log. There is no shared database to lock against, so we use
-// an advisory lease file created with O_EXCL (atomic exclusive create, which
-// works the same on POSIX and Windows).
-//
-// The lease file sits next to the JSONL as `<id>.lock` and holds the owner's
-// identity: pid (for liveness) plus, when the owner is a daemon, its discovery
-// url + token so a second opener can be redirected to attach as a subscriber
-// instead of opening a competing writer. A crashed owner leaves a stale lock on
-// disk; the next acquirer reclaims it after confirming the pid is dead — the
-// same `process.kill(pid, 0)` liveness idiom the serve-discovery file uses.
-//
-// Design posture:
-//  - Advisory, not mandatory: nothing stops a process that ignores the lease
-//    from writing. Enforcement is that every Session acquires before loading.
-//  - Fail-soft on the read side: a corrupt / unreadable lock is treated as
-//    reclaimable (stale), never a hard error, so a bad lock can't wedge a
-//    session forever.
-//  - Reclaim is atomic-ish: we re-create with O_EXCL after unlinking the stale
-//    file, so two racing reclaimers can't both win.
+// An advisory lease file (`<id>.lock`, O_EXCL) prevents two processes from
+// appending the same session at once. Holds owner pid (liveness) plus daemon
+// discovery info for attach redirect; stale locks reclaimed once the pid is dead.
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";

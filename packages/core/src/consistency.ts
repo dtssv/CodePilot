@@ -1,28 +1,13 @@
 /**
  * Consistency assertion: "model-visible equals logged".
  *
- * In production, the agent loop intentionally transforms the persisted event
- * transcript before sending it to the model provider:
- * - **Micro-compaction**: old `tool_result` events are folded into short
- * stubs (`foldToolResults`) to save tokens. This is lossy by design.
- * - **Secret redaction**: applied identically to both the persisted event
- * and the provider message, so it is NOT a source of divergence.
- *
- * This module provides an assertion that verifies the *non-folded* portions
- * of the provider messages exactly match the corresponding persisted events.
- * It catches bugs where a tool result's content, a tool call's input, or a
- * message's text diverges between what the model saw and what was logged — a
- * class of bug that is otherwise invisible and extremely hard to reproduce.
- *
- * The agent loop runs this on every turn, before sending, via two triggers:
- * - the `consistencyCheck` config (`"off"` | `"warn"` (default) | `"throw"`):
- *   `"warn"` emits a non-blocking diagnostic on divergence, `"throw"` fails
- *   the turn loudly. This is active in production by default (warn mode).
- * - the `CODEPILOT_ASSERT_CONSISTENCY=1` env var: a hard override that forces
- *   the throwing path regardless of config — intended for tests/CI.
- *
- * On any divergence the check surfaces a precise diff (`ConsistencyError`)
- * rather than letting the provider transcript silently drift from the log.
+ * The agent loop intentionally transforms the transcript before sending to the
+ * provider (micro-compaction folds old `tool_result` events). This module
+ * asserts the non-folded portions of provider messages exactly match the
+ * persisted events — catching invisible divergence in tool content/call
+ * input/message text. Runs every turn before sending, via `consistencyCheck`
+ * config ("off" | "warn" (default) | "throw") or the
+ * `CODEPILOT_ASSERT_CONSISTENCY=1` env override (forces throw, for tests/CI).
  *
  * @module consistency
  */

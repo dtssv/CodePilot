@@ -1,23 +1,8 @@
 // File-state snapshots for checkpoint rewind.
 //
-// Problem: the agent edits files incrementally across a turn. If a later
-// edit breaks the build, the user may want to "rewind" to a known-good
-// state without manually undoing each edit. CodePilot snapshots only the
-// files the agent touches, on-demand, keyed by a checkpoint id.
-//
-// Lifecycle:
-// - `createSnapshot(cwd, label)` — reads the CURRENT on-disk content of every
-// file touched so far in the session (the session tracks touched paths and
-// passes them in) and stores it, returning an id. The pre-edit state is
-// captured because a snapshot is taken at a checkpoint boundary, before the
-// next batch of edits.
-// - `rewindToSnapshot(cwd, id)` — restores every tracked file to its
-// state at snapshot creation time. Files created after the snapshot
-// are deleted; files deleted after are restored.
-//
-// Storage: `~/.codepilot/projects/<hash>/snapshots/<id>/manifest.json`
-// + per-file blobs. Snapshots are pruned to a configurable max count
-// (default 20) to bound disk usage.
+// `createSnapshot` stores on-disk content of every touched file (at a checkpoint
+// boundary, pre-edit). `rewindToSnapshot` restores them; files created after are
+// deleted, deleted ones restored. Under `~/.codepilot/projects/<hash>/snapshots/`.
 
 import { mkdir, readFile, writeFile, readdir, rm, stat, access } from "node:fs/promises";
 import { existsSync } from "node:fs";

@@ -1,21 +1,9 @@
 /**
- * Command palette — fuzzy-searchable command picker.
- *
- * Opened two ways:
- * 1. Ctrl+K anywhere (opens with an empty query),
- * 2. typing `/` as the first character of the input (opens with the text
- * after `/` as the live query — replaces the old prefix-only dropdown).
- *
- * Keys while open:
- * ↑/↓ or Ctrl+P/Ctrl+N move selection
- * Tab complete the command name into the input (no run)
- * Enter accept and run (or leave `/name ` for required args)
- * Esc close (and restore the pre-palette input)
- * typing refines the fuzzy query
- *
- * The palette is a pure controlled component: it owns no key handling of
- * its own — the parent (InputBox) feeds it keys and asks it to render.
- * That keeps all input focus logic in one place.
+ * Command palette — fuzzy-searchable command picker. Opened via Ctrl+K (empty
+ * query) or `/` as the first input char (rest of line is the live query). Keys
+ * while open: ↑/↓ or Ctrl+P/N move, Tab complete name (no run), Enter accept
+ * and run, Esc close, typing refines. Pure controlled component: the parent
+ * (InputBox) owns all key handling, so input focus logic stays in one place.
  */
 import React from "react";
 import { Box, Text } from "ink";

@@ -10,7 +10,7 @@
  * repaints with the new palette on the next Ink render. Two module-scope
  * colour maps (StatusBar's PERM/AGENT maps) were made render-time reads for
  * the same reason. `syntax` stays fixed — syntax highlighting is a separate
- * concern from the UI palette (codex keeps base chrome on terminal colours).
+ * concern from the UI palette.
  */
 
 import { THEMES, type ThemeName, type TuiPalette } from "./themes.js";

@@ -1,17 +1,9 @@
 /**
- * First-run setup guide (`/setup`, and auto-opened once on first launch).
- *
- * Walks the user through three optional steps:
- *   1. provider  — reuse the `/connect` flow to add a model (required to chat).
- *   2. search    — pick a web_search backend; keyed providers prompt for a key,
- *                  DuckDuckGo (default) / skip keep the keyless fallback.
- *   3. image_gen — paste a baseURL + key to enable image generation; skip
- *                  leaves it disabled.
- *
- * Nothing here is mandatory: every step can be skipped. When the guide closes
- * (completed OR skipped) the caller stamps `onboardedAt` so it never auto-opens
- * again. Search / image settings are persisted to the user config
- * (`~/.codepilot/config.json`) via readUserConfigFile / writeUserConfigFile.
+ * First-run setup guide (`/setup`, auto-opened once on first launch). Three
+ * optional, skippable steps: provider (the `/connect` flow, required to chat),
+ * search (web_search backend; DuckDuckGo default/skip = keyless), image_gen
+ * (baseURL + key, or disabled). On close the caller stamps `onboardedAt` so it
+ * never reopens; settings persist to `~/.codepilot/config.json`.
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";

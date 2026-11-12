@@ -1,10 +1,7 @@
 /**
- * Slash command dispatch.
- *
- * Selection-style commands (`/model`, `/provider`, `/mode`, `/agent`,
- * `/resume`, `/sessions`, `/goal`) open an interactive picker when invoked
- * without args — users never have to type the parameter by hand. Passing
- * an explicit argument still works as a shortcut.
+ * Slash command dispatch. Selection-style commands (`/model`, `/provider`,
+ * `/mode`, `/agent`, `/resume`, `/sessions`, `/goal`) open a picker when invoked
+ * without args; an explicit argument is a shortcut.
  */
 import type { AgentMode, PermissionMode, PermissionPresetName, SlashCommand } from "@codepilot/core";
 import { resolveSlashCommand, BUILTIN_COMMANDS } from "@codepilot/core";

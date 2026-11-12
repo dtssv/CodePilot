@@ -1,18 +1,8 @@
 /**
- * CodePilot headless protocol server.
- *
- * Bridges `@codepilot/core`'s `Session` API onto a JSON-RPC 2.0 NDJSON
- * transport. One process can serve many sessions; each session is held in a
- * `Map` and its events are forwarded as `event` notifications to the client.
- *
- * Lifecycle:
- * 1. client calls `initialize` (negotiates protocolVersion, exchanges cwd).
- * 2. client opens sessions with `session/new` / `session/resume`.
- * 3. client streams prompts via `prompt/send`; events come back as `event`
- * notifications. The server may issue a `permission/request` reverse
- * request when core's `onPermissionRequest` is invoked; client replies
- * with `permission/respond` and we resolve the pending promise.
- * 4. `shutdown` returns and we close the peer.
+ * CodePilot headless protocol server: bridges `@codepilot/core`'s `Session`
+ * onto JSON-RPC 2.0 NDJSON. One process serves many sessions. Lifecycle:
+ * `initialize` → `session/new`|`resume` → `prompt/send` (events + reverse
+ * `permission/request`) → `shutdown`.
  */
 
 import { readdir, readFile, stat, writeFile, rename } from "node:fs/promises";
@@ -335,8 +325,7 @@ export interface GitGenericResult { ok: boolean; output: string; }
 export interface GitCommitMessageResult { message: string; }
 
 /** Inline (Tab) code completion for the editor plugins. prefix/suffix framed
- * for a future native FIM swap (design §3, docs/design/G-inline-completion.md).
- * Stateless: the client owns debounce / cancel / cache. */
+ * for a future native FIM swap. Stateless: the client owns debounce / cancel / cache. */
 export interface InlineCompletionParams {
   /** Text before the cursor (client-capped). */
   prefix: string;
@@ -1476,12 +1465,9 @@ interface SessionExtras {
 }
 
 /**
- * Process-wide registry of LIVE session instances, shared across every client
- * connection, with a reference count. A session is created once and reused by
- * any connection that opens it (so all clients follow the same running task).
- * Closing the last UI does NOT cancel a busy run — the session stays here
- * with zero holders until `session/resume` reattaches (or `shutdown` force-
- * disposes). Idle sessions are disposed when the last holder leaves.
+ * Process-wide registry of LIVE sessions, shared across connections with a
+ * refcount. A busy run survives the last UI closing; idle sessions are
+ * disposed when the last holder leaves (or `shutdown` force-disposes).
  */
 interface LiveSession {
   session: Session;
@@ -2677,12 +2663,9 @@ function grantAllowedCwds(grant: RemoteGrant): Set<string> {
 }
 
 /**
- * Enforce that a scoped remote grant may only act on a workspace it authorizes.
- * No-op for the local (ungranted) connection. Filtering `session/list` alone is
- * insufficient: a remote phone could otherwise point `initialize`/`session/new`
- * or any cwd-based `workspace/*` RPC at an arbitrary directory outside its
- * grant. This closes that gap at every cwd entry point. An absent/empty cwd is
- * allowed through (it resolves to the grant's own default on the handler side).
+ * Enforce that a scoped remote grant may only act on an authorized workspace
+ * (no-op for local). Checked at every cwd entry point, not just `session/list`,
+ * so a remote client can't target an arbitrary directory outside its grant.
  */
 function assertCwdInGrantScope(ctx: ServerContext, cwd: string | undefined): void {
   const grant = ctx.remoteGrant;
@@ -3089,11 +3072,9 @@ function liveSessionForCwd(ctx: ServerContext, cwd: string): Session | null {
 
 const COMPLETION_IGNORE_DIRS = new Set([".git", "node_modules", ".codepilot", "dist", "build", "out", "target", ".next", ".venv", "venv", "__pycache__", "coverage", ".idea", ".gradle"]);
 
-/** Unified `@`-mention completion. Server computes ranked candidates across
- * kinds (file/dir/mcp/git/skill), mirroring codex/opencode/dsh which all
- * compute completions server-side. The inserted `value` is a plain token the
- * agent resolves at prompt time (CodePilot already resolves `@path` images and
- * `@mcp:` refs) — the server does not inline content here. */
+/** Unified `@`-mention completion: server ranks candidates across kinds
+ * (file/dir/mcp/git/skill); the inserted `value` is a token the agent
+ * resolves at prompt time (server does not inline content). */
 async function handleWorkspaceComplete(ctx: ServerContext, params: WorkspaceCompleteParams): Promise<WorkspaceCompleteResult> {
   assertInitialized(ctx);
   assertCwdInGrantScope(ctx, params.cwd);

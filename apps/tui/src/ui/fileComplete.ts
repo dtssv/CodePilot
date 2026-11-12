@@ -1,20 +1,9 @@
 /**
- * listFilesForCompletion — returns up to `max` file/directory entries under
- * `cwd` matching a prefix, for the `@path` autocomplete in the TUI input.
- *
- * Behavior:
- * - Walks one or two levels deep to keep latency low (we're typing in a
- * TTY; even 50ms feels laggy). For deeper paths, the user narrows by
- * typing more and we re-scan with the longer prefix.
- * - Respects a small set of ignore rules (node_modules, .git, dist, build
- * output, hidden dirs) so the menu isn't flooded with noise.
- * - Returns relative paths (POSIX) for display; the caller inserts them
- * after the `@` token.
- * - Directories are suffixed with `/` so the user knows they can keep
- * descending.
- *
- * This is intentionally synchronous + cached: the TUI input loop calls this
- * on every keystroke when the cursor is in an `@` token, so it must be fast.
+ * listFilesForCompletion — up to `max` file/dir entries under `cwd` matching a
+ * prefix, for the TUI `@path` autocomplete. Walks 1-2 levels deep to keep TTY
+ * latency low (deeper paths narrow by typing more); ignores node_modules/.git/
+ * dist/build/hidden; returns POSIX relative paths (dirs suffixed `/`)
+ * inserted after the `@`. Synchronous + cached: called per keystroke.
  */
 import { readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";

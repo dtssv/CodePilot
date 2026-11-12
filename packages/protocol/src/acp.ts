@@ -1,21 +1,9 @@
-// Opt-in ACP (Agent Client Protocol) stdio server adapter.
-//
-// This is a SECONDARY, opt-in interface: the first-class JSON-RPC protocol in
-// server.ts remains the primary surface serving the native clients. The ACP
-// adapter exists so ACP-speaking editors/tools can drive a CodePilot session
-// over the ecosystem-standard protocol. It is reached only by the explicit
-// `codepilot acp` subcommand — nothing registers it by default.
-//
-// ACP is itself JSON-RPC 2.0 over newline-delimited stdio, so it rides the same
-// `Peer` / `StdioTransport` as the native protocol; no third-party dependency is
-// pulled in. We implement the baseline agent methods (initialize, session/new,
-// session/prompt, session/cancel) plus the optional session/load, and translate
-// core `Session` events into ACP `session/update` notifications. Permission and
-// ask-user prompts become ACP reverse requests to the connected client.
-//
-// Single-client by design: an ACP agent is launched as a subprocess of one
-// client, so this adapter maps each ACP session to one core Session and talks
-// to exactly one peer (no multi-holder broadcast like the native server).
+// Opt-in ACP (Agent Client Protocol) stdio server adapter — a SECONDARY
+// interface reachable only via `codepilot acp`. The native JSON-RPC in
+// server.ts stays primary. ACP rides the same `Peer`/`StdioTransport` (no new
+// deps), translating core `Session` events to ACP `session/update` and prompts
+// to ACP reverse requests. Single-client: each ACP session maps to one core
+// Session and one peer (no multi-holder broadcast).
 
 import { Peer, StdioTransport, RpcError, ErrorCode, type RpcTransport } from "./rpc.js";
 import type {

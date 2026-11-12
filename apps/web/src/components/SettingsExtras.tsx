@@ -30,13 +30,10 @@ const THEME_NAME_LABELS: Record<ThemeName, string> = {
 };
 
 /**
- * The HTTP(S) origin a phone should connect to for remote pairing.
- *
- * On the web-served surface this is just `window.location` origin. On the
- * desktop app the SPA is loaded over `file://` (so `window.location` is
- * `file://` with an empty host), but the daemon's real URL is passed in the
- * `?ws=` query param — convert that ws(s):// URL to http(s)://. Without this
- * the QR payload becomes `file://.../remote/pair?...`, which no phone can open.
+ * The HTTP(S) origin a phone connects to for remote pairing. Web-served: just
+ * `window.location` origin. Desktop loads the SPA over `file://` but passes the
+ * daemon's real URL in `?ws=` — convert ws(s):// to http(s)://, else the QR
+ * payload is an unopenable `file://.../remote/pair?...`.
  */
 function resolveServeUrl(): string {
   const origin = `${window.location.protocol}//${window.location.host}`;

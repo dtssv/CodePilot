@@ -1,11 +1,8 @@
 /**
- * `codepilot agent`: the task-oriented agent app without an installer.
- *
- * Serves the web UI and the protocol on one loopback port, then opens the
- * agent layout in a chromeless app window (Chrome / Edge / Chromium with
- * `--app`) on a dedicated profile, so the window behaves like a desktop app
- * and the agent stops when it is closed. Without such a browser it falls
- * back to the default browser and runs until interrupted.
+ * `codepilot agent`: the no-installer task-oriented agent app. Serves the web
+ * UI + protocol on one loopback port, then opens the agent layout in a
+ * chromeless Chromium `--app` window on a dedicated profile (agent stops on
+ * close); falls back to the default browser if none is available.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";

@@ -139,14 +139,12 @@ type EventBody =
   * control event: never sent to the model, zero context cost.
   */
   | { type: "tool_started"; toolCallId: string; name: string }
- /**
-  * Loop-detection telemetry. Emitted whenever a layer fires (warn / refuse /
-  * rotating-batch / path spiral / redundant re-ask) so operators can audit
-  * false positives by tool name and tune thresholds — it is NOT a boast about
-  * refusal rate. `count` is the exact-repetition count at the time (0 for the
-  * non-count layers). A control event: never sent to the model, zero context
-  * cost.
-  */
+  /**
+   * Loop-detection telemetry emitted when a layer fires (warn/refuse/seq/path/
+   * ask_reask) for auditing false positives and tuning thresholds. `count` is the
+   * exact-repetition count at fire time (0 for non-count layers). Control event;
+   * never sent to the model.
+   */
   | {
       type: "doom_loop";
       kind: "warn" | "refuse" | "seq" | "path" | "ask_reask";
@@ -473,23 +471,14 @@ export interface TeamMessageEvent {
 export type AgentMode = "chat" | "plan" | "agent";
 
 /**
- * How tool invocations that are not covered by an explicit rule are resolved.
- *
- * - `ask` — prompt for every write/dangerous call (the default).
- * - `auto-edit` — auto-approve write-tier file edits; still prompt for bash and
- *   dangerous calls.
+ * How unmatched tool calls are resolved.
+ * - `ask` — prompt for every write/dangerous call (default).
+ * - `auto-edit` — auto-approve file edits; still prompt bash/dangerous.
  * - `yolo` — never prompt (dangerous commands still ask).
- * - `auto` — an unmatched soft ask is routed to a background classifier that
- *   either allows it, denies it with a reason the model sees, or (when
- *   uncertain, or after too many consecutive classifier denials) falls back to
- *   an interactive prompt. Hard floors (dangerous commands, sensitive paths,
- *   sandbox escalation, out-of-sandbox writes) are never silently allowed — they
- *   still prompt. Use for long, mostly-unattended runs that should not stall on
- *   every benign call but must not quietly do something destructive.
- * - `dont-ask` — an unmatched soft ask is denied immediately (optionally with a
- *   standard feedback note) instead of blocking on a prompt; explicit allow
- *   rules and read/network defaults still pass. Interactive and headless share
- *   this semantics.
+ * - `auto` — background classifier allows/denies/asks; hard floors (dangerous
+ *   commands, sensitive paths, sandbox escalation) always prompt.
+ * - `dont-ask` — unmatched soft asks denied immediately; explicit allow +
+ *   read/network defaults still pass.
  */
 export type PermissionMode = "ask" | "auto-edit" | "yolo" | "auto" | "dont-ask";
 
@@ -545,11 +534,9 @@ export const PERMISSION_PRESETS: Record<
 export interface SandboxConfig {
   mode?: "off" | "workspace-write" | "read-only";
   /**
-   * Network policy. Boolean is the legacy form: `true` → full access,
-   * `false` → no network. Object form enables an allowlist egress proxy:
-   *   { "mode": "proxy", "allow": ["*.github.com"], "allowPorts": [443] }
-   * Modes: "off" (no network), "full" (unrestricted), "proxy" (only `allow`
-   * hosts, via a cooperative local proxy).
+   * Network policy. Boolean legacy form (`true`=full, `false`=none). Object form
+   * enables an allowlist egress proxy: `{ mode, allow, allowPorts }`.
+   * Modes: "off" / "full" / "proxy".
    */
   network?:
     | boolean
@@ -576,38 +563,21 @@ export interface SandboxConfig {
   */
   protectGit?: boolean;
  /**
-  * How the resolved `.git` metadata dir is treated at the OS sandbox layer —
-  * the richer form of `protectGit` (and the one that wins when both are set):
-  *  - "protect": carve `.git` read-only at the OS layer, so no
-  *    approved shell command can rewrite hooks/config/objects. Equivalent to
-  *    `protectGit: true`.
-  *  - "allow-git-cli" (the default posture): leave `.git` writable under the
-  *    sandbox so ordinary
-  *    `git commit` / `git add` (which write the object store and refs) work
-  *    without per-command escalation. The real history-rewrite/hook-plant
-  *    risk stays gated at the file-tool layer (a `write_file`/`edit_file`
-  *    into `.git/…` still asks), so this trades the OS-level `.git` lock for
-  *    the tool-level one rather than removing the guard.
-  *  - "ask": same OS posture as "allow-git-cli"; named to signal that the
-  *    file-tool `.git` write confirmation is the gate.
-  * Unset falls back to `protectGit` (true → "protect", false → "allow-git-cli");
-  * when neither is set the default is NOT to carve `.git` (git CLI works).
+  * How `.git` is treated at the OS sandbox layer; wins over `protectGit`.
+  *  - "protect": carve `.git` read-only (= `protectGit: true`).
+  *  - "allow-git-cli" (default): leave `.git` writable so git CLI works; the
+  *    history-rewrite/hook-plant risk is gated at the file-tool layer instead.
+  *  - "ask": same OS posture; signals the file-tool `.git` write ask is the gate.
+  * Unset falls back to `protectGit`; neither set → `.git` writable (git CLI works).
   */
   gitWrite?: "protect" | "allow-git-cli" | "ask";
 }
 
 /**
- * Permission rules (`allow` / `ask` / `deny`). Each rule is a string:
- *
- * "read_file" — the whole tool
- * "mcp__github__*" — wildcard over tool names
- * "bash(npm test *)" — prefix/glob match on the tool's primary
- * argument (bash→command, read_file/write_file/
- * edit_file→path, web_fetch→url)
- * "bash(/^git (status|diff)/)" — regex match on the primary argument
- *
- * Evaluation order: deny > ask > allow > mode default. `deny` applies in
- * every mode, including yolo — it is the last-line safety net.
+ * Permission rules (`allow` / `ask` / `deny`), each a string:
+ * "read_file" (whole tool) | "mcp__github__*" (name wildcard) |
+ * "bash(npm test *)" (glob on primary arg) | "bash(/^…/ )" (regex on primary arg).
+ * Evaluation order: deny > ask > allow > mode default. `deny` always applies.
  */
 export interface PermissionRules {
   allow?: string[];
@@ -651,17 +621,11 @@ export type PermissionDecision = "allow" | "deny" | "always" | "always-project";
 
 /**
  * What a host's permission handler may return:
- *
- * - a plain {@link PermissionDecision} (allow / deny / always / always-project);
- * - a deny that carries a `feedback` message the model sees as the tool
- *   result — "decline-with-feedback" — turning a dead-end denial into steering
- *   ("don't edit that file, edit this one") instead of a canned "permission
- *   denied";
- * - `{ decision: "abort" }` — cancel the whole current prompt/turn (the user hit
- *   "deny & stop"), not just this one call. The turn ends cleanly with no fake
- *   user message in the transcript; the session is NOT cleared.
- *
- * Backward-compatible: handlers that return a bare string still work.
+ * - a plain {@link PermissionDecision} (allow/deny/always/always-project);
+ * - a deny with `feedback` the model sees ("decline-with-feedback" → steering);
+ * - `{ decision: "abort" }` — cancel the whole turn ("deny & stop"), not just
+ *   this call; session is NOT cleared.
+ * Bare strings still work (backward-compatible).
  */
 export type PermissionResolution =
   | PermissionDecision
@@ -732,50 +696,29 @@ export interface McpServerConfig {
 
 /** A user-configured lifecycle hook. */
 export interface HookEntryConfig {
- /** Regex matched against the tool name; "*" matches all.
- * For SessionStart/PreCompact/PostCompact/SubagentStop, matched against
- * the event's discriminator (source/trigger/agent_type) instead. */
+ /** Regex matched against the tool name ("*" = all); for
+ * SessionStart/PreCompact/PostCompact/SubagentStop, the event discriminator. */
   matcher: string;
-  /** Shell command; receives a JSON payload on stdin. Exit 2 = block (where
-  * the event supports blocking — PreToolUse, UserPromptSubmit, PreCompact,
-  * Stop). Stdout JSON `{"decision":"block","reason":"..."}` also blocks;
-  * PostToolUse may emit `{"feedback":"..."}`; PreToolUse may emit
-  * `{"updatedInput":{...}}` to rewrite the tool input.
- *
- * Mutually exclusive with `http`, `mcp_tool`, `prompt`, and `agent`.
- * At least one handler type must be provided. */
+  /** Shell command; JSON payload on stdin. Exit 2 blocks (where the event
+  * supports blocking); stdout JSON `{"decision":"block","reason":...}` blocks;
+  * PostToolUse may emit `{"feedback":...}`; PreToolUse may emit
+  * `{"updatedInput":{...}}`. Mutually exclusive with the other handlers. */
   command?: string;
- /** HTTP endpoint to POST the hook payload to ( `http`
- * handler). The response body is interpreted as JSON for decisions
- * (same schema as `command` stdout: `{"decision":"block","reason":"..."}`
- * etc.). A non-2xx status is treated as exit-code-2 (block) when the
- * status is 4xx, or a warning (non-fatal) otherwise.
- *
- * Mutually exclusive with `command`. */
+ /** HTTP endpoint to POST the payload to. Response body = JSON decisions (same
+ * schema as `command` stdout). Non-2xx: 4xx → block, else warning. */
   http?: string;
  /** Optional: extra headers for the `http` request. Ignored for `command`. */
   httpHeaders?: Record<string, string>;
  /** Optional: timeout in ms for `http` requests (default 10s). */
   timeout?: number;
- /** MCP tool handler: invoke an MCP server tool by name
- * (`<server>:<tool>`). The hook payload is passed as the tool's
- * arguments. The tool's text result is interpreted as JSON for
- * decisions (same schema as `command` stdout).
- *
- * Mutually exclusive with `command` and `http`. Requires an MCP
- * resolver to be wired into the HookEngine. */
+ /** MCP tool handler: invoke `<server>:<tool>` with the payload as args; result
+ * parsed as JSON decisions. Requires a wired MCP resolver. */
   mcpTool?: string;
- /** Prompt handler: send the hook payload (as JSON) to the small model
- * as a user message and interpret the model's text response as JSON
- * for decisions. Use for natural-language hook logic that's hard to
- * express in a shell script (e.g. "is this command safe to run?").
- *
- * Mutually exclusive with `command` and `http`. Requires a prompt
- * resolver to be wired into the HookEngine. */
+ /** Prompt handler: send payload as JSON to the small model; parse its text
+ * response as JSON decisions. For NL hook logic. Requires a prompt resolver. */
   prompt?: string;
- /** Agent handler: spawn a sub-agent with the hook payload as its
- * objective. The sub-agent's conclusion text is interpreted as JSON
- * for decisions. Heavier than `prompt` but can use tools (e.g.
+ /** Agent handler: spawn a sub-agent with the payload as its objective; its
+ * conclusion text is parsed as JSON decisions. Heavier than `prompt` but can
  * read_file to inspect the repo before deciding).
  *
  * Mutually exclusive with `command` and `http`. Requires an agent
@@ -943,7 +886,7 @@ export interface CodepilotConfig {
   * to a lightweight model: completion uses `completion.model` if set, else the
   * `smallModel`, and stays OFF when the resolved model is the main chat model
   * (so as-you-type completion never silently bills the big model). Ignored by
-  * non-editor clients (TUI/desktop/web). See docs/design/G-inline-completion.md. */
+  * non-editor clients (TUI/desktop/web). */
   completion?: {
    /** Master toggle. Default false. */
    enabled?: boolean;

@@ -1237,13 +1237,10 @@ export function useStickyScroll(
 }
 
 /**
- * Scroll an element to the bottom AFTER layout settles. A single synchronous
- * `scrollTop = scrollHeight` runs before the browser has laid out freshly
- * mounted content (markdown, code blocks, images) — so when a session loads a
- * long transcript at once, `scrollHeight` is still small and the view ends up
- * near the TOP. We re-pin across a few animation frames (and a short timeout)
- * so late-growing content is accounted for and the transcript opens at the
- * newest message.
+ * Scroll to bottom after layout settles. A synchronous `scrollTop =
+ * scrollHeight` runs before freshly mounted content (markdown, code, images)
+ * is laid out, so a long transcript loads near the TOP. Re-pin across a few
+ * frames + a short timeout so late-growing content is accounted for.
  */
 function scrollToBottomSoon(el: HTMLDivElement): void {
   const pin = (): void => {

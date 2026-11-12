@@ -1,25 +1,8 @@
 // Memory: read & write project + user durable notes.
 //
-// Project agent memory lives under `~/.codepilot/projects/<hash>/MEMORY.md`
-// (same project-state root as artifacts/scratch) so runs do not pollute the
-// git working tree. Optional shareable instruction files in the workspace
-// (CODEPILOT.md / AGENTS(.override).md / CLAUDE(.local).md — see
-// MEMORY_CANDIDATE_NAMES) are still *read* hierarchically for human-authored
-// context; the walk stops at the git toplevel by default.
-// User memory is `~/.codepilot/MEMORY.md`.
-//
-// MEMORY.md files are structured documents with four sections:
-//
-// ## Project context - what is this project, its goal
-// ## Rules - user-stated hard constraints
-// ## Architecture decisions - major design choices with rationale
-// ## Discovered durable knowledge - facts that survive across sessions
-//
-// Older files written before this layout existed are still readable: the
-// parser tolerates arbitrary `## <title>` sections and falls back to a
-// single "Body" section for unstructured content. `memory_write` accepts
-// a `section` argument to target one of the canonical sections; without
-// one, the entry is appended as a titled block under a best-guess section.
+// Project: `~/.codepilot/projects/<hash>/MEMORY.md`; user: `~/.codepilot/MEMORY.md`.
+// Four canonical sections (Project context, Rules, Architecture decisions,
+// Discovered durable knowledge); parser also tolerates arbitrary `## <title>`.
 
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { realpathSync } from "node:fs";

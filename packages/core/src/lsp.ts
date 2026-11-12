@@ -1,23 +1,8 @@
-// Minimal stdio LSP client for navigation (go-to-definition / find-references
-// / hover). This gives the agent precise symbol navigation in large repos
-// instead of guessing with grep.
+// Minimal stdio LSP client for navigation (definition / references / hover) —
+// precise symbol navigation instead of grep guesses.
 //
-// Scope, deliberately small:
-// - One language server process per (server command, workspace root), spawned
-//   lazily on first use and reused. Content-Length framed JSON-RPC over stdio
-//   (the LSP wire format — NOT the NDJSON that MCP uses).
-// - We `initialize` + `initialized`, then for each query open the target file
-//   with `textDocument/didOpen` (servers like typescript-language-server need
-//   the document open before they answer position requests) and issue the
-//   navigation request.
-// - Best-effort and fail-soft: if no server is configured for the file's
-//   language, or the binary isn't installed, the caller returns a clear
-//   "not available" message instead of throwing.
-//
-// Server selection is config-driven (`lsp.servers`): the host maps a language
-// id (derived from the file extension) to a spawn command. We ship sensible
-// built-in defaults for TypeScript/JavaScript so it works out of the box when
-// `typescript-language-server` is resolvable.
+// One server per (command, workspace root), spawned lazily and reused (Content-
+// Length framed JSON-RPC). Fail-soft (returns "not available"); selection via `lsp.servers`.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";

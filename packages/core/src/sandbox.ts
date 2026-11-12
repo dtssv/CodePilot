@@ -1,42 +1,14 @@
 // OS-level sandboxing for tool execution.
 //
-// Two enforcement layers, both driven by a single SandboxConfig:
-//
-// 1. Process layer (bash): commands are wrapped in the strongest
-// available OS sandbox —
-// macOS : sandbox-exec (Seatbelt) with a generated profile that
-// allows reads, restricts writes to the workspace + tmp +
-// ~/.codepilot (+ configured writablePaths), and optionally
-// denies the network.
-// Linux : bwrap (bubblewrap) with / mounted read-only and the
-// workspace re-bound read-write; --unshare-net when the
-// network is disabled.
-// Windows: there is no dependency-free kernel sandbox primitive
-// (Job Objects need native code; AppContainer needs
-// packaging). We follow the same posture as other coding
-// agents (e.g. WSL): if WSL with bwrap is
-// reachable, commands are sandboxed through it; otherwise
-// the policy fallback applies — "deny" (fail closed) by
-// default, i.e. bash refuses to run rather than running
-// unsandboxed. The tool-layer guard below is fully
-// enforced on Windows regardless.
-//
-// When no sandbox backend exists and mode != "off", the policy's
-// `fallback` decides: "deny" (fail closed, default) or
-// "allow-unsandboxed" (run raw with a loud warning in the output).
-//
-// 2. Tool layer (file tools): assertPathAllowed validates every path
-// used by read_file / write_file / edit_file / ls / glob / grep before
-// any I/O. Writes are confined to the writable set; reads are allowed
-// anywhere except a sensitive deny-list (~/.ssh, credential files,
-// /etc/shadow, private keys) which always requires explicit user
-// intent (surfaced as an error the model must escalate). Existing
-// paths are additionally checked through realpath so symlinks cannot
-// escape the writable roots. This layer is pure Node and works
-// identically on macOS, Linux and Windows.
-//
-// This module is dependency-free and never throws from detection: the
-// environment is probed once and cached.
+// Sandbox: two enforcement layers driven by one SandboxConfig.
+// 1. Process layer (bash): commands wrapped in the strongest OS sandbox —
+//    macOS sandbox-exec (Seatbelt), Linux bwrap (--unshare-net when network
+//    off), Windows via WSL/bwrap or fail-closed fallback ("deny" default).
+// 2. Tool layer (file tools): assertPathAllowed validates every path before
+//    I/O — writes confined to the writable set, reads allowed except a
+//    sensitive deny-list (~/.ssh, creds, /etc/shadow), symlinks resolved via
+//    realpath. Pure Node; identical on all platforms. Dependency-free; never
+//    throws from detection.
 
 import { existsSync, realpathSync, statSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -73,24 +45,20 @@ export interface ResolvedSandbox {
   * is active and the proxy has been started. Injected into bash as
   * HTTP(S)_PROXY. Absent until the host starts the proxy and sets it. */
   proxyUrl?: string;
- /** How strongly the "proxy" network policy is enforced for the active
-  * backend:
-  *  - "enforced": the OS sandbox forces all egress through the proxy (Seatbelt
-  *    loopback-only). A child cannot bypass by ignoring HTTP(S)_PROXY.
-  *  - "best-effort": cooperative only — the proxy env vars are injected but a
-  *    process opening a raw socket can bypass them (bwrap/wsl without a
-  *    userspace net stack; or proxy not yet started).
+ /** How strongly the "proxy" policy is enforced for the active backend:
+  *  - "enforced": OS sandbox forces all egress through the proxy (cannot bypass
+  *    by ignoring HTTP(S)_PROXY).
+  *  - "best-effort": cooperative only — env vars injected but a raw socket can
+  *    bypass (bwrap/wsl without a userspace net stack, or proxy not yet up).
   * Undefined when the network policy is not "proxy". */
   proxyEnforcement?: "enforced" | "best-effort";
 }
 
 /**
- * OS temp locations shells and CLIs routinely use (`curl -o /tmp/…`, zsh
- * heredoc scratch files, `mktemp`). `os.tmpdir()` alone is not enough on
- * macOS: it is often under `/var/folders/…` while scripts still write `/tmp`
- * (a symlink to `/private/tmp`). Coding agents generally allow these temps
- * under workspace-write so banal commands don't fail with "operation not
- * permitted".
+ * OS temp locations shells/CLIs routinely use (`curl -o /tmp/…`, `mktemp`).
+ * `os.tmpdir()` alone is insufficient on macOS (often `/var/folders/…` while
+ * scripts write `/tmp` → `/private/tmp`). Allowed under workspace-write so banal
+ * commands don't fail.
  */
 function defaultTempWritableRoots(): string[] {
   const roots = new Set<string>();
@@ -415,11 +383,9 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
   lines.push("(allow default)");
   // Network policy:
   //  - "off"   → deny all network.
-  //  - "proxy" → when the loopback proxy is up (proxyUrl set), deny all network
-  //    then re-allow outbound only to the proxy's loopback port, so a child
-  //    process cannot bypass the allowlist by ignoring HTTP(S)_PROXY. If the
-  //    proxy isn't up yet we leave network open (cooperative/best-effort), same
-  //    posture as other backends.
+  //  - "proxy" → with proxy up, deny all then re-allow only the proxy's
+  //    loopback port (a child can't bypass by ignoring HTTP(S)_PROXY); without
+  //    the proxy up, leave open (best-effort, like other backends).
   //  - "full"  → unrestricted (no rule).
   if (!policy.network) {
     lines.push("(deny network*)");
@@ -521,21 +487,13 @@ function withProxyEnv(
 const SLIRP_GATEWAY = "10.0.2.2";
 
 /**
- * Build a self-contained POSIX-shell orchestration that runs `bwrapCmd` (a
- * fully-formed `bwrap --unshare-net …` command whose inner command blocks on
- * --block-fd) under a slirp4netns userspace network stack confined to the
- * loopback proxy. Flow:
- *   1. Two FIFOs: bwrap reports its namespace child-pid on --info-fd; bwrap's
- *      inner command blocks on --block-fd until we release it.
- *   2. Start bwrap in the background; read the child-pid from the info FIFO.
- *   3. Start slirp4netns targeting that pid, binding outbound to host loopback
- *      so only the gateway→proxy path can carry traffic; wait for its ready-fd.
- *   4. Release the inner command (write the block FIFO). It now runs with tap0
- *      up and proxy env pointed at the gateway.
- *   5. Wait for bwrap, capture its status, tear slirp down, propagate the code.
- * All scratch lives under a per-run mktemp dir that is removed on exit. If any
- * setup step fails the whole thing exits non-zero (fail-closed) rather than
- * running the command with no network confinement.
+ * POSIX-shell orchestration: run `bwrapCmd` (`bwrap --unshare-net …`, inner
+ * command on --block-fd) under a slirp4netns userspace net stack confined to
+ * the loopback proxy. Flow: FIFOs for bwrap's child-pid + block; start bwrap,
+ * read child-pid; start slirp4netns bound to host loopback (only the
+ * gateway→proxy path routable), wait ready; release the inner command; wait +
+ * propagate status. Scratch under a per-run mktemp dir (cleaned on exit);
+ * any setup failure exits non-zero (fail-closed).
  */
 function buildSlirpOrchestration(bwrapInnerCmd: string, slirp: string): string {
   const sq = shellQuote;
@@ -821,12 +779,10 @@ export const SENSITIVE_READ_PATHS: string[] = [
 ];
 
 /**
- * System / credential / boot paths where an accidental write or delete is
- * catastrophic or a security risk. A write or delete targeting any of these
- * forces an interactive confirmation EVEN when the sandbox is off or the mode
- * is yolo — the same posture as a dangerous bash command. This is a safety
- * floor, independent of the writable-root math (which only runs when a sandbox
- * is active). It is NOT a hard deny: a user who truly means it can confirm.
+ * System/credential/boot paths where an accidental write or delete is
+ * catastrophic. A write/delete here forces interactive confirmation EVEN with
+ * sandbox off or yolo mode — a safety floor independent of the writable-root
+ * math. Not a hard deny; a user who means it can confirm.
  */
 export const SENSITIVE_WRITE_PATHS: string[] = [
   // Credentials / keys (clobbering authorized_keys or known_hosts is an attack).
@@ -875,22 +831,14 @@ export function sensitivePathHit(
 }
 
 /**
- * Whether a write targets a `.git/` directory (the git object database /
- * refs / hooks). This is the workspace-relative counterpart of
- * {@link SENSITIVE_WRITE_PATHS}: the absolute list cannot name `.git` because
- * it lives inside the (writable) workspace, yet a direct write there —
- * `write_file .git/config`, `edit_file .git/hooks/pre-commit` — can corrupt
- * history or plant a persistence hook. Like the rest of the safety floor this
- * is NOT a hard deny: it forces an interactive confirmation (even in yolo /
- * under an active sandbox), so a user who really wants the agent to edit
- * `.git/…` confirms it at the prompt (or adds a deny rule to block it outright).
- * Consistent with {@link SENSITIVE_WRITE_PATHS}, the floor sits above allow
- * rules — a blanket allow does not silently bypass it. Legitimate git
- * operations go through the `git` binary (`git config …`), which is unaffected —
- * only direct file-tool writes to the object store are gated.
- *
- * `.git` must be a whole path component, so `foo.gitignore` is not matched.
- * Returns the `.git` directory path (for messaging) or null.
+ * Whether a write targets a `.git/` directory (object db / refs / hooks) — the
+ * workspace-relative counterpart of {@link SENSITIVE_WRITE_PATHS} (`.git` can't
+ * be in the absolute list since it sits inside the writable workspace). A direct
+ * file-tool write there (`write_file .git/config`) can corrupt history or plant
+ * a hook, so it forces an interactive confirmation (even yolo / under sandbox);
+ * not a hard deny. The floor sits above allow rules. Legitimate git ops via the
+ * `git` binary are unaffected. `.git` must be a whole path component
+ * (`foo.gitignore` not matched). Returns the `.git` dir path or null.
  */
 export function gitMetadataWriteHit(inputPath: string, cwd: string): string | null {
   const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
@@ -942,12 +890,10 @@ export function isWriteOutsideSandbox(
 }
 
 /**
- * True when `inputPath` is inside the working set — the union of `cwd`, any
- * extra working directories, and `roots` (typically sandbox writable roots plus
- * delivery roots). This is the boundary the `workspaceBoundary` policy tests:
- * a path outside the set is subject to ask / deny depending on policy. Membership
- * is a prefix check with platform-aware normalization (symlinks are not
- * resolved here — callers that need that use the async sandbox path guard).
+ * True when `inputPath` is inside the working set (cwd ∪ extra working dirs ∪
+ * `roots` = sandbox writable + delivery roots). This is the boundary
+ * `workspaceBoundary` tests; outside → ask/deny per policy. Prefix check with
+ * platform-aware normalization (no symlink resolution — use the async guard).
  */
 export function isInsideWorkingSet(
   inputPath: string,
@@ -1016,8 +962,8 @@ export function looksLikeSandboxWriteDenial(text: string): boolean {
  * caused (network disabled / bwrap --unshare-net / proxy allowlist). These are
  * the errors a service or package manager emits when the jail blocks egress;
  * used to nudge the model toward a one-command escalation rather than silently
- * giving up. Deliberately broad (name resolution / connection refused /
- * unreachable / proxy), matching codex's sandbox-denial network heuristic. */
+ * giving up. Deliberately broad: name resolution / connection refused /
+ * unreachable / proxy. */
 export function looksLikeSandboxNetworkDenial(text: string): boolean {
   return (
     /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT)\b/.test(text) ||

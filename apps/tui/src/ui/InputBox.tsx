@@ -1,24 +1,11 @@
 /**
  * Multi-line input box with command palette, history search and @file
- * completion.
- *
- * Key map:
- * - Enter → submit (or accept the highlighted palette/completion
- * entry when a menu is open)
- * - Shift+Enter, `\`+Enter → newline
- * - Ctrl+K → open/close the command palette
- * - `/` at col 0 → open the command palette with the rest of the line as
- * the fuzzy query
- * - Ctrl+R → open reverse history search; again cycles older hits
- * - Up/Down → history navigation (menus closed) / menu navigation
- * - Tab → complete slash command into the input (palette);
- * accept the highlighted entry for history / @file
- * - Enter → submit, or accept+run the highlighted palette command
- * - Esc → close menu (restore pre-menu input)
- * - Ctrl+C → cancel the running prompt; exit when idle
- *
- * The component owns three mutually-exclusive menus (palette / history
- * search / @file completion) and is the only place that interprets keys.
+ * completion. Owns three mutually-exclusive menus (palette / history /
+ * @file) and is the only place that interprets keys. Key map: Enter submit
+ * (or accept highlighted menu entry); Shift+Enter or `\`+Enter newline;
+ * Ctrl+K toggle palette; `/` at col 0 open palette with the rest as query;
+ * Ctrl+R reverse history search (again cycles); Up/Down history (menus
+ * closed) or menu nav; Tab complete; Esc close menu; Ctrl+C cancel/exit.
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";

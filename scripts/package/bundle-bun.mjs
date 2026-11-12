@@ -4,8 +4,7 @@
  *
  * The TUI cannot use the CLI's esbuild→CJS→pkg path: Ink/yoga use top-level
  * await (no CJS output) and @yao-pkg/pkg can't reliably run an ESM entry from
- * its snapshot FS. Bun handles ESM + TLA + native modules natively — the same
- * choice opencode made for the same reason.
+ * its snapshot FS. Bun handles ESM + TLA + native modules natively.
  *
  * Run with Bun: `bun scripts/package/bundle-bun.mjs <entry> <outfile> <target>`
  *   target is a Bun compile target, e.g. bun-darwin-arm64 / bun-linux-x64 /

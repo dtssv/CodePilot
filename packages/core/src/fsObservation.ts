@@ -1,30 +1,13 @@
 // File-observation store: read-before-write + staleness (CAS) guard.
 //
-// Why this exists
-// ---------------
-// A long-running agent edits files it "remembers" reading. Two failure modes
-// cause silent corruption / hallucinated edits:
-//   1. Editing a file the agent never actually read this session (it is
-//      reasoning from memory of a similar file, or from a folded stub).
-//   2. Editing a file that changed on disk *after* the agent read it (another
-//      process, a formatter, the user) — the edit is based on stale content.
-//
-// This store records a lightweight observation (mtime + size) every time a
-// file is successfully read, and lets write-tools assert, before mutating:
-//   - the path was observed this session (read-before-write), and
-//   - the on-disk mtime/size still match what was observed (no stale write).
-//
-// The primary gate is coarse (mtime+size): cheap, no extra I/O beyond a stat
-// the tools already do, and good enough to catch the real "changed since I
-// read it" case. But some filesystems jitter mtime or round it coarsely, so a
-// content-equal file can look stale (a false positive) — e.g. a formatter that
-// rewrites identical bytes, or a `touch`. To avoid blocking a safe edit, the
-// store also records a content hash at read time; when mtime/size says stale
-// but the current content hashes to the same value, the write is allowed. When
-// no hash is available (older observation, hash not supplied) the mtime/size
-// decision stands unchanged. A session owns one store; it is passed to tools
-// via ToolContext.observeFile / checkFileFresh. Absent in minimal test contexts
-// — tools must treat it as optional and degrade to current behaviour.
+// Read-before-write gate: records mtime+size (+ content hash) whenever a file
+// is read, and lets write-tools assert (a) the path was observed this session
+// and (b) the on-disk state still matches — preventing edits from stale
+// memory or from files changed by another process since the last read.
+// mtime+size is the primary check (cheap, no extra I/O); a content hash is the
+// fallback that clears a false positive when a formatter rewrites identical
+// bytes or `touch` bumps mtime. Optional in ToolContext — tools degrade to
+// current behaviour when absent.
 
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";

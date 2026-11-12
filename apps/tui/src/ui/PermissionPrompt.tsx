@@ -1,17 +1,10 @@
 /**
- * Permission confirmation dialog.
- *
- * Shows enough detail to approve confidently without leaving the terminal:
- * - bash: the full command (multi-line, wrapped) plus cwd
- * - write: file path + a preview of the content being written
- * - edit: file path + a compact before→after diff
- * - anything: the formatted target line
- *
- * Keys: 1 / y → allow once · 2 / a → always allow (this session) ·
- * 3 / p → always allow + remember in project config · 4 / n / Esc → deny ·
- * 5 / f → deny with feedback (type a correction the model sees instead of a
- * bare "denied") · 6 / s → deny & stop (refuse this call and end the turn) ·
- * ↑↓ + ↵ for mouse-free selection.
+ * Permission confirmation dialog. Shows enough to approve without leaving the
+ * terminal: bash → command + cwd; write → path + content preview; edit → path
+ * + before→after diff; else → formatted target line. Keys: 1/y allow once,
+ * 2/a always (session), 3/p always + remember in project config, 4/n/Esc deny,
+ * 5/f deny with feedback (model sees the correction), 6/s deny & stop the turn,
+ * ↑↓+↵ mouse-free.
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";

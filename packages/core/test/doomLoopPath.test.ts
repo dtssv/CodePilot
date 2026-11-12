@@ -14,10 +14,9 @@ import {
 } from "../src/doomLoop.js";
 
 // Layer 1 — exact (tool, input) repetition. This is the ONLY layer that
-// hard-denies (refuse) on a count, and the only harness among codex/opencode/
-// dsh/pi that does so at all (dsh warns but never vetoes). Because a refusal
-// stops real work, the threshold boundary and the "exact input only" scope
-// are worth pinning precisely.
+// hard-denies (refuse) on a count. Because a refusal stops real work, the
+// threshold boundary and the "exact input only" scope are worth pinning
+// precisely.
 describe("DoomLoopDetector layer 1 (exact repetition)", () => {
   it(`warns at WARN_THRESHOLD (${WARN_THRESHOLD}) and refuses at REFUSE_THRESHOLD (${REFUSE_THRESHOLD})`, () => {
     const d = new DoomLoopDetector();

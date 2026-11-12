@@ -1,6 +1,6 @@
 // Inline (Tab) code completion — the headless, provider-agnostic pieces.
 //
-// Design: docs/design/G-inline-completion.md. The protocol layer owns provider
+// The protocol layer owns provider
 // resolution and the network call (mirroring handleGitCommitMessage); this
 // module owns the *pure* logic so it is unit-testable with no provider:
 //   1. the model gate (never run as-you-type completion on the main model),

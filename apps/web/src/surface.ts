@@ -15,9 +15,9 @@ export type Theme = "light" | "dark";
  * A named colour palette, layered on top of the light/dark axis. `default` is
  * the built-in CodePilot palette (the existing look). Each other name swaps
  * the `--color-*` token set via `[data-theme-name]` in index.css, and still
- * has a light and a dark variant so it composes with the Theme toggle — the
- * codex model ("a named palette selected by config/picker"), adapted to the
- * web's existing light/dark infrastructure instead of replacing it.
+ * has a light and a dark variant so it composes with the Theme toggle — a
+ * named palette selected by config/picker, adapted to the web's existing
+ * light/dark infrastructure instead of replacing it.
  */
 export type ThemeName = "default" | "nord" | "solarized" | "high-contrast";
 

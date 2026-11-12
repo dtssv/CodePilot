@@ -1,4 +1,4 @@
-// Cooperative network egress proxy (B3 Part A, step 2).
+// Cooperative network egress proxy.
 //
 // A tiny dependency-free HTTP/HTTPS forward proxy that enforces a host
 // allowlist. It is pointed at by HTTP_PROXY/HTTPS_PROXY env vars injected into
@@ -8,7 +8,7 @@
 // Scope and limits (deliberate):
 //  - Cooperative only: a process that opens a raw socket ignoring the proxy
 //    env vars bypasses it. Non-cooperative enforcement (net namespace / OS
-//    scoping) is a separate step (see docs/design/B3-landlock-network-proxy.md).
+//    scoping) is a separate step (out of scope here).
 //  - HTTPS via CONNECT is tunneled, NOT terminated: we allow/deny on the
 //    requested host:port, then relay bytes. No TLS interception, so payloads
 //    stay private and no cert trust surgery is needed.

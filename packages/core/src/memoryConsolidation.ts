@@ -1,23 +1,8 @@
 // Automatic memory consolidation: a two-phase, fail-soft background pipeline
-// that turns finished sessions into durable progressive-memory notes.
-//
-// Phase 1 (per-session extraction): a small model reads a finished session's
-// transcript and extracts structured, reusable facts — each as {topic, summary,
-// body}. Output is strictly gated: no reusable signal → nothing is written. Both
-// the transcript fed to the model and the model's output pass secret redaction.
-// Extracted facts are written as append-only DRAFT notes, never straight into
-// the live memory files.
-//
-// Phase 2 (project-wide consolidation): on a dual-gate schedule (enough time
-// since the last run AND enough new drafts), a reconciliation step folds the
-// accumulated drafts into the progressive topic files — deduping near-identical
-// entries, dropping entries contradicted by newer drafts, and keeping the
-// phrasing of still-valid entries stable. Drafts are treated strictly as data,
-// never as instructions, so transcript content cannot steer the pipeline.
-//
-// Scheduling state lives next to the memory files; both phases are fire-and-
-// forget and swallow their own errors — memory is an optimisation, never a
-// blocker for a session's main work.
+// turning finished sessions into durable progressive-memory notes. Phase 1: a
+// small model extracts redacted, reusable facts → append-only DRAFTs. Phase 2:
+// on a dual-gate schedule, folds drafts into topic files (dedup, drop
+// contradicted, stable phrasing). Drafts are data, never instructions.
 
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
