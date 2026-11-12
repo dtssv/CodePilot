@@ -60,10 +60,11 @@ describe("wrapCommand proxy env injection", () => {
     };
     const w = wrapCommand("curl https://x/", policy);
     // The inner command may be re-quoted by the OS backend (sandbox-exec /
-    // bwrap), so assert on the variable names + proxy URL, not exact quoting.
+    // bwrap), so assert on the variable names + proxy port, not exact quoting
+    // or host. On Linux the slirp gateway rewrites the host to 10.0.2.2.
     expect(w.command).toContain("HTTP_PROXY=");
     expect(w.command).toContain("HTTPS_PROXY=");
-    expect(w.command).toContain("127.0.0.1:12345");
+    expect(w.command).toContain(":12345");
     expect(w.command).toContain("NO_PROXY=");
   });
 
