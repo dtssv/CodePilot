@@ -190,6 +190,7 @@ import {
 } from "./snapshots.js";
 import { existsSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
+import { thawSession, readColdSessionText } from "./sessionCompression.js";
 import {
   SESSIONS_DIR,
   buildProvider,
@@ -3464,7 +3465,24 @@ export class Session {
   private async loadFromDisk(): Promise<void> {
     try {
       const path = sessionPath(this.id);
-      const text = await readFile(path, "utf-8");
+      // Cold-storage: a session compressed by housekeeping has only a `.jsonl.br`.
+      // A write-open session is thawed back to plaintext first (it is about to
+      // append); a read-only open reads the compressed text directly without
+      // materializing the plaintext. Both are no-ops for a normal live session.
+      let text: string;
+      if (!this.readOnly) {
+        await thawSession(this.id).catch(() => undefined);
+        text = await readFile(path, "utf-8");
+      } else {
+        try {
+          text = await readFile(path, "utf-8");
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          const cold = await readColdSessionText(this.id);
+          if (cold === null) throw err;
+          text = cold;
+        }
+      }
       // Physical integrity: if the process crashed mid-append, the final line
       // can be a torn (incomplete) JSON fragment with no trailing newline. We
       // skip it when parsing (below), but a torn tail also poisons the NEXT

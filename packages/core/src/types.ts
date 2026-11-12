@@ -1137,6 +1137,17 @@ export interface SessionsConfig {
   * to continue its last turn. Default false — seal-and-idle only, since a prior
   * run's side-effecting tools may already have executed. */
   autoResumeAfterCrash?: boolean;
+ /** Delete non-pinned sessions whose transcript is older than this many days
+  * (by mtime). 0 (default) never deletes. Pinned sessions are always exempt.
+  * Swept fail-soft at daemon startup. */
+  retentionDays?: number;
+ /** When true, sessions not touched for `coldCompressAfterDays` days have their
+  * plaintext JSONL compressed to a `.jsonl.br` sibling (brotli) to reclaim disk;
+  * they are transparently decompressed when next opened. Default false. */
+  coldCompress?: boolean;
+ /** Days of inactivity before a session is eligible for cold compression when
+  * `coldCompress` is on. Default 30. */
+  coldCompressAfterDays?: number;
 }
 
 export interface StatusLineConfig {

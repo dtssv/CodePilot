@@ -21,11 +21,27 @@
 
 import type Database from "better-sqlite3";
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { brotliDecompressSync } from "node:zlib";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { AgentMode, Event } from "./types.js";
 import type { RichSessionSummary } from "./session-utils.js";
 import { getSessionsDir, sameCwd } from "./session-utils.js";
+
+/** Read a session's JSONL whether live (`.jsonl`) or cold (`.jsonl.br`). Sync
+ * (the index parses synchronously); "" when neither exists. */
+function readSessionJsonlSync(dir: string, id: string): string {
+  try {
+    return readFileSync(join(dir, `${id}.jsonl`), "utf-8");
+  } catch {
+    /* try cold */
+  }
+  try {
+    return brotliDecompressSync(readFileSync(join(dir, `${id}.jsonl.br`))).toString("utf-8");
+  } catch {
+    return "";
+  }
+}
 
 function readSidecar(dir: string, id: string, ext: string): string | null {
   try {
@@ -98,7 +114,7 @@ function parseSession(
   let messageCount = 0;
   let lastStatus: string | null = null;
   try {
-    const text = readFileSync(join(dir, `${id}.jsonl`), "utf-8");
+    const text = readSessionJsonlSync(dir, id);
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       try {
@@ -200,8 +216,14 @@ class SqliteSessionIndex implements SessionIndex {
     // sidecar edit (title/cwd written after the turn) also triggers re-parse.
     const onDisk = new Map<string, { updatedAt: number; stamp: number; size: number }>();
     for (const name of names) {
-      if (!name.endsWith(".jsonl")) continue;
-      const id = name.slice(0, -6);
+      // Index live (`.jsonl`) and cold (`.jsonl.br`) sessions alike so a
+      // compressed session stays listable; the staleness key is its own mtime.
+      const id = name.endsWith(".jsonl.br")
+        ? name.slice(0, -".jsonl.br".length)
+        : name.endsWith(".jsonl")
+          ? name.slice(0, -".jsonl".length)
+          : undefined;
+      if (!id) continue;
       try {
         const st = statSync(join(this.dir, name));
         let stamp = st.mtimeMs;

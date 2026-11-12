@@ -357,6 +357,17 @@ export {
   buildSingleProvider,
 } from "./session-utils.js";
 export type { RecoveredSession, ReconcileSummary } from "./session-utils.js";
+export {
+  sweepSessionRetention,
+  compressColdSessions,
+  freezeSession,
+  thawSession,
+  isSessionCold,
+} from "./sessionCompression.js";
+export type {
+  RetentionSweepResult,
+  ColdCompressResult,
+} from "./sessionCompression.js";
 
 // ---- Goal ----
 export { runGoal, driveGoalRounds } from "./goal.js";

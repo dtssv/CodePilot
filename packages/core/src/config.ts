@@ -164,6 +164,14 @@ export const SessionsConfigSchema = z
     // a prior run's side-effecting tools may already have executed and a blind
     // resume risks double execution.
     autoResumeAfterCrash: z.boolean().optional(),
+    // Delete non-pinned sessions older than this many days by mtime. 0 (default)
+    // never deletes; pinned sessions are always exempt. Swept at daemon startup.
+    retentionDays: z.number().int().nonnegative().optional(),
+    // Compress sessions untouched for `coldCompressAfterDays` days to `.jsonl.br`
+    // (brotli), decompressed transparently on next open. Default false.
+    coldCompress: z.boolean().optional(),
+    // Inactivity threshold (days) for cold compression. Default 30.
+    coldCompressAfterDays: z.number().int().positive().optional(),
   })
   .strict()
   .optional();

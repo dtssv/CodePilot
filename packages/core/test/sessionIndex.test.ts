@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { openSessionIndex, type SessionIndex } from "../src/sessionIndex.js";
+import { compressSessionText } from "../src/session-utils.js";
 
 function writeSession(
   dir: string,
@@ -85,6 +86,26 @@ describe("sessionIndex (SQLite metadata index)", () => {
     const run = i.suspended().find((s) => s.id === "running")!;
     expect(run.lastStatus).toBe("running");
     expect(run.cwd).toBe("/work/x");
+  });
+
+  it("indexes a cold (compressed) session so it stays listable/searchable", () => {
+    const i = open();
+    writeSession(dir!, "warm", { user: "still live" });
+    // A cold session on disk: only a `.jsonl.br`, no plaintext.
+    const coldJsonl =
+      JSON.stringify({ type: "message", id: "u1", role: "user", content: [{ type: "text", text: "archived cold session" }] }) +
+      "\n" +
+      JSON.stringify({ type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "ok" }], model: "m-cold" }) +
+      "\n";
+    writeFileSync(join(dir!, "cold.jsonl.br"), compressSessionText(coldJsonl));
+    const list = i.list();
+    const cold = list.find((s) => s.id === "cold");
+    expect(cold, "cold session should be listed").toBeTruthy();
+    expect(cold!.title).toBe("archived cold session");
+    expect(cold!.model).toBe("m-cold");
+    expect(cold!.messageCount).toBe(2);
+    // Searchable by its (decompressed) metadata.
+    expect(i.search("archived cold").map((s) => s.id)).toContain("cold");
   });
 
   it("filters by cwd (strict; unknown excluded)", () => {

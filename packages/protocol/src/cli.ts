@@ -721,6 +721,33 @@ async function cmdServeWeb(
     }
   })();
 
+  // Boot-time session housekeeping: delete non-pinned sessions older than
+  // `sessions.retentionDays` (0 = never) and, when `sessions.coldCompress` is
+  // on, compress long-inactive sessions to `.jsonl.br` to reclaim disk. Both are
+  // fail-soft and run once in the background so they never delay startup.
+  void (async () => {
+    try {
+      const { loadConfig, sweepSessionRetention, compressColdSessions } = await import(
+        "@codepilot/core"
+      );
+      const cfg = await loadConfig(process.cwd()).catch(() => undefined);
+      const retention = await sweepSessionRetention({ config: cfg });
+      if (retention.deleted.length > 0) {
+        process.stderr.write(
+          `[serve] retention: deleted ${retention.deleted.length} old session(s)\n`,
+        );
+      }
+      const cold = await compressColdSessions({ config: cfg });
+      if (cold.compressed.length > 0) {
+        process.stderr.write(
+          `[serve] cold-store: compressed ${cold.compressed.length} inactive session(s)\n`,
+        );
+      }
+    } catch {
+      /* fail-soft: housekeeping is best-effort, never blocks the daemon */
+    }
+  })();
+
   // Idle / scheduled tasks: run when no live session is busy.
   const { startSchedulerWatcher, createSession } = await import("@codepilot/core");
   const { anyLiveSessionBusy, deliverScheduledFollowup } = await import("./server.js");

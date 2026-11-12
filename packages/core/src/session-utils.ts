@@ -18,6 +18,11 @@ import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promi
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import {
+  brotliCompressSync,
+  brotliDecompressSync,
+  constants as zlibConstants,
+} from "node:zlib";
 import type {
   AgentMode,
   CodepilotConfig,
@@ -266,7 +271,10 @@ export async function extractTitleAndMeta(
   messageCount: number;
 }> {
   try {
-    const text = await readFile(path, "utf-8");
+    // Read live or cold transcript (the `path` arg is the live path; a cold
+    // session is read transparently from its `.jsonl.br` by id).
+    const text = (await readFile(path, "utf-8").catch(() => undefined)) ??
+      (await readSessionJsonlText(id));
     const lines = text.split("\n").filter((l) => l.trim().length > 0);
     let title = "(untitled)";
     let firstUserText = "";
@@ -303,7 +311,7 @@ export async function extractTitleAndMeta(
 
 export async function readSessionSearchCorpus(id: string): Promise<string> {
   try {
-    const text = await readFile(sessionPath(id), "utf-8");
+    const text = await readSessionJsonlText(id);
     const lines = text.split("\n").slice(0, 200);
     const out: string[] = [];
     for (const line of lines) {
@@ -420,6 +428,50 @@ export function renderMarkdownTranscript(events: Event[], id: string): string {
 
 export function sessionPath(id: string): string {
   return join(SESSIONS_DIR, `${id}.jsonl`);
+}
+
+/** Cold-storage path for a session whose plaintext JSONL has been compressed
+ * (see sessionCompression.ts). A session is EITHER live (`.jsonl`, no
+ * compressed sibling) OR cold (`.jsonl.br`, no `.jsonl`) — never both; the
+ * compressed form uses brotli (built into node:zlib, no native dep). */
+export function compressedSessionPath(id: string): string {
+  return join(SESSIONS_DIR, `${id}.jsonl.br`);
+}
+
+/** Compress UTF-8 JSONL text with brotli (quality tuned for text). The codec
+ * lives here, in the low-level persistence module, so every read/write path
+ * (including sessionCompression.ts) shares one implementation. */
+export function compressSessionText(text: string): Buffer {
+  return brotliCompressSync(Buffer.from(text, "utf-8"), {
+    params: {
+      [zlibConstants.BROTLI_PARAM_QUALITY]: 9,
+      [zlibConstants.BROTLI_PARAM_SIZE_HINT]: Buffer.byteLength(text),
+    },
+  });
+}
+
+/** Decompress a brotli-compressed session buffer back to UTF-8 JSONL text. */
+export function decompressSessionBuffer(buf: Buffer): string {
+  return brotliDecompressSync(buf).toString("utf-8");
+}
+
+/**
+ * Read a session's JSONL text whether it is live (`.jsonl`) or cold
+ * (`.jsonl.br`). Returns "" when neither exists / is unreadable. Read-only;
+ * never materializes the plaintext for a cold session. Used by every read path
+ * (list / search / export / title) so cold sessions are transparent.
+ */
+export async function readSessionJsonlText(id: string): Promise<string> {
+  try {
+    return await readFile(sessionPath(id), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return "";
+  }
+  try {
+    return decompressSessionBuffer(await readFile(compressedSessionPath(id)));
+  } catch {
+    return "";
+  }
 }
 
 /** Human-readable record of the turns compaction removed from the session
@@ -810,12 +862,19 @@ async function listSessionsFullScan(
   }
   const summaries: RichSessionSummary[] = [];
   for (const name of entries) {
-    if (!name.endsWith(".jsonl")) continue;
-    const id = name.slice(0, -6);
+    // Enumerate live (`.jsonl`) and cold (`.jsonl.br`) sessions alike. A cold
+    // session's mtime (on the `.jsonl.br`) is its updatedAt; its content is read
+    // transparently by `extractTitleAndMeta`.
+    const id = name.endsWith(".jsonl.br")
+      ? name.slice(0, -".jsonl.br".length)
+      : name.endsWith(".jsonl")
+        ? name.slice(0, -".jsonl".length)
+        : undefined;
+    if (!id) continue;
     const path = join(SESSIONS_DIR, name);
     try {
       const st = await stat(path);
-      const derived = await extractTitleAndMeta(path, id);
+      const derived = await extractTitleAndMeta(sessionPath(id), id);
       const state = await loadSessionState(id);
       summaries.push({
         id,
@@ -1034,18 +1093,14 @@ export async function exportSession(
   format: SessionExportFormat
 ): Promise<string> {
   let events: Event[] = [];
-  try {
-    const text = await readFile(sessionPath(id), "utf-8");
-    for (const line of text.split("\n")) {
-      if (!line) continue;
-      try {
-        events.push(JSON.parse(line) as Event);
-      } catch {
+  const text = await readSessionJsonlText(id);
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try {
+      events.push(JSON.parse(line) as Event);
+    } catch {
  /* skip */
-      }
     }
-  } catch {
- /* empty */
   }
   if (format === "jsonl") {
     return events.map((e) => JSON.stringify(e)).join("\n") + "\n";
