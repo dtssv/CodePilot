@@ -557,9 +557,17 @@ export class CodepilotClient {
     return this.call("session/contextCountPrecise", { sessionId });
   }
 
-  /** List slash commands for the `/` menu (shared built-ins + md commands). */
+  /** List slash commands for the `/` menu (shared built-ins + md commands).
+   * `kind` tells local actions ("local") apart from prompt-expanding markdown
+   * commands ("prompt") without a hard-coded name list. */
   async commandsList(cwd?: string): Promise<{
-    commands: Array<{ name: string; description: string; argumentHint?: string; source: "builtin" | "project" | "user" }>;
+    commands: Array<{
+      name: string;
+      description: string;
+      argumentHint?: string;
+      source: "builtin" | "project" | "user" | "plugin";
+      kind: "local" | "prompt";
+    }>;
     warnings: string[];
   }> {
     return this.call("commands/list", { cwd });

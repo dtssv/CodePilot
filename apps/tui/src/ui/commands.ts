@@ -7,7 +7,7 @@
  * an explicit argument still works as a shortcut.
  */
 import type { AgentMode, PermissionMode, PermissionPresetName, SlashCommand } from "@codepilot/core";
-import { resolveSlashCommand } from "@codepilot/core";
+import { resolveSlashCommand, BUILTIN_COMMANDS } from "@codepilot/core";
 import type { SessionController } from "./controller.js";
 import { THEME_NAMES, type ThemeName } from "./themes.js";
 
@@ -74,39 +74,34 @@ export interface CommandInfo {
   args?: string;
 }
 
-export const COMMANDS: readonly CommandInfo[] = [
-  { name: "help", description: "Show available commands" },
-  { name: "connect", description: "Interactively add a model provider (API key)" },
-  { name: "setup", description: "Run the first-run setup guide (provider · search · images)" },
-  { name: "model", description: "Pick a model (↑↓ + Enter)", args: "[provider/model]" },
-  { name: "provider", description: "Pick a provider preset (↑↓ + Enter)", args: "[id]" },
-  { name: "mode", description: "Pick permission mode (↑↓ + Enter)", args: "[ask|auto-edit|yolo|auto|dont-ask]" },
-  { name: "preset", description: "Pick a permission preset (mode + sandbox)", args: "[safe|standard|full-access|supervised-auto]" },
-  { name: "agent", description: "Pick collaboration mode (↑↓ + Enter)", args: "[chat|plan|agent]" },
-  { name: "theme", description: "Pick a colour palette (↑↓ + Enter)", args: "[default|nord|solarized|high-contrast]" },
-  { name: "plan", description: "Show the current plan" },
-  { name: "compact", description: "Trigger compaction" },
-  { name: "retry", description: "Send the last prompt again" },
-  { name: "resume", description: "Pick a session to resume (↑↓ + Enter)", args: "[session-id]" },
-  { name: "sessions", description: "Pick a session to resume (↑↓ + Enter)" },
-  { name: "goal", description: "Start a long-running goal (prompts for objective)", args: "[objective]" },
-  { name: "clear", description: "Start a fresh task: archive prior context (kept on disk) and clear the log" },
-  { name: "mcp", description: "Show MCP server status & tools" },
-  { name: "hooks", description: "Show configured hooks" },
-  { name: "agents", description: "Show custom sub-agents" },
-  { name: "skills", description: "Show available skills" },
-  { name: "context", description: "Show context window usage" },
-  { name: "plugins", description: "Show installed plugins" },
-  { name: "export", description: "Export session transcript (markdown or jsonl)", args: "[md|jsonl] [path]" },
-  { name: "undo", description: "Undo last agent file edits" },
-  { name: "redo", description: "Redo last undone file edits" },
-  { name: "init", description: "Scaffold AGENTS.md for this project", args: "[--force]" },
-  { name: "web", description: "Open the web UI in your browser (shares this session)" },
-  { name: "remote", description: "Mint a one-time QR for phone remote control" },
-  { name: "schedule", description: "List scheduled / idle tasks" },
-  { name: "gc-artifacts", description: "Reclaim unreferenced spilled artifacts for this project" },
-  { name: "exit", description: "Exit CodePilot" },
-];
+// Picker-friendly descriptions shown in the terminal palette. The command SET,
+// ordering, scope and kind come from the shared catalog (@codepilot/core); this
+// map only overrides the display text for commands whose terminal affordance
+// (an interactive ↑↓ picker) is worth spelling out in the menu. Any command not
+// listed here falls back to the shared catalog's description.
+const TUI_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  model: "Pick a model (↑↓ + Enter)",
+  provider: "Pick a provider preset (↑↓ + Enter)",
+  mode: "Pick permission mode (↑↓ + Enter)",
+  agent: "Pick collaboration mode (↑↓ + Enter)",
+  theme: "Pick a colour palette (↑↓ + Enter)",
+  compact: "Trigger compaction",
+  resume: "Pick a session to resume (↑↓ + Enter)",
+  sessions: "Pick a session to resume (↑↓ + Enter)",
+  goal: "Start a long-running goal (prompts for objective)",
+  clear: "Start a fresh task: archive prior context (kept on disk) and clear the log",
+  export: "Export session transcript (markdown or jsonl)",
+};
+
+// The terminal command list, derived from the shared catalog so the set never
+// drifts from what the `commands/list` RPC advertises. Terminal-only commands
+// (exit, setup, theme, …) are included here even though the RPC omits them for
+// GUI surfaces — the TUI is their only home.
+export const COMMANDS: readonly CommandInfo[] = BUILTIN_COMMANDS.map((c) => ({
+  name: c.name,
+  description: TUI_DESCRIPTIONS[c.name] ?? c.description,
+  ...(c.argumentHint ? { args: c.argumentHint } : {}),
+}));
 
 const AGENT_MODES: readonly AgentMode[] = ["chat", "plan", "agent"];
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo", "auto", "dont-ask"];
@@ -271,39 +266,13 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
   }
 }
 
+// Names a custom `.md` command may not shadow: every built-in from the shared
+// catalog plus the terminal-only aliases (`?` for help, `quit` for exit) that
+// the dispatcher accepts but the catalog does not enumerate.
 export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
-  "help",
+  ...BUILTIN_COMMANDS.map((c) => c.name),
   "?",
-  "connect",
-  "model",
-  "provider",
-  "mode",
-  "preset",
-  "agent",
-  "theme",
-  "plan",
-  "compact",
-  "resume",
-  "sessions",
-  "goal",
-  "clear",
-  "mcp",
-  "hooks",
-  "agents",
-  "skills",
-  "context",
-  "plugins",
-  "export",
-  "undo",
-  "redo",
-  "init",
-  "web",
-  "remote",
-  "schedule",
-  "gc-artifacts",
-  "exit",
   "quit",
-  "retry",
 ]);
 
 export function runCommandWithCustom(

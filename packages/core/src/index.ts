@@ -916,7 +916,7 @@ export type { ContextTransformCheck } from "./contextTransform.js";
 export { BoundedSinkQueue } from "./sessionSink.js";
 export type { SessionEventSink, BoundedSinkQueueOptions } from "./sessionSink.js";
 export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
-export type { BuiltinCommand, BuiltinCommandScope } from "./builtinCommands.js";
+export type { BuiltinCommand, BuiltinCommandScope, CommandKind } from "./builtinCommands.js";
 export { FileObservationStore, hashFileContent } from "./fsObservation.js";
 export type { FileObservation, FreshnessResult } from "./fsObservation.js";
 

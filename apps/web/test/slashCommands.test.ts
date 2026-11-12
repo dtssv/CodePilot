@@ -49,7 +49,8 @@ describe("interpretSlash — local-first semantics", () => {
     const out = await interpretSlash("/compact", cp);
     expect(out.handled).toBe(true);
     expect(out.forward).toBeUndefined();
-    expect((cp.client as never as { sessionCompact: ReturnType<typeof vi.fn> }).sessionCompact).toHaveBeenCalledWith("s1");
+    // No focus arg given → the optional focus is forwarded as undefined.
+    expect((cp.client as never as { sessionCompact: ReturnType<typeof vi.fn> }).sessionCompact).toHaveBeenCalledWith("s1", undefined);
   });
 
   it("/clear archives context locally, no forward", async () => {
@@ -62,6 +63,24 @@ describe("interpretSlash — local-first semantics", () => {
   it("an unknown command is NOT handled locally (flows to the model/server)", async () => {
     const cp = mockCp();
     const out = await interpretSlash("/my-custom-prompt do a thing", cp);
+    expect(out.handled).toBe(false);
+  });
+
+  it("a known LOCAL command this surface can't run is reported, not forwarded", async () => {
+    const cp = mockCp();
+    const knownLocalNames = new Set(["retry", "goal", "resume"]);
+    const out = await interpretSlash("/retry", cp, { knownLocalNames });
+    // Handled locally (no forward, no model turn) even though we don't run it.
+    expect(out.handled).toBe(true);
+    expect(out.forward).toBeUndefined();
+    expect(out.notice).toContain("/retry");
+    expect(cp.send).not.toHaveBeenCalled();
+  });
+
+  it("a prompt-expanding md command is NOT caught by knownLocalNames (still forwards)", async () => {
+    const cp = mockCp();
+    const knownLocalNames = new Set(["retry", "goal"]);
+    const out = await interpretSlash("/my-custom-prompt do a thing", cp, { knownLocalNames });
     expect(out.handled).toBe(false);
   });
 

@@ -52,6 +52,12 @@ export async function interpretSlash(
     openModePicker?: () => void;
     setNotice?: (text: string) => void;
     openPanel?: (name: string) => void;
+    /** Names of known LOCAL commands (kind === "local") advertised by the
+     * `commands/list` RPC. A local command this surface can't yet carry out is
+     * reported as unsupported instead of leaking to the model as a prompt — a
+     * local action must never silently become a model turn. Prompt-expanding
+     * markdown commands are NOT in this set, so they still flow to the server. */
+    knownLocalNames?: ReadonlySet<string>;
   } = {},
 ): Promise<SlashOutcome> {
   const parsed = parseSlash(text);
@@ -116,8 +122,16 @@ export async function interpretSlash(
     return { handled: true };
   }
 
-  // Unknown command → not a known local action. Let it flow to the server,
-  // which resolves project/user markdown commands (prompt-expanding) or echoes
-  // an "unknown command" hint. The caller forwards the full text unchanged.
+  // A known LOCAL command this surface doesn't implement (e.g. /retry, /goal):
+  // surface it as unsupported rather than forwarding — a local action must not
+  // turn into a model prompt. Handled locally (no forward).
+  if (ui.knownLocalNames?.has(name)) {
+    ui.setNotice?.(`/${name} isn't available here yet.`);
+    return { handled: true, notice: `/${name} isn't available here yet.` };
+  }
+
+  // Unknown command → not a known local action (a project/user/plugin markdown
+  // command is prompt-expanding). Let it flow to the server, which resolves it
+  // or echoes an "unknown command" hint. The caller forwards the full text.
   return { handled: false };
 }

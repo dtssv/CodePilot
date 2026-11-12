@@ -291,6 +291,10 @@ interface LayoutProps {
 function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void, placeholder?: string) {
   const { state } = cp;
   const busy = state.status !== "idle";
+  // Cache of known LOCAL command names (kind === "local") from the commands/list
+  // RPC, so a local command this surface can't run is reported as unsupported
+  // instead of leaking to the model. Fetched lazily on first slash use.
+  const localNames = useRef<ReadonlySet<string> | null>(null);
   return {
     value: draft,
     onChange: setDraft,
@@ -303,9 +307,17 @@ function useComposer(cp: Codepilot, draft: string, setDraft: (v: string) => void
       // Slash commands are LOCAL actions first (switch mode / compact / clear /
       // pickers), not prompts — only trailing args (or unknown md commands)
       // reach the model. Attachments bypass interpretation (they can't be a
-      // command). Mirrors codex's slash-dispatch semantics.
+      // command).
       if (text.startsWith("/") && (!images || images.length === 0) && (!files || files.length === 0)) {
-        const outcome = await interpretSlash(text, cp);
+        if (!localNames.current) {
+          try {
+            const r = await cp.client.commandsList(state.cwd || undefined);
+            localNames.current = new Set(r.commands.filter((c) => c.kind === "local").map((c) => c.name));
+          } catch {
+            localNames.current = new Set();
+          }
+        }
+        const outcome = await interpretSlash(text, cp, { knownLocalNames: localNames.current });
         if (outcome.handled) {
           if (outcome.forward && outcome.forward.trim()) {
             await cp.send(outcome.forward, images, files, delivery);

@@ -904,17 +904,25 @@ describe("server / protocol handlers", () => {
       permissionMode: "ask",
       clientInfo: { name: "t", version: "0" },
     });
-    const res = await client.request<{ cwd?: string }, { commands: Array<{ name: string; source: string }>; warnings: string[] }>(
-      "commands/list",
-      {},
-    );
+    const res = await client.request<
+      { cwd?: string },
+      { commands: Array<{ name: string; source: string; kind: string }>; warnings: string[] }
+    >("commands/list", {});
     const names = res.commands.map((c) => c.name);
-    // Shared built-ins are advertised; TUI-only ones (exit/remote/connect) are not.
+    // Shared built-ins are advertised; TUI-only ones (exit/remote/connect/setup/
+    // theme/web) are not.
     expect(names).toContain("compact");
     expect(names).toContain("clear");
     expect(names).toContain("model");
     expect(names).not.toContain("exit");
     expect(names).not.toContain("remote");
+    expect(names).not.toContain("setup");
+    // Every advertised built-in carries source "builtin" and kind "local" so a
+    // GUI client can tell local actions apart from prompt-expanding commands.
+    const model = res.commands.find((c) => c.name === "model")!;
+    expect(model.source).toBe("builtin");
+    expect(model.kind).toBe("local");
+    expect(res.commands.every((c) => c.kind === "local" || c.kind === "prompt")).toBe(true);
   });
 
   it("workspace/complete returns file candidates for an @mention query", async () => {

@@ -279,8 +279,13 @@ export interface CommandInfoRpc {
   name: string;
   description: string;
   argumentHint?: string;
-  /** "builtin" = shipped shared command; "project"/"user" = markdown command. */
-  source: "builtin" | "project" | "user";
+  /** "builtin" = shipped shared command; "project"/"user" = markdown command;
+   * "plugin" = command shipped by an installed plugin. */
+  source: "builtin" | "project" | "user" | "plugin";
+  /** "local" = a client-side action (switch mode, open a picker, compact, …);
+   * "prompt" = expands into a model turn. Built-ins are local; custom markdown
+   * commands are prompt. Lets a GUI client branch without a hard-coded name list. */
+  kind: "local" | "prompt";
 }
 export interface CommandsListResult { commands: CommandInfoRpc[]; warnings: string[]; }
 
@@ -3006,6 +3011,7 @@ async function handleCommandsList(ctx: ServerContext, params?: CommandsListParam
     description: c.description,
     argumentHint: c.argumentHint,
     source: "builtin" as const,
+    kind: c.kind,
   }));
   const warnings: string[] = [];
   try {
@@ -3025,7 +3031,10 @@ async function handleCommandsList(ctx: ServerContext, params?: CommandsListParam
         name: c.name,
         description: c.description,
         argumentHint: c.argumentHint,
-        source: c.source === "builtin" ? "builtin" : c.source === "plugin" ? "user" : c.source,
+        // Markdown commands keep their true source (project / user / plugin);
+        // they always expand into a model turn, so kind is "prompt".
+        source: c.source,
+        kind: "prompt",
       });
     }
     warnings.push(...discovered.warnings);

@@ -1,9 +1,8 @@
 // Reusable `/` (slash command) + `@` (mention) autocomplete menu for the
 // composer. UI-only + keyboard nav; all candidates come from the server via
 // callbacks the parent wires to the protocol client (commandsList /
-// workspaceComplete). Mirrors the mainstream design (codex/opencode/dsh):
-// the server computes ranked candidates, the client just renders and inserts
-// a plain token the agent resolves at prompt time.
+// workspaceComplete): the server computes ranked candidates, the client just
+// renders and inserts a plain token the agent resolves at prompt time.
 
 import React, { useEffect, useRef, useState } from "react";
 
@@ -20,7 +19,9 @@ export interface CommandCandidate {
   name: string;
   description: string;
   argumentHint?: string;
-  source: "builtin" | "project" | "user";
+  source: "builtin" | "project" | "user" | "plugin";
+  /** "local" = client action; "prompt" = expands into a model turn. */
+  kind: "local" | "prompt";
 }
 
 export interface MenuProvider {
