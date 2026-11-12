@@ -265,6 +265,61 @@ export function parseMemory(raw: string | undefined): ParsedMemory {
   return { sections, extras, unstructured: false, raw };
 }
 
+/** Heading titles that mark a user-authored "compact instructions" block in a
+ * project memory file (CODEPILOT.md / AGENTS.md / CLAUDE.md). Matched
+ * case-insensitively; every matching section's body is collected. */
+const COMPACT_INSTRUCTION_TITLES = [
+  "compact instructions",
+  "compaction instructions",
+  "summary instructions",
+  "压缩指令",
+  "压缩说明",
+];
+
+/**
+ * Extract the user's "compact instructions" from the layered project memory
+ * (CODEPILOT.md / AGENTS.md / CLAUDE.md up the tree). Returns the concatenated
+ * bodies of every `## Compact Instructions`-style section found across the
+ * layers (deduped), or undefined when none is present. Section matching reuses
+ * `parseMemory`, so the block lives alongside the rest of a project's memory.
+ */
+export async function readCompactInstructions(
+  cwd: string,
+  opts?: { walkToHome?: boolean },
+): Promise<string | undefined> {
+  const raw = await readLayeredProjectMemory(cwd, opts);
+  return extractCompactInstructions(raw);
+}
+
+/** Pull `## Compact Instructions` bodies out of already-loaded memory markdown.
+ * Split out from {@link readCompactInstructions} so it can be unit-tested and
+ * reused on cached memory without re-reading the filesystem. */
+export function extractCompactInstructions(raw: string | undefined): string | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  const found: string[] = [];
+  const seen = new Set<string>();
+  // A layered file concatenates several documents with `---` separators; parse
+  // the whole thing — `parseMemory` collects non-canonical `##` sections into
+  // `extras`, which is exactly where a Compact Instructions block lands.
+  const { extras } = parseMemory(raw);
+  for (const { title, body } of extras) {
+    if (!COMPACT_INSTRUCTION_TITLES.includes(title.trim().toLowerCase())) continue;
+    // A layered document concatenates files with `---` separators and annotates
+    // each with a `<!-- from <path> -->` comment. When a `## Compact
+    // Instructions` section is the last one in its file, its body runs up to the
+    // next file's `##` header, swallowing the separator + comment — strip those
+    // trailing lines so only the instruction text remains.
+    const trimmed = body
+      .replace(/\n*(?:^|\n)\s*---\s*(?:\n|$)[\s\S]*$/m, "")
+      .replace(/\n*<!--[\s\S]*?-->\s*$/g, "")
+      .trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    found.push(trimmed);
+  }
+  return found.length > 0 ? found.join("\n\n") : undefined;
+}
+
 /** Best-effort mapping from a free-text title to a canonical section. */
 export function classifySection(title: string, content: string): MemorySection {
   const t = `${title}\n${content}`.toLowerCase();

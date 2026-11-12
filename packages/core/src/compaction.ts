@@ -32,6 +32,15 @@ export interface CompactionOptions {
    * window but `estimateEventTokens` still under-counts (CJK/tools/images).
    */
   force?: boolean;
+  /**
+   * User-authored "compact instructions" — what the summary MUST preserve.
+   * Merged from project memory (a `## Compact Instructions` section), a
+   * per-invocation `/compact <focus…>` argument, and a PreCompact hook, in that
+   * order. Appended to the summariser's system prompt as a fixed
+   * "Additional Instructions" block. Empty/omitted leaves the base prompt
+   * unchanged.
+   */
+  extraInstructions?: string;
 }
 
 export interface CompactionDecision {
@@ -957,7 +966,7 @@ export async function compact(
       const drop = working.slice(0, cutoff);
       const recent = working.slice(cutoff);
       try {
-        summary = await callSummariser(opts.summariser, drop, opts.summaryModel);
+        summary = await callSummariser(opts.summariser, drop, opts.summaryModel, opts.extraInstructions);
       } catch {
         summary = "";
       }
@@ -1015,23 +1024,64 @@ export async function compact(
 async function callSummariser(
   provider: ChatProvider,
   events: Event[],
-  model: string | undefined
+  model: string | undefined,
+  extraInstructions?: string,
 ): Promise<string> {
   const userContent = events
     .map(serializeForSummary)
     .filter((s) => s !== "")
     .join("\n---\n");
   const collected: string[] = [];
+  const systemPrompt = composeSummaryPrompt(extraInstructions);
   const stream = provider.stream({
     model: model ?? provider.smallModel,
     messages: [{ role: "user", content: [{ type: "text", text: userContent }] }],
-    systemPrompt: SUMMARY_SYSTEM_PROMPT,
+    systemPrompt,
   });
   for await (const ev of stream) {
     if (ev.kind === "text_delta") collected.push(ev.text);
     if (ev.kind === "error") throw new Error(ev.message);
   }
   return collected.join("").trim() || "(no summary produced)";
+}
+
+/** Compose the summariser system prompt: the base checkpoint spec plus an
+ * optional, clearly-delimited "Additional Instructions" block carrying the
+ * user's compact instructions (what the summary MUST preserve). */
+export function composeSummaryPrompt(extraInstructions?: string): string {
+  const extra = (extraInstructions ?? "").trim();
+  if (extra.length === 0) return SUMMARY_SYSTEM_PROMPT;
+  return (
+    SUMMARY_SYSTEM_PROMPT +
+    "\n\n## Additional Instructions\n" +
+    "The user has explicitly asked that the summary preserve the following. " +
+    "Treat these as hard requirements and do not drop them:\n\n" +
+    extra
+  );
+}
+
+/**
+ * Merge compact instructions from their three sources into one block. The
+ * precedence order is project file → per-invocation slash focus → hook, with
+ * later sources appended after earlier ones (a later source does not erase an
+ * earlier one — all are hard requirements). Blank sources are skipped and exact
+ * duplicate blocks are collapsed so the same instruction isn't repeated when,
+ * say, the hook echoes the file. Returns undefined when nothing was supplied.
+ */
+export function mergeCompactInstructions(sources: {
+  project?: string;
+  focus?: string;
+  hook?: string;
+}): string | undefined {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [sources.project, sources.focus, sources.hook]) {
+    const trimmed = (raw ?? "").trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    parts.push(trimmed);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 /** Decide whether a usage update means compaction should run.

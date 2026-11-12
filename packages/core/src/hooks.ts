@@ -107,6 +107,11 @@ export interface PreHookResult {
  * original input before execution. Only the first hook's replacement
  * wins; subsequent hooks see the rewritten input. */
   updatedInput?: unknown;
+ /** Extra compact instructions a PreCompact hook returned (its stdout JSON
+  * `additionalInstructions`/`additional_instructions`). Merged into the
+  * summariser's "Additional Instructions" block. Blocks from multiple hooks are
+  * concatenated. Undefined when no hook supplied any. */
+  additionalInstructions?: string;
   warnings: string[];
 }
 
@@ -377,6 +382,7 @@ export class HookEngine {
     customInstructions?: string,
   ): Promise<PreHookResult> {
     const warnings: string[] = [];
+    const extra: string[] = [];
     for (const h of this.matching("PreCompact", trigger, { trigger })) {
       const r = await this.runHook(h, {
         event: "PreCompact",
@@ -393,6 +399,10 @@ export class HookEngine {
           warnings,
         };
       }
+      if (typeof decision.additionalInstructions === "string") {
+        const trimmed = decision.additionalInstructions.trim();
+        if (trimmed.length > 0) extra.push(trimmed);
+      }
       if (r.code !== 0 && r.code !== null) {
         warnings.push(
           `PreCompact hook "${h.command}" exited ${r.code}: ${r.stderr.trim()}`,
@@ -400,7 +410,11 @@ export class HookEngine {
       }
       if (r.timedOut) warnings.push(`PreCompact hook "${h.command}" timed out`);
     }
-    return { action: "allow", warnings };
+    return {
+      action: "allow",
+      warnings,
+      additionalInstructions: extra.length > 0 ? extra.join("\n\n") : undefined,
+    };
   }
 
  /** Run PostCompact hooks. Cannot block; fire-and-forget feedback. */

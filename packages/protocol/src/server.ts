@@ -667,10 +667,10 @@ export function registerServer(
   peer.onRequest<{ sessionId: string; archived: boolean }, { ok: true }>("session/archive", (p) =>
     handleSessionArchive(ctx, p),
   );
-  peer.onRequest<{ sessionId: string }, { ok: true }>("session/compact", async (p) => {
+  peer.onRequest<{ sessionId: string; focus?: string }, { ok: true }>("session/compact", async (p) => {
     assertInitialized(ctx);
     if (!p?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
-    await requireSession(ctx, p.sessionId).compact();
+    await requireSession(ctx, p.sessionId).compact(p.focus);
     return { ok: true };
   });
   peer.onRequest<

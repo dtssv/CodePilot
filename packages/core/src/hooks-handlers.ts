@@ -362,6 +362,9 @@ export interface HookDecision {
   * `feedback`, which only appends). Honoured only for PostToolUse; the first
   * hook that returns one wins and later hooks see the rewritten text. */
   updatedResult?: string;
+ /** PreCompact: extra compact instructions the hook asks the summary to
+  * preserve (stdout JSON `additionalInstructions` / `additional_instructions`). */
+  additionalInstructions?: string;
 }
 
 /**
@@ -387,7 +390,21 @@ export function interpretDecision(r: HookRawResult): HookDecision {
     const updatedInput = "updatedInput" in json ? json.updatedInput : undefined;
     const updatedResult =
       typeof json.updatedResult === "string" ? json.updatedResult : undefined;
-    return { action, reason, feedback, rewrittenPrompt, updatedInput, updatedResult };
+    const additionalInstructions =
+      typeof json.additionalInstructions === "string"
+        ? json.additionalInstructions
+        : typeof json.additional_instructions === "string"
+          ? json.additional_instructions
+          : undefined;
+    return {
+      action,
+      reason,
+      feedback,
+      rewrittenPrompt,
+      updatedInput,
+      updatedResult,
+      additionalInstructions,
+    };
   }
   return { action: "allow" };
 }

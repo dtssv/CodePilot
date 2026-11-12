@@ -54,13 +54,14 @@ import { ToolRegistry, zodToJsonSchema, type ToolDef } from "./tools/types.js";
 import { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 import { ArtifactStore } from "./tools/artifacts.js";
 import { PermissionEngine } from "./permissions.js";
-import { readMemory, readLayeredProjectMemory, FileMemorySink, summariseMemory } from "./memory.js";
+import { readMemory, readLayeredProjectMemory, readCompactInstructions, FileMemorySink, summariseMemory } from "./memory.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { compact, liveTranscript, renderTranscriptArchive, shouldCompact, type CompactionOptions, type CompactionResult } from "./compaction.js";
 import {
   extractPlan,
   estimateEventTokens,
   compactionGeometry,
+  mergeCompactInstructions,
   DEFAULT_COMPACTION_FRACTION,
   PROVIDER_INPUT_COMPACTION_RATIO,
   HARD_TRIM_RATIO,
@@ -429,6 +430,11 @@ export class Session {
   * The next turn forces a system-prompt rebuild so the model sees the updated
   * memory instead of the stale index captured in `systemPromptCache`. */
   private memoryIndexDirty = false;
+ /** Cached project "compact instructions" (a `## Compact Instructions` section
+  * in CODEPILOT.md / AGENTS.md / CLAUDE.md). Loaded lazily before compaction and
+  * invalidated whenever memory changes (same trigger as `memoryIndexDirty`).
+  * `undefined` means "not loaded yet"; a loaded-but-absent value is `null`. */
+  private compactInstructionsCache: string | null | undefined = undefined;
  /** Pending prompt-cache warm timer + its abort controller. Scheduled at a
   * turn end when a warm is cost-effective; cancelled when the next real turn
   * starts (it supersedes the warm) or on dispose. */
@@ -3988,10 +3994,20 @@ export class Session {
    * pre-computation when its fingerprint still matches the current history.
    * This is what turns the otherwise-blocking small-model summary into a
    * free, already-done step on the turn that crosses the hard trigger. */
-  private async runCompaction(trigger: number, force: boolean): Promise<CompactionResult> {
+  private async runCompaction(
+    trigger: number,
+    force: boolean,
+    extraInstructions?: string,
+    hasFocus?: boolean,
+  ): Promise<CompactionResult> {
     const cached = this.precompact;
     this.precompact = null;
-    if (cached && cached.fingerprint === this.historyFingerprint()) {
+    // Reuse the pre-computed summary only when no per-invocation focus applies.
+    // The pre-computation already folded in the project `## Compact Instructions`
+    // and any PreCompact-hook additions (the auto path), so those match; but a
+    // `/compact <focus…>` argument the cache couldn't know forces a fresh
+    // summarise so the focus is honoured.
+    if (cached && cached.fingerprint === this.historyFingerprint() && !hasFocus) {
       // The pre-computed summary was built from exactly this history — reuse
       // it verbatim (including droppedRange, so the archive write still runs),
       // skipping the small-model round-trip on the hot path.
@@ -4003,7 +4019,24 @@ export class Session {
       // Use the small provider for summarisation (best-effort).
       summariser: buildSmallProvider(this.config),
       summaryModel: this.config.smallModel,
+      extraInstructions,
     } as CompactionOptions);
+  }
+
+  /** Load the project's `## Compact Instructions` section (CODEPILOT.md /
+   * AGENTS.md / CLAUDE.md), session-cached and invalidated on memory change.
+   * Returns undefined when absent. */
+  private async loadCompactInstructions(): Promise<string | undefined> {
+    if (this.compactInstructionsCache === undefined) {
+      try {
+        const walkToHome = this.config.memory?.walkToHome === true;
+        this.compactInstructionsCache =
+          (await readCompactInstructions(this.cwd, { walkToHome })) ?? null;
+      } catch {
+        this.compactInstructionsCache = null;
+      }
+    }
+    return this.compactInstructionsCache ?? undefined;
   }
 
   /** Turn-boundary pre-compaction (best practice: compact at the natural pause
@@ -4037,10 +4070,18 @@ export class Session {
     const tokens = estimateEventTokens(this.events, estimateTokens);
     if (tokens < softTrigger || tokens >= hardTrigger) return;
     // Don't pre-compact through a PreCompact hook that would block it anyway.
+    // Pre-computation is the auto path: fold in the project `## Compact
+    // Instructions` (no per-invocation focus here) so the cached summary matches
+    // what the auto `runCompaction` would produce.
+    const projectInstructions = await this.loadCompactInstructions();
     const pre = await this.hooks
-      .runPreCompact("auto")
+      .runPreCompact("auto", projectInstructions)
       .catch(() => ({ action: "allow" as const, warnings: [] }));
     if (pre.action === "block") return;
+    const extraInstructions = mergeCompactInstructions({
+      project: projectInstructions,
+      hook: (pre as { additionalInstructions?: string }).additionalInstructions,
+    });
     this.precompactInFlight = true;
     const fingerprint = this.historyFingerprint();
     try {
@@ -4049,6 +4090,7 @@ export class Session {
         force: true, // soft band is below the local gate; force the shrink
         summariser: buildSmallProvider(this.config),
         summaryModel: this.config.smallModel,
+        extraInstructions,
       } as CompactionOptions);
       // Only keep it if the history hasn't moved under us while summarising.
       if (result.events !== this.events && this.historyFingerprint() === fingerprint) {
@@ -4088,7 +4130,11 @@ export class Session {
       const consolidated = await maybeConsolidateMemory(deps).catch(() => false);
       // A consolidation rewrote MEMORY.md; mark the index stale so the next
       // turn rebuilds the system prompt with the updated memory.
-      if (consolidated) this.memoryIndexDirty = true;
+      if (consolidated) {
+        this.memoryIndexDirty = true;
+        // A memory rewrite may add/change a `## Compact Instructions` section.
+        this.compactInstructionsCache = undefined;
+      }
     } catch {
       /* fail-soft: memory consolidation never blocks the session */
     } finally {
@@ -4146,7 +4192,7 @@ export class Session {
     this.cacheWarmTimer.unref?.();
   }
 
-  private async maybeCompact(opts: { force?: boolean } = {}): Promise<void> {
+  private async maybeCompact(opts: { force?: boolean; focus?: string } = {}): Promise<void> {
  // Master toggle: when autoCompact is explicitly false, the session
  // never auto-compacts (the user must invoke /compact manually).
     if (this.config.autoCompact === false) return;
@@ -4172,10 +4218,21 @@ export class Session {
       const decision = shouldCompact(this.events, { contextWindow: trigger });
       if (!decision.shouldCompact) return;
     }
+    // Compact instructions: what the summary MUST preserve. Sourced from the
+    // project memory's `## Compact Instructions` section, a per-invocation
+    // `/compact <focus…>` argument, and (below) a PreCompact hook. The trigger
+    // literal reflects whether this is a manual `/compact` (force) or the
+    // threshold-driven auto path.
+    const hookTrigger: "manual" | "auto" = force ? "manual" : "auto";
+    const projectInstructions = await this.loadCompactInstructions();
+    const fileAndFocus = mergeCompactInstructions({
+      project: projectInstructions,
+      focus: opts.focus,
+    });
  // PreCompact hooks may block compaction (e.g. to preserve state during
- // a long-running task). Manual compaction is trigger "manual"; the
- // threshold-driven path here is "auto".
-    const pre = await this.hooks.runPreCompact("auto").catch(() => ({
+ // a long-running task). They also receive the file+focus instructions and
+ // may return their own `additionalInstructions` to fold in.
+    const pre = await this.hooks.runPreCompact(hookTrigger, fileAndFocus).catch(() => ({
       action: "allow" as const,
       warnings: [],
     }));
@@ -4185,9 +4242,19 @@ export class Session {
       );
       return;
     }
+    const extraInstructions = mergeCompactInstructions({
+      project: projectInstructions,
+      focus: opts.focus,
+      hook: (pre as { additionalInstructions?: string }).additionalInstructions,
+    });
     let result: CompactionResult;
     try {
-      result = await this.runCompaction(trigger, force);
+      result = await this.runCompaction(
+        trigger,
+        force,
+        extraInstructions,
+        !!(opts.focus && opts.focus.trim().length > 0),
+      );
     } catch (err) {
       // A thrown compaction counts as a failure toward the breaker. Manual
       // compaction surfaces the error to the caller; auto swallows it (the run
@@ -4278,7 +4345,7 @@ export class Session {
     const summary = compactionEvent && compactionEvent.type === "compaction"
       ? compactionEvent.summary
       : "";
-    await this.hooks.runPostCompact("auto", summary).catch(() => undefined);
+    await this.hooks.runPostCompact(hookTrigger, summary).catch(() => undefined);
 
     // Breaker evaluation on a successful compaction: if the live transcript is
     // still at/over the hard trigger, the compaction did not actually get us
@@ -4494,8 +4561,8 @@ export class Session {
   /** Public manual compaction (the `/compact` command). Forces a summary pass
    * now regardless of token pressure, keeping the session going on the same
    * task (unlike clearWorkingContext, which draws a task boundary). */
-  async compact(): Promise<void> {
-    await this.maybeCompact({ force: true });
+  async compact(focus?: string): Promise<void> {
+    await this.maybeCompact({ force: true, focus });
   }
 
   /**

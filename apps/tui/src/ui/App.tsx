@@ -932,12 +932,27 @@ export function App(props: AppProps): React.ReactElement {
             text = last.text;
             break;
           }
-          case "compact":
+          case "compact": {
+            // Manual compaction, same task. An optional focus tells the
+            // summariser what to preserve this run.
+            const focus = result.focus;
             dispatch({
               type: "set-notice",
-              text: "Manual compaction requested — if core supports it, look for a status:compacting event shortly.",
+              text: focus
+                ? `Compacting conversation (focus: ${focus})…`
+                : "Compacting conversation…",
             });
+            try {
+              await session.compact(focus);
+              dispatch({ type: "set-notice", text: "Compacted." });
+            } catch (err: unknown) {
+              dispatch({
+                type: "set-notice",
+                text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            }
             return;
+          }
           case "list-sessions": {
             await openSessionPicker();
             return;

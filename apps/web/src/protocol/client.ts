@@ -532,8 +532,8 @@ export class CodepilotClient {
   }
 
   /** Manual compaction (`/compact`): summarise now, keep going on the task. */
-  async sessionCompact(sessionId: string): Promise<{ ok: true }> {
-    return this.call("session/compact", { sessionId });
+  async sessionCompact(sessionId: string, focus?: string): Promise<{ ok: true }> {
+    return this.call("session/compact", { sessionId, ...(focus ? { focus } : {}) });
   }
 
   /** Task boundary (`/clear`): archive context, continue with a clean slate. */

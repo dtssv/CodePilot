@@ -36,7 +36,7 @@ export type CommandResult =
   | { kind: "clear" }
   | { kind: "exit" }
   | { kind: "show-plan" }
-  | { kind: "compact" }
+  | { kind: "compact"; focus?: string }
   | { kind: "retry" }
   | { kind: "goal"; objective: string }
   | { kind: "show-mcp" }
@@ -208,7 +208,7 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
     case "plan":
       return { kind: "show-plan" };
     case "compact":
-      return { kind: "compact" };
+      return { kind: "compact", focus: rest || undefined };
     case "retry":
       return { kind: "retry" };
     case "resume": {

@@ -81,10 +81,11 @@ export async function interpretSlash(
     return { handled: true };
   }
 
-  // --- /compact: manual compaction, same task. No LLM turn.
+  // --- /compact [focus…]: manual compaction, same task. The optional focus
+  //     text tells the summariser what to preserve this run. No LLM turn.
   if (name === "compact") {
-    if (sessionId) await cp.client.sessionCompact(sessionId).catch(() => {});
-    ui.setNotice?.("Compacting conversation…");
+    if (sessionId) await cp.client.sessionCompact(sessionId, args || undefined).catch(() => {});
+    ui.setNotice?.(args ? `Compacting conversation (focus: ${args})…` : "Compacting conversation…");
     return { handled: true };
   }
 
