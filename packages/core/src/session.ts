@@ -30,7 +30,7 @@ import {
   createPromptPermissionClassifier,
   type PermissionClassifier,
 } from "./permissionClassifier.js";
-import { INTERRUPTED_RESULT, decideLazyMcp, buildProviderMessages, buildProviderToolDefs, listAdvertisedToolNames } from "./agent-messages.js";
+import { INTERRUPTED_RESULT, NOT_STARTED_RESULT, decideLazyMcp, buildProviderMessages, buildProviderToolDefs, listAdvertisedToolNames } from "./agent-messages.js";
 import { runtimeRegistry, type AgentRuntime, type PluginToolDef } from "./runtime.js";
 import { BoundedSinkQueue } from "./sessionSink.js";
 import type {
@@ -3679,6 +3679,8 @@ export class Session {
   private async sealOrphanedToolCalls(): Promise<number> {
     const callNames = new Map<string, string>();
     const answered = new Set<string>();
+    // Calls that reached execution (a `tool_started` marker was persisted).
+    const started = new Set<string>();
     for (const e of this.events) {
       if (e.type === "tool_call") {
         if (!callNames.has(e.id)) callNames.set(e.id, e.name);
@@ -3688,16 +3690,20 @@ export class Session {
         }
       } else if (e.type === "tool_result") {
         answered.add(e.toolCallId);
+      } else if (e.type === "tool_started") {
+        started.add(e.toolCallId);
       }
     }
     let sealed = 0;
     for (const [id, name] of callNames) {
       if (answered.has(id)) continue;
+      // A call killed before it started (no marker) never took effect and is
+      // safe to retry; one with a marker but no result has an UNKNOWN outcome.
       const ev: Event = {
         type: "tool_result",
         toolCallId: id,
         name,
-        content: INTERRUPTED_RESULT,
+        content: started.has(id) ? INTERRUPTED_RESULT : NOT_STARTED_RESULT,
         isError: true,
       };
       this.events.push(ev);

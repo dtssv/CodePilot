@@ -177,16 +177,18 @@ describe("provider transcript", () => {
     expect(r.type === "tool_result" && r.isError).toBe(true);
   });
 
-  it("the synthetic result for an interrupted tool is side-effect-safe (outcome unknown, not 'just re-issue')", () => {
-    // Borrowed from dsh's repair-closer: a crash can land AFTER a mutating tool
-    // took effect, so the synthetic result must mark the outcome UNKNOWN and
-    // warn against blindly re-running side-effecting calls — not tell the model
-    // it simply "never ran, re-issue it". This pins that safer contract.
+  it("the synthetic result for a tool interrupted after it started is side-effect-safe (outcome unknown)", () => {
+    // A crash can land AFTER a mutating tool took effect, so when the tool had
+    // actually started (a tool_started marker is present) the synthetic result
+    // must mark the outcome UNKNOWN and warn against blindly re-running
+    // side-effecting calls — not tell the model it simply "never ran".
     const events: Event[] = [
       { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "delete the temp files" }] },
       { type: "tool_call", id: "t1", name: "bash", input: { command: "rm -rf build" } },
       { type: "message", id: "a1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "rm -rf build" } }] },
-      // Process crashed here: no tool_result was ever recorded.
+      // The tool cleared permission and began executing...
+      { type: "tool_started", toolCallId: "t1", name: "bash" },
+      // ...then the process crashed: no tool_result was ever recorded.
     ];
     const msgs = compactTranscriptToProviderMessages(events, "");
     const result = msgs
@@ -200,6 +202,28 @@ describe("provider transcript", () => {
     expect(text).toMatch(/UNKNOWN|unknown/);
     expect(text).toMatch(/side effect|verify|re-read|ask the user/i);
     expect(text).not.toMatch(/Re-issue the call only if you still need it/);
+  });
+
+  it("the synthetic result for a tool interrupted before it started says it is safe to retry", () => {
+    // Killed while waiting on permission: no tool_started marker, so the call
+    // never ran and could not have taken effect — the model is told it is safe
+    // to re-issue, without the side-effect caution.
+    const events: Event[] = [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "delete the temp files" }] },
+      { type: "tool_call", id: "t1", name: "bash", input: { command: "rm -rf build" } },
+      { type: "message", id: "a1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "rm -rf build" } }] },
+      // Crashed before the tool cleared permission: no tool_started, no result.
+    ];
+    const msgs = compactTranscriptToProviderMessages(events, "");
+    const result = msgs
+      .flatMap((m) => m.content)
+      .find((b): b is Extract<typeof b, { type: "tool_result" }> => b.type === "tool_result" && b.toolCallId === "t1");
+    expect(result).toBeTruthy();
+    expect(result!.isError).toBe(true);
+    const text = String(result!.content);
+    expect(text).toMatch(/before this tool started running/);
+    expect(text).toMatch(/safe to re-issue/i);
+    expect(text).not.toMatch(/UNKNOWN/);
   });
 
   it("drops results whose call is gone (compacted away)", () => {

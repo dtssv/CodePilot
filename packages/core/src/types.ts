@@ -127,6 +127,18 @@ type EventBody =
       name: string;
       input: unknown;
     }
+ /**
+  * Lifecycle marker persisted the instant a tool call clears permission (and
+  * validation) and is about to execute — i.e. it is no longer merely sampled
+  * but has actually started doing work. Append-only safe: a `tool_call` is
+  * persisted at sampling time, long before execution, so we cannot stamp a
+  * "started" flag onto it without rewriting history; this separate marker is
+  * the append-only-correct signal. Its sole use is to let crash-recovery seal
+  * an orphaned call differently — a call with no `tool_started` never began
+  * (safe to retry), one with a marker but no result has an UNKNOWN outcome. A
+  * control event: never sent to the model, zero context cost.
+  */
+  | { type: "tool_started"; toolCallId: string; name: string }
   | {
       type: "tool_result";
       toolCallId: string;

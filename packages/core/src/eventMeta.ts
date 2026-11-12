@@ -39,6 +39,8 @@ export function linkIdForEvent(e: Event): string | undefined {
       return e.id;
     case "tool_result":
       return `result:${e.toolCallId}`;
+    case "tool_started":
+      return `started:${e.toolCallId}`;
     case "request":
       return `request:${e.startedAt}`;
     case "compaction":

@@ -250,6 +250,14 @@ export const INTERRUPTED_RESULT =
   "(writing/editing files, running commands, network or data changes), first verify the actual " +
   "state (e.g. re-read the file or list the resource) or ask the user before re-running.]";
 
+// Synthetic result for a tool_use that was cut off BEFORE it started executing
+// — there is no `tool_started` marker, so the call never reached its handler
+// (killed while waiting on permission, or before dispatch). It had no chance to
+// take effect, so re-issuing it is safe regardless of whether it mutates state.
+export const NOT_STARTED_RESULT =
+  "[interrupted: the turn was cut off before this tool started running, so it had no effect. " +
+  "It is safe to re-issue the call.]";
+
 /**
  * Map the internal event transcript into the provider's message format.
  *
@@ -267,11 +275,16 @@ export function compactTranscriptToProviderMessages(
 ): ProviderMessage[] {
   const callsInMessages = new Set<string>();
   const resultEvents = new Set<string>();
+  // Calls that reached execution (a `tool_started` marker was persisted). An
+  // orphan with a marker sealed as outcome-unknown; without one, never-started.
+  const startedCalls = new Set<string>();
   for (const e of transcript) {
     if (e.type === "message" && e.role === "assistant") {
       for (const b of e.content) if (b.type === "tool_use") callsInMessages.add(b.id);
     } else if (e.type === "tool_result") {
       resultEvents.add(e.toolCallId);
+    } else if (e.type === "tool_started") {
+      startedCalls.add(e.toolCallId);
     }
   }
 
@@ -333,7 +346,8 @@ export function compactTranscriptToProviderMessages(
   const closeOpenCalls = (): void => {
     for (const id of open) {
       answered.add(id);
-      push("user", [{ type: "tool_result", toolCallId: id, content: INTERRUPTED_RESULT, isError: true }]);
+      const content = startedCalls.has(id) ? INTERRUPTED_RESULT : NOT_STARTED_RESULT;
+      push("user", [{ type: "tool_result", toolCallId: id, content, isError: true }]);
     }
     open = [];
   };

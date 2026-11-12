@@ -479,6 +479,13 @@ export async function runOneTool(
       : undefined,
   };
 
+  // Mark the call as started: permission is granted, PreToolUse hooks passed,
+  // and input validated — execution is now imminent. If the process is killed
+  // from here on, crash recovery sees this marker and seals the orphan as
+  // "outcome unknown" rather than "never started" (a call killed while still
+  // waiting on permission has no marker and is safe to retry).
+  await emit({ type: "tool_started", toolCallId: tc.id, name: tc.name });
+
   try {
     const result = await tool.execute(parsed as never, ctx);
     let content = result.content;

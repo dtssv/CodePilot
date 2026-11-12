@@ -106,6 +106,65 @@ describe("Session seals orphaned tool_calls on crash recovery", () => {
     expect(sealIdx).toBeLessThan(idleIdx);
   });
 
+  it("seals a call killed before it started as safe-to-retry (no started marker)", async () => {
+    dir = mkdtempSync(join(tmpdir(), "seal-notstarted-"));
+    const id = `seal_${Date.now()}_ns`;
+    // Killed while waiting on permission: tool_call persisted, but no
+    // tool_started marker and no result.
+    seedSession(id, [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }] },
+      {
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "bash", input: { command: "ls" } }],
+      },
+      { type: "tool_call", id: "call_1", name: "bash", input: { command: "ls" } },
+      { type: "status", status: "running" },
+    ]);
+
+    session = makeSession(id);
+    await session.init();
+
+    const sealed = readPersisted(id).find(
+      (e) => e.type === "tool_result" && e.toolCallId === "call_1",
+    ) as Extract<Event, { type: "tool_result" }> | undefined;
+    expect(sealed).toBeDefined();
+    expect(sealed!.content).toContain("before this tool started running");
+    expect(sealed!.content).toContain("safe to re-issue");
+    // Must NOT carry the outcome-unknown wording.
+    expect(sealed!.content).not.toContain("UNKNOWN");
+  });
+
+  it("seals a call killed after it started as outcome-unknown (started marker present)", async () => {
+    dir = mkdtempSync(join(tmpdir(), "seal-started-"));
+    const id = `seal_${Date.now()}_st`;
+    // Killed while bash was executing: tool_call + tool_started persisted, no
+    // result.
+    seedSession(id, [
+      { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }] },
+      {
+        type: "message",
+        id: "m1",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "bash", input: { command: "ls" } }],
+      },
+      { type: "tool_call", id: "call_1", name: "bash", input: { command: "ls" } },
+      { type: "tool_started", toolCallId: "call_1", name: "bash" },
+      { type: "status", status: "running" },
+    ]);
+
+    session = makeSession(id);
+    await session.init();
+
+    const sealed = readPersisted(id).find(
+      (e) => e.type === "tool_result" && e.toolCallId === "call_1",
+    ) as Extract<Event, { type: "tool_result" }> | undefined;
+    expect(sealed).toBeDefined();
+    expect(sealed!.content).toContain("UNKNOWN");
+    expect(sealed!.content).not.toContain("before this tool started running");
+  });
+
   it("does not seal a tool_call that already has a result", async () => {
     dir = mkdtempSync(join(tmpdir(), "seal-ok-"));
     const id = `seal_${Date.now()}_b`;
