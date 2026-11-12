@@ -9,6 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { detectDegenerateText, detectRunawayRepetition } from "./textDegeneration.js";
 import { runAgent, type AgentDeps, isTransientError } from "./agent.js";
+import { trimEventsToBudget } from "./compaction.js";
 import type { CodepilotConfig, Event, QuestionAnswers, UsageInfo } from "./types.js";
 import { ToolRegistry } from "./tools/types.js";
 import { ArtifactStore } from "./tools/artifacts.js";
@@ -156,6 +157,12 @@ export interface SubagentFactoryOptions {
   addDeliveryRoot?: AgentDeps["addDeliveryRoot"];
   scratchDir?: () => string | undefined;
   projectStateDir?: () => string | undefined;
+ /** Snapshot of the parent's model-visible events, used to seed a `context:
+  * "fork"` sub-agent. Returns the same view `Session.getEvents()` does (the
+  * post-compaction working set), which the runner trims and prepends before the
+  * objective. Omitted (or absent) means forking is unavailable and the sub-agent
+  * runs fresh. */
+  getParentEvents?: () => Event[];
  /** Build the tool registry for the given agent type. */
   buildToolRegistry: (agentType?: "explore" | "worker") => ToolRegistry;
  /** Optional hook engine to fire SubagentStop events (may block + continue). */
@@ -179,7 +186,7 @@ export function createSubagentRunner(
   factoryOpts: SubagentFactoryOptions
 ): SubagentRunner {
   return {
-    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath }) {
+    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath, context, forkMaxTokens }) {
       const live = factoryOpts.getEndpoint?.();
       const opts: SubagentFactoryOptions = live
         ? { ...factoryOpts, config: live.config, model: live.model }
@@ -433,6 +440,29 @@ export function createSubagentRunner(
         content: [{ type: "text", text: initialText }],
       };
 
+      // Fork seed: when `context: "fork"` (and not resuming), inherit a copy of
+      // the parent's model-visible history as a prefix so the sub-agent sees the
+      // files and references the parent already read. The prefix is trimmed to a
+      // token budget (older turns folded/dropped), with a marker so the sub-agent
+      // treats it as prior context from the parent, not its own work. Dangling
+      // tool calls in the slice are repaired at provider-build time. The prefix
+      // is context-only — it is not persisted into the sub-agent's transcript.
+      let forkPrefix: Event[] = [];
+      if (context === "fork" && !resuming) {
+        const parentEvents = opts.getParentEvents?.() ?? [];
+        if (parentEvents.length > 0) {
+          const budget = forkMaxTokens ?? DEFAULT_FORK_MAX_TOKENS;
+          const trimmed = trimEventsToBudget(parentEvents, budget, { keepRecentMessages: 6 });
+          const marker: Event = {
+            type: "message",
+            id: `msg_${randomUUID()}`,
+            role: "user",
+            content: [{ type: "text", text: FORK_CONTEXT_MARKER }],
+          };
+          forkPrefix = [marker, ...trimmed.events];
+        }
+      }
+
  // Sub-agent retry: the whole sub-agent run is retried in place for
  // transient failures only (rate limit, dropped socket, gateway 5xx),
  // with exponential backoff. Deterministic failures (bad schema,
@@ -492,7 +522,11 @@ export function createSubagentRunner(
  // transcript so it resumes its own conversation rather than starting over.
           const run = await runAgent(
             {
-              history: resuming ? [...priorEvents, initial] : [initial],
+              history: resuming
+                ? [...priorEvents, initial]
+                : forkPrefix.length > 0
+                  ? [...forkPrefix, initial]
+                  : [initial],
               userText: resuming ? initialText : objective,
             },
             makeDeps(effectiveMaxSteps ?? 0),
@@ -716,6 +750,15 @@ export function createSubagentRunner(
  * role boundary right before the model starts reasoning.
  */
 const SUBAGENT_OBJECTIVE_FOOTER = `This is your only task. When you are done, your final assistant message must follow the structured conclusion format described in your system prompt (### Findings / ### Key references / ### Recommendations, or ### Blocker if blocked). Do not produce any other output.`;
+
+/** Default token cap on an inherited (`context: "fork"`) parent history. Keeps
+ * the fork seed from blowing the sub-agent's own budget; the older turns are
+ * folded/trimmed to fit. Overridable per call via `fork_max_tokens`. */
+const DEFAULT_FORK_MAX_TOKENS = 24_000;
+
+/** Prefix message that precedes a forked parent history, so the sub-agent reads
+ * it as inherited context rather than its own prior work. */
+const FORK_CONTEXT_MARKER = `The messages above are inherited context from the parent conversation that delegated this task — files it has already read, decisions it has made, and tool output it has seen. Use them as background. Do NOT continue the parent's work or address its user; your only task is the OBJECTIVE that follows.`;
 
 /** Instruction block appended to the role when an output schema is
  * requested. Overrides the free-text conclusion format. */

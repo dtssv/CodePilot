@@ -3147,6 +3147,9 @@ export class Session {
       addDeliveryRoot: (dir) => this.addDeliveryRoot(dir),
       scratchDir: () => scratchDir(this.cwd, this.id),
       projectStateDir: () => projectStatePath(this.cwd),
+      // Model-visible history for a `context: "fork"` sub-agent — the same
+      // post-compaction working set the model itself sees.
+      getParentEvents: () => this.getEvents(),
       buildToolRegistry: (agentType) =>
         buildSubagentToolRegistry(agentType, {
           getManager: () => this.lspManager,

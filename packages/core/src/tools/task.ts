@@ -134,6 +134,27 @@ const schema = z
       .enum(["none", "worktree"])
       .optional()
       .describe("Filesystem isolation for single-task mode (default \"none\")."),
+    context: z
+      .enum(["fresh", "fork"])
+      .optional()
+      .describe(
+        "Starting context for single-task mode (default \"fresh\"). \"fresh\": the " +
+          "sub-agent starts with an empty conversation and sees only the objective " +
+          "— describe everything it needs in `objective`. \"fork\": the sub-agent " +
+          "inherits a copy of THIS conversation's model-visible history as a prefix, " +
+          "so it can see files and references you already read, then works the " +
+          "objective. Use fork when the objective depends on context you've built up " +
+          "and would be lossy to restate. Mutually exclusive with `continue_session_id`.",
+      ),
+    fork_max_tokens: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "When `context: \"fork\"`, hard-cap the inherited history to this many " +
+          "estimated tokens (older turns are folded/trimmed). Omit for a sensible default.",
+      ),
     continue_session_id: z
       .string()
       .optional()
@@ -221,7 +242,13 @@ const schema = z
       message:
         "provide exactly one of `objective` (single task), `tasks` (fan-out), `csv` (batch), or `team` (team mode, with `objective` as the shared goal)",
     }
-  );
+  )
+  .refine((v) => !(v.context === "fork" && v.continue_session_id), {
+    message:
+      "`context: \"fork\"` and `continue_session_id` are mutually exclusive — a " +
+      "continued sub-agent already has its own conversation; forking the parent's " +
+      "would conflict. Use one or the other.",
+  });
 
 export interface SubagentRunSpec {
   objective: string;
@@ -253,6 +280,14 @@ export interface SubagentRunSpec {
   * `objective` (or `continueText`) as a follow-up — the sub-agent keeps its
   * full conversation. The id is the `sessionId` a prior run returned. */
   resumeSessionId?: string;
+ /** When "fork", the runner seeds the sub-agent with a copy of the parent's
+  * model-visible history (via {@link SubagentFactoryOptions.getParentEvents})
+  * as a prefix before the objective, so it inherits what the parent has read.
+  * "fresh" (default) starts empty. Mutually exclusive with resumeSessionId. */
+  context?: "fresh" | "fork";
+ /** When forking, hard-cap the inherited history to this many estimated tokens
+  * (older turns folded/trimmed). Omit for the runner's default. */
+  forkMaxTokens?: number;
  /** The follow-up message when continuing (defaults to `objective`). Sent
   * WITHOUT the "you are a sub-agent" preamble — the resumed agent already has
   * that context. */
@@ -483,6 +518,17 @@ export const taskTool: ToolDef<typeof schema> & {
         isError: true,
       };
     }
+    // `context: "fork"` inherits the parent conversation; `continue_session_id`
+    // resumes a sub-agent that already has its own — they can't both apply.
+    if (input.context === "fork" && input.continue_session_id) {
+      return {
+        content:
+          "Refused: `context: \"fork\"` and `continue_session_id` are mutually " +
+          "exclusive. Fork to seed a new sub-agent with this conversation, or " +
+          "continue an existing one — not both.",
+        isError: true,
+      };
+    }
  // Concurrency guard: cap the number of sub-agents running at once.
     if (!this._sem) {
       this._sem = new Semaphore(this.maxThreads ?? 6);
@@ -601,6 +647,8 @@ export const taskTool: ToolDef<typeof schema> & {
           outputSchema: input.output_schema,
           isolation: input.isolation,
           resumeSessionId: input.continue_session_id,
+          context: input.context,
+          forkMaxTokens: input.fork_max_tokens,
         },
       ];
     })();
