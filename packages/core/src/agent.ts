@@ -991,6 +991,18 @@ export async function runAgent(
       const degenEnabled = degenCfg?.enabled !== false;
       let repetitionCheckedAt = 0;
       const REPETITION_CHECK_EVERY = degenCfg?.checkEveryChars ?? 2_000;
+      // The live-streaming guard biases hard toward NOT interrupting a
+      // legitimate task. A true degeneration loop is almost perfectly periodic
+      // (the model emits the identical clause over and over), whereas
+      // legitimately repetitive output — a generated table, repeated code
+      // structure — is only APPROXIMATELY periodic (row values differ, fields
+      // change). Requiring near-total periodicity before stopping keeps the net
+      // for real collapses while giving that legitimate output clear headroom.
+      // This is the floor only when the user has not set an explicit threshold;
+      // `degeneration.threshold` overrides it, and the detector's own lower
+      // default still serves the offline sub-agent outcome assessment (which
+      // scores a finished transcript, not a live stream).
+      const LIVE_DEGEN_THRESHOLD = 0.98;
  // Per-request timing (persisted as a `request` event for diagnostics).
       const startedAt = Date.now();
       let ttftMs: number | undefined;
@@ -1055,7 +1067,7 @@ export async function runAgent(
                   windowChars: degenCfg?.windowChars,
                   maxPeriod: degenCfg?.maxPeriod,
                   minRepeats: degenCfg?.minRepeats,
-                  threshold: degenCfg?.threshold,
+                  threshold: degenCfg?.threshold ?? LIVE_DEGEN_THRESHOLD,
                 });
                 if (rep) {
                   // Say "stopped", not "aborted": this is a deliberate

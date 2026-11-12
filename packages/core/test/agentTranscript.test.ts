@@ -163,6 +163,43 @@ describe("provider transcript", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not abort legitimately repetitive (approximately periodic) output", async () => {
+    // A genuine collapse is almost PERFECTLY periodic (the model loops the
+    // identical clause); legitimate repetitive output — a generated table,
+    // repeated code structure — is only APPROXIMATELY periodic, with a small
+    // fraction of chars varying per repeat. This streams a periodic body with
+    // ~1.5% of positions perturbed: above the detector's lower default
+    // periodicity but below the raised live-stream floor, so it is NOT flagged
+    // where a near-1.0 loop still would be. Well past the 2 KB check trigger.
+    const base = "abcdefghij0123456789".repeat(300);
+    const arr = base.split("");
+    let seed = 999;
+    const rnd = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let i = 0; i < arr.length; i++) if (rnd() < 0.015) arr[i] = "Z";
+    const body = arr.join("");
+    let drained = false;
+    const provider = new ScriptedProvider([
+      async function* () {
+        // Stream in chunks so the live guard checks run mid-stream.
+        for (let i = 0; i < body.length; i += 200) {
+          yield { kind: "text_delta", messageId: "m", text: body.slice(i, i + 200) } as StreamEvent;
+        }
+        drained = true;
+        yield { kind: "done", finishReason: "stop" } as StreamEvent;
+      },
+    ]);
+    const { deps: d, events, dir } = deps(provider);
+    await runAgent({ history: [], userText: "go" }, d);
+    // The whole body streamed; no degeneration stop and no error.
+    expect(drained).toBe(true);
+    expect(events.find((e) => e.type === "degeneration")).toBeUndefined();
+    const err = events.find(
+      (e) => e.type === "error" && /repeating loop|degenerated/.test((e as { message: string }).message),
+    );
+    expect(err).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("answers calls that never ran so the next request stays valid", () => {
     const events: Event[] = [
       { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "go" }] },
