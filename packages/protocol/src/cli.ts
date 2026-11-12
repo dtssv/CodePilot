@@ -96,6 +96,8 @@ Usage:
   codepilot web [--port N] [--host H]  — open the web UI (serves the embedded
                        [--token T] [--no-open]  SPA and opens the browser)
   codepilot serve                      — JSON-RPC over stdio
+  codepilot acp [--cwd D]              — Agent Client Protocol (ACP) over stdio,
+                                         for ACP-capable editors/tools (opt-in)
   codepilot serve --web [--port N] [--host H] [--token T]
                        [--allow-origin O1,O2] [--no-auth] [--web-root [DIR]]
                        [--no-open]
@@ -166,6 +168,8 @@ export async function runProtocolCli(rawArgv?: readonly string[]): Promise<numbe
   switch (cmd) {
     case "serve":
       return cmdServe(flags);
+    case "acp":
+      return cmdAcp(flags);
     case "web":
       // Open the web UI: serve the embedded SPA over the protocol on one
       // loopback port and open the browser (unless --no-open). Honours
@@ -453,6 +457,25 @@ async function cmdConfig(
       process.stderr.write(`unknown config subcommand: ${sub}\n\n${configHelp()}`);
       return 2;
   }
+}
+
+/**
+ * Opt-in ACP (Agent Client Protocol) stdio server. Speaks the ecosystem-standard
+ * agent protocol over stdin/stdout so an ACP-capable editor/tool can drive a
+ * CodePilot session. Nothing registers this by default — it exists only when the
+ * `acp` subcommand is invoked. Blocks until the stream closes.
+ */
+async function cmdAcp(
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const { startAcpServer } = await import("./acp.js");
+  const handle = await startAcpServer({
+    defaultCwd: (flags["cwd"] as string | undefined) ?? process.cwd(),
+  });
+  await handle.peer.loopDone;
+  await handle.dispose().catch(() => {});
+  await killAllJobs().catch(() => {});
+  return 0;
 }
 
 async function cmdServe(

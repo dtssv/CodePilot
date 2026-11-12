@@ -18,6 +18,14 @@
 export * from "./rpc.js";
 export * from "./server.js";
 export {
+  startAcpServer,
+  registerAcpServer,
+  ACP_PROTOCOL_VERSION,
+  type AcpServerOptions,
+  type AcpServerHandle,
+  type AcpSessionFactory,
+} from "./acp.js";
+export {
   writeServeInfo,
   clearServeInfo,
   readLiveServeInfo,

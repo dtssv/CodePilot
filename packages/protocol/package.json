@@ -18,6 +18,10 @@
       "types": "./dist/rpc.d.ts",
       "import": "./dist/rpc.js"
     },
+    "./acp": {
+      "types": "./dist/acp.d.ts",
+      "import": "./dist/acp.js"
+    },
     "./agent-app": {
       "types": "./dist/agent-app.d.ts",
       "import": "./dist/agent-app.js"

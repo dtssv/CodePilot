@@ -279,7 +279,12 @@ export class Peer {
           return;
         }
         if (line === "") continue; // tolerate stray empty lines
-        await this.handleLine(line);
+        // Dispatch concurrently rather than awaiting: a request handler that
+        // blocks for a while (e.g. a long turn that issues reverse requests and
+        // awaits their replies) must not stall the read loop, or those replies
+        // could never be read — a deadlock. Responses are correlated by id, so
+        // out-of-order completion is safe; reads stay serial.
+        void this.handleLine(line).catch((err) => this.log("handleLine threw", err));
       }
     } catch (err) {
       this.log("loop crashed", err);

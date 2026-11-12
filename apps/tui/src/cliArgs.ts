@@ -17,6 +17,7 @@ export const SUBCOMMANDS = ["bundle"] as const;
 export const CLI_COMMANDS = new Set([
   "web",
   "serve",
+  "acp",
   "run",
   "goal",
   "agent",
