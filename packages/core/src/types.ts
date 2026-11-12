@@ -280,10 +280,13 @@ type EventBody =
       parentToolCallId: string;
       index: number;
       objective: string;
-      state?: "running" | "ok" | "failed";
+      state?: "running" | "ok" | "failed" | "interrupted";
       event?: Event;
       sessionId?: string;
       runSeq?: number;
+     /** True for a sub-agent dispatched with `run: "background"` (returns
+      * immediately; delivers a one-time completion summary to the parent). */
+      background?: boolean;
     }
   | { type: "mode"; mode: AgentMode }
   | { type: "mode_request"; mode: AgentMode; reason?: string; rememberAuto?: boolean }

@@ -52,11 +52,13 @@ export interface AppState {
 export interface SubagentRun {
   index: number;
   objective: string;
-  state: "running" | "ok" | "failed";
+  state: "running" | "ok" | "failed" | "interrupted";
  /** Session-global unique sequence for this dispatch (for a stable `#N`). */
   runSeq?: number;
  /** The sub-agent's stable id (`sub_…`); the handle for continuation. */
   sessionId?: string;
+ /** True for a sub-agent dispatched with `run: "background"`. */
+  background?: boolean;
  /** The sub-agent's own transcript, reduced like a session. */
   view: AppState;
 }
@@ -279,6 +281,7 @@ function applySubagent(state: AppState, e: Extract<Event, { type: "subagent" }>)
       state: "running",
       runSeq: e.runSeq,
       sessionId: e.sessionId,
+      background: e.background,
       view: initialState(state.cwd),
     });
     runs.sort((a, b) => a.index - b.index);
@@ -289,6 +292,7 @@ function applySubagent(state: AppState, e: Extract<Event, { type: "subagent" }>)
     ...run,
     runSeq: e.runSeq ?? run.runSeq,
     sessionId: e.sessionId ?? run.sessionId,
+    background: e.background ?? run.background,
     state: e.state ?? run.state,
     view: e.event ? applyEvent(run.view, e.event) : run.view,
   };

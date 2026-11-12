@@ -57,6 +57,11 @@ const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "write_file",
   "edit_file",
   "task",
+ // Control tools for background sub-agents: dispatching needs `task` (denied
+ // here), so their companions are denied in restricted modes too.
+  "subagent_list",
+  "subagent_wait",
+  "subagent_interrupt",
  // Executes arbitrary model-written JS that can write files / run bash — same
  // (actually broader) risk profile as bash, so blocked in chat/plan.
   "code_mode",

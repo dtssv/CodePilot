@@ -33,6 +33,15 @@ export { readArtifactTool } from "./read_artifact.js";
 export { taskBoardTool } from "./task_board.js";
 export { taskTool } from "./task.js";
 export type { SubagentRunner } from "./task.js";
+export {
+  subagentListTool,
+  subagentWaitTool,
+  subagentInterruptTool,
+} from "./subagentControl.js";
+export {
+  BackgroundSubagentRegistry,
+  type BackgroundSubagentMeta,
+} from "./subagentJobs.js";
 export { harnessBridgeTool, buildHarnessCommand, extractHarnessOutput } from "./harnessBridge.js";
 export type { HarnessKind } from "./harnessBridge.js";
 export { askUserQuestionTool, planDoneTool } from "./ask_user.js";

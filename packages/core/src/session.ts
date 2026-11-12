@@ -142,6 +142,11 @@ import {
   makeToolCatalogTool,
   filterToolsByModeFromRegistry,
   filterToolsByModel,
+  subagentListTool,
+  subagentWaitTool,
+  subagentInterruptTool,
+  BackgroundSubagentRegistry,
+  type BackgroundSubagentMeta,
 } from "./tools/index.js";
 import { onJobCompletion, readJobLog } from "./tools/bashJobs.js";
 import type { OutputStyle } from "./systemPrompt.js";
@@ -471,6 +476,10 @@ export class Session {
    * writable roots.
    */
   private deliveryRoots: string[] = [];
+ /** Per-session registry of background sub-agents dispatched with
+  * `run: "background"`. Owned here (not a module singleton) so parallel
+  * sessions never see each other's jobs; interrupted on dispose. */
+  private backgroundSubagents = new BackgroundSubagentRegistry();
  /** The permission mode active before the user entered plan mode, so we can
  * restore it on approval. */
   private prePlanMode: AgentMode | null = null;
@@ -2907,6 +2916,9 @@ export class Session {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.followUpQueue = [];
+    // Interrupt any still-running background sub-agents so they stop promptly
+    // and release their permits when the session goes away.
+    this.backgroundSubagents.interruptAll();
     // Flush any buffered telemetry spans so a clean shutdown never drops the
     // last batch (spans otherwise flush at ~64 or every 5s). Best-effort.
     await getTracer().flush().catch(() => undefined);
@@ -3172,8 +3184,47 @@ export class Session {
     if (typeof this.config.subagentCache?.ttlHours === "number") {
       task.cacheTtlMs = this.config.subagentCache.ttlHours * 60 * 60 * 1000;
     }
+    // Background sub-agents (`run: "background"`): a per-session registry so a
+    // dispatched job can be listed / waited / interrupted, and so its one-time
+    // completion summary is steered back to the parent. Shared with the control
+    // tools below.
+    task.backgroundRegistry = this.backgroundSubagents;
+    this.backgroundSubagents.onCompletion((meta) => {
+      this.deliverBackgroundCompletion(meta);
+    });
+    subagentListTool.registry = this.backgroundSubagents;
+    subagentWaitTool.registry = this.backgroundSubagents;
+    subagentInterruptTool.registry = this.backgroundSubagents;
+    this.toolRegistry.register(subagentListTool);
+    this.toolRegistry.register(subagentWaitTool);
+    this.toolRegistry.register(subagentInterruptTool);
 
     this.wireHookResolvers(task.runner);
+  }
+
+  /**
+   * Deliver a background sub-agent's one-time completion summary to the parent.
+   * Rides the same out-of-band system-steer channel as other background-job
+   * notices (bash jobs, MCP notifications): it lands in the current turn when
+   * busy, or is picked up at the start of the next turn when idle. This is a
+   * single notice, not a chat channel — to iterate with the sub-agent the model
+   * re-dispatches with `continue_session_id`.
+   */
+  private deliverBackgroundCompletion(meta: BackgroundSubagentMeta): void {
+    const obj =
+      meta.objective.length > 100 ? `${meta.objective.slice(0, 97)}…` : meta.objective;
+    const summary = meta.summary ? `\n\n${meta.summary}` : "";
+    const verb =
+      meta.status === "interrupted"
+        ? "was interrupted"
+        : meta.status === "failed"
+          ? "failed"
+          : "finished";
+    this.steerSystem(
+      `[background sub-agent ${meta.sessionId} ${verb}] objective: ${obj}` +
+        `${summary}\n\n(To continue this sub-agent, dispatch task with ` +
+        `continue_session_id: "${meta.sessionId}".)`,
+    );
   }
 
   /**

@@ -2,9 +2,12 @@
 // parallel fan-out (`tasks: [...]`), plus named agent types that control the
 // tool surface ("explore" = read-only, "worker" = read+write).
 //
-// The sub-agent gets a fresh context (does not see the parent's history)
-// and returns only its final conclusion. Parallel tasks run concurrently
-// via Promise.all; each returns its own structured conclusion.
+// A sub-agent returns only its final conclusion. By default it starts with a
+// fresh context; `context: "fork"` seeds it with the parent's visible history.
+// Single-task mode can run in the background (`run: "background"`): the call
+// returns immediately and a one-time completion summary is delivered later.
+// Parallel tasks run concurrently via Promise.all; each returns its own
+// structured conclusion.
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -12,6 +15,7 @@ import type { Event, UsageInfo } from "../types.js";
 import type { ToolDef } from "./types.js";
 import { SubagentCache } from "../subagentCache.js";
 import { isTransientError } from "../transientError.js";
+import { BackgroundSubagentRegistry } from "./subagentJobs.js";
 
 /** Named sub-agent types. "explore" is read-only; "worker" may edit files. */
 export const AGENT_TYPES = ["explore", "worker"] as const;
@@ -134,6 +138,18 @@ const schema = z
       .enum(["none", "worktree"])
       .optional()
       .describe("Filesystem isolation for single-task mode (default \"none\")."),
+    run: z
+      .enum(["await", "background"])
+      .optional()
+      .describe(
+        "Dispatch mode for single-task mode (default \"await\"). \"await\": block " +
+          "until the sub-agent finishes and return its conclusion inline. " +
+          "\"background\": return immediately with `{session_id, status: \"running\"}` " +
+          "and keep working; when the sub-agent finishes (or fails), a one-time " +
+          "completion summary is delivered to you. Use background to dispatch " +
+          "long-running work you don't need to block on. Control a background run " +
+          "with `subagent_list` / `subagent_wait` / `subagent_interrupt`.",
+      ),
     context: z
       .enum(["fresh", "fork"])
       .optional()
@@ -304,6 +320,10 @@ export interface SubagentRunSpec {
    * sits outside the parent cwd) are not rejected as out-of-root. `isolation`
    * stays "none": no per-member tree is created. Ignored when empty. */
   sharedWorktreePath?: string;
+ /** External abort signal for this run. Threaded into the sub-agent's agent
+  * loop so a background job can be interrupted via `subagent_interrupt`. When
+  * aborted, the run stops at the next loop checkpoint and returns a blocker. */
+  signal?: AbortSignal;
 }
 
 /** Sub-agent filesystem isolation modes. */
@@ -485,6 +505,10 @@ export const taskTool: ToolDef<typeof schema> & {
   * from `subagentCache.ttlHours`. Set by the session. */
   cacheEnabled?: boolean;
   cacheTtlMs?: number;
+ /** Per-session registry of background sub-agents (`run: "background"`). Set by
+  * the session; also read by the `subagent_list`/`wait`/`interrupt` control
+  * tools. Absent → background dispatch is unavailable (falls back to await). */
+  backgroundRegistry?: BackgroundSubagentRegistry;
 } = {
   name: "task",
   description:
@@ -493,6 +517,8 @@ export const taskTool: ToolDef<typeof schema> & {
     "Default `agent_type: \"explore\"` is read-only; use `\"worker\"` to edit. " +
     "Skip for a single read/grep. Write self-contained objectives. " +
     "`isolation: \"worktree\"` for mutating workers that must not touch the main tree. " +
+    "`run: \"background\"` dispatches a single task without blocking (control with " +
+    "subagent_list / subagent_wait / subagent_interrupt). " +
     "CSV: `csv` + `csv_template` → one agent per row. " +
     "Team: `objective` + `team: [{role,…}]` when roles must be reconciled (else prefer `tasks`).",
   inputSchema: schema,
@@ -548,6 +574,110 @@ export const taskTool: ToolDef<typeof schema> & {
       this._spawned = already + grant;
       return grant;
     };
+
+    // Background dispatch (single-task mode, `run: "background"`): launch the
+    // sub-agent detached, return a handle immediately, and deliver a one-time
+    // completion summary to the parent later. Only single-task mode — fan-out /
+    // team / csv always await (they exist to produce a combined result the
+    // parent reads now). A permit + a spawn-count slot are held for the run's
+    // real lifetime and released when it settles, so a background job counts
+    // against the same concurrency / fork-bomb caps as an awaited one.
+    if (
+      input.run === "background" &&
+      input.objective &&
+      !(input.team && input.team.length > 0) &&
+      !input.tasks &&
+      !input.csv
+    ) {
+      const registry = this.backgroundRegistry;
+      if (!registry) {
+        return {
+          content:
+            "Background dispatch is not available in this context; run the task " +
+            "normally (omit `run: \"background\"`).",
+          isError: true,
+        };
+      }
+      if (tryReserve(1) < 1) {
+        return {
+          content:
+            `Refused: this session has already spawned ${this._spawned ?? 0} ` +
+            `sub-agents, reaching the cap of ${maxTotal}.`,
+          isError: true,
+        };
+      }
+      const runSeq = (this._runSeq = (this._runSeq ?? 0) + 1);
+      const ownerId = input.continue_session_id ?? `sub_${randomUUID()}`;
+      // Abort wire for `subagent_interrupt`. Independent of the parent turn's
+      // signal: a background job outlives the turn that dispatched it.
+      const controller = new AbortController();
+      const progress = (extra: {
+        state?: "running" | "ok" | "failed" | "interrupted";
+        event?: Event;
+      }): void => {
+        if (!ctx.emitEvent || !ctx.toolCallId) return;
+        void Promise.resolve(
+          ctx.emitEvent({
+            type: "subagent",
+            parentToolCallId: ctx.toolCallId,
+            index: 0,
+            objective: input.objective!,
+            sessionId: ownerId,
+            runSeq,
+            background: true,
+            ts: Date.now(),
+            ...extra,
+          }),
+        ).catch(() => {});
+      };
+      progress({ state: "running" });
+      const spec: SubagentRunSpec = {
+        objective: input.objective,
+        cwd: ctx.cwd,
+        agentType: input.agent_type,
+        tools: input.tools,
+        model: input.model,
+        maxSteps: input.maxSteps,
+        depth: currentDepth + 1,
+        outputSchema: input.output_schema,
+        isolation: input.isolation,
+        resumeSessionId: input.continue_session_id,
+        context: input.context,
+        forkMaxTokens: input.fork_max_tokens,
+        ownerId,
+        signal: controller.signal,
+      };
+      // Detached run: hold a permit for its real lifetime (not the parent turn),
+      // release the spawn slot + permit on settle, and relay progress events.
+      const done = sem
+        .withPermit(
+          () =>
+            this.runner!.run({
+              ...spec,
+              onLiveEvent: (event) => progress({ event }),
+            }),
+          { signal: controller.signal, timeoutMs: this.subagentTimeoutMs },
+        )
+        .then((r) => {
+          progress({ state: controller.signal.aborted ? "interrupted" : r.ok ? "ok" : "failed" });
+          emitParentUsage(ctx.emitEvent, r.usage);
+          return r;
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          progress({ state: controller.signal.aborted ? "interrupted" : "failed" });
+          return { conclusion: msg, steps: 0, ok: false as const };
+        });
+      registry.register({ sessionId: ownerId, objective: input.objective, runSeq, controller, done });
+      return {
+        content:
+          `Background sub-agent started.\n\n` +
+          `session_id: ${ownerId}\nstatus: running\n\n` +
+          `It runs independently; you will get a one-time completion summary when ` +
+          `it finishes. Use subagent_list to check on it, subagent_wait to block ` +
+          `until it is done, or subagent_interrupt to stop it.`,
+      };
+    }
 
  // Team mode: one goal, several roles, merged result. See ../teams.ts.
     if (input.team && input.team.length > 0) {

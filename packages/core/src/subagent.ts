@@ -186,7 +186,7 @@ export function createSubagentRunner(
   factoryOpts: SubagentFactoryOptions
 ): SubagentRunner {
   return {
-    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath, context, forkMaxTokens }) {
+    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath, context, forkMaxTokens, signal }) {
       const live = factoryOpts.getEndpoint?.();
       const opts: SubagentFactoryOptions = live
         ? { ...factoryOpts, config: live.config, model: live.model }
@@ -485,6 +485,9 @@ export function createSubagentRunner(
         // 0 = unlimited; must set explicitly so parent config.maxTurns is not inherited.
         maxTurns,
         isSubagent: true,
+        // External abort wire (e.g. `subagent_interrupt` on a background run).
+        // The agent loop honours this signal at every checkpoint.
+        signal,
         // When a structured result is requested and the provider speaks the
         // OpenAI dialect (incl. Azure, which reuses that provider), additionally
         // constrain output with native json_schema. The prompt+parse path in
