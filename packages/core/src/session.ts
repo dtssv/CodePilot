@@ -2499,10 +2499,9 @@ export class Session {
   }
 
  /**
- * Grant an extra writable directory (Claude-style add-dir).
- * `persist: true` also appends to user `sandbox.writablePaths`.
- * Restarts the persistent shell when an OS sandbox is active so bash
- * picks up the new roots.
+ * Grant an extra writable directory. `persist: true` also appends to user
+ * `sandbox.writablePaths`. Restarts the persistent shell when an OS sandbox
+ * is active so bash picks up the new roots.
  */
   /** Add a directory as a task delivery root (session-scoped).
    * Mutates the live array in place so mid-turn ToolContext stays current. */
@@ -3631,13 +3630,10 @@ export class Session {
       }
     }
     if (lastStatus === "running" || lastStatus === "waiting_permission") {
- // The prior run was cut off mid-flight. Before flipping to `idle`, seal
- // any tool call it left unanswered so the persisted JSONL is
- // self-consistent (every tool_call has a matching tool_result). The
- // provider-message builder already repairs dangling calls in-memory
- // Seal orphan tool_calls on disk (the in-memory side is handled by
- // `closeOpenCalls`) with the same `INTERRUPTED_RESULT` so the raw log
- // stays valid for export and replay.
+ // The prior run was cut off mid-flight. Seal any tool call it left
+ // unanswered with `INTERRUPTED_RESULT` so the persisted JSONL stays
+ // self-consistent and valid for export/replay. In-memory dangling calls
+ // are repaired separately by `closeOpenCalls`.
       const sealedToolCalls = await this.sealOrphanedToolCalls();
       const ev: Event = { type: "status", status: "idle" };
       this.events.push(ev);

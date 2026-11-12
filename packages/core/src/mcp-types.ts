@@ -1,11 +1,8 @@
 // Shared types for the MCP (Model Context Protocol) client.
 //
-// This module defines the public type surface used by every transport
-// (stdio / SSE / Streamable HTTP) and by the McpManager. Keeping the types
-// in one place lets the transports depend on a single, stable header
-// without circular imports — the transport implementations import from
-// here, and `mcp.ts` (the entry point) re-exports everything for backward
-// compatibility with existing call sites that import from "./mcp.js".
+// Defines the public type surface used by every transport (stdio / SSE /
+// Streamable HTTP) and the McpManager, so transports share one stable header
+// without circular imports; `mcp.ts` re-exports everything for back-compat.
 
 import type { McpServerConfig } from "./types.js";
 
@@ -18,11 +15,9 @@ export type { McpServerConfig };
 // ---------------------------------------------------------------------------
 
 /**
- * Maximum length for a normalized MCP tool name. Provider APIs (Anthropic,
- * OpenAI) and the model's function-call schema generally enforce a 64-char
- * limit on function names. Names exceeding this must be truncated, and to
- * avoid collisions between two long names that share a prefix, a short hash
- * of the full original name is appended.
+ * Max length for a normalized MCP tool name. Provider function-name limits are
+ * ~64 chars; longer names are truncated, with a short hash of the full name
+ * appended to avoid collisions between names sharing a prefix.
  */
 export const MCP_TOOL_NAME_MAX_LENGTH = 64;
 

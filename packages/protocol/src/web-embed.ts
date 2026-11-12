@@ -1,15 +1,7 @@
 /**
- * Embedded web UI support for the single self-contained binary.
- *
- * When the binary is built with Bun `--compile`, the web SPA
- * (`apps/web/dist`) is embedded via a generated VFS module
- * (`web-vfs.generated.ts`) that maps each SPA-relative path to a file whose
- * bytes Bun embedded in the binary. At runtime `materializeEmbeddedWeb` copies
- * those files out to a temp directory and returns its path, so the existing
- * static file server (`serveStatic`) can serve them unchanged.
- *
- * In the source / npm layout there is no embedded VFS (the generated module is
- * empty), and callers fall back to `detectWebRoot` (filesystem lookup).
+ * Embedded web UI for the self-contained binary: with Bun `--compile` the
+ * SPA is embedded via a generated VFS module; `materializeEmbeddedWeb`
+ * copies it to a temp dir for the static server, else `detectWebRoot`.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";

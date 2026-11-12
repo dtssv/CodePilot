@@ -23,14 +23,9 @@ export interface OpenAIProviderOptions {
   defaultModel?: string;
   smallModel?: string;
   /**
-   * API dialect. "openai" (default) targets `/v1/chat/completions` with a
-   * Bearer token. "azure" targets Azure OpenAI's
-   * `/openai/deployments/{model}/chat/completions?api-version=...` with an
-   * `api-key` header; the model id is used as the Azure deployment name.
-   * "responses" targets `/v1/responses` (the newer stateful endpoint) with a
-   * Bearer token; tool calls and reasoning stream as named SSE events. The
-   * streamed output maps onto the same StreamEvent union as the chat path, so
-   * the agent loop is dialect-agnostic.
+   * API dialect. "openai" (default) → /v1/chat/completions (Bearer token);
+   * "azure" → Azure deployment routing (`api-key` header); "responses" →
+   * /v1/responses (stateful, named SSE events). All map onto the same StreamEvent.
    */
   apiStyle?: "openai" | "azure" | "responses";
   /** Azure `api-version` query param (required when apiStyle === "azure"). */
@@ -214,14 +209,9 @@ export class OpenAIProvider implements ChatProvider {
           for (const choice of choices) {
             const delta = choice.delta as Record<string, unknown> | undefined;
             if (!delta) continue;
-            // Reasoning / chain-of-thought stream. Reasoning models on the
-            // OpenAI-compatible wire (DeepSeek, GLM, Qwen, …) send their
-            // thinking in a SEPARATE field alongside `content` — most commonly
-            // `reasoning_content`, some gateways use `reasoning`. Surface it as
-            // a thinking_delta so it flows through the same agent→UI→render
-            // path as Anthropic/Gemini reasoning; without this the thinking is
-            // silently dropped and never shown. Emit before `content` so the
-            // thinking leads the visible answer in the transcript.
+            // Reasoning models on the OpenAI-compatible wire send thinking in a
+            // separate field (`reasoning_content` or `reasoning`) alongside
+            // `content`. Surface it as thinking_delta so it isn't dropped.
             const reasoning =
               (typeof delta.reasoning_content === "string" && delta.reasoning_content) ||
               (typeof delta.reasoning === "string" && delta.reasoning) ||
@@ -314,11 +304,8 @@ export class OpenAIProvider implements ChatProvider {
 
   /**
    * Native FIM via the OpenAI-compatible `/v1/completions` endpoint with a
-   * `suffix` (design G, phase 4). DeepSeek-Coder / Codestral / Qwen-Coder /
-   * vLLM / Ollama expose this. ONE non-streaming, FAST-FAIL call (no retry — a
-   * late inline completion is worse than none). Azure's deployment routing has
-   * no legacy-completions equivalent, so FIM is openai-dialect only; the
-   * handler falls back to the chat path for azure.
+   * `suffix`. One non-streaming, fast-fail call (no retry — a late inline
+   * completion is worse than none). OpenAI-dialect only; Azure has no equivalent.
    */
   async fim(opts: FimCompletionOptions): Promise<FimCompletionResult> {
     if (this.apiStyle === "azure") {
@@ -356,12 +343,9 @@ export function buildOpenAIMessages(
 ): unknown[] {
   const out: unknown[] = [];
   if (systemPrompt) out.push({ role: "system", content: systemPrompt });
-  // Have we emitted anything other than a leading system block yet? Once the
-  // conversation proper has started, a later `system` message is a
-  // mid-conversation system — which some OpenAI-compatible backends (GLM-5.2
-  // via the jdcloud gateway) reject with `invalid_argument`. We demote those
-  // to `user` (same as the Anthropic adapter), keeping the content while
-  // satisfying "system must lead" backends. A leading system is unaffected.
+    // Once the conversation has started, a later `system` message is demoted to
+    // `user` (some backends like GLM-5.2 reject a non-leading system). A leading
+    // system is unaffected.
   let conversationStarted = false;
   for (const m of messages) {
     if (m.role === "system") {
@@ -459,21 +443,9 @@ function toParts(content: unknown): unknown[] {
 }
 
 /**
- * Collapse adjacent same-role messages for `system` and `user`.
- *
- * Two sources create same-role runs that strict OpenAI-compatible backends —
- * notably GLM-5.2 via the jdcloud gateway — reject with `invalid_argument`:
- *   1. The leading `systemPrompt` plus a harness-injected `<runtime_context>`
- *      system message can land back to back (a sub-agent's first turn, where
- *      history is just the user objective and runtime_context inserts at 0) →
- *      two consecutive `system`.
- *   2. A mid-conversation `system` (runtime_context inserted before the current
- *      turn) is demoted to `user` by `buildOpenAIMessages`, which can place it
- *      right after the opening user message → two consecutive `user`.
- *
- * Merging the content keeps everything the model should see while satisfying
- * backends that require non-repeating roles, mirroring the Anthropic adapter's
- * `mergeConsecutiveRoles`.
+ * Collapse adjacent same-role `system`/`user` messages (from a leading
+ * systemPrompt plus runtime_context, or a system demoted to `user`), merging
+ * content to satisfy backends that require non-repeating roles.
  */
 function mergeConsecutiveRoles(messages: unknown[]): unknown[] {
   return mergeAdjacentRoles(messages, (prevRaw, curRaw) => {

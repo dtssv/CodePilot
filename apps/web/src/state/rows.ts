@@ -1,9 +1,5 @@
-// Row model for the transcript.
-//
-// Events arrive as a stream of deltas and pairs (tool_call now, tool_result
-// later); the UI wants a flat list of stable, renderable rows. This implements
-// the TUI's `Row` model (apps/tui/src/ui/state.ts) so both front ends agree
-// on what a transcript looks like.
+// Row model for the transcript: turns the delta/pair event stream into a flat
+// list of stable renderable rows, matching the TUI's `Row` model.
 
 import type { Event, ImageAttachment, PlanStep, SavedUpload, UsageInfo } from "@codepilot/core";
 import type { FileChange } from "./diff.js";

@@ -1,9 +1,6 @@
-// Session telemetry: extracted from the monolithic session.ts.
-//
-// Wraps each `Session.prompt` in a "codepilot.prompt" span (no-op when
-// OTEL is not configured). The span is wired into the agent deps as
-// `parentSpan` so provider streams and tool executions become child spans,
-// and is ended in the prompt's finally block.
+// Session telemetry: wraps each `Session.prompt` in a "codepilot.prompt" span
+// (no-op without OTEL), wired as the agent's parentSpan so provider streams and
+// tool calls become child spans; ended in the prompt's finally block.
 
 import { getTracer } from "./telemetry.js";
 import type { Span } from "./telemetry.js";

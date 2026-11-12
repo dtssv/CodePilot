@@ -39,16 +39,9 @@ export function detectDegenerateText(text: string): { unit: string; ratio: numbe
 }
 
 /**
- * Detect runaway PHRASE-level repetition in streaming text — the "I call xxx,
- * I execute xxx, I call xxx…" collapse where the model loops a whole clause
- * instead of a single character. `detectDegenerateText` only catches 1–4 char
- * units; this catches longer periodic tails.
- *
- * We examine the tail (most recent `windowChars`) and look for the smallest
- * period `p` (a repeating block up to `maxPeriod` chars) such that the tail is
- * ≥ `threshold` periodic. A healthy answer is not periodic; a loop is. Returns
- * the repeating unit + how many times it tiled, or null. Cheap: O(window ·
- * maxPeriod), meant to run only every few KB of output.
+ * Detect runaway PHRASE-level repetition in streaming text — the clause-loop
+ * collapse `detectDegenerateText` (1–4 char units) misses. Examines recent
+ * `windowChars` for the smallest repeating period (≤ `maxPeriod`, ≥ `threshold`); returns the unit + tile count, or null. O(window · maxPeriod).
  */
 export function detectRunawayRepetition(
   text: string,

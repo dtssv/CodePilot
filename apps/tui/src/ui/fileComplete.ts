@@ -1,9 +1,7 @@
 /**
- * listFilesForCompletion — up to `max` file/dir entries under `cwd` matching a
- * prefix, for the TUI `@path` autocomplete. Walks 1-2 levels deep to keep TTY
- * latency low (deeper paths narrow by typing more); ignores node_modules/.git/
- * dist/build/hidden; returns POSIX relative paths (dirs suffixed `/`)
- * inserted after the `@`. Synchronous + cached: called per keystroke.
+ * listFilesForCompletion — up to `max` entries under `cwd` matching a prefix,
+ * for the TUI `@path` autocomplete. Walks 1-2 levels, ignores node_modules/.git/
+ * dist/build/hidden; returns POSIX relative paths (dirs `/`). Sync + cached.
  */
 import { readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";

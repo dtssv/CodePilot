@@ -1,11 +1,7 @@
-// Session MCP support: extracted from the monolithic session.ts.
-//
-// - startMcp(host): boots configured MCP servers and registers their
-// tools into the session's registry (called from Session.init).
-// - resolveSessionMcpReferences(mcp, prompt): expands `@mcp:<server>/<uri>`
-// references into inline resource content before the agent sees the prompt.
-// - jsonSchemaToZod / compileJsonSchema: tiny JSON-Schema → Zod converter
-// for the subset of schema features MCP servers actually use.
+// Session MCP support: startMcp boots configured MCP servers and registers
+// their tools; resolveSessionMcpReferences expands `@mcp:<server>/<uri>` into
+// inline resource content; jsonSchemaToZod/compileJsonSchema convert the
+// JSON-Schema subset MCP servers use into Zod.
 
 import { z } from "zod";
 import {

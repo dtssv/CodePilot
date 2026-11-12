@@ -1,11 +1,7 @@
-/**
- * Declarative model-capability catalog — a static source of truth for the
- * structured capabilities previously inferred ad hoc from model-id substrings:
- * reasoning-effort tiers, input modalities (text/vision), and a companion
- * "small" model. Keyed by an id glob (`*`/`?`, case-insensitive, provider-prefix
- * tolerant), scanned most-specific-first. Advisory: a live `/models` probe still
- * wins; an id matching no entry falls back to id heuristics.
- */
+/** Declarative model-capability catalog: reasoning-effort tiers, input
+ * modalities, and a suggested "small" companion model, keyed by id glob
+ * (`*`/`?`, case-insensitive), most-specific-first. Advisory — a live `/models`
+ * probe wins; unmatched ids fall back to id heuristics. */
 
 import { modelGlobMatch } from "./tools/modes.js";
 import type { ModelModality } from "./config.js";

@@ -299,18 +299,9 @@ function applySubagent(state: AppState, e: Extract<Event, { type: "subagent" }>)
 }
 
 /**
- * Prepare the working `rows` array for an event.
- *
- * Live path (`replay` false): copy the array and strip transient retry/429
- * banners — the single-event reducer must stay pure and must repaint retry
- * banners away as the turn resumes.
- *
- * Replay path (`replay` true): the array is a private accumulator created
- * fresh in `session-opened`, so we mutate it in place (no per-event copy) and
- * skip the per-event `clearTransientRetryRows` filter. Without this,
- * `session-opened` was O(N²) — every one of N streamed events (mostly
- * `message_delta`) spread-copied and filtered the whole growing rows array.
- * The one-time cleanup runs once after the fold in `replaySession`.
+ * Prepare the working `rows` array: live path copies and strips transient
+ * retry/429 banners; replay path mutates the private accumulator in place
+ * (skipping per-event copy/filter to avoid O(N²) in `session-opened`).
  */
 function workingRows(state: AppState, replay: boolean): Row[] {
   return replay ? state.rows : clearTransientRetryRows([...state.rows]);
@@ -765,10 +756,8 @@ function findStreamingMessage(rows: Row[], id: string): number {
 }
 
 /**
- * Drop retry banners and recoverable rate-limit errors once the turn has
- * resumed (or finished successfully). Must strip from anywhere in the list —
- * a trailing `usage` / tool row used to sit after the 429 banner and the old
- * "trim suffix only" logic left HTTP 429 stuck in the transcript forever.
+ * Drop retry banners and recoverable rate-limit errors once the turn resumes or
+ * finishes. Must strip from anywhere in the list, not just the suffix.
  */
 function clearTransientRetryRows(rows: Row[]): Row[] {
   const next = rows.filter((r) => {

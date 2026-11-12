@@ -1,15 +1,7 @@
 /**
- * WebSocket transport for the headless protocol — same JSON-RPC 2.0 as stdio,
- * only the carrier differs, so browsers can talk to a local CodePilot without a
- * subprocess. Each connection gets its own `Peer` + server registration.
- *
- * Security defaults (opens a port in front of a shell-running agent):
- * - Loopback only (127.0.0.1) unless `host` overrides.
- * - Bearer token: random when unset, checked in constant time on every upgrade
- *   (`?token=` or `Authorization: Bearer`); `auth:"none"` is tests/trusted only.
- * - Origin allowlist: browsers can open sockets to localhost without CORS, so a
- *   browser `Origin` must be allowlisted (non-browser clients pass).
- * Rejections use real HTTP status codes (401/403) during upgrade.
+ * WebSocket transport for the headless protocol (JSON-RPC 2.0 over WS).
+ * Each connection gets its own `Peer` + server. Security defaults:
+ * loopback-only bind, random bearer token, `Origin` allowlist.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -119,11 +111,9 @@ export interface WebSocketServerOptions extends ServerOptions {
  /** Interface to bind. Default `127.0.0.1` — see the security notes above. */
   host?: string;
  /**
-  * Host to ADVERTISE in the handle's `host`/`url` (and thus serve.json),
-  * when it must differ from the bind `host`. Use case: bind `0.0.0.0` for LAN
-  * access while still advertising `127.0.0.1` so loopback-only discovery
-  * (readLiveServeInfo) keeps working and local clients connect over loopback.
-  * Defaults to `host`.
+  * Host to ADVERTISE in the handle's `host`/`url` when it must differ from the
+  * bind `host` (e.g. bind `0.0.0.0` for LAN but advertise `127.0.0.1` so
+  * loopback-only discovery keeps working). Defaults to `host`.
   */
   advertiseHost?: string;
  /**
@@ -150,15 +140,10 @@ export interface WebSocketServerOptions extends ServerOptions {
  /** Called whenever a client connects or disconnects (for CLI logging). */
   onConnection?: (info: { count: number; remote?: string }) => void;
  /**
- * Optional directory of static assets to serve over plain HTTP GET —
- * the built web SPA (`apps/web/dist`) for the `codepilot serve --web`
- * deployment mode. When unset, GET requests
- * get a 426 telling the client to upgrade. When set, requests are served
- * from this directory with an SPA fallback (unknown extensionless paths
- * resolve to `index.html`). Path traversal outside the root is rejected.
- * Static GETs are NOT token-gated (the SPA itself is not sensitive — the
- * token gates the WebSocket handshake, which is what can run commands).
- */
+  * Optional static asset dir for the web SPA. Served with SPA fallback
+  * (extensionless → `index.html`); traversal outside root rejected. Static
+  * GETs aren't token-gated (the token gates the WS handshake).
+  */
   staticRoot?: string;
 }
 
@@ -181,10 +166,9 @@ const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_MAX_CONNECTIONS = 16;
 
 /**
- * Start an HTTP server that accepts WebSocket upgrades and — when
- * `staticRoot` is set — serves the built web SPA over plain GET. The
- * upgrade path is not significant (the advertised URL uses `/rpc`); what
- * gates a connection is the origin + token check in {@link checkUpgrade}.
+ * Start an HTTP server that accepts WebSocket upgrades and (when `staticRoot`
+ * is set) serves the web SPA over plain GET. What gates a connection is the
+ * origin + token check in {@link checkUpgrade}.
  */
 export async function startWebSocketServer(
   opts: WebSocketServerOptions = {},
@@ -469,9 +453,8 @@ function escapeHtmlAttr(s: string): string {
 
 /**
  * A browser always sends `Origin`; other clients (TUI, curl, tests) do not.
- * We therefore only police the value when it is present: an absent Origin
- * cannot come from a web page, and blocking it would break every non-browser
- * client for no gain.
+ * Only police the value when present — blocking an absent Origin would break
+ * every non-browser client for no gain.
  */
 export function originAllowed(
   origin: string | undefined,
@@ -561,18 +544,14 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
 };
 
 /**
- * Serve a static file from `root`, with an SPA fallback: unknown paths that
- * carry no file extension resolve to `index.html` so client-side routing
- * works. Path traversal outside `root` is rejected with 403; missing files
- * (that DO have an extension) get 404. Everything is resolved through
- * `normalize` + a root prefix check, never raw concatenation.
+ * Serve a static file from `root` with an SPA fallback (extensionless paths →
+ * `index.html`). Traversal outside `root` → 403; missing files with an
+ * extension → 404. Resolved via `normalize` + root prefix check.
  */
 /**
  * Add `ws://<host> wss://<host>` to the entry HTML's CSP `connect-src` so a
- * page served over a non-loopback host (phone on the LAN) may open its
- * WebSocket back to the same host. The static CSP ships loopback-only; this
- * widens it to exactly the host that served the page, nothing more. A no-op
- * when there is no Host header or no connect-src directive to extend.
+ * non-loopback-served page can open its WebSocket back. No-op without Host or
+ * connect-src.
  */
 export function withHostConnectSrc(html: string, host: string | undefined): string {
   if (!host) return html;

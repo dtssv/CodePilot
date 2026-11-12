@@ -1,25 +1,10 @@
 // Codex app-server protocol backend for harness_bridge.
-//
-// Instead of scraping `codex exec` stdout, this drives Codex's app-server — a
-// long-lived JSON-RPC-over-stdio (JSONL) process — to run a single turn and
-// return the agent's final message. This gives a structured final answer,
-// explicit streaming semantics, and a real approval channel, rather than a
-// best-effort text scrape.
-//
-// Protocol shape (app-server is "JSON-RPC 2.0 with the header omitted"):
-//   client → server requests get a matching `{id, result|error}`.
-//   server → client notifications (no id) stream turn progress
-//     (`item/agentMessage/delta`, `item/completed`, `turn/completed`, …).
-//   server → client requests (with id) ask for approvals; we answer with a
-//     conservative default so an unattended bridge turn can make progress
-//     without hanging, and without silently escalating privileges.
-//
-// Lifecycle driven here (minimal, version-tolerant):
-//   initialize → initialized notification → newConversation → sendUserTurn →
-//   read notifications until the turn completes → collect the final agent text.
-//
-// This backend is OPT-IN (config `harnessBridge.allowProtocol`) and never the
-// default; the CLI backend remains the fallback.
+// Drives the Codex app-server (JSON-RPC over stdio) to run one turn and return
+// the agent's final message, instead of scraping `codex exec` stdout.
+// Lifecycle: initialize → initialized → newConversation → sendUserTurn →
+// read notifications until turn completes → collect final agent text.
+// Server-initiated approval requests are answered conservatively (decline).
+// OPT-IN via config `harnessBridge.allowProtocol`; CLI backend is the fallback.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import readline from "node:readline";

@@ -1,11 +1,7 @@
 /**
  * OpenTelemetry-compatible telemetry — dependency-free OTLP/JSON traces over
- * HTTP, controlled by standard OTEL env vars (OTEL_EXPORTER_OTLP_ENDPOINT,
- * OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES, OTEL_TRACES_EXPORTER). No
- * endpoint → all calls are no-ops. The session wires lifecycle events into
- * spans: prompt, llm_call (with usage), tool_call, and errors.
- *
- * @module telemetry
+ * HTTP (standard OTEL env vars). No endpoint → all no-ops; spans cover prompt,
+ * llm_call, tool_call, and errors. @module telemetry
  */
 import { request } from "node:http";
 import { request as requestHttps } from "node:https";

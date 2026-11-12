@@ -142,11 +142,9 @@ async function walk(
 }
 
 /**
- * Search `base` with ripgrep. Returns the hits (parsed from rg's
- * `file:line:text` output) on success, or null when rg is unavailable / errors
- * so the caller can fall back to the walker. Context lines are collapsed into
- * each hit's text to match the walker's `GrepHit` shape. rg's own ignore rules
- * (.gitignore, hidden-file skip) stand in for the walker's shouldSkipWalkDir.
+ * Search `base` with ripgrep, parsing rg's `file:line:text` output into hits,
+ * or null when rg is unavailable so the caller falls back to the walker. Context
+ * lines collapse into each hit's text; rg's ignore rules stand in for the walker.
  */
 async function runRipgrep(
   base: string,

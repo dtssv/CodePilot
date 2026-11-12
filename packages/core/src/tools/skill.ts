@@ -1,15 +1,7 @@
-// `skill` tool — load a skill's full instructions on demand.
-//
-// Skills advertise themselves in the system prompt as a one-line description
-// (see `skillsPromptSection` in `../skills.js`). The full markdown body is
-// only fetched when the model explicitly calls this tool, which is the
-// progressive-disclosure trick that keeps the static prefix small and
-// preserves the prompt cache hit across turns.
-//
-// The tool takes a `name` (the skill's canonical identifier — matches the
-// `name` frontmatter field, falling back to the directory name). It returns
-// the full body of the skill, prefixed with a short header so the model can
-// see which skill it loaded.
+// `skill` tool — load a skill's full instructions on demand (progressive
+// disclosure keeps the static prompt prefix small). Takes `name` (the
+// skill identifier — frontmatter `name` or directory name) and returns the
+// full skill body prefixed with a short header.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

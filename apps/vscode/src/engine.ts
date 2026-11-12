@@ -1,9 +1,7 @@
 // The CodePilot engine: a private `codepilot serve` over stdio, or a shared
-// local daemon (`serve --daemon`) over WebSocket. Default `shared`: discover
-// ~/.codepilot/serve.json, attach if live, else spawn the bundled CLI. The
-// extension does not speak the protocol — the chat webview owns the JSON-RPC
-// client; this class just relays newline-delimited lines. `tapServerLine`
-// peeks at the relayed traffic for status / diffs.
+// daemon over WebSocket. The extension does not speak the protocol — the chat
+// webview owns the JSON-RPC client; this class just relays newline-delimited
+// lines (peeking via `tapServerLine` for status / diffs).
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -80,11 +78,9 @@ export class Engine extends EventEmitter {
   }
 
   /**
-   * Issue a JSON-RPC request from the extension host and await its result.
-   * Used by host-owned features (inline completion). Rejects if the engine is
-   * not running, on timeout, or when the peer returns an error. `signal` aborts
-   * the wait (the in-flight request is abandoned, not cancelled on the server —
-   * the server fast-fails cheaply on its own).
+   * Issue a JSON-RPC request from the extension host (used by inline completion).
+   * Rejects if the engine is not running, on timeout, or on peer error. `signal`
+   * abandons the wait — it does not cancel on the server.
    */
   request<R = unknown>(
     method: string,

@@ -1,24 +1,7 @@
-// suggest_mode: let the model propose switching the collaboration mode
-// (chat / plan / agent) when it judges the current task would be better served
-// in a different mode — then let the USER decide.
-//
-// Why a tool, not a heuristic
-// ---------------------------
-// Auto-switching by guessing "task complexity" (step count, file count,
-// keywords) is a scenario-specific heuristic that misfires. Instead the MODEL
-// — which understands the request — proposes a switch via its own semantic
-// judgement, and the user confirms, not a silent auto-switch.
-//
-// Behaviour
-// ---------
-//  - Headless or `autoAcceptModeSuggestions` on → accept silently and switch.
-//  - Otherwise ask the user (ask_user channel). Accept → switch; "Always
-//    switch" also persists the auto-accept preference to config; decline →
-//    stay (free text the user types instead rides into the tool result as a
-//    correction the model can act on).
-// Acceptance reuses the existing `mode_request` → setAgentMode flow (the same
-// path plan_done uses), so no new switching machinery is introduced. The tool
-// result carries a `mode_request` block the agent loop already understands.
+// suggest_mode: let the model propose switching collaboration mode
+// (chat/plan/agent); the user decides. Headless or autoAcceptModeSuggestions
+// → accept silently; otherwise ask via ask_user (accept / always-switch /
+// decline). Reuses the existing `mode_request` → setAgentMode flow.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

@@ -1,16 +1,7 @@
-// mcp meta-tool: on-demand discovery of external MCP server tools.
-//
-// When an MCP server exposes many tools, injecting every tool's full JSON
-// schema into every request bloats the prompt (a single rich schema can be
-// thousands of tokens). To keep the per-turn tool list small, MCP tools are
-// hidden from the provider tool list and reached through this one meta-tool:
-//
-//   - list              → names + one-line descriptions of all MCP tools
-//   - describe(name)    → the full input JSON schema for one MCP tool
-//   - call(name, args)  → invoke one MCP tool with arguments
-//
-// The real MCP tools stay in the registry (so `call` can dispatch to them);
-// they are simply not advertised directly to the model.
+// mcp meta-tool: on-demand discovery of external MCP server tools, kept hidden
+// from the per-turn tool list to avoid prompt bloat. Reached via list /
+// describe(name) / call(name, args); the real tools stay in the registry for
+// dispatch but are not advertised directly to the model.
 
 import { z } from "zod";
 import type { ToolDef, ToolContext, ToolResult } from "./types.js";
@@ -162,13 +153,10 @@ export function makeMcpMetaTool(getRegistry: () => ToolRegistry): ToolDef<typeof
   };
 }
 
-/** Build a generic `tool_catalog` meta-tool bound to a registry lookup and a
- * source predicate. It mirrors the `mcp` meta-tool but for any deferred tool
- * surface (today: plugin tools): the individual tool schemas are hidden from
- * the per-turn tool list and reached on demand through list/describe/call/batch.
- * The registry is read lazily on each call so tools registered after boot are
- * visible, and `describe` renders the tool's JSON schema from its Zod schema
- * (plugin tools carry no raw-schema metadata). */
+/** Generic `tool_catalog` meta-tool for any deferred tool surface (plugin
+ * tools): schemas hidden from the per-turn list, reached on demand via
+ * list/describe/call/batch. Registry is read lazily; `describe` renders JSON
+ * schema from the Zod schema (plugin tools carry no raw-schema metadata). */
 export function makeToolCatalogTool(
   getRegistry: () => ToolRegistry,
   isDeferred: (tool: ToolDef) => boolean,

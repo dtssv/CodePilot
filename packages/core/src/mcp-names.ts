@@ -1,10 +1,7 @@
 // MCP tool-name normalization and naming helpers.
-//
-// Provider APIs enforce a 64-char limit on function names; MCP tool names of
-// the form `mcp__<server>__<tool>` can exceed that. This module normalises
-// long names to fit while preserving uniqueness via a short hash, and
-// provides the reverse parse + `@mcp:` reference resolution used by the
-// session layer.
+// Provider APIs enforce a 64-char limit; `mcp__<server>__<tool>` can exceed it.
+// This module normalises long names to fit (uniqueness via a short hash) and
+// provides reverse parse + `@mcp:` reference resolution.
 
 import { createHash } from "node:crypto";
 import type { McpToolDescriptor } from "./mcp-types.js";
@@ -22,30 +19,18 @@ interface McpManagerLike {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize an MCP tool name to fit within {@link MCP_TOOL_NAME_MAX_LENGTH}
- * characters while preserving uniqueness.
- *
- * The canonical form is `mcp__<server>__<tool>`. When that fits, it is
- * returned unchanged. When it exceeds the limit, the middle of the name is
- * truncated and an 8-char hash (first 8 hex chars of sha256 of the full
- * name) is appended, e.g. `mcp__serv…__tool__a1b2c3d4`. The hash guarantees
- * that two distinct long names cannot collapse to the same normalized form.
- *
- * @param server The MCP server name (config key).
- * @param tool The tool name advertised by the server.
- * @returns the normalized, provider-safe tool name.
+ * Normalize an MCP tool name to fit {@link MCP_TOOL_NAME_MAX_LENGTH} while
+ * preserving uniqueness. `mcp__<server>__<tool>` is returned unchanged when it
+ * fits; otherwise the middle is truncated and an 8-char sha256 hash appended.
  */
 export function normalizeMcpToolName(server: string, tool: string): string {
   const full = `mcp__${server}__${tool}`;
   if (full.length <= MCP_TOOL_NAME_MAX_LENGTH) return full;
  // Hash the full name so collisions on the truncated prefix are impossible.
   const hash = createHash("sha256").update(full).digest("hex").slice(0, 8);
- // Keep the `mcp__` prefix and the hash suffix; truncate the middle.
- // The result is `mcp__<server>__<tool>__<hash>` — THREE `__` separators.
- // Reserve: "mcp__" (5) + "__" (2, server/tool) + "__" (2, tool/hash) +
- // hash (8) = 17 chars of overhead. (A previous reserve of 15 forgot the
- // second `__`, so a long name could normalize to 66 chars — 2 over the
- // limit — defeating the whole point of this function.)
+ // Keep the `mcp__` prefix and hash suffix; truncate the middle.
+ // Result: `mcp__<server>__<tool>__<hash>` (three `__` separators).
+ // Reserve 17 chars of overhead: "mcp__"(5) + "__"(2) + "__"(2) + hash(8).
   const budget = MCP_TOOL_NAME_MAX_LENGTH - 17;
  // Give the server a fair share; the tool name gets the rest.
   const serverPart = server.slice(0, Math.max(1, Math.floor(budget / 3)));
@@ -54,10 +39,9 @@ export function normalizeMcpToolName(server: string, tool: string): string {
 }
 
 /**
- * Build a reverse-lookup map from normalized tool names to the original
- * `(server, tool)` pair, for a set of descriptors. Used by the session layer
- * so the registry wrapper can invoke the correct server tool even when the
- * registered name was truncated.
+ * Reverse-lookup map from normalized tool names to the original
+ * `(server, tool)` pair, so the registry invokes the correct server tool
+ * even when the registered name was truncated.
  */
 export function buildMcpToolNameMap(
   tools: McpToolDescriptor[]

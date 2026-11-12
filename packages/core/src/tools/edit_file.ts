@@ -1,16 +1,6 @@
-// edit_file: search/replace edits with multiple fallback strategies and an
-// optional multi-edit (transactional) mode.
-// Match strategies (in order):
-// 1. Exact string match.
-// 2. Trimmed whitespace-tolerant match (ignore leading/trailing whitespace per line).
-// 3. Typographic-tolerant match (fold smart quotes / Unicode dashes / exotic
-//    spaces and collapse inner whitespace, per line).
-// 4. Unique-line match when search is a single line that appears exactly once.
-// 5. Regex literal search (only with the explicit `regex` flag).
-//
-// Multi-edit mode (`edits: [...]`) applies several edits in order and is
-// transactional: if any edit fails, the file is left untouched and the
-// error names the failing edit index and strategy.
+// edit_file: search/replace edits with fallback match strategies (exact,
+// whitespace-tolerant, typographic-tolerant, unique-line, regex) and an
+// optional transactional multi-edit mode.
 
 import { z } from "zod";
 import { readFile, writeFile, stat } from "node:fs/promises";
@@ -257,16 +247,10 @@ function normaliseLines(s: string): string {
 }
 
 /**
- * Fold the character differences that make a copied-out search string fail to
- * match otherwise-identical source: smart/curly quotes → straight quotes, the
- * various Unicode dashes → hyphen-minus, non-breaking / exotic spaces → a plain
- * space, then collapse inner whitespace runs and trim the ends. This is the
- * typographic-tolerant tier — used only after exact and trailing/leading-trim
- * matching have failed, matching the looseness of mature agents' seek routines.
- * Matching is located by this normalized form, but the replacement is always
- * spliced into the ORIGINAL source lines, so no source characters change except
- * the block being replaced.
- */
+ * Typographic-tolerant match tier: fold smart quotes, Unicode dashes, and
+ * exotic spaces to ASCII, collapse inner whitespace. Matching locates by this
+ * normalized form, but the replacement splices into the ORIGINAL source lines
+ * — no source chars change except the replaced block. */
 function normaliseTypography(s: string): string {
   return s
     .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")

@@ -1,11 +1,8 @@
 // Built-in Stop verification — validity gate at the completion boundary.
-// Built-in Stop gate: an optional post-completion check before the turn ends.
 // Modes (config `stopVerify`): "off" (default), "prompt" (small-model judge),
-// "tests" (run a detected project test command), true (alias for "prompt"),
-// or { mode, forceContinue }. Default is "off" because the judge shares the
-// provider's TPM budget and often 429s after a long task. Even when enabled,
-// the verdict is advisory by default; `forceContinue: true` opts into the
-// block→continue gate.
+// "tests" (run a detected project test command), true (alias for "prompt"), or
+// { mode, forceContinue }. Default off (judge shares the provider's TPM budget);
+// advisory unless `forceContinue: true` opts into the block→continue gate.
 
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -48,17 +45,9 @@ export function resolveStopVerifyForceContinue(
 }
 
 /**
- * Decide the effective stopVerify mode for a completed turn.
- *
- * stopVerify is strictly opt-in: it runs only when the user explicitly sets a
- * mode ("prompt"/"tests"/true), and stays off otherwise. There is no automatic
- * "the turn touched a .ts file, so run the project tests" upgrade — that forced
- * a completion gate onto turns the user never asked to verify (including pure
- * analysis turns that merely edited a string in a source file), and when the
- * detected test command could not run in the hook's environment it looped,
- * re-summarising each round until the continue cap. Verification is the model's
- * own judgement (see the system prompt) or a user-configured Stop hook, not a
- * gate the framework imposes by file extension.
+ * Decide the effective stopVerify mode for a completed turn. Strictly opt-in —
+ * only runs when the user sets a mode ("prompt"/"tests"/true), never
+ * auto-upgrading by file extension (not a framework-imposed gate).
  */
 export function effectiveStopVerifyMode(args: {
   /** Raw config value; an explicit `false`/"off" is honoured as off, same as unset. */

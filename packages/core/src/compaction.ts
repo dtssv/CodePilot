@@ -33,11 +33,8 @@ export interface CompactionOptions {
   force?: boolean;
   /**
    * User-authored "compact instructions" — what the summary MUST preserve.
-   * Merged from project memory (a `## Compact Instructions` section), a
-   * per-invocation `/compact <focus…>` argument, and a PreCompact hook, in that
-   * order. Appended to the summariser's system prompt as a fixed
-   * "Additional Instructions" block. Empty/omitted leaves the base prompt
-   * unchanged.
+   * Merged from project memory, `/compact <focus…>`, and a PreCompact hook.
+   * Appended to the summariser's system prompt; empty leaves it unchanged.
    */
   extraInstructions?: string;
 }
@@ -65,13 +62,9 @@ export function shouldCompact(
 }
 
 // ---------------------------------------------------------------------------
-// Compaction trigger geometry — ONE place for every coefficient.
-//
-// These ratios used to be written inline at ~10 sites across agent.ts,
-// session.ts and this file (0.92 / 0.9 / 0.85 / 0.8 / 0.5), which made the
-// actual trigger order hard to reason about and easy to drift. They now live
-// here and feed `compactionGeometry`, the single function that turns a model
-// window + config into the concrete trigger set every caller shares.
+// Compaction trigger geometry — ONE place for every coefficient. Feeds
+// `compactionGeometry`, the single function turning a model window + config
+// into the concrete trigger set every caller shares.
 // ---------------------------------------------------------------------------
 
 /** Default fraction of the context window at which we compact, unless the
@@ -253,21 +246,14 @@ export interface CompactionResult {
 export interface FoldOptions {
   keepRecentMessages?: number;
   minChars?: number;
- /** Rolling tool-output window.
- * When set, any tool_result older than the keep window is folded once the
- * number of still-unfolded old results exceeds this count — regardless of
- * each result's size or the overall token budget. This is an *early*,
- * token-independent trigger: it keeps the live transcript's tool-output
- * backlog bounded (so a long run of small-but-numerous results can't quietly
- * accumulate), rather than waiting for a budget/compaction threshold. The
- * `minChars` floor is ignored for these overflow results (they are folded
- * even when individually small). */
+ /** Rolling tool-output window. When set, fold old tool_results once the
+ * still-unfolded count exceeds this — regardless of size or token budget
+ * (an early, token-independent trigger). `minChars` is ignored for these
+ * overflow results. */
   maxUnfoldedToolResults?: number;
- /** Tool names whose results are folded only after every other eligible
- * result has been folded. File reads are the model's working memory in
- * analysis tasks — folding them early triggers re-read spirals, while
- * bash/grep/glob outputs are usually one-shot listings that summarise
- * well. */
+ /** Tool names whose results are folded only after every other eligible result
+ * (file reads are the model's working memory; bash/grep/glob outputs summarise
+ * well). */
   deferTools?: ReadonlySet<string>;
 }
 
@@ -309,12 +295,9 @@ export function foldToolResults(
       return foldAt(e as Event & { type: "tool_result" });
     });
   }
-  // Rolling tool-output window: once the live transcript carries more than
-  // `maxUnfoldedToolResults` still-unfolded old
-  // results, fold the oldest ones down to that count — even if each is under
-  // `minChars`. This is an early, token-independent trim so numerous small
-  // results can't quietly accumulate while every single one stays under the
-  // size floor. Deferred tools (read_file) are folded last, preserving order.
+  // Rolling tool-output window: once still-unfolded old results exceed
+  // `maxUnfoldedToolResults`, fold the oldest down to that count — even if each
+  // is under `minChars`. Deferred tools (read_file) folded last, preserving order.
   const cap = options.maxUnfoldedToolResults;
   if (cap !== undefined && cap >= 0) {
     out = foldRollingWindow(out, cutoff, cap, defer, foldAt);
@@ -418,10 +401,8 @@ function lastAssistantIndex(events: Event[]): number {
 }
 
 /**
- * The structured prompt the small model receives to summarise dropped
- * history. Exported so tests can assert the contract; callers that want
- * to customise the prompt can pass a string override (not currently
- * exposed via the public API but kept here for future use).
+ * The structured prompt the small model receives to summarise dropped history.
+ * Exported so tests can assert the contract.
  */
 export const SUMMARY_SYSTEM_PROMPT = `You are a context compactor for a long-running coding session. The conversation below has been dropped from the active context window because the session is running out of tokens. Your job is to write a checkpoint that lets the next instance of the agent (which has not seen the dropped turns) resume the work with no loss of essential context — as if nothing had happened.
 
@@ -506,10 +487,8 @@ export function renderTranscriptArchive(events: Event[]): string {
 }
 
 /**
- * Rebuild the model-facing event list from an append-only transcript.
- * Everything after the last summary compaction (and the tail that
- * compaction kept, identified by `keepFrom`) is live; earlier turns stay
- * on disk only.
+ * Rebuild the model-facing event list from an append-only transcript: keep
+ * everything after the last summary compaction (plus the tail `keepFrom`).
  */
 export function liveTranscript(persisted: Event[]): Event[] {
   let last = -1;
@@ -524,15 +503,9 @@ export function liveTranscript(persisted: Event[]): Event[] {
 }
 
 /**
- * Hard-trim a transcript copy to fit `budget` tokens. Never mutates the
- * input array.
- *
- * Semantic contract (must not break the task):
- * - Prefer folding tool_results (artifactRef retained) over dropping turns.
- * - When turns must drop, replace them with a structured local handoff
- *   (user asks, plan, files, errors, next action) — never a bare "omitted".
- * - Always keep the latest plan + the last user turn and everything after it.
- * - Truncate oversized tool dumps before touching user / plan text.
+ * Hard-trim a transcript copy to fit `budget` tokens (never mutates input):
+ * fold tool_results over dropping turns; when turns drop, replace with a
+ * structured handoff. Keep latest plan + last user turn and everything after.
  */
 export function trimEventsToBudget(
   events: Event[],
@@ -577,9 +550,8 @@ export function trimEventsToBudget(
         working[0]?.type === "compaction" && working[0].kind === "summary"
           ? working[0].summary
           : undefined;
-      // Exclude prior compaction blobs from re-extraction — they explode the
-      // stub if re-embedded every trim pass. Semantics come from a capped
-      // merge of prior head + fresh handoff of the newly dropped turns.
+      // Exclude prior compaction blobs from re-extraction — they'd explode the
+      // stub. Semantics come from a capped merge of prior head + fresh handoff.
       const dropSansCompaction = drop.filter((e) => e.type !== "compaction");
       // Cap the stub relative to the remaining budget so the handoff itself
       // cannot consume the whole window (esp. tiny test / small-model budgets).
@@ -596,10 +568,8 @@ export function trimEventsToBudget(
       const recentHasPlan = recent.some((e) => e.type === "plan");
       const recentClean =
         recent[0]?.type === "compaction" ? recent.slice(1) : recent;
-      // Pinned messages in the dropped range are kept VERBATIM: carry them
-      // forward (in order) right after the handoff stub instead of letting the
-      // summary paraphrase them. This is the anchor guarantee — a pinned user
-      // requirement survives every trim intact, not just as summary prose.
+      // Pinned messages in the dropped range are carried verbatim after the
+      // handoff stub — a pinned user requirement survives every trim intact.
       const carriedPins = drop.filter(
         (e): e is Extract<Event, { type: "message" }> =>
           e.type === "message" && e.pinned === true,
@@ -973,13 +943,10 @@ export async function compact(
       } catch {
         summary = "";
       }
-      // Forward-progress gate: a small model can degenerate and return a
-      // summary as long as — or longer than — the history it replaces (verbose
-      // restatement, echoing the input). Swapping that in makes compaction a
-      // no-op or a REGRESSION, and worse, persists a bloated blob as a
-      // "compaction" the next pass trusts. Only adopt the summary when it
-      // genuinely shrinks the dropped range; otherwise discard it and let
-      // Pass 3's hard local trim guarantee we fit.
+      // Forward-progress gate: only adopt the summary when it genuinely shrinks
+      // the dropped range — a degenerate summary (verbose restatement) would
+      // make compaction a no-op/regression and persist a bloated blob. Otherwise
+      // discard it and let Pass 3's hard local trim guarantee we fit.
       if (summary) {
         const compactionEvent: Event = { type: "compaction", kind: "summary", summary };
         const plan = extractPlan(drop);
@@ -1064,12 +1031,9 @@ export function composeSummaryPrompt(extraInstructions?: string): string {
 }
 
 /**
- * Merge compact instructions from their three sources into one block. The
- * precedence order is project file → per-invocation slash focus → hook, with
- * later sources appended after earlier ones (a later source does not erase an
- * earlier one — all are hard requirements). Blank sources are skipped and exact
- * duplicate blocks are collapsed so the same instruction isn't repeated when,
- * say, the hook echoes the file. Returns undefined when nothing was supplied.
+ * Merge compact instructions from three sources (project → focus → hook) into
+ * one block; later sources are appended, not erased. Blank sources are skipped
+ * and exact duplicates collapsed. Returns undefined when nothing was supplied.
  */
 export function mergeCompactInstructions(sources: {
   project?: string;

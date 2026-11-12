@@ -1,11 +1,7 @@
 /**
- * Shared headless (non-interactive / print-mode) output contract.
- *
- * One prompt runs to completion, output goes to a sink. Formats: `text`
- * (final assistant message), `json` (single result object), `stream-json`
- * (NDJSON events + final result). `json`/`stream-json` share the same
- * `HeadlessResult` schema. Headless mode never prompts interactively.
- * @module headless
+ * Shared headless (non-interactive / print-mode) output contract. One prompt
+ * runs to completion via a sink as `text`, `json`, or `stream-json` (the latter
+ * two share `HeadlessResult`). Never prompts interactively. @module headless
  */
 import type { Event, UsageInfo } from "./types.js";
 
@@ -59,10 +55,8 @@ export interface HeadlessOptions {
 }
 
 /**
- * Run a single prompt in headless mode and write the output via the sink.
- * Resolves when the prompt completes (or errors). The caller is responsible for
- * disposing the session afterwards. Returns the computed `HeadlessResult` so a
- * caller can derive an exit code (subtype === "error") without re-parsing.
+ * Run a single prompt in headless mode and write output via the sink. Resolves
+ * on completion/error; caller disposes the session. Returns `HeadlessResult`.
  */
 export async function runHeadless(opts: HeadlessOptions): Promise<HeadlessResult> {
   const { session, prompt, format, allowedTools } = opts;

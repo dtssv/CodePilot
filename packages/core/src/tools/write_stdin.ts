@@ -1,9 +1,6 @@
-// write_stdin: send input to a background job's stdin.
-//
-// Interactive long-running processes (REPLs, dev servers, CLIs that prompt
-// for input) started with `bash(run_in_background: true)` keep their stdin
-// open. This tool lets the agent send text — or raw bytes — to that stdin,
-// enabling "type into the running process" workflows for interactive processes.
+// write_stdin: send text or raw bytes to a background job's stdin, for
+// interactive processes (REPLs, dev servers) started with
+// `bash(run_in_background: true)`.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
@@ -73,11 +70,9 @@ export const writeStdinTool: ToolDef<typeof schema> = {
       return { content: describeUnknownJob(ctx.cwd, input.job_id), isError: true };
     }
     // Ownership guard: the bashJobs registry is keyed only by cwd, so parallel
-    // sub-agents that fell back to a shared parent cwd (worktree isolation
-    // unavailable) share a job table. Refuse to write to a job started by a
-    // DIFFERENT session/sub-agent — otherwise one sub-agent could inject into
-    // another's interactive process stdin. Only enforced when BOTH sides carry
-    // an identity (older jobs / minimal contexts stay unrestricted).
+    // sub-agents sharing a parent cwd share a job table. Refuse to write to a
+    // job started by a different session; only enforced when both sides carry
+    // an identity.
     if (job.meta.ownerSessionId && ctx.sessionId && job.meta.ownerSessionId !== ctx.sessionId) {
       return {
         content:

@@ -1,14 +1,8 @@
-// Skill system.
-//
-// Skills — a folder with a SKILL.md (YAML frontmatter + markdown body).
-// Discovery (highest priority first):
-// 1. <cwd>/.codepilot/skills/*/SKILL.md  2. ~/.codepilot/skills/*/SKILL.md
-// 3. Ecosystem-compat roots (.claude/.agents/.opencode) — opt out via
-//    `includeCompatDirs: false`.  4. Extra dirs (plugin skills/, config).
-// 5. packages/core/skills/*/SKILL.md (built-in).
-// `config.skills.enabled:false` disables all; `disabled` omits names. The
-// system prompt advertises name + one-line description only; the body loads on
-// demand via the `skill` tool (progressive disclosure, preserves cache hits).
+// Skill system: discovers SKILL.md folders (frontmatter + markdown body),
+// advertises name + description in the system prompt, and loads the full body
+// on demand via the `skill` tool (progressive disclosure). Source priority:
+// project, user, ecosystem-compat (.claude/.agents/.opencode), extra, built-in.
+// `config.skills.enabled:false` disables all; `disabled` omits named skills.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -69,16 +63,9 @@ export interface DiscoverOptions {
 // Frontmatter parser (deliberately minimal)
 // ---------------------------------------------------------------------------
 
-/**
- * Parse a SKILL.md into `{ frontmatter, body }`. Frontmatter is a `key: value`
- * block delimited by `---` lines; only recognised keys (`name`, `description`,
- * `when`, `tools`, `user-invocable-only` / alias `disable-model-invocation`)
- * are returned, the rest ignored.
- *
- * Split on the first two `---` lines; after the closing `---` is the body. No
- * multi-line values/anchors/includes (a full YAML parser isn't worth the bundle
- * size). Lists via YAML flow (`[a, b, c]`) or repeated same-indent keys.
- */
+/** Parse a SKILL.md into frontmatter keys + body. Only `name`, `description`,
+ * `when`, `tools`, `user-invocable-only` are recognised; lists use YAML flow
+ * `[a,b,c]` or repeated `- ` keys. No anchors/includes (no full YAML parser). */
 export function parseSkillMd(
   text: string
 ): { name?: string; description?: string; when?: string; tools?: string[]; userInvocableOnly?: boolean } {
@@ -164,15 +151,11 @@ function stripQuotes(s: string): string {
 
 const BUILTIN_SKILLS_DIR_HINT = ["skills"]; // relative to packages/core/
 
-/** Resolve the absolute path to the directory holding the built-in skills.
- * We resolve from this module's URL so the result is stable regardless of
- * the caller's cwd — the build emits `dist/skills.js`, and `skills/` lives
- * one level up from `src/`, so we walk up from `dist/`. */
+/** Resolve the built-in skills directory relative to this module, so the
+ * result is stable regardless of caller cwd. */
 export function defaultBuiltinSkillsDir(): string {
- // The compiled file lives at <pkg>/dist/skills.js; the source is at
- // <pkg>/src/skills.ts. In both layouts the skills/ folder sits next to
- // the package root, so the parent of the file's directory is the right
- // place to look.
+ // The compiled file lives at <pkg>/dist/skills.js, source at <pkg>/src/skills.ts;
+  // in both layouts skills/ sits next to the package root.
   const here = fileURLToPath(import.meta.url);
   const pkgRoot = resolve(dirname(here), "..");
   return join(pkgRoot, ...BUILTIN_SKILLS_DIR_HINT);
@@ -264,17 +247,10 @@ function stripFrontmatter(text: string): string {
   return text;
 }
 
-/** Discover skills from all known sources. Later sources do NOT override
- * earlier ones — the first definition of a name wins (project > user > builtin).
- * The `extraDirs` argument, if given, is scanned after builtins and uses the
- * `project` source label.
- *
- * Built-in skills come from one of two places, in priority order:
- * 1. The on-disk `packages/core/skills/` directory (if it exists on the host
- * filesystem — useful during development and for users who install from
- * a source checkout).
- * 2. The embedded `BUILTIN_SKILLS` table (used when the package is installed
- * from a registry and the skills directory is not shipped). */
+/** Discover skills from all sources. First definition of a name wins
+ * (project > user > compat > builtin). `extraDirs` is scanned after builtins
+ * with the `project` label. Built-ins prefer on-disk `packages/core/skills/`,
+ * falling back to the embedded `BUILTIN_SKILLS` table. */
 export async function discoverSkills(
   cwd: string,
   extraDirs: string[] | string | DiscoverOptions = []
@@ -374,16 +350,9 @@ export async function readDisabledSkillNames(): Promise<string[]> {
 // Matching
 // ---------------------------------------------------------------------------
 
-/**
- * Find the best skill for a query. Matching is case-insensitive and tries, in
- * order:
- * 1. Exact name match.
- * 2. Substring match of the query in the name.
- * 3. Substring match of any whitespace-separated keyword in the name,
- * description, or `when` hint.
- *
- * Returns `null` if no skill is a plausible match.
- */
+/** Find the best skill for a query (case-insensitive): exact name, then
+ * substring, then keyword in name/description/`when`. Returns `null` if none
+ * match. */
 export function matchSkill(skills: Skill[], query: string): Skill | null {
   const q = query.trim().toLowerCase();
   if (q.length === 0) return null;
@@ -407,13 +376,9 @@ export function matchSkill(skills: Skill[], query: string): Skill | null {
 // System-prompt section (progressive disclosure)
 // ---------------------------------------------------------------------------
 
-/**
- * Render the system-prompt section that advertises available skills. The
- * session layer can splice this in directly — it is intentionally short:
- * each skill contributes only its name and a one-line description. The full
- * instructions live behind the `skill` tool, so a model that needs detail
- * can fetch it on demand without bloating the static prefix.
- */
+/** Render the system-prompt skill list: name + one-line description only.
+ * Full instructions load on demand via the `skill` tool to keep the prefix
+ * small. */
 export function skillsPromptSection(skills: Skill[]): string {
   // Skills flagged user-invocable-only are discovered and still loadable by
   // name, but omitted from the model-facing catalog so they do not occupy the

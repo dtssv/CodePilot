@@ -27,10 +27,9 @@ export interface PlanFile {
 }
 
 /**
- * The directory where plans are written. Defaults to
- * `~/.codepilot/projects/<hash>/plans` (runtime state, not the workspace).
- * Override via `config.plansDirectory` (absolute, or relative to cwd) when
- * you want plans inside the repo for review.
+ * Directory where plans are written. Defaults to runtime state
+ * (`~/.codepilot/projects/<hash>/plans`); override via `config.plansDirectory`
+ * (absolute or relative to cwd) to keep plans in-repo for review.
  */
 export function plansDir(cwd: string, override?: string): string {
   if (override) {

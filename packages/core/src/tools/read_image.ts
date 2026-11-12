@@ -1,13 +1,7 @@
-// read_image: load an image file from disk and return it to the model as
-// a multimodal image block. The agent uses this to "see" screenshots,
-// diagrams, photos, or any image that's part of the task — e.g. a UI
-// screenshot to reproduce, a chart to analyse, a design mockup to implement.
-//
-// Supported formats: jpeg, png, gif, webp (the set the major multimodal
-// providers accept). Other formats are refused with a clear message.
-// Large images are NOT spilled to an artifact — providers downsample
-// internally — but we cap the encoded size to avoid blowing the context
-// window on a 50MB raw photo.
+// read_image: load an image file and return it to the model as a
+// multimodal image block. Supports jpeg/png/gif/webp; other formats are
+// refused. Encoded size is capped to avoid blowing the context window;
+// images are not spilled to an artifact (providers downsample internally).
 
 import { z } from "zod";
 import { readFile } from "node:fs/promises";

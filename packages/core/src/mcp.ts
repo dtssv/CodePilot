@@ -1,11 +1,7 @@
 // MCP (Model Context Protocol) client — entry point.
-//
-// Re-exports the public API split across transport sub-modules and defines
-// the `McpManager` (one client per configured server). Existing "./mcp.js"
-// imports keep working. Module layout:
-// mcp-types.ts (types/config/guards), mcp-names.ts (tool-name normalization),
-// mcp-jsonrpc.ts (JSON-RPC plumbing), mcp-stdio.ts (child-process stdio),
-// mcp-sse.ts (HTTP+SSE), mcp-http.ts (Streamable HTTP), mcp.ts (this file).
+// Re-exports the public API and defines `McpManager` (one client per server).
+// Module layout: mcp-types (types/config), mcp-names (name normalization),
+// mcp-jsonrpc/stdio/sse/http (transports), mcp.ts (this file).
 
 import type {
   McpClient,
@@ -100,14 +96,9 @@ function buildClient(
 // ---------------------------------------------------------------------------
 
 /**
- * Manager owning one client per configured MCP server. Each transport is
- * implemented by its own class; both implement the `McpClient` interface.
- *
- * The manager is **fail-soft**: a single misconfigured server does not stop
- * the others from starting, and the session remains usable. Per-server
- * errors are collected and exposed via `startErrors` and the `onError`
- * listener. Callers that want to surface the failures (e.g. the session
- * layer printing a warning) can iterate over the result.
+ * Manager owning one client per configured MCP server. Fail-soft: a single
+ * misconfigured server doesn't stop the others; per-server errors surface via
+ * `startErrors` and the `onError` listener.
  */
 export class McpManager {
   private readonly clients = new Map<string, McpClient>();
@@ -209,13 +200,9 @@ export class McpManager {
   };
 
  /**
- * @param configs Either the legacy `Record<string, McpServerConfig>` map
- * (all entries treated as stdio) or the richer
- * `Record<string, McpServerConfigEntry>` map. Existing
- * session.ts call sites keep working.
- * @param ctx Transport context (cwd + OAuth host hook). Optional; when
- * omitted, remote servers requiring OAuth will fail with a
- * 401 instead of launching a browser flow.
+ * @param configs legacy `Record<string, McpServerConfig>` (all stdio) or the
+ * richer `Record<string, McpServerConfigEntry>` map.
+ * @param ctx transport context (cwd + OAuth host hook); omit → 401 for OAuth.
  */
   constructor(
     private readonly configs: Record<
@@ -361,12 +348,9 @@ export class McpManager {
     this.clients.clear();
   }
 
- /** Register a reverse-request handler. Returns an unregister function the
-  * caller MUST invoke when it no longer wants to receive reverse requests
-  * (e.g. on session dispose) so a shared manager stops routing to a dead
-  * session. The stable `dispatch` fan-out is wired onto every client once;
-  * individual handlers come and go through the set. Passing `null` is a no-op
-  * that returns a no-op unregister (kept for back-compat with old callers). */
+ /** Register a reverse-request handler; returns an unregister function the
+  * caller MUST invoke (e.g. on session dispose) so a shared manager stops
+  * routing to a dead session. Passing `null` is a no-op (back-compat). */
   setServerRequestHandler(h: McpServerRequestHandler | null): () => void {
     if (!h) return () => {};
     this.requestHandlers.add(h);

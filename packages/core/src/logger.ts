@@ -134,10 +134,8 @@ function makeStderrSink(): LogSink {
 }
 
 /**
- * NDJSON file sink with size-based rotation. Synchronous on purpose —
- * structured logs are low volume and we never want a queued log line
- * to show up after the program has exited. (If you ever need async
- * batching, swap this out for a pino transport.)
+ * NDJSON file sink with size-based rotation. Synchronous — structured logs
+ * are low volume and must never appear after exit.
  */
 function makeFileSink(filePath: string): LogSink {
   ensureDir(filePath);
@@ -169,12 +167,9 @@ function ensureDir(filePath: string): void {
 }
 
 /**
- * If `filePath` is at or above `maxBytes`, rotate the generations:
- * foo.log.2 → foo.log.3 (delete if it exists)
- * foo.log.1 → foo.log.2
- * foo.log → foo.log.1
- * `keep` is the maximum number of `.N` files to retain. The active
- * file is recreated lazily on the next write.
+ * If `filePath` is at/above `maxBytes`, rotate generations: foo.log.N → N+1
+ * (deleting the oldest past `keep`), foo.log → foo.log.1. The active file is
+ * recreated lazily on the next write.
  */
 export function rotateIfNeeded(
   filePath: string,

@@ -1,9 +1,7 @@
-// Agent loop. Streams from the ChatProvider, parses tool calls, runs the
-// Agent turn loop: builds provider messages, streams the model, runs permission
-// checks, executes tools in parallel, appends tool_results, and loops until the
-// model emits no more tool calls (or is cancelled).
-// Layout: agent.ts (this — types + loop); agent-messages.ts (provider messages
-// + tool defs + streamOnce); agent-tools.ts (runOneTool + token estimates).
+// Agent loop: stream from the ChatProvider, parse tool calls, run permission
+// checks, execute tools, append results, and loop until no more tool calls.
+// Layout: agent.ts (types + loop); agent-messages.ts (messages + tool defs +
+// streamOnce); agent-tools.ts (runOneTool + token estimates).
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -87,29 +85,22 @@ export interface AgentDeps {
   * rate-limit headers. Observational — the session keeps the latest snapshot to
   * surface in the status-line payload. Optional. */
   onRateLimit?: (info: { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }) => void;
- /**
+/**
  * Called after every assistant turn with the running session-level token
- * estimate. The estimate is produced by the segmented estimator in
- * `./tokens.js` and is meant to drive decisions like "should we
- * checkpoint now?" rather than match a specific provider's BPE table.
+ * estimate (segmented estimator in `./tokens.js`; for decisions, not exact BPE).
  * Optional — when omitted the agent runs unchanged.
  */
   onTokenEstimate?: (estimate: { tokens: number; turns: number; window: number }) => void;
   /**
    * Mid-run context compaction: called before a provider turn when the live
-   * transcript approaches the model window. Should compact the session's
-   * authoritative event list and return the new live transcript so the agent
-   * can resync `history` / `produced`. Return `null` when nothing changed.
+   * transcript approaches the model window. Compact the session's authoritative
+   * event list and return the new live transcript (or `null` if unchanged).
    */
   compactNow?: () => Promise<Event[] | null>;
- /**
-  * Register a prompt-cache warm candidate at a normal turn end. The agent
-  * passes the prefix size (last request's input tokens) and a `replay` closure
-  * that re-sends THE EXACT request just built (same messages/tools/system) with
-  * a 1-token output cap — a faithful, drift-free warm. The session decides
-  * (cost-gated, see `decideCacheWarm`) whether and when to call `replay`, and
-  * cancels it when the next real turn starts. Fire-and-forget; omitting this
-  * callback disables warming.
+/**
+  * Register a prompt-cache warm candidate at a normal turn end: `replay`
+  * re-sends the exact request with a 1-token output cap. The session decides
+  * (cost-gated) whether/when to call it; omit to disable warming.
   */
   onWarmableRequest?: (candidate: {
     prefixTokens: number;
@@ -185,17 +176,10 @@ export interface AgentDeps {
  * replayed in the next instead of re-read. Omitted in tests/subagents,
  * where a fresh run-local cache is created automatically. */
   dedupCache?: DedupCache;
- /**
+/**
  * Steering hook: called at the start of every agent turn. `user` items are
- * genuine human input and are injected into the transcript as user messages;
- * `system` items are engine-generated notices (background-job completion,
- * etc.) and are surfaced via the per-turn runtime_context instead, so they
- * can never be mistaken for — or spoof — user input. Lets a host queue
- * mid-run guidance without cancelling the run.
- *
- * `scope: "steer"` drains only steer-delivery items (plus all system notices)
- * and leaves follow-up items queued for the next top-level turn; `"all"` (the
- * default) drains everything. Repeatable within a turn.
+ * injected into the transcript as user messages; `system` items are surfaced
+ * via the per-turn runtime_context (never spoofable as user input).
  */
   drainSteering?: (opts?: { scope?: "steer" | "all" }) => Array<{
     source: "user" | "system";
@@ -206,21 +190,17 @@ export interface AgentDeps {
   * so a mid-run correction lands in the same turn. */
   peekSteering?: () => boolean;
  /** Returns the signal that aborts only the in-flight provider SSE for a
-  * mid-stream steer. Read per request (not captured once) so the host can
-  * rotate the underlying controller after a steer is consumed. Distinct from
-  * `signal` (user Stop): a steer abort keeps partial text and does NOT mark the
-  * run cancelled. */
+  * mid-stream steer. Distinct from `signal` (user Stop): a steer abort keeps
+  * partial text and does NOT mark the run cancelled. */
   getSteerSignal?: () => AbortSignal | undefined;
  /**
  * Collaboration mode. Filters the tool table sent to the
  * provider. Defaults to "agent" (no filtering).
  */
   agentMode?: AgentMode;
- /**
+/**
  * Optional parent telemetry span (the `codepilot.prompt` span created by
- * session.prompt). Child spans (`codepilot.llm_call`, `codepilot.tool_call`,
- * `codepilot.permission_request`) link to it. Unused when telemetry is
- * disabled — all span creation is gated on `tracer.enabled`.
+ * session.prompt); child spans link to it. Unused when telemetry is disabled.
  */
   parentSpan?: Span;
   /**
@@ -230,10 +210,9 @@ export interface AgentDeps {
    */
   lastProviderInputTokens?: number;
   /**
-   * Session-scoped file-observation store (read-before-write + staleness
-   * guard). When supplied, read_file records observations and write/edit
-   * tools assert freshness before mutating. Omitted in tests/sub-agents,
-   * where tools fall back to their prior (unguarded) behaviour.
+   * Session-scoped file-observation store (read-before-write + staleness guard).
+   * When supplied, read_file records observations and write/edit tools assert
+   * freshness before mutating. Omitted in tests/sub-agents.
    */
   fileObservations?: import("./fsObservation.js").FileObservationStore;
   /**
@@ -242,24 +221,13 @@ export interface AgentDeps {
    * secret floor — never instead of it. Omitted in tests/sub-agents.
    */
   redactPatterns?: readonly RedactionPattern[];
-  /**
-   * Optional plugin-provided context transform. Called with a COPY of the
-   * provider message view right before each provider request — AFTER
-   * CodePilot's own fold/compaction and the consistency check, so a plugin
-   * can prune / window / inject memory into what the model sees WITHOUT
-   * touching the persisted transcript (the copy is thrown away after the
-   * request). The returned view is validated (roles legal, tool_use ↔
-   * tool_result pairing preserved, non-empty); on any validation failure or
-   * throw the untransformed view is used (fail-soft — never send a malformed
-   * request). Set by the Session from a plugin runtime; omitted → no-op.
-   */
+  /** Plugin context transform applied to the provider message view before each
+   * request (after fold/compaction). Fail-soft; omitted → no-op. */
   contextTransform?: (view: ProviderMessage[]) => ProviderMessage[];
   /**
-   * Query-relevant memory notes selected at turn start (progressive recall).
-   * Injected into the volatile per-turn context (`<relevant_memories>`) so a
-   * relevant note is not missed, without persisting it to the transcript or
-   * busting the cached system prefix. Set by the Session for the turn; omitted →
-   * no recall block.
+   * Query-relevant memory notes selected at turn start, injected into the
+   * volatile per-turn context without persisting to the transcript or busting
+   * the cached system prefix. Omitted → no recall block.
    */
   relevantMemories?: string;
 }
@@ -272,32 +240,20 @@ export interface AgentRunInput {
  /** Files already written under the workspace for this prompt. */
   files?: import("./types.js").SavedUpload[];
   /**
-   * Stop-hook / stopVerify continue feedback. Sent to the model as a
-   * provider-only resume (same channel as truncation resume) and never
-   * persisted as a `role: user` transcript event — so the UI does not show
-   * a fake user bubble for `<stop_hook_continue>…`.
+   * Stop-hook / stopVerify continue feedback. Sent as a provider-only resume
+   * (not persisted as a `role: user` event, so no fake user bubble).
    */
   systemContinue?: string;
   /**
-   * Resume the LAST turn from the existing `history` instead of starting a
-   * new one. Set after a turn ended in an error (provider failure, tool
-   * failure, Stop-verify cap) so a user "retry" picks up exactly where it
-   * stopped: no new `role:"user"` event is emitted, and the provider view is
-   * rebuilt from `history` (whose trailing user turn + any assistant/tool
-   * progress already drives the model; dangling `tool_use` calls are repaired
-   * into "interrupted" results by `compactTranscriptToProviderMessages`). The
-   * `userText` carries the last prompt only as the compaction fallback — it is
-   * NOT re-appended when the history is non-empty.
+   * Resume the LAST turn from `history` instead of starting a new one (set
+   * after an error so a user "retry" picks up where it stopped). No new
+   * `role:"user"` event is emitted; `userText` is only the compaction fallback.
    */
   resume?: boolean;
   /**
-   * The caller has ALREADY appended (and surfaced) the `role:"user"` message
-   * for this prompt into `history`, so the loop must not emit a second one.
-   * Used by the session to show the user's bubble immediately — before the
-   * per-turn preprocessing (recall, context shrink, provider build) and the
-   * first model round-trip — instead of waiting for the loop to emit it. The
-   * provider view is still rebuilt from `history` (which already carries this
-   * turn's user message), and `userText` remains the compaction fallback.
+   * The caller has already appended/surfaced the `role:"user"` message into
+   * `history`, so the loop must not emit a second one. The provider view is
+   * still rebuilt from `history`.
    */
   userAlreadyEmitted?: boolean;
 }
@@ -317,11 +273,9 @@ export interface AgentRunResult {
 }
 
 /**
- * Convenience for a normal conversational close: models often deliver the
- * plan's last step as their final text reply (no tool call left to mark it
- * completed). When the turn ends with no pending steps, close leftover
- * in_progress steps from this run. Soft stops with remaining pending work
- * are left alone so the next user message can continue the conversation.
+ * Convenience for a conversational close: when the turn ends with no pending
+ * steps, close leftover in_progress steps from this run. Soft stops with
+ * remaining pending work are left alone for the next user message.
  */
 async function closeFinishedPlan(produced: Event[], emit: (e: Event) => Promise<void>): Promise<void> {
   const plan = [...produced].reverse().find((e): e is Extract<Event, { type: "plan" }> => e.type === "plan");
@@ -348,16 +302,11 @@ export async function runAgent(
   const configuredMax = deps.maxTurns ?? deps.config.maxTurns;
   const maxTurns =
     configuredMax === undefined || configuredMax === 0 ? Number.POSITIVE_INFINITY : configuredMax;
-  // Soft convergence ceiling, applied even when maxTurns is unlimited. The
-  // exact-signature DoomLoopDetector can't catch a weak model that keeps
-  // re-verifying with slightly different bash/git/python each turn — every
-  // command differs textually but the run is going in circles. When this many
-  // turns pass without the user intervening, the loop winds down and disables
-  // tool calls for the final turn (the same backstop the finite maxTurns path
-  // uses). 0 (config or deps) disables it; otherwise it falls back to
-  // DEFAULT_CONVERGENCE_CAP so the default daemon is always protected.
-  // Precedence: a per-run deps override, then `convergence.cap`, then the flat
-  // `convergenceCap`. All share the "0 = disabled, unset = default" meaning.
+  // Soft convergence ceiling applied even when maxTurns is unlimited: winds
+  // down and disables tools on the final turn after this many turns without
+  // user intervention (catches a model re-verifying with slightly different
+  // commands). 0 disables; unset falls back to DEFAULT_CONVERGENCE_CAP.
+  // Precedence: deps override, then convergence.cap, then convergenceCap.
   const cv = deps.config.convergence;
   const rawConvergenceCap = deps.convergenceCap ?? cv?.cap ?? deps.config.convergenceCap;
   const convergenceCap =
@@ -435,14 +384,10 @@ export async function runAgent(
     4_000,
     contextWindow - systemReserve - outputReserve - 1_024,
   );
-  // Auto-compact trigger: when the live transcript reaches this token count we
-  // ask the session to compact. This is a HISTORY-size decision and must match
-  // the session's own `maybeCompact` trigger exactly — both now come from the
-  // shared `compactionGeometry` so the mid-run trigger and the turn-boundary
-  // trigger can never drift apart (previously agent.ts recomputed its own
-  // `contextWindow * 0.92` capped at `hardBudget`, a third parallel formula).
-  // Still capped at `hardBudget` so we never let history alone exceed what one
-  // request can carry.
+  // Auto-compact trigger: ask the session to compact when the live transcript
+  // reaches this token count. Must match the session's `maybeCompact` trigger
+  // (both come from shared `compactionGeometry` so they can't drift). Capped
+  // at `hardBudget` so history alone never exceeds one request's capacity.
   const autoTrigger = Math.min(
     hardBudget,
     compactionGeometry({
@@ -461,13 +406,10 @@ export async function runAgent(
   /** Last provider-reported input size, used for next-turn pressure checks. */
   let lastInputTokens = Math.max(0, deps.lastProviderInputTokens ?? 0);
 
- // Append the user message as a transcript event — unless this run is a
- // Stop-hook continue (systemContinue) or a resume of the last turn. In both
- // cases the model must be re-engaged WITHOUT emitting another `role:"user"`
- // event: the continue feedback reaches the model via `systemContinue`, and a
- // resume drives purely from the existing `history` (whose trailing user turn
- // is already there). Emitting a new user bubble for either would fake human
- // input in the UI / persisted JSONL.
+ // Skip emitting a `role:"user"` transcript event for a Stop-hook continue
+ // (systemContinue) or a resume: the continue feedback flows via
+ // systemContinue, a resume reuses the existing history, and a new user
+ // bubble would fake human input in the UI / persisted JSONL.
   const suppressUserEvent =
     !!input.systemContinue || !!input.resume || !!input.userAlreadyEmitted;
   const userImages = suppressUserEvent ? undefined : input.images;
@@ -570,86 +512,78 @@ export async function runAgent(
       }
     }
 
- // Plan-stall notice: if a plan exists and we've gone several turns
- // calling tools without any plan step advancing, the model is spinning
- // on exploration without synthesizing. Flag it so this turn's live
- // context carries a reminder (then reset the counter so it clears once
- // the plan advances). The notice rides in <runtime_context>, never as a
- // persisted message, so it can't be mistaken for user input.
+ // Plan-stall notice: flag in <runtime_context> when several tool turns pass
+ // without a plan step advancing, then reset the counter. Never persisted as a
+ // message so it can't be mistaken for user input.
     if (planProgressSig !== "" && turnsSincePlanProgress >= PLAN_STALL_TURNS) {
       turnsSincePlanProgress = 0;
       planStalled = true;
     }
 
-    // Turn-budget wind-down: as the run approaches the governing ceiling
-    // (`windDownAt` = the lower of maxTurns and the convergence cap), urge
-    // synthesis before (and on) the last turns — never rely on a hard error to
-    // end the run. Sub-agents also get a dedicated bonus turn (see
-    // subagentSynthesisBonus). On the final turn we ALSO hard-disable tool
-    // calls (`toolChoice:"none"`) so the model physically cannot start another
-    // tool call the prose nudge asked it to avoid — the nudge is advisory, this
-    // is the backstop. This fires even when maxTurns is unlimited, which is what
-    // stops a weak model from re-verifying forever.
+    // Turn-budget wind-down: as the run approaches `windDownAt` (lower of
+    // maxTurns and the convergence cap), urge synthesis on the last turns. On
+    // the final turn hard-disable tool calls (toolChoice:"none") as a backstop
+    // — fires even when maxTurns is unlimited.
     let lockToolsThisTurn = false;
     let budgetWarning = false;
     if (Number.isFinite(windDownAt) && turn > 0) {
       const remaining = windDownAt - turn;
-      const capLabel = Number.isFinite(windDownAt) ? String(windDownAt) : "∞";
+      // Tiered fixed copy (no per-turn counters) keeps the trailing
+      // runtime_context byte-stable across turns in the same wind-down tier;
+      // only the tier transition rewrites the tail.
       if (subagentSynthesisBonus || remaining <= 1) {
         lockToolsThisTurn = true;
         budgetWarning = true;
         systemSteerNotices.push(
           deps.isSubagent
-            ? `Turn budget reached (${turn}/${capLabel}). ` +
-                `Do NOT call any more tools. Write your structured conclusion NOW ` +
-                `(### Findings / ### Key references / ### Recommendations, or ### Blocker). ` +
-                `Partial-but-synthesized beats stopping mid-exploration. Note anything left unverified.`
-            : `You have reached the turn budget for this task (${turn + 1}/${capLabel}). Do NOT ` +
-                `call any more tools. Using only what you already have, write your final answer now. ` +
-                `If some detail is still unverified, say so explicitly rather than looping to verify it.`,
+            ? "Turn budget reached. Do NOT call any more tools. Write your structured " +
+                "conclusion NOW (### Findings / ### Key references / ### Recommendations, or " +
+                "### Blocker). Partial-but-synthesized beats stopping mid-exploration. Note " +
+                "anything left unverified."
+            : "You have reached the turn budget for this task. Do NOT call any more tools. " +
+                "Using only what you already have, write your final answer now. If some detail " +
+                "is still unverified, say so explicitly rather than looping to verify it.",
         );
       } else if (remaining <= remainingNudgeAt) {
         budgetWarning = true;
         systemSteerNotices.push(
-          `${remaining} turn${remaining === 1 ? "" : "s"} left in your budget (${turn + 1}/${capLabel}). ` +
-            `Wrap up tool use soon and prepare to synthesize your final answer from what you already have.`,
+          "A few turns left in your budget. Wrap up tool use soon and prepare to synthesize " +
+            "your final answer from what you already have.",
         );
       }
     }
 
-    // Progress-gated stall ladder: independent of the absolute convergence cap,
-    // this catches a run that keeps calling tools without changing durable state
-    // (the 13:51 pattern: variant git/python re-reading the same logs). We nudge
-    // at NO_PROGRESS_SOFT/STRONG, then at NO_PROGRESS_LOCK reuse the wind-down
-    // lock (toolChoice:"none" + synthesis urge). This is a soft land, not a
-    // failure; any later durable progress resets the streak (see below), so a
-    // genuine long task that keeps writing/editing is never throttled here.
+    // Progress-gated stall ladder: nudges at NO_PROGRESS_SOFT/STRONG then reuses
+    // the wind-down lock at NO_PROGRESS_LOCK when a run keeps calling tools
+    // without changing durable state. Durable progress resets the streak, so a
+    // genuine long task is never throttled. Notice text is tier-stable (no
+    // embedding the exact stall count) so same-tier turns share a cacheable tail.
     if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressLock) {
       lockToolsThisTurn = true;
       systemSteerNotices.push(
         deps.isSubagent
-          ? `You have gone ${turnsSinceNoProgress} turns without changing any durable state ` +
-              `(no writes, edits, or sub-agent conclusions) — you are re-checking in circles. ` +
-              `Do NOT call any more tools. Write your structured conclusion NOW ` +
-              `(### Findings / ### Key references / ### Recommendations, or ### Blocker) from what ` +
-              `you already have. Note anything left unverified instead of looping to verify it.`
-          : `You have gone ${turnsSinceNoProgress} turns without changing any durable state ` +
-              `(no writes or edits) — you are verifying in circles. Do NOT call any more tools. ` +
-              `Using only what you already have, write your final answer now: what you found, what ` +
-              `is still unverified or unfinished, and the recommended next step. Mark unverified ` +
-              `details as such rather than looping to confirm them.`,
+          ? "You have gone many turns without changing any durable state (no writes, edits, " +
+              "or sub-agent conclusions) — you are re-checking in circles. Do NOT call any more " +
+              "tools. Write your structured conclusion NOW (### Findings / ### Key references / " +
+              "### Recommendations, or ### Blocker) from what you already have. Note anything " +
+              "left unverified instead of looping to verify it."
+          : "You have gone many turns without changing any durable state (no writes or edits) " +
+              "— you are verifying in circles. Do NOT call any more tools. Using only what you " +
+              "already have, write your final answer now: what you found, what is still " +
+              "unverified or unfinished, and the recommended next step. Mark unverified " +
+              "details as such rather than looping to confirm them.",
       );
     } else if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressStrong) {
       systemSteerNotices.push(
-        `You have made no durable progress (no writes, edits, or conclusions) for ` +
-          `${turnsSinceNoProgress} turns. Stop re-checking and move to synthesis: decide whether ` +
-          `you already have enough to answer, and if so answer now instead of running more tools.`,
+        "You have made no durable progress (no writes, edits, or conclusions) for many turns. " +
+          "Stop re-checking and move to synthesis: decide whether you already have enough to " +
+          "answer, and if so answer now instead of running more tools.",
       );
     } else if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressSoft) {
       systemSteerNotices.push(
-        `You have made no durable progress (no writes or edits) for ${turnsSinceNoProgress} turns. ` +
-          `If you keep reading/re-running commands without acting, you are likely spinning — ` +
-          `take a concrete action (edit, write, or answer) rather than gathering more evidence.`,
+        "You have made no durable progress (no writes or edits) for several turns. If you keep " +
+          "reading/re-running commands without acting, you are likely spinning — take a concrete " +
+          "action (edit, write, or answer) rather than gathering more evidence.",
       );
     }
 
@@ -672,14 +606,9 @@ export async function runAgent(
     // last API input) approaches the configured window, persist a summary
     // compaction and resync history so growth stays bounded.
     if (deps.compactNow && deps.config.autoCompact !== false) {
-      // Estimate the transcript ONCE here. Formerly this estimate ran up to
-      // three times over the identical event array in a single iteration — for
-      // `liveTokens`, inside a dead `shouldCompact(...)` OR operand, and again
-      // for `estLive` below. `liveTokens` adds the fixed system-prompt reserve,
-      // so it dominates a bare `shouldCompact(transcript, autoTrigger)` against
-      // the same autoTrigger; that third operand could only fire when
-      // `liveTokens` already had (unless systemReserve were negative, which it
-      // never is), so it was dead and is dropped.
+      // Estimate the transcript once here. `liveTokens` adds the fixed
+      // system-prompt reserve, so it dominates a bare
+      // shouldCompact(transcript, autoTrigger) check against the same trigger.
       const liveTokens =
         estimateEventTokens([...input.history, ...produced], estimateTokens) + systemReserve;
       const pressure =
@@ -760,14 +689,10 @@ export async function runAgent(
     });
     const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices, relevantMemories: deps.relevantMemories });
 
- // Consistency assertion: verify the non-folded tail of the provider
- // messages matches the persisted event log, catching bugs where what the
- // model sees diverges from what was logged. Two triggers: the
- // `consistencyCheck` config (warn by default → non-blocking diagnostic;
- // throw → fail the turn) and the `CODEPILOT_ASSERT_CONSISTENCY=1` env
- // override (forces the throwing path for tests/CI). The trailing
- // provider-only resume nudge (if any) is excluded — it is deliberately not
- // in the log, so comparing it would always report a spurious mismatch.
+ // Consistency assertion: verify the non-folded provider message tail matches
+ // the persisted event log. Triggers: `consistencyCheck` config (warn/throw)
+ // and `CODEPILOT_ASSERT_CONSISTENCY=1` (forces throw). The trailing
+ // provider-only resume nudge is excluded — it's deliberately not in the log.
     const consistencyView = providerOnlyTrailing > 0
       ? providerMessages.slice(0, providerMessages.length - providerOnlyTrailing)
       : providerMessages;
@@ -919,18 +844,11 @@ export async function runAgent(
       if (attempt >= turnRetries || failureKind !== "transient") break;
       const delayMs = Math.min(8000, 1500 * 2 ** attempt);
 
-      // Continuation path: the stream dropped AFTER the model had already
-      // produced visible text, and no tool_call had started streaming. Rather
-      // than discard that text and regenerate the whole turn — which re-runs
-      // the task from scratch and wastes the work and tokens already spent — we
-      // KEEP the partial text and ask the model to continue exactly where it
-      // stopped, reusing the same machinery as an output-token-limit cut-off.
-      //
-      // Guards:
-      //  - no tool_call streamed: a half-streamed call is ambiguous (did the
-      //    args finish? was it executed?), so we fall back to regeneration;
-      //  - some text was actually produced: nothing to continue otherwise;
-      //  - bounded by MAX_INTERRUPT_RESUMES so a flapping connection can't loop.
+      // Continuation path: the stream dropped after visible text was produced
+      // with no tool_call started. Keep the partial text and ask the model to
+      // continue where it stopped (reuses the output-token-limit machinery).
+      // Guards: no tool_call streamed (ambiguous → regenerate instead), text
+      // actually produced, bounded by MAX_INTERRUPT_RESUMES.
       const partialText = assistantText.join("");
       if (
         streamed.callIds.size === 0 &&
@@ -946,12 +864,10 @@ export async function runAgent(
           reason: `${sawError} — continuing from the interrupted point`,
         });
         if (!(await sleepUnlessAborted(delayMs, deps.signal))) break;
-        // Keep the partial output: its `message_delta` events stay in
-        // `produced`, and the assistant `message` persisted below carries the
-        // text so the next provider request includes it. Clearing `sawError`
-        // makes the post-loop flow treat this like a clean partial stop; the
-        // interrupt-resume check after the stream then re-enters the outer turn
-        // loop with INTERRUPT_RESUME, exactly like a truncation resume.
+        // Keep the partial output: it stays in `produced` and the persisted
+        // assistant message carries it into the next request. Clearing
+        // sawError makes the post-loop flow re-enter the turn loop with
+        // INTERRUPT_RESUME, like a truncation resume.
         sawError = null;
         pendingProviderResume = INTERRUPT_RESUME;
         interruptedForResume = true;
@@ -990,28 +906,17 @@ export async function runAgent(
       // underlying controller after a steer is consumed, so each request reads
       // the current one.
       const steerSignal = deps.getSteerSignal?.();
- // Live degeneration guard: a weak model can lock into looping one clause
- // ("I call X, I execute X, …") and fill the whole output ceiling. Waiting
- // for the turn to finish wastes the entire output budget, so we watch the
- // accumulating text and abort the stream the moment it goes periodic. We
- // only re-check every few KB of NEW text to keep it cheap. All thresholds are
- // configurable (`degeneration.*`) and the whole guard can be disabled for
- // deployments with legitimately repetitive output.
+ // Live degeneration guard: abort the stream when accumulating text goes
+ // periodic (a weak model looping one clause), re-checked every few KB to stay
+ // cheap. Thresholds configurable via `degeneration.*`; can be disabled.
       const degenCfg = deps.config.degeneration;
       const degenEnabled = degenCfg?.enabled !== false;
       let repetitionCheckedAt = 0;
       const REPETITION_CHECK_EVERY = degenCfg?.checkEveryChars ?? 2_000;
-      // The live-streaming guard biases hard toward NOT interrupting a
-      // legitimate task. A true degeneration loop is almost perfectly periodic
-      // (the model emits the identical clause over and over), whereas
-      // legitimately repetitive output — a generated table, repeated code
-      // structure — is only APPROXIMATELY periodic (row values differ, fields
-      // change). Requiring near-total periodicity before stopping keeps the net
-      // for real collapses while giving that legitimate output clear headroom.
-      // This is the floor only when the user has not set an explicit threshold;
-      // `degeneration.threshold` overrides it, and the detector's own lower
-      // default still serves the offline sub-agent outcome assessment (which
-      // scores a finished transcript, not a live stream).
+      // Bias toward not interrupting: require near-total periodicity before
+      // stopping, since true degeneration is almost perfectly periodic while
+      // legitimate repetitive output (tables, code) is only approximately so.
+      // This floor applies only without an explicit `degeneration.threshold`.
       const LIVE_DEGEN_THRESHOLD = 0.98;
  // Per-request timing (persisted as a `request` event for diagnostics).
       const startedAt = Date.now();
@@ -1173,13 +1078,10 @@ export async function runAgent(
               finishReason = ev.finishReason;
               break;
           }
-          // Mid-stream steer (B1): a user correction arrived while the model
-          // was still emitting THIS turn. If no tool call has started yet, cut
-          // the stream at this safe boundary so the correction is drained and
-          // the model re-samples with it in view — keeping the partial text
-          // already produced. Once a tool_call has begun streaming we do NOT
-          // preempt (a half-streamed call is ambiguous); the steer then lands
-          // at the post-tool-batch boundary (B2) instead.
+          // Mid-stream steer (B1): a user correction arrived mid-turn. If no
+          // tool call has started, cut the stream to drain the correction and
+          // re-sample keeping the partial text. Once a tool_call is streaming
+          // we don't preempt (ambiguous); it lands at post-tool-batch (B2).
           if (
             !steeredMidStream &&
             callIds.size === 0 &&
@@ -1302,13 +1204,10 @@ export async function runAgent(
       continue;
     }
 
-    // Mid-stream steer (B1): the partial text is now persisted as its own
-    // assistant message (part of the transcript). Re-enter the outer turn loop:
-    // the next iteration's B0 drain turns the queued user steer into a user
-    // message, and the model samples a fresh response with the correction in
-    // view. We only reach here with no started tool call (the peek guard), so
-    // nothing was executed. The partial is NOT folded into resumedText — this is
-    // a new response to new input, not a continuation of the same answer.
+    // Mid-stream steer (B1): the partial text is persisted as its own assistant
+    // message; re-enter the turn loop so B0 drain turns the queued steer into a
+    // user message and the model samples a fresh response. Nothing was executed
+    // (peek guard), and the partial is NOT folded into resumedText.
     if (steeredMidStream) {
       continue;
     }
@@ -1326,13 +1225,10 @@ export async function runAgent(
       const trimmed = finalText.trim();
       const allEvents = [...input.history, ...produced];
 
-      // Empty successful stop: the model ended cleanly (finishReason stop, no
-      // error, no tool calls) but produced no visible text at all. This happens
-      // two ways, both handled here: (a) after tool use the model forgot to
-      // write a closing summary, and (b) a provider degenerate completion where
-      // the very first response streams zero content blocks — surfacing that
-      // raw to the user/parent is a silent blank reply. Rather than yield an
-      // empty turn, retry (bounded) asking the model to continue / respond.
+      // Empty successful stop: clean finish (stop, no error, no tool calls) but
+      // no visible text — either a missing closing summary after tools or a
+      // zero-content completion. Retry (bounded) asking the model to respond
+      // rather than yield a silent blank reply.
       if (
         !sawError &&
         trimmed === "" &&
@@ -1414,14 +1310,10 @@ export async function runAgent(
     resumedText = "";
     sawToolCalls = true;
 
- // Run tools with a read/write concurrency barrier. Read-only and network
- // tools have no filesystem side effects, so they run concurrently; write and
- // execute tools can race each other — two parallel edits to the same file
- // would clobber, and the mtime/size CAS guard only covers staleness ACROSS
- // turns, not two in-flight writes inside one turn (both pre-stat the same
- // baseline and each passes the check). So mutating calls are serialized and
- // run exclusively. Results are still collected in the model's original call
- // order.
+ // Run tools with a read/write concurrency barrier: read-only and network
+ // tools run concurrently; mutating tools are serialized (the mtime/size CAS
+ // only covers staleness across turns, not two in-flight writes in one turn).
+ // Results are collected in the model's original call order.
     await emitAux({ type: "activity", phase: "tools", since: Date.now(), tools: toolCalls.map((tc) => tc.name) });
     const runCall = (tc: ToolUseBlock): Promise<ToolExecResult> =>
       hasUnparsedInput(tc)
@@ -1455,13 +1347,10 @@ export async function runAgent(
  // model context or artifacts (see redact.ts).
       let safeContent = redactSecrets(r.content, deps.redactPatterns);
       if (planOnlyTurn && !r.isError) safeContent += PLAN_ONLY_TURN;
- // Fold-safety net: any result big enough to be folded later (minChars
- // 400 in compaction.ts) but without its own artifactRef gets one now,
- // so a future fold stub always carries a way back to the full text.
- // Without this the stub's "do NOT re-call" guidance is a dead end and
- // the model re-reads the target — the fold/dedup doom loop.
- // Skip results that already carry a dedup prefix: persisting the banner
- // into an artifact would poison future read_artifact calls.
+ // Fold-safety net: any result big enough to be folded later but without an
+ // artifactRef gets one now, so a fold stub always carries a way back to the
+ // full text (otherwise the model re-reads the target). Skip results already
+ // carrying a dedup prefix — persisting the banner would poison read_artifact.
       let artifactRef = r.artifactRef;
       if (
         !artifactRef &&
@@ -1656,11 +1545,9 @@ export function isAbortMessage(message: string): boolean {
 }
 
 /**
- * Whether a tool can run concurrently with other tools in the same turn.
- * Read-only and network tools have no local filesystem side effects, so they
- * are safe to run in parallel. Write/execute tools mutate the working tree (or
- * run arbitrary commands) and must be serialized to avoid write-write races.
- * Fail-closed: an unknown permission (undefined) is treated as NOT parallel-safe.
+ * Whether a tool can run concurrently with others in the same turn. Read-only
+ * and network tools parallelize; write/execute tools serialize. Fail-closed:
+ * unknown permission is NOT parallel-safe.
  */
 export function isParallelSafeTool(permission: PermissionLevel | undefined): boolean {
   return permission === "read" || permission === "network";
@@ -1668,10 +1555,8 @@ export function isParallelSafeTool(permission: PermissionLevel | undefined): boo
 
 /**
  * Execute a turn's tool calls with a read/write concurrency barrier, returning
- * results in the original call order. Maximal runs of adjacent parallel-safe
- * calls execute concurrently; each non-parallel-safe (mutating) call runs
- * exclusively, after all prior calls have settled and before any later call
- * starts. Reads parallelize, writes serialize, order is preserved.
+ * results in original call order. Adjacent parallel-safe calls run concurrently;
+ * mutating calls run exclusively. Reads parallelize, writes serialize.
  */
 export async function runToolsWithBarrier<T>(
   calls: readonly T[],
@@ -1698,11 +1583,9 @@ export async function runToolsWithBarrier<T>(
 }
 
 /** Soft convergence ceiling: when neither maxTurns nor config.convergenceCap is
- * set, the loop still winds down after this many turns and disables tool calls
- * for the final turn. This is the backstop against semantic looping that the
- * exact-signature DoomLoopDetector can't catch — each command differs textually
- * but the run is going in circles. Chosen high enough that genuine long tasks
- * finish normally, low enough that a stuck weak model is forced to answer. */
+ * set, the loop winds down after this many turns and disables tool calls for
+ * the final turn. Backstop against semantic looping the exact-signature
+ * DoomLoopDetector can't catch. */
 const DEFAULT_CONVERGENCE_CAP = 60;
 /** Turns of slack between where wind-down starts (tools disabled + synthesis
  * urge) and the absolute hard break. Gives the model room to actually write its
@@ -1713,17 +1596,10 @@ const CONVERGENCE_HARD_SLACK = 3;
  * (and a `turn_budget` warning is surfaced to the host). */
 const DEFAULT_REMAINING_NUDGE_AT = 2;
 
-/** Progress-gated stall ladder. The convergence cap above is an *absolute*
- * ceiling; this catches a much earlier failure mode the exact-signature
- * DoomLoopDetector can't: a model that keeps calling read-only / variant-bash
- * tools (git show, python to re-parse the same logs) turn after turn without
- * ever changing durable state — textually different each time, so neither the
- * doom loop nor the plan-stall (which needs a plan) fires. We count turns with
- * no durable progress and escalate: soft nudge, stronger nudge, then reuse the
- * wind-down path (toolChoice:"none" + synthesis urge). Locking is a soft land —
- * the model answers from what it has; it is NOT a task failure. A later turn
- * that makes real progress resets the streak, so genuine long tasks that keep
- * writing/editing/testing are never throttled. */
+/** Progress-gated stall ladder. Catches models calling read-only/variant tools
+ * turn after turn without changing durable state (textually different, so the
+ * doom loop / plan-stall don't fire). Escalate: soft nudge → stronger nudge →
+ * wind-down path. A later turn with real progress resets the streak. */
 const NO_PROGRESS_SOFT_TURNS = 8;
 const NO_PROGRESS_STRONG_TURNS = 12;
 const NO_PROGRESS_LOCK_TURNS = 16;
@@ -1836,19 +1712,9 @@ function hasUnparsedInput(tc: ToolUseBlock): boolean {
 }
 
 /**
- * The model tried to call a tool by writing the call as markup INTO its reply
- * text instead of emitting a real structured tool call. Some models (seen with
- * certain GLM builds) print `<tool_call>…<arg_key>…</arg_key>…` or Anthropic-
- * style `<function_calls><invoke name=…><parameter …>` as prose — none of it
- * reaches the structured tool channel, so nothing executes and the turn just
- * ends with the markup shown to the user.
- *
- * We detect that shape and (bounded) feed back a correction telling the model
- * to use the real tool channel. We do NOT parse the markup and run it: silently
- * honoring an invented text protocol is how the wrong call gets executed. The
- * match targets invocation markup specifically — an opening call wrapper, or an
- * argument-key/parameter tag — so ordinary prose or code that merely mentions
- * these words is not flagged.
+ * Detect when the model wrote a tool call as markup into its reply text instead
+ * of a real structured call. We (bounded) nudge it back to the tool channel; we
+ * do NOT parse and run the markup. Targets invocation markup specifically.
  */
 export function looksLikePseudoToolCall(text: string): boolean {
   const t = text.trim();
@@ -1892,17 +1758,9 @@ function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> 
 }
 
 /**
- * Per-turn context the model needs fresh every turn: the CURRENT plan (the
- * system prompt's copy is frozen at prompt start) and a ledger of the calls
- * already made for this request. Old tool output gets folded away during
- * long runs; without the ledger the model forgets it already did a step and
- * does it again.
- *
- * When `planStalled` is set, a stall notice is appended. `systemNotices` are
- * engine-generated, out-of-band messages (e.g. background-job completion):
- * they live here, in the per-turn runtime_context, rather than in the
- * persisted transcript, so they steer the model without ever looking like —
- * or being spoofable as — a user message on replay.
+ * Per-turn context the model needs fresh every turn: the CURRENT plan and a
+ * ledger of calls already made (old tool output gets folded away during long
+ * runs). `systemNotices` are engine-generated, out-of-band, never spoofable.
  */
 export function buildLiveContext(
   all: Event[],

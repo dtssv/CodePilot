@@ -17,13 +17,10 @@ export interface RetryOptions {
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
-/** Read an explicit `x-should-retry` directive from a response, if the provider
- * sent one. Anthropic (and OpenAI-compatible gateways) use this header to
- * override the status-based heuristic: `true` means "retry even though the
- * status looks ambiguous", `false` means "do not retry even though the status
- * is normally retryable" (e.g. a 429 the provider knows is terminal). Returns
- * null when the header is absent or unparseable, leaving the status heuristic
- * in charge. */
+/** Read an explicit `x-should-retry` directive from a response. `true` retries
+ * an ambiguous status; `false` skips a normally-retryable one (e.g. a terminal
+ * 429). Returns null when absent/unparseable, leaving the status heuristic in
+ * charge. */
 export function shouldRetryHeader(res: Response): boolean | null {
   const v = res.headers.get("x-should-retry");
   if (v == null) return null;
@@ -51,11 +48,10 @@ function numHeader(res: Response, ...names: string[]): number | undefined {
 }
 
 /**
- * Parse provider rate-limit headers into a normalized snapshot, or null when a
- * response carries none. Handles the common families (Anthropic
- * `anthropic-ratelimit-*`, OpenAI/DeepSeek `x-ratelimit-*`) plus a plain
- * `retry-after` for the reset estimate. Pure + fail-soft: unknown providers
- * simply yield fewer fields.
+ * Parse rate-limit headers into a normalized snapshot, or null when absent.
+ * Handles Anthropic `anthropic-ratelimit-*`, OpenAI/DeepSeek `x-ratelimit-*`,
+ * and plain `retry-after`. Pure + fail-soft: unknown providers yield fewer
+ * fields.
  */
 export function parseRateLimitHeaders(res: Response): ProviderRateLimit | null {
   const requestsRemaining = numHeader(
@@ -158,10 +154,9 @@ export async function fetchWithRetry(
 }
 
 /**
- * Thrown when retrying is aborted because the next backoff would exceed the
- * `abortOnDelayMs` threshold (sustained rate-limiting). Providers catch this
- * in their stream and yield it as a recoverable error so the agent loop can
- * stop cleanly and the host can prompt the user to switch provider/model.
+ * Thrown when the next backoff would exceed `abortOnDelayMs` (sustained rate-
+ * limiting). Providers catch this in-stream and yield it as a recoverable error
+ * so the agent loop stops cleanly and the host can prompt to switch provider.
  */
 export class RateLimitAbortedError extends Error {
   constructor(message: string) {

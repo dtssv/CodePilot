@@ -1,18 +1,8 @@
-// Spec-driven-development artifact discovery.
-//
-// A "spec" is one feature folder under the project's spec directory
-// (default `<cwd>/.codepilot/specs/<feature>/`) holding up to three Markdown
-// files written by the spec-* skills:
-//
-//   requirements.md  — numbered acceptance criteria (AC-x.y), the contract
-//   design.md        — how it will be built, traced to the ACs
-//   tasks.md         — ordered tasks, each with `verify:<cmd> → AC-x.y`
-//
-// Unlike plans (runtime state under `~/.codepilot/projects/<hash>/plans`),
-// specs default INSIDE the repo so they are reviewed and versioned with the
-// code. This module is read-only discovery: the skills themselves create and
-// edit the files with `write_file`/`edit_file`, keeping one writer and no
-// bespoke persistence to drift. The source of truth is the Markdown on disk.
+// Read-only discovery of spec-driven-development artifacts: a "spec" is one
+// feature folder under `<cwd>/.codepilot/specs/<feature>/` holding
+// requirements.md (ACs), design.md, and tasks.md. Specs live in the repo for
+// review/versioning; the spec-* skills own writing them. The source of truth is
+// the Markdown on disk.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";

@@ -1,8 +1,7 @@
 /**
- * Terminal rendering for `codepilot run` / `goal` / the REPL when stderr is
- * a TTY: the same glyphs, verbs and palette as the TUI and the graphical
- * clients. Pipes and `NO_COLOR` keep the plain `[tool:…]` format, which is
- * easier to grep.
+ * Terminal rendering for `codepilot run` / `goal` / the REPL when stderr
+ * is a TTY (same glyphs/palette as the TUI). Pipes and NO_COLOR keep the
+ * plain `[tool:…]` format, which is easier to grep.
  */
 
 import { stripThinking, type Event } from "@codepilot/core";

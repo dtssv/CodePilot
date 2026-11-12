@@ -1,14 +1,7 @@
-// Structured audit log.
-//
-// Records every tool call, its outcome, permission denials and errors as
-// append-only JSONL under `~/.codepilot/audit/<YYYY-MM-DD>.jsonl` (or a
-// configured directory). The logger is DRIVEN BY THE EVENT STREAM, not by
-// instrumenting the tool hot path: a session subscribes it to its events, so
-// it captures every tool call/result across all code paths with no risk of
-// missing an early return. Secrets never reach it — the agent loop redacts
-// tool results before they become events, and the short primary-argument
-// summary we keep of inputs (and any error message) is run through the secret
-// floor before it is written.
+// Structured audit log. Records tool calls, outcomes, permission denials and
+// errors as append-only JSONL under `~/.codepilot/audit/<YYYY-MM-DD>.jsonl`.
+// Driven by the session event stream so it captures every call; inputs/outputs
+// are redacted through the secret floor.
 
 import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -63,9 +56,8 @@ function summariseInput(input: unknown): string | undefined {
 
 /**
  * Append-only structured audit logger. Subscribe {@link onEvent} to a
- * session's event stream. Writes are fire-and-forget and never throw into the
- * caller (audit must not break the agent); failures are swallowed after a
- * single stderr notice.
+ * session's event stream. Writes never throw into the caller (audit must not
+ * break the agent).
  */
 export class AuditLogger {
   private readonly sessionId: string;

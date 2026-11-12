@@ -5,10 +5,9 @@
 import type { ContextReport } from "../protocol/client";
 
 /**
- * The numerator the gauge should display: the provider's own reported prompt
- * size when we have it (ground truth), else the full per-turn send estimate
- * (event log + system prompt + tool/MCP schemas), else the event-log total.
- * Mirrors how core computes `usagePercent` in `Session.contextReport`.
+ * Numerator the gauge displays: provider-reported prompt size if available
+ * (ground truth), else the per-turn send estimate, else the event-log total.
+ * Mirrors core's `usagePercent` in `Session.contextReport`.
  */
 export function effectiveContextTokens(r: ContextReport): number {
   if (r.providerInputTokens && r.providerInputTokens > 0) return r.providerInputTokens;

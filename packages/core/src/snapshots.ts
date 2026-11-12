@@ -66,10 +66,8 @@ export async function listSnapshots(cwd: string): Promise<SnapshotEntry[]> {
 }
 
 /**
- * Create a snapshot of the given files' current on-disk content. The
- * caller (typically the session) supplies the set of paths to snapshot —
- * usually "every file the agent has touched this session". Returns the
- * snapshot id.
+ * Create a snapshot of the given files' current on-disk content (typically
+ * every file the agent has touched this session) and return the snapshot id.
  */
 export async function createSnapshot(
   cwd: string,

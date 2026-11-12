@@ -1,13 +1,8 @@
-// task_board: a shared task board for coordinating parallel sub-agents.
-//
-// One tool with an `action` selector over the board operations. Ownership is
-// stamped with the caller's session id, so a task claimed by one sub-agent
-// cannot be completed or annotated by another. Read-only `list`/`get` are
-// available to every sub-agent; the mutating actions need the write tier.
-//
-// The board is append-only JSONL under the project state dir and is fully
-// fail-soft (see taskBoard.ts). This tool neither prescribes a workflow nor
-// assumes one — it only exposes the board's operations.
+// task_board: a shared task board for coordinating parallel sub-agents,
+// one tool with an `action` selector. Ownership is stamped with the
+// caller's session id (a claimed task can't be completed/annotated by
+// another). Read-only list/get for all; mutating actions need write tier.
+// Backed by append-only JSONL; fully fail-soft.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

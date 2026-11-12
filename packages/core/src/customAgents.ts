@@ -1,12 +1,7 @@
-// Custom sub-agent discovery from `.codepilot/agents/`.
-//
-// Custom agents: a Markdown file with YAML frontmatter declaring identity,
-// tool allowlist, model, and behaviour; the body is the agent's system-prompt
-// supplement (appended to the shared prefix when it runs). Discovered from
-// <cwd>/.codepilot/agents/*.md then ~/.codepilot/agents/*.md. Frontmatter:
-// name (required), description (required, the routing signal), tools,
-// disallowedTools, model, maxTurns, permissionMode. The parent delegates via
-// `task({ agent_type: "<name>", objective })`.
+// Custom sub-agent discovery from `.codepilot/agents/`. A Markdown file with
+// YAML frontmatter (name, description, tools, disallowedTools, model, maxTurns,
+// permissionMode) + a system-prompt body; found in <cwd>/ then ~/.codepilot/.
+// The parent delegates via `task({ agent_type: "<name>", objective })`.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve, basename } from "node:path";

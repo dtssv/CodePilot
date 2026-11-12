@@ -1,17 +1,8 @@
-// ask_user_question / plan_done: structured user interaction tools.
-//
-// ask_user_question: the model
-// poses one or more structured questions; the host UI renders them and
-// returns an answers map. Requires a host `onAskUser` handler — headless
-// sessions get an explicit error telling the model to proceed with the
-// most reasonable default instead.
-//
-// plan_done: plan-mode exit ramp.
-// The model calls it when the plan is ready; the host is asked to approve;
-// on approval the session emits a `mode_request` event which the Session
-// turns into a switch to agent mode. The plan is also written to
-// `~/.codepilot/projects/<hash>/plans/<slug>.md` so it survives as a
-// reviewable artifact.
+// ask_user_question: structured Q&A the host renders and answers; headless
+// sessions error out so the model falls back to a reasonable default.
+// plan_done: plan-mode exit ramp — host approves, then a `mode_request` event
+// switches the session to agent mode; the plan is also written to
+// `~/.codepilot/projects/<hash>/plans/<slug>.md` as a reviewable artifact.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

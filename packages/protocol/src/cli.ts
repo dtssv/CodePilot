@@ -1,15 +1,8 @@
 #!/usr/bin/env node
 /**
- * `codepilot` CLI entry point.
- *
- * Subcommands:
- * codepilot serve — run the JSON-RPC server over stdio.
- * codepilot run "<task>" [--flags] — one-shot, non-interactive execution.
- * codepilot goal "<objective>" [--max-rounds N] [--max-stalls N] — long-horizon goal loop.
- * codepilot agent [dir] — the agent app (web UI in an app window).
- *
- * The CLI talks directly to @codepilot/core (no protocol overhead) for the
- * one-shot paths; only `serve` runs the protocol server.
+ * `codepilot` CLI entry point. Subcommands: serve, run, goal, agent.
+ * One-shot paths talk directly to @codepilot/core; only `serve` runs the
+ * JSON-RPC protocol server.
  */
 
 import {
@@ -470,10 +463,8 @@ async function cmdConfig(
 }
 
 /**
- * Opt-in ACP (Agent Client Protocol) stdio server. Speaks the ecosystem-standard
- * agent protocol over stdin/stdout so an ACP-capable editor/tool can drive a
- * CodePilot session. Nothing registers this by default — it exists only when the
- * `acp` subcommand is invoked. Blocks until the stream closes.
+ * Opt-in ACP (Agent Client Protocol) stdio server. Only runs when the `acp`
+ * subcommand is invoked; blocks until the stream closes.
  */
 async function cmdAcp(
   flags: Record<string, string | boolean>,
@@ -510,10 +501,8 @@ async function cmdServe(
 const DEFAULT_WEB_PORT = 18765;
 
 /**
- * `codepilot serve --web`: the same protocol over WebSocket, for browser
- * clients. Prints the URL (token included) to stdout and then runs until
- * interrupted. With `--web-root`, opens the browser to the UI with the token
- * in the query string so the SPA auto-connects (unless `--no-open`).
+ * `codepilot serve --web`: protocol over WebSocket for browser clients.
+ * Prints the token-bearing URL to stdout and runs until interrupted.
  */
 async function cmdServeWeb(
   flags: Record<string, string | boolean>,
@@ -1330,15 +1319,9 @@ async function cmdGoal(
 // ---------- interactive REPL ----------
 
 /**
- * `codepilot` / `codepilot chat` / `codepilot repl`: a multi-turn interactive
- * conversation over stdio. Thinner than the Ink TUI (`codepilot-tui`) — no
- * fancy rendering, just readline + the same event renderer `run` uses — but
- * it makes `codepilot` itself usable interactively without spawning a second
- * binary.
- *
- * Slash commands: /mode <chat|plan|agent>, /model <name>, /clear, /help, /exit.
- * Up/Down arrows recall history (readline native). Ctrl+C cancels the current
- * turn (or exits if idle); Ctrl+D exits.
+ * `codepilot` / `codepilot chat` / `codepilot repl`: multi-turn interactive
+ * conversation over stdio (readline + the `run` event renderer). Slash
+ * commands: /mode, /model, /clear, /help, /exit. Ctrl+D exits.
  */
 async function cmdRepl(
   positional: string[],

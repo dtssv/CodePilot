@@ -1,9 +1,7 @@
 /**
- * Discover a live shared daemon (`~/.codepilot/serve.json` /
- * `server.json`) or spawn one and wait until it advertises itself.
- *
- * Used by VS Code / IDEA / optional TUI attach so multiple clients share one
- * local protocol server instead of each spawning a private stdio serve.
+ * Discover a live shared daemon (`~/.codepilot/serve.json` / `server.json`) or
+ * spawn one and wait until it advertises itself, so multiple clients (VS Code /
+ * IDEA / TUI) share one local protocol server.
  */
 
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
@@ -85,9 +83,8 @@ export interface DiscoverOrSpawnResult {
 
 /**
  * Prefer an already-running loopback daemon; otherwise spawn one and wait for
- * its lockfile. The caller owns disconnect semantics — do not kill `owned`
- * just because one client is leaving (other UIs may share it); the daemon
- * exits on idle grace after the last WebSocket client leaves.
+ * its lockfile. Do not kill `owned` on one client leaving — other UIs may share
+ * it; the daemon exits on idle grace after the last client leaves.
  */
 export async function discoverOrSpawnDaemon(
   opts: DiscoverOrSpawnOptions,

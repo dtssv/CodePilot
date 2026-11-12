@@ -1,10 +1,6 @@
-// Materialise browser-uploaded files into project state so the model can
-// read them with the normal file tools. Images still travel as vision
-// blocks separately; this path is for everything else (and also works for
-// images the user wants on disk).
-//
-// Files land under `~/.codepilot/projects/<hash>/uploads/` (not the
-// workspace) so uploads never pollute the git tree.
+// Materialise browser-uploaded files into project state so the model can read
+// them with normal file tools (images still travel as vision blocks separately).
+// Files land under `~/.codepilot/projects/<hash>/uploads/`, never the workspace.
 
 import { mkdir, writeFile, access } from "node:fs/promises";
 import { basename, join } from "node:path";

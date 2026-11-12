@@ -1,8 +1,6 @@
 /**
  * CodePilot headless protocol server: bridges `@codepilot/core`'s `Session`
- * onto JSON-RPC 2.0 NDJSON. One process serves many sessions. Lifecycle:
- * `initialize` → `session/new`|`resume` → `prompt/send` (events + reverse
- * `permission/request`) → `shutdown`.
+ * onto JSON-RPC 2.0 NDJSON. One process serves many sessions.
  */
 
 import { readdir, readFile, stat, writeFile, rename } from "node:fs/promises";
@@ -375,9 +373,7 @@ export interface PromptSendParams {
   files?: { name: string; mediaType?: string; base64: string }[];
   /**
    * How to deliver the prompt when a run may already be active:
-   * - `auto` (default): idle → start; busy → enqueue follow-up
-   * - `queue`: always enqueue when busy; start when idle
-   * - `steer`: inject into the current run (next agent turn); start when idle
+   * `auto` (idle→start, busy→queue), `queue`, or `steer` (inject into run).
    */
   delivery?: "auto" | "queue" | "steer";
 }
@@ -392,10 +388,8 @@ export interface PromptResumeParams {
 
 export interface PromptResumeResult {
   /**
-   * `started` — the agent re-entered the last turn from the transcript.
-   * `queued` — a run was already active (should not normally happen for resume).
-   * `noop` — nothing to resume (no prior user turn, or the last turn did not
-   *   end in a recoverable error).
+   * `started` — re-entered the last turn. `queued` — a run was already active.
+   * `noop` — nothing to resume (no prior user turn, or last turn ended cleanly).
    */
   delivery: "started" | "queued" | "noop";
 }
@@ -1212,9 +1206,7 @@ export interface ServerOptions {
   remoteGrant?: RemoteGrant;
   /**
    * Identity recorded in each session's write-lease lock file so a second
-   * opener (another process) can be redirected to attach to THIS daemon as a
-   * subscriber instead of opening a competing writer. The web/daemon entry
-   * passes its own discovery url + token here.
+   * opener can be redirected to attach here as a subscriber.
    */
   lockIdentity?: { host?: string; url?: string; token?: string };
 }
@@ -1280,11 +1272,9 @@ export function anyLiveSessionBusy(): boolean {
 }
 
 /**
- * Deliver a scheduled run as a follow-up into an EXISTING session. If the
- * session is already live in this process we reuse it (so the follow-up lands in
- * the user's open conversation, queued behind a busy turn); otherwise we load it
- * from disk by id, prompt, wait for the turn, and release it. Returns ok/error
- * like the new-session delivery path.
+ * Deliver a scheduled run as a follow-up into an existing session. Reuses a
+ * live session if present; otherwise loads from disk, prompts, waits for the
+ * turn, and releases.
  */
 export async function deliverScheduledFollowup(
   sessionId: string,
@@ -1327,11 +1317,9 @@ export interface ServerHandle {
   peer: Peer;
   close(): Promise<void>;
  /**
- * Release this connection's hold on sessions (unsubscribe from events).
- * Idle sessions with no remaining holders are disposed. Busy sessions
- * (a prompt still running) stay in the process-wide live registry so a
- * browser refresh can reconnect without cancelling the task. Explicit
- * `shutdown` force-disposes even busy sessions.
+ * Release this connection's hold on sessions. Idle sessions with no holders
+ * are disposed; busy sessions stay live for reconnect. `shutdown` force-
+ * disposes even busy sessions.
  */
   dispose(): Promise<void>;
 }
@@ -1657,10 +1645,9 @@ function attachSessionEvents(ctx: ServerContext, session: Session): SessionExtra
 }
 
 /**
- * Record a model-requested goal loop (from the `start_goal` tool) as pending.
- * It is NOT started here: `session.prompt()` enqueues while busy, so we wait
- * for the triggering turn to settle (idle) and let `maybeStartGoalLoop` take
- * over. Returning true tells the tool the host accepted.
+ * Record a model-requested goal loop (from `start_goal`) as pending. Not
+ * started here — waits for the triggering turn to settle, then
+ * `maybeStartGoalLoop` takes over.
  */
 function recordPendingGoal(
   ctx: ServerContext,
@@ -1676,10 +1663,8 @@ function recordPendingGoal(
 
 /**
  * On a turn settling idle: if this session has a pending goal and no loop is
- * already driving, consume it and start `driveGoalRounds`. The loop's own
- * per-round prompts produce more idle events, but `activeGoalLoops` guards
- * against re-entry so we drive exactly one loop at a time. When the loop ends
- * (completed / blocked / round-limit), the guard is cleared.
+ * driving, consume it and start `driveGoalRounds`. `activeGoalLoops` guards
+ * against re-entry (one loop at a time).
  */
 function maybeStartGoalLoop(ctx: ServerContext, session: Session): void {
   const sessionId = session.id;
@@ -2521,11 +2506,9 @@ async function handleSessionResume(
   // session's cwd from disk and reject out-of-scope ids. The local connection
   // (no grant) is unaffected.
   await assertSessionInGrantScope(ctx, params.sessionId);
- // If this session is ALREADY live in memory (running in the background, or
- // open on another connection), reuse that instance. Creating a fresh one
- // from the on-disk JSONL would hand back a frozen snapshot and subscribe the
- // client to a dead copy. We look at the PROCESS-WIDE live registry, not just
- // this connection's, so a task started elsewhere is followed live.
+ // Reuse a process-wide live instance if present — creating a fresh one from
+ // disk would hand back a frozen snapshot. We look at the PROCESS-WIDE
+ // registry, not just this connection's.
   const existing = liveSessions.get(params.sessionId)?.session
     ?? ctx.sessions.get(params.sessionId);
   if (existing) {
@@ -2859,13 +2842,10 @@ async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadPara
   try {
     data = await readFile(abs);
   } catch (err) {
-    // The path didn't resolve at the joined location. A very common case: the
-    // model referenced a file by a bare name or a repo-relative path that isn't
-    // rooted at the open workspace (e.g. "subagent.ts" for
-    // "packages/core/src/subagent.ts"). Rather than ENOENT, search the
-    // workspace for a file whose path ends with the requested suffix and open
-    // the single best (shallowest) match. Only for not-found; other errors
-    // (permissions etc.) propagate.
+    // The path didn't resolve. Common case: the model referenced a file by a
+    // bare name or repo-relative path. Search the workspace for a file whose
+    // path ends with the requested suffix and open the shallowest match.
+    // Only for not-found; other errors propagate.
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     const root = resolve(params.cwd && params.cwd.trim() ? params.cwd : ctx.defaultCwd);
     const found = await resolveByBasename(root, params.path);
@@ -2900,12 +2880,9 @@ async function handleWorkspaceRead(ctx: ServerContext, params: WorkspaceReadPara
   };
 }
 
-/** Resolve a (possibly bare / relative / repo-relative) path to the absolute
- * path the host should open. Tries the direct join first; on miss falls back to
- * the same workspace basename search as workspace/read. This is the single
- * source of truth for "turn a referenced path into something openable", so the
- * desktop/web "Open in editor" button never joins a bare name to the wrong
- * root and reports "Failed to open path". */
+/** Resolve a (possibly bare / relative) path to an absolute one the host
+ * should open. Direct join first; on miss falls back to the workspace basename
+ * search. Source of truth for "turn a referenced path into something openable". */
 async function handleWorkspaceResolve(ctx: ServerContext, params: WorkspaceResolveParams): Promise<WorkspaceResolveResult> {
   assertInitialized(ctx);
   const root = resolve(params.cwd && params.cwd.trim() ? params.cwd : ctx.defaultCwd);
@@ -2923,12 +2900,9 @@ async function handleWorkspaceResolve(ctx: ServerContext, params: WorkspaceResol
   return { path: target.rel, absolute: target.abs, exists: false };
 }
 
-/** Best-effort fallback for a read whose path didn't resolve: search the
- * workspace for a file whose path ends with the requested suffix (full
- * relative path or bare basename) and return the shallowest unique match.
- * Returns null when there is no match or the match is ambiguous (several files
- * at the same shallowest depth), so we never silently open the wrong file.
- * Skips the usual noise dirs and stays inside `root`. */
+/** Best-effort fallback: search the workspace for a file whose path ends with
+ * the requested suffix, returning the shallowest unique match. Returns null on
+ * no match or ambiguity. Skips noise dirs; stays inside `root`. */
 async function resolveByBasename(root: string, requested: string | undefined): Promise<string | null> {
   if (!requested) return null;
   const want = requested.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/\/+$/, "");
@@ -3406,12 +3380,11 @@ async function handleGitCommitMessage(ctx: ServerContext, params?: { cwd?: strin
   return { message };
 }
 
-// Inline (Tab) code completion. Mirrors the commit-message template (resolve
-// the session's provider + apiKey) but inverts two things for as-you-type use:
-//   1. model gate — never run on the main chat model (design §2.5); and
-//   2. retry — FAST-FAIL (one attempt, short timeout). A late completion is
-//      worse than none, so we do not relax retry the way commit-message does.
-// Stateless by design: the editor plugins own debounce / cancel / cache (§5.1).
+// Inline (Tab) code completion. Mirrors the commit-message template but:
+//   1. never runs on the main chat model (design §2.5); and
+//   2. FAST-FAIL retry (one attempt, short timeout) — a late completion is
+//      worse than none.
+// Stateless: the editor plugins own debounce / cancel / cache (§5.1).
 async function handleInlineCompletion(ctx: ServerContext, params: InlineCompletionParams): Promise<InlineCompletionResult> {
   assertInitialized(ctx);
   const requestId = params.requestId;
@@ -3831,15 +3804,9 @@ async function handleShutdown(
 }
 
 /**
- * Issue a server-initiated `permission/request` to the client and resolve
- * with the client's `permission/respond` decision.
- *
- * The wire-level requestId is composed as `<sessionId>#<coreId>` to guarantee
- * global uniqueness across concurrent sessions; the client echoes it back
- * unchanged in `permission/respond` and `handlePermissionRespond` matches on
- * that exact string. The returned decision is what core expects
- * (`allow | deny | always | always-project`) — the core-level requestId is
- * opaque to the wire.
+ * Issue a server-initiated `permission/request` and resolve with the client's
+ * `permission/respond` decision. The wire requestId is `<sessionId>#<coreId>`
+ * for global uniqueness; the client echoes it back unchanged.
  */
 async function requestPermissionFromClient(
   ctx: ServerContext,
@@ -3899,10 +3866,9 @@ function defaultDecision(mode: PermissionMode): PermissionDecision {
 }
 
 /**
- * Issue a server-initiated `question/request` to the client and resolve with
- * the client's `question/respond` answers. Uses the same `<sessionId>#<id>`
- * wire-id convention as permission requests. On transport failure we resolve
- * with empty answers (fail-closed: plan_done reads that as "not approved").
+ * Issue a server-initiated `question/request` and resolve with the client's
+ * `question/respond` answers. Same `<sessionId>#<id>` wire-id as permission.
+ * Transport failure resolves with empty answers (fail-closed).
  */
 async function requestQuestionFromClient(
   ctx: ServerContext,
@@ -3923,14 +3889,9 @@ async function requestQuestionFromClient(
 }
 
 /**
- * Bridge the core `DiagnosticsProvider` contract to a server-initiated
- * `diagnostics/request`. Unlike permission/question (a user prompt broadcast to
- * every holder, first answer wins), diagnostics is a direct data fetch from the
- * one connection that owns the session, so it uses the request's inline reply
- * rather than a separate `diagnostics/respond`. A host with no language server
- * replies `unavailable` (or the request rejects, e.g. method-not-found on a
- * client that doesn't handle it); either way the provider returns an empty set
- * so the core tool prints its "not available, use bash" guidance.
+ * Bridge core `DiagnosticsProvider` to a server-initiated
+ * `diagnostics/request` — a direct fetch from the owning connection (not
+ * broadcast). No-LS → `unavailable` → provider returns an empty set.
  */
 function makeDiagnosticsProvider(ctx: ServerContext, getSession: () => Session): DiagnosticsProvider {
   const ask = (path?: string): Promise<DiagnosticsRequestResult> => {

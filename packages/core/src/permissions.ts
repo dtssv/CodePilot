@@ -1,12 +1,8 @@
-// Permission engine: decides whether a tool invocation is auto-allowed,
-// Permission rules: decide whether a tool call is allowed, denied, or asked.
-// Syntax: "read_file" (bare name); "mcp__github__*" (wildcard);
-// "bash(npm test *)" (glob on primary arg); "bash(/^git (status|diff)/)"
-// (regex on primary arg).
-// Evaluation (first match wins): 1. deny (always, even yolo) 2. ask 3. allow
-// 4. mode defaults (yolo/read-tier/auto-edit → allow) 5. dangerous-command scan
-// (bash → ask even under yolo) 6. otherwise → ask. UI "always" adds a session
-// rule scoped to the primary arg; deny still overrides.
+// Permission rules: allow/deny/ask a tool call.
+// Syntax: "read_file"; "mcp__github__*" (wildcard); "bash(npm test *)" (glob);
+// "bash(/^git status/)" (regex on primary arg).
+// Evaluation (first match wins): deny → ask → allow → mode defaults →
+// dangerous-command scan → ask.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -294,13 +290,9 @@ export class PermissionEngine {
   }
 
   /**
-  * Derive the "always allow" grant rule, NARROWED to the invocation:
-  * - bash: safe leading prefix as a glob (`npm test -- --watch` →
-  *   `bash(npm test *)`; program + first subcommand for multi-word CLIs).
-  *   BANNED_PREFIXES programs (rm/sudo/`bash -c`/interpreters) get a
-  *   wildcard-free exact rule so they never auto-approve a different command.
-  * - file tools: containing directory (`write_file(/repo/src/*)`).
-  * - else: bare tool name. deny overrides; session-scoped, never persisted.
+  * Derive the "always allow" grant rule, narrowed to the invocation: bash →
+  * safe leading prefix glob (BANNED_PREFIXES get an exact rule); file tools →
+  * containing directory; else → bare tool name. Session-scoped; deny overrides.
   */
   static suggestRule(tool: ToolDef, input?: unknown): string {
     if (tool.name === "bash") {
@@ -333,22 +325,15 @@ export class PermissionEngine {
       : firstMatch(this.rules().deny, tool.name, primary, input);
     if (deny) return { decision: "deny", reason: `matched deny rule "${deny}"` };
 
-    // Per-command sandbox escalation (bash `escalate_sandbox: true`): the model
-    // asked to run THIS one command WITHOUT the OS jail (e.g. a dev server the
-    // sandbox's network/fs policy breaks). It always forces an interactive
-    // confirmation — never auto-allowed, even under yolo, an active sandbox, or
-    // an allow rule. A deny rule (checked above) still wins. The escalation is
-    // ephemeral: it applies only to this invocation and never changes the
-    // session policy.
+    // Per-command sandbox escalation (bash `escalate_sandbox: true`): run THIS
+    // one command without the OS jail. Always forces confirmation — never
+    // auto-allowed, even under yolo/allow rules. Deny (above) still wins.
     if (bash && isSandboxEscalation(input)) return "ask";
 
- // Sensitive-path floor — applies EVEN when the sandbox is off or the mode is
- // yolo, and above every allow rule. A write/delete onto a system, boot, or
- // credential path (/etc, ~/.ssh, shell rc files, …) forces an interactive
- // confirmation, mirroring the dangerous-command posture. This is the tool-
- // layer counterpart of checkDangerousCommand for bash: file tools would
- // otherwise have no floor at all when the sandbox is off. Not a hard deny —
- // a user who means it can still confirm (or add an explicit allow/deny rule).
+ // Sensitive-path floor — applies even with sandbox off / yolo mode, above
+ // every allow rule. A write/delete onto a system/credential path (/etc,
+ // ~/.ssh, …) forces "ask" (not hard deny). The tool-layer counterpart of
+ // checkDangerousCommand for bash.
     {
       const cwd = this.sandbox?.cwd ?? process.cwd();
       // write-tier file tools (write_file / edit_file / apply_patch / image_gen);
@@ -380,13 +365,10 @@ export class PermissionEngine {
       }
     }
 
-    // Workspace-boundary policy. Under `deny-write` / `deny-read-write`, a path
-    // that lands OUTSIDE the working set (cwd ∪ extra working dirs ∪ sandbox
-    // writable roots ∪ delivery roots) is hard-denied with a reason — no prompt,
-    // even under yolo / allow rules. The default `ask` leaves the existing flow
-    // (writes fall through to the sandbox-expand "ask" below). Covers file write
-    // tools, file read tools, and bash output-redirection targets, so bash and
-    // the file tools share one boundary.
+    // Workspace-boundary policy. Under deny-write/deny-read-write, a path
+    // OUTSIDE the working set is hard-denied (no prompt, even under yolo).
+    // Default `ask` falls through to the sandbox-expand "ask" below. Covers
+    // file write/read tools and bash redirection targets.
     if (this.workspaceBoundary !== "ask") {
       const cwd = this.sandbox?.cwd ?? process.cwd();
       const roots = this.workingSetRoots();
@@ -461,12 +443,8 @@ export class PermissionEngine {
     }
 
  // 4. mode defaults.
- // memory_write to PROJECT scope is a silent side channel (project-state
- // MEMORY.md); never prompt — same posture as other read-tier bookkeeping
- // tools. Writing USER scope (global ~/.codepilot/MEMORY.md) is different:
- // it is a cross-project rule the agent would otherwise persist silently and
- // re-inject into every future session, so require interactive confirmation
- // for user-scope writes. yolo mode still auto-allows (see below).
+ // memory_write PROJECT scope is silent (auto-allowed); USER scope needs
+ // confirmation (cross-project, re-injected every session). yolo auto-allows.
     if (tool.name === "memory_write") {
       const scope = (input as { scope?: unknown } | null)?.scope;
       if (scope === "user" && this.mode !== "yolo") {
@@ -543,13 +521,9 @@ export class PermissionEngine {
   }
 
   /**
-   * Classify WHY {@link preflight} would ask, so `auto`/`dont-ask` can differ:
-   * - `"hard"` — a safety floor forced the ask (dangerous command, sensitive/
-   *   `.git` path, sandbox escalation, out-of-root write, or explicit `ask`
-   *   rule). `auto` must never silently allow; `dont-ask` stays denied.
-   * - `"soft"` — no floor applies (e.g. ordinary write outside auto-edit).
-   *   `auto` may adjudicate; `dont-ask` denies.
-   * Only meaningful when preflight returns `"ask"`.
+   * Classify WHY {@link preflight} would ask, so `auto`/`dont-ask` differ:
+   * "hard" = a safety floor forced it (auto must never allow; dont-ask denies);
+   * "soft" = no floor (auto may adjudicate; dont-ask denies).
    */
   askSeverity(tool: ToolDef, input: unknown): "hard" | "soft" {
     const primary = extractPrimaryArg(tool.name, input);
@@ -663,9 +637,7 @@ export class PermissionEngine {
 
   /**
    * Enrich a permission request so the UI can show what a `job_id` refers to.
-   * `bash_kill` / `write_stdin` only carry `{ job_id }`; without this the
-   * approval card is opaque. Mutates `req` in place. Safe no-op when the job
-   * is unknown or the tool is unrelated.
+   * Mutates `req` in place; safe no-op when the job is unknown.
    */
   async enrichForDisplay(req: PermissionRequest, cwd: string): Promise<void> {
     if (!req.input || typeof req.input !== "object") return;
@@ -718,10 +690,9 @@ export class PermissionEngine {
   }
 
  /**
-   * Directory to grant when a **file write tool** targets a path outside the
-   * sandbox. Bash is not scanned for write paths — the OS jail is the
-   * enforcement; expand happens when the user allows a folder on a write
-   * tool (or via delivery-root approval, which also expands the jail).
+   * Directory to grant when a file write tool targets a path outside the
+   * sandbox. Bash is not scanned (the OS jail enforces); expand happens on a
+   * write-tool allow or delivery-root approval.
    */
   sandboxExpandFor(
     tool: ToolDef,
@@ -751,15 +722,9 @@ export class PermissionEngine {
 // ---------------------------------------------------------------------------
 
 /**
- * Strip leading noise prefixes from a bash command so allow rules match the
- * real probe the model intended.
- *
- * Agents commonly emit chains like:
- * `cd /repo && echo "=== label ===" && grep -rn TODO src`
- * Without normalisation, `bash(grep *)` never matches and the session stalls
- * on permission prompts. We only strip `cd` / `echo` prefixes — never drop
- * a trailing dangerous segment (deny rules still see the normalised rest,
- * e.g. `cd x && rm -rf /` → `rm -rf /`).
+ * Strip leading `cd`/`echo` prefixes from a bash command so allow rules
+ * match the real probe (e.g. `cd x && grep …` → `grep …`). Never drops a
+ * trailing dangerous segment — deny rules still see the normalised rest.
  */
 export function stripLeadingCd(command: string): string {
   return normalizeBashPrimary(command);
@@ -786,11 +751,9 @@ export function normalizeBashPrimary(command: string): string {
 }
 
 /**
- * Programs that must never be widened into a prefix grant. These either run
- * arbitrary code from an argument (shells / interpreters with `-c`, `eval`),
- * escalate privilege (`sudo`, `doas`), or destroy data (`rm`), so an "always
- * allow" on one invocation must not auto-approve a different command sharing
- * the program. For these, the grant covers only the exact command line.
+ * Programs that must never be widened into a prefix grant: they run arbitrary
+ * code (shells/`-c`, `eval`), escalate privilege (sudo), or destroy data (rm).
+ * An "always allow" on one covers only the exact command line.
  */
 const BANNED_PREFIXES: ReadonlySet<string> = new Set([
   "rm", "rmdir", "sudo", "doas", "su",
@@ -813,10 +776,9 @@ function shellWords(command: string): string[] {
 }
 
 /**
- * Build the session allow rule for an "always allow" on a bash command. Safe
- * programs widen to a prefix glob (`bash(npm test *)`); banned programs get a
- * wildcard-free exact rule so only this invocation is covered. The input is
- * the already-normalised primary (leading `cd`/`echo` stripped).
+ * Build the session allow rule for "always allow" on a bash command. Safe
+ * programs widen to a prefix glob; banned programs get a wildcard-free exact
+ * rule. Input is the already-normalised primary.
  */
 export function suggestBashRule(primary: string): string {
   const words = shellWords(primary).map((w) => w.replace(/^(['"])([\s\S]*)\1$/, "$2"));
@@ -1020,17 +982,9 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * Persist a rule into a config file under `permissions.<effect>`. Merges
- * with existing file content; creates the file when missing. Best-effort:
- * throws on malformed existing JSON.
- *
- * @param cwd repo root
- * @param rule the rule string
- * @param effect allow / ask / deny
- * @param scope "repo" (default, `<cwd>/.codepilot/config.json`) or
- * "user" (`~/.codepilot/config.json`). Project rules should
- * be committed; user rules follow the developer across
- * projects.
+ * Persist a rule into `permissions.<effect>` in a config file. Merges with
+ * existing content; creates when missing. Throws on malformed JSON.
+ * @param scope "repo" (`<cwd>/.codepilot/config.json`) or "user" (`~/.codepilot/config.json`).
  */
 export async function persistRule(
   cwd: string,

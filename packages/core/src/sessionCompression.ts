@@ -1,20 +1,8 @@
-// Session retention + cold compression.
-//
-// Two housekeeping operations over the sessions directory, both fail-soft and
-// safe to run at startup or in the background:
-//
-//   - Retention: delete non-pinned sessions whose JSONL (live or cold) is older
-//     than `sessions.retentionDays` by mtime. 0 (default) never deletes.
-//   - Cold compression: a session whose plaintext JSONL has not been touched for
-//     `sessions.coldCompressAfterDays` is compressed to a `.jsonl.br` sibling and
-//     the plaintext removed, reclaiming disk. It is transparently decompressed
-//     ("thawed") back to plaintext before the session is opened for writing.
-//
-// Codec is brotli via node:zlib — built in, no native dependency, available on
-// every supported runtime (unlike node's zstd, which is above the repo's Node
-// floor). The source of truth stays JSONL: a session is EITHER live (`.jsonl`,
-// no `.jsonl.br`) OR cold (`.jsonl.br`, no `.jsonl`), never both. A failed
-// compress or decompress leaves the existing file untouched (no data loss).
+// Session retention + cold compression (brotli via node:zlib).
+// Retention deletes non-pinned sessions older than `retentionDays` by mtime.
+// Cold compression freezes idle sessions to `.jsonl.br` and thaws them before
+// writing. A session is either live (`.jsonl`) or cold (`.jsonl.br`), never
+// both; a failed op leaves the existing file untouched.
 
 import { readFile, writeFile, unlink, readdir, stat, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -61,11 +49,9 @@ export async function readColdSessionText(id: string): Promise<string | null> {
 }
 
 /**
- * Freeze a live session: compress its `.jsonl` to `.jsonl.br`, then remove the
- * plaintext. No-op (returns false) when the session is already cold, has no
- * plaintext, or on any error. The compressed file is written and fsync-flushed
- * before the plaintext is unlinked, so a crash mid-freeze never loses the
- * transcript (worst case leaves both, which `thawSession` resolves on next open).
+ * Freeze a live session: compress `.jsonl` to `.jsonl.br`, then remove the
+ * plaintext. No-op when already cold or on error. The compressed file is
+ * written before the plaintext is unlinked, so a crash never loses the transcript.
  */
 export async function freezeSession(id: string): Promise<boolean> {
   const live = sessionPath(id);
@@ -92,14 +78,9 @@ export async function freezeSession(id: string): Promise<boolean> {
 }
 
 /**
- * Thaw a cold session back to a live `.jsonl` so it can be read with the normal
- * plaintext path and, critically, appended to. MUST run before a session is
- * opened for writing. No-op when the session is not cold. On success the
- * `.jsonl.br` is removed; on any error the cold file is left untouched.
- *
- * If BOTH a `.jsonl` and `.jsonl.br` exist (a crash during a prior freeze), the
- * plaintext wins and the stale `.br` is discarded — the plaintext is the newer,
- * append-target source of truth.
+ * Thaw a cold session back to a live `.jsonl` so it can be appended to.
+ * MUST run before opening for writing. No-op when not cold. If both files
+ * exist (crash during freeze), the plaintext wins and the stale `.br` is dropped.
  */
 export async function thawSession(id: string): Promise<boolean> {
   const live = sessionPath(id);
@@ -176,9 +157,8 @@ export interface RetentionSweepResult {
 
 /**
  * Delete non-pinned sessions older than `retentionDays` by mtime. Fail-soft:
- * each session is handled independently; one failure never aborts the sweep.
- * `retentionDays <= 0` is a no-op. Pinned sessions are always exempt. Operates
- * on both live and cold sessions (the cold `.br` mtime is the retention key).
+ * each session is handled independently. Pinned sessions are exempt.
+ * Operates on both live and cold sessions.
  */
 export async function sweepSessionRetention(opts: {
   config?: CodepilotConfig;
@@ -231,11 +211,9 @@ export interface ColdCompressResult {
 }
 
 /**
- * Compress live sessions not touched for `coldCompressAfterDays` into
- * `.jsonl.br`. Fail-soft and idempotent (already-cold sessions are skipped).
- * Gated on `sessions.coldCompress === true`. Pinned sessions are left live
- * (they are the ones most likely to be reopened). A session with a live-writer
- * lock is skipped — freezing a file being appended would corrupt it.
+ * Compress live sessions idle for `coldCompressAfterDays` into `.jsonl.br`.
+ * Gated on `sessions.coldCompress === true`. Pinned sessions and sessions
+ * with a live-writer lock are skipped (freezing a file being appended corrupts it).
  */
 export async function compressColdSessions(opts: {
   config?: CodepilotConfig;

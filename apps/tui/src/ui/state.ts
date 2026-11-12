@@ -1,14 +1,8 @@
 /**
- * TUI state model + reducer.
- *
- * The TUI keeps a *normalized* event log plus per-message streaming buffers.
- * On every incoming core `Event`, we dispatch a `TuiAction`; the reducer
- * produces the next `TuiState` which drives the renderer.
- *
- * Why a reducer (vs. mutating in effects)?
- * - Streaming `message_delta` events must fold into the current message
- * without rebuilding the entire event log.
- * - The same logic is testable in isolation.
+ * TUI state model + reducer. Keeps a normalized event log plus per-message
+ * streaming buffers; each core `Event` dispatches a `TuiAction`, the reducer
+ * returns the next `TuiState`. `message_delta` folds into the current message
+ * without rebuilding the log.
  */
 import type {
   AgentMode,

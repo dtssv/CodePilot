@@ -1,18 +1,7 @@
-// FallbackProvider: an ordered chain of ChatProviders with automatic
-// failover. If the primary provider's stream fails BEFORE any content was
-// produced (rate limit, quota exhausted, auth error, outage), the request
-// is retried against the next provider in the chain. Once a provider has
-// streamed real content we stay on it for the rest of the call — switching
-// mid-stream would corrupt tool-call framing.
-//
-// Config (see config.ts):
-// "fallbacks": [
-// { "provider": "openai", "model": "gpt-5", "apiKey": "${OPENAI_API_KEY}" },
-// { "provider": "anthropic", "model": "claude-sonnet-4-5" }
-// ]
-//
-// The primary provider is implicit (the top-level provider/model fields);
-// `fallbacks` lists the backups tried in order.
+// FallbackProvider: an ordered chain of ChatProviders with automatic failover.
+// If the primary stream fails BEFORE any content is produced (rate limit, auth,
+// outage) the request retries on the next provider; once real content streams we
+// stay put (switching mid-stream would corrupt tool-call framing).
 
 import type {
   ChatProvider,

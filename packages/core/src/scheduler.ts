@@ -1,8 +1,7 @@
 /**
  * Scheduled / idle tasks — run prompts when idle, at a wall-clock time, on an
- * interval, or on a cron expression. Tasks may be paused or carry an `endsAt`;
- * `once` tasks auto-disable after running. Persisted to
- * `~/.codepilot/scheduled-tasks.json`; execution is host-driven.
+ * interval, or on a cron. Persisted to `~/.codepilot/scheduled-tasks.json`;
+ * execution is host-driven.
  */
 
 import { randomUUID } from "node:crypto";
@@ -93,11 +92,9 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
 }
 
 /**
- * Whether any task is still pending at `now` — i.e. enabled, not paused, not
- * past its `endsAt`, and (for `once`) not already fired. Used by a host to
- * decide whether to keep a daemon alive with no connected clients so a lone
- * scheduled task still runs; a store with only spent/paused/expired tasks lets
- * the daemon idle-exit normally.
+ * Whether any task is still pending at `now` (enabled, not paused, not past
+ * `endsAt`, and for `once` not fired). Lets a host keep a daemon alive with no
+ * clients so a lone scheduled task still runs; otherwise idle-exit.
  */
 export async function hasPendingScheduledTasks(now: number = Date.now()): Promise<boolean> {
   for (const task of (await load()).tasks) {

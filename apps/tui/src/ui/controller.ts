@@ -1,12 +1,7 @@
 /**
- * SessionController + PermissionBridge — narrow façades exposed to the TUI.
- *
- * The TUI doesn't talk to `@codepilot/core` directly; instead it goes through
- * these objects. That keeps:
- * - the TUI component tree pure (no `await import` inside render),
- * - a single seam for substituting a mock backend during UI development,
- * - slash commands self-contained (no scattered core access),
- * - permission flow decoupled from React state.
+ * SessionController + PermissionBridge — narrow façades the TUI uses to reach
+ * `@codepilot/core`, keeping React render pure and providing one seam for a
+ * mock backend.
  */
 import type {
   CodepilotConfig,
@@ -48,11 +43,8 @@ export interface RemoteSessionController {
 export type SessionController = CoreSessionController | MockSessionController | RemoteSessionController;
 
 /**
- * Bridge between the React UI and the (possibly async) permission callback
- * that core sees. Implementation in cli.tsx wires
- * onPermissionRequest = (req) => bridge.waitDecision(req)
- * The UI calls `bridge.resolve(requestId, resolution)` when the user picks.
- * A resolution is either a plain decision or a decline-with-feedback object.
+ * Bridge between the React UI and the (async) permission callback core sees.
+ * cli.tsx wires onPermissionRequest→waitDecision; the UI calls `resolve`.
  */
 export interface PermissionBridge {
  /** UI subscribes to know when a request is waiting for the user. */
@@ -75,11 +67,8 @@ export interface PendingPermission {
 }
 
 /**
- * Bridge for model-requested goal loops (the `start_goal` tool). core's
- * `onGoalRequest` calls `bridge.request(...)` to record a pending goal; the UI
- * subscribes via `onPending` to pick it up and drive rounds when the triggering
- * turn settles. Mirrors the permission/question bridges so the session (created
- * in cli.tsx before the React tree mounts) and the UI share one seam.
+ * Bridge for model-requested goal loops (`start_goal`). core's `onGoalRequest`
+ * calls `request`; the UI subscribes via `onPending` to drive rounds.
  */
 export interface GoalBridge {
   /** core calls this from onGoalRequest; returns true to accept the request. */
@@ -110,11 +99,8 @@ export function createGoalBridge(): GoalBridge {
 }
 
 /**
- * Bridge between the React UI and the (async) onAskUser callback that core
- * sees. Implementation in cli.tsx wires
- * onAskUser = (req) => bridge.waitAnswers(req)
- * The UI calls `bridge.resolve(requestId, answers)` when the user finishes
- * answering all questions in the request.
+ * Bridge between the React UI and the (async) onAskUser callback core sees.
+ * cli.tsx wires onAskUser→waitAnswers; the UI calls `resolve`.
  */
 export interface QuestionBridge {
  /** UI subscribes to know when a question request is waiting for the user. */

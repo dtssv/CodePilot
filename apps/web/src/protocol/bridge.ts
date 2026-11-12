@@ -1,10 +1,8 @@
-// Host bridge: lets the same UI run inside an IDE webview. In VSCode and
-// IntelliJ the page has no socket; the extension spawns `codepilot serve`
-// (JSON-RPC over stdio) and relays raw protocol lines over the webview message
-// channel. VSCode exposes `acquireVsCodeApi`; IntelliJ (JCEF) injects
+// Host bridge: lets the same UI run inside an IDE webview. The extension
+// spawns `codepilot serve` and relays raw protocol lines over the webview
+// message channel. VSCode uses `acquireVsCodeApi`; IntelliJ (JCEF) injects
 // `window.__codepilotHostPost`/`__codepilotReceive` after load, so messages to
-// the IDE are queued until the channel exists. A self-serving host can preset
-// `window.__codepilotHost` inline so kind/theme apply on first paint.
+// the IDE queue until the channel exists.
 
 import type { AgentMode } from "@codepilot/core";
 import type { RpcTransport } from "@codepilot/protocol/rpc";

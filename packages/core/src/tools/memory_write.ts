@@ -1,12 +1,8 @@
 // memory_write: append durable knowledge to project-state MEMORY.md
-// (`~/.codepilot/projects/<hash>/`) or user-level `~/.codepilot/MEMORY.md`,
-// and mirror into progressive index + topic files under
-// `~/.codepilot/memory/<hash>/` (thin index in the prompt; full notes via
-// `read_file`). Auto-allowed and UI-silent — do not narrate to the user.
-//
-// When `section` is set (Project context / Rules / …), the entry lands under
-// that MEMORY.md heading and maps to a topic file (overview / standards / …).
-// Optional `topic` / `category` override the progressive-disclosure target.
+// or user-level MEMORY.md, mirroring into a progressive index + topic files
+// (thin index in the prompt; full notes via read_file). Auto-allowed and
+// UI-silent. `section` lands the entry under a MEMORY.md heading; optional
+// `topic`/`category` override the progressive-disclosure target.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

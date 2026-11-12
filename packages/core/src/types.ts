@@ -101,10 +101,8 @@ type EventBody =
       content: ContentBlock[];
  /**
   * Anchor this message against compaction: a pinned message is never folded,
-  * trimmed, or dropped while any unpinned content could be shed instead. Used
-  * for a key requirement/constraint the user (or a plugin) wants kept verbatim
-  * through long sessions, independent of the recent-N window. Pinning does not
-  * change the source of truth — it only biases compaction's eviction order.
+  * trimmed, or dropped while unpinned content could be shed. Used for a key
+  * requirement kept verbatim; only biases compaction eviction order.
   */
       pinned?: boolean;
  /** Images the user attached to this message. Persisted with the event so
@@ -127,23 +125,16 @@ type EventBody =
       name: string;
       input: unknown;
     }
- /**
-  * Lifecycle marker persisted the instant a tool call clears permission (and
-  * validation) and is about to execute — i.e. it is no longer merely sampled
-  * but has actually started doing work. Append-only safe: a `tool_call` is
-  * persisted at sampling time, long before execution, so we cannot stamp a
-  * "started" flag onto it without rewriting history; this separate marker is
-  * the append-only-correct signal. Its sole use is to let crash-recovery seal
-  * an orphaned call differently — a call with no `tool_started` never began
-  * (safe to retry), one with a marker but no result has an UNKNOWN outcome. A
-  * control event: never sent to the model, zero context cost.
-  */
+/**
+ * Lifecycle marker persisted when a tool call clears permission and is about
+ * to execute. Lets crash-recovery seal an orphaned call: no marker = never
+ * began; marker but no result = UNKNOWN. Control event; never sent to model.
+ */
   | { type: "tool_started"; toolCallId: string; name: string }
   /**
    * Loop-detection telemetry emitted when a layer fires (warn/refuse/seq/path/
-   * ask_reask) for auditing false positives and tuning thresholds. `count` is the
-   * exact-repetition count at fire time (0 for non-count layers). Control event;
-   * never sent to the model.
+   * ask_reask). `count` is the exact-repetition count at fire time. Control
+   * event; never sent to the model.
    */
   | {
       type: "doom_loop";
@@ -199,15 +190,10 @@ type EventBody =
   | {
       type: "compaction";
       summary: string;
- /**
- * Which kind of context reduction this event records:
- * - "summary" (default): the layered compactor dropped old history from
- * the *model* context and replaced it with an LLM summary. The original
- * turns stay on disk (session JSONL + `.history.md` archive).
- * - "micro-fold": old large tool_results were folded to short stubs that
- * still carry an artifactRef — lossless, the full text is retrievable
- * via read_artifact. This is a routine token-saving prune, NOT a
- * context-window compaction, and UIs should present it quietly.
+/**
+ * Context reduction kind: `"summary"` (default) compactor dropped old
+ * history for an LLM summary (original turns stay on disk); `"micro-fold"`
+ * folds old large tool_results to short stubs (lossless).
  */
       kind?: "summary" | "micro-fold";
  /**
@@ -218,14 +204,9 @@ type EventBody =
       keepFrom?: number;
     }
  /**
-  * A large payload was moved out of the inline transcript into the
-  * content-addressed artifact store, leaving a short head+tail stub (carrying
-  * the artifactRef) in the owning event. This durable record exists so:
-  *  - a fork can replicate the exact replacement instead of re-spilling;
-  *  - artifact GC can walk referenced refs from the JSONL (source of truth);
-  *  - an audit can account for every offload (what, how big, where it went).
-  * NOT sent to the model (the owning event's inline stub already carries the
-  * head+tail + ref) and rendered quietly by UIs, like a micro-fold.
+  * A large payload was moved to the artifact store, leaving a head+tail stub in
+  * the owning event. Durable record so a fork can replicate, artifact GC can
+  * walk refs, and audit can account for offloads. NOT sent to the model.
   */
   | {
       type: "content_replacement";
@@ -245,13 +226,9 @@ type EventBody =
       type: "status";
       status: "idle" | "running" | "waiting_permission" | "compacting";
       /**
-       * Durable-execution claim, attached to the `running` status the Session
-       * writes atomically at the start of a real turn. Its presence in the tail
-       * of a session's JSONL after an unclean shutdown is the signal a crash
-       * recovery sweep keys off: the owning process is gone, so the run can
-       * never complete or be cancelled on its own. Cleared implicitly by the
-       * trailing `idle` status on a normal finish. Absent on the agent loop's
-       * per-step `running` heartbeats (only the opening claim carries it).
+       * Durable-execution claim, attached to the opening `running` status of a
+       * real turn. Its presence in the JSONL tail after an unclean shutdown is
+       * the crash-recovery signal; cleared by the trailing `idle`.
        */
       claim?: {
         /** Unique id for this execution attempt (one per prompt/turn start). */
@@ -268,13 +245,9 @@ type EventBody =
       };
     }
   | { type: "error"; message: string; recoverable: boolean }
- /** A prior run for this session was interrupted (process crash / daemon kill)
-  * and has been sealed to a clean idle state by the crash-recovery sweep. The
-  * session is ready to accept a new prompt; this is an advisory the host can
-  * surface ("the previous run was interrupted — you can continue"). NOT
-  * persisted (it is derived from the recovery, not part of the transcript) and
-  * never sent to the model — the model gets its recovery context via the
-  * `<interrupted_run>` system-prompt block instead. */
+ /** A prior run was interrupted (crash/kill) and sealed to idle by the
+  * crash-recovery sweep. Advisory for the host; NOT persisted and never sent
+  * to the model (it gets recovery context via the `<interrupted_run>` block). */
   | ({ type: "interrupted_run" } & InterruptedRunInfo)
  /** Transient failure being retried. Not persisted. When `discardMessageId`
  * is set, the partially streamed assistant message with that id was
@@ -303,12 +276,10 @@ type EventBody =
  /** Live progress marker — what the run is waiting on right now (the model,
  * or the named tools). Not persisted. */
   | { type: "activity"; phase: "model" | "tools"; since: number; tools?: string[] }
- /** Per-turn budget snapshot for the client status line. Emitted at the start
-  * of every turn (and whenever the counters change) so a UI can show how far
-  * into the turn budget a run is and whether it is stalling. `windDownAt` /
-  * `maxTurns` are null when unlimited; `stalledTurns` is the current
-  * no-durable-progress streak. `warning` is true on the turns at/after the
-  * "turns left" nudge threshold. Not persisted; never sent to the model. */
+ /** Per-turn budget snapshot for the client status line. Emitted each turn so
+  * a UI can show progress/stall. `windDownAt`/`maxTurns` null when unlimited;
+  * `warning` true at/after the "turns left" nudge. Not persisted; not sent to
+  * the model. */
   | {
       type: "turn_budget";
       turn: number;
@@ -319,16 +290,10 @@ type EventBody =
     }
  /** Stop hook blocked ending the turn; the agent will continue. Not persisted. */
   | { type: "stop_continue"; count: number; cap: number; reason: string }
- /** Live progress of one sub-agent spawned by a `task` call, so UIs can
- * follow it. Never sent to the model. `event` is the sub-agent's own
- * event; `state` marks start / finish.
- *
- * `sessionId` is the sub-agent's stable, unique run id (`sub_…`): it is the
- * handle the parent can pass back as `continue_session_id` to continue the
- * SAME sub-agent instead of dispatching a fresh one. `runSeq` is a
- * session-global monotonic counter so UIs can label each dispatch uniquely
- * (`#3`) rather than the per-fan-out `index` which resets to 0 every call
- * (so a repeated single-task dispatch always looked like `#1`). */
+ /** Live progress of one sub-agent spawned by a `task` call, for UIs. Never
+ * sent to the model. `sessionId` is the sub-agent's run id (pass back as
+ * `continue_session_id` to continue it); `runSeq` is a session-global monotonic
+ * counter for unique UI labels. */
   | {
       type: "subagent";
       parentToolCallId: string;
@@ -392,8 +357,7 @@ type EventBody =
  /**
   * Anchor/unanchor a prior message against compaction (`pinned` on its
   * `message` event). Append-only safe: the original line is never rewritten;
-  * on load the latest `pin` for a message id wins and the flag is reapplied to
-  * the in-memory event. The last-writer-wins so a later unpin overrides.
+  * on load the latest `pin` for a message id wins (last-writer-wins).
   */
   | { type: "pin"; messageId: string; pinned: boolean }
   /** A turn-boundary snapshot pair pushed onto (or moved between) the undo/redo
@@ -408,12 +372,9 @@ type EventBody =
       afterId: string;
       label: string;
     }
-  /** The live streaming-degeneration guard stopped a turn because the output
-   * collapsed into a short repeating unit. Informational telemetry for tuning
-   * the detector thresholds (and spotting false positives on legitimately
-   * repetitive output) — never sent to the model. `unit` is the detected
-   * repeating snippet (truncated), `repeats` how many times it tiled, and
-   * `soFarLen` the output length when the guard fired. */
+  /** Telemetry: the streaming-degeneration guard stopped a turn whose output
+   * collapsed into a short repeating unit. `unit`/`repeats`/`soFarLen` describe
+   * the loop. Informational; never sent to the model. */
   | {
       type: "degeneration";
       action: "stopped";
@@ -435,14 +396,9 @@ export interface FollowUpItem {
 }
 
 /**
- * Communication between members of an agent team:
- * leader assignments, worker conclusions, conflict notices.
- *
- * These events are persisted and streamed to the UI so a team run can be
- * audited afterwards, but they are deliberately invisible to the model —
- * `compactTranscriptToProviderMessages` ignores them, so a team's internal
- * chatter never inflates the parent's context. The parent agent learns the
- * outcome from the `task` tool result, as with any other sub-agent.
+ * Communication between members of an agent team (assignments, conclusions,
+ * conflict notices). Persisted/streamed to the UI for audit, but invisible to
+ * the model; the parent learns the outcome from the `task` tool result.
  */
 export interface TeamMessageEvent {
   type: "team_message";
@@ -458,27 +414,16 @@ export interface TeamMessageEvent {
 }
 
 /**
- * Collaboration mode. Controls which tools the model is allowed
- * to call and how the system prompt is shaped.
- *
- * - `chat`: read-only Q&A. Only safe read tools are exposed. No file edits,
- * no shell. Model is asked to answer questions / give suggestions without
- * modifying the codebase.
- * - `plan`: read-only + `plan_update`. The model explores the code and
- * produces a structured plan but does not execute any mutations.
- * - `agent`: full autonomy — the default. All tools are available.
+ * Collaboration mode. Controls which tools the model may call and shapes the
+ * system prompt. `chat`: read-only Q&A. `plan`: read-only + `plan_update`.
+ * `agent`: full autonomy (default; all tools).
  */
 export type AgentMode = "chat" | "plan" | "agent";
 
 /**
  * How unmatched tool calls are resolved.
- * - `ask` — prompt for every write/dangerous call (default).
- * - `auto-edit` — auto-approve file edits; still prompt bash/dangerous.
- * - `yolo` — never prompt (dangerous commands still ask).
- * - `auto` — background classifier allows/denies/asks; hard floors (dangerous
- *   commands, sensitive paths, sandbox escalation) always prompt.
- * - `dont-ask` — unmatched soft asks denied immediately; explicit allow +
- *   read/network defaults still pass.
+ * `ask` (default) / `auto-edit` / `yolo` / `auto` (classifier) / `dont-ask`.
+ * Hard floors (dangerous, sensitive paths) always prompt regardless.
  */
 export type PermissionMode = "ask" | "auto-edit" | "yolo" | "auto" | "dont-ask";
 
@@ -511,25 +456,8 @@ export const PERMISSION_PRESETS: Record<
 
 /**
  * Sandbox policy for shell commands and file tools.
- *
- * - `off` — no sandboxing (legacy behaviour; not recommended).
- * - `workspace-write` — commands may read the host but may only write inside
- * the session cwd, the system temp dir, and
- * `~/.codepilot`. File tools enforce the same boundary.
- * - `read-only` — no writes at all.
- *
- * Enforcement is two-layer:
- * 1. Process layer: bash commands are wrapped in `sandbox-exec` (macOS
- * Seatbelt) or `bwrap` (Linux) when available.
- * 2. Tool layer: read_file / write_file / edit_file / ls / glob / grep
- * paths are validated against the policy before any I/O happens.
- *
- * `network: false` blocks outbound network for sandboxed commands where the
- * platform sandbox supports it.
- *
- * `fallback` decides what happens when no OS sandbox binary is available and
- * mode is not "off": "deny" refuses to run bash (fail closed, the default),
- * "allow-unsandboxed" runs the command anyway with a loud warning.
+ * `off` (legacy), `workspace-write` (read host, write cwd+temp+`~/.codepilot`),
+ * `read-only` (no writes). Two-layer enforcement: process + tool.
  */
 export interface SandboxConfig {
   mode?: "off" | "workspace-write" | "read-only";
@@ -553,41 +481,32 @@ export interface SandboxConfig {
   writablePaths?: string[];
   fallback?: "deny" | "allow-unsandboxed";
  /**
-  * Carve repository metadata (the resolved `.git` directory, including a linked
-  * worktree's gitdir) out of the writable roots as read-only at the OS layer,
-  * so an approved bash command cannot rewrite hooks/config/objects even though
-  * the workspace is writable. File tools still gate `.git` writes separately.
-  * Unset leaves `.git` writable (so an ordinary `git commit` works without
-  * escalation); set true to carve it read-only. Superseded by `gitWrite` when
-  * that is set.
+  * Carve the resolved `.git` directory (incl. a linked worktree's gitdir) out
+  * of the writable roots as OS-level read-only, so an approved bash command
+  * cannot rewrite hooks/config/objects. Unset leaves `.git` writable.
   */
   protectGit?: boolean;
  /**
   * How `.git` is treated at the OS sandbox layer; wins over `protectGit`.
-  *  - "protect": carve `.git` read-only (= `protectGit: true`).
-  *  - "allow-git-cli" (default): leave `.git` writable so git CLI works; the
-  *    history-rewrite/hook-plant risk is gated at the file-tool layer instead.
-  *  - "ask": same OS posture; signals the file-tool `.git` write ask is the gate.
-  * Unset falls back to `protectGit`; neither set → `.git` writable (git CLI works).
+  *  "protect": carve read-only. "allow-git-cli" (default): leave writable; risk
+  *  gated at file-tool layer. "ask": same; file-tool ask is the gate.
   */
   gitWrite?: "protect" | "allow-git-cli" | "ask";
 }
 
 /**
- * Permission rules (`allow` / `ask` / `deny`), each a string:
- * "read_file" (whole tool) | "mcp__github__*" (name wildcard) |
- * "bash(npm test *)" (glob on primary arg) | "bash(/^…/ )" (regex on primary arg).
- * Evaluation order: deny > ask > allow > mode default. `deny` always applies.
+ * Permission rules (`allow`/`ask`/`deny`), each a string:
+ * "read_file" | "mcp__github__*" (wildcard) | "bash(npm test *)" (glob) |
+ * "bash(/^…/ )" (regex). Order: deny > ask > allow > mode default.
  */
 export interface PermissionRules {
   allow?: string[];
   ask?: string[];
   deny?: string[];
   /**
-   * Policy for reads/writes outside the working set (cwd + extra working
-   * directories + sandbox writable roots + delivery roots). `ask` (default)
-   * prompts and lets the user grant the folder; `deny-write` hard-denies
-   * out-of-boundary writes; `deny-read-write` hard-denies reads and writes.
+   * Policy for reads/writes outside the working set (cwd + extra dirs + sandbox
+   * writable roots + delivery roots). `ask` (default) prompts + grants;
+   * `deny-write`/`deny-read-write` hard-deny writes/both.
    */
   workspaceBoundary?: "ask" | "deny-write" | "deny-read-write";
   /**
@@ -612,20 +531,15 @@ export interface PermissionRequest {
 
 /**
  * A permission decision from the host.
- *
- * - `always` grants for the rest of THIS session (in-memory rule, not persisted).
- * - `always-project` additionally persists the (narrowed) rule to the project
- *   config (`.codepilot/config.json`), so it auto-applies in future sessions.
+ * `always`: grants for the rest of THIS session (in-memory, not persisted).
+ * `always-project`: additionally persists the narrowed rule to project config.
  */
 export type PermissionDecision = "allow" | "deny" | "always" | "always-project";
 
 /**
- * What a host's permission handler may return:
- * - a plain {@link PermissionDecision} (allow/deny/always/always-project);
- * - a deny with `feedback` the model sees ("decline-with-feedback" → steering);
- * - `{ decision: "abort" }` — cancel the whole turn ("deny & stop"), not just
- *   this call; session is NOT cleared.
- * Bare strings still work (backward-compatible).
+ * What a host's permission handler may return: a plain
+ * {@link PermissionDecision}; a deny with `feedback` (→ steering); or
+ * `{ decision: "abort" }` — cancel the whole turn; session NOT cleared.
  */
 export type PermissionResolution =
   | PermissionDecision
@@ -719,10 +633,7 @@ export interface HookEntryConfig {
   prompt?: string;
  /** Agent handler: spawn a sub-agent with the payload as its objective; its
  * conclusion text is parsed as JSON decisions. Heavier than `prompt` but can
- * read_file to inspect the repo before deciding).
- *
- * Mutually exclusive with `command` and `http`. Requires an agent
- * resolver to be wired into the HookEngine. */
+ * read_file to inspect the repo. Mutually exclusive with `command`/`http`. */
   agent?: string;
 }
 
@@ -748,8 +659,7 @@ export interface HooksConfig {
   /**
    * Fires when the agent is about to end a turn. Exit 2 / `decision: block`
    * continues the run with the reason as feedback (capped by
-   * `stopHookBlockCap`). Payload includes `stop_hook_active`.
-   * Built-in `stopVerify` (default `"off"`) runs before these hooks when enabled.
+   * `stopHookBlockCap`). `stopVerify` runs before these hooks when enabled.
    */
   Stop?: HookEntryConfig[];
 }
@@ -871,22 +781,18 @@ export interface CodepilotConfig {
   * true. */
   dontAskFeedback?: boolean;
  /** Models to treat as HIGH-RISK: when the active model id matches one of these
-  * (substring, case-insensitive), persisted (config/project) allow rules are
-  * IGNORED during permission matching — deny / ask rules and the hard safety
-  * floors still apply — so a broad allow a human saved for everyday work cannot
-  * silently vouch for a destructive call the risky model issues. Session
-  * "always" grants are kept unless `highRiskDropSessionAllows` is set. */
+  * (substring, case-insensitive), persisted allow rules are IGNORED during
+  * permission matching (deny/ask + safety floors still apply), so a broad allow
+  * cannot vouch for a destructive call. Session "always" grants kept unless
+  * `highRiskDropSessionAllows` is set. */
   highRiskModels?: string[];
  /** When true, a high-risk model (see {@link highRiskModels}) additionally
   * ignores this-session "always allow" grants, not only persisted ones.
   * Default false. */
   highRiskDropSessionAllows?: boolean;
- /** Inline (Tab) code completion for the editor plugins (VSCode / IntelliJ).
-  * Off by default. Runs on the user's existing provider + apiKey but is gated
-  * to a lightweight model: completion uses `completion.model` if set, else the
-  * `smallModel`, and stays OFF when the resolved model is the main chat model
-  * (so as-you-type completion never silently bills the big model). Ignored by
-  * non-editor clients (TUI/desktop/web). */
+ /** Inline (Tab) code completion for editor plugins. Off by default; gated to a
+  * lightweight model (`completion.model` or `smallModel`), OFF when that is the
+  * main chat model. Ignored by non-editor clients. */
   completion?: {
    /** Master toggle. Default false. */
    enabled?: boolean;
@@ -940,11 +846,10 @@ export interface CodepilotConfig {
  * built-in TypeScript/JavaScript default. */
   lsp?: { servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }> };
  /** How external MCP tools are surfaced to the model:
- * - "lazy" (default when > `mcpLazyThreshold` tools): hide individual MCP
- *   tool schemas from the per-turn tool list and expose a single `mcp`
- *   meta-tool (list/describe/call) — keeps the prompt small.
- * - "eager": advertise every MCP tool directly (full schema each turn).
- * - "auto" (default): eager when few MCP tools, lazy once many. */
+ * - "lazy": hide individual schemas, expose a single `mcp` meta-tool (keeps
+ *   the prompt small).
+ * - "eager": advertise every MCP tool directly.
+ * - "auto" (default): eager when few, lazy once many. */
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
  /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
   mcpLazyThreshold?: number;
@@ -996,18 +901,15 @@ export interface CodepilotConfig {
   * built-in floor (which always runs and cannot be disabled here). */
   redact?: { patterns?: Array<{ name: string; regex: string; flags?: string; replace?: string }> };
  /**
-  * Cap on assistant↔tool round trips for one user prompt.
-  * Unset or `0` = no limit: the run ends when the model replies without
-  * tool calls, or when a doom-loop / cancel / budget guard fires. Set a
-  * positive number for headless/CI cost bounds.
+  * Cap on assistant↔tool round trips for one user prompt. Unset or `0` = no
+  * limit (doom-loop/cancel/budget guards still stop the run). Set a positive
+  * number for headless/CI cost bounds.
    */
   maxTurns?: number;
  /** Soft convergence ceiling that applies even when `maxTurns` is unlimited.
-  * After this many assistant↔tool round trips the loop winds down — it urges
-  * synthesis and hard-disables tool calls for the final turn so the model must
-  * answer from what it already has instead of looping (e.g. a weak model that
-  * keeps re-verifying with slightly different commands, which the exact-match
-  * doom-loop guard can't catch). Unset = a built-in default; `0` disables it.
+  * After this many turns the loop winds down: urges synthesis and hard-disables
+  * tool calls for the final turn. Catches a weak model re-verifying with variant
+  * commands (which the doom-loop guard can't). Unset = built-in default; `0` off.
   */
   convergenceCap?: number;
  /** Fine-grained convergence / no-progress thresholds. Every field defaults to
@@ -1051,20 +953,16 @@ export interface CodepilotConfig {
  * 200). Bounds cumulative fan-out regardless of tree shape, so a deep/wide
  * tree can't fork-bomb the token budget. */
   subagentMaxTotal?: number;
- /** Whether a built-in sub-agent (explore/worker, no custom permissionMode)
-  * shares the parent's live PermissionEngine or runs under a fresh one.
-  * "inherit" (default) keeps today's behavior — the parent engine, including
-  * any session-approved allow rules, carries in. "independent" gives each
-  * built-in sub-agent its own engine (mode "auto-edit", config autoApprove
-  * only) so a mid-session grant to the parent does not widen the sub-agent.
-  * Custom agents with their own permissionMode are always independent. */
+ /** Whether a built-in sub-agent (explore/worker) shares the parent's live
+  * PermissionEngine or runs under a fresh one. "inherit" (default) carries the
+  * parent engine in; "independent" gives each its own engine so a mid-session
+  * grant to the parent does not widen the sub-agent. Custom agents are always
+  * independent. */
   subagentPermissions?: "inherit" | "independent";
  /** Durable reuse of a completed sub-agent's conclusion. When a `task` spec
-  * (same objective + agent type + cwd + model) already succeeded within the
-  * TTL, the stored conclusion is returned instead of re-running — which makes
-  * an interrupted fan-out resumable for the children that already finished.
-  * `enabled` defaults to true; `ttlHours` defaults to 24. Set `enabled:false`
-  * to always re-run. */
+  * (same objective + agent type + cwd + model) already succeeded within the TTL,
+  * the stored conclusion is returned instead of re-running — makes an
+  * interrupted fan-out resumable. `enabled` default true; `ttlHours` default 24. */
   subagentCache?: { enabled?: boolean; ttlHours?: number };
  /** Lifecycle hooks (PreToolUse/PostToolUse/Notification/Stop). */
   hooks?: HooksConfig;
@@ -1075,16 +973,8 @@ export interface CodepilotConfig {
    */
   stopHookBlockCap?: number;
   /**
-   * Built-in Stop validity gate (default `"off"` — no extra request at turn end).
-   * - `"prompt"` / `true` — small model judges feature vs code correctness
-   * - `"tests"` — run a detected project test command when present
-   * - `"off"` / `false` / omit — disabled (user Stop hooks still run)
-   *
-   * By default the judge/tests result is **advisory**: when it is not satisfied
-   * the concern is surfaced as a non-blocking notice and the turn still ends.
-   * The object form `{ mode, forceContinue: true }` opts into the older
-   * block->re-run behaviour, where a negative result forces another full model
-   * turn (bounded by `stopHookBlockCap`, or a lower default when unset).
+   * Built-in Stop validity gate (default `"off"`). `"prompt"`/`true`: small
+   * model judges correctness; `"tests"`: run a detected project test command.
    */
   stopVerify?:
     | boolean
@@ -1114,11 +1004,9 @@ export interface CodepilotConfig {
   /** Auto-apply model `suggest_mode` switches without re-asking. Default off. */
   autoAcceptModeSuggestions?: boolean;
   /**
-   * Execution-reliability guard: verify the provider-facing messages match
-   * the persisted event log before each request.
-   * - `"off"` — disabled
-   * - `"warn"` — emit a diagnostic on divergence, do not interrupt (default)
-   * - `"throw"` — fail the turn loudly (CI/tests)
+   * Execution-reliability guard: verify provider messages match the persisted
+   * event log before each request.
+   * - `"off"` / `"warn"` (default) / `"throw"` (fail the turn, CI/tests).
    */
   consistencyCheck?: "off" | "warn" | "throw";
  /** When true, command hooks run under the same OS sandbox as `bash`
@@ -1216,11 +1104,9 @@ export interface CodepilotConfig {
 /** Session-lifecycle tuning for a long-lived daemon. */
 export interface SessionsConfig {
  /** When the daemon starts, sweep the sessions directory for any session whose
-  * last recorded status is in-flight (a run interrupted by a crash or kill) and
-  * seal each to a clean idle before anyone reopens it. Default true. The sweep
-  * is seal-and-idle only — it never re-enters the agent loop, since a prior
-  * run's side-effecting tools may already have executed and a blind resume
-  * would risk double execution. */
+  * last status is in-flight (interrupted by crash/kill) and seal it to idle
+  * before anyone reopens it. Seal-and-idle only — never re-enters the agent
+  * loop (a prior run's side effects may already have executed). */
   reconcileOnBoot?: boolean;
  /** Delete non-pinned sessions whose transcript is older than this many days
   * (by mtime). 0 (default) never deletes. Pinned sessions are always exempt.
@@ -1278,12 +1164,9 @@ export interface ImageGenConfig {
 export type WebSearchProvider = "duckduckgo" | "brave" | "serper" | "google" | "custom";
 
 /**
- * A user-defined HTTP search backend. The URL / headers / body support
- * `{query}` / `{max}` / `{language}` / `{region}` placeholders and `${ENV}`
- * interpolation; the JSON response is mapped to hits via `resultsPath` (a
- * dot-path to the array) and `fields` (which keys hold the title / url /
- * snippet). This lets any JSON search API (Baidu, Bing, DeepSeek, a self-hosted
- * gateway) be configured without new backend code.
+ * A user-defined HTTP search backend. URL/headers/body support `{query}`/`{max}`/
+ * `{language}`/`{region}` placeholders + `${ENV}` interpolation; the JSON response
+ * is mapped to hits via `resultsPath` + `fields`. Any JSON search API works.
  */
 export interface CustomSearchTemplate {
  /** HTTP method. Default `GET`. */
@@ -1320,12 +1203,9 @@ export interface WebSearchConfig {
   cx?: string;
  /** Override the backend endpoint (advanced / self-hosted gateways). */
   endpoint?: string;
- /** Preferred result language as an ISO-639-1 code (e.g. `zh`, `en`, `ja`).
-  * When omitted, the tool auto-detects CJK vs. Latin from the query so a
-  * Chinese query is anchored to Chinese-language results instead of relying
-  * on IP/UA locale inference. Mapped to each backend's native param
-  * (DDG `kl`, Bing `setlang`, Brave `search_lang`, Google `lr`/`hl`,
-  * Serper `hl`). */
+ /** Preferred result language (ISO-639-1, e.g. `zh`/`en`/`ja`). When omitted,
+  * auto-detected from the query (CJK vs. Latin). Mapped to each backend's native
+  * param (DDG `kl`, Bing `setlang`, Brave `search_lang`, Google `lr`/`hl`). */
   language?: string;
  /** Preferred result region/country as an ISO-3166-1 alpha-2 code (e.g.
   * `cn`, `us`, `jp`). When omitted, inferred alongside `language`. Mapped to
@@ -1388,11 +1268,9 @@ export interface SessionOptions {
     params: unknown
   ) => Promise<unknown>;
  /** Host handler for MCP OAuth: called when a remote MCP server requires
- * authorization. The host should open `authorizationUrl` in a browser
- * (or print it for the user) and return once the URL has been surfaced.
- * The core handles the redirect listener + token exchange. When unset,
- * remote servers requiring OAuth will fail with a 401 instead of
- * launching a browser flow. */
+ * authorization. The host opens `authorizationUrl` (browser or print) and
+ * returns; the core handles the redirect listener + token exchange. When unset,
+ * OAuth-requiring servers fail with a 401 instead of launching a browser flow. */
   onMcpOpenAuthUrl?: (serverName: string, authorizationUrl: string) => void | Promise<void>;
  /** Host handler for `start_goal`: the model asked to escalate the current
   * task into a long-horizon goal loop. The host should drive rounds (e.g. via

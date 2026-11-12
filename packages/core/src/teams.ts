@@ -1,10 +1,7 @@
-// Agent Teams: multi-agent collaboration with explicit
-// Teams: several sub-agents working on ONE goal with roles, a shared workspace,
-// conflict detection, and a merge strategy. Unlike `task`'s fan-out (N
-// independent objectives → N conclusions), team members share one goal; a
-// leader can split it, members can share a worktree, same-file edits are
-// detected, and results are merged. Built on `SubagentRunner` — a team member
-// is a sub-agent. Members are peers (same nesting depth; cannot spawn teams).
+// Agent Teams: several sub-agents working on ONE goal with roles, a shared
+// workspace, conflict detection, and a merge strategy. A leader splits the
+// goal, members may share a worktree, same-file edits are detected, results
+// are merged. Built on `SubagentRunner`; members are peers (can't spawn teams).
 
 import {
   emitParentUsage,
@@ -27,17 +24,9 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * A member's role.
- *
- * - `leader` — decomposes the goal into assignments and (for the
- * `leader_summary` strategy) writes the final report. Runs read-only:
- * planning and summarising need no write access, and a leader that edits
- * files while its workers do the same is exactly the conflict the team
- * structure exists to avoid.
- * - `worker` — carries out an assignment. May edit files.
- * - `specialist` — a worker with a narrow remit (security, performance, …).
- * Same execution path; the distinction is for the leader's benefit and
- * for readable logs.
+ * A member's role: `leader` (decomposes the goal, writes the final report;
+ * runs read-only to avoid conflicting with workers), `worker` (carries out an
+ * assignment, may edit), `specialist` (a worker with a narrow remit).
  */
 export type TeamRole = "leader" | "worker" | "specialist";
 
@@ -336,11 +325,9 @@ const VOTE_SCHEMA: Record<string, unknown> = {
 };
 
 /**
- * Run an agent team to completion.
- *
- * Order of operations: validate → (shared worktree) → leader decomposition →
- * members in parallel → conflict detection → merge. Every phase is
- * narrated through `team_message` events.
+ * Run an agent team to completion: validate → (shared worktree) → leader
+ * decomposition → members in parallel → conflict detection → merge. Each
+ * phase is narrated through `team_message` events.
  */
 export async function runTeam(
   spec: TeamSpec,
@@ -505,13 +492,10 @@ export async function runTeam(
     }
 
  // --- members in parallel --------------------------------------------
-    // Tool-agnostic git evidence: a file changed via bash/sed shows up in
-    // `git status` even though no write-tool call named it. We snapshot the
-    // worktree's dirty set before and after each member and attribute the delta
-    // to that member, so bash-only writes still feed conflict detection. Under
-    // parallelism the windows overlap, so attribution is conservative (it may
-    // over-report a shared file to both members — the safe direction for a
-    // conflict WARNING). No git / not a repo → tool-path evidence only, noted.
+    // Git evidence: snapshot the worktree dirty set before/after each member and
+    // attribute the delta, so bash-only writes feed conflict detection. Under
+    // parallelism attribution is conservative (may over-report to both — the
+    // safe direction). No git / not a repo → tool-path evidence only.
     const memberRepoRoot = await resolveRepoRoot(memberCwd);
     const gitEvidence = memberRepoRoot !== null;
     if (!gitEvidence) {

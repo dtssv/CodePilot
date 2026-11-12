@@ -1,7 +1,6 @@
-// Chat webview: hosts the shared CodePilot UI (apps/web, embed build) and
-// relays its JSON-RPC traffic to the engine process.
-//
-// Message contract (see apps/web/src/protocol/bridge.ts):
+// Chat webview: hosts the shared CodePilot UI (apps/web embed build) and
+// relays its JSON-RPC to the engine. Message contract (see
+// apps/web/src/protocol/bridge.ts):
 // webview → host rpc {line} · ready · restart · openFile {path, line?} · insertText {text}
 // host → webview rpc {line} · host/init · host/engine · host/theme
 // host/prompt {text, send?} · host/command {name, mode?}

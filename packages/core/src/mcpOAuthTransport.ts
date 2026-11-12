@@ -1,21 +1,9 @@
-// OAuth-aware request helper shared by the MCP HTTP and SSE transports.
-//
-// Both remote transports need the same behavior on a 401:
-// 1. Load a persisted token for the server (if any) and attach it as
-// `Authorization: Bearer <token>` to outbound requests.
-// 2. When a request comes back 401 with
-// `WWW-Authenticate: Bearer resource_metadata="<url>"`, run the OAuth
-// Authorization Code + PKCE flow (via the host's `openAuthUrl` hook),
-// persist the new token, and retry the original request once.
-// 3. If a token is expired and we have a refresh token, refresh it before
-// retrying.
-//
-// This module factors that into a reusable helper so neither transport has
-// to duplicate the logic. The transport provides two primitives:
-// - `doRequest(opts, body)`: perform a single HTTP round-trip and return
-// `{ status, headers, body }`.
-// - `serverName`, `cwd`, `oauthCfg`: identity + config.
-// and the helper handles everything else.
+// OAuth-aware request helper shared by the MCP HTTP and SSE transports. On 401
+// it attaches a persisted bearer token; when the server advertises
+// `WWW-Authenticate: Bearer resource_metadata=...` it runs the OAuth
+// Authorization Code + PKCE flow via `openAuthUrl`, and refreshes expired
+// tokens before retrying. The transport supplies `doRequest(opts, body)`
+// plus `serverName`/`cwd`/`oauthCfg`.
 
 
 import { URL } from "node:url";

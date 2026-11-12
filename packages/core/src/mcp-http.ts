@@ -1,11 +1,7 @@
-// Streamable HTTP transport (MCP 2025-03-26).
-//
-// One endpoint, POST-per-message. Responses may be `application/json`
-// (single envelope) or `text/event-stream` (a short SSE stream whose frames
-// carry the response and any server-initiated messages). Session state rides
-// the `mcp-session-id` header: the server assigns it on `initialize`, we
-// echo it on every later request, and we DELETE it on `stop`. Notifications
-// receive `202 Accepted` with an empty body.
+// Streamable HTTP transport (MCP 2025-03-26): POST-per-message; responses are
+// `application/json` or `text/event-stream`. Session state rides the
+// `mcp-session-id` header (assigned on `initialize`, echoed later, DELETE on
+// `stop`); notifications get `202 Accepted` with an empty body.
 
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";

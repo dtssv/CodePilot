@@ -83,10 +83,9 @@ export interface ArtifactGcResult {
 }
 
 /**
- * Mark-and-sweep the artifact store for the project containing `cwd`. Deletes
- * only artifacts referenced by no session in that project. Safe to re-run and
- * fail-soft: any per-session read error makes the sweep conservative (keeps the
- * artifact). `dryRun` reports what WOULD be removed without deleting.
+ * Mark-and-sweep the artifact store for the project containing `cwd`: deletes
+ * only artifacts referenced by no session. Fail-soft (read errors keep the
+ * artifact); `dryRun` reports without deleting.
  */
 export async function gcProjectArtifacts(
   cwd: string,

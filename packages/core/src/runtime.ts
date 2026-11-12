@@ -15,13 +15,9 @@ import type { AgentMode, DoomLoopConfig, Event, ToolUseBlock } from "./types.js"
 export type AgentRuntimeState = "idle" | "running" | "waiting_permission";
 
 /**
- * A tool a plugin runtime can contribute to the session, described in
- * ABI-safe terms (no `@codepilot/core` types). The core adapts this into a
- * real registry entry so the model can call it; execution still flows through
- * the permission + PreToolUse/PostToolUse pipeline like any built-in tool.
- *
- * `parameters` is a JSON Schema object (the same shape MCP tools provide), NOT
- * a Zod schema — the plugin module cannot import Zod from the core copy.
+ * A tool a plugin runtime can contribute, described in ABI-safe terms
+ * (no `@codepilot/core` types). `parameters` is a JSON Schema object, NOT
+ * Zod — the plugin module can't import Zod from the core copy.
  */
 export interface PluginToolDef {
   /** Unique, namespaced tool name (e.g. "myplugin_fetch"). */
@@ -43,9 +39,8 @@ export interface PluginToolDef {
 
 /**
  * A provider message as seen by a plugin context transform — the plain data
- * shape of the model's view (role + content blocks). ABI-safe: a plugin
- * operates on this structure without importing any core type. Mirrors the
- * core `ProviderMessage`, so the two stay assignable.
+ * shape of the model's view (role + content blocks). ABI-safe; mirrors the
+ * core `ProviderMessage` so the two stay assignable.
  */
 export interface PluginContextMessage {
   role: "user" | "assistant" | "system";
@@ -59,24 +54,16 @@ export interface PluginContextMessage {
 
 /**
  * A plugin context transform: given a COPY of the model's message view, return
- * the view to send. Runs after fold/compaction so a plugin can prune / window /
- * inject-memory without touching the persisted transcript. The result is
- * validated and ignored fail-soft on any problem (untransformed view sent).
+ * the view to send. Runs after fold/compaction. Fail-soft on any problem.
  */
 export type PluginContextTransform = (
   view: PluginContextMessage[],
 ) => PluginContextMessage[];
 
 /**
- * An additive session event sink a plugin can register to MIRROR the JSONL
- * event log to an external data source (NAS / OSS / DB / webhook). ABI-safe:
- * the plugin receives the exact JSONL line already written locally, AFTER the
- * canonical append resolves.
- *
- * This never replaces the source of truth — JSONL stays the single writer. The
- * host wraps the sink in a bounded, single-flight queue, so `write` being slow
- * or throwing can never block or fail the canonical write (fail-soft is
- * enforced by the host, not the sink author).
+ * Additive sink mirroring the session JSONL event log to an external source.
+ * JSONL stays the source of truth; the host bounds `write` so a slow/throwing
+ * sink can never block the canonical write.
  */
 export interface PluginEventSink {
   /** Mirror one already-persisted JSONL line (no trailing newline). */
@@ -88,10 +75,9 @@ export interface PluginEventSink {
 }
 
 /**
- * A pluggable agent runtime. Implementations drive one prompt to completion
- * (model streaming + tool execution), emitting session events through
- * `deps.onEvent` exactly like the default loop does, so persistence,
- * subscribers, and the protocol layer keep working unchanged.
+ * A pluggable agent runtime. Drives one prompt to completion, emitting
+ * session events via `deps.onEvent` so persistence/subscribers/protocol
+ * keep working unchanged.
  */
 export interface AgentRuntime {
  /** Unique runtime name (e.g. "default"). */
@@ -110,59 +96,37 @@ export interface AgentRuntime {
 }
 
 /**
- * Host-provided primitives handed to every runtime factory.
- *
- * A plugin runtime lives in its own module and must not import
- * `@codepilot/core` (it would resolve to a different copy, or not resolve at
- * all from `~/.codepilot/plugins/`). The toolkit closes that gap: everything
- * a runtime needs from the core is reachable through this object.
+ * Host-provided primitives handed to every runtime factory. A plugin runtime
+ * can't import `@codepilot/core`; this toolkit exposes everything a runtime
+ * needs from the core.
  */
 export interface RuntimeToolkit {
  /** ABI version, bumped when a member changes shape. */
   readonly version: 4;
  /**
-  * Register a tool the model can call for the rest of the session. The tool
-  * is adapted into the core registry and executed through the same pipeline
-  * as built-in tools (permission check, PreToolUse/PostToolUse hooks, Zod
-  * validation of the JSON-schema input, telemetry). Call it while
-  * constructing the runtime (a factory's `create`).
-  *
-  * No-op when the host did not wire a registrar (e.g. a bare toolkit built
-  * for a test); a throwing registration is swallowed so one bad tool never
-  * breaks the session (fail-soft).
+  * Register a tool the model can call. Executed through the same pipeline
+  * as built-in tools (permission check, hooks, Zod validation, telemetry).
+  * No-op on a bare toolkit; throwing registrations are swallowed (fail-soft).
   */
   registerTool(def: PluginToolDef): void;
  /**
-  * Install a context transform for the rest of the session. The transform is
-  * applied to a COPY of the model's message view before each provider
-  * request (after CodePilot's own fold/compaction), so a plugin can prune /
-  * window / inject-memory without touching the persisted transcript. The
-  * returned view is validated and ignored fail-soft on any problem. Setting
-  * it again replaces the previous transform. No-op on a bare toolkit.
+  * Install a context transform applied to a COPY of the model's message view
+  * before each provider request (after fold/compaction). Fail-soft; replaces
+  * any previous transform. No-op on a bare toolkit.
   */
   setContextTransform(transform: PluginContextTransform): void;
  /**
-  * Register an additive event sink that MIRRORS the session's JSONL event
-  * log to an external data source. The sink receives each already-persisted
-  * line AFTER the canonical local append; the host wraps it in a bounded,
-  * single-flight queue so a slow or throwing sink can never block or fail the
-  * canonical write (JSONL stays the source of truth). Registering again
-  * replaces the previous sink. No-op on a bare toolkit.
+  * Register an additive event sink mirroring the session JSONL log to an
+  * external source. Replaces the previous sink. No-op on a bare toolkit.
   */
   registerEventSink(sink: PluginEventSink): void;
  /** Run the built-in agent loop — the behaviour of `DefaultRuntime`. */
   runDefault(input: AgentRunInput, deps: AgentDeps): Promise<AgentRunResult>;
  /**
- * Execute one tool call through the built-in pipeline: mode gating,
- * doom-loop detection, permission check, PreToolUse/PostToolUse hooks,
- * Zod validation of the input, and telemetry spans.
- *
- * `emit` receives the status/permission events the pipeline produces and
- * should forward them to `deps.onEvent` (or a runtime-local collector).
- * Note that the returned content is NOT secret-redacted; the default loop
- * redacts it before it reaches the transcript, so a runtime that persists
- * tool output itself should call {@link redactToolOutput}.
- */
+  * Execute one tool call through the built-in pipeline (mode gating,
+  * doom-loop, permission, hooks, validation, telemetry). Returned content is
+  * NOT redacted; call {@link redactToolOutput} if persisting output yourself.
+  */
   runTool(
     call: ToolUseBlock,
     deps: AgentDeps,
@@ -252,9 +216,8 @@ export interface RuntimeFactoryDeps {
 }
 
 /**
- * What a host passes to {@link RuntimeRegistry.resolve}. The toolkit is
- * optional here and defaulted by the registry, so hosts (and tests) can keep
- * calling `resolve(name, { cwd })`.
+ * Options for {@link RuntimeRegistry.resolve}. The toolkit is optional and
+ * defaulted by the registry.
  */
 export interface RuntimeResolveOptions {
   cwd: string;
@@ -279,10 +242,8 @@ export interface RuntimeFactory {
 }
 
 /**
- * The built-in runtime: wraps `runAgent` from agent.ts. Tracks state so
- * hosts can introspect; `cancel` is a no-op because cancellation flows
- * through `deps.signal` (the session's AbortController), which the default
- * loop already honours.
+ * The built-in runtime: wraps `runAgent` from agent.ts. `cancel` is a no-op —
+ * cancellation flows through `deps.signal`, which the default loop honours.
  */
 export class DefaultRuntime implements AgentRuntime {
   readonly name = "default";
@@ -365,10 +326,9 @@ export class RuntimeRegistry {
   }
 
  /**
- * Resolve a runtime by name, falling back to the default runtime when
- * `name` is undefined. Throws for an unknown explicit name — a plugin
- * declaring a runtime that failed to load must not silently degrade to
- * the default loop.
+ * Resolve a runtime by name, falling back to default when `name` is
+ * undefined. Throws for an unknown explicit name (no silent degrade to
+ * the default loop).
  */
   resolve(name: string | undefined, opts: RuntimeResolveOptions): AgentRuntime {
     const effective = name ?? DEFAULT_RUNTIME_NAME;

@@ -1,19 +1,7 @@
-// Shared task board for coordinating parallel sub-agents.
-//
-// A single append-only JSONL file at `<projectStateDir>/taskboard.jsonl`,
-// mirroring the session-level event-sourcing model (one file, single-writer
-// append + replay). The board is a DERIVED view: the JSONL log of entries is
-// the source of truth, and the task snapshot is recomputed by folding the log
-// at read time. The file may be deleted at any time — a missing/corrupt file
-// just yields an empty board.
-//
-// Ownership is single-writer-per-task: a task is claimed by exactly one owner,
-// and only that owner may complete or update it. Claiming an already-claimed
-// task fails (the loser does other work). This gives parallel sub-agents a
-// contention-safe way to divide labour without a central coordinator.
-//
-// Everything is best-effort and fail-soft: the board is a coordination aid,
-// never a blocker. A failed append simply means the entry was not recorded.
+// Shared task board for coordinating parallel sub-agents: a single append-only
+// JSONL log (the source of truth) folded into a task snapshot at read time.
+// Single-writer-per-task: a task is claimed by one owner, who alone may update
+// it. Best-effort/fail-soft — a failed append just means the entry was lost.
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";

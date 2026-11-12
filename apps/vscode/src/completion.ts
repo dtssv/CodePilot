@@ -1,10 +1,7 @@
-// Inline (Tab) code completion provider.
-//
-// All model/prompt logic lives in
-// core/protocol behind the `completion/inline` RPC; this host-side provider is
-// thin: collect capped prefix/suffix → RPC → render ghost text → cancel. The
-// latency machinery (debounce, cancel, client-side LRU cache, prefix/suffix cap)
-// is owned here — the server handler stays stateless.
+// Inline (Tab) code completion provider. The host-side provider is thin:
+// collect capped prefix/suffix → `completion/inline` RPC → render ghost text →
+// cancel. Latency machinery (debounce, cancel, client LRU cache, prefix/suffix
+// cap) lives here; the server handler stays stateless.
 
 import * as vscode from "vscode";
 

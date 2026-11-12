@@ -1,16 +1,8 @@
-// Disk-backed, content-addressed cache of sub-agent conclusions.
-//
-// Persists each SUCCESSFUL sub-agent conclusion to disk, keyed by a hash of
-// (objective + agentType + cwd + model). Before running a spec, `task` checks
-// the cache; a hit returns the stored conclusion instead of re-running. This
-// makes a `task` fan-out idempotent and resumable: if the engine crashes or is
-// interrupted mid-fan-out, completed sub-agents are replayed from the cache
-// on resume instead of running again.
-//
-// Entries are content-addressed and best-effort: a missing/corrupt cache never
-// blocks execution, it just means the sub-agent runs again. Entries older than
-// a TTL (default 24h) are ignored, so a crash-resume replays recent work but a
-// days-later repeat of the same objective re-runs against current code.
+// Disk-backed, content-addressed cache of sub-agent conclusions, keyed by
+// (objective + agentType + cwd + model). A cache hit makes a `task` fan-out
+// return the stored conclusion instead of re-running, so it is idempotent and
+// resumable. Best-effort: a missing/corrupt cache never blocks execution;
+// entries older than the TTL (default 24h) are ignored.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";

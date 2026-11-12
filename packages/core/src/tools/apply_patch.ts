@@ -1,27 +1,8 @@
 // apply_patch: multi-file atomic edits using a unified patch format.
-//
-// Patch format:
-// *** Begin Patch
-// *** Add File: <path>
-// <full file content>
-// *** End File
-// *** Delete File: <path>
-// *** Update File: <path>
-// @@<context>
-// -<removed line>
-// +<added line>
-// <unchanged context line>
-// *** End File
-// *** End Patch
-//
-// All file operations in a single patch are applied atomically: if any
-// single hunk fails to apply, NO file is written and the error reports the
-// failing file + hunk. This makes apply_patch ideal for cross-file refactors
-// where partial application would leave the tree in an inconsistent state.
-//
-// Update hunks use a context-anchored apply: leading/trailing unchanged
-// lines (those starting with a space, or no marker) locate the position,
-// then `-` lines must match verbatim and are replaced by `+` lines.
+// Ops: Add/Delete/Update File between *** Begin/End Patch. All ops apply
+// atomically — if any hunk fails, NO file is written. Update hunks are
+// context-anchored: unchanged lines locate the position, `-` lines must match
+// verbatim and are replaced by `+` lines.
 
 import { z } from "zod";
 import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
@@ -339,12 +320,10 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         const fresh = await guardFreshWrite(ctx, p, preStat, originals.get(op.path));
         if (fresh) return fresh;
       } else if (op.kind === "add") {
-        // Add File is meant to CREATE a new file, not overwrite an existing one.
-        // If the target already exists, silently clobbering it would discard its
-        // contents based on no read. Allow it only when the file was observed
-        // this session and is still fresh (then it is a full replace, not a blind
-        // overwrite) — reusing the same observation graph as update. Otherwise
-        // refuse and point at Update / write_file.
+        // Add File creates a new file; if the target exists, clobbering it would
+        // discard unread contents. Allow only when the file was observed this
+        // session and is still fresh (then a full replace); otherwise refuse and
+        // point at Update / write_file.
         const p = resolve(ctx.cwd, op.path);
         if (existsSync(p)) {
           let preStat: { mtimeMs: number; size: number } | null = null;

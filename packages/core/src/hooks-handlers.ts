@@ -1,19 +1,8 @@
 // Hook handler execution + decision interpretation.
-//
-// Extracted from `hooks.ts`: the five handler types (command, http, mcp_tool,
-// prompt, agent) and the JSON-decision parser that turns handler stdout /
-// exit codes into structured `{ action, reason, feedback, updatedInput }`
-// results. Keeping these here lets `HookEngine` read as a clean event loop.
-//
-// Handler contract (see `hooks.ts` header for the full spec):
-// - command : spawn `<shell> -c <command>`, payload on stdin
-// - http : POST payload to URL, response body = decision JSON
-// - mcp_tool: invoke `<server>:<tool>`, text result = decision JSON
-// - prompt : send payload to small model, response = decision JSON
-// - agent : spawn sub-agent with payload as objective
-//
-// All handlers return a uniform `{ code, stdout, stderr, timedOut }` shape;
-// `interpretDecision` maps that onto `HookDecision`.
+// Five handler types (command, http, mcp_tool, prompt, agent) + a JSON-decision
+// parser turning stdout/exit codes into `{ action, reason, feedback,
+// updatedInput }`. Handler contract documented in `hooks.ts`; all handlers
+// return a uniform `{ code, stdout, stderr, timedOut }`.
 
 import { spawn } from "node:child_process";
 import type { HookEntry } from "./hooks.js";
@@ -43,12 +32,10 @@ export interface HookResolvers {
 // Command handler (default)
 // ---------------------------------------------------------------------------
 
-/** Spawn the hook command through the host shell. By default hooks are NOT
- * sandboxed — they are user-authored config at the same trust level as the
- * config file. When a `sandbox` policy is passed (opt-in via config), the
- * command is wrapped with the same OS sandbox the `bash` tool uses
- * (Seatbelt / bwrap), so a hook can't exceed what a sandboxed command could.
- * Payload is written to stdin as JSON; stdout/stderr are captured. */
+/** Spawn the hook command through the host shell. Hooks are NOT sandboxed by
+ * default (user-authored config); an opt-in `sandbox` policy wraps with the
+ * same OS sandbox as the `bash` tool (Seatbelt / bwrap). Payload on stdin as
+ * JSON; stdout/stderr captured. */
 export function runCommandHook(
   command: string,
   payload: Record<string, unknown>,
@@ -298,12 +285,9 @@ export async function dispatchHook(
   hashPrefix: (subject: string) => string,
   sandbox?: ResolvedSandbox,
 ): Promise<HookRawResult> {
- // Trust gate FIRST, before any side effect. Covers both handler types that
- // reach an arbitrary config-specified target: `command` (shell) and `http`
- // (POST to a URL). `isTrusted` returns true for the exempt types
- // (mcp_tool/prompt/agent), so this is a no-op for them. Keeping the gate here
- // — ahead of the handler dispatch — ensures an untrusted http hook never
- // exfiltrates the payload, which the old command-only gate allowed.
+ // Trust gate FIRST, before any side effect: covers `command` and `http`
+ // handlers (no-op for the exempt mcp_tool/prompt/agent types). Gating ahead of
+ // dispatch ensures an untrusted http hook can't exfiltrate the payload.
   if (!isTrusted(hook)) {
     const subject = hook.command ?? hook.http ?? "";
     const kind = hook.command ? "command" : "http";

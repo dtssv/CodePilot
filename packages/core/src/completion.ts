@@ -1,15 +1,7 @@
-// Inline (Tab) code completion — the headless, provider-agnostic pieces.
-//
-// The protocol layer owns provider
-// resolution and the network call (mirroring handleGitCommitMessage); this
-// module owns the *pure* logic so it is unit-testable with no provider:
-//   1. the model gate (never run as-you-type completion on the main model),
-//   2. the scenario-neutral prompt builder,
-//   3. output cleanup + small-block truncation.
-//
-// Phase 1 uses the prompted-chat path over the existing ChatProvider. The shapes
-// here are FIM-ready (prefix + suffix) so phase 2 can swap in a native FIM call
-// behind the same seam without touching the editors.
+// Inline (Tab) code completion — headless, provider-agnostic pure logic:
+// the model gate (never complete on the main model), the scenario-neutral
+// prompt builder, and output cleanup + small-block truncation. Shapes are
+// FIM-ready (prefix + suffix) so a native FIM call can swap in later.
 
 /** Request shape the completion handler works from (editor-supplied, capped). */
 export interface InlineCompletionInput {
@@ -26,17 +18,10 @@ export type CompletionModelDecision =
   | { run: true; model: string }
   | { run: false; disabledReason: "no-small-model" };
 
-/**
- * The single most important correctness point (design §2.5): completion must
- * run on a genuinely lightweight model, never the main chat model. Because
- * `smallModel` falls back to the main `model` when the user has not configured
- * one (session-utils.ts), we refuse to run when the resolved small model is not
- * distinct from the main model and let the client prompt the user to configure
- * a lightweight/free completion model.
- *
- * An explicit `completionModel` override (same provider/apiKey) always wins and
- * is never gated — the user opted into a specific model.
- */
+/** Completion must run on a lightweight model, never the main chat model.
+ * `smallModel` falls back to the main model when unconfigured, so we refuse to
+ * run when they are not distinct. An explicit `completionModel` override
+ * always wins and is never gated. */
 export function decideCompletionModel(opts: {
   /** Resolved main chat model (provider.defaultModel / session model). */
   mainModel: string;
@@ -77,19 +62,10 @@ function basename(p: string): string {
   return i >= 0 ? norm.slice(i + 1) : norm;
 }
 
-/**
- * Clean a raw model response and truncate it to a small code block (design §4).
- *
- * - strips a wrapping markdown fence the model may add despite instructions,
- * - trims a leading newline (the model often echoes the cursor's line break),
- * - truncates to a small code block: stop at the first blank-line run, and cap
- *   at `COMPLETION_MAX_LINES` lines so the suggestion is a few lines rather than
- *   a whole function. Deliberately language-neutral — no brace/indent heuristic
- *   that would assume a syntax (project scenario-neutrality principle).
- *
- * `prefix` is accepted for future use (e.g. de-duplicating a repeated line) and
- * to keep the phase-2 FIM swap signature-compatible; it is unused today.
- */
+/** Clean a raw completion response: strip markdown fences, trim a leading
+ * newline, and truncate to a small block (stop at first blank line, cap at
+ * `COMPLETION_MAX_LINES`). Language-neutral — no syntax-specific heuristics.
+ * `prefix` is unused today but kept for FIM compatibility. */
 export function cleanCompletion(raw: string, _prefix: string): string {
   let text = stripFence(raw);
   // Drop a single leading newline the model may prepend (cursor line break).

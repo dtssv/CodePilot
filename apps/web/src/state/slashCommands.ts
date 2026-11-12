@@ -1,13 +1,7 @@
-// Client-side slash-command interpreter for the web/embedded surfaces.
-//
-// A slash command is primarily a LOCAL action (switch mode, compact, clear,
-// open a picker) — NOT a prompt to the model. When the command carries trailing
-// args (e.g. `/plan add a test`), we perform the local action first, then send
-// the remaining text to the model. With no args, only the local action runs —
-// no LLM call.
-//
-// Commands we don't recognise as local (project/user markdown commands) are
-// left to flow through to the server as a normal prompt, which expands them.
+// Client-side slash-command interpreter. A slash command is primarily a local
+// action (switch mode, compact, clear, picker); trailing args (e.g. `/plan add
+// a test`) run the local action then send the rest to the model. Unrecognised
+// commands flow to the server as a prompt.
 
 import type { AgentMode } from "@codepilot/core";
 import type { Codepilot } from "./useCodepilot.js";
@@ -37,10 +31,9 @@ const MODE_COMMANDS: Record<string, AgentMode> = {
 };
 
 /**
- * Interpret a composer submission: returns whether the text was handled locally
- * and what (if anything) to still send. `ui` carries client actions + optional
- * UI hooks; all optional so a minimal host degrades gracefully (unknown local
- * command → treated as not-local → sent as prompt).
+ * Interpret a composer submission: returns whether handled locally and what to
+ * still send. `ui` is all optional so a minimal host degrades gracefully
+ * (unknown command → sent as prompt).
  */
 export async function interpretSlash(
   text: string,

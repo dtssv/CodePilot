@@ -1,13 +1,7 @@
-// Browser-side protocol client.
-//
-// Wraps `Peer` with the CodePilot method surface and turns the two
-// server-initiated requests (`permission/request`, `question/request`) into
-// callbacks the UI can render as dialogs.
-//
-// Everything imported from `@codepilot/core` here is `import type` on
-// purpose: those types are erased at build time, so no Node-only code reaches
-// the bundle. The runtime import is `@codepilot/protocol/rpc`, which has no
-// dependencies at all.
+// Browser-side protocol client: wraps `Peer` with the CodePilot method surface,
+// turning `permission/request` and `question/request` into UI dialogs.
+// `@codepilot/core` imports are `import type` (build-time erased) so no Node
+// code reaches the bundle; runtime import is the dep-free `@codepilot/protocol/rpc`.
 
 import { Peer, RpcError, PROTOCOL_VERSION, type RpcTransport } from "@codepilot/protocol/rpc";
 import type {
@@ -1133,10 +1127,9 @@ export class CodepilotClient {
   }
 
   /**
-   * Resume the last turn from the transcript after it ended in an error —
-   * re-engages the model where it stopped instead of sending a new user
-   * message. `noop` means there is nothing to resume; the caller should fall
-   * back to re-sending the last prompt.
+   * Resume the last turn after it ended in an error — re-engage the model where
+   * it stopped. `noop` means nothing to resume; the caller should re-send the
+   * last prompt.
    */
   async resumeTurn(
     sessionId: string,

@@ -1,11 +1,7 @@
 /**
  * Mock Session for UI development: implements the public subset of the
  * @codepilot/core Session contract the TUI needs, without the core package.
- * Not declared `: Session` (too many private members); cli.tsx casts at the
- * seam. subscribe/getEvents replay a fixed startup then accept appended
- * events; prompt() emits a thinking status, streams a canned reply, then a
- * tool_call/tool_result cycle; cancel aborts; fork/dispose stubbed;
- * onPermissionRequest routed through the bridge.
+ * Not declared `: Session` (too many private members); cli.tsx casts at the seam.
  */
 import { randomUUID } from "node:crypto";
 

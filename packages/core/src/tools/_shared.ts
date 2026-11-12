@@ -40,13 +40,9 @@ export const DEFAULT_IGNORED_DIRS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Relative path prefixes (from the search root) that must be skipped even
- * when the leaf directory name alone is not in {@link DEFAULT_IGNORED_DIRS}.
- *
- * IMPORTANT: these cannot be checked with `ent.name` alone — e.g.
- * `.codepilot/artifacts` never appears as a single directory name, so a
- * name-only ignore silently fails and greps pollute results with old
- * spilled tool output.
+ * Relative path prefixes (from the search root) to skip when the leaf
+ * directory name alone isn't enough — e.g. `.codepilot/artifacts` never
+ * appears as a single basename, so name-only ignore would silently fail.
  */
 export const DEFAULT_IGNORED_REL_PATHS: ReadonlySet<string> = new Set([
   ".codepilot/artifacts",
@@ -62,11 +58,8 @@ export function isIgnoredDirName(name: string): boolean {
 
 /**
  * True when a walker should skip this directory entry.
- *
- * @param relPath Path of the entry relative to the search root, using `/`
- * separators (e.g. `.codepilot/artifacts`). Pass the child
- * path you are about to descend into, not the parent.
- * @param name The entry's basename (`ent.name`).
+ * @param relPath entry path relative to the search root (`/` separators).
+ * @param name the entry's basename (`ent.name`).
  */
 export function shouldSkipWalkDir(relPath: string, name: string): boolean {
   if (DEFAULT_IGNORED_DIRS.has(name)) return true;
@@ -78,14 +71,10 @@ export function shouldSkipWalkDir(relPath: string, name: string): boolean {
   return false;
 }
 
-/**
- * Shared threshold for spilling large tool output to an artifact. Above this
- * many characters, a tool keeps a bounded inline view and stashes the full
- * body via {@link ToolContext.artifact}. Single-sourced here because several
- * tools (bash / grep / web_fetch / code_mode) independently enforce the same
- * budget — a drifting per-file copy would make "how big before it spills"
- * silently inconsistent across tools.
- */
+/** Shared threshold for spilling large tool output to an artifact. Above this
+ * many characters, a tool keeps a bounded inline view and stashes the full body
+ * via {@link ToolContext.artifact}. Single-sourced so several tools enforce the
+ * same budget consistently. */
 export const ARTIFACT_THRESHOLD = 8_000;
 
 /** Default head/tail window for {@link spillHeadTail}. */
@@ -94,13 +83,8 @@ const DEFAULT_SPILL_TAIL = 4_000;
 
 /**
  * Spill `content` to an artifact and return a bounded head+tail inline view
- * with a gap marker. Use when BOTH ends carry signal (e.g. a command's first
- * lines AND its exit status / stack tail) — a head-only truncation would lose
- * the tail. Tools where only the head matters (grep matches, fetched pages)
- * keep their own head-only render but should still use {@link ARTIFACT_THRESHOLD}.
- *
- * Returns the full body unchanged when it is at or below the threshold (no
- * artifact is written in that case).
+ * with a gap marker. Use when both ends carry signal (e.g. a command's first
+ * lines AND its exit status). Unchanged at or below the threshold.
  */
 export async function spillHeadTail(
   ctx: ToolContext,
@@ -155,16 +139,9 @@ function isDeliveryExempt(abs: string, ctx: ToolContext): boolean {
 }
 
 /**
- * Keep intentional project writes inside the session's delivery roots
- * (defaults to cwd; extended from path tokens in user prompts).
- *
- * If the OS sandbox already allows the write (path is under a granted
- * writable root), do **not** re-ask — silently extend delivery roots.
- * Users already answered via sandbox "Allow folder" / writablePaths; a
- * second delivery-root prompt for the same tree is pure friction.
- *
- * When the target is outside both delivery roots and the sandbox jail,
- * ask whether to add that folder for this task; otherwise refuse.
+ * Keep intentional writes inside delivery roots. If the OS sandbox already
+ * allows the write, silently extend delivery roots; otherwise ask to add the
+ * folder, or refuse.
  */
 export async function guardDeliveryWrite(
   ctx: ToolContext,
@@ -261,21 +238,9 @@ async function adoptDeliveryRoot(
 }
 
 /**
- * Read-before-write + staleness guard for a write/edit target. Returns null
- * when the write may proceed (or when no observation store is wired), or an
- * error ToolResult the tool should return to the model.
- *
- * `currentStat` is the pre-write stat of the file, or null if it does not
- * exist yet (a create, which is always allowed). Pass the stat the tool
- * already obtained to avoid an extra syscall.
- *
- * `currentContent` is the file's current on-disk bytes (or text) when the tool
- * already has them in hand; it enables the content-equality fallback so a
- * jittered mtime does not block an edit to unchanged content. A tool that does
- * NOT already hold the content (e.g. an overwrite) may instead pass a lazy
- * `readCurrent` reader; it is invoked ONLY when the mtime/size gate first
- * reports stale, so the common fast path never re-reads the whole file. Omit
- * both to keep the pure mtime/size decision.
+ * Read-before-write + staleness guard for a write/edit target: null to proceed
+ * or an error ToolResult. `currentStat` (null = create); `currentContent`/
+ * `readCurrent` enable the content-equality fallback for a jittered mtime.
  */
 export async function guardFreshWrite(
   ctx: ToolContext,

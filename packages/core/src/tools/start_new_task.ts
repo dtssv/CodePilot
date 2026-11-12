@@ -1,17 +1,8 @@
 // start_new_task: let the model draw a task boundary — archive the current
-// working context and continue with a clean slate.
-//
-// This is a GENERIC capability, not a scenario-specific heuristic. The model
-// calls it only when it judges that the current task is finished AND the next
-// request is unrelated to it, so carrying the full prior transcript forward
-// would waste context and risk cross-task contamination (e.g. reasoning about
-// task B while still "remembering" the details of task A). Nothing auto-fires:
-// the model decides, exactly as a user would with `/clear`.
-//
-// The session wires `onStartNewTask` to Session.clearWorkingContext, which
-// force-summarises the prior context (full transcript retained on disk) and
-// injects a boundary marker. If no handle is wired (tests / minimal hosts),
-// the tool degrades to a no-op acknowledgement.
+// working context and continue with a clean slate. Model-invoked when the
+// current task is finished and the next request is unrelated. Wires to
+// Session.clearWorkingContext (force-summarises prior context; full
+// transcript retained on disk); with no handle wired, degrades to no-op.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

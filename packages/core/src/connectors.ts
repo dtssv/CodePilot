@@ -1,8 +1,7 @@
 /**
  * Office / productivity connectors — guided installs for everyday tools.
- *
- * Catalog: GitHub `catalog/connectors.json` — try update once per day;
- * keep local forever if weak/offline. Bundled JSON is the offline seed.
+ * Catalog is GitHub `catalog/connectors.json` (daily update, keep local if
+ * offline; bundled JSON is the offline seed).
  */
 
 import { mkdir, writeFile, readFile, access } from "node:fs/promises";

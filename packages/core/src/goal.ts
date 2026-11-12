@@ -1,19 +1,7 @@
 // Long-horizon goal mode: drive the agent until it reports done, blocked, or
-// hits maxRounds. The session owns plan + memory state; the goal loop just
-// keeps prompting with a structured per-round nudge.
-//
-// Enhancements (2025-Q1):
-// - Per-round checkpoint append: after each round we append a small
-// `### Round N — <status>` block to the session's checkpoint file
-// (under ~/.codepilot/projects/<hash>/checkpoints/<sessionId>.md) so the next session
-// can see not just the final state but the trajectory that got us
-// there. The structured `blocked_reason` is included verbatim when
-// the round terminates with `<goal_status>blocked</goal_status>`.
-// - onCheckpoint callback: callers (CLI, protocol server) can observe
-// every checkpoint write without reading the file. The callback
-// fires once per round with the round index, status, optional
-// reason, and the checkpoint path. It is part of `GoalRunOptionsEx`
-// to preserve the existing `GoalRunOptions` shape.
+// hits maxRounds. The session owns plan + memory state; the goal loop keeps
+// prompting with a structured per-round nudge. Per-round checkpoints are
+// appended to the session's checkpoint file.
 
 import { createSession, type Session } from "./session.js";
 import type { GoalRunOptions, GoalRunResult, Event } from "./types.js";
@@ -100,12 +88,8 @@ Additional rules:
 The loop will continue until you report a status (via the \`goal_status\` tool or the text marker) or it hits the round cap.`;
 
 /**
- * Extra goal-loop guidance injected ONLY when this project has a spec folder
- * (`<specDir>/<feature>/` with requirements/design/tasks). Kept separate from
- * `goalPromptBody` so a project that does not use spec-driven development never
- * sees it — the vast majority of runs have no spec and pay nothing. The
- * spec-* skills (which produce these artifacts) are an optional plugin; this
- * clause is the only core-side spec awareness and it is lazy by design.
+ * Extra goal-loop guidance injected only when this project has a spec folder.
+ * Kept separate from `goalPromptBody` so non-spec projects never see it.
  */
 export const goalSpecClause = `\n\nThis project has a spec (a \`.codepilot/specs/<feature>/\` folder with requirements/design/tasks). Treat the acceptance criteria (\`AC-x.y\`) and each task's \`verify:<command> → AC-x.y\` line as the source of truth for "done": run the named verify command and treat an \`AC\` as satisfied only when its command passes. Do not emit \`completed\` for the OBJECTIVE while any acceptance criterion is still unmet.`;
 
@@ -120,13 +104,9 @@ export async function runGoal(opts: GoalRunOptionsEx): Promise<GoalRunResult> {
 }
 
 /**
- * Drive the goal loop over an ALREADY-CREATED session, without creating or
- * disposing it. This is the reusable core of `runGoal`: `runGoal` owns the
- * session lifecycle and delegates the round loop here, while a host that wants
- * to escalate the CURRENT session into a goal loop (via the `start_goal` tool /
- * `goal_request` event) can call this directly on its live session — the loop
- * just keeps `prompt()`ing that session, so the user's existing context carries
- * through. The caller is responsible for the session's lifecycle.
+ * Drive the goal loop over an already-created session, without creating or
+ * disposing it. `runGoal` owns the session lifecycle; a host escalating the
+ * current session can call this directly — the caller owns the lifecycle.
  */
 export async function driveGoalRounds(
   session: Session,
@@ -189,13 +169,9 @@ export async function driveGoalRounds(
     const completedBefore = completedStepCount(session.getEvents());
     const userText = renderRoundPrompt(round, opts.objective, hasSpec);
     const delivery = await session.prompt(userText);
-    // When the session was busy (e.g. a goal loop was escalated from a still-
-    // running agent turn via `start_goal`), `prompt()` does not execute the
-    // round — it enqueues it and returns "queued". Advancing immediately would
-    // scan the previous round's stale output, find no status marker, and spin:
-    // one queued round prompt per iteration (the "7 identical OBJECTIVE
-    // (unchanged across rounds)" pile-up). Wait for the session to drain so the
-    // round we just enqueued actually runs before we read its result.
+    // When the session was busy, `prompt()` enqueues the round and returns
+    // "queued". Wait for it to drain before reading the result, else we'd scan
+    // stale output and spin.
     if (delivery === "queued") {
       await session.waitUntilIdle();
     }
@@ -293,14 +269,9 @@ Resume where you left off. If the previous turn ended without a status marker, i
 }
 
 /**
- * Did this round make observable progress? True when, among the events the
- * round appended, there was a successful write/edit tool call, a successful
- * shell command, or the plan's completed-step count rose above
- * `completedBefore`. A round that only produced text (narration, re-planning
- * chatter) with no acted change, or an empty reply, is NOT progress — an agent
- * can narrate indefinitely without advancing. Tool progress is judged by the
- * `tool_result` (so a call that errored does not count), paired with its
- * `tool_call` for the tool name.
+ * Did this round make observable progress? True when the round's events include
+ * a successful write/edit tool call, a successful shell command, or the plan's
+ * completed-step count rose. Text-only or empty rounds are NOT progress.
  */
 function roundMadeProgress(roundEvents: Event[], completedBefore: number): boolean {
   const callNames = new Map<string, string>();

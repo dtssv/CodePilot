@@ -1,14 +1,7 @@
 /**
  * Lightweight, dependency-free syntax tokenizer for code blocks in the
- * terminal. A single generic tokenizer with per-language keyword sets covers
- * the languages that dominate agent output well enough for a CLI: comments,
- * strings, numbers, keywords and the odd operator get color; everything else
- * keeps the terminal's default foreground. Unknown languages tokenize with an
- * empty keyword set, so they still get string/number/comment coloring.
- *
- * This deliberately mirrors the web highlighter's role (apps/web/src/state/
- * highlighter.ts) but stays a tiny tokenizer: pulling a full grammar engine
- * into a terminal UI is not worth the weight.
+ * terminal. One generic tokenizer with per-language keyword sets colors
+ * comments, strings, numbers, keywords and operators.
  */
 
 export type TokenKind =

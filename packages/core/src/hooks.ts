@@ -1,11 +1,7 @@
-// Hook system: user-configured shell/HTTP handlers on agent lifecycle events. user-configured shell commands
-// Hook engine: external scripts/handlers at agent lifecycle points that can
-// observe or block tool execution. Events: SessionStart, UserPromptSubmit,
-// PreToolUse, PostToolUse, PreCompact, PostCompact, SubagentStop, Stop,
-// Notification. Exit 0 = OK; exit 2 = BLOCK (stderr = reason); other nonzero =
-// warning. Handlers may emit JSON on stdout for richer control (decision,
-// feedback, updatedInput, updatedResult, prompt). See hooks-handlers.ts for
-// the schema and hooks-trust.ts for command trust.
+// Hook system: external scripts/handlers at agent lifecycle events
+// (PreToolUse, PostToolUse, Stop, etc.) that observe or block tool execution.
+// Exit 0 = OK; exit 2 = BLOCK (stderr = reason); other nonzero = warning.
+// Handlers may emit JSON (decision, feedback, updatedInput, updatedResult, prompt).
 
 import type { HooksConfig, HookEntryConfig } from "./types.js";
 import { HookTrustStore, hashCommand, trustSubject } from "./hooks-trust.js";
@@ -160,14 +156,9 @@ export class HookEngine {
 
  // ---- Hook trust (hash-based review) ----
  //
- // Hooks that reach an arbitrary config-specified target — `command` (shell)
- // and `http` (POST the payload to a URL) — require the user to approve each
- // unique trust subject (its SHA-256 hash) before running. Approved hashes are
- // persisted to `.codepilot/hook_trust.json`; unapproved hooks are skipped with
- // a warning (fail-safe: don't run untrusted side effects).
- //
- // `mcp_tool`/`prompt`/`agent` handlers are exempt (they delegate to
- // infrastructure vetted elsewhere, not an arbitrary command or URL).
+ // `command`/`http` hooks require per-subject SHA-256 approval before running;
+ // approved hashes persist to `.codepilot/hook_trust.json`, unapproved are
+ // skipped (fail-safe). `mcp_tool`/`prompt`/`agent` handlers are exempt.
 
  /** Set the trust file path (typically `<cwd>/.codepilot/hook_trust.json`).
  * When set, command and http hooks are gated on hash approval. Call
@@ -257,12 +248,9 @@ export class HookEngine {
   }
 
  /**
-  * Run PostToolUse hooks. Concatenates any stdout feedback (appended to the
-  * tool result), and lets a hook REPLACE the result text via
-  * `{"updatedResult":"…"}` — the first such hook wins and later hooks see the
-  * rewritten text as their `result` payload (so chained redaction composes).
-  * Feedback still appends on top of the (possibly rewritten) result. The
-  * rewritten text is bounded the same as the inbound result (50k).
+  * Run PostToolUse hooks. Appends stdout feedback to the result; a hook may
+  * REPLACE the result via `{"updatedResult":"…"}` (first wins, later hooks see
+  * the rewritten text; feedback still appends on top). Rewritten text ≤ 50k.
   */
   async runPostToolUse(
     toolName: string,
@@ -486,11 +474,8 @@ export class HookEngine {
 
   /**
    * Run Stop hooks at the end of a prompt. First blocking hook wins (exit 2
-   * or `{"decision":"block","reason":"..."}`). When no Stop hooks are
-   * configured, returns allow immediately.
-   *
-   * Payload should include `stop_hook_active` (true when already continuing
-   * from a prior Stop block) so handlers can avoid unresolvable loops.
+   * or `{"decision":"block"}`); no hooks → allow. Payload should include
+   * `stop_hook_active` so handlers avoid unresolvable loops.
    */
   async runStop(payload: Record<string, unknown> = {}): Promise<PreHookResult> {
     const warnings: string[] = [];

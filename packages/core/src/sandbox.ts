@@ -1,14 +1,7 @@
-// OS-level sandboxing for tool execution.
-//
-// Sandbox: two enforcement layers driven by one SandboxConfig.
-// 1. Process layer (bash): commands wrapped in the strongest OS sandbox —
-//    macOS sandbox-exec (Seatbelt), Linux bwrap (--unshare-net when network
-//    off), Windows via WSL/bwrap or fail-closed fallback ("deny" default).
-// 2. Tool layer (file tools): assertPathAllowed validates every path before
-//    I/O — writes confined to the writable set, reads allowed except a
-//    sensitive deny-list (~/.ssh, creds, /etc/shadow), symlinks resolved via
-//    realpath. Pure Node; identical on all platforms. Dependency-free; never
-//    throws from detection.
+// OS-level sandboxing for tool execution. Two layers driven by one
+// SandboxConfig: process layer (bash via sandbox-exec/bwrap/WSL) and tool
+// layer (assertPathAllowed validates paths before I/O). Pure Node;
+// dependency-free; never throws from detection.
 
 import { existsSync, realpathSync, statSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -45,20 +38,16 @@ export interface ResolvedSandbox {
   * is active and the proxy has been started. Injected into bash as
   * HTTP(S)_PROXY. Absent until the host starts the proxy and sets it. */
   proxyUrl?: string;
- /** How strongly the "proxy" policy is enforced for the active backend:
-  *  - "enforced": OS sandbox forces all egress through the proxy (cannot bypass
-  *    by ignoring HTTP(S)_PROXY).
-  *  - "best-effort": cooperative only — env vars injected but a raw socket can
-  *    bypass (bwrap/wsl without a userspace net stack, or proxy not yet up).
-  * Undefined when the network policy is not "proxy". */
+ /** How strongly the "proxy" policy is enforced: "enforced" = OS sandbox
+  * forces all egress through the proxy; "best-effort" = cooperative only
+  * (env vars injected but a raw socket can bypass). Undefined when not "proxy". */
   proxyEnforcement?: "enforced" | "best-effort";
 }
 
 /**
- * OS temp locations shells/CLIs routinely use (`curl -o /tmp/…`, `mktemp`).
- * `os.tmpdir()` alone is insufficient on macOS (often `/var/folders/…` while
- * scripts write `/tmp` → `/private/tmp`). Allowed under workspace-write so banal
- * commands don't fail.
+ * OS temp locations shells/CLIs use (`curl -o /tmp/…`, `mktemp`). `os.tmpdir()`
+ * alone is insufficient on macOS (often `/var/folders/…` while scripts write
+ * `/tmp` → `/private/tmp`). Allowed under workspace-write.
  */
 function defaultTempWritableRoots(): string[] {
   const roots = new Set<string>();
@@ -88,18 +77,10 @@ export function resolveSandbox(
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];
   const networkPolicy = normalizeNetworkPolicy(config?.network);
-  // Whether to carve `.git` read-only at the OS layer. The DEFAULT is NOT to
-  // carve it: an ordinary `git commit`/`add` writes the object store and refs,
-  // and OS-locking `.git` turns every commit into an escalation prompt — too
-  // heavy for a normal coding workflow. The real history-rewrite/hook-plant
-  // risk stays gated at the file-tool layer regardless (a direct `write_file`/
-  // `edit_file` into `.git/…` still asks), so the default trades the OS-level
-  // `.git` lock for the tool-level one rather than dropping the guard.
-  //
-  // Precedence: the richer `gitWrite` knob wins when set ("protect" carves,
-  // "allow-git-cli"/"ask" do not); otherwise the legacy boolean `protectGit`
-  // decides when IT is set (true carves, false does not); when neither is set
-  // the default is to leave `.git` writable.
+  // Whether to carve `.git` read-only at the OS layer. Default: leave writable
+  // (git CLI works); the file-tool layer still gates direct `.git/…` writes.
+  // Precedence: `gitWrite` wins when set ("protect" carves, others do not);
+  // otherwise legacy `protectGit` (true carves); neither set → writable.
   const protectGit =
     config?.gitWrite !== undefined
       ? config.gitWrite === "protect"
@@ -116,13 +97,9 @@ export function resolveSandbox(
 }
 
 /**
- * For each writable root, resolve the repository metadata directory that must
- * stay read-only at the OS layer. A plain checkout has `<root>/.git` as a
- * directory; a linked worktree (or submodule) has `<root>/.git` as a *file*
- * whose `gitdir: <path>` line points at the real metadata directory elsewhere.
- * Both the in-tree `.git` and the pointed-at gitdir are protected so a write
- * cannot reach hooks/config/objects through either path. Returns absolute,
- * deduplicated paths that actually exist.
+ * For each writable root, resolve the `.git` directory that must stay
+ * read-only — handles a plain dir and a linked-worktree `.git` file (follows
+ * the `gitdir:` pointer). Returns absolute, deduplicated, existing paths.
  */
 function resolveProtectedGitPaths(writableRoots: string[]): string[] {
   const out = new Set<string>();
@@ -266,16 +243,8 @@ function probeWslBwrap(): boolean {
 let cachedLandlock: string | null | undefined = undefined;
 
 /** Resolve a Landlock launcher binary, or null when none is installed.
- *
- * Landlock is a kernel LSM that restricts a process's filesystem access without
- * needing user namespaces (which some hardened hosts disable, breaking bwrap).
- * We don't embed the kernel syscalls ourselves; instead we look for a small
- * launcher helper on PATH-like fixed locations — either our own bundled
- * `codepilot-landlock` or a known standalone launcher — and exec the command
- * under it. Probed the same way as bwrap/slirp (fixed paths) and cached. The
- * launcher is a filesystem jail only; network restriction still relies on the
- * namespace/proxy machinery, so it is a write-scoping fallback, not a full
- * replacement for bwrap. */
+ * Landlock is a filesystem-only jail (no network namespace); used as a
+ * write-scoping fallback for hosts where user namespaces are disabled. */
 export function landlockLauncherPath(): string | null {
   if (cachedLandlock !== undefined) return cachedLandlock;
   if (process.platform !== "linux") {
@@ -298,11 +267,8 @@ export function landlockLauncherPath(): string | null {
 }
 
 /** Probe the host for an available sandbox backend. Cached per process.
- *
- * Linux order: bubblewrap first (full namespace jail), then a Landlock launcher
- * as a write-scoping fallback for hosts where user namespaces are disabled.
- * Windows is sandboxed through WSL2 + bubblewrap. No backend → "none"
- * (fail-closed at the wrap seam). */
+ * Linux: bwrap first, then Landlock fallback. Windows: WSL2 + bwrap.
+ * No backend → "none" (fail-closed). */
 export function detectSandboxBackend(): SandboxBackend {
   if (cachedBackend) return cachedBackend;
   if (process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
@@ -367,26 +333,17 @@ function proxyPort(url: string): number | null {
 }
 
 /**
- * Build the Seatbelt profile for the current policy.
- *
- * The profile starts from `(allow default)` — reads, signals, process
- * management all work — then denies writes globally and re-allows them for
- * the writable roots. Network is denied outright when policy.network is
- * false. Sensitive paths get an explicit read deny *before* the default
- * allow takes effect (Seatbelt evaluates denies with higher precedence
- * than allows for the same operation when listed — we keep the deny rules
- * explicit so the intent is auditable).
+ * Build the Seatbelt profile: starts from `(allow default)`, denies writes
+ * globally and re-allows writable roots, denies network when off, and denies
+ * sensitive reads before the default allow takes effect.
  */
 export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
   const lines: string[] = [];
   lines.push("(version 1)");
   lines.push("(allow default)");
-  // Network policy:
-  //  - "off"   → deny all network.
-  //  - "proxy" → with proxy up, deny all then re-allow only the proxy's
-  //    loopback port (a child can't bypass by ignoring HTTP(S)_PROXY); without
-  //    the proxy up, leave open (best-effort, like other backends).
-  //  - "full"  → unrestricted (no rule).
+  // Network policy: "off" → deny all; "proxy" → deny all then re-allow only
+  //    the proxy's loopback port (best-effort without proxy up); "full" →
+  //    unrestricted.
   if (!policy.network) {
     lines.push("(deny network*)");
   } else if (policy.networkPolicy.mode === "proxy" && policy.proxyUrl) {
@@ -441,12 +398,11 @@ export function buildSeatbeltProfile(policy: ResolvedSandbox): string {
 }
 
 /** Wrap a command for the given policy. Never throws. */
-/** Prefix `export`s that route a sandboxed command's HTTP(S) traffic through
- * the loopback allowlist proxy, when a "proxy" network policy is active and
- * the host has started the proxy (policy.proxyUrl set). No-op otherwise. When
- * `hostOverride` is given, the proxy host in the exported URLs is rewritten to
- * it — used by the enforced bwrap path, where the sandbox reaches the host
- * proxy through the slirp gateway address rather than host loopback. */
+/** Prefix `export`s routing a sandboxed command's HTTP(S) traffic through the
+ * loopback allowlist proxy when a "proxy" policy is active and
+ * policy.proxyUrl is set; no-op otherwise. `hostOverride` rewrites the proxy
+ * host in the exported URLs (enforced bwrap path reaches the host proxy via
+ * the slirp gateway address). */
 function withProxyEnv(
   command: string,
   policy: ResolvedSandbox,
@@ -487,13 +443,9 @@ function withProxyEnv(
 const SLIRP_GATEWAY = "10.0.2.2";
 
 /**
- * POSIX-shell orchestration: run `bwrapCmd` (`bwrap --unshare-net …`, inner
- * command on --block-fd) under a slirp4netns userspace net stack confined to
- * the loopback proxy. Flow: FIFOs for bwrap's child-pid + block; start bwrap,
- * read child-pid; start slirp4netns bound to host loopback (only the
- * gateway→proxy path routable), wait ready; release the inner command; wait +
- * propagate status. Scratch under a per-run mktemp dir (cleaned on exit);
- * any setup failure exits non-zero (fail-closed).
+ * POSIX-shell orchestration: run bwrap --unshare-net under a slirp4netns
+ * userspace net stack confined to the loopback proxy. Uses FIFOs to coordinate
+ * bwrap's child-pid + block; any setup failure exits non-zero (fail-closed).
  */
 function buildSlirpOrchestration(bwrapInnerCmd: string, slirp: string): string {
   const sq = shellQuote;
@@ -529,14 +481,9 @@ function buildSlirpOrchestration(bwrapInnerCmd: string, slirp: string): string {
 }
 
 /**
- * Environment overlay that makes child processes behave predictably for a
- * non-interactive agent: no pager (so `git log` / `git diff` / `man` don't
- * block on a TTY that doesn't exist), no color escapes, a dumb terminal, and
- * git's own non-interactive guards. Applied to EVERY command path — the
- * persistent shell, one-shot bash, and background jobs — so none of them can
- * silently hang on a pager. Callers overlay this ON TOP of their base env, so
- * an explicit user value still wins
- * where it is set deliberately (we only set keys the agent context needs).
+ * Environment overlay for non-interactive agents: no pager, no color, dumb
+ * terminal, git non-interactive guards. Applied to every command path so none
+ * can hang on a pager. Callers overlay this on top of their base env.
  */
 export function modelShellEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
@@ -569,11 +516,9 @@ export function wrapCommand(
     return { command, sandboxed: false, backend: "none" };
   }
   const backend = opts?.backend ?? detectSandboxBackend();
-  // Determine whether this is an enforced-proxy bwrap/wsl run. In proxy mode on
-  // Linux bwrap we can give the namespace a userspace network stack (slirp4netns)
-  // confined to the loopback proxy, so a raw socket cannot bypass it. When proxy
-  // mode is requested but slirp4netns is unavailable, we fail closed below
-  // rather than silently running with full network.
+  // Enforced-proxy bwrap run: give the namespace a userspace network stack
+  // (slirp4netns) confined to the loopback proxy. Fail closed if slirp4netns
+  // is unavailable.
   const proxyMode = policy.networkPolicy.mode === "proxy" && !!policy.proxyUrl;
   const slirp =
     proxyMode && backend === "bwrap"
@@ -583,11 +528,9 @@ export function wrapCommand(
       : null;
   const enforcedBwrapProxy = proxyMode && backend === "bwrap" && !!slirp;
 
-  // In "proxy" network mode, force child tools through the loopback proxy by
-  // exporting the standard proxy env vars ahead of the command. Cooperative for
-  // seatbelt's own profile and for best-effort backends; for the enforced bwrap
-  // path the env is instead injected inside the namespace pointing at the slirp
-  // gateway, so skip the host-loopback export here.
+  // Force child tools through the loopback proxy via env vars (cooperative).
+  // The enforced bwrap path injects env inside the namespace instead, so skip
+  // the host-loopback export here.
   if (!enforcedBwrapProxy) {
     command = withProxyEnv(command, policy);
   }
@@ -623,11 +566,9 @@ export function wrapCommand(
     };
   }
   if (backend === "landlock") {
-    // Landlock is a FILESYSTEM jail only — it cannot create a network namespace.
-    // Any network restriction (an enforced proxy, or "off") therefore cannot be
-    // enforced here, so a restricted policy fails closed rather than silently
-    // running with full host egress: honoring "off"/"proxy" by doing nothing
-    // would be a lie. Only "full" (no restriction) is served under Landlock.
+    // Landlock is a filesystem jail only — it cannot create a network
+    // namespace. A restricted network policy (proxy/off) fails closed rather
+    // than silently running with full egress. Only "full" is served.
     if (proxyMode || !policy.network) {
       const want = proxyMode ? `"proxy"` : `"off"`;
       return {
@@ -641,11 +582,9 @@ export function wrapCommand(
         backend,
       };
     }
-    // The launcher grants write access to the given roots (reads stay open,
-    // matching the bwrap "/ ro, roots rw" shape). Protected metadata (`.git`)
-    // lives INSIDE a writable root, so it must be re-scoped read-only explicitly
-    // — the same carve bwrap does with a `--ro-bind` over the rw bind — rather
-    // than relying on it being "not granted" (it IS granted via its parent).
+    // The launcher grants write access to writable roots; protected metadata
+    // (`.git`) inside a root is re-scoped read-only (same carve as bwrap's
+    // --ro-bind over the rw bind).
     const launcher =
       opts?.landlockPath !== undefined ? opts.landlockPath : landlockLauncherPath();
     if (!launcher) {
@@ -700,10 +639,8 @@ export function wrapCommand(
     };
   }
  // bwrap: mount / read-only, re-bind writable roots rw, fresh /dev+/proc.
-  // Fail closed: proxy mode was requested but slirp4netns is not installed, so
-  // we cannot enforce egress through the loopback proxy. Refuse rather than run
-  // with full host network (which cooperative env vars alone would allow a raw
-  // socket to bypass).
+ // Fail closed: proxy mode without slirp4netns cannot enforce egress — refuse
+ // rather than run with full host network.
   if (proxyMode && !slirp) {
     return {
       command: `echo ${shellQuote(
@@ -724,11 +661,9 @@ export function wrapCommand(
     if (existsSync(p)) args.push("--ro-bind", p, p);
   }
   if (enforcedBwrapProxy && slirp) {
-    // Enforced proxy: isolate the network namespace, then attach a userspace
-    // stack (slirp4netns) whose only routable egress is the loopback proxy.
-    // The inner command is pointed at the slirp gateway. bwrap reports its
-    // namespace pid on --info-fd (fd 10) so slirp can target it, and blocks the
-    // sandbox on --block-fd (fd 11) until the orchestration brings tap0 up.
+    // Enforced proxy: isolate the network namespace, attach slirp4netns whose
+    // only egress is the loopback proxy. bwrap reports its namespace pid on
+    // --info-fd (fd 10) and blocks on --block-fd (fd 11) until tap0 is up.
     const innerCmd = withProxyEnv(command, policy, SLIRP_GATEWAY);
     args.push(
       "--unshare-net",
@@ -780,9 +715,8 @@ export const SENSITIVE_READ_PATHS: string[] = [
 
 /**
  * System/credential/boot paths where an accidental write or delete is
- * catastrophic. A write/delete here forces interactive confirmation EVEN with
- * sandbox off or yolo mode — a safety floor independent of the writable-root
- * math. Not a hard deny; a user who means it can confirm.
+ * catastrophic: forces interactive confirmation even with sandbox off or yolo
+ * mode. Not a hard deny — a user who means it can confirm.
  */
 export const SENSITIVE_WRITE_PATHS: string[] = [
   // Credentials / keys (clobbering authorized_keys or known_hosts is an attack).
@@ -813,9 +747,8 @@ function join2(...parts: string[]): string {
 
 /**
  * Whether `inputPath` resolves onto a protected system/credential path for the
- * given access kind. Mode-independent: this is the safety floor that applies
- * even when the sandbox is off. Returns the matched root (for messaging) or
- * null when the path is not sensitive.
+ * given access kind — the safety floor that applies even with the sandbox off.
+ * Returns the matched root (for messaging) or null.
  */
 export function sensitivePathHit(
   inputPath: string,
@@ -831,14 +764,9 @@ export function sensitivePathHit(
 }
 
 /**
- * Whether a write targets a `.git/` directory (object db / refs / hooks) — the
- * workspace-relative counterpart of {@link SENSITIVE_WRITE_PATHS} (`.git` can't
- * be in the absolute list since it sits inside the writable workspace). A direct
- * file-tool write there (`write_file .git/config`) can corrupt history or plant
- * a hook, so it forces an interactive confirmation (even yolo / under sandbox);
- * not a hard deny. The floor sits above allow rules. Legitimate git ops via the
- * `git` binary are unaffected. `.git` must be a whole path component
- * (`foo.gitignore` not matched). Returns the `.git` dir path or null.
+ * Whether a write targets a `.git/` directory — forces interactive confirmation
+ * (even yolo/under sandbox) since a direct write can corrupt history or plant a
+ * hook. `.git` must be a whole path component. Returns the dir path or null.
  */
 export function gitMetadataWriteHit(inputPath: string, cwd: string): string | null {
   const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
@@ -868,10 +796,9 @@ function isUnder(path: string, root: string): boolean {
 }
 
 /**
- * Directory to grant when the user allows a write outside the sandbox.
- * Uses the parent of a file path (so sibling files in that folder work).
- * If that folder does not exist yet, {@link addWritableRoot} also grants
- * its parent so the OS sandbox can `mkdir` it.
+ * Directory to grant when the user allows a write outside the sandbox: the
+ * parent of the file path (so sibling files work). {@link addWritableRoot}
+ * also grants a non-existent parent so the OS sandbox can `mkdir` it.
  */
 export function writableRootForTarget(inputPath: string, cwd: string): string {
   const abs = isAbsolute(inputPath) ? resolve(inputPath) : resolve(cwd, inputPath);
@@ -890,10 +817,9 @@ export function isWriteOutsideSandbox(
 }
 
 /**
- * True when `inputPath` is inside the working set (cwd ∪ extra working dirs ∪
- * `roots` = sandbox writable + delivery roots). This is the boundary
- * `workspaceBoundary` tests; outside → ask/deny per policy. Prefix check with
- * platform-aware normalization (no symlink resolution — use the async guard).
+ * True when `inputPath` is inside the working set (cwd ∪ extra dirs ∪ `roots`).
+ * Prefix check with platform-aware normalization (no symlink resolution — use
+ * the async guard).
  */
 export function isInsideWorkingSet(
   inputPath: string,
@@ -959,11 +885,8 @@ export function looksLikeSandboxWriteDenial(text: string): boolean {
 }
 
 /** True when command output looks like a network failure the sandbox likely
- * caused (network disabled / bwrap --unshare-net / proxy allowlist). These are
- * the errors a service or package manager emits when the jail blocks egress;
- * used to nudge the model toward a one-command escalation rather than silently
- * giving up. Deliberately broad: name resolution / connection refused /
- * unreachable / proxy. */
+ * caused (disabled network / bwrap --unshare-net / proxy allowlist). Used to
+ * nudge toward a one-command escalation. Deliberately broad. */
 export function looksLikeSandboxNetworkDenial(text: string): boolean {
   return (
     /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT)\b/.test(text) ||
@@ -977,11 +900,9 @@ export function looksLikeSandboxNetworkDenial(text: string): boolean {
 }
 
 /**
- * Validate a path against the policy. `kind` is "read" or "write".
- * Absolute and relative paths are both accepted; they are resolved against
- * `cwd` first. Symlinks are not resolved here (the process sandbox catches
- * symlink escapes for bash; file tools additionally use realpath callers
- * where it matters).
+ * Validate a path against the policy. `kind` is "read" or "write"; absolute and
+ * relative paths resolve against `cwd`. Symlinks aren't resolved here — the
+ * process sandbox catches escapes for bash, file tools use realpath callers.
  */
 export function assertPathAllowed(
   inputPath: string,
@@ -1034,10 +955,9 @@ export function assertPathAllowed(
 }
 
 /**
- * Async variant that also resolves symlinks for existing paths, so a
- * symlink inside the workspace cannot be used to escape the writable
- * roots. Non-existent paths (new files) fall back to the lexical check on
- * the deepest existing ancestor.
+ * Async variant that also resolves symlinks for existing paths, so a symlink
+ * inside the workspace can't escape the writable roots. Non-existent paths
+ * fall back to the lexical check on the deepest existing ancestor.
  */
 export async function assertPathAllowedAsync(
   inputPath: string,
@@ -1098,13 +1018,10 @@ const DANGEROUS_PATTERNS: Array<{ re: RegExp; why: string }> = [
   { re: /\btruncate\b[^|]*-s\s*0[^|]*\s\/(?:etc|boot|bin|sbin|usr)\b/, why: "truncate of system path" },
   // Recursive delete of a shell glob at root (`rm -rf /*`, `/home/*`).
   { re: /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+\/\S*\*/, why: "recursive delete of a root glob" },
-  // Destructive removal of a repo's .git directory. Catastrophic even inside
-  // the workspace (an active sandbox otherwise auto-allows it), and unlike
-  // legitimate git subcommands (`git config`, `git log`) this is never a normal
-  // operation. Matches `rm -rf .git`, `rm -rf ./.git`, `rm -rf path/to/.git`,
-  // and a trailing slash. `.git` must be a whole path component (so
-  // `rm foo.gitignore` is NOT caught). Only `rm` is flagged — `git` subcommands
-  // keep their own precise patterns above, so `git config` is never caught.
+  // Destructive removal of a repo's .git directory — catastrophic even inside
+  // the workspace. Matches `rm -rf .git` / `path/to/.git` (whole path component
+  // only, so `foo.gitignore` is not caught). Only `rm` is flagged; `git`
+  // subcommands keep their own patterns above.
   {
     re: /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+(?:\S*\/)?\.git(?:\/\S*)?(?:\s|$)/,
     why: "delete of a .git directory",

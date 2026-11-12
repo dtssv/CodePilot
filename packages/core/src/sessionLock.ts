@@ -100,16 +100,9 @@ function writeOwner(fd: number, owner: SessionLockOwner): void {
 }
 
 /**
- * Acquire the single-writer lease for a session. Creates `<id>.lock` with
- * O_EXCL. If the lock already exists:
- *  - owner pid alive  → throws SessionLockedError (the holder's identity rides
- *    along so the caller can redirect / open read-only);
- *  - owner pid dead / lock corrupt → the stale lock is reclaimed (unlinked and
- *    re-created) and the lease is granted.
- *
- * Reclaim races are resolved by O_EXCL: after unlinking a stale lock we retry
- * the exclusive create; whichever process wins the create holds the lease, the
- * loser re-reads and either throws (now a live owner) or retries a reclaim.
+ * Acquire the single-writer lease via `<id>.lock` (O_EXCL). A live owner →
+ * SessionLockedError (identity included for redirect); a dead/corrupt owner is
+ * reclaimed. Reclaim races resolve by retrying the exclusive create.
  */
 export function acquireSessionLock(
   id: string,

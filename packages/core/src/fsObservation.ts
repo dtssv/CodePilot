@@ -1,13 +1,7 @@
-// File-observation store: read-before-write + staleness (CAS) guard.
-//
-// Read-before-write gate: records mtime+size (+ content hash) whenever a file
-// is read, and lets write-tools assert (a) the path was observed this session
-// and (b) the on-disk state still matches — preventing edits from stale
-// memory or from files changed by another process since the last read.
-// mtime+size is the primary check (cheap, no extra I/O); a content hash is the
-// fallback that clears a false positive when a formatter rewrites identical
-// bytes or `touch` bumps mtime. Optional in ToolContext — tools degrade to
-// current behaviour when absent.
+// File-observation store: read-before-write + staleness guard.
+// Records mtime+size (+ content hash) on read; write-tools assert the path was
+// observed and the on-disk state still matches. mtime+size is the primary check;
+// a content hash clears false positives (formatter rewrite, `touch`). Optional.
 
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
@@ -19,11 +13,9 @@ const FULL_HASH_LIMIT = 256 * 1024;
 const SAMPLE_BYTES = 64 * 1024;
 
 /**
- * Fast content hash for the stale-write fallback. Full SHA-1 for files up to
- * `FULL_HASH_LIMIT`; for larger files a hash of size + head + tail sample, so a
- * real edit anywhere near the ends (the common case) is still caught while the
- * cost stays bounded. Equal hashes mean "very likely identical", used only to
- * rescue a false-positive mtime — never to declare a file changed.
+ * Fast content hash for the stale-write fallback. Full SHA-1 up to
+ * `FULL_HASH_LIMIT`; larger files hash size + head + tail sample. Equal hashes
+ * mean "very likely identical", used only to rescue a false-positive mtime.
  */
 export function hashFileContent(buf: Buffer): string {
   const h = createHash("sha1");
@@ -87,19 +79,9 @@ export class FileObservationStore {
   }
 
   /**
-   * Assert that a write/edit to `absPath` is safe. `currentStat` is the
-   * current on-disk stat, or null when the file does not exist yet.
-   *
-   * - File does not exist (new file) → allowed; the caller is creating it.
-   * - File exists but was never observed → "unobserved" (read-before-write).
-   * - File exists and observed, but mtime/size differ → normally "stale", BUT
-   *   if both the observation and `currentContentHash` are present and equal,
-   *   the content is unchanged (false-positive mtime) → ok.
-   * - File exists, observed, unchanged → ok.
-   *
-   * `currentContentHash` (from hashFileContent on the current on-disk bytes) is
-   * optional: tools may supply it so a jittered mtime does not block an edit to
-   * identical content. When omitted, the mtime/size decision stands.
+   * Assert a write/edit to `absPath` is safe. New file → allowed; unobserved →
+   * "unobserved"; mtime/size mismatch → "stale" unless a matching
+   * `currentContentHash` proves bytes unchanged (false-positive mtime).
    */
   checkFresh(
     absPath: string,
@@ -151,10 +133,8 @@ export class FileObservationStore {
   }
 
   /**
-   * Re-observe after a successful write so a subsequent edit in the same
-   * session sees the just-written state as fresh (not stale against the
-   * pre-write observation). Carries an optional content hash of the bytes just
-   * written.
+   * Re-observe after a successful write so a subsequent edit sees the
+   * just-written state as fresh. Carries an optional content hash.
    */
   reobserveAfterWrite(
     absPath: string,

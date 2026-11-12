@@ -1,10 +1,6 @@
-// Single-tool execution for the agent loop.
-//
-// Extracted from `agent.ts`: `runOneTool` is ~200 lines covering permission
+// Single-tool execution for the agent loop: runOneTool covers permission
 // checks, PreToolUse/PostToolUse hooks, doom-loop detection, Zod validation,
-// and telemetry spans. Keeping it in its own module lets the agent loop read
-// as a clean turn-orchestration loop, and makes the tool-execution path
-// independently testable.
+// and telemetry spans.
 
 import { randomUUID } from "node:crypto";
 import type { ToolContext } from "./tools/types.js";
@@ -41,10 +37,8 @@ export function emitTokenEstimateIfNeeded(
 ): void {
   if (!deps.onTokenEstimate) return;
   const all = [...input.history, ...produced];
-  // Use the ONE canonical estimator (compaction.ts) so the session-level
-  // estimate matches the compaction gate and checkpoint gate — previously this
-  // was a separate per-block loop that ignored image tokens, so a session with
-  // images under-counted here while the compaction gate counted them.
+  // Use the canonical estimator (compaction.ts) so the session-level estimate
+  // matches the compaction and checkpoint gates.
   const tokens = estimateEventTokens(all, estimateTokens);
   let turns = 0;
   for (const e of all) {
@@ -87,12 +81,9 @@ export interface ToolExecResult {
   aborted?: boolean;
 }
 
-/** Execute a single tool call: permission check → PreToolUse hooks → Zod
- * validation → execution → PostToolUse hooks → doom-loop warning.
- *
- * Returns the result content (already secret-redacted by the caller) plus
- * metadata (artifactRef, blocks, images) the caller merges into the
- * transcript. */
+/** Execute a single tool call: permission → PreToolUse hooks → Zod validation
+ * → execution → PostToolUse hooks → doom-loop warning. Returns result content
+ * plus metadata the caller merges into the transcript. */
 export async function runOneTool(
   tc: ToolUseBlock,
   deps: AgentDeps,
@@ -159,12 +150,8 @@ export async function runOneTool(
     }
     if (dl.warn && dl.message) doomLoopPreWarn = dl.message;
  // Idempotent-call de-duplication: if this exact (tool, input) already
- // succeeded earlier in the run, replay the cached result instead of
- // re-executing. This collapses the "rate-limit makes the model re-explore
- // the same directories" loop: the model still gets the data it asked for,
- // but we don't burn another tool round-trip or stack a duplicate
- // tool_result into the context. A short prefix tells the model this is a
- // replay so it doesn't keep asking for the same thing.
+  // succeeded earlier in the run, replay the cached result. A short prefix
+  // tells the model this is a replay so it doesn't keep asking.
     const cached = doomLoop.cachedResult(tc.name, tc.input);
     if (cached) {
       endToolSpan();
@@ -206,11 +193,8 @@ export async function runOneTool(
   let resolvedWithoutPrompt = false;
   if (check === "ask") {
  // Non-interactive permission modes resolve a would-be prompt without the UI.
- // `dont-ask` denies every ask (there is no matching rule, and it is configured
- // not to block on a prompt). `auto` routes SOFT asks (nothing matched, no hard
- // floor) to a background classifier; HARD-floor asks (dangerous commands,
- // sensitive/.git writes, sandbox escalation, out-of-sandbox writes, explicit
- // ask rules) still prompt — the classifier must never silently allow those.
+  // `dont-ask` denies every ask; `auto` routes SOFT asks to a background
+  // classifier but HARD-floor asks still prompt.
     const permMode = deps.permissions.getMode();
     if (permMode === "dont-ask") {
       decision = "deny";
@@ -337,15 +321,9 @@ export async function runOneTool(
         }
       }
       if (decision === "always" || decision === "always-project") {
- // Narrow the grant to a rule covering THIS invocation (e.g.
- // "bash(npm test *)", or the exact command for banned programs like
- // rm/sudo) rather than flipping the whole session to allow every call
- // to this tool. The rule is session-scoped: it lives in memory on the
- // PermissionEngine and is never persisted, so it dies with this
- // Session. deny rules still override — they are checked first in
- // preflight and are absolute, even under yolo. For sandbox-expand asks
- // the folder grant above is the durable part; the tool rule is still
- // useful for same-tool retries.
+ // Narrow the grant to a session-scoped rule covering THIS invocation (e.g.
+      // "bash(npm test *)") rather than allowing every call to this tool. deny
+      // rules still override — checked first in preflight, absolute even under yolo.
         const rule = PermissionEngine.suggestRule(tool, effectiveInput);
         deps.permissions.addSessionRule(rule, "allow");
  // "always-project" also persists the SAME narrowed rule to the project
@@ -422,10 +400,8 @@ export async function runOneTool(
     }
   }
 
- // Validate input via Zod. A validation failure is returned as a tool
- // error so the model can self-correct (this is the behaviour all mature
- // agents rely on); silently passing malformed input through is how
- // corrupt edits happen.
+  // Validate input via Zod. A validation failure is returned as a tool error
+  // so the model can self-correct.
   let parsed: unknown = effectiveInput;
   const safe = tool.inputSchema.safeParse(effectiveInput);
   if (!safe.success) {
@@ -495,12 +471,9 @@ export async function runOneTool(
   try {
     const result = await tool.execute(parsed as never, ctx);
     let content = result.content;
- // Doom-loop warning (post-execution). NOTE: we do NOT call
- // doomLoop.check again here — the pre-execution check already
- // recorded this call. A second check would double-count every
- // invocation, making the REFUSE_THRESHOLD (5) effectively fire at
- // the 3rd real call (6 counts). Instead we ask for the CURRENT
- // count without incrementing, purely to decide whether to warn.
+ // Doom-loop warning (post-execution). Do NOT call doomLoop.check again —
+    // the pre-execution check already recorded this call. Peek the current
+    // count without incrementing to decide whether to warn.
     if (doomLoop) {
       const count = doomLoop.peekCount(tc.name, tc.input);
       if (count >= DoomLoopDetector.WARN_THRESHOLD) {

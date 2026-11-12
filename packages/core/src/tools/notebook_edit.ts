@@ -1,13 +1,7 @@
-// notebook_edit: edit Jupyter notebook (.ipynb) cells.
-//
-// Jupyter notebooks are JSON files with a `cells` array. This tool lets the
-// agent manipulate individual cells by index — replace the source, change
-// the cell type, insert a new cell, or delete one — without rewriting the
-// entire file. This implements NotebookEdit tool.
-//
-// The notebook is read, the requested mutation is applied to the in-memory
-// cell array, and the full JSON is written back atomically. Cell IDs are
-// preserved for existing cells; new cells get a generated ID.
+// notebook_edit: edit Jupyter notebook (.ipynb) cells by index — replace
+// source, change type, insert, or delete — without rewriting the whole
+// file. Reads the notebook, applies the mutation in memory, writes the full
+// JSON back atomically; existing cell IDs are preserved.
 
 import { z } from "zod";
 import { readFile, writeFile, stat } from "node:fs/promises";

@@ -1,13 +1,7 @@
-// Google Gemini provider — native `generateContent` streaming API.
-// No SDK dependency; uses fetch + SSE directly, like the other providers.
-//
-// Gemini differs from OpenAI/Anthropic in a few ways the mapping handles:
-// - roles are "user" / "model" (assistant → model); there is no "system"
-//   role — system text goes in a top-level `systemInstruction`.
-// - tool calls are `functionCall` parts; tool results are `functionResponse`
-//   parts carried on a *user* turn.
-// - streaming uses `?alt=sse`; each SSE frame is a GenerateContentResponse
-//   chunk with `candidates[].content.parts[]` and a trailing `usageMetadata`.
+// Google Gemini provider — native `generateContent` streaming via fetch + SSE.
+// Mapping notes: roles are "user"/"model" (no "system" — uses `systemInstruction`);
+// tool calls are `functionCall` parts, results `functionResponse` on a user turn;
+// `?alt=sse` frames carry `candidates[].content.parts[]` + trailing `usageMetadata`.
 
 import { parseSse } from "./sse.js";
 import { fetchWithRetry, parseRateLimitHeaders } from "./retry.js";

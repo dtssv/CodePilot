@@ -1,8 +1,7 @@
 /**
- * Process-wide shared MCP managers.
- *
- * Sessions share one manager per identical `mcpServers` config (ref-counted)
- * and can start it in the background without blocking resume.
+ * Process-wide shared MCP managers. Sessions share one manager per identical
+ * `mcpServers` config (ref-counted); start can run in the background without
+ * blocking resume.
  */
 
 import { McpManager } from "./mcp.js";

@@ -15,13 +15,9 @@ import {
 } from "./env.js";
 
 /**
- * Output style (explanatory / learning). Controls how
- * verbose the assistant is and whether it teaches as it goes.
- * - `concise` (default): direct, technical, minimal — the existing style.
- * - `explanatory`: lead with the "why", explain non-obvious decisions,
- * surface trade-offs. Still no fluff, but teach.
- * - `learning`: like explanatory but also call out the concepts a junior
- * engineer would need to understand the change.
+ * Output style: `concise` (default), `explanatory` (lead with the why,
+ * surface trade-offs), or `learning` (also teach concepts a junior engineer
+ * would need).
  */
 export type OutputStyle = "concise" | "explanatory" | "learning";
 
@@ -120,20 +116,17 @@ const STATIC_PREFIX_TARGET_TOKENS = 4500;
 // ---------------------------------------------------------------------------
 // Section registry.
 //
-// Static prefix assembled from named, ordered sections. Registry enforces unique
-// `name`, deterministic order (by `order` then `name`), per-model override
-// (`source: "model"` replaces the core section of the same name). "\n\n"-joined.
+// Static prefix assembled from named, ordered sections: unique `name`,
+// deterministic order, per-model override (`source: "model"`).
 
 export interface StaticSection {
   name: string;
   order: number;
   source?: "core" | "model";
   /**
-   * Tools this section's guidance is *about*. When present, the section renders
-   * only if every listed tool is exposed this session (same gating as the
-   * Tool-Use Policy PolicyBullet, lifted to section granularity). A section
-   * teaching an unexposed tool is waste (e.g. Planning under `chat`, which has
-   * no `plan_update`). Omit for task-execution sections that apply regardless.
+   * Tools this section's guidance is about. The section renders only when
+   * every listed tool is exposed this session. Omit for sections that apply
+   * regardless of tool availability.
    */
   requires?: string[];
   text: string;
@@ -336,9 +329,8 @@ ${ctx.extra.trim()}`);
 // ---------------------------------------------------------------------------
 // Tool-Use Policy.
 //
-// tool-AGNOSTIC bullets always render. tool-BOUND bullets declare `requires` and
-// render only when all required tools are exposed (never teach an unavailable
-// tool). Backtick mentions must name tools in `requires` — contract-enforced.
+// tool-AGNOSTIC bullets always render; tool-BOUND bullets render only when
+// all required tools are exposed. Backtick mentions must name tools in `requires`.
 
 interface PolicyBullet {
   /** Tools this bullet instructs the model to use; omit for tool-agnostic. */
@@ -479,11 +471,9 @@ function outputStyleGuidance(style: OutputStyle): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Split the dynamic context into a byte-stable tier (environment identity +
- * git identity + memory index + skills) and a volatile tier (current time +
- * plan). The stable tier is appended to the cached system block so it is sent
- * once and then served from the provider's prompt cache; only the volatile
- * tier rides each turn's last user message.
+ * Split dynamic context into a byte-stable tier (env/git/memory/skills) and
+ * a volatile tier (time/plan). The stable tier rides the cached system block;
+ * only the volatile tier rides each turn's last user message.
  */
 async function buildTieredSuffix(
   ctx: SystemPromptContext,

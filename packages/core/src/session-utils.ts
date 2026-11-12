@@ -1,18 +1,7 @@
-// Session factory + repository + provider construction.
-//
-// Despite the "-utils" filename, this module is NOT a grab-bag of helpers: it
-// is the three collaborators the
-// `Session` class delegates to —
-//   1. ProviderFactory  — buildProvider / buildSmallProvider / FallbackProvider,
-//   2. SessionRepository — persistence paths, listing, search, export, delete,
-//                          pin/archive, the SQLite metadata index,
-//   3. SessionFactory   — `createSession`, which resolves config/model/runtime
-//                          then constructs a `Session`.
-// Plus a few small pure helpers (titling, id generation) used across the codebase.
-//
-// It is a *leaf* of the module graph: it imports the `Session` TYPE only, and
-// pulls the concrete class in lazily inside `createSession`, so session.ts can
-// import these helpers without the old session.ts ⇄ session-utils.ts cycle.
+// Session factory + repository + provider construction: ProviderFactory,
+// SessionRepository (persistence/listing/search/export/delete/pin/archive),
+// and SessionFactory (createSession). Leaf module — imports the `Session`
+// type only and loads the concrete class lazily to avoid a session.ts cycle.
 
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -462,10 +451,8 @@ export function decompressSessionBuffer(buf: Buffer): string {
 }
 
 /**
- * Read a session's JSONL text whether it is live (`.jsonl`) or cold
- * (`.jsonl.br`). Returns "" when neither exists / is unreadable. Read-only;
- * never materializes the plaintext for a cold session. Used by every read path
- * (list / search / export / title) so cold sessions are transparent.
+ * Read a session's JSONL text whether live (`.jsonl`) or cold (`.jsonl.br`).
+ * Returns "" when neither exists; never materializes plaintext for cold sessions.
  */
 export async function readSessionJsonlText(id: string): Promise<string> {
   try {
@@ -595,14 +582,8 @@ export function sameCwd(a: string | undefined, b: string | undefined): boolean {
 }
 
 /** Delete a session's persisted file + sidecars. Refuses while a live process
- * holds the single-writer lease (another daemon / CLI is actively writing it),
- * unless `force` is set — a crashed owner's stale lock does not block deletion.
- * Also removes the lock file so a reclaimed-but-orphaned lock is not left
- * behind. After the session file is gone, runs an artifact mark-and-sweep for
- * that project so the deleted session's now-unreferenced spilled artifacts are
- * reclaimed (a sibling session referencing the same content keeps it). Pass
- * `skipGc` to suppress the sweep (test cleanup); pass `force` to bypass the
- * live-writer guard. */
+ * holds the single-writer lease unless `force` is set; runs an artifact
+ * mark-and-sweep for the project (pass `skipGc` to suppress). */
 export async function deleteSession(
   id: string,
   opts?: { force?: boolean; skipGc?: boolean },
@@ -710,13 +691,9 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
       for (const [plugin, message] of init.errors) {
         log.warn(`plugin ${plugin}: runtime module failed to load — ${message}`);
       }
-      // Reuse the discovered plugins (no second scan) to wire the rest of a
-      // plugin's contributions into the live session: hooks + MCP servers via
-      // the config merge, and skills + agents via extra discovery dirs. Each
-      // step is fault-isolated — a single misconfigured/undeclared plugin is
-      // skipped (merge is fail-closed per capability, path collection is
-      // existence-checked) and can never abort session creation or disable
-      // another plugin.
+      // Wire a plugin's remaining contributions (hooks + MCP via config merge,
+      // skills + agents via discovery dirs). Each step is fault-isolated — a
+      // single misconfigured plugin is skipped and never aborts session creation.
       try {
         // Load the plugin content-trust store so sensitive components (hooks /
         // MCP servers / runtime) of a plugin whose on-disk content drifted from
@@ -730,12 +707,9 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
           (m) => log.warn(m),
           trust,
         ) as typeof config;
-        // mergePluginConfig may also resolve a plugin runtime default from the
-        // MANIFEST alone — but `initPluginRuntimes` already chose the default
-        // from plugins whose module actually LOADED (a broken module must not
-        // become the default). Keep the authoritative runtime (the `runtime`
-        // var resolved above) and take only the hooks/mcpServers the merge
-        // contributed.
+        // Keep the authoritative runtime resolved above; take only the
+        // hooks/mcpServers the merge contributed (a broken module must not
+        // become the default runtime).
         pluginConfig = { ...merged, runtime };
       } catch (err) {
         log.warn(`plugin config merge failed — ${(err as Error).message}`);
@@ -758,13 +732,9 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
     }
   }
 
- // Expand the chosen model into a FULLY-RESOLVED config. This is the crucial
- // step: a model name alone (from opts, sticky history, or config.model) is
+ // Expand the chosen model into a fully-resolved config: a model name alone is
  // not enough — the provider/apiKey/baseURL live in the matching `providers`
- // preset. Without expanding it, buildSingleProvider falls back to the
- // Anthropic default and fails with "missing API key" until the user manually
- // switches models (which runs this same expansion via setModel). Do it here
- // so a fresh/resumed session works on the first message.
+ // preset. Without this, buildSingleProvider falls back to Anthropic and fails.
   let resolvedConfig = pluginConfig;
   let resolvedModel = model ?? "";
   const target = model ?? resolveDefaultModel(pluginConfig)?.model;
@@ -831,10 +801,8 @@ export function resetSessionIndex(): void {
 }
 
 /**
- * List session summaries. Each summary includes the auto-title (or a
- * truncated prefix of the first user message), the model, the current
- * mode, the message count, and the mtime. Sessions can be filtered by
- * cwd or by a substring search via `searchSessions`.
+ * List session summaries (title, model, mode, message count, mtime).
+ * Filter by cwd or search via `searchSessions`.
  */
 export async function listSessions(
   cwd?: string
@@ -971,14 +939,9 @@ async function suspendedSessionsFullScan(): Promise<
 }
 
 /**
- * Boot-time crash-recovery sweep. Finds sessions whose JSONL tail is an
- * in-flight status (interrupted run) and seals each to a clean idle: orphaned
- * tool calls get `INTERRUPTED_RESULT`, a trailing `idle` is appended, and the
- * next prompt carries a one-shot recovery instruction.
- *
- * Seal-and-idle only — does NOT auto-resume (prior side-effecting tools may
- * already have run; double-execution risk). Uses the SQLite `suspended()` fast
- * path with a bounded full-scan fallback; per-session errors are isolated.
+ * Boot-time crash-recovery sweep: finds sessions with an in-flight JSONL tail
+ * and seals each to a clean idle. Seal-only — never auto-resumes (double-
+ * execution risk). Uses the SQLite fast path with a full-scan fallback.
  */
 export async function recoverSuspendedSessions(opts?: {
   /** Config applied to each recovered session's load (model resolution, etc.).
@@ -1034,10 +997,8 @@ export async function recoverSuspendedSessions(opts?: {
 }
 
 /**
- * Search session summaries by title or content. `query` is a plain string;
- * it is matched case-insensitively against the title, the first user
- * message, and the last assistant message. Returns matching summaries
- * sorted by recency.
+ * Search session summaries by title or content (case-insensitive). Returns
+ * matches sorted by recency.
  */
 export async function searchSessions(
   query: string,
@@ -1075,12 +1036,8 @@ export async function searchSessions(
 }
 
 /**
- * Export a session transcript as either a human-readable markdown
- * document or a JSONL dump (the same shape as the persisted event log).
- * Markdown output renders user/assistant turns as blockquotes, lists each
- * tool call + result, and surfaces plan + mode events as their own
- * sections. JSONL output streams the events one per line for piping
- * into other tools.
+ * Export a session transcript as markdown (human-readable) or JSONL
+ * (one event per line, same shape as the persisted event log).
  */
 export async function exportSession(
   id: string,

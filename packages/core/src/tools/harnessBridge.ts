@@ -1,19 +1,8 @@
-// harness_bridge: invoke an external agent CLI as a subprocess (built-in
-// adapters for common CLIs, or a custom command), adapt stdout back into
-// the CodePilot tool result.
-//
-// Unlike `task` (in-process CodePilot sub-agent), this tool runs another
-// binary in one-shot/non-interactive mode, passes the prompt as an argument,
-// and returns the harness's final output.
-//
-// Security posture (same wrapping as bash):
-// - The subprocess command is wrapped in the session's OS sandbox
-// (seatbelt / bwrap / wsl-bwrap) via wrapCommand, so the harness runs
-// under the same write/network restrictions as the parent's bash.
-// - stdin is never piped ("ignore") — harnesses cannot hang waiting for
-// interactive input.
-// - Wall-clock timeout (default 2 min, max 10 min) enforced with SIGTERM.
-// - Combined output is truncated at 100 KB.
+// harness_bridge: run an external agent CLI as a sandboxed one-shot subprocess,
+// pass the prompt, and return its final output. Unlike `task` (in-process
+// sub-agent), this spawns another binary. Security: wrapped in the session's
+// OS sandbox (same as bash), no stdin (no interactive hangs), wall-clock
+// timeout (default 2 min, max 10 min), output truncated at 100 KB.
 
 import { z } from "zod";
 import { spawn } from "node:child_process";
@@ -66,12 +55,9 @@ export function isSecretEnvKey(key: string): boolean {
   return SECRET_KEY_PATTERNS.some((p) => upper.includes(p));
 }
 
-/**
- * Build the environment for a spawned harness. By default every env var whose
- * NAME looks like a secret is dropped so the child cannot read the parent's
- * credentials; `envKeep` adds specific keys back and `envScrub` removes more.
- * With `scrubSecrets: false` the full parent env is inherited unchanged.
- */
+/** Build the child env for a spawned harness. By default secret-looking keys
+ * are dropped so the child can't read the parent's credentials; `envKeep`
+ * adds keys back, `envScrub` removes more. `scrubSecrets:false` inherits all. */
 export function scrubChildEnv(
   base: NodeJS.ProcessEnv,
   opts: ChildEnvScrubOptions = {},
@@ -177,12 +163,9 @@ export function buildHarnessCommand(input: {
   }
 }
 
-/**
- * Extract the model-facing output from a harness's stdout. claude-code's
- * `--output-format json` envelope is parsed for its `result` field; codex
- * and custom harnesses return raw text. Parse failures degrade gracefully
- * to the raw text.
- */
+/** Extract model-facing output from harness stdout. claude-code's JSON
+ * envelope is parsed for its `result` field; codex and custom harnesses
+ * return raw text. Parse failures fall back to raw text. */
 export function extractHarnessOutput(harness: HarnessKind, stdout: string): string {
   if (harness === "claude-code") {
     try {

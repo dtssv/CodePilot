@@ -1,20 +1,9 @@
-// Progressive project memory: thin INDEX + topic files (harness-style).
-//
-// Layout (per project):
-//   ~/.codepilot/memory/<project-hash>/
-//     MEMORY.md          — index only (injected at session start, capped)
-//     overview.md        — what the project is
-//     architecture.md    — design / module map
-//     standards.md       — rules & conventions
-//     knowledge.md       — discovered durable facts
-//     user.md / feedback.md / reference.md — cross-cutting notes
-//     <custom>.md        — optional agent-chosen topics
-//
-// Prompt gets the index + short MEMORY.md summaries; full topic bodies are
-// loaded on demand via `read_file` (paths are listed in the index).
-//
-// Writes go through `memory_write` → {@link writeAutoMemoryNote} (wired from
-// FileMemorySink). Toggle via `config.autoMemoryEnabled`.
+// Progressive project memory: thin INDEX + topic files.
+// Layout: ~/.codepilot/memory/<project-hash>/ with MEMORY.md (index only,
+// injected at session start) + topic files (overview, architecture, standards,
+// knowledge, user, feedback, reference, <custom>). Topic bodies load on demand
+// via `read_file`. Writes go through `memory_write` → {@link writeAutoMemoryNote};
+// toggle via `config.autoMemoryEnabled`.
 
 import { mkdir, readFile, writeFile, access, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -70,17 +59,10 @@ const DEFAULT_CONFIG: AutoMemoryConfig = {
 };
 
 // Per-key serialization for memory file writes.
-//
-// Memory writes are read-modify-write (read the topic/index file, append,
-// write it back; FileMemorySink does the same for MEMORY.md). The in-turn
-// tool barrier (agent.ts) treats `memory_write` as parallel-safe because its
-// permission TIER is "read" (an approval axis, not a side-effect axis), so two
-// `memory_write` calls in one turn can run concurrently. Without this lock two
-// concurrent writers read the same baseline and the second writeFile clobbers
-// the first's entry (last-writer-wins) and the rebuilt index reflects a partial
-// view. A promise chain keyed by the directory/path being mutated makes RMW
-// cycles over the same files run strictly one at a time (across sessions
-// sharing a cwd too, since the chains are module-global).
+// Memory writes are read-modify-write; the tool barrier can run two
+// `memory_write` calls concurrently (permission tier "read"), which would let
+// the second writer clobber the first. A promise chain keyed by the mutated
+// path makes RMW cycles over the same files run one at a time.
 const memoryWriteChains = new Map<string, Promise<unknown>>();
 
 /** Run `fn` after any in-flight write to `key` settles; serializes RMW. */
@@ -371,12 +353,9 @@ async function safeReaddir(dir: string): Promise<string[]> {
 }
 
 /**
- * Delete a single note by id. NOT yet implemented: `writeAutoMemoryNote`
- * persists only the bullet + body (the note `id` is never written into the
- * topic file), so there is no on-disk key to match against. Per-id delete
- * therefore needs a topic-file format change and is deferred until a caller
- * needs it. Returns false (nothing deleted) and does not touch the index — do
- * not mistake this for a working delete. Use {@link clearAutoMemory} to wipe a
+ * Delete a single note by id. NOT yet implemented: the note `id` is never
+ * written into the topic file, so there is no on-disk key to match. Returns
+ * false and does not touch the index. Use {@link clearAutoMemory} to wipe a
  * project's notes wholesale.
  */
 export async function deleteAutoMemoryNote(

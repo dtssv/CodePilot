@@ -1,9 +1,7 @@
 /**
- * @codepilot/protocol — public surface. Consumers (TUI, VSCode, IDEA) usually
- * need just `Peer` + `StdioTransport` + the `server.ts` wire types. Two
- * subpaths avoid pulling unneeded deps: `@codepilot/protocol/ws` (WS server,
- * drags in `ws`) and `@codepilot/protocol/rpc` (`Peer` + JSON-RPC types, no
- * `@codepilot/core` — what the browser UI imports).
+ * @codepilot/protocol public surface: `Peer` + `StdioTransport` + server.ts
+ * wire types. Subpaths avoid extra deps: `…/ws` (WS server, drags in `ws`),
+ * `…/rpc` (no @codepilot/core — browser UI imports).
  */
 
 export * from "./rpc.js";

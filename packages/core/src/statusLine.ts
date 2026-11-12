@@ -1,11 +1,7 @@
 /**
- * Status-line rendering: a declarative preset or a custom script.
- *
- * `config.statusLine` is either a `preset` (named: default/minimal/verbose, or
- * a fixed item list) or a `command` (TUI spawns it per update, feeds session
- * JSON on stdin, renders stdout; ANSI preserved). Updates are debounced; an
- * in-flight script is killed when a new update arrives.
- * @module statusLine
+ * Status-line rendering: a declarative `preset` (default/minimal/verbose or a
+ * fixed item list) or a custom `command` (TUI spawns per update, feeds session
+ * JSON on stdin, renders stdout; ANSI preserved). @module statusLine
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
@@ -104,12 +100,9 @@ export interface StatusLineResult {
 }
 
 /**
- * Run the status-line command with the given payload. Returns the stdout
- * text and whether the command succeeded. Kills the process after
- * `timeoutMs` (default 2000ms) to avoid hanging the UI.
- *
- * This is a synchronous-from-the-caller-perspective async function — it
- * resolves once the command finishes or times out.
+ * Run the status-line command with the given payload, returning stdout text and
+ * success. Kills the process after `timeoutMs` (default 2000ms) to avoid
+ * hanging the UI.
  */
 export function runStatusLine(
   config: StatusLineCommandConfig,

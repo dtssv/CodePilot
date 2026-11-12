@@ -1,9 +1,8 @@
 // lsp_navigate: precise symbol navigation via a language server
-// (go-to-definition / find-references / hover). Lets the agent jump to the
-// exact definition or every use of a symbol in a large repo instead of
-// grepping and guessing. Fail-soft: when no LSP server is configured/installed
-// for the file's language, it returns a clear message (and the model should
-// fall back to grep).
+// (go-to-definition / find-references / hover), so the agent jumps to the exact
+// definition or every use of a symbol instead of grepping and guessing.
+// Fail-soft: with no LSP for the file's language it returns a clear message and
+// the model falls back to grep.
 
 import { z } from "zod";
 import type { ToolDef, ToolContext } from "./types.js";

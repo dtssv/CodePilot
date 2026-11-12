@@ -1,19 +1,7 @@
 // Example runtime (a): security audit — read-only with an enforced report
-// format. 
-//
-// Why a runtime and not a skill or a sub-agent? Because the two guarantees it
-// makes are loop-level, not prompt-level:
-//
-// 1. Read-only, enforced twice. The tool table handed to the model is
-// filtered to the read-only set, and every tool call is re-checked on
-// the way out (the loop's mode gate). A prompt saying "don't edit
-// files" is a request; this is a property of the run.
-// 2. The report contract is verified, not hoped for. When the final answer
-// is missing a required section, the runtime spends another turn asking
-// for a conforming rewrite instead of returning a half-report.
-//
-// Everything else — streaming, permissions, hooks, telemetry, persistence —
-// is inherited by delegating to the built-in loop through the toolkit.
+// format. Two loop-level guarantees: read-only is enforced both by filtering the
+// tool table and re-checking each call via the mode gate; and a missing required
+// section costs another reformat turn. Everything else is inherited via the toolkit.
 
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent.js";
 import type {
@@ -74,10 +62,9 @@ export function missingAuditSections(report: string): string[] {
 
 export interface AuditRuntimeOptions {
  /**
- * Collaboration mode the audit runs in. Default `"chat"` — the read-only
- * baseline. `"plan"` additionally allows `plan_update` / `memory_write`,
- * which is useful when the audit should leave notes behind. `"agent"` is
- * rejected: it would defeat the runtime's only hard guarantee.
+ * Collaboration mode the audit runs in. Default `"chat"` (read-only baseline);
+ * `"plan"` also allows `plan_update`/`memory_write` to leave notes. `"agent"`
+ * is rejected — it would defeat the runtime's read-only guarantee.
  */
   mode?: Exclude<AgentMode, "agent">;
  /** How many reformat turns to spend on a non-conforming report. Default 1. */

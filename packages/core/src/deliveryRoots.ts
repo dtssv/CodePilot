@@ -1,11 +1,7 @@
 // Task delivery roots: where intentional project deliverables should land.
-//
-// Distinct from sandbox writable roots (OS jail). Expanding the sandbox so a
-// path is writable does NOT change the delivery root — the user-named target
-// remains the preferred place for source/deliverables.
-//
-// Generic: any absolute / home / drive / relative path-like token in user text
-// can extend the set. Defaults to the session cwd.
+// Distinct from sandbox writable roots — expanding the sandbox does NOT change
+// the delivery root. Defaults to the session cwd; path-like tokens in user text
+// can extend the set.
 
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, resolve } from "node:path";

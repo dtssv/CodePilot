@@ -1,11 +1,8 @@
-// Slash command system: markdown files under `.codepilot/commands/` become `/name` prompts.
-//
-// Slash commands: `/<name>` loads a Markdown file as the next user prompt
+// Slash command system: `/<name>` loads a Markdown file as the next user prompt
 // (with argument interpolation) and runs the agent loop. Discovered from
 // <cwd>/.codepilot/commands/*.md then ~/.codepilot/commands/*.md (first wins).
-// Optional YAML frontmatter: description, argument-hint, allowed-tools
-// (turn-scoped), model. Body placeholders: $ARGUMENTS, $1 $2 …, $$; unknown
-// `$<word>` is left untouched. Built-in commands cannot be shadowed.
+// Optional YAML frontmatter: description, argument-hint, allowed-tools, model.
+// Body placeholders: $ARGUMENTS, $1 $2 …, $$; built-in commands can't be shadowed.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -88,11 +85,9 @@ export interface SlashCommandFrontmatter {
 }
 
 /**
- * Parse a command .md file's frontmatter. Recognised keys:
- * `description`, `argument-hint`, `allowed-tools`, `model`. Everything
- * else is silently ignored. Lists accept YAML flow (`[a, b]`) or repeated
- * `- item` lines. `allowed-tools` may also be a comma/space-separated
- * string.
+ * Parse a command .md file's frontmatter. Recognised keys: `description`,
+ * `argument-hint`, `allowed-tools`, `model`; others ignored. Lists accept YAML
+ * flow (`[a, b]`) or repeated `- item`; `allowed-tools` may be comma/space-separated.
  */
 export function parseSlashCommandMd(text: string): SlashCommandFrontmatter {
   const out: SlashCommandFrontmatter = {};
@@ -348,13 +343,9 @@ export function commandHelpLine(c: SlashCommand): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Render the command body into the final user prompt by interpolating
- * `$ARGUMENTS`, `$1`, `$2`, … and `$$`. Unknown `$<word>` sequences are
- * left untouched so environment-style refs survive.
- *
- * Positional args split on whitespace (1-indexed: `$1` is the first word).
- * `$ARGUMENTS` is the raw string after the command name (trimmed but
- * otherwise unmodified — quotes are preserved).
+ * Render the command body into the final prompt by interpolating `$ARGUMENTS`,
+ * `$1`, `$2`, … and `$$`. Unknown `$<word>` is left untouched. Positional args
+ * split on whitespace (1-indexed); `$ARGUMENTS` is the raw trimmed string.
  */
 export function renderCommandPrompt(
   command: SlashCommand,
@@ -472,18 +463,9 @@ export type ResolveResult =
     };
 
 /**
- * Resolve a raw user input string against a set of discovered commands.
- *
- * - Input not starting with `/` → `{ ok: false, reason: "not-a-command" }`.
- * - `/name args...`: looks up `name`. Unknown → `not-found`. Found → renders
- * the prompt and returns it. If the command declares `argument-hint` (i.e.
- * expects args) and none were given, returns `no-args` with a usage hint so
- * the host can surface "Usage: /name <hint>" instead of sending an empty
- * prompt.
- *
- * Note: this does NOT touch built-in commands — the caller is expected to
- * have already checked `isCommand` + the built-in dispatch table. This
- * function only handles custom commands discovered from disk.
+ * Resolve raw user input against discovered commands. Non-`/` → not-a-command;
+ * unknown `/name` → not-found; found → render the prompt; expects-args-but-none
+ * → `no-args` with a usage hint. Custom commands only (built-ins handled by caller).
  */
 export function resolveSlashCommand(
   input: string,

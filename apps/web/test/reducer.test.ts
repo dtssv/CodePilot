@@ -405,12 +405,9 @@ describe("connection and sessions", () => {
   });
 
   it("batched replay yields the same rows as driving events one-by-one (O(N) fold stays equivalent)", () => {
-    // The resume fast path mutates one accumulator in place with replay=true.
-    // It MUST produce byte-identical transcript rows to the pure live path, or
-    // a resumed session would render differently from the one you just lived.
-    // Stamp every event with an explicit `ts` so both fold paths derive their
-    // row timestamps from it rather than Date.now() — otherwise a fold that
-    // straddles a millisecond boundary would make the two paths differ by 1ms.
+    // The resume fast path must produce byte-identical rows to the live path.
+    // Stamp every event with an explicit `ts` so both folds derive row
+    // timestamps from it rather than Date.now().
     const ts = 1_700_000_000_000;
     const history: Event[] = [
       { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "do it" }], ts },

@@ -1,12 +1,8 @@
-// Persistent shell: keep a long-lived PTY so cwd/env survive across bash tool calls.
-//
-// Persistent login shell: a long-running child process (`$SHELL -i`) that
-// stays alive for the Session's lifetime, so `cd`/`export`/background jobs
-// persist across `run` calls. Each command is followed by a unique sentinel
-// marker carrying the exit code; we read until the sentinel, then parse it.
-// stdout/stderr are interleaved. A timeout SIGINTs the command's process
-// group (not the shell). Sandbox uses the same `wrapCommand` policy as the
-// one-shot bash tool. Lazily started; respawned if it exits unexpectedly.
+// Persistent login shell (`$SHELL -i`) for the Session's lifetime, so
+// `cd`/`export`/background jobs persist across `run` calls. Each command is
+// followed by a sentinel marker carrying the exit code; stdout/stderr are
+// interleaved. Timeout SIGINTs the command's process group (not the shell).
+// Lazily started; respawned if it exits unexpectedly.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -87,14 +83,11 @@ export class PersistentShell {
   private ensureStarted(): void {
     if (this.child && !this.child.killed) return;
     if (this.closed) throw new Error("PersistentShell closed");
- // Interactive shells source rc files and run precmd hooks whose output
- // (prompt themes, Terminal.app session banners, OSC title escapes) lands
- // in our stdout stream. We can't stop users' rc files from running, so
- // instead we wrap every command in *two* sentinels: a pre-marker that
- // discards everything before it, and the completion marker. Init noise
- // between them can only pollute the FIRST run — so ensureStarted fires a
- // sacrificial no-op command immediately and swallows its output, letting
- // the shell settle before the first real command.
+ // Interactive shells source rc files whose output (prompts, banners, OSC
+ // escapes) lands in our stdout. We can't stop rc files, so each command is
+ // wrapped in two sentinels: a pre-marker discarding everything before it, and
+ // the completion marker. Init noise can only pollute the FIRST run, so
+ // ensureStarted fires a sacrificial no-op first and swallows its output.
     const env: Record<string, string> = {
       ...modelShellEnv(this.opts.env),
  // Discourage (not eliminate) rc chrome (modelShellEnv already set TERM=dumb):
@@ -192,14 +185,10 @@ export class PersistentShell {
  // runs. Prepend a pre-sentinel and discard everything up to it, so only
  // the wrapped command's own output survives.
     const preSentinel = `__CP_START_${randomBytes(6).toString("hex")}__`;
- // Wrap the command so the sentinel + exit code are printed after it.
- // We use `;` so the sentinel prints even if the command fails, and we
- // capture `$?` immediately after the command (before the `;` runs).
- // The marker line is: <sentinel> <exitcode>
- // The command goes through `eval` of one quoted word: the shell parses it
- // as a whole, so multi-line input doesn't trigger continuation prompts
- // and an unbalanced quote fails the eval instead of swallowing the
- // sentinel lines. `eval` runs in this shell, so `cd`/`export` persist.
+ // Wrap the command so the sentinel + exit code print after it. `;` ensures
+ // the sentinel prints even on failure; `$?` is captured before the `;`.
+ // The command runs through `eval` of one quoted word so multi-line input
+ // doesn't trigger continuation prompts and `cd`/`export` persist.
     const wrapped =
       `printf '%s\\n' '${preSentinel}'\n` +
       `eval ${shellQuote(command)}\n__cp_exit=$?\nprintf '%s %s\\n' '${sentinel}' "$__cp_exit"\n`;

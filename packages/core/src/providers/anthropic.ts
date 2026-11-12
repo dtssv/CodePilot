@@ -23,24 +23,15 @@ export interface AnthropicProviderOptions {
   smallModel?: string;
  /** Auto-attach cache_control to the last tool / system block. Default true. */
   enableCaching?: boolean;
- /**
-  * Whether the endpoint honours `cache_control` on *tool definitions*. The
-  * real Anthropic API does (default true). Some Anthropic-compatible gateways
-  * reject a `cache_control` field inside a tool definition even though they
-  * accept it on system/message blocks. Set false for such an endpoint to drop
-  * ONLY the tool breakpoint — system and conversation-history caching stay on.
-  * This is a capability dimension of `enableCaching`, not a separate toggle:
-  * it has no effect when caching is disabled.
-  */
+ /** Whether the endpoint honours `cache_control` on tool definitions. The real
+  * API does (default true); some gateways reject it on tools while accepting it
+  * on system/message blocks. Set false to drop ONLY the tool breakpoint — system
+  * and history caching stay on. No effect when caching is disabled. */
   cacheControlOnTools?: boolean;
-  /**
-   * Lifetime for the `cache_control` breakpoints. "5m" (default) uses
-   * Anthropic's standard ephemeral TTL and emits no `ttl` field (back-compat).
-   * "1h" asks for the extended one-hour TTL — it adds `ttl: "1h"` to every
-   * breakpoint and sends the extended-cache-ttl beta header. Endpoints that do
-   * not support the extended TTL ignore the field and fall back to 5m; no
-   * separate eligibility probe is needed.
-   */
+  /** Lifetime for `cache_control` breakpoints. "5m" (default) uses the standard
+   * ephemeral TTL and emits no `ttl` field. "1h" adds `ttl: "1h"` to every
+   * breakpoint and sends the extended-cache-ttl beta header; endpoints that
+   * don't support it ignore the field and fall back to 5m. */
   cacheTtl?: "5m" | "1h";
 }
 
@@ -129,10 +120,9 @@ export class AnthropicProvider implements ChatProvider {
 
     // Budgeted prompt-cache breakpoint placement: Anthropic allows up to 4
     // `cache_control` breakpoints. Fill them by priority — system block, last
-    // tool, then the stable conversation-history tail — counting what the first
-    // two use so history gets the remainder (never exceeding the cap, never
-    // marking the volatile runtime_context / current turn). Breakpoint count is
-    // reported as usage telemetry below.
+    // tool, then the stable conversation-history tail — counting the first two
+    // so history gets the remainder. Never mark the volatile runtime_context /
+    // current turn. Count is reported as usage telemetry below.
     const BREAKPOINT_CAP = 4;
     const systemCached = !!opts.systemPrompt && this.enableCaching;
     const toolCached =
@@ -352,10 +342,9 @@ export class AnthropicProvider implements ChatProvider {
   }
 
   /**
-   * Exact prompt token count via Anthropic's `/v1/messages/count_tokens`. A
-   * single non-streaming request; used only on explicit demand to show an
-   * accurate `/context` gauge. Never attaches cache_control (counting is
-   * cache-agnostic) and never drives compaction.
+   * Exact token count via Anthropic's `/v1/messages/count_tokens` (non-
+   * streaming, only on explicit demand for `/context`). Never attaches
+   * cache_control and never drives compaction.
    */
   async countTokens(opts: CountTokensOptions): Promise<CountTokensResult> {
     const body: Record<string, unknown> = {
@@ -449,18 +438,9 @@ function toAnthropicMessage(m: ProviderMessage): Record<string, unknown> {
 }
 
 /**
- * Place prompt-cache breakpoints on the conversation-history prefix so
- * multi-turn chats reuse the cached message history — not just system + tools.
- * Anthropic allows up to 4 `cache_control` breakpoints per request; this fills
- * whatever the system + tool breakpoints left unused with breakpoints on the
- * newest STABLE messages (walking backward from the current turn).
- *
- * Breakpoints go on the last cacheable block of each chosen message, skipping
- * the per-turn volatile tail — the `<runtime_context>` message and the current
- * user turn — which change every turn and must stay outside the cached prefix.
- * Marking the last few stable messages (not just one) means a change deep in
- * history only invalidates from its breakpoint forward, keeping earlier spans
- * cached. Returns the number of history breakpoints actually placed.
+ * Place cache breakpoints on the stable conversation-history prefix (skipping
+ * the volatile `<runtime_context>` + current user turn), filling whatever the
+ * system + tool breakpoints left unused. Returns breakpoints placed.
  */
 function markConversationCache(
   messages: Array<Record<string, unknown>>,
@@ -499,12 +479,9 @@ function markConversationCache(
 }
 
 /**
- * Anthropic requires message roles to alternate user/assistant and forbids two
- * consecutive messages with the same role. Harness-injected `system`-role
- * messages are promoted to `user` above, which can place two user messages in a
- * row (e.g. the real user turn followed by the runtime-context message). Merge
- * adjacent same-role messages by concatenating their content blocks so the
- * sequence stays valid without losing the separate-message intent upstream.
+ * Anthropic requires alternating user/assistant roles. `system`-role messages
+ * promoted to `user` above can place two `user`s in a row; merge adjacent
+ * same-role messages by concatenating content blocks.
  */
 function mergeConsecutiveRoles(
   messages: Array<Record<string, unknown>>,

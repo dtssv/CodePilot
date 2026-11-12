@@ -1,8 +1,7 @@
 /**
- * Interactive PTY host for the web workspace terminal.
- *
- * Spawns real shells via `node-pty` so Tab completion / readline work like a
- * local terminal. One connection owns its terminals; dispose kills them all.
+ * Interactive PTY host for the web workspace terminal. Spawns real shells
+ * via `node-pty` so Tab completion / readline work like a local terminal.
+ * One connection owns its terminals; dispose kills them all.
  */
 
 import { randomUUID } from "node:crypto";

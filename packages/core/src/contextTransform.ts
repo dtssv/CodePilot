@@ -16,17 +16,9 @@ export interface ContextTransformCheck {
 const LEGAL_ROLES = new Set(["user", "assistant", "system"]);
 
 /**
- * Validate a plugin-transformed provider view. Rejects (so the caller falls
- * back to the untransformed view) when the result:
- *  - is not a non-empty array,
- *  - contains a message with an illegal role or non-array content,
- *  - drops a `tool_result` for a `tool_use` that is still present, or
- *    introduces a `tool_result` that answers no present `tool_use` — i.e. the
- *    tool_use↔tool_result pairing is broken (providers reject that).
- *
- * Note: this does NOT require the transform to preserve order or all text; a
- * plugin is free to prune/window/inject. It only guards the invariants that
- * would make the provider request invalid.
+ * Validate a plugin-transformed provider view. Rejects (falling back to the
+ * untransformed view) when not a non-empty array, has an illegal role/non-array
+ * content, or breaks the tool_use↔tool_result pairing. Does NOT require order/text.
  */
 export function validateTransformedView(
   view: unknown,
@@ -72,11 +64,8 @@ export function validateTransformedView(
 
 /**
  * Apply a plugin context transform to a provider view, fail-soft. Runs the
- * transform on a structural copy (so a mutating transform cannot corrupt the
- * caller's array), validates the result, and returns the validated transformed
- * view — or the ORIGINAL view when the transform is absent, throws, or returns
- * an invalid view. `onReject` is called with the reason when a transform is
- * ignored (for an observability warning).
+ * transform on a structural copy, validates it, returns the transformed view —
+ * or the ORIGINAL when absent/throwing/invalid (`onReject` gets the reason).
  */
 export function applyContextTransform(
   view: ProviderMessage[],

@@ -1,9 +1,7 @@
-// Helpers shared by the example runtimes.
-//
-// Both example runtimes work the same way: they run the built-in loop one or
-// more times with adjusted deps, then combine the results. Neither reaches
-// into the loop's internals, which is the point — they are what a plugin
-// runtime can do with nothing but the `RuntimeToolkit`.
+// Helpers shared by the example runtimes. Both run the built-in loop one or
+// more times with adjusted deps then combine results — without reaching into
+// the loop's internals, which is the point: they show what a plugin runtime
+// can do with nothing but the `RuntimeToolkit`.
 
 import type { AgentDeps, AgentRunResult } from "../agent.js";
 import type { Event } from "../types.js";
@@ -12,13 +10,9 @@ import type { Event } from "../types.js";
 export type SystemPromptParts = NonNullable<AgentDeps["systemPrompt"]>;
 
 /**
- * Append runtime instructions to the system prompt's volatile per-turn tier.
- *
- * The suffix is injected as the per-turn `<runtime_context>` message (its own
- * `system`-role message, placed just before the current turn) rather than into
- * the cached static+stable system block — so the cacheable prefix stays
- * byte-identical and prompt-cache hit rates are unaffected. Falls back to
- * `dynamicSuffix` for prompts built before the stable/volatile split.
+ * Append runtime instructions to the system prompt's volatile per-turn tier (its
+ * own `system` message before the current turn) so the cacheable prefix stays
+ * byte-identical. Falls back to `dynamicSuffix` for pre-split prompts.
  */
 export function withPromptSuffix(
   prompt: SystemPromptParts | undefined,

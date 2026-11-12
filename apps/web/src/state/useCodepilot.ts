@@ -122,12 +122,8 @@ export function useCodepilot(): Codepilot {
  // onto the empty / new-workspace view.
         if (!live.current.sessionId || sessionId !== live.current.sessionId) return;
         dispatch({ type: "event", event });
-        // A brand-new session is a "draft" until its first message is
-        // persisted, so listSessions() (and the sidebar) omits it. The old
-        // refreshSessions() in newSession/send ran before that first event was
-        // flushed, so the session only appeared after a later manual refresh.
-        // When the first user message for the on-screen session arrives and it
-        // is not yet in the sidebar, refresh once so it shows immediately.
+        // A new session is a "draft" until its first user message is
+        // persisted, so refresh the sidebar once when that message arrives.
         if (
           event.type === "message" &&
           event.role === "user" &&

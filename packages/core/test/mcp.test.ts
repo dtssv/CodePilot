@@ -19,13 +19,8 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Write a tiny Node script to a temp file that speaks the MCP JSON-RPC
- * framing on its stdio. The script reads newline-delimited JSON requests
- * and dispatches a programmable response table.
- *
- * We embed the script as a string (rather than carrying a fixture file) so
- * the test is self-contained and the framing rules are visible at the call
- * site.
+ * Write a Node script to a temp file that speaks MCP JSON-RPC over stdio,
+ * dispatching a programmable response table for incoming requests.
  */
 function writeMockMcpServer(
   responses: Array<{
@@ -174,12 +169,9 @@ describe("McpStdioClient framing", () => {
         args: [mock.path],
       });
       await c.start();
- // initialize + tools/list are intercepted by the mock? No — they're
- // missing from the table, so the mock returns -32601 for them. The
- // client treats that as an error.
- // We don't await c.start above with errors, so let me construct a
- // scenario where initialize works but tools/call does not.
- // Re-do with a partial mock:
+ // initialize/tools/list were missing from the table, so the mock
+ // returned -32601 and start failed. Re-do with a partial mock where
+ // initialize works but tools/call does not.
       await c.stop();
     } catch {
  /* fallthrough */
@@ -390,12 +382,8 @@ describe("SSE transport — frame parsing", () => {
     const url = `http://127.0.0.1:${addr.port}/`;
     try {
       const c = new McpSseClient("sse", { type: "sse", url });
- // The first POST is `initialize`, which our mock server doesn't
- // know about, so it returns a JSON-RPC error. That's still a
- // valid response — we just need to confirm the SSE-framed parsing
- // path. To make `start` succeed we have to also handle
- // `tools/list`; so our mock returns both:
- // Update the server to handle both:
+ // The mock returns a JSON-RPC error for `initialize`; reconfigure it
+ // to handle `initialize` and `tools/list` so `start` can succeed.
       server.removeAllListeners("request");
       server.on("request", (req, res) => {
         const chunks: Buffer[] = [];

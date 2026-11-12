@@ -1,7 +1,6 @@
 /**
- * `codepilot agent`: the no-installer task-oriented agent app. Serves the web
- * UI + protocol on one loopback port, then opens the agent layout in a
- * chromeless Chromium `--app` window on a dedicated profile (agent stops on
+ * `codepilot agent`: serves the web UI + protocol on one loopback port, then
+ * opens the agent layout in a chromeless Chromium `--app` window (stops on
  * close); falls back to the default browser if none is available.
  */
 
@@ -76,10 +75,9 @@ export function webPageUrl(
 }
 
 /**
- * Locate the built web SPA directory (the folder containing `index.html`).
- * Checks the packaged-binary layout (`<dir-of-exe>/web`) first, then the
- * source/npm layout relative to this module. Returns undefined if neither
- * exists; pass `what` to emit a build hint to stderr on miss.
+ * Locate the built web SPA directory (containing `index.html`): packaged-binary
+ * layout first, then source/npm layout. Returns undefined if neither exists;
+ * pass `what` to emit a build hint to stderr on miss.
  */
 export function detectWebRoot(what?: string): string | undefined {
   const candidates: string[] = [];

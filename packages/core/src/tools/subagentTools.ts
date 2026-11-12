@@ -1,18 +1,8 @@
 // The tool surface granted to sub-agents, by agent type.
-//
-// Kept in one place (and exported) so the set is single-sourced and testable,
-// rather than buried in a closure inside session.ts. See subagent.ts for the
-// prompt text that tells the model which of these it has.
-//
-// - `explore` (default, read-only): file inspection + network research. The
-//   network tools (`web_fetch` / `web_search`) are read-only and
-//   side-effect-free, and research is the whole point of an explore agent, so
-//   they are included for every type. The read-only `lsp_navigate` is included
-//   for every type when the parent wires a language-server manager, so an
-//   explore agent can jump to definitions/references instead of grepping.
-// - `worker`: everything explore has, plus write/edit/patch/bash to carry out
-//   a delegated change (and verify it), and the shared task board for
-//   coordinating with peer workers.
+// - `explore` (default, read-only): file inspection + network research
+//   + read-only lsp_navigate when a language-server manager is wired.
+// - `worker`: explore's set plus write/edit/patch/bash and the shared
+//   task board for coordinating with peer workers.
 
 import { ToolRegistry } from "./types.js";
 import {

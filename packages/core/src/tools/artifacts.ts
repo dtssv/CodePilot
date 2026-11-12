@@ -48,11 +48,8 @@ export class ArtifactStore {
   }
 
  /**
- * Convenience: serialise a JSON value, write it, and return both the
- * artifact reference and the byte count. Used by the checkpoint writer
- * to stash large per-round debug payloads without growing the
- * transcript. The JSON is pretty-printed so the artifact file is
- * diff-friendly when humans inspect it later.
+ * Serialise a JSON value, write it, and return the artifact reference and byte
+ * count. Pretty-printed so the artifact file is diff-friendly on inspection.
  */
   async writeJson(value: unknown, hint?: string): Promise<{ ref: string; bytes: number }> {
     const text = JSON.stringify(value, null, 2);

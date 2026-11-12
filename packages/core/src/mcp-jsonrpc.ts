@@ -1,10 +1,8 @@
 // Shared JSON-RPC 2.0 plumbing for MCP transports.
-//
-// Both the stdio and HTTP-based transports (SSE + Streamable HTTP) share the
-// same lifecycle: assign ids, track pending requests, dispatch responses,
-// run the `initialize` handshake, and probe capabilities. This abstract base
-// implements all of that; subclasses only provide `sendFrame` (the wire write
-// path) and the transport-specific `start`/`stop`.
+// Both stdio and HTTP-based transports share the same lifecycle (assign ids,
+// track pending, dispatch responses, run the `initialize` handshake, probe
+// capabilities); this base implements it all, subclasses provide `sendFrame`
+// and transport-specific `start`/`stop`.
 
 import type {
   McpClient,
@@ -250,13 +248,11 @@ export abstract class BaseJsonRpcClient implements McpClient {
     this.pending.clear();
   }
 
- /** Handle a server notification (method, no id). We act on
-  * `notifications/tools/list_changed`: re-list the server's tools so a server
-  * that adds/removes tools mid-session is reflected, then fire the optional
-  * tools-changed handler so the consumer (the session) can re-register. Other
-  * `list_changed` notifications refresh their caches too. Any notification we
-  * do NOT act on internally is forwarded to the optional notification handler
-  * (e.g. an opt-in inbound channel); with no handler installed it is ignored. */
+ /** Handle a server notification (method, no id). `notifications/*_list_changed`
+  * re-list the affected server resources so mid-session adds/removes are
+  * reflected, then fire the optional tools-changed handler for the consumer.
+  * Any notification we do NOT act on internally is forwarded to the optional
+  * notification handler (or ignored if none installed). */
   protected handleServerNotification(method: string, params?: unknown): void {
     if (method === "notifications/tools/list_changed") {
       void this.refreshTools()

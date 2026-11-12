@@ -105,9 +105,7 @@ export class SettingsStore implements DisposableLike {
 }
 
 /**
- * Status bar entry. Shows connection status + cumulative tokens + current
- * collaboration mode.
- *
+ * Status bar entry: connection status + cumulative tokens + current mode.
  * Clicks fire the registered command ("codepilot.openSidebar" by default).
  */
 export class StatusBar implements vscode.Disposable {

@@ -24,15 +24,10 @@ import { SubagentStore } from "./subagentStore.js";
 const MAX_BUDGET_EXTENSIONS = 8;
 
 /**
- * Decide the PermissionEngine a sub-agent runs under. A fresh, independent
- * engine is used when:
- *  - the custom agent declares its own permissionMode (always independent),
- *  - there is no parent engine to inherit (tests / minimal harness), or
- *  - config `subagentPermissions: "independent"` opts a built-in sub-agent
- *    out of sharing the parent's live engine.
- * Default ("inherit") shares the parent engine so session-approved allow
- * rules carry in — today's behavior. "independent" closes the gap where a
- * mid-session grant to the parent silently widened a built-in sub-agent.
+ * Decide the PermissionEngine a sub-agent runs under: a fresh independent
+ * engine when the custom agent declares its own permissionMode, there is no
+ * parent, or config `subagentPermissions: "independent"`; "inherit" shares the
+ * parent engine.
  */
 export function resolveSubagentPermissions(args: {
   parent?: PermissionEngine;
@@ -52,16 +47,8 @@ export function resolveSubagentPermissions(args: {
 
 /**
  * Re-anchor a worktree sub-agent's sandbox and delivery roots to the worktree
- * path. A worktree lives OUTSIDE the parent cwd (a temp checkout), so the
- * parent's roots — all built from the parent cwd — do not cover it. Without
- * this, a worker's writes to its OWN worktree rely on the worktree happening
- * to sit under the OS tmpdir (an incidental default writable root), which
- * breaks the moment the worktree parent dir is configured elsewhere.
- *
- * The sandbox is CLONED before the worktree root is added, so the parent's
- * live policy is never widened. The worktree is prepended to the parent's
- * delivery roots (deduped) so a worker's edits there are on-task, not
- * out-of-root friction.
+ * path (it lives outside the parent cwd). The sandbox is CLONED so the parent's
+ * policy is never widened; the worktree is prepended to delivery roots.
  */
 export function resolveWorktreeRoots(args: {
   worktreePath: string;
@@ -99,10 +86,8 @@ function sumOptional(a?: number, b?: number): number | undefined {
 }
 
 /**
- * The block appended to a sub-agent's static prefix. It makes the role
- * boundary crisp so the sub-agent does not drift into doing the parent's
- * job, and it tells the sub-agent the exact shape of the conclusion it
- * must return.
+ * The block appended to a sub-agent's static prefix: makes the role boundary
+ * crisp and tells the sub-agent the conclusion shape it must return.
  */
 export const SUBAGENT_ROLE_BLOCK = `## Sub-Agent Role
 
@@ -132,10 +117,9 @@ You are a sub-agent invoked by a parent CodePilot agent via the \`task\` tool. Y
 - **Be terse.** The parent is paying for your tokens too. No preamble, no apology, no recap of the question. The structured conclusion is the entire output.`;
 
 /**
- * Appended to {@link SUBAGENT_ROLE_BLOCK} for a built-in `plan` sub-agent: a
- * read-only planning worker. It replaces the default Findings/Key-references/
- * Recommendations conclusion with a plan structure and forbids claiming any
- * code was changed (it has no write tools).
+ * Appended to {@link SUBAGENT_ROLE_BLOCK} for a built-in `plan` sub-agent:
+ * replaces the default conclusion with a plan structure; read-only (no write
+ * tools).
  */
 export const SUBAGENT_PLAN_ROLE_BLOCK = `
 
@@ -184,10 +168,8 @@ export interface SubagentFactoryOptions {
   scratchDir?: () => string | undefined;
   projectStateDir?: () => string | undefined;
  /** Snapshot of the parent's model-visible events, used to seed a `context:
-  * "fork"` sub-agent. Returns the same view `Session.getEvents()` does (the
-  * post-compaction working set), which the runner trims and prepends before the
-  * objective. Omitted (or absent) means forking is unavailable and the sub-agent
-  * runs fresh. */
+  * "fork"` sub-agent (trimmed + prepended before the objective). Omitted means
+  * forking is unavailable; the sub-agent runs fresh. */
   getParentEvents?: () => Event[];
  /** Build the tool registry for the given agent type. */
   buildToolRegistry: (agentType?: "explore" | "plan" | "worker") => ToolRegistry;
@@ -200,10 +182,9 @@ export interface SubagentFactoryOptions {
     ) => Promise<{ action: "allow" | "block"; reason?: string; warnings: string[] }>;
   };
  /**
- * Optional resolver for custom agents (`.codepilot/agents/*.md`). When
- * the requested `agentType` is neither "explore" nor "worker", this is
- * called to look up a custom agent definition by name. Returns undefined
- * for unknown names (the runner then falls back to "explore").
+ * Optional resolver for custom agents (`.codepilot/agents/*.md`). Called for
+ * an `agentType` that isn't a built-in; returns undefined for unknown names
+ * (runner falls back to "explore").
  */
   resolveCustomAgent?: (name: string) => Promise<import("./customAgents.js").CustomAgent | undefined>;
 }
@@ -242,35 +223,22 @@ export function createSubagentRunner(
       // when the parent `task` call or custom-agent frontmatter sets a value.
       const effectiveMaxSteps = maxSteps ?? custom?.maxTurns;
 
- // Filesystem isolation: when `isolation === "worktree"`, create a
- // linked git worktree on a fresh branch and run the sub-agent there.
- // Its edits land in an isolated checkout; we clean up (and surface a
- // diff stat) in the finally block below. Falls back to the parent cwd
- // if git is unavailable or worktree creation fails — isolation is a
- // best-effort feature, never a hard requirement.
-      // Unique owner id for this sub-agent run. Stamped onto any background
-      // jobs it starts so `write_stdin` refuses cross-agent writes — critical
-      // when worktree isolation falls back to a shared parent cwd, where the
-      // bashJobs registry (keyed only by cwd) would otherwise let sibling
-      // sub-agents reach each other's job stdin.
-      //
-      // Prefer the id the `task` tool assigned (so the progress events, the
-      // persisted transcript, and the returned session_id all match); a resume
-      // reuses the prior id; otherwise mint a fresh one.
+ // Filesystem isolation: when `isolation === "worktree"`, run the sub-agent
+ // in a linked git worktree on a fresh branch. Falls back to the parent cwd
+ // if git is unavailable — best-effort, never a hard requirement.
+      // Unique owner id so `write_stdin` refuses cross-agent writes (critical
+      // when worktree isolation falls back to a shared cwd). Prefer the
+      // `task`-assigned id; a resume reuses the prior; otherwise mint one.
       const subagentOwnerId = ownerId ?? resumeSessionId ?? `sub_${randomUUID()}`;
       const isResume = Boolean(resumeSessionId);
       let worktreeHandle: import("./worktree.js").WorktreeHandle | null = null;
       let effectiveCwd = cwd;
       let isolationNote = "";
       let isolationFellBack = false;
-      // When worktree isolation succeeds, the sub-agent's cwd moves to the
-      // worktree — a temp dir OUTSIDE the parent cwd. Its sandbox/delivery
-      // roots must be re-anchored there explicitly: the parent's roots are
-      // built from the parent cwd, so a worker's writes to its OWN worktree
-      // would otherwise rely on the worktree happening to sit under the OS
-      // tmpdir (incidentally a default writable root). That coincidence breaks
-      // the moment the worktree parent dir is configured elsewhere. These stay
-      // undefined unless a worktree is actually created.
+      // When worktree isolation succeeds, the sub-agent's cwd moves outside the
+      // parent cwd, so its sandbox/delivery roots must be re-anchored there
+      // explicitly (the parent's roots don't cover it). Undefined unless a
+      // worktree is actually created.
       let worktreeSandbox: import("./sandbox.js").ResolvedSandbox | undefined;
       let worktreeDeliveryRoots: string[] | undefined;
       // Durable transcript store: persists this sub-agent's replayable events
@@ -333,11 +301,9 @@ export function createSubagentRunner(
               `Your edits land in this isolated checkout and do NOT affect the parent's working tree. ` +
               `The worktree is removed automatically when you finish; if you produce commits the branch is kept for the parent to merge.`;
           } else {
- // Fall back to the parent cwd. Surface the reason prominently in
- // both the sub-agent's prompt and (later) its conclusion, because a
- // parallel fan-out that each asked for worktree isolation and
- // silently got none can have two workers writing the SAME files in
- // the parent tree — clobbering each other with no record.
+ // Fall back to the parent cwd. Surface the reason prominently — a parallel
+ // fan-out that silently got no isolation can have two workers writing the
+ // SAME files in the parent tree.
             isolationFellBack = true;
             isolationNote =
               `\n\n⚠️ [worktree isolation UNAVAILABLE] requested isolation could not be set up ` +
@@ -361,11 +327,9 @@ export function createSubagentRunner(
       }
 
       // A shared worktree supplied by the caller (team `shared_worktree`): run
-      // inside it without creating a per-member tree. Re-anchor sandbox and
-      // delivery roots to it — the same re-anchoring the `isolation: "worktree"`
-      // path does — so a member's writes to the shared checkout (outside the
-      // parent cwd) are not rejected as out-of-root. Skip when the isolation
-      // path already created a worktree (they are mutually exclusive by design).
+      // inside it, re-anchoring sandbox/delivery roots (same as the
+      // `isolation: "worktree"` path). Skipped when the isolation path already
+      // created a worktree.
       if (!worktreeHandle && sharedWorktreePath && sharedWorktreePath.trim().length > 0) {
         effectiveCwd = sharedWorktreePath;
         const reanchored = resolveWorktreeRoots({
@@ -429,12 +393,10 @@ export function createSubagentRunner(
  // what it reads.
       const memory =
         omitMemory || isPlan ? {} : summariseMemory(await readMemory(cwd));
- // Sub-agents always run in "agent" mode (the chat/plan restrictions
- // would be over-restrictive for a delegated worker, and the tool
- // surface itself is already mode-filtered upstream by `task` callers).
- // We still pass the parent's `extra` so project notes propagate.
- // For custom agents, the agent's body (its system-prompt supplement)
- // is prepended to the role block.
+ // Sub-agents always run in "agent" mode (the tool surface is already
+ // mode-filtered upstream by `task` callers). We pass the parent's `extra`
+ // so project notes propagate. For custom agents, the agent's body is
+ // prepended to the role block.
       const baseRoleBlock = custom
         ? `${custom.body}\n\n---\n\n${SUBAGENT_ROLE_BLOCK}`
         : isPlan
@@ -480,13 +442,10 @@ export function createSubagentRunner(
         content: [{ type: "text", text: initialText }],
       };
 
-      // Fork seed: when `context: "fork"` (and not resuming), inherit a copy of
-      // the parent's model-visible history as a prefix so the sub-agent sees the
-      // files and references the parent already read. The prefix is trimmed to a
-      // token budget (older turns folded/dropped), with a marker so the sub-agent
-      // treats it as prior context from the parent, not its own work. Dangling
-      // tool calls in the slice are repaired at provider-build time. The prefix
-      // is context-only — it is not persisted into the sub-agent's transcript.
+      // Fork seed: when `context: "fork"` (and not resuming), inherit a trimmed
+      // copy of the parent's model-visible history as a prefix (with a marker so
+      // the sub-agent treats it as inherited context). Context-only — not
+      // persisted into the sub-agent's transcript.
       let forkPrefix: Event[] = [];
       if (context === "fork" && !resuming) {
         const parentEvents = opts.getParentEvents?.() ?? [];
@@ -528,11 +487,9 @@ export function createSubagentRunner(
         // External abort wire (e.g. `subagent_interrupt` on a background run).
         // The agent loop honours this signal at every checkpoint.
         signal,
-        // When a structured result is requested and the provider speaks the
-        // OpenAI dialect (incl. Azure, which reuses that provider), additionally
-        // constrain output with native json_schema. The prompt+parse path in
-        // structuredOutputBlock / extractStructuredJson still runs and validates,
-        // so this is a strict upgrade (native enforcement where available,
+        // When a structured result is requested on an OpenAI-dialect provider,
+        // additionally constrain output with native json_schema. The prompt+parse
+        // path still runs, so this is a strict upgrade (native where available,
         // prompt-only elsewhere).
         responseFormat:
           outputSchema && provider.name === "openai"
@@ -957,12 +914,9 @@ function countSteps(events: Event[]): number {
 export { detectDegenerateText, detectRunawayRepetition };
 
 /**
- * Decide whether a sub-agent run produced a usable conclusion.
- *
- * Soft failures (provider 404, empty stream, aborted mid-turn with no
- * text) are surfaced as errors with `ok: false` rather than as successful
- * `0 steps` / "no final text" results, so the parent does not keep
- * exploring a failed sub-agent.
+ * Decide whether a sub-agent run produced a usable conclusion. Soft failures
+ * (provider 404, empty stream, aborted mid-turn) surface as `ok: false` so
+ * the parent does not keep exploring a failed sub-agent.
  */
 export function assessSubagentOutcome(
   events: Event[],
@@ -998,14 +952,9 @@ export function assessSubagentOutcome(
           `retry (optionally with a stronger model or a narrower objective).`,
       };
     }
-    // Zero tool steps is a failure for an agentic sub-agent, regardless of what
-    // text it emitted. A sub-agent's job is to DO work (read/search/run) and
-    // then report; text produced without any tool call is an announcement of
-    // intent ("I'll read the files…"), not a result. Adopting it credits the
-    // child with work it never did. A "completed" run with no captured work is
-    // forced to error. We key off the real signal (step count), not a fragile
-    // text-pattern match, so it is model- and language-agnostic. Guards the
-    // premature-termination form.
+    // Zero tool steps is a failure for an agentic sub-agent: text without any
+    // tool call is an announcement of intent, not a result. Keyed off step
+    // count (model- and language-agnostic), not a text-pattern match.
     if (steps === 0) {
       const snippet = text.length > 160 ? `${text.slice(0, 160)}…` : text;
       return {

@@ -1,13 +1,8 @@
-// Extension entry point.
-//
-// The chat view runs the shared CodePilot UI (the same React app as the web
-// client and the desktop agent), so all clients look and behave the same.
-// This host side only:
-// - spawns `codepilot serve` and relays JSON-RPC lines to the webview,
-// - turns editor commands (ask about selection, explain/fix file) into
-// prompts for the view,
-// - keeps the status bar and the `codepilot.busy` context key in sync,
-// - opens native diff tabs for file edits (taps the relayed events).
+// Extension entry point. The chat view runs the shared CodePilot UI (same React
+// app as the web/desktop clients). This host side spawns `codepilot serve` and
+// relays JSON-RPC to the webview, turns editor commands into prompts, keeps the
+// status bar and `codepilot.busy` context key in sync, and opens native diff
+// tabs for file edits.
 
 import * as vscode from "vscode";
 import { isAbsolute, join } from "node:path";

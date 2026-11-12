@@ -1,13 +1,7 @@
 /**
  * In-place self-update for the npm-prefix install under ~/.codepilot
- * (or CODEPILOT_INSTALL_DIR).
- *
- * - Not a reinstall: downloads release tarballs and runs
- *   `npm install --prefix <installRoot> …` over the existing tree.
- * - Startup: one check when {@link startSelfUpdateWatcher} is called.
- * - Long-lived processes: another check every 24h while the process stays up.
- * - Skips when not a prefix install, when CODEPILOT_SKIP_UPDATE is set,
- *   or when `--no-update` / CODEPILOT_NO_UPDATE is set.
+ * (CODEPILOT_INSTALL_DIR): downloads tarballs and runs `npm install --prefix`
+ * over the existing tree; checks at startup + every 24h, skipping unless a prefix install or CODEPILOT_SKIP_UPDATE / `--no-update` / CODEPILOT_NO_UPDATE is set.
  */
 
 import { createRequire } from "node:module";

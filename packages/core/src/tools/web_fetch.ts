@@ -1,22 +1,8 @@
-// web_fetch: fetch a URL and return readable text.
-//
-// Zero-dependency: uses Node's global fetch. HTML is stripped to text with
-// a small, deterministic pipeline (drop script/style, tags → whitespace,
-// entity decode, whitespace collapse). A large page spills in full to an
-// artifact and the inline view keeps a head+tail window so a page's trailing
-// conclusion / footnotes survive.
-//
-// Two policy levers (driven by `config.webFetch`):
-// - **Per-domain allowlist/blocklist** (suffix match, e.g. `github.com` also
-// matches `api.github.com`): domains in `blockedDomains` are always refused.
-// When `allowedDomains` is non-empty it is a hard allowlist — a domain not on
-// it is refused. When `allowedDomains` is empty/absent, every (non-blocked)
-// domain is allowed. The OS sandbox's network policy governs child processes;
-// it does not gate this in-process fetch, so these lists are the control.
-// - **15-minute disk cache**: identical URLs within the TTL return the
-// cached text instead of re-fetching. Cache lives under
-// `~/.codepilot/projects/<hash>/cache/web_fetch/<hash>.json` and is shared across
-// sessions in the same project. Set `cacheTtlMinutes: 0` to disable.
+// web_fetch: fetch a URL and return readable text (zero-dep global fetch;
+// HTML stripped deterministically; large pages spill to an artifact with a
+// head+tail inline view). config.webFetch levers: per-domain
+// allowlist/blocklist (suffix match; empty allowlist = all non-blocked
+// allowed) and a 15-minute disk cache (cacheTtlMinutes: 0 disables).
 
 import { z } from "zod";
 import { createHash } from "node:crypto";

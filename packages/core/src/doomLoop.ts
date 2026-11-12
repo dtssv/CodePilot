@@ -1,11 +1,6 @@
-// Doom-loop detection: when the agent calls the same tool
-// Detects when the agent loops (repeats calls without progress) and steers it
-// back. Three layers:
-// 1. Per-signature: 3rd identical call → tool-result warning; 4th → refuse.
-// 2. Sequence-level: sliding window detects re-issued batches of calls.
-// 3. Path-level (read_file): overlapping startLine/maxLines windows warn toward
-//    a soft budget (the fold-induced spiral); advancing non-overlapping windows
-//    are legitimate paging and reset the budget. Never hard-denies a read.
+// Doom-loop detection: detects when the agent loops (repeats calls without
+// progress). Layers: per-signature (3rd → warn, 4th → refuse), sequence-level
+// (rotating batches), and path-level read_file overlap (soft budget, never refuses).
 
 /** Signature of a single tool call: tool name + stable input hash. */
 function signature(toolName: string, input: unknown): string {
@@ -78,10 +73,9 @@ export function windowOverlapFraction(
 export const PATH_OVERLAP_THRESHOLD = 0.6;
 
 /**
- * Normalize a question to its semantic core: lowercased, with digits,
- * punctuation, whitespace and the trailing "data dump" stripped. Reworded /
- * re-id'd / data-appended repeats collapse toward the same string. Option
- * labels are excluded (models shuffle them between asks).
+ * Normalize a question to its semantic core (lowercased, digits/punctuation/
+ * whitespace/data-dump stripped) so reworded or re-id'd repeats collapse.
+ * Option labels excluded (models shuffle them between asks).
  */
 export function questionFingerprints(input: unknown): string[] {
   if (!input || typeof input !== "object") return [];
@@ -130,19 +124,11 @@ export const QUESTION_SIMILARITY_THRESHOLD = 0.7;
  * represents so a cached full read can be re-sliced for a narrower request. */
 const READ_FILE_HEADER = /^\((\d+) lines, \d+ bytes(?:; showing lines (\d+)-(\d+))?\)/;
 
-/** Re-slice a cached read_file body to the requested window. The cached
- * content is the verbatim tool result (header + numbered lines); when the
- * caller asks for lines [startLine, startLine+maxLines) and the cache holds
- * the full file, we return just those numbered lines with an adjusted header.
- *
- * Returns `null` to signal a MISS — the cache cannot answer the request, so
- * the caller must re-run the real read. A miss happens when the requested
- * window starts outside the lines the cached body actually covers: serving
- * the whole (earlier, narrower) body in that case would hand the model the
- * wrong lines — typically the file header — while claiming they are the
- * requested window, which is exactly how read offsets drift. If a window IS
- * requested but the header can't be parsed we also miss rather than guess.
- * A full-file / no-window request still returns the full cached body. */
+/** Re-slice a cached read_file body to the requested window, returning just
+ * those numbered lines with an adjusted header. Returns `null` (MISS) when the
+ * requested window starts outside the lines the cached body covers, or when a
+ * window is requested but the header can't be parsed — caller must re-read.
+ * A full-file / no-window request returns the full cached body. */
 function sliceWindow(cached: string, input: unknown): string | null {
   if (!input || typeof input !== "object") return cached;
   const obj = input as Record<string, unknown>;
@@ -203,25 +189,20 @@ export interface DoomLoopCheck {
 export const WARN_THRESHOLD = 3;
 export const REFUSE_THRESHOLD = 4;
 
-/** Path-level threshold for `read_file`. Only OVERLAPPING re-reads of the same
- * path count toward this; advancing/paging reads reset it. We WARN at this
- * count and never refuse — a path read is never a hard loop (see header). */
+/** Path-level threshold for `read_file`. Only OVERLAPPING re-reads count toward
+ * this; advancing/paging reads reset it. We WARN at this count and never refuse. */
 export const PATH_WARN_THRESHOLD = 3;
 
-/** Sequence-loop detection window. We look at the last SEQ_WINDOW
- * signatures (including the one being checked) and compare against the
- * SEQ_WINDOW signatures immediately before them. If ≥ SEQ_REPEAT of the
- * recent signatures already appeared in that prior window, the model is
+/** Sequence-loop detection window. If ≥ SEQ_REPEAT of the last SEQ_WINDOW
+ * signatures already appeared in the SEQ_WINDOW before them, the model is
  * re-walking a batch of calls — a rotating loop. */
 export const SEQ_WINDOW = 6;
 export const SEQ_REPEAT = 4;
 
 /**
- * Idempotent-call result cache. Extracted from DoomLoopDetector so it can
- * outlive a single run: a `read_file`/`grep`/`ls`/`glob` result cached in one
- * prompt is replayed in the next, instead of re-reading the same file every
- * time the user says "继续". The loop-detection COUNTERS still reset per run
- * (a fresh prompt is a legitimate new turn), but the cached bodies persist.
+ * Idempotent-call result cache, outliving a single run so a read/grep/ls/glob
+ * result cached in one prompt replays in the next. Loop-detection counters
+ * still reset per run; cached bodies persist across prompts.
  */
 export class DedupCache {
  /** Tools whose results are safe to replay when called again with identical
@@ -390,12 +371,9 @@ export class DoomLoopDetector {
   check(toolName: string, input: unknown): DoomLoopCheck {
     const sig = signature(toolName, input);
 
-    // Excluded tools are never counted toward exact-repetition (layer 1) or
-    // rotating-batch (layer 2) detection — a legitimate idempotent poll or
-    // retry of such a tool must not be warned or refused. Their results are
-    // still deduped on replay (that path is keyed off the cache, not here).
-    // The ask_user_question re-ask guard and the read_file path layer below do
-    // not depend on these counters, so they still apply.
+    // Excluded tools skip layers 1/2 (a legitimate idempotent poll must not be
+    // warned/refused); results still dedupe via the cache. The ask_user_question
+    // re-ask guard and read_file path layer still apply.
     const excluded = this.isExcluded(toolName, sig);
     const count = excluded ? 0 : (this.counts.get(sig) ?? 0) + 1;
     if (!excluded) {
@@ -403,12 +381,9 @@ export class DoomLoopDetector {
       this.seq.push(sig);
     }
 
- // Interactive-question guard: refuse re-asking a question the user has
- // ALREADY answered this run. The judgement is "is the information already
- // in hand", NOT "how many times" — one redundant ask is still wrong. We
- // fingerprint each question by its normalized text (digits/punctuation/
- // option noise stripped) so reworded or re-id'd repeats (fire→fire2, extra
- // whitespace, added data lines) still match a prior answered question.
+ // Interactive-question guard: refuse re-asking a question the user already
+ // answered this run (information-already-in-hand, not a count). Questions
+ // are fingerprinted by normalized text so reworded/re-id'd repeats match.
     if (toolName === "ask_user_question") {
       const fps = questionFingerprints(input);
       const isReAsk = (f: string): boolean => {

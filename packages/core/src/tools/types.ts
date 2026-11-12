@@ -32,10 +32,8 @@ export interface ToolContext {
  */
   askUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
  /**
- * Persistent shell for foreground `bash` calls. When present, the bash
- * tool routes foreground commands through it so `cd`, `export`, and
- * background jobs persist across calls. Absent in test harnesses —
- * the bash tool falls back to a fresh `sh -c` child.
+ * Persistent shell for foreground `bash` calls, so `cd`, `export`, and
+ * background jobs persist across calls. Absent in test harnesses.
  */
   persistentShell?: { run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("../persistentShell.js").PersistentShellResult> };
  /**
@@ -55,15 +53,10 @@ export interface ToolContext {
  * unbounded recursion. */
   subagentDepth?: number;
  /**
- * Side channel for auxiliary session events (currently `team_message`
- * from the `task` tool's team mode). Events go straight to the host —
- * persisted and streamed to the UI — WITHOUT entering the provider
- * transcript, so a tool can narrate long-running internal work without
- * spending the model's context on it. The model still learns everything
- * it needs from the tool result.
- *
- * Absent in minimal contexts; tools must treat it as optional.
- */
+   * Side channel for auxiliary session events (e.g. `team_message`).
+   * Bypasses the provider transcript so a tool can narrate internal work
+   * without spending model context. Absent in minimal contexts.
+   */
   emitEvent?: (e: import("../types.js").Event) => void | Promise<void>;
   /** Id of the tool call being executed (lets `task` tag sub-agent events). */
   toolCallId?: string;
@@ -89,11 +82,9 @@ export interface ToolContext {
     opts: { persist: boolean },
   ) => Promise<void> | void;
   /**
-   * File-observation store (read-before-write + staleness guard). When
-   * present: read tools call `observeFile` after a successful read; write/
-   * edit tools call `checkFileFresh` before mutating and `reobserveFile`
-   * after. Absent in minimal test contexts — tools MUST treat it as optional
-   * and fall back to their prior behaviour (no guard).
+   * File-observation store (read-before-write + staleness guard). Read tools
+   * call `observeFile` after a read; write tools call `checkFileFresh` before
+   * mutating and `reobserveFile` after. Optional — tools fall back to no guard.
    */
   observeFile?: (
     absPath: string,
@@ -133,13 +124,10 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
   inputSchema: S;
   permission: PermissionLevel;
   execute(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
-  /**
-   * Origin of the tool. "mcp" marks tools surfaced by an external MCP server;
-   * when lazy MCP discovery is on, these are hidden from the provider tool list
-   * and reached via the `mcp` meta-tool instead (keeps the per-turn tool schema
-   * small when a server exposes dozens of tools). "plugin" marks a tool a
-   * plugin runtime contributed through the `RuntimeToolkit` ABI. Undefined =
-   * built-in.
+    /**
+   * Origin of the tool: "mcp" (external MCP server; hidden from the provider
+   * tool list under lazy discovery, reached via the `mcp` meta-tool), "plugin"
+   * (contributed via `RuntimeToolkit`), or undefined = built-in.
    */
   source?: "mcp" | "plugin";
   /** For `source: "mcp"`: the server + original tool name + raw JSON schema,
@@ -148,31 +136,9 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
 }
 
 /**
- * Convert a Zod schema to a JSON Schema object that Anthropic / OpenAI / Gemini
- * accept as a tool's input schema.
- *
- * Backed by the `zod-to-json-schema` library rather than hand-walking Zod's
- * internal `_def` (which was brittle and had already silently mis-converted
- * nested-object arrays). We pin two options to keep the output shape identical
- * to what the providers expect and what this codebase relied on:
- *  - `target: "openApi3"` → objects carry `additionalProperties: false` and
- *    nullable fields render as `{ ..., nullable: true }` (OpenAPI style), not a
- *    JSON-Schema `anyOf: [T, {type:"null"}]`.
- *  - `$refStrategy: "none"` → schemas are fully inlined, so no `$ref`/`$defs`
- *    appear (Anthropic/OpenAI take inlined schemas directly; Gemini's
- *    `sanitizeSchema` strips refs anyway, but inlining avoids relying on that).
- * The leading `$schema` key is dropped so the object is a bare schema.
- *
- * Finally we normalize numeric exclusivity: `target: "openApi3"` emits the
- * DRAFT-04 boolean form (`{ minimum: 0, exclusiveMinimum: true }`) for Zod's
- * `.positive()` / `.gt()` / `.lt()`. OpenAI's own API — and strict gateways
- * like GLM via jdcloud — speak draft 2020-12, where `exclusiveMinimum` /
- * `exclusiveMaximum` are NUMBERS. The boolean form made those gateways reject
- * the whole request with `400 invalid_argument` whenever a tool using
- * `.positive()`/`.max()` was present (bash's `timeout`, web_fetch, grep, …),
- * which looked like an intermittent, order-dependent 400 but was really this
- * one schema-dialect mismatch. `normalizeExclusiveBounds` converts it to the
- * numeric form every provider accepts.
+ * Convert a Zod schema to JSON Schema via `zod-to-json-schema` (`openApi3`
+ * target: additionalProperties false, inlined, `$schema` dropped), then
+ * convert draft-04 boolean exclusive bounds to numeric draft-2020-12 form.
  */
 export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
   const out = zodToJsonSchemaLib(schema, {
@@ -185,12 +151,9 @@ export function zodToJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
 }
 
 /**
- * Recursively rewrite draft-04 boolean exclusive bounds to the numeric
- * draft-2020-12 form that OpenAI and strict gateways require:
- *   { minimum: X, exclusiveMinimum: true }  →  { exclusiveMinimum: X }
- *   { maximum: X, exclusiveMaximum: true }  →  { exclusiveMaximum: X }
- * A redundant `exclusive*: false` is simply dropped (the plain
- * `minimum`/`maximum` already carries the inclusive bound).
+ * Rewrite draft-04 boolean exclusive bounds to numeric draft-2020-12 form
+ * (OpenAI/GLM): `{min: X, exclusiveMin: true}` → `{exclusiveMin: X}`;
+ * a redundant `exclusive*: false` is dropped.
  */
 function normalizeExclusiveBounds(node: unknown): void {
   if (Array.isArray(node)) {

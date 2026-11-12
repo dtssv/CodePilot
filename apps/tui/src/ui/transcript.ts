@@ -1,15 +1,8 @@
 /**
- * Rows → render blocks, with the same presentation rules as the web UI
- * (apps/web/src/state/selectors.ts):
- * - one user bubble per user message,
- * - everything until the next user message folds into one `assistant_turn`
- * (single assistant glyph) so tool loops still read as 一问一答,
- * - consecutive tool rows collapse into one step group inside the turn,
- * - usage rows are dropped (totals live in the status bar),
- * - only the latest plan renders in full; earlier ones become a one-line
- * marker,
- * - plan_update calls are hidden (the plan block shows them),
- * - assistant messages without visible content are skipped.
+ * Rows → render blocks, mirroring the web UI's presentation rules: one user
+ * bubble per user message; everything until the next user message folds into
+ * one `assistant_turn`; consecutive tool rows collapse into a step group;
+ * only the latest plan renders in full; plan_update/empty messages skipped.
  */
 import { hasVisibleAssistantContent, type PlanStep } from "@codepilot/core";
 import type { MessageRow, Row, ToolRow } from "./state.js";

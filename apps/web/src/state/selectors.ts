@@ -121,16 +121,9 @@ export type Block =
   | { kind: "assistant_turn"; key: string; parts: TurnPart[] };
 
 /**
- * Turn rows into render blocks:
- * - one user bubble per user message,
- * - everything until the next user message folds into a single
- * `assistant_turn` (one left avatar) so multi-step tool loops still
- * read as 一问一答,
- * - consecutive tool rows collapse into one "steps" group inside the turn,
- * - usage rows are dropped (totals live in the status bar),
- * - only the most recent plan renders in full; earlier ones become a
- * compact "plan updated" marker,
- * - assistant shells with no visible content are skipped.
+ * Turn rows into render blocks: one user bubble per user message; everything
+ * until the next user message folds into one `assistant_turn`; consecutive tool
+ * rows collapse into a "steps" group; usage rows dropped; latest plan full.
  */
 export function groupRows(rows: Row[]): Block[] {
   const blocks: Block[] = [];

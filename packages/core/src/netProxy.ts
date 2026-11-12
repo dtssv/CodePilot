@@ -1,19 +1,7 @@
-// Cooperative network egress proxy.
-//
-// A tiny dependency-free HTTP/HTTPS forward proxy that enforces a host
-// allowlist. It is pointed at by HTTP_PROXY/HTTPS_PROXY env vars injected into
-// sandboxed bash commands, so ordinary tools (curl, npm, pip, git-over-https)
-// are transparently restricted to the configured hosts.
-//
-// Scope and limits (deliberate):
-//  - Cooperative only: a process that opens a raw socket ignoring the proxy
-//    env vars bypasses it. Non-cooperative enforcement (net namespace / OS
-//    scoping) is a separate step (out of scope here).
-//  - HTTPS via CONNECT is tunneled, NOT terminated: we allow/deny on the
-//    requested host:port, then relay bytes. No TLS interception, so payloads
-//    stay private and no cert trust surgery is needed.
-//  - Host matching is by allowlist globs ("*.github.com"); everything else is
-//    refused with a logged 403 / connection refusal.
+// Cooperative network egress proxy: a dependency-free HTTP/HTTPS forward proxy
+// enforcing a host allowlist, pointed at by HTTP_PROXY/HTTPS_PROXY. Cooperative
+// only (raw sockets bypass it); HTTPS via CONNECT is tunneled, not terminated;
+// hosts matched by allowlist globs, everything else refused with a 403.
 
 import { createServer, request as httpRequest, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";

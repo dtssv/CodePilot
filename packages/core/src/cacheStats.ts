@@ -1,21 +1,7 @@
-// Cache-waste attribution.
-//
-// Why this exists
-// ---------------
-// Prompt caching is only cheap when the stable prefix keeps hitting. When a
-// turn re-bills input tokens that *should* have been cached, something broke
-// the hit: the cache TTL lapsed during an idle gap, the model switched (a
-// different model has a different cache), or the context legitimately changed
-// at a compaction / branch boundary (in which case the re-bill is expected, not
-// waste). CodePilot already aggregates per-turn `cacheRead` / `cacheWrite` from
-// provider usage; this module turns that raw stream into an attributed,
-// dollar-quantified view so the cost is visible and explainable.
-//
-// Design stance (CodePilot): a pure function over the turn stream, like
-// `compactionGeometry` / `filterToolsByMode`. No timers, no provider calls — it
-// only interprets usage records the session already records. Fail-soft: unknown
-// model price yields an undefined cost (never a fabricated zero), and the
-// first turn is never counted as waste (there is nothing cached yet).
+// Cache-waste attribution: turns per-turn `cacheRead`/`cacheWrite` usage into
+// an attributed, dollar-quantified view. Pure function over the turn stream —
+// no timers or provider calls. Fail-soft: unknown model price → undefined cost
+// (never a fabricated zero); the first turn is never waste.
 
 import { estimateCostUSD } from "./tokens.js";
 
@@ -67,11 +53,9 @@ export interface CacheWasteReport {
 }
 
 /**
- * The standard `ephemeral` cache lifetime (Anthropic default). A gap longer
- * than the active TTL between turns means the previous turn's cached prefix has
- * expired, so the next turn pays full price again. `analyzeCacheWaste` takes the
- * configured TTL (5m default, or the extended 1h tier via `promptCache.ttl`);
- * this constant is the 5m fallback when no TTL is supplied.
+ * Standard `ephemeral` cache lifetime (Anthropic default, 5m). A gap longer
+ * than the TTL expires the previous turn's cached prefix; this is the 5m
+ * fallback when no TTL is supplied.
  */
 export const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
 
@@ -83,16 +67,9 @@ export const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
 export const CACHE_MISS_NOISE_FLOOR = 1024;
 
 /**
- * Attribute each turn's re-billed input to a cause and quantify the waste.
- *
- * A turn "re-bills" when it has substantial `input` but little or no
- * `cacheRead` even though a previous turn established a cache. The cause is:
- *   - idle_expiry: the idle gap exceeded `ttlMs` → the entry lapsed.
- *   - model_switch: the model differs from the previous turn.
- *   - cold_start: the first cacheable turn (not waste — nothing to reuse).
- *   - unknown: a miss with no idle/model explanation (likely prefix drift).
- * A turn flagged `contextChanged` is an expected re-bill (new content), never
- * waste.
+ * Attribute each turn's re-billed input to a cause: idle_expiry (gap > ttlMs),
+ * model_switch, cold_start (not waste), or unknown (likely prefix drift). A
+ * `contextChanged` turn is an expected re-bill, never waste.
  */
 export function analyzeCacheWaste(
   turns: readonly CacheTurn[],

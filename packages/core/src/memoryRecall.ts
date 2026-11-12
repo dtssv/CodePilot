@@ -1,16 +1,7 @@
-// Query-time progressive memory recall.
-//
-// The system prompt injects only the memory INDEX (bullets + topic paths) so
-// the model must `read_file` a topic to see its body. That leaves a recall gap:
-// a relevant note exists but the model never opens it. At the start of a turn
-// this module asks the small model to pick the few topic files most relevant to
-// the user's query, reads their bodies (truncated, hard-capped), and returns a
-// `<relevant_memories>` block for the volatile per-turn tail — model-visible,
-// never persisted, outside the cached prefix.
-//
-// Strictly bounded: at most `recallMax` files, each truncated to a per-file
-// char cap and the whole block to a total cap. Fail-soft throughout: any error
-// yields no block and never blocks the turn.
+// Query-time progressive memory recall. At turn start a small model picks the
+// few topic files most relevant to the user's query; their bodies (truncated,
+// hard-capped) become a `<relevant_memories>` block in the volatile per-turn
+// tail. Bounded by `recallMax`/per-file/total caps; fail-soft throughout.
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";

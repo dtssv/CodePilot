@@ -1,21 +1,8 @@
 // MCP SSE transport (HTTP + server-sent events, MCP 2024-11-05).
-//
-// The server's URL is treated as the *control plane*:
-//
-// 1. POST `{jsonrpc,method,params,id}` to it as `Content-Type: application/json`
-// and `Accept: application/json, text/event-stream`. The response is either
-// a JSON body (for short, non-streaming replies) or an SSE stream that
-// carries one or more events, the last of which carries the JSON-RPC
-// response. The spec lets the server decide per request; we accept both.
-// 2. When the server's `initialize` response carries an `endpoint` field in
-// the `_meta` map (or in a `session`/`endpoint` header), subsequent calls
-// can be POSTed to that per-session URL instead of the control URL. We
-// honour both shapes and fall back to the control URL when no per-session
-// endpoint is advertised.
-// 3. If the server returns a long-lived event stream after `initialize`
-// (carrying `endpoint` and/or `session` events), we keep it open in the
-// background and dispatch any server-pushed JSON-RPC envelopes through
-// the same `onMessage` path.
+// The server URL is the control plane: POST `{jsonrpc,…}` as JSON, accept a JSON
+// body or SSE stream (last event carries the response). If `initialize` advertises
+// a per-session `endpoint`, subsequent calls POST there; a long-lived event stream
+// is kept open and its server-pushed envelopes dispatched via `onMessage`.
 
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from "node:https";
@@ -253,10 +240,9 @@ export class McpSseClient extends BaseJsonRpcClient {
   }
 
  /**
- * POST a JSON-RPC envelope and resolve with the raw HTTP response. Handles
- * both the JSON-body reply case and the SSE-stream reply case (the latter
- * is dispatched onto `onMessage` and the POST resolves as soon as the
- * matching response frame arrives).
+ * POST a JSON-RPC envelope and resolve with the raw HTTP response (JSON body
+ * or SSE stream — the latter is dispatched onto `onMessage` and the POST
+ * resolves on the matching response frame).
  */
   private postJson(
     msg: JsonRpcRequest

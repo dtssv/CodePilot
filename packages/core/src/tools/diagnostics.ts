@@ -1,10 +1,7 @@
 // diagnostics: surface LSP / language-server diagnostics (errors, warnings,
-// hints) to the agent. Core has no LSP client of its own; instead the host
-// (VSCode, IDEA, or a future core-side LSP) registers a DiagnosticsProvider
-// that returns per-file diagnostics on demand.
-//
-// Lets the agent verify edits via the language server's verdict (type errors,
-// unused imports, lint failures) without running a full build.
+// hints) to the agent. The host registers a DiagnosticsProvider returning
+// per-file diagnostics on demand, so the agent can verify edits via the
+// language server's verdict without running a full build.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

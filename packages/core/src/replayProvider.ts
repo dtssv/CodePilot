@@ -1,9 +1,7 @@
 /**
- * Keyless transcript replay — a `ChatProvider` that replays a recorded
- * session transcript for deterministic tests without an API key. Each
- * `prompt` call maps to the next assistant message in the transcript; tool
- * calls execute against real tools (use a temp dir).
- * @module replayProvider
+ * Keyless transcript replay — a `ChatProvider` replaying a recorded session for
+ * deterministic tests without an API key. Each `prompt` maps to the next
+ * assistant message; tool calls run against real tools (use a temp dir).
  */
 import { readFile } from "node:fs/promises";
 import type {
@@ -100,10 +98,9 @@ interface ReplayTurn {
 }
 
 /**
- * Extract replayable assistant turns from a session event log. Each
- * assistant `message` event with text and/or tool_use blocks becomes one
- * turn. Tool_result events are skipped (the agent loop produces them by
- * executing tools, not by the provider).
+ * Extract replayable assistant turns from a session event log. Each assistant
+ * `message` event with text and/or tool_use blocks becomes one turn; tool_result
+ * events are skipped (the agent loop produces those by executing tools).
  */
 export function extractReplayTurns(events: Event[]): ReplayTurn[] {
   const turns: ReplayTurn[] = [];

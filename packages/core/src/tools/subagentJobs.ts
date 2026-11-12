@@ -1,10 +1,7 @@
-// Per-session registry of background sub-agents dispatched with `run:
-// "background"`. Unlike bash background jobs (module-global, keyed by cwd), this
-// is instantiated ONE PER SESSION and owned by the Session — a shared singleton
-// would cross-wire parallel sessions (the same reason the task tool is copied
-// per session). Each entry tracks a running `runner.run(...)` promise plus its
-// AbortController so the parent can list / wait / interrupt it, and fires a
-// one-time completion listener the session turns into a system steer summary.
+// Per-session registry of background sub-agents dispatched with
+// `run: "background"`. Instantiated one per session (a shared singleton
+// would cross-wire parallel sessions). Each entry tracks the running
+// promise + AbortController and fires a one-time completion listener.
 
 import type { SubagentRunResult } from "./task.js";
 

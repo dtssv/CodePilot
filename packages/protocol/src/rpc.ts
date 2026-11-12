@@ -1,19 +1,13 @@
 /**
- * Minimal JSON-RPC 2.0 over NDJSON: one UTF-8 JSON document per `\n`-terminated
- * line (no framed batches). `Peer` is one side of the conversation exposing
- * `request`/`notify`/`onRequest`/`onNotification`; I/O goes through
- * `transport.write`/`readLine`. Reverse requests (e.g. `permission/request`)
- * correlate by `id`; pending promises reject on transport end or cancel.
+ * Minimal JSON-RPC 2.0 over NDJSON (one JSON document per `\n`-terminated line).
+ * `Peer` exposes request/notify/onRequest/onNotification over
+ * `transport.write`/`readLine`; reverse requests correlate by `id`, reject on end/cancel.
  */
 
 /**
- * The CodePilot headless-protocol version advertised in `initialize`.
- *
- * Defined HERE (in the dependency-free rpc module) rather than in server.ts so
- * both sides share ONE value: the Node server imports it, and browser clients
- * (which can only import `@codepilot/protocol/rpc` — importing the full barrel
- * would pull Node server code into the bundle) import the same constant instead
- * of redeclaring their own `1` that could silently drift on a version bump.
+ * The CodePilot headless-protocol version advertised in `initialize`. Defined
+ * in this dependency-free module (not server.ts) so the Node server and browser
+ * clients — which can only import `@codepilot/protocol/rpc` — share one value.
  */
 export const PROTOCOL_VERSION = 1;
 

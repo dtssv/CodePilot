@@ -1,24 +1,6 @@
-// Example runtime (b): search-based exploration for open-ended tasks.
-//
-//
-// Naming, precisely: this is *flat* Monte-Carlo search — one level of
-// expansion, then evaluation and selection — not UCT with tree reuse across
-// prompts. The four phases map onto the usual vocabulary:
-//
-// expand N read-only rollouts, each pushed toward a different approach
-// simulate one scoring pass that rates every candidate against a rubric
-// select take the highest-scoring candidate (ties → first, i.e. lowest
-// temperature-of-exploration order)
-// exploit run the task for real, in the session's own mode, with the
-// winning approach injected as guidance
-//
-// The expansion phase is deliberately read-only: N independent loops all
-// editing the same working tree would interleave writes, and the point of
-// the search is to compare approaches before committing to one. Only the
-// exploit phase can modify anything.
-//
-// Cost: N + 2 provider runs per prompt (N exploration + 1 scoring +
-// 1 exploitation).
+// Search-based runtime: flat Monte-Carlo search (expand N read-only rollouts,
+// score them, select the best, then exploit it for real). Only the exploit
+// phase can modify the working tree. Cost: N + 2 provider runs per prompt.
 
 import { randomUUID } from "node:crypto";
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent.js";

@@ -1,8 +1,6 @@
 // Token estimation + per-model context windows.
-//
-// `estimateTokens` delegates to a swappable active tokenizer: a zero-dependency
-// heuristic by default, or `gpt-tokenizer` (o200k_base) if installed via
-// `tryLoadRealTokenizer()`. The heuristic is monotonic and rounds up.
+// `estimateTokens` delegates to a swappable tokenizer: a zero-dependency
+// heuristic by default, or `gpt-tokenizer` (o200k_base) if installed.
 
 /** A single estimator. Pure, total, no allocation beyond locals. */
 export type TokenEstimator = (text: string) => number;
@@ -31,11 +29,9 @@ export function hasRealTokenizer(): boolean {
 }
 
 /**
- * Best-effort: install a provider-accurate tokenizer if the optional
- * `gpt-tokenizer` package is available. Returns true when a real tokenizer
- * is now active, false when it stayed on the heuristic (package missing or
- * failed to load). Safe to call more than once and safe to call when the
- * package was never installed — it never throws.
+ * Install `gpt-tokenizer` as the active tokenizer if available. Returns true
+ * on success, false when it stayed on the heuristic. Safe to call repeatedly
+ * and never throws.
  */
 export async function tryLoadRealTokenizer(): Promise<boolean> {
   if (hasRealTokenizer()) return true;
@@ -65,16 +61,9 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * Zero-dependency heuristic tokenizer — a character-class scan:
- *
- * - CJK / wide characters: 1 token per character
- * - latin / cyrillic / greek letter runs ("words"): ~0.75 tokens per word
- * - digits grouped with letters/underscores (identifiers): part of the word
- * - code / JSON punctuation: ~1 token per 3 characters
- * - whitespace: 0 tokens on its own
- *
- * Not meant to match a specific provider's BPE table; see the module header
- * for the accurate opt-in path.
+ * Zero-dependency heuristic tokenizer (character-class scan): CJK = 1 token/char,
+ * word runs = 0.75 tokens/word, code punctuation = 1 token/3 chars, whitespace
+ * = 0. Not a BPE match; see module header for the accurate opt-in path.
  */
 export function heuristicTokens(text: string): number {
   if (!text) return 0;
@@ -154,13 +143,9 @@ function isCodeChar(code: number): boolean {
 }
 
 /**
- * Flat per-image token estimate. Provider image tokenisation is model-specific
- * (OpenAI 512px tiles / Anthropic ~(w·h)/750 / Gemini fixed per tile), so a
- * general harness cannot compute an exact count without a per-provider algebra;
- * a single conservative mid-range constant keeps the budget safe across all of
- * them. This is the ONE source of truth — both `estimateMessagesTokens` (here)
- * and `estimateEventTokens` (compaction) price images through it so the local
- * estimate and the compaction/self-calibration path can never disagree.
+ * Flat per-image token estimate — a conservative mid-range constant (provider
+ * image tokenisation is model-specific). Single source of truth: both
+ * `estimateMessagesTokens` and `estimateEventsTokens` price images through it.
  */
 export const IMAGE_TOKEN_ESTIMATE = 1_600;
 
@@ -196,10 +181,8 @@ export function estimateObjectTokens(value: unknown): number {
 }
 
 // ---------------------------------------------------------------------------
-// Per-model context windows.
-//
-// The map below is the canonical source of truth for the models we ship
-// out-of-the-box. Unknown models fall back to a configurable default.
+// Per-model context windows. Canonical source of truth for shipped models;
+// unknown models fall back to a configurable default.
 // ---------------------------------------------------------------------------
 
 export interface ModelContextWindow {
@@ -270,10 +253,8 @@ const MODEL_COSTS: Array<{ match: (id: string) => boolean; cost: ModelCost }> = 
 ];
 
 /**
- * Estimate the USD cost of one usage record. Returns undefined when the
- * model is unknown — callers should treat undefined as "not priced", not
- * zero. Cache-write is priced at 1.25x input (Anthropic semantics);
- * cache-read uses the table's cacheRead or input * 0.1.
+ * Estimate USD cost of one usage record; undefined when the model is unknown.
+ * Cache-write = 1.25x input; cache-read = table's cacheRead or input * 0.1.
  */
 export function estimateCostUSD(
   model: string | undefined,

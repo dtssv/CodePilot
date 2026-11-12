@@ -1,16 +1,8 @@
 /**
- * Terminal palette and vocabulary, shared by every TUI component.
- *
- * Colors mirror the web/desktop/IDE design tokens (apps/web/src/index.css)
- * so the CLI reads as the same product. Body text keeps the terminal's own
- * foreground: a fixed light ink would vanish on light terminal themes.
- *
- * `color` is a MUTABLE palette object: `setTheme(name)` reassigns its fields
- * in place, so every component that reads `color.accent` (etc.) inside render
- * repaints with the new palette on the next Ink render. Two module-scope
- * colour maps (StatusBar's PERM/AGENT maps) were made render-time reads for
- * the same reason. `syntax` stays fixed — syntax highlighting is a separate
- * concern from the UI palette.
+ * Terminal palette and vocabulary, shared by every TUI component. Body text
+ * keeps the terminal's own foreground so it survives light themes. `color` is
+ * MUTABLE: `setTheme(name)` reassigns its fields in place, so `color.accent`
+ * readers repaint on the next Ink render.
  */
 
 import { THEMES, type ThemeName, type TuiPalette } from "./themes.js";

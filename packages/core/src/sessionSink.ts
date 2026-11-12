@@ -1,19 +1,8 @@
-// Additive session event sink — an OPTIONAL write-through mirror of the JSONL
-// event log to an external data source (NAS / OSS / DB / webhook).
-//
-// This does NOT replace the source of truth. The canonical JSONL append in
-// `Session.persistEvent` is the single writer and is never gated by a sink;
-// AGENTS.md forbids replacing the source of truth, not copying from it (the
-// derived SQLite index is the same kind of additive artifact). A sink receives
-// the exact line already written to JSONL, AFTER the local append resolves.
-//
-// Fail-soft is mandatory and enforced here, not left to the sink author: a
-// throwing or slow sink must never fail or block the canonical write. Lines are
-// handed to a bounded in-memory queue and flushed on a background drain; when
-// the queue is full the OLDEST pending line is dropped (newest-wins, bounded
-// memory) and counted. A sink error is swallowed (optionally surfaced via
-// `onError`) and the session continues — mirroring `openSessionIndex` returning
-// null on any failure.
+// Additive, OPTIONAL write-through mirror of the JSONL event log to an external
+// sink. The canonical JSONL append stays the single writer; the sink receives
+// each line only after the local append resolves. Fail-soft is enforced here:
+// lines buffer in a bounded background-drained queue (oldest dropped when full),
+// sink errors are swallowed, and the canonical write is never blocked or gated.
 
 /** An external mirror for session JSONL lines. Implementations typically ship
  * from a plugin (e.g. an S3/OSS/NAS writer). All methods may be async. */

@@ -1,9 +1,6 @@
-// CodePilot Agent: a desktop window around the shared web UI's agent layout.
-// The engine is the shared local daemon (`codepilot serve --daemon`) that the
-// web client and IDE plugins also attach to, so sessions and the open workspace
-// stay in sync across surfaces. The window loads the SPA over `file://` and
-// connects via `?ws=&token=`; the preload adds a native folder picker and
-// "open with default app".
+// CodePilot Agent: a desktop window around the shared web UI. The engine is
+// the shared local daemon (`codepilot serve --daemon`). The window loads the
+// SPA over `file://` and connects via `?ws=&token=`.
 
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, shell } from "electron";
 import { spawn } from "node:child_process";
@@ -76,23 +73,17 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   const existing = await readLiveServeInfo();
   if (existing) {
-    // Reuse only if it speaks our protocol (has the extended git ops) AND its
-    // bind matches the LAN-access preference. A loopback-only daemon left by
-    // the web/IDE client would otherwise be reused even when the user asked for
-    // LAN access, so the phone's QR URL stays unreachable — the "toggle did
-    // nothing" bug. Replace a mismatched daemon.
+    // Reuse only if it has the extended git ops AND its bind matches the
+    // LAN-access preference (a loopback-only daemon would leave the phone's
+    // QR URL unreachable). Replace a mismatched daemon.
     if ((await daemonHasGit(existing)) && (await daemonBindMatchesPref())) return existing;
     try {
       process.kill(existing.pid);
     } catch {
       /* already gone */
     }
-    // Wait for the OLD daemon to actually release the port, not merely clear
-    // serve.json. A graceful SIGTERM (disconnect clients + http.close) can take
-    // longer than the serve.json unlink, and binding before the port is free
-    // makes the new daemon exit with EADDRINUSE — the root cause of the
-    // "did not publish serve.json within 15s" failure on first launch after an
-    // upgrade. Poll the port itself, up to ~8s.
+    // Wait for the old daemon to release the port (not just clear serve.json).
+    // Binding before the port is free causes EADDRINUSE. Poll the port, ~8s.
     for (let i = 0; i < 40; i++) {
       await sleep(200);
       if (!(await portInUse(DAEMON_PORT))) break;
@@ -145,9 +136,7 @@ async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
 
 /**
  * Restart the shared daemon to reflect current settings (chiefly the LAN bind).
- * The token is minted per start, so after the daemon republishes its lockfile
- * every window reloads with a fresh page URL (new token, same loopback host).
- * Returns false if no new daemon came up.
+ * Each window reloads with a fresh page URL (new token). Returns false on failure.
  */
 async function restartDaemon(): Promise<boolean> {
   if (!webRootPath) return false;
@@ -197,10 +186,8 @@ function portInUse(port: number, host = "127.0.0.1"): Promise<boolean> {
 }
 
 /**
- * Terminate whatever holds `port` (a stale daemon left after an upgrade whose
- * serve.json was cleared). Best-effort, cross-platform: find the listening PID,
- * SIGTERM (then SIGKILL on POSIX). Never throws — caller re-polls the port and
- * falls back to the EADDRINUSE path.
+ * Terminate whatever holds `port` (a stale daemon after an upgrade). Best-effort,
+ * cross-platform: SIGTERM then SIGKILL on POSIX. Never throws.
  */
 async function freeStaleDaemonPort(port: number): Promise<void> {
   const { execFile } = await import("node:child_process");
@@ -252,11 +239,9 @@ function lanIp(): string | undefined {
 }
 
 /**
- * Does the running daemon's bind match the current LAN-access preference?
- * serve.json always advertises loopback (so local discovery works), so probe
- * the LAN IP directly: a loopback-only daemon refuses it, a 0.0.0.0 daemon
- * accepts. When LAN access is off, any bind is fine. Returns true if no change
- * is needed.
+ * Does the running daemon's bind match the LAN-access preference? Probe the
+ * LAN IP directly (serve.json always advertises loopback). Returns true when
+ * no change is needed.
  */
 async function daemonBindMatchesPref(): Promise<boolean> {
   if (!settings.lanAccess) return true; // off: don't care about the bind

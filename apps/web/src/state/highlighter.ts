@@ -1,16 +1,6 @@
-// Syntax highlighting for fenced code blocks and the file preview.
-//
-// Shiki with the JavaScript regex engine (no WASM) keeps us inside the strict
-// CSP used by the browser page and the IDE webviews: the WASM engine would
-// need `wasm-unsafe-eval`, which the host CSPs forbid. Grammars and themes are
-// statically imported so the whole highlighter inlines into the single-file
-// embed bundle — nothing is fetched at runtime.
-//
-// Output is HTML rendered via dangerouslySetInnerHTML. That is safe here:
-// Shiki emits only <pre>/<code>/<span> with inline color styles (allowed by
-// `style-src 'unsafe-inline'`), and the input code is escaped by Shiki. The
-// dual light/dark themes emit CSS variables so the existing [data-theme]
-// toggle switches palettes without re-highlighting.
+// Syntax highlighting for fenced code blocks and the file preview. Shiki uses
+// the JS regex engine (no WASM) so the host CSP never needs `wasm-unsafe-eval`;
+// grammars/themes are statically imported into the single-file embed bundle.
 
 import { createHighlighterCore, type HighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";

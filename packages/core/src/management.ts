@@ -1,12 +1,7 @@
 /**
  * Runtime management & introspection for the `/mcp`, `/hooks`, `/agents`,
- * `/skills`, and `/context` slash commands.
- *
- * The TUI/IDE hosts call `describeMcp`, `describeHooks`, etc. to get a
- * pre-formatted text block for display, plus the raw structured data for
- * richer UIs. Pure functions over the session's existing state — no side
- * effects, no I/O. Skills and custom agents are (re)discovered on demand
- * so freshly added files show up without a restart.
+ * `/skills`, and `/context` slash commands: pre-formatted text + raw data for
+ * hosts. Pure functions over session state; skills/agents rediscovered on demand.
  *
  * @module management
  */

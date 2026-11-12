@@ -1,11 +1,8 @@
 // Checkpoint writer — per-session long-term memory file.
-//
-// Cross-session continuity: when a session crosses a token threshold or
-// completes a goal round, the transcript is distilled into a 7-section
-// markdown file under `~/.codepilot/projects/<hash>/checkpoints/<id>.md`. A
-// resumed session injects the checkpoint summary into the system prompt
-// instead of replaying the full JSONL. Compaction owns in-session memory
-// pressure; checkpoints own cross-session continuity.
+// When a session crosses a token threshold or completes a goal round, the
+// transcript is distilled into a markdown file under
+// `~/.codepilot/projects/<hash>/checkpoints/<id>.md`; a resumed session injects
+// the summary into the system prompt instead of replaying the JSONL.
 
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { join, dirname } from "node:path";
@@ -531,12 +528,9 @@ export async function writeCheckpoint(
 }
 
 /**
- * Write a checkpoint from an ALREADY-BUILT snapshot. Split out from
- * {@link writeCheckpoint} so a caller can build the snapshot synchronously
- * (capturing the transcript at a precise point) and then run the slow part —
- * the small-model distillation and the disk write — off the hot path. The
- * snapshot is a plain-data copy, so it is safe to hold while the live
- * transcript keeps mutating.
+ * Write a checkpoint from an ALREADY-BUILT snapshot: capture the transcript
+ * synchronously, then run slow distillation + disk write off the hot path. The
+ * snapshot is a plain-data copy, safe to hold while the live transcript mutates.
  */
 export async function writeCheckpointFromSnapshot(
   cwd: string,

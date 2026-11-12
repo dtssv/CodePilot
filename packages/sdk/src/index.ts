@@ -1,29 +1,7 @@
 /**
- * @codepilot/sdk — embed CodePilot agents in scripts, CI pipelines, and
- * backend services.
- *
- * The SDK wraps `@codepilot/core`'s `Session` in a clean, promise-based API
- * suitable for programmatic use. Programmatic session API:
- *
- * import { Agent } from "@codepilot/sdk";
- *
- * const agent = await Agent.create({ cwd: "/my/project", model: "claude-sonnet-4-5" });
- * const result = await agent.prompt("Fix the failing tests in src/");
- * console.log(result.text);
- * await agent.dispose;
- *
- * Or for one-shot use:
- *
- * import { run } from "@codepilot/sdk";
- * const { text } = await run({ cwd: ".", prompt: "lint and fix" });
- *
- * Streaming:
- *
- * for await (const event of agent.stream("explain this codebase")) {
- * if (event.type === "text") process.stdout.write(event.text);
- * }
- *
- * @module @codepilot/sdk
+ * @codepilot/sdk — embed CodePilot agents in scripts, CI, and backend services.
+ * Promise-based wrapper around `@codepilot/core`'s `Session`: `prompt`/`stream`,
+ * `dispose`, or one-shot `run`. @module @codepilot/sdk
  */
 import {
   Session,
@@ -326,9 +304,6 @@ export interface RunOptions extends AgentCreateOptions {
 /**
  * One-shot: create an agent, send a prompt, return the result, and dispose.
  * Convenient for scripts and CI pipelines.
- *
- * import { run } from "@codepilot/sdk";
- * const { text } = await run({ cwd: ".", prompt: "fix lint errors" });
  */
 export async function run(opts: RunOptions): Promise<AgentResult> {
   const { prompt, images, ...createOpts } = opts;

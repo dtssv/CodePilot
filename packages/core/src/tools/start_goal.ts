@@ -1,26 +1,8 @@
-// start_goal: let the model escalate the CURRENT task into a long-horizon
-// goal loop — multi-round autonomous execution that keeps driving until the
-// objective is met, blocked, or a round cap is reached.
-//
-// Why a tool, not a heuristic
-// ---------------------------
-// There is no "detect a complex/long task and auto-start a goal loop"
-// heuristic anywhere — that would be scenario-specific and misfire. Instead the
-// MODEL, which understands the request, declares "this is a long-horizon
-// objective worth driving in rounds" via a structured tool call — model-invoked,
-// not inferred from the prompt. It is a generic capability the model opts into,
-// never a system guess.
-//
-// How the loop actually runs
-// --------------------------
-// core's `session.prompt()` returns control to the host each turn — core is not
-// an event bus that auto-continues. So this tool does NOT loop inside the
-// session. It emits a `goal_request` event carrying the objective (+ optional
-// round cap); the HOST (CLI / protocol server / TUI) picks it up and drives
-// rounds using the existing, battle-tested `runGoal` logic. This reuses the
-// mature round loop instead of duplicating it inside the session control flow.
-// If no host wires a handle (minimal embedders / tests), the tool degrades to a
-// no-op acknowledgement and the model just continues normally.
+// start_goal: let the model escalate the current task into a long-horizon
+// goal loop (multi-round autonomous execution until met, blocked, or round
+// cap). Model-invoked, not auto-detected. Emits a `goal_request` event;
+// the host drives rounds via the existing runGoal loop. With no host
+// handle wired, degrades to a no-op acknowledgement.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

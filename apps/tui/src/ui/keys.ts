@@ -1,10 +1,7 @@
 /**
- * Shared key-matching helpers for Ink `useInput` handlers.
- *
- * Esc detection is centralised here because some terminals deliver a bare
- * Escape as the raw `\u001B` byte in `input` without Ink setting `key.escape`
- * (SSH, certain paste and multiplexer setups). Matching both keeps "Esc to
- * cancel" working everywhere.
+ * Shared key-matching helpers for Ink `useInput` handlers. Esc detection is
+ * centralised here: some terminals deliver a bare Escape as the raw `\u001B`
+ * byte in `input` without setting `key.escape`, so we match both.
  */
 import type { Key } from "ink";
 

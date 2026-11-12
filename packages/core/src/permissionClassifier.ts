@@ -1,19 +1,8 @@
-// Background permission classifier for the `auto` permission mode.
-//
-// In `auto` mode, a tool call that is not covered by an explicit rule and does
-// not trip a hard safety floor (dangerous command, sensitive/.git write,
-// sandbox escalation, out-of-sandbox write) is routed here instead of blocking
-// on an interactive prompt. The classifier adjudicates the call:
-//
-//   - "allow"     — benign; let it run without prompting.
-//   - "deny"      — risky but not a hard floor; refuse with a reason the model
-//                   sees (so a denial becomes steering, not a dead end).
-//   - "uncertain" — fall back to an interactive prompt.
-//
-// The classifier can NEVER override a hard floor (those are decided before it is
-// consulted) and its denials are tracked by the caller: after too many
-// consecutive (or total) denials the engine stops trusting it and falls back to
-// the human, so a misfiring classifier cannot wedge the hot path.
+// Background permission classifier for the `auto` mode: adjudicates tool calls
+// not covered by an explicit rule and not tripping a hard safety floor, as
+// "allow" / "deny" (with a model-visible reason) / "uncertain" (prompt). It can
+// never override a hard floor; the caller falls back to the human after too many
+// denials, so a misfiring classifier cannot wedge the hot path.
 
 import type { ToolDef } from "./tools/types.js";
 

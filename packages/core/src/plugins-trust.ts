@@ -1,10 +1,7 @@
-// Plugin content-trust: a hash-based re-approval gate for a plugin's sensitive
-// Detects whether a plugin's sensitive components (hooks / MCP servers /
-// runtime) changed on disk after install consent. We hash the sensitive
-// manifest parts at consent time; on load, a mismatch skips the plugin's
-// hooks and MCP servers (fail-safe) until re-confirmed. Only hooks/mcp/runtime
-// are fingerprinted; skills/agents/commands are data and not gated. A plugin
-// with no recorded hash is not gated (legacy behaviour preserved).
+// Plugin content-trust: hash-based re-approval gate. Hashes the sensitive
+// manifest parts (hooks/mcp/runtime) at consent; on load, a mismatch skips
+// hooks and MCP servers (fail-safe) until re-confirmed. skills/agents/commands
+// are data, not gated. No recorded hash → not gated (legacy-compatible).
 
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -18,13 +15,8 @@ export function defaultPluginTrustPath(): string {
 }
 
 /**
- * The canonical content a plugin is trusted AS: only the sensitive,
- * code/process-bearing parts of its manifest (hooks, mcpServers, runtime).
- * A change to any of them changes the fingerprint; a change to skills/agents/
- * commands/description does not (those are gated or inert elsewhere).
- *
- * Keys are sorted so the serialization is stable regardless of manifest key
- * order on disk.
+ * Canonical content a plugin is trusted AS: only the sensitive manifest parts
+ * (hooks, mcpServers, runtime). Keys are sorted for stable serialization.
  */
 export function pluginContentHash(manifest: PluginManifest): string {
   const sensitive = {
@@ -74,10 +66,8 @@ export class PluginTrustStore {
   }
 
   /**
-   * Whether a plugin's sensitive content is trusted:
-   * - no recorded hash → true (un-fingerprinted; not gated, legacy-compatible).
-   * - recorded hash matches the current content hash → true.
-   * - recorded hash differs → false (content drifted; re-confirmation needed).
+   * Trusted if no recorded hash (legacy) or the recorded hash matches the
+   * current content hash; false (needs re-confirmation) if they differ.
    */
   isTrusted(name: string, currentHash: string): boolean {
     const rec = this.hashes?.get(name);

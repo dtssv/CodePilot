@@ -1,19 +1,9 @@
-// Hook trust mechanism: hash-based review before running side-effecting hooks.
-//
-// Two hook handler types reach arbitrary, config-specified targets:
-//   - `command` runs any shell code;
-//   - `http`    POSTs the hook payload (tool inputs, prompts) to any URL and
-//               lets the response block/rewrite the action.
-// Both are as attacker-controllable as the config that declares them, so both
-// require the user to approve each unique *trust subject* (identified by its
-// SHA-256 hash) before running. Approved hashes persist to
-// `.codepilot/hook_trust.json`; unapproved hooks are skipped with a warning
-// (fail-safe: don't run untrusted side effects).
-//
-// `mcp_tool`/`prompt`/`agent` handlers are exempt: they delegate to
-// infrastructure already vetted elsewhere (MCP servers approved at connect
-// time, the session's own small model, the curated sub-agent registry) rather
-// than to an arbitrary command or URL — see `hooks-handlers.ts`.
+// Hook trust: hash-based review before running side-effecting hooks.
+// `command` (shell) and `http` (POST payload to URL) handlers reach arbitrary
+// config-specified targets, so each unique trust subject (SHA-256) must be
+// approved before running. Approved hashes persist to
+// `.codepilot/hook_trust.json`; unapproved hooks are skipped (fail-safe).
+// `mcp_tool`/`prompt`/`agent` are exempt (vetted elsewhere).
 
 import { createHash } from "node:crypto";
 import type { HookEntry } from "./hooks.js";
@@ -24,11 +14,9 @@ export function hashCommand(command: string): string {
 }
 
 /**
- * The canonical string a hook is trusted *as*. Command hooks are trusted by
- * their exact command; http hooks by their method+URL+sorted headers (headers
- * matter — they can carry an auth token or redirect intent). Returns null for
- * handler types that don't require trust. Keeping this in one place means
- * `isTrusted`, approval, and UI display all agree on what gets hashed.
+ * The canonical string a hook is trusted *as*: command hooks by exact command,
+ * http hooks by method+URL+sorted headers (headers can carry auth/redirect).
+ * Returns null for exempt types. One source so isTrusted/approval/UI agree.
  */
 export function trustSubject(hook: HookEntry): string | null {
   if (hook.command) return hook.command;
@@ -44,11 +32,9 @@ export function trustSubject(hook: HookEntry): string | null {
 }
 
 /**
- * Manages the set of approved command hashes, persisted to a JSON file.
- *
- * The store is loaded lazily: `load` reads the file, `isTrusted`
- * returns `true` for non-command hooks and when no trust file is configured
- * (backwards-compatible default — trust is opt-in).
+ * Manages approved command hashes, persisted to a JSON file. Loaded lazily;
+ * `isTrusted` returns true for non-command hooks and when no trust file is
+ * configured (trust is opt-in).
  */
 export class HookTrustStore {
   private hashes: Set<string> | null = null;

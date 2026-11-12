@@ -1,10 +1,7 @@
-// Browser `RpcTransport` over the native WebSocket.
-//
-// `Peer` (from @codepilot/protocol/rpc) pulls lines with `readLine`, while a
-// WebSocket pushes messages at us — so this is a queue with at most one
-// waiter, the same shape as the server-side transport. Inbound frames are
-// split on newlines so a peer that batches several JSON documents into one
-// frame still parses.
+// Browser `RpcTransport` over the native WebSocket. `Peer` pulls lines with
+// `readLine` while a WebSocket pushes messages, so this is a queue with at most
+// one waiter. Inbound frames are split on newlines so a peer that batches
+// several JSON documents into one frame still parses.
 
 import type { RpcTransport } from "@codepilot/protocol/rpc";
 

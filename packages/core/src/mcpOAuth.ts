@@ -1,12 +1,8 @@
-// MCP OAuth 2.1 client (Authorization Code + PKCE).
-//
-// MCP (2025-03-26) OAuth flow for remote HTTP/SSE servers.
-// Authorization Code grant + PKCE (S256) per OAuth 2.1.
-// On 401, resolve Protected Resource Metadata (RFC 9728) → Authorization
-// Server Metadata (RFC 8414), optionally DCR a client, then run the code
-// exchange via a 127.0.0.1 callback. Tokens persist to
-// `~/.codepilot/projects/<hash>/mcp-tokens/<server>.json` (0600), refreshed
-// via `refresh_token`. Never log token values.
+// MCP OAuth 2.1 client (Authorization Code + PKCE, S256).
+// On 401: resolve Protected Resource Metadata (RFC 9728) → Authorization
+// Server Metadata (RFC 8414), optionally DCR a client, then code exchange via
+// a 127.0.0.1 callback. Tokens persist (0600) and refresh via `refresh_token`.
+// Never log token values.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
@@ -33,13 +29,9 @@ export interface McpTokenBundle {
   scope?: string;
 }
 
-/** A handle returned by `McpOAuthFlow.authorize` so the host can drive the
- * browser interaction. The host should:
- * 1. `openUrl(handle.authorizationUrl)` — open in the user's browser.
- * 2. `await handle.waitForCallback` — resolves with the tokens once
- * the redirect arrives, or rejects on timeout / error.
- * The flow automatically spins up a local HTTP listener to capture the
- * redirect; the host does not need to manage it. */
+/** Handle from `McpOAuthFlow.authorize` for the host to drive the browser
+ * flow: open `authorizationUrl`, then `await waitForCallback` for tokens. The
+ * flow spins up its own local HTTP listener for the redirect. */
 export interface McpOAuthHandle {
  /** The URL the user should visit to authorize. */
   authorizationUrl: string;
@@ -52,12 +44,8 @@ export interface McpOAuthHandle {
   cancel(): void;
 }
 
-/** The host provides this callback so the flow can surface the
- * authorization URL for the user. The host is responsible for:
- * - opening the URL in a browser (or printing it for manual copy),
- * - letting the user know they need to authorize,
- * - optionally showing a "waiting…" UI.
- * The flow handles the redirect capture and token exchange itself. */
+/** Host callback to surface the authorization URL (open it / print it / show
+ * a waiting UI). The flow handles redirect capture and token exchange. */
 export type McpOpenAuthUrl = (
   serverName: string,
   authorizationUrl: string,

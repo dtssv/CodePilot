@@ -1,14 +1,8 @@
-// Turning a file-mutating tool call into something reviewable.
-//
-// The protocol does not ship diffs: a tool call carries the *inputs* the agent
-// chose (`write_file` → full content, `edit_file` → search/replace pairs), and
-// the result carries prose. That is enough to show what the agent intends to
-// change, which is the thing a reviewer needs before approving — so we derive
-// the view model from the inputs rather than waiting for a real diff.
-//
-// This is explicitly NOT a diff algorithm: for `edit_file` we show the exact
-// search/replace text the agent submitted (that IS the change it requested),
-// and for `write_file` the whole file as an insertion.
+// Turning a file-mutating tool call into something reviewable. The protocol
+// carries the tool *inputs* (`write_file` → full content, `edit_file` →
+// search/replace pairs), not diffs, so we derive the view model from those
+// inputs. For `edit_file` we show the exact search/replace text submitted; for
+// `write_file` the whole file as an insertion.
 
 export type DiffLineKind = "add" | "remove" | "context" | "meta";
 

@@ -43,11 +43,8 @@ export const CACHE_WARM_TTL_FRACTION = 0.9;
 
 /**
  * The prompt-cache lifetime for a model, in ms, or undefined when the model has
- * no inline cache we warm. Only Anthropic exposes an explicit `ephemeral`
- * breakpoint cache that a replay can refresh; OpenAI/Gemini caches are implicit
- * and provider-managed, so warming them is not meaningful. The configured
- * breakpoint TTL (`promptCache.ttl`) selects the 5-minute default or the
- * extended one-hour lifetime; attribution and warm timing read the same value.
+ * no inline cache we warm (only Anthropic's `ephemeral` cache is refreshable;
+ * OpenAI/Gemini are provider-managed). `promptCache.ttl` selects 5m/1h.
  */
 export function cacheTtlMs(
   model: string | undefined,
@@ -63,13 +60,9 @@ export function cacheTtlMs(
 export const CACHE_WARM_MIN_SAVINGS_USD = 0.05;
 
 /**
- * Decide whether to schedule a prompt-cache warm and when.
- *
- * expectedSavings = P(continue) · missCost − warmCost
- *   missCost = full input price of re-billing the prefix (what a miss costs).
- *   warmCost = cache-read price of the prefix (what the warm itself costs).
- * Warm only when expectedSavings ≥ the minimum threshold, the model has a known
- * TTL, and the replay is safe (identical request).
+ * Decide whether to schedule a prompt-cache warm and when. Warm only when the
+ * expected savings (P(continue)·missCost − warmCost) clear the threshold, the
+ * model has a known TTL, and the replay is safe (identical request).
  */
 export function decideCacheWarm(input: CacheWarmInput): CacheWarmDecision {
   const none = (reason: string): CacheWarmDecision => ({

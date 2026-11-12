@@ -1,8 +1,5 @@
-// Provider message construction for the agent loop.
-//
-// Extracted from `agent.ts` so the ~150 lines of transcript-to-provider-
-// message conversion (folding, compaction, block mapping) live in a focused
-// module that is easy to test in isolation. `runAgent` calls
+// Provider message construction for the agent loop: transcript-to-provider
+// message conversion (folding, compaction, block mapping). `runAgent` calls
 // `buildProviderMessages` once per turn.
 
 import type {
@@ -32,11 +29,9 @@ import { estimateTokens } from "./tokens.js";
 // Tool-table construction
 // ---------------------------------------------------------------------------
 
-/** Decide whether a turn lazily surfaces MCP tools: hide the individual MCP
- * tool schemas and expose only the `mcp` meta-tool. "lazy" always defers;
- * "eager" never does; "auto" (default) defers once the MCP tool count exceeds
- * the threshold (default 8). Shared by the turn builder and the context gauge so
- * both agree on which MCP schemas actually ride the request. */
+/** Decide whether a turn lazily surfaces MCP tools (hide individual schemas,
+ * expose only the `mcp` meta-tool). "lazy" always defers, "eager" never,
+ * "auto" (default) defers once MCP tool count exceeds the threshold (default 8). */
 export function decideLazyMcp(
   mcpToolCount: number,
   discovery: "auto" | "lazy" | "eager" | undefined,
@@ -49,13 +44,9 @@ export function decideLazyMcp(
   return mcpToolCount > (lazyThreshold ?? 8);
 }
 
-/** Build the provider-facing tool definitions for a turn, filtered by the
- * active collaboration mode and (optionally) a per-model exposure downgrade.
- * When `lazyMcp` is true, individual MCP tools are dropped from the list
- * (they're reached via the `mcp` meta-tool instead), keeping the per-turn tool
- * schema small when a server exposes many tools. When `model` + `toolExposure`
- * are given, tools the configured rules downgrade for that model are removed
- * last (after mode + lazy-MCP filtering). */
+/** Build the provider-facing tool definitions for a turn, filtered by mode and
+ * optional per-model exposure downgrade. `lazyMcp` drops individual MCP tools
+ * (reached via the `mcp` meta-tool) to keep the tool schema small. */
 export function buildProviderToolDefs(
   tools: ToolRegistry,
   mode: AgentMode,
@@ -78,12 +69,9 @@ export interface TurnToolFilterOptions {
   toolExposure?: ToolExposureRule[];
 }
 
-/** The exact filter chain that decides which tools ride a turn: mode → lazy
- * MCP (drop individual `mcp__*`, keep the `mcp` meta-tool) → lazy plugin (drop
- * `source:"plugin"` tools, keep the `tool_catalog` meta-tool) → per-model
- * `toolExposure` downgrade. Shared so the provider tool table and anything that
- * must mirror it (the system-prompt advertisement, the `/context` tool row) all
- * start from one source of truth. */
+/** The filter chain that decides which tools ride a turn: mode → lazy MCP →
+ * lazy plugin → per-model `toolExposure` downgrade. Shared so the provider tool
+ * table and its mirrors (system-prompt ad, `/context` row) stay in sync. */
 function filterToolsForTurn(
   tools: ToolRegistry,
   mode: AgentMode,
@@ -102,10 +90,8 @@ function filterToolsForTurn(
   return visible;
 }
 
-/** Names the model is told it can call this turn — the same filter chain
- * `buildProviderToolDefs` uses, so the system-prompt advertisement never lists
- * a tool the provider request omits (or hides a meta-tool's deferred schemas
- * under lazy discovery). */
+/** Names the model is told it can call this turn — the same filter chain as
+ * `buildProviderToolDefs`, so the system-prompt ad never lists an omitted tool. */
 export function listAdvertisedToolNames(
   tools: ToolRegistry,
   mode: AgentMode,
@@ -119,18 +105,9 @@ export function listAdvertisedToolNames(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the provider message list for a turn.
- *
- * History is the persisted transcript; newEvents is the events produced so
- * far in the current run (we already appended the user message, so we omit
- * `userText` here). The agent loop is responsible for sending the user
- * message once at the start of the run.
- *
- * Context management:
- * 1. Soft fold — stub old tool_results toward `contextBudget` (speed).
- * 2. Hard trim — if still over `hardBudget` (model window minus reserves),
- *    drop oldest turns / images so the request cannot exceed the configured
- *    context length. Operates on a COPY — persisted JSONL is untouched.
+ * Build the provider message list for a turn: history (persisted transcript)
+ * + newEvents (current run). Soft-folds old tool_results toward
+ * `contextBudget`, then hard-trims to `hardBudget`. Operates on a COPY.
  */
 export function buildProviderMessages(
   history: Event[],
@@ -147,10 +124,8 @@ export function buildProviderMessages(
     maxUnfoldedToolResults?: number;
  /** Invoked when micro-compaction folds ≥1 tool_result (observability). */
     onFolded?: (foldedCount: number) => void;
- /** Drop every inline image from the send view (both the prompt's images and
-  * any carried on message / tool_result events). Used by the payload-too-large
-  * recovery path: images are the usual cause of a byte-size rejection and
-  * cannot be token-compacted. */
+ /** Drop every inline image from the send view. Used by the payload-too-large
+  * recovery path (images are the usual byte-size cause and can't be token-compacted). */
     dropImages?: boolean;
   } = {},
 ): ProviderMessage[] {
@@ -235,14 +210,9 @@ function foldForBudget(
 }
 
 // Synthetic result for a tool_use left unanswered when the turn was cut off
-// (crash/restart/interrupt). The phrasing is deliberately side-effect-safe: the
-// interrupt may have landed AFTER the tool started — even after it finished but
-// before its result was persisted — so the outcome is genuinely UNKNOWN, not a
-// guaranteed "never ran". Telling the model to blindly re-issue would double a
-// mutating action (duplicate write, repeated request, re-deleted data). Retry
-// only read-only / idempotent calls; for a call that may have side effects,
-// verify the real state (re-read the file, list the resource) or ask the user
-// before re-running.
+// (crash/restart/interrupt). Outcome is genuinely UNKNOWN — the interrupt may
+// have landed after the tool started or finished. Telling the model to blindly
+// re-issue would double a mutating action; verify real state before re-running.
 export const INTERRUPTED_RESULT =
   "[interrupted: the turn was cut off before this tool's result was recorded, so its outcome is " +
   "UNKNOWN — it may not have run, or may have already taken effect. Do NOT blindly re-issue it. " +
@@ -260,12 +230,8 @@ export const NOT_STARTED_RESULT =
 
 /**
  * Map the internal event transcript into the provider's message format.
- *
- * The event log records each tool call twice (a `tool_call` event while
- * streaming and a `tool_use` block in the assistant message) and each result
- * as a `tool_result` event. Providers need exactly one `tool_use` per id,
- * every `tool_use` answered by one `tool_result` in the following user turn,
- * and strictly alternating roles; this function normalises to that shape.
+ * Normalises the duplicated tool_call/tool_use records into one `tool_use`
+ * per id, each answered by one `tool_result`, with strictly alternating roles.
  */
 export function compactTranscriptToProviderMessages(
   transcript: Event[],
@@ -293,12 +259,9 @@ export function compactTranscriptToProviderMessages(
   const answered = new Set<string>();
   let open: string[] = [];
   let attachedImages = false;
-  // Round-level image dedup: the exact same image often rides along multiple
-  // turns (a user keeps a screenshot pinned,
-  // or a tool re-attaches the same picture). Re-sending the bytes costs
-  // ~1.5K tokens each time for zero new information. We send each distinct
-  // payload once and replace later identical ones with a tiny text pointer so
-  // the model still knows the image is "there" without paying for it again.
+  // Round-level image dedup: the same image often rides multiple turns; send
+  // each distinct payload once and replace later identical ones with a text
+  // pointer (saves ~1.5K tokens each).
   const seenImages = new Map<string, number>();
   const imageBlocksFor = (
     imgs: readonly ImageAttachment[] | undefined,
@@ -419,10 +382,9 @@ export function compactTranscriptToProviderMessages(
       continue;
     }
     if (e.type === "tool_result") {
- // Image-capable tools (read_image) attach images to the tool_result.
- // They ride as sibling image blocks in the same user turn so a
- // multimodal model sees the picture alongside the tool's text result.
- // Deduped round-level so a re-attached picture isn't paid for twice.
+ // Image-capable tools attach images to the tool_result; they ride as sibling
+ // image blocks in the same user turn so a multimodal model sees the picture.
+ // Deduped round-level.
       const imgs = imageBlocksFor(e.images);
       pushResult({ type: "tool_result", toolCallId: e.toolCallId, content: e.content, isError: e.isError }, imgs);
       continue;
@@ -457,8 +419,10 @@ export function compactTranscriptToProviderMessages(
 // ---------------------------------------------------------------------------
 
 /** Stream one provider turn. The session-stable context rides the cached system
- * block; the volatile per-turn context (now / git / plan) is appended as its own
- * separate `system`-role message after the user turn. */
+ * block; the volatile per-turn context (now / plan / stall / budget) is appended
+ * as its own trailing `system`-role message so the conversation prefix stays
+ * byte-stable for implicit prompt caches (OpenAI / GLM). Harness nudges go at
+ * the request tail, never spliced into mid-history. */
 export async function* streamOnce(
   provider: ChatProvider,
   deps: AgentDeps,
@@ -496,46 +460,20 @@ export async function* streamOnce(
         : `${perTurn ? `${perTurn}\n\n` : ""}${live}`;
     }
   }
-  // Runtime context is NOT a user message: it's harness-injected per-turn state
-  // (now / live plan / progress). Emit it as its own separate `system`-role
-  // message placed JUST BEFORE the current turn (the last user / tool-result
-  // message), so background is stated first and the user's actual request stays
-  // last — the strongest-attention, closest-to-generation position, and the
-  // instruction the model should act on. Providers that honor mid-conversation
-  // system messages (OpenAI-compatible) treat it as harness context; on
-  // Anthropic (no mid-stream system role) it degrades to user and is merged
-  // with an adjacent user message to satisfy role alternation.
+  // Runtime context is harness-injected per-turn state. Append it AFTER the
+  // full transcript (including any trailing assistant tool_use + tool_result
+  // pair) so:
+  //   1) OpenAI/GLM never see a split tool pair (invalid_argument);
+  //   2) implicit prefix caches keep hitting on the whole history — only this
+  //      trailing note changes between turns (OpenCode step-nudge placement).
+  // OpenAI adapters demote a non-leading `system` to `user` and may merge it
+  // with an adjacent user turn; Anthropic skips it for cache breakpoints.
   let effectiveMessages = messages;
   const dynamicSuffix = perTurn;
-  if (dynamicSuffix && dynamicSuffix.trim().length > 0 && messages.length > 0) {
+  if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
     const note = `<runtime_context>\n${dynamicSuffix}\n</runtime_context>`;
     const contextMsg: ProviderMessage = { role: "system", content: [{ type: "text", text: note }] };
-    // Normally insert just before the current turn (last message). But the
-    // runtime_context is a `system`-role message, and OpenAI-compatible
-    // backends require a `tool`-role result to IMMEDIATELY follow the
-    // assistant message that issued the tool_calls — nothing (not even a
-    // system message) may sit between them. On a continuation turn the tail is
-    // `assistant(tool_calls) → user(tool_result…)`, so inserting at length-1
-    // would split that pair and the upstream rejects it with
-    // `invalid_argument` (observed on GLM-5.2). Back the insert point up past
-    // any trailing tool_result-bearing messages AND the assistant tool_calls
-    // turn they answer, so the context lands on a clean role boundary.
-    let insertAt = messages.length - 1;
-    const carriesToolResult = (m: ProviderMessage): boolean =>
-      Array.isArray(m.content) &&
-      m.content.some((c) => (c as { type?: string }).type === "tool_result");
-    const hasToolUse = (m: ProviderMessage): boolean =>
-      Array.isArray(m.content) &&
-      m.content.some((c) => (c as { type?: string }).type === "tool_use");
-    // Skip back over the trailing run of tool_result messages…
-    while (insertAt > 0 && carriesToolResult(messages[insertAt]!)) insertAt--;
-    // …and if that run is answering an assistant tool_calls turn, place the
-    // context before that assistant turn too (never between the pair).
-    while (insertAt > 0 && hasToolUse(messages[insertAt - 1]!)) insertAt--;
-    effectiveMessages = [...messages.slice(0, insertAt), contextMsg, ...messages.slice(insertAt)];
-  } else if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
-    // No prior messages (degenerate): context goes first.
-    effectiveMessages = [{ role: "system", content: [{ type: "text", text: `<runtime_context>\n${dynamicSuffix}\n</runtime_context>` }] }];
+    effectiveMessages = messages.length > 0 ? [...messages, contextMsg] : [contextMsg];
   }
   void messageId;
   // Either a user Stop (`deps.signal`) or a mid-stream steer (`deps.steerSignal`)

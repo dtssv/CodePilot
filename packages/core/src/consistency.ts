@@ -1,25 +1,15 @@
 /**
- * Consistency assertion: "model-visible equals logged".
- *
- * The agent loop intentionally transforms the transcript before sending to the
- * provider (micro-compaction folds old `tool_result` events). This module
- * asserts the non-folded portions of provider messages exactly match the
- * persisted events — catching invisible divergence in tool content/call
- * input/message text. Runs every turn before sending, via `consistencyCheck`
- * config ("off" | "warn" (default) | "throw") or the
- * `CODEPILOT_ASSERT_CONSISTENCY=1` env override (forces throw, for tests/CI).
- *
- * @module consistency
+ * Consistency assertion: model-visible equals logged — the non-folded portions
+ * of provider messages must exactly match persisted events. Runs every turn via
+ * `consistencyCheck` config. @module consistency
  */
 import type { ProviderMessage, ProviderMessageContent } from "./providers/types.js";
 import type { Event } from "./types.js";
 import { compactTranscriptToProviderMessages } from "./agent-messages.js";
 
 /**
- * Whether the `CODEPILOT_ASSERT_CONSISTENCY` env override is set — a hard
- * force of the throwing path for tests/CI. This is NOT the only trigger: the
- * `consistencyCheck` config also runs the check (warn by default). Env unset
- * means "defer to config", not "check disabled".
+ * Whether the CODEPILOT_ASSERT_CONSISTENCY env override forces the throwing
+ * path (for tests/CI). Env unset means "defer to config", not "disabled".
  */
 export function consistencyAssertEnabled(): boolean {
   return process.env.CODEPILOT_ASSERT_CONSISTENCY === "1" ||
@@ -37,14 +27,8 @@ export class ConsistencyError extends Error {
 }
 
 /**
- * Verify that the provider messages are consistent with the persisted event
- * log. Only the **recent** (non-folded) messages are checked — folded tool
- * results are allowed to differ (that's the whole point of micro-compaction).
- *
- * @param providerMessages The messages built by `buildProviderMessages`.
- * @param events The full persisted event log (history + produced).
- * @param keepRecent The `keepRecentMessages` window used by folding
- * (must match what `buildProviderMessages` used).
+ * Verify provider messages are consistent with the persisted event log.
+ * Only the recent (non-folded) messages are checked — folded results may differ.
  * @throws {ConsistencyError} on any divergence in the non-folded portion.
  */
 export function assertConsistency(
@@ -141,14 +125,9 @@ function assertBlockEqual(actual: ProviderMessageContent, expected: ProviderMess
       });
     }
     if (actual.content !== expected.content) {
-      // A tool_result inside the checked tail may still have been legitimately
-      // compacted: under budget pressure the real build drops its fold window
-      // (keepRecentMessages 8 → 6 → 4 → 2, then a hard trim at 1) and folds or
-      // truncates results that this fixed-window ground-truth rebuild left
-      // whole. That divergence is by design, not corruption. Treat the provider
-      // (`actual`) side being a recognised fold stub / truncation of the full
-      // (`expected`) content as consistent; only a NON-compacted-yet-different
-      // content is a genuine "model saw something other than what we logged".
+      // A tail tool_result may have been legitimately compacted under budget
+      // pressure (the real build folds/truncates what this fixed-window rebuild
+      // left whole). Treat a recognised fold stub/truncation as consistent.
       if (isCompactedToolResult(String(actual.content), String(expected.content))) return;
       throw new ConsistencyError(`Tool-result content mismatch at ${ctx}`, {
         expected: String(expected.content).slice(0, 200),
@@ -160,11 +139,8 @@ function assertBlockEqual(actual: ProviderMessageContent, expected: ProviderMess
 }
 
 /**
- * True when `actual` is a legitimate micro-compaction of `expected`: either a
- * fold stub (`[folded …]`) or a hard-trim truncation (`… [truncated to fit
- * context window.]`). These transforms are applied on the provider path by
- * design when the turn is under budget pressure; the no-fold ground-truth
- * rebuild keeps the full content, so a divergence here is expected, not a bug.
+ * True when `actual` is a legitimate micro-compaction of `expected`: a fold
+ * stub (`[folded …]`) or hard-trim truncation (`… [truncated to fit context window.]`).
  */
 function isCompactedToolResult(actual: string, expected: string): boolean {
   // Fold stubs — see summariseToolResult / foldForBudget in compaction.ts.

@@ -1,11 +1,6 @@
-/**
- * Per-model reasoning / extended-thinking effort levels.
- *
- * OpenAI o-series & Anthropic extended thinking both map onto the shared
- * `reasoningEffort` config knob. A declarative capability catalog is the
- * primary source for which levels a known model accepts; models the catalog
- * does not list fall back to id heuristics (and an optional provider hint).
- */
+/** Per-model reasoning/extended-thinking effort levels. The declarative
+ * capability catalog is the primary source; unlisted models fall back to id
+ * heuristics plus an optional provider hint. */
 
 import { catalogEffortChoices } from "./modelCatalog.js";
 

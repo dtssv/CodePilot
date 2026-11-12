@@ -1,11 +1,8 @@
 // image_gen: generate an image from a text prompt, or edit/transform existing
-// image(s) when input images are supplied. Calls a separate, configurable
-// image model (config.imageGen) — the tool is only registered when that
-// endpoint is configured, since not every provider can generate images.
-//
-// Output lands in the workspace (default `generated-images/`) and the tool
-// returns the RELATIVE path, so web/remote clients can view it through the
-// existing workspace image preview (served as base64 over the protocol).
+// image(s) when inputs are supplied, via a configurable image model
+// (config.imageGen). Registered only when that endpoint is configured. Output
+// lands in the workspace (default `generated-images/`); the tool returns the
+// relative path for web/remote clients to preview over the protocol.
 
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";

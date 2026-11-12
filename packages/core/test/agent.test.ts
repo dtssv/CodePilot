@@ -429,8 +429,9 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
       systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
     };
     await runAgent({ history: [], userText: "go" }, deps);
-    // turn 2 (remaining == 2): soft "2 turns left, wrap up" nudge.
-    expect(systemText(provider.calls[2]!)).toMatch(/2 turns left/);
+    // turn 2 (remaining == 2): soft tier-stable "few turns left" nudge (no
+    // per-turn counter — keeps the trailing runtime_context cacheable).
+    expect(systemText(provider.calls[2]!)).toMatch(/few turns left in your budget/i);
     // turn 3 (remaining == 1): hard "do NOT call any more tools, write your
     // final answer now" nudge.
     const last = systemText(provider.calls[3]!);

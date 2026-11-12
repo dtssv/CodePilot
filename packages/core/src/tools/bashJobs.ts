@@ -1,21 +1,7 @@
-// Background job registry for the bash tool.
-//
-// A background job is a detached child process whose stdout/stderr stream
-// into `~/.codepilot/projects/<hash>/jobs/<jobId>.log`, with metadata
-// in `<jobId>.json`.
-// The registry is module-level and keyed by cwd, so the `bash`,
-// `bash_output` and `bash_kill` tools share it within a session.
-//
-// Lifecycle:
-// - Cancel / session dispose: jobs keep running (reconnect-friendly).
-// - Engine process exit (`killAllJobs` + exit hook): cascade-stop every
- //   running job (process-group SIGTERM → SIGKILL). Without this,
- //   `npm run dev` / `http.server` orphan on serve exit.
-//
-// Job state survives the command that started it, but NOT a process
-// restart of CodePilot itself: on disk, jobs whose metadata says
-// "running" at load time are reported as "unknown" (the pid may be dead
-// or reused).
+// Background job registry for the bash tool, keyed by cwd (shared by bash/
+// bash_output/bash_kill). Jobs are detached children streaming to
+// `~/.codepilot/projects/<hash>/jobs/`. Cancel/session dispose leaves jobs
+// running; engine exit cascade-stops them. Stale "running" jobs load as "unknown".
 
 import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -245,11 +231,9 @@ export function listJobs(cwd: string): JobMeta[] {
 }
 
 /**
- * Build an actionable "unknown job" error. A bare `unknown job: <id>` is a
- * dead end — the model (which sometimes hallucinates a placeholder id like
- * `job_1a2b3c4d`) has nothing to recover from and stalls. We instead list the
- * jobs that actually exist this session, with their status, and point at
- * where a real id comes from.
+ * Build an actionable "unknown job" error: list jobs that actually exist this
+ * session (with status) rather than a dead-end bare id, so the model can
+ * recover instead of stalling on a hallucinated placeholder.
  */
 export function describeUnknownJob(cwd: string, requestedId: string): string {
   const jobs = listJobs(cwd);
@@ -285,11 +269,9 @@ export async function killJob(cwd: string, id: string): Promise<boolean> {
 }
 
 /**
- * Cascade-stop every running background job in this engine process.
- * Call on serve/CLI/TUI process exit — not on turn cancel or soft session
- * dispose (those must leave servers up for reconnect).
- *
- * @returns number of jobs that were signaled
+ * Cascade-stop every running background job. Call on engine process exit only,
+ * not on turn cancel or session dispose (those leave servers up for reconnect).
+ * @returns number of jobs signaled.
  */
 export async function killAllJobs(): Promise<number> {
   const running: BackgroundJob[] = [];
@@ -330,16 +312,9 @@ export type WriteJobStdinResult =
   | { ok: false; reason: "write-failed"; message: string };
 
 /**
- * Write data to a background job's stdin. Used by the `write_stdin` tool to
- * send input to interactive long-running processes (REPLs, servers, CLIs
- * that read stdin).
- *
- * The status is re-checked here rather than trusted from the caller: a job
- * can exit between the caller's check and this write, and the result tells
- * the caller which of those actually happened.
- *
- * When `appendNewline` is true (default), a `\n` is appended — most CLI
- * tools expect line-terminated input. Set it to false for raw binary input.
+ * Write data to a background job's stdin (for interactive processes). Status
+ * is re-checked here since a job can exit between the caller's check and the
+ * write. `appendNewline` (default true) appends `\n`; false for raw binary.
  */
 export async function writeJobStdin(
   cwd: string,

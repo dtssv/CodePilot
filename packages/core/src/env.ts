@@ -1,9 +1,6 @@
-// Environment provider — collects host, shell, git, and time information
-// that is injected into the dynamic suffix of the system prompt.
-//
-// The default implementation shells out to `git` and inspects process state
-// (platform / arch / node / cwd). Tests can pass a custom provider to avoid
-// real `git` calls and to make the dynamic suffix fully deterministic.
+// Environment provider — collects host, shell, git, and time information for
+// the dynamic suffix of the system prompt. Tests pass a custom provider to
+// avoid real `git` calls and make the suffix deterministic.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

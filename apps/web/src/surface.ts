@@ -1,10 +1,6 @@
-// Which surface this page is running as, and its theme.
-//
-// One bundle serves every graphical client:
-// web browser tab against `codepilot serve --web` (connect screen)
-// agent the task-oriented agent UI (desktop or `?layout=agent`)
-// embedded VSCode / IntelliJ sidebar, talking through the host bridge
-// The layout comes from `?layout=`, else the host, else the saved choice.
+// Which surface this page runs as, and its theme. One bundle serves every
+// graphical client: web tab, agent UI, or embedded sidebar. Layout comes from
+// `?layout=`, else the host, else the saved choice.
 
 import { detectHostKind, type HostKind } from "./protocol/bridge.js";
 
@@ -12,12 +8,9 @@ export type Layout = "web" | "agent" | "embedded";
 export type Theme = "light" | "dark";
 
 /**
- * A named colour palette, layered on top of the light/dark axis. `default` is
- * the built-in CodePilot palette (the existing look). Each other name swaps
- * the `--color-*` token set via `[data-theme-name]` in index.css, and still
- * has a light and a dark variant so it composes with the Theme toggle — a
- * named palette selected by config/picker, adapted to the web's existing
- * light/dark infrastructure instead of replacing it.
+ * A named colour palette layered on the light/dark axis. `default` is the
+ * built-in palette; other names swap the `--color-*` token set via
+ * `[data-theme-name]` and still compose with the Theme toggle.
  */
 export type ThemeName = "default" | "nord" | "solarized" | "high-contrast";
 

@@ -1,10 +1,7 @@
-// Integration: CodepilotClient automatic reconnect against the REAL
-// WebSocket server from @codepilot/protocol. A real server socket is
-// terminated mid-session; the client must redial, re-initialize, and fire
-// onReconnected — without a manual reconnect call.
-//
-// `ws` is not a dependency of this package (the browser uses the native
-// WebSocket), so it is resolved through @codepilot/protocol, which has it.
+// Integration: CodepilotClient auto-reconnect against the real WebSocket
+// server from @codepilot/protocol — the server socket is terminated
+// mid-session and the client must redial, re-initialize, and fire
+// onReconnected on its own. `ws` comes from @codepilot/protocol.
 
 import { createRequire } from "node:module";
 import { realpathSync } from "node:fs";

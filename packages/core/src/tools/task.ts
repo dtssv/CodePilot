@@ -1,14 +1,8 @@
-// task: dispatch sub-tasks to sub-agents. Supports single objective or a
+// task: dispatch sub-tasks to sub-agents. Supports a single objective or a
 // parallel fan-out (`tasks: [...]`), plus named agent types that control the
-// tool surface ("explore"/"plan" = read-only, "worker" = read+write).
-//
-// A sub-agent returns only its final conclusion. By default it starts with a
-// fresh context; `context: "fork"` seeds it with the parent's visible history.
-// A "plan" sub-agent is read-only and returns a structured plan. Single-task
-// mode can run in the background (`run: "background"`): the call returns
-// immediately and a one-time completion summary is delivered later. Parallel
-// tasks run concurrently via Promise.all; each returns its own structured
-// conclusion.
+// tool surface ("explore"/"plan" = read-only, "worker" = read+write). A sub-agent
+// returns only its final conclusion; `context: "fork"` seeds it with the
+// parent's history. Single-task mode can run in the background.
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -327,13 +321,10 @@ export interface SubagentRunSpec {
   * progress events, the persisted transcript, and the returned
   * `session_id` all match. When omitted the runner generates one. */
   ownerId?: string;
-  /** A pre-created shared worktree the sub-agent should run inside WITHOUT
-   * creating its own (used by `team` with `shared_worktree`: all members share
-   * one checkout). When set, the runner re-anchors the sub-agent's sandbox and
-   * delivery roots to this path — the same re-anchoring the `isolation:
-   * "worktree"` path does — so a member's writes to the shared checkout (which
-   * sits outside the parent cwd) are not rejected as out-of-root. `isolation`
-   * stays "none": no per-member tree is created. Ignored when empty. */
+  /** A pre-created shared worktree the sub-agent runs inside without creating
+   * its own (used by `team` with `shared_worktree`). When set, the runner
+   * re-anchors sandbox + delivery roots to this path so writes to the shared
+   * checkout aren't rejected as out-of-root. `isolation` stays "none". */
   sharedWorktreePath?: string;
  /** External abort signal for this run. Threaded into the sub-agent's agent
   * loop so a background job can be interrupted via `subagent_interrupt`. When
@@ -383,11 +374,9 @@ export interface SubagentRunner {
 }
 
 /**
- * Minimal CSV parser: handles quoted fields (with embedded commas, quotes
- * escaped as `""`), and CRLF/LF line endings. Returns an array of rows,
- * each row an array of field strings. The first row is the header. Does
- * not handle multi-line quoted fields (rows must be single-line) — this is
- * sufficient for `csv` batch mode where each row is a short objective spec.
+ * Minimal CSV parser: quoted fields (commas embedded, `""` escapes), CRLF/LF.
+ * First row is the header. No multi-line quoted fields (rows must be
+ * single-line) — sufficient for `csv` batch mode.
  */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -433,10 +422,9 @@ export class Semaphore {
     this.permits = permits;
   }
  /**
- * Acquire a permit. Resolves immediately when one is free, otherwise waits
- * in FIFO order. When `signal` is provided, a waiting acquire rejects (and
- * removes itself from the queue) if the signal aborts — so a cancelled or
- * stuck caller never holds the queue hostage.
+ * Acquire a permit: immediate when free, otherwise FIFO-queued. A provided
+ * `signal` makes a waiting acquire reject (and dequeue) on abort, so a
+ * cancelled/stuck caller never holds the queue hostage.
  */
   async acquire(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new Error("semaphore acquire aborted");
@@ -467,10 +455,9 @@ export class Semaphore {
     }
   }
  /**
- * Run `fn` under the semaphore, always releasing the permit. An optional
- * `timeoutMs` bounds how long `fn` may run before it is abandoned (the
- * permit is released so other work proceeds); `signal` cancels a queued
- * acquire. A stuck sub-agent therefore cannot starve the rest of the pool.
+ * Run `fn` under the semaphore, always releasing the permit. `timeoutMs`
+ * bounds `fn`'s runtime (permit released on timeout so others proceed);
+ * `signal` cancels a queued acquire. A stuck sub-agent can't starve the pool.
  */
   async withPermit<T>(fn: () => Promise<T>, opts: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
     await this.acquire(opts.signal);
@@ -576,12 +563,9 @@ export const taskTool: ToolDef<typeof schema> & {
     }
     const sem = this._sem;
 
-    // Total-spawn guard, shared by BOTH the team path and the fan-out path so a
-    // team can't bypass the session-wide fork-bomb cap. `tryReserve` checks the
-    // cumulative `_spawned` counter against `maxTotal`, increments it by the
-    // granted amount, and returns how many spawns are allowed now (0 = at cap).
-    // Fan-out trims to fit; a team roster is atomic, so it refuses wholesale
-    // when it would overflow rather than running a partial team.
+    // Total-spawn guard shared by the team and fan-out paths: `tryReserve`
+    // checks the cumulative `_spawned` counter against `maxTotal`. Fan-out
+    // trims to fit; a team roster is atomic and refuses wholesale on overflow.
     const maxTotal = this.maxTotal ?? 200;
     const tryReserve = (want: number): number => {
       const already = this._spawned ?? 0;
@@ -590,13 +574,10 @@ export const taskTool: ToolDef<typeof schema> & {
       return grant;
     };
 
-    // Background dispatch (single-task mode, `run: "background"`): launch the
-    // sub-agent detached, return a handle immediately, and deliver a one-time
-    // completion summary to the parent later. Only single-task mode — fan-out /
-    // team / csv always await (they exist to produce a combined result the
-    // parent reads now). A permit + a spawn-count slot are held for the run's
-    // real lifetime and released when it settles, so a background job counts
-    // against the same concurrency / fork-bomb caps as an awaited one.
+    // Background dispatch (single-task mode): launch detached, return a handle
+    // immediately, deliver a one-time completion summary later. Fan-out/team/csv
+    // always await. A permit + spawn slot are held for the run's real lifetime
+    // and released on settle.
     if (
       input.run === "background" &&
       input.objective &&

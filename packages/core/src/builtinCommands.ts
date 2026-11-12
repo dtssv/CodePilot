@@ -1,10 +1,6 @@
-// Shared catalog of built-in slash commands.
-//
-// The single cross-surface source of truth for the built-in `/` menu (TUI +
-// `commands/list` RPC for every GUI client). Two axes: `scope` ("shared" — any
-// surface, RPC-advertised; "tui-only" — terminal-only, RPC-omitted) and `kind`
-// ("local" — client-side action; "prompt" — expands to a model turn; built-ins
-// are always "local", custom markdown commands are "prompt").
+// Shared catalog of built-in slash commands: the cross-surface source of truth
+// for the `/` menu (TUI + `commands/list` RPC). Axes: `scope` ("shared" /
+// "tui-only") and `kind` ("local" / "prompt").
 
 export type BuiltinCommandScope = "shared" | "tui-only";
 

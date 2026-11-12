@@ -25,12 +25,9 @@ export const PROJECT_MEMORY_NAME = "CODEPILOT.md";
 export const AGENTS_MEMORY_NAME = "AGENTS.md";
 
 /**
- * Instruction-file candidates read at each directory level, in precedence
- * order (first = highest). Override/local variants win over the formal file
- * of the same family so an uncommitted tweak layers on top of the committed
- * instructions. Identical content (by trimmed text) is read only once across
- * the list so a repo that ships the same body under two names is not injected
- * twice.
+ * Instruction-file candidates read at each directory level, in precedence order
+ * (first = highest). Override/local variants win over the formal file of the
+ * same family; identical content is read only once.
  */
 export const MEMORY_CANDIDATE_NAMES = [
   PROJECT_MEMORY_NAME,
@@ -96,23 +93,8 @@ export async function readMemory(cwd: string): Promise<MemoryContents> {
 
 /**
  * Hierarchical project memory: walk from `cwd` upward collecting instruction
- * files ({@link MEMORY_CANDIDATE_NAMES}) at each level. Nearer directories take
- * precedence — their content is listed first. The combined markdown annotates
- * each layer with its source path so the model can cite (and update) the right
- * file.
- *
- * The walk stops at the git toplevel for `cwd` (or the cwd itself when not in a
- * repo) so repo-external parent conventions are not pulled in. Pass
- * `walkToHome: true` to instead walk up to the user's home directory.
- *
- * At each directory the candidate names are tried in precedence order and the
- * first non-empty, not-yet-seen content wins; override/local variants therefore
- * shadow the formal file of the same family, and identical content shared across
- * names is injected only once.
- *
- * `@import` expansion: each layer's content is scanned for `@path` tokens.
- * Imported files are expanded inline, relative to the importing file's
- * directory. Imports chain up to a max depth of 4 hops.
+ * files (nearest first, annotated with source), stopping at the git toplevel
+ * (or home with `walkToHome`). `@path` tokens expand inline, up to 4 hops.
  */
 export async function readLayeredProjectMemory(
   cwd: string,
@@ -163,10 +145,9 @@ const MAX_IMPORT_DEPTH = 4;
 const IMPORT_RE = /(?:^|\s)@([^\s@][^\s]*?)(?=\s|$)/gm;
 
 /**
- * Expand `@path` imports in a memory file's text. Paths resolve relative
- * to `baseDir`. Recursion is capped at {@link MAX_IMPORT_DEPTH} hops. A
- * visited set guards against cycles. Missing files are left as-is (the
- * model sees the literal `@path` and can investigate).
+ * Expand `@path` imports in a memory file's text, relative to `baseDir`.
+ * Recursion capped at MAX_IMPORT_DEPTH; a visited set guards cycles. Missing
+ * files are left as-is so the model sees the literal `@path`.
  */
 async function expandImports(text: string, baseDir: string, depth: number): Promise<string> {
   if (depth >= MAX_IMPORT_DEPTH) return text;
@@ -260,11 +241,9 @@ const COMPACT_INSTRUCTION_TITLES = [
 ];
 
 /**
- * Extract the user's "compact instructions" from the layered project memory
- * (CODEPILOT.md / AGENTS.md / CLAUDE.md up the tree). Returns the concatenated
- * bodies of every `## Compact Instructions`-style section found across the
- * layers (deduped), or undefined when none is present. Section matching reuses
- * `parseMemory`, so the block lives alongside the rest of a project's memory.
+ * Extract the user's "compact instructions" from layered project memory.
+ * Returns the concatenated bodies (deduped) of every `## Compact Instructions`-style
+ * section, or undefined when none is present.
  */
 export async function readCompactInstructions(
   cwd: string,
@@ -453,10 +432,9 @@ export function summariseMemory(
 }
 
 /**
- * Smart truncation that, for files over a line threshold, keeps the
- * head (header lines) of each section plus a leading excerpt, then
- * collapses the tail with a marker. Falls back to a flat prefix for
- * unstructured files.
+ * Smart truncation: for files over a line threshold, keeps the head of each
+ * section plus a leading excerpt, collapsing the tail with a marker. Falls back
+ * to a flat prefix for unstructured files.
  */
 export function summariseMemoryText(text: string, maxChars: number): string {
   const lines = text.split(/\r?\n/);

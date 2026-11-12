@@ -1,22 +1,8 @@
 // goal_status: the structured, format-drift-proof channel for reporting the
-// terminal state of a long-horizon goal loop.
-//
-// Why a tool alongside the text markers
-// -------------------------------------
-// The goal loop decides "done" by looking for a `<goal_status>completed</…>` /
-// `<goal_status>blocked</…>` marker in the assistant's text. Text scanning is
-// fragile: a reworded marker, a marker buried mid-paragraph, or stray output can
-// cause a miss (loop keeps spinning) or a false positive (loop stops early).
-//
-// This tool gives the model a second, authoritative channel: a structured call
-// the host trusts AHEAD of the text scan. It emits a `goal_status` event (via a
-// JSON block the agent loop parses, mirroring `start_goal`'s `goal_request`),
-// which the goal loop reads before falling back to the text markers. The text
-// markers stay fully supported — this is additive, not a replacement.
-//
-// Outside a goal loop (ordinary agent/chat turns, or a host that never drives
-// rounds) nothing reads the event, so the tool is a harmless, explanatory no-op:
-// it does not start a loop, change modes, or end the turn on its own.
+// terminal state of a long-horizon goal loop, trusted ahead of the fragile
+// text-marker scan. Emits a `goal_status` event the goal loop reads before
+// falling back to the text markers (which stay supported). Outside a goal loop
+// it is a harmless, explanatory no-op.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";

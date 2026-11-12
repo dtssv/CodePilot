@@ -1,16 +1,7 @@
 /**
- * Persistent prompt history for the TUI.
- *
- * Storage: one JSON line per entry at ~/.codepilot/tui-history.jsonl:
- * {"text":"…","cwd":"…","at":1739000000000}
- *
- * Design choices:
- * - Append-only JSONL: a crash mid-write corrupts at most the last line,
- * which we skip on load. No locking needed for a single TUI instance.
- * - Load is sync and capped (newest N entries) so startup stays instant.
- * - Duplicates are de-duped on write (move-to-end semantics).
- * - Entries from every cwd are kept; navigation shows newest first
- * regardless of project — muscle memory beats scoping here.
+ * Persistent prompt history for the TUI, append-only JSONL at
+ * ~/.codepilot/tui-history.jsonl (one {"text","cwd","at"} per line). Crash-safe
+ * (last line skipped on load), deduped on write, newest first across all cwds.
  */
 import { appendFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { writeFileSync, renameSync } from "node:fs";
@@ -87,10 +78,9 @@ export function compactHistory(path: string = defaultHistoryPath()): void {
 }
 
 /**
- * Fuzzy-filter history for the Ctrl+R reverse-search. A query matches when
- * its characters appear in order in the entry text (subsequence match);
- * results are ranked: substring-prefix hits first, then other substring
- * hits, then subsequence hits, newest first within each tier.
+ * Fuzzy-filter history for Ctrl+R reverse-search: subsequence match, ranked
+ * substring-prefix first, then other substring, then subsequence, newest first
+ * within each tier.
  */
 export function searchHistory(
   entries: readonly HistoryEntry[],

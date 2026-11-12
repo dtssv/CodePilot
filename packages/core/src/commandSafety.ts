@@ -1,11 +1,8 @@
 // Shell command structure for permission decisions.
 //
-// Permission rules like `bash(cat *)` are prefix globs over the whole command
-// string, so on their own they also match `cat a && rm -rf x`. The helpers
-// here split a command into the simple commands it runs, so rules and the
-// read-only allowlist can be applied to each one, and flag constructs whose
-// effect cannot be judged from the text (command substitution, file writes
-// through redirection).
+// Splits a command into the simple commands it runs so permission rules and the
+// read-only allowlist apply to each one, and flags constructs whose effect
+// cannot be judged from the text (command substitution, redirection writes).
 
 export interface ParsedCommand {
  /** The simple commands, split on `&&`, `||`, `;`, `|`, `&` and newlines. */
@@ -75,13 +72,9 @@ export function parseCommand(command: string): ParsedCommand {
 }
 
 /**
- * File paths a command writes to through output redirection (`>`, `>>`, `&>`,
- * `n>`, `n>>`). Harmless targets (`/dev/null`, fd duplication like `2>&1`) are
- * skipped, as are redirections into process/command substitution (those are
- * `opaque` and judged separately). Quotes around the target are stripped. Used
- * to apply the workspace-boundary policy to bash writes, which the OS jail would
- * otherwise be the only thing enforcing. Best-effort: a path built from a
- * variable or substitution is not resolvable here and is not returned.
+ * File paths a command writes to via output redirection (`>`, `>>`, `&>`, `n>`).
+ * Harmless targets (`/dev/null`, fd duplication) and substitution redirects are
+ * skipped; quotes stripped. Best-effort — variable/substitution paths unresolvable.
  */
 export function extractRedirectWriteTargets(command: string): string[] {
   const targets: string[] = [];

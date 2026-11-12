@@ -60,13 +60,9 @@ export class McpStdioClient extends BaseJsonRpcClient {
     const proc = spawn(command, this.config.args ?? [], {
       env: {
         ...process.env,
-        // MCP servers are commonly launched via `npx`/`uvx`/`node`. When the
-        // daemon is started by a GUI app (the macOS desktop launches it via
-        // Electron), the inherited PATH is the trimmed GUI environment
-        // (/usr/bin:/bin:/usr/sbin:/sbin) and omits /usr/local/bin,
-        // /opt/homebrew/bin, nvm, etc. — so `npx` isn't found and the server
-        // exits with code 127. Augment PATH with the usual user bin dirs so
-        // stdio servers resolve regardless of how the daemon was launched.
+        // GUI-launched daemons inherit a trimmed PATH that omits
+        // /usr/local/bin, /opt/homebrew/bin, nvm, etc., making `npx`/`uvx`/`node`
+        // fail with 127. Augment PATH with the usual user bin dirs.
         PATH: augmentedPath(process.env.PATH),
         ...(this.config.env ?? {}),
       },

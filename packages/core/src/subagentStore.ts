@@ -1,19 +1,8 @@
-// Durable per-sub-agent transcript store.
-//
-// Each sub-agent run gets its own append-only JSONL file at
-// `<projectStateDir>/subagents/<sessionId>.jsonl`, mirroring the session-level
-// event-sourcing model (one file per session, single writer, append+replay).
-// This is what makes a sub-agent CONTINUABLE: the parent can pass the
-// sub-agent's `sessionId` back as `continue_session_id` and the runner replays
-// the stored events as history so the sub-agent resumes its own conversation
-// instead of starting over. It also lets an interrupted in-flight sub-agent be
-// picked up again — its partial transcript survives the crash.
-//
-// Only "replayable" events (message / tool_call / tool_result / plan / usage /
-// error) are stored; live-only noise (deltas, activity) is dropped so the file
-// stays a faithful, replayable transcript and does not balloon. Everything is
-// best-effort: a missing/corrupt file just means the sub-agent can't be
-// continued and runs fresh.
+// Durable per-sub-agent transcript store: an append-only JSONL file at
+// `<projectStateDir>/subagents/<sessionId>.jsonl` of replayable events only.
+// It makes a sub-agent CONTINUABLE — passing its sessionId back replays stored
+// events as history instead of restarting. Best-effort: a missing/corrupt file
+// just means the sub-agent runs fresh.
 
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

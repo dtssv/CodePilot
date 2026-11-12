@@ -1,9 +1,8 @@
-// Opt-in ACP (Agent Client Protocol) stdio server adapter — a SECONDARY
-// interface reachable only via `codepilot acp`. The native JSON-RPC in
-// server.ts stays primary. ACP rides the same `Peer`/`StdioTransport` (no new
-// deps), translating core `Session` events to ACP `session/update` and prompts
-// to ACP reverse requests. Single-client: each ACP session maps to one core
-// Session and one peer (no multi-holder broadcast).
+// Opt-in ACP (Agent Client Protocol) stdio server adapter — a secondary
+// interface via `codepilot acp` (native JSON-RPC in server.ts stays
+// primary). Rides the same Peer/StdioTransport, translating core Session
+// events to ACP session/update and prompts to ACP reverse requests.
+// Single-client: each ACP session maps to one core Session + one peer.
 
 import { Peer, StdioTransport, RpcError, ErrorCode, type RpcTransport } from "./rpc.js";
 import type {

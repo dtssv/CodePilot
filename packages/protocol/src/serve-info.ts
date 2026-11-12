@@ -1,10 +1,7 @@
-// Discovery file for a running `codepilot serve --web`. Written on startup,
-// removed on exit, so that `codepilot chat` / `codepilot-tui` can detect a
-// live server and attach to it (follow the same sessions) instead of silently
-// starting a second, conflicting in-process engine.
-//
-// Only loopback servers are advertised — we never want a terminal to
-// auto-connect to a remote host it wasn't told about.
+// Discovery file for a running `codepilot serve --web`. Written on
+// startup, removed on exit, so `codepilot chat` / `codepilot-tui` can
+// detect a live server and attach instead of starting a conflicting
+// in-process engine. Only loopback servers are advertised.
 
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";

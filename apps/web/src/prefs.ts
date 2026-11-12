@@ -1,10 +1,6 @@
-// Remembered connection settings and open workspaces.
-//
-// URL, token and workspaces live in `localStorage` so a refresh or a newly
-// opened tab (including one opened from the serve-printed link) reconnects
-// without the connect form. A restarted `serve` issues a new token; the old
-// one simply fails auth until the user opens the new link, which overwrites
-// the saved token.
+// Remembered connection settings and open workspaces in `localStorage` so a
+// refresh or new tab reconnects without the connect form. A restarted `serve`
+// issues a new token; the old one fails auth until the new link overwrites it.
 
 import type { AgentMode, PermissionMode, ReasoningEffort } from "@codepilot/core";
 
@@ -100,10 +96,8 @@ export function removeWorkspace(cwd: string): string[] {
 
 /**
  * Replace the entire workspace list with exactly `cwds` (normalized, deduped)
- * and persist it. Unlike {@link addWorkspace}, this PURGES any prior entries —
- * used by a remote phone so only the grant-authorized workspaces remain,
- * discarding stale localStorage-cached workspaces from an earlier local
- * session on the same browser profile.
+ * and persist it. Unlike {@link addWorkspace}, this PURGES prior entries — used
+ * by a remote phone so only grant-authorized workspaces remain.
  */
 export function replaceWorkspaces(cwds: string[]): string[] {
   const seen = new Set<string>();

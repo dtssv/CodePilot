@@ -60,13 +60,9 @@ export interface StreamChatOptions {
   * from it (see `anthropic.ts`); setting this explicitly takes precedence. */
   thinkingBudget?: number;
  /**
-  * Request provider-enforced structured output. Currently honored by the
-  * OpenAI dialect, which emits `response_format: { type: "json_schema", ... }`
-  * so the model is constrained to the given JSON Schema. Providers without a
-  * native equivalent ignore it (callers should still prompt for the shape).
-  * NOTE: some models reject `json_schema` combined with tool-calling in the
-  * same request — intended for single-shot structured completions, not the
-  * tool loop.
+  * Provider-enforced structured output. OpenAI dialect emits
+  * `response_format: { type: "json_schema", ... }`; others ignore it.
+  * Some models reject it combined with tool-calling (single-shot only).
   */
   responseFormat?: {
     /** Schema name (OpenAI requires one; `[a-zA-Z0-9_-]`). */
@@ -83,14 +79,9 @@ export interface StreamChatOptions {
   * latest snapshot into the status-line payload). */
   onRateLimit?: (info: { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }) => void;
  /**
-  * Tool-call policy for this turn. `"auto"` (default) lets the model decide;
-  * `"none"` hard-disables tool calls so the model MUST answer in text. The
-  * agent loop sets `"none"` at the turn-budget boundary (and the sub-agent
-  * synthesis turn) so the final turn cannot start another tool call that would
-  * blow the budget — a hard backstop to the prose wind-down nudge. Tool
-  * definitions are still sent (so the prompt cache prefix stays stable);
-  * only the ability to invoke them is withdrawn. Providers without a native
-  * `tool_choice` knob ignore it. Omitted ⇒ provider default (auto).
+  * Tool-call policy: `"auto"` (default) lets the model decide; `"none"`
+  * disables tool calls so the model MUST answer in text. Tool definitions
+  * are still sent (keeps the prompt cache prefix stable). Omitted ⇒ auto.
   */
   toolChoice?: "auto" | "none";
 }
@@ -133,22 +124,15 @@ export interface ChatProvider {
   readonly smallModel: string;
   stream(opts: StreamChatOptions): AsyncIterable<StreamEvent>;
  /**
-  * OPTIONAL native fill-in-the-middle completion (design G, phase 2/4). When a
-  * provider/model supports it (OpenAI-compatible `/v1/completions` with a
-  * `suffix`, i.e. DeepSeek-Coder / Codestral / Qwen-Coder / vLLM / Ollama FIM),
-  * this returns the raw middle text for a prefix+suffix in ONE non-streaming
-  * call — strictly lower latency and higher quality than wrapping the task in a
-  * chat prompt. Providers without a FIM endpoint omit this; callers
-  * (handleInlineCompletion) fall back to the chat path. Used ONLY by inline
-  * completion, never by the agent loop.
+  * OPTIONAL native fill-in-the-middle completion. Returns middle text for a
+  * prefix+suffix in one call when the provider supports a FIM endpoint.
+  * Used ONLY by inline completion; callers fall back to chat otherwise.
   */
   fim?(opts: FimCompletionOptions): Promise<FimCompletionResult>;
   /**
-   * OPTIONAL exact prompt token count via the provider's count-tokens API
-   * (Anthropic `/v1/messages/count_tokens`). Used ONLY on explicit demand
-   * (`/context --precise`) to show an accurate gauge — never on a hot path and
-   * never to drive compaction. Providers without the API omit this; callers fall
-   * back to the local heuristic.
+   * OPTIONAL exact prompt token count via the provider's count-tokens API.
+   * Used ONLY on explicit demand (`/context --precise`), never on a hot path
+   * or to drive compaction. Providers without the API fall back to the heuristic.
    */
   countTokens?(opts: CountTokensOptions): Promise<CountTokensResult>;
 }
@@ -214,16 +198,9 @@ export function userMessage(
 }
 
 /**
- * Collapse adjacent same-role messages into a single message.
- *
- * Several sources produce same-role runs (e.g. the real user turn followed by
- * a runtime-context message, or two system fragments) that strict
- * provider-compatible backends reject. The walk-and-flush skeleton is identical
- * across providers; only the *rule* for folding `cur` into `prev` differs — so
- * each provider supplies a `mergeInto(prev, cur)` callback that mutates `prev`
- * and returns `true` when it absorbed `cur`, or `false` to keep `cur` as its
- * own message. The accumulator is seeded with shallow clones so callers never
- * mutate their inputs.
+ * Collapse adjacent same-role messages into one. Same-role runs are rejected
+ * by strict provider backends. Each provider supplies a `mergeInto(prev, cur)`
+ * callback returning `true` when it absorbed `cur`. Inputs are shallow-cloned.
  */
 export function mergeAdjacentRoles<T>(
   messages: readonly T[],

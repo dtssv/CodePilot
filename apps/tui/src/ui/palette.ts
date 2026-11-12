@@ -1,14 +1,7 @@
 /**
- * Fuzzy matching for the command palette.
- *
- * A query matches a command when it fuzzy-matches (subsequence) the name OR
- * any word in the description. Ranking:
- * 1. exact name match
- * 2. name startsWith query
- * 3. name substring
- * 4. name subsequence
- * 5. description substring
- * Ties break by the command's original list order (built-ins first).
+ * Fuzzy matching for the command palette. A query matches when it subsequence-
+ * matches the name OR any description word. Ranking: exact > startsWith >
+ * substring > subsequence > description substring; ties break by list order.
  */
 import type { CommandInfo } from "./commands.js";
 

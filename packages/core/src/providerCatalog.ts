@@ -110,13 +110,9 @@ function mergeTemplates(
 }
 
 /**
- * GitHub catalog (update once per day; keep local forever on failure).
- *
- * `overlay` lets a caller merge extra templates on TOP of the bundled +
- * remote set — e.g. plugin-contributed templates from
- * `collectPluginProviderTemplates`. Overlay templates win on id clash, but
- * plugin ids are namespaced `<plugin>/<id>` so they never collide with
- * built-ins in practice.
+ * GitHub catalog (update daily; keep local forever on failure). `overlay` merges
+ * extra templates on top of bundled+remote and wins on id clash; plugin ids are
+ * namespaced `<plugin>/<id>` so collisions with built-ins don't occur.
  */
 export async function listProviderTemplates(opts?: {
   force?: boolean;
@@ -148,10 +144,9 @@ export function nextProviderId(base: string, existing: Iterable<string>): string
 const SYNTHETIC_ACTIVE_ID = "_active";
 
 /**
- * Pick a concrete chat model when the caller did not pass one.
- * Prefer flat `config.model`, then `activeProvider`'s preset, then the first
- * selectable chat model from `providers`. Never invent a vendor default
- * (the old `"claude-sonnet-4-5"` fallback showed up as a phantom model).
+ * Pick a concrete chat model when the caller did not pass one. Prefer flat
+ * `config.model`, then `activeProvider`'s preset, then the first selectable
+ * chat model from `providers`. Never invent a vendor default.
  */
 export function resolveDefaultModel(
   config: CodepilotConfig | ResolvedCodepilotConfig,

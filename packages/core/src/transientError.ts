@@ -1,16 +1,5 @@
-// Single source of truth for message-based transient-error classification.
-//
-// Several layers need to ask "is this error worth retrying / not a real
-// failure?" from an error *message* (as opposed to an HTTP Response — that
-// status-based check lives in providers/retry.ts, a lower layer):
-//   - the agent turn loop (regenerate a dropped stream),
-//   - the task tool (retry a transient sub-agent failure once),
-//   - stop-verify (treat a rate-limited judge call as a non-failure).
-// They used to each carry their own near-duplicate regex, which drifted: the
-// judge classifier matched phrasings the others lacked ("too many requests",
-// "tokens limit", "访问限制") while missing network/timeout, and the task
-// classifier was a strict subset of the agent one. Unifying on this union keeps
-// the retry policy predictable everywhere.
+// Transient-error classification from error messages: shared by the agent
+// turn loop, the task tool, and stop-verify so retry policy stays consistent.
 
 /** Phrasings that indicate a transient, retry-worthy failure. The union of the
  * network, errno, timeout, overload, rate-limit, and stream-drop families, plus
@@ -28,18 +17,9 @@ const TRANSIENT_PATTERNS: RegExp[] = [
   /stream (ended|closed)|unexpected end/i,
 ];
 
-/** Client errors (HTTP 4xx) are deterministic: the request itself is wrong
- * (bad params, unsupported schema, auth, not found), so retrying sends the same
- * bad request and fails the same way — it must fail fast. The exceptions are the
- * few 4xx that genuinely clear on retry: 408 request-timeout, 409 conflict,
- * 425 too-early, 429 rate-limit (mirrors the retryable set in providers/retry.ts).
- *
- * Providers frame the status as a standalone code right before a colon —
- * "OpenAI 400: <body>", "Anthropic 404: <body>", "Gemini 400: <body>" (see
- * providers/{openai,anthropic,gemini}.ts). We anchor on that "<code>:" token so
- * a stray 4xx/5xx number or a "please try again" nicety inside the response body
- * cannot flip the verdict. Status 0 / network-level failures have no such token
- * and fall through to the transient-pattern check below. */
+/** Client 4xx errors are deterministic and fail fast, except the few that clear
+ * on retry (408/409/425/429). Providers frame the status as "<code>:" which we
+ * anchor on so a stray number or "try again" in the body cannot flip the verdict. */
 const STATUS_TOKEN = /(?:^|\s)(\d{3}):/;
 const RETRYABLE_CLIENT_STATUS = new Set([408, 409, 425, 429]);
 
@@ -60,16 +40,9 @@ export function isTransientError(message: string): boolean {
   return TRANSIENT_PATTERNS.some((re) => re.test(message));
 }
 
-/** Coarse failure class for a provider request, from its error message.
- *  - "payload_too_large": the request bytes/size were rejected (413 or an
- *    explicit "payload/request too large"), WITHOUT token/context-window
- *    semantics. Recover by shrinking the request body (fold the largest tool
- *    results, drop inline images, head+tail a single oversize message) rather
- *    than compacting the whole transcript.
- *  - "context_overflow": too many tokens for the model's context window.
- *    Recover by compacting the transcript and shrinking the send budget.
- *  - "transient": network blip / rate-limit / gateway overload — retry.
- *  - "fatal": a deterministic error (auth, bad request) — fail fast. */
+/** Coarse failure class for a provider request, from its error message:
+ * payload_too_large (shrink request body), context_overflow (compact transcript),
+ * transient (retry), fatal (fail fast). */
 export type ProviderFailureKind =
   | "payload_too_large"
   | "context_overflow"
@@ -93,10 +66,8 @@ const CONTEXT_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Classify a provider failure from its error message. Structured signal (the
- * framed HTTP status) is consulted first; 413 is split by whether the body also
- * carries context/window semantics (then overflow) or only size semantics (then
- * payload). Non-413 messages fall back to pattern families.
+ * Classify a provider failure from its error message. Framed HTTP status first;
+ * 413 splits by context vs size semantics; non-413 falls back to pattern families.
  */
 export function classifyProviderFailure(message: string): ProviderFailureKind {
   const statusMatch = STATUS_TOKEN.exec(message);
@@ -116,19 +87,9 @@ export function classifyProviderFailure(message: string): ProviderFailureKind {
   return "fatal";
 }
 
-/** Failure class as it bears on *provider failover* — a finer split than
- * {@link ProviderFailureKind} because failover must distinguish errors that are
- * worth trying on another provider (rate-limit, overload, 5xx, transport) from
- * those that will fail identically everywhere (auth, a malformed request) and
- * from quota, which is usually account-scoped and so is governed by policy.
- *  - "auth": 401/403 — a wrong/expired key or missing permission.
- *  - "invalid_request": a deterministic 4xx (bad params, unsupported schema).
- *  - "quota": the account's quota/credit is exhausted (often account-wide).
- *  - "rate_limit": 429 / "rate limit" — transient pressure.
- *  - "overloaded": 529 / gateway overload / "temporarily unavailable".
- *  - "server_5xx": a 5xx other than 529.
- *  - "transport": network/socket/timeout with no HTTP status.
- *  - "other": anything unclassified (treated as non-cascading by default). */
+/** Failure class for provider failover: distinguishes errors worth trying on
+ * another provider (rate_limit, overloaded, server_5xx, transport) from those
+ * that fail identically everywhere (auth, invalid_request) and from quota. */
 export type ProviderFailoverKind =
   | "auth"
   | "invalid_request"
@@ -155,12 +116,9 @@ const TRANSPORT_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Classify a provider failure for failover routing. The framed HTTP status
- * ("<Provider> <code>: <body>") is authoritative when present: 401/403 → auth,
- * 429 → rate_limit, 529 → overloaded, other 5xx → server_5xx, other 4xx →
- * invalid_request. Quota phrasings win over a bare 429 (an exhausted quota is
- * not a transient rate limit). Status-less messages fall back to pattern
- * families; anything unrecognised is "other".
+ * Classify a provider failure for failover routing. Framed HTTP status is
+ * authoritative; quota phrasings win over a bare 429; status-less messages
+ * fall back to pattern families; unrecognised → "other".
  */
 export function classifyFailover(message: string): ProviderFailoverKind {
   const statusMatch = STATUS_TOKEN.exec(message);

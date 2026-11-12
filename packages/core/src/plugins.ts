@@ -1,8 +1,6 @@
 /**
- * Plugins — distributable extensions. A plugin dir has a `plugin.json` manifest
- * plus any of: skills, agents, commands, hooks, MCP configs. Discovered from
- * <cwd>/.codepilot/plugins/ and ~/.codepilot/plugins/; install clones/copies into
- * ~/.codepilot/plugins/<name>/.
+ * Plugins — distributable extensions (skills, agents, commands, hooks, MCP).
+ * Discovered from <cwd>/.codepilot/plugins/ and ~/.codepilot/plugins/.
  * @module plugins
  */
 import { readdir, readFile, stat, rm, mkdir, mkdtemp } from "node:fs/promises";
@@ -31,13 +29,8 @@ export interface PluginTrustGate {
 
 /**
  * Capabilities a plugin may declare under `permissions`.
- * - `hooks`    — register hooks (run shell/http/mcp/prompt/agent handlers)
- * - `mcp`      — register MCP servers (spawn external processes / endpoints)
- * - `runtime`  — replace the agent loop with plugin-provided Node code
- * - `tools`    — contribute tools the model can call (via the runtime toolkit)
- * - `network`  — advisory: the plugin's skills/agents reach the network
- * - `fileWrite`— advisory: the plugin's skills/agents write files
- * - `bash`     — advisory: the plugin's skills/agents run shell commands
+ * `hooks`/`mcp`/`runtime`/`tools` gate the matching resource;
+ * `network`/`fileWrite`/`bash` are advisory side-effect tags.
  */
 export type PluginPermission =
   | "hooks"
@@ -61,9 +54,7 @@ export const PLUGIN_PERMISSIONS: readonly PluginPermission[] = [
 
 /**
  * A provider template a plugin may contribute (`plugin.json` `providerTemplates`).
- * Plain-data subset of the catalog's `ProviderTemplate` (duplicated, not imported,
- * to keep the manifest decoupled). Plugins contribute templates (baseURL + models
- * + protocol), NOT provider code; custom transport/OAuth is out of scope (§4.3).
+ * Plain-data (baseURL + models + protocol), no provider code.
  */
 export interface PluginProviderTemplate {
  /** Stable id; namespaced to the plugin on merge to avoid clashes. */
@@ -106,23 +97,18 @@ export interface PluginManifest {
   */
   providerTemplates?: PluginProviderTemplate[];
  /**
-  * Capabilities the plugin needs. Opt-in enforcement: when present, an
-  * undeclared `hooks`/`mcpServers`/`runtime` is refused at merge (fail-closed)
-  * + warned; when absent, legacy no-gating behaviour. `hooks`/`mcp`/`runtime`
-  * gate the matching resource; `network`/`fileWrite`/`bash`/`tools` are advisory
-  * consent tags (`tools` is advisory — the hard gate is `runtime`).
+  * Capabilities the plugin needs. Opt-in: when present, an undeclared
+  * `hooks`/`mcpServers`/`runtime` is refused at merge (fail-closed).
+  * `network`/`fileWrite`/`bash`/`tools` are advisory.
   */
   permissions?: PluginPermission[];
  /** Whether the plugin is enabled (default true). */
   enabled?: boolean;
  /**
- * Custom agent runtime: a JS module exporting a `RuntimeFactory` (default
- * export, or named `factory`/`runtimeFactory`).
- * - String form: relative module path (factory's own `name` used).
- * - Object form: `module` + optional `name` + optional `default: true` to
- *   claim the session runtime (only one plugin may; see {@link initPluginRuntimes}).
- * Runs in-host with full Node access — install only trusted plugins.
- */
+  * Custom agent runtime: a JS module exporting a `RuntimeFactory` (default
+  * export, or named `factory`/`runtimeFactory`). String = relative module path;
+  * object form adds `name`/`default`. Runs in-host with full Node access.
+  */
   runtime?: string | { module: string; name?: string; default?: boolean };
 }
 
@@ -251,10 +237,8 @@ export interface PluginPermissionReport {
 }
 
 /**
- * Report a plugin's declared permissions against the capabilities its
- * manifest actually ships. Pure; use it to drive a consent UI (`/plugins`)
- * or to explain why a resource was skipped. `violations` is always empty
- * when the plugin didn't opt into enforcement (no `permissions` field).
+ * Report a plugin's declared permissions vs. the capabilities its manifest
+ * ships. `violations` is empty when the plugin didn't opt into enforcement.
  */
 export function pluginPermissionReport(plugin: Plugin): PluginPermissionReport {
   const m = plugin.manifest;
@@ -270,15 +254,9 @@ export function pluginPermissionReport(plugin: Plugin): PluginPermissionReport {
 // ---------------------------------------------------------------------------
 
 /**
- * What a plugin will contribute and what side effects it carries, derived
- * from its manifest (and, when the directory is on disk, a best-effort static
- * scan of the runtime module). Built BEFORE a plugin is activated — or even
- * before it is committed to the plugins dir — so a host can show the user
- * exactly what they are about to run and ask for consent.
- *
- * This is deliberately static and execution-free: we never run plugin code to
- * find out what it does (running it is the very thing we are gating). Tool
- * detection from a runtime module is therefore best-effort — see `toolsPartial`.
+ * What a plugin will contribute and its side effects, derived from the manifest
+ * (+ best-effort static scan of the runtime module). Static and execution-free;
+ * built before activation for consent. Tool detection is best-effort.
  */
 export interface PluginCapabilityReport {
   name: string;
@@ -444,10 +422,9 @@ function allowsCapability(manifest: PluginManifest, cap: PluginPermission): bool
 // ---------------------------------------------------------------------------
 
 /**
- * Collect all resource directories from discovered plugins, in priority order
- * (project plugins before user plugins). These paths can be passed to the
- * respective discovery functions (`discoverSkills`, `discoverCustomAgents`,
- * `discoverSlashCommands`) as `extraDirs`.
+ * Collect resource directories from discovered plugins (project before user).
+ * Pass to `discoverSkills`/`discoverCustomAgents`/`discoverSlashCommands`
+ * as `extraDirs`.
  */
 export function pluginResourcePaths(
   plugins: Map<string, Plugin>
@@ -465,8 +442,7 @@ export function pluginResourcePaths(
 
 /**
  * Collect provider templates from discovered plugins (pure data, no code).
- * Ids namespaced `<plugin>/<id>`; templates missing `id`/`displayName`/`provider`
- * or naming an unsupported provider are skipped. Feed to
+ * Ids namespaced `<plugin>/<id>`; invalid ones are skipped. Feed to
  * {@link listProviderTemplates} as an overlay.
  */
 export async function collectPluginProviderTemplates(
@@ -495,13 +471,9 @@ export async function collectPluginProviderTemplates(
 }
 
 /**
- * Merge plugin hooks and MCP server configs into a session config.
- * Returns a new config object; does not mutate the input.
- *
- * When a plugin opts into permission enforcement (its manifest has a
- * `permissions` field), a capability-bearing resource it did not declare is
- * refused (fail-closed) and reported via `onWarn`. Plugins without a
- * `permissions` field keep the legacy behaviour (no gating).
+ * Merge plugin hooks and MCP server configs into a session config (new object).
+ * Enforced plugins refuse undeclared capabilities (fail-closed, via `onWarn`);
+ * plugins without a `permissions` field keep legacy no-gating behaviour.
  */
 export function mergePluginConfig(
   config: Record<string, unknown>,
@@ -589,11 +561,8 @@ export function mergePluginConfig(
 
 /**
  * The runtime name a plugin declared as session default (`runtime.default
- * === true`), or undefined. `existing` = already-chosen name (config/session);
- * conflicting defaults throw rather than pick silently. `registered` (plugin
- * → registered name, from {@link loadPluginRuntimes}) resolves a manifest
- * omitting `runtime.name` from the factory (post-import); without it the
- * plugin name is the best guess.
+ * === true`), or undefined. Conflicting defaults throw. `registered` resolves
+ * a manifest omitting `runtime.name` from the factory post-import.
  */
 export function pluginDefaultRuntime(
   plugins: Map<string, Plugin>,
@@ -629,12 +598,9 @@ export interface PluginRuntimeLoadResult {
 }
 
 /**
- * Dynamically import each discovered plugin's `runtime` module and register
- * its `RuntimeFactory` (default: process-wide {@link runtimeRegistry}). Factory
- * export may be default or named `factory`/`runtimeFactory`; `name` overridable
- * via manifest `runtime.name`. Per-plugin isolated — failures collected in
- * `errors` for host surfacing. Call after `discoverPlugins`, before session
- * creation.
+ * Import each discovered plugin's `runtime` module and register its
+ * `RuntimeFactory` (default or `factory`/`runtimeFactory` export). Per-plugin
+ * isolated; failures collected in `errors`. Call after `discoverPlugins`.
  */
 export async function loadPluginRuntimes(
   plugins: Map<string, Plugin>,
@@ -741,10 +707,8 @@ export interface InstallOptions {
 
 /**
  * Install a plugin from a git URL (cloned) or local path (copied). A `#subdir`
- * fragment selects a monorepo sub-directory (cloned to temp, only `<subdir>`
- * copied; works for git URLs and local paths).
- * Returns the installed path. Throws if it exists (unless `force`) or has no
- * `plugin.json`.
+ * fragment selects a monorepo sub-directory. Returns the installed path.
+ * Throws if it exists (unless `force`) or has no `plugin.json`.
  */
 export async function installPlugin(
   source: string,
@@ -827,13 +791,8 @@ async function fetchPluginInto(source: string, target: string): Promise<void> {
 }
 
 /**
- * Inspect what a plugin source WILL do, without installing it. Fetches the
- * source into a temp dir (git clone / local copy), reads its manifest, builds
- * a {@link PluginCapabilityReport} (including a static scan for registered
- * tools), then discards the temp copy. Use this to drive an install
- * confirmation prompt: show the user the tools / side effects before any
- * plugin code lands in `~/.codepilot/plugins/` or runs.
- *
+ * Inspect what a plugin source will do, without installing it. Fetches into a
+ * temp dir, builds a {@link PluginCapabilityReport}, then discards the copy.
  * Throws if the source has no valid `plugin.json`.
  */
 export async function inspectPluginSource(source: string): Promise<PluginCapabilityReport> {
@@ -895,14 +854,9 @@ export function derivePluginName(source: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetch a marketplace index from a URL. The index is a JSON array of
- * `MarketplaceEntry` objects (or a `{ plugins: [...] }` document). This is a
- * simple HTTP GET — no auth, no pagination. Marketplace hosts can serve this
- * as a static JSON file (e.g. GitHub Pages / raw.githubusercontent.com).
- *
- * The URL must be http(s). This is third-party content: CodePilot validates
- * the format, not the claims — callers should show the install `source` for
- * confirmation before installing (see {@link describeMarketplaceEntry}).
+ * Fetch a marketplace index from a URL (JSON array or `{ plugins: [...] }`).
+ * Simple HTTP GET. Callers should show the install `source` for consent
+ * before installing (see {@link describeMarketplaceEntry}).
  */
 export async function fetchMarketplaceIndex(url: string): Promise<MarketplaceEntry[]> {
   const res = await fetch(url, {
@@ -944,14 +898,9 @@ function coercePluginIndex(data: unknown): MarketplaceEntry[] {
 }
 
 /**
- * The default, GitHub-hosted plugin marketplace — the out-of-the-box
- * discovery entry point. Mirrors `listMcpMarkets`: served from the shared
- * remote catalog (`catalog/plugins.json`, daily refresh) with a bundled
- * offline seed, so it works offline and degrades to the shipped list on any
- * network/parse failure. Pass `{ force: true }` to refresh today.
- *
- * This is what a `/plugins` browse flow calls to list installable plugins
- * without the user having to know a git URL upfront.
+ * The default plugin marketplace, served from the remote catalog with an
+ * offline seed (degrades to the shipped list on failure). Pass
+ * `{ force: true }` to refresh today.
  */
 export async function listPluginMarket(opts?: { force?: boolean }): Promise<MarketplaceEntry[]> {
   try {
