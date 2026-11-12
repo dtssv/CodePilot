@@ -37,6 +37,10 @@ export interface AppState {
   lastRequest?: { durationMs: number; ttftMs?: number; inputTokens?: number; outputTokens?: number };
  /** What the running turn is waiting on right now (model vs tools). */
   activity?: Activity;
+ /** Latest per-turn budget snapshot (from `turn_budget`). `windDownAt`/
+  * `maxTurns` are null when unlimited; `warning` marks an imminent wind-down.
+  * Cleared when a prompt settles. */
+  turnBudget?: { turn: number; windDownAt: number | null; maxTurns: number | null; stalledTurns: number; warning?: boolean };
  /** Sub-agents spawned by `task` calls, keyed by the parent tool call id. */
   subagents?: Record<string, SubagentRun[]>;
  /** Every unanswered prompt, across sessions, oldest first. `permission`
@@ -137,6 +141,7 @@ export function reducer(state: AppState, action: Action): AppState {
         agentMode: action.agentMode,
         status: "idle",
         activity: undefined,
+        turnBudget: undefined,
         rows: [],
         plan: [],
         usage: { input: 0, output: 0 },
@@ -227,6 +232,7 @@ export function reducer(state: AppState, action: Action): AppState {
         plan: [],
         usage: { input: 0, output: 0 },
         activity: undefined,
+        turnBudget: undefined,
         subagents: undefined,
         followUps: undefined,
         lastRequest: undefined,
@@ -577,6 +583,18 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
       };
     }
 
+    case "turn_budget":
+      return {
+        ...state,
+        turnBudget: {
+          turn: e.turn,
+          windDownAt: e.windDownAt,
+          maxTurns: e.maxTurns,
+          stalledTurns: e.stalledTurns,
+          ...(e.warning ? { warning: true } : {}),
+        },
+      };
+
     case "stop_continue": {
       const short =
         e.reason.length > 160 ? `${e.reason.slice(0, 157)}…` : e.reason;
@@ -599,6 +617,7 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
         ...state,
         rows,
         activity: e.status === "idle" ? undefined : state.activity,
+        turnBudget: e.status === "idle" ? undefined : state.turnBudget,
         status:
           e.status === "idle"
             ? "idle"

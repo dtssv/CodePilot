@@ -275,6 +275,30 @@ describe("side channels", () => {
     expect(state.rows).toHaveLength(0);
     expect(state.notice).toMatch(/asked for agent mode: needs to edit files/);
   });
+
+  it("records a turn_budget snapshot without a row and clears it on idle", () => {
+    let state = drive([
+      {
+        type: "turn_budget",
+        turn: 2,
+        windDownAt: 4,
+        maxTurns: 4,
+        stalledTurns: 1,
+        warning: true,
+      },
+    ]);
+    expect(state.rows).toHaveLength(0);
+    expect(state.turnBudget).toEqual({
+      turn: 2,
+      windDownAt: 4,
+      maxTurns: 4,
+      stalledTurns: 1,
+      warning: true,
+    });
+    // Settling the prompt clears the snapshot.
+    state = reducer(state, { type: "event", event: { type: "status", status: "idle" } });
+    expect(state.turnBudget).toBeUndefined();
+  });
 });
 
 describe("status transitions", () => {

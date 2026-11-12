@@ -141,6 +141,25 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ apiStyle: "grpc" as never })).toThrow();
   });
 
+  it("accepts a convergence threshold block", () => {
+    const r = validateConfig({
+      convergence: {
+        cap: 20,
+        hardSlack: 2,
+        noProgressSoft: 6,
+        noProgressStrong: 10,
+        noProgressLock: 14,
+        remainingNudgeAt: 3,
+      },
+    }) as { convergence?: { cap?: number; remainingNudgeAt?: number } };
+    expect(r.convergence?.cap).toBe(20);
+    expect(r.convergence?.remainingNudgeAt).toBe(3);
+  });
+
+  it("rejects an unknown convergence key", () => {
+    expect(() => validateConfig({ convergence: { bogus: 1 } as never })).toThrow();
+  });
+
   it("accepts a doomLoop threshold + exclude block", () => {
     const r = validateConfig({
       doomLoop: {

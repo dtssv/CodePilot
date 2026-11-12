@@ -107,6 +107,10 @@ export interface TuiState {
   sessions: { id: string; title: string; updatedAt: number; cwd: string }[];
  /** What the running turn is waiting on right now (model vs tools). */
   activity?: { phase: "model" | "tools"; since: number; tools?: string[] };
+ /** Latest per-turn budget snapshot (from `turn_budget`), for the status line.
+  * `windDownAt`/`maxTurns` are null when unlimited; `warning` marks an imminent
+  * wind-down. Cleared when a prompt settles. */
+  turnBudget?: { turn: number; windDownAt: number | null; maxTurns: number | null; stalledTurns: number; warning?: boolean };
 }
 
 export type Row =
@@ -544,6 +548,17 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           };
         case "activity":
           return { ...state, activity: { phase: ev.phase, since: ev.since, tools: ev.tools } };
+        case "turn_budget":
+          return {
+            ...state,
+            turnBudget: {
+              turn: ev.turn,
+              windDownAt: ev.windDownAt,
+              maxTurns: ev.maxTurns,
+              stalledTurns: ev.stalledTurns,
+              ...(ev.warning ? { warning: true } : {}),
+            },
+          };
         case "stop_continue": {
           const short =
             ev.reason.length > 120 ? `${ev.reason.slice(0, 117)}…` : ev.reason;
@@ -572,6 +587,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           return {
             ...state,
             activity: ev.status === "idle" ? undefined : state.activity,
+            turnBudget: ev.status === "idle" ? undefined : state.turnBudget,
             status:
               ev.status === "idle"
                 ? "idle"

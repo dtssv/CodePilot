@@ -350,7 +350,10 @@ export async function runAgent(
   // tool calls for the final turn (the same backstop the finite maxTurns path
   // uses). 0 (config or deps) disables it; otherwise it falls back to
   // DEFAULT_CONVERGENCE_CAP so the default daemon is always protected.
-  const rawConvergenceCap = deps.convergenceCap ?? deps.config.convergenceCap;
+  // Precedence: a per-run deps override, then `convergence.cap`, then the flat
+  // `convergenceCap`. All share the "0 = disabled, unset = default" meaning.
+  const cv = deps.config.convergence;
+  const rawConvergenceCap = deps.convergenceCap ?? cv?.cap ?? deps.config.convergenceCap;
   const convergenceCap =
     rawConvergenceCap === 0
       ? Number.POSITIVE_INFINITY
@@ -360,6 +363,13 @@ export async function runAgent(
   // The turn at which wind-down (synthesis urge + toolChoice:"none") begins.
   // Whichever ceiling is lower governs; both can be unlimited.
   const windDownAt = Math.min(maxTurns, convergenceCap);
+  // Resolved convergence / no-progress thresholds (config overlaid on the
+  // built-in constants).
+  const hardSlack = cv?.hardSlack ?? CONVERGENCE_HARD_SLACK;
+  const noProgressSoft = cv?.noProgressSoft ?? NO_PROGRESS_SOFT_TURNS;
+  const noProgressStrong = cv?.noProgressStrong ?? NO_PROGRESS_STRONG_TURNS;
+  const noProgressLock = cv?.noProgressLock ?? NO_PROGRESS_LOCK_TURNS;
+  const remainingNudgeAt = cv?.remainingNudgeAt ?? DEFAULT_REMAINING_NUDGE_AT;
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
   const doomLoop = new DoomLoopDetector(deps.dedupCache, deps.config.doomLoop);
@@ -506,7 +516,7 @@ export async function runAgent(
     // forever. Whichever fires first stops the run.
     const hardCeiling = Math.min(
       maxTurns,
-      Number.isFinite(windDownAt) ? windDownAt + CONVERGENCE_HARD_SLACK : Number.POSITIVE_INFINITY,
+      Number.isFinite(windDownAt) ? windDownAt + hardSlack : Number.POSITIVE_INFINITY,
     );
     if (turn >= hardCeiling) {
       if (deps.isSubagent === true && !subagentSynthesisBonus && Number.isFinite(hardCeiling)) {
@@ -571,11 +581,13 @@ export async function runAgent(
     // is the backstop. This fires even when maxTurns is unlimited, which is what
     // stops a weak model from re-verifying forever.
     let lockToolsThisTurn = false;
+    let budgetWarning = false;
     if (Number.isFinite(windDownAt) && turn > 0) {
       const remaining = windDownAt - turn;
       const capLabel = Number.isFinite(windDownAt) ? String(windDownAt) : "∞";
       if (subagentSynthesisBonus || remaining <= 1) {
         lockToolsThisTurn = true;
+        budgetWarning = true;
         systemSteerNotices.push(
           deps.isSubagent
             ? `Turn budget reached (${turn}/${capLabel}). ` +
@@ -586,10 +598,11 @@ export async function runAgent(
                 `call any more tools. Using only what you already have, write your final answer now. ` +
                 `If some detail is still unverified, say so explicitly rather than looping to verify it.`,
         );
-      } else if (remaining === 2) {
+      } else if (remaining <= remainingNudgeAt) {
+        budgetWarning = true;
         systemSteerNotices.push(
-          `Two turns left in your budget (${turn + 1}/${capLabel}). Wrap up tool use soon and ` +
-            `prepare to synthesize your final answer from what you already have.`,
+          `${remaining} turn${remaining === 1 ? "" : "s"} left in your budget (${turn + 1}/${capLabel}). ` +
+            `Wrap up tool use soon and prepare to synthesize your final answer from what you already have.`,
         );
       }
     }
@@ -601,7 +614,7 @@ export async function runAgent(
     // lock (toolChoice:"none" + synthesis urge). This is a soft land, not a
     // failure; any later durable progress resets the streak (see below), so a
     // genuine long task that keeps writing/editing is never throttled here.
-    if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_LOCK_TURNS) {
+    if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressLock) {
       lockToolsThisTurn = true;
       systemSteerNotices.push(
         deps.isSubagent
@@ -616,19 +629,32 @@ export async function runAgent(
               `is still unverified or unfinished, and the recommended next step. Mark unverified ` +
               `details as such rather than looping to confirm them.`,
       );
-    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_STRONG_TURNS) {
+    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressStrong) {
       systemSteerNotices.push(
         `You have made no durable progress (no writes, edits, or conclusions) for ` +
           `${turnsSinceNoProgress} turns. Stop re-checking and move to synthesis: decide whether ` +
           `you already have enough to answer, and if so answer now instead of running more tools.`,
       );
-    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= NO_PROGRESS_SOFT_TURNS) {
+    } else if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressSoft) {
       systemSteerNotices.push(
         `You have made no durable progress (no writes or edits) for ${turnsSinceNoProgress} turns. ` +
           `If you keep reading/re-running commands without acting, you are likely spinning — ` +
           `take a concrete action (edit, write, or answer) rather than gathering more evidence.`,
       );
     }
+
+    // Per-turn budget snapshot for the client status line (non-persisted). A
+    // UI can show turn/ceiling and the stall streak; `warning` is set on the
+    // turns at/after the "turns left" threshold so a status line can highlight
+    // an imminent wind-down.
+    await emitAux({
+      type: "turn_budget",
+      turn,
+      windDownAt: Number.isFinite(windDownAt) ? windDownAt : null,
+      maxTurns: Number.isFinite(maxTurns) ? maxTurns : null,
+      stalledTurns: turnsSinceNoProgress,
+      ...(budgetWarning ? { warning: true } : {}),
+    });
 
     await emit({ type: "status", status: "running" });
 
@@ -1636,6 +1662,9 @@ const DEFAULT_CONVERGENCE_CAP = 60;
  * answer after tools are locked, while still guaranteeing termination if a
  * provider ignores `toolChoice:"none"`. */
 const CONVERGENCE_HARD_SLACK = 3;
+/** Turns before the governing ceiling at which the "turns left" nudge fires
+ * (and a `turn_budget` warning is surfaced to the host). */
+const DEFAULT_REMAINING_NUDGE_AT = 2;
 
 /** Progress-gated stall ladder. The convergence cap above is an *absolute*
  * ceiling; this catches a much earlier failure mode the exact-signature

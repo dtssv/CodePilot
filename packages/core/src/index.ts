@@ -36,6 +36,7 @@ export type {
   PermissionDecision,
   PermissionResolution,
   CodepilotConfig,
+  ConvergenceConfig,
   DoomLoopConfig,
   McpServerConfig,
   SessionOptions,

@@ -137,6 +137,26 @@ export function StatusBar({
           ? `${state.providerId} · ${state.model ?? "?"}`
           : (state.model ?? "model unset")}
       </Text>
+      {(() => {
+        // Show how far into the turn budget the run is when a finite governing
+        // ceiling exists (the lower of windDownAt / maxTurns). Hidden when both
+        // are unlimited (nothing to count down to).
+        const tb = state.turnBudget;
+        if (!tb) return null;
+        const ceiling =
+          tb.windDownAt !== null && tb.maxTurns !== null
+            ? Math.min(tb.windDownAt, tb.maxTurns)
+            : (tb.windDownAt ?? tb.maxTurns);
+        if (ceiling === null) return null;
+        return (
+          <>
+            {sep}
+            <Text color={tb.warning ? color.warn : color.faint}>
+              turn {tb.turn + 1}/{ceiling}
+            </Text>
+          </>
+        );
+      })()}
       <Box flexGrow={1} />
       <Text color={color.faint}>
         {formatTokens(total)} tokens

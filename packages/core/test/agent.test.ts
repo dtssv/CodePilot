@@ -430,8 +430,8 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
       systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
     };
     await runAgent({ history: [], userText: "go" }, deps);
-    // turn 2 (remaining == 2): soft "two turns left, wrap up" nudge.
-    expect(systemText(provider.calls[2]!)).toMatch(/[Tt]wo turns left/);
+    // turn 2 (remaining == 2): soft "2 turns left, wrap up" nudge.
+    expect(systemText(provider.calls[2]!)).toMatch(/2 turns left/);
     // turn 3 (remaining == 1): hard "do NOT call any more tools, write your
     // final answer now" nudge.
     const last = systemText(provider.calls[3]!);
@@ -463,6 +463,116 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     const nudges = provider.calls.map(systemText).join("\n---\n");
     expect(nudges).toMatch(/Findings/);
     expect(nudges).toMatch(/Recommendations|Blocker/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("drives the wind-down from config.convergence.cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [];
+    for (let i = 0; i < 40; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    // No flat convergenceCap; the nested block governs instead.
+    deps.config.convergence = { cap: 4 };
+    const r = await runAgent({ history: [], userText: "spin" }, deps);
+    expect(provider.calls.length).toBeLessThanOrEqual(8);
+    expect(provider.calls.some((c) => c.toolChoice === "none")).toBe(true);
+    const err = r.events.find((e) => e.type === "error");
+    expect(err && err.type === "error" && err.message).toMatch(/convergence limit \(4 turns\)/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("never locks tools on convergence when config.convergence.cap is 0", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 70 WRITE turns (above the default cap of 60) then text — each write is
+    // durable progress, so the no-progress ladder never fires; with the cap
+    // disabled none of these should be capped.
+    provider.responses = [];
+    for (let i = 0; i < 70; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "write_file", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "fin", text: "done" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.config.convergence = { cap: 0 };
+    const r = await runAgent({ history: [], userText: "long write task" }, deps);
+    expect(r.finalText).toBe("done");
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("emits a per-turn turn_budget snapshot with the governing ceiling and warning", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // maxTurns 4 → turns 0..3; keep calling tools so we reach the wind-down.
+    provider.responses = [];
+    for (let i = 0; i < 4; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    // turn_budget is a host-only control event (not persisted into r.events);
+    // capture it via onEvent.
+    const seen: Event[] = [];
+    const deps = { ...f.deps(), maxTurns: 4, onEvent: async (e: Event) => { seen.push(e); } };
+    await runAgent({ history: [], userText: "go" }, deps);
+    const budgets = seen.filter((e) => e.type === "turn_budget");
+    expect(budgets.length).toBeGreaterThan(0);
+    // Governing ceiling is the finite maxTurns (no convergence cap lower).
+    for (const b of budgets) {
+      expect(b.type === "turn_budget" && b.maxTurns).toBe(4);
+    }
+    // The last two turns (remaining <= 2) carry the warning flag.
+    const warned = budgets.filter((b) => b.type === "turn_budget" && b.warning === true);
+    expect(warned.length).toBeGreaterThanOrEqual(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("lowers the no-progress lock via config.convergence.noProgressLock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // Read-only calls make no durable progress; a low lock threshold should
+    // disable tools early (toolChoice:"none") well before the default of 16.
+    provider.responses = [];
+    for (let i = 0; i < 10; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.config.convergence = { noProgressLock: 3, noProgressStrong: 2, noProgressSoft: 1 };
+    const r = await runAgent({ history: [], userText: "spin read-only" }, deps);
+    // The tool lock fires once the stall streak reaches the lowered threshold.
+    const lockedIdx = provider.calls.findIndex((c) => c.toolChoice === "none");
+    expect(lockedIdx).toBeGreaterThanOrEqual(0);
+    expect(lockedIdx).toBeLessThan(8);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 });

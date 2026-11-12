@@ -294,6 +294,20 @@ type EventBody =
  /** Live progress marker — what the run is waiting on right now (the model,
  * or the named tools). Not persisted. */
   | { type: "activity"; phase: "model" | "tools"; since: number; tools?: string[] }
+ /** Per-turn budget snapshot for the client status line. Emitted at the start
+  * of every turn (and whenever the counters change) so a UI can show how far
+  * into the turn budget a run is and whether it is stalling. `windDownAt` /
+  * `maxTurns` are null when unlimited; `stalledTurns` is the current
+  * no-durable-progress streak. `warning` is true on the turns at/after the
+  * "turns left" nudge threshold. Not persisted; never sent to the model. */
+  | {
+      type: "turn_budget";
+      turn: number;
+      windDownAt: number | null;
+      maxTurns: number | null;
+      stalledTurns: number;
+      warning?: boolean;
+    }
  /** Stop hook blocked ending the turn; the agent will continue. Not persisted. */
   | { type: "stop_continue"; count: number; cap: number; reason: string }
  /** Live progress of one sub-agent spawned by a `task` call, so UIs can
@@ -765,6 +779,23 @@ export interface HooksConfig {
   Stop?: HookEntryConfig[];
 }
 
+/** Convergence / no-progress thresholds. Every field is optional; an unset
+ * field falls back to the built-in constant. See `CodepilotConfig.convergence`. */
+export interface ConvergenceConfig {
+  /** Soft convergence ceiling (same as `convergenceCap`; 0 disables it). */
+  cap?: number;
+  /** Turns of slack between where wind-down starts and the hard break. */
+  hardSlack?: number;
+  /** No-durable-progress turn count that triggers the soft nudge (default 8). */
+  noProgressSoft?: number;
+  /** …the stronger nudge (default 12). */
+  noProgressStrong?: number;
+  /** …the tool lock + synthesis urge (default 16). A soft land, not a failure. */
+  noProgressLock?: number;
+  /** Turns before the ceiling at which the "turns left" nudge fires (default 2). */
+  remainingNudgeAt?: number;
+}
+
 /** Loop-detection thresholds + exclusions. Every field is optional; an unset
  * field falls back to the built-in constant. See `CodepilotConfig.doomLoop`. */
 export interface DoomLoopConfig {
@@ -1001,6 +1032,11 @@ export interface CodepilotConfig {
   * doom-loop guard can't catch). Unset = a built-in default; `0` disables it.
   */
   convergenceCap?: number;
+ /** Fine-grained convergence / no-progress thresholds. Every field defaults to
+  * the built-in constant, so an absent block changes nothing. `cap` is an alias
+  * for the soft convergence ceiling (0 disables it); the no-progress gradient
+  * and wind-down offsets let a long task raise or relax the backstops. */
+  convergence?: ConvergenceConfig;
  /** Loop-detection thresholds + exclusions. Every field defaults to a built-in
   * constant, so an unset/empty object changes nothing. `exclude` lists tool
   * names or `tool::glob` patterns that are never counted toward the

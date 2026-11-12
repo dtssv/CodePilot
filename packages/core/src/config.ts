@@ -640,6 +640,28 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // final turn, forcing the model to answer from what it already has instead
     // of spinning (e.g. a weak model re-verifying forever). 0 = disabled.
     convergenceCap: z.number().int().min(0).max(10_000).optional(),
+    // Fine-grained convergence / no-progress thresholds. Every field defaults
+    // to the built-in constant, so an absent block changes nothing. `cap` is an
+    // alias for the soft convergence ceiling (0 disables it, matching
+    // convergenceCap); the no-progress gradient and wind-down offsets below let
+    // a long task raise or relax the backstops. Orthogonal to doomLoop.
+    convergence: z
+      .object({
+        // Soft convergence ceiling (same meaning as convergenceCap; 0 = off).
+        cap: z.number().int().min(0).max(10_000).optional(),
+        // Turns of slack between where wind-down starts and the hard break.
+        hardSlack: z.number().int().min(0).max(1000).optional(),
+        // No-durable-progress turn count that triggers the soft nudge.
+        noProgressSoft: z.number().int().min(1).max(10_000).optional(),
+        // …the stronger nudge.
+        noProgressStrong: z.number().int().min(1).max(10_000).optional(),
+        // …the tool lock + synthesis urge (a soft land, not a failure).
+        noProgressLock: z.number().int().min(1).max(10_000).optional(),
+        // How many turns before the ceiling to emit the "turns left" nudge.
+        remainingNudgeAt: z.number().int().min(1).max(1000).optional(),
+      })
+      .strict()
+      .optional(),
     // Loop-detection thresholds + per-tool exclusions. Unset = built-in
     // constants; see DoomLoopConfigSchema.
     doomLoop: DoomLoopConfigSchema,
