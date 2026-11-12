@@ -17,6 +17,7 @@ import {
   schedulerTick,
   listScheduledTasks,
   removeScheduledTask,
+  hasPendingScheduledTasks,
 } from "../src/scheduler.js";
 
 const STORE = join(homedir(), ".codepilot", "scheduled-tasks.json");
@@ -197,5 +198,46 @@ describe("schedulerTick (cron / weekly / lifecycle)", () => {
     // Next minute → due again.
     expect((await schedulerTick({ ...noRun, now: now + 60_000 })).length).toBe(1);
     await updateScheduledTask(t.id, { enabled: false });
+  });
+});
+
+describe("hasPendingScheduledTasks (daemon keep-alive)", () => {
+  beforeEach(async () => {
+    await clearStore();
+  });
+  afterEach(async () => {
+    await clearStore();
+  });
+
+  it("is false with an empty store", async () => {
+    expect(await hasPendingScheduledTasks()).toBe(false);
+  });
+
+  it("is true with an enabled, non-paused, non-expired task", async () => {
+    await addScheduledTask({ title: "t", prompt: "p", cwd: "/tmp", kind: "cron", cron: "* * * * *" });
+    expect(await hasPendingScheduledTasks()).toBe(true);
+  });
+
+  it("is false when the only task is disabled", async () => {
+    const t = await addScheduledTask({
+      title: "t", prompt: "p", cwd: "/tmp", kind: "cron", cron: "* * * * *",
+    });
+    await updateScheduledTask(t.id, { enabled: false });
+    expect(await hasPendingScheduledTasks()).toBe(false);
+  });
+
+  it("is false when the only task is paused", async () => {
+    await addScheduledTask({
+      title: "t", prompt: "p", cwd: "/tmp", kind: "cron", cron: "* * * * *", paused: true,
+    });
+    expect(await hasPendingScheduledTasks()).toBe(false);
+  });
+
+  it("is false when the only task is past endsAt", async () => {
+    const now = Date.now();
+    await addScheduledTask({
+      title: "t", prompt: "p", cwd: "/tmp", kind: "cron", cron: "* * * * *", endsAt: now - 1000,
+    });
+    expect(await hasPendingScheduledTasks(now)).toBe(false);
   });
 });

@@ -678,6 +678,7 @@ export type {
 // ---- Scheduled / idle tasks ----
 export {
   listScheduledTasks,
+  hasPendingScheduledTasks,
   addScheduledTask,
   updateScheduledTask,
   removeScheduledTask,
@@ -687,6 +688,7 @@ export {
 export type {
   ScheduledTask,
   ScheduledTaskKind,
+  ScheduledDelivery,
   SchedulerTickContext,
   SchedulerWatcherHandle,
 } from "./scheduler.js";

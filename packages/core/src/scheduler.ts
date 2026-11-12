@@ -107,6 +107,25 @@ export async function listScheduledTasks(): Promise<ScheduledTask[]> {
   return (await load()).tasks;
 }
 
+/**
+ * Whether any task is still pending at `now` — i.e. enabled, not paused, not
+ * past its `endsAt`, and (for `once`) not already fired. Used by a host to
+ * decide whether to keep a daemon alive with no connected clients so a lone
+ * scheduled task still runs; a store with only spent/paused/expired tasks lets
+ * the daemon idle-exit normally.
+ */
+export async function hasPendingScheduledTasks(now: number = Date.now()): Promise<boolean> {
+  for (const task of (await load()).tasks) {
+    if (!task.enabled) continue;
+    if (task.paused) continue;
+    if (typeof task.endsAt === "number" && now > task.endsAt) continue;
+    // A one-time task that has already fired is disabled above; one that hasn't
+    // is still pending.
+    return true;
+  }
+  return false;
+}
+
 export async function addScheduledTask(
   input: Omit<ScheduledTask, "id" | "createdAt" | "enabled"> & { enabled?: boolean },
 ): Promise<ScheduledTask> {

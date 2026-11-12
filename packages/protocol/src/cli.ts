@@ -531,6 +531,42 @@ async function cmdServeWeb(
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
 
+  // Idle-exit with scheduler keep-alive: when the last client disconnects we
+  // normally shut the daemon down after a grace period. But if there are still
+  // PENDING scheduled tasks (enabled, not paused, not expired), shutting down
+  // would mean "installed but never runs" — so we keep the daemon alive and
+  // re-check later instead. With no pending tasks the daemon idle-exits as usual.
+  const armIdleShutdown = (): void => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    idleTimer = setTimeout(() => {
+      void (async () => {
+        if (shuttingDown) return;
+        let pending = false;
+        try {
+          const { hasPendingScheduledTasks } = await import("@codepilot/core");
+          pending = await hasPendingScheduledTasks();
+        } catch {
+          /* fail-soft: if we can't read the store, don't block shutdown */
+        }
+        if (pending) {
+          process.stderr.write(
+            `[serve] no clients, but scheduled tasks pending — staying alive for the scheduler\n`,
+          );
+          armIdleShutdown();
+          return;
+        }
+        process.stderr.write(
+          `[serve] no clients for ${IDLE_GRACE_MS / 1000}s — shutting down daemon\n`,
+        );
+        process.emit("SIGTERM");
+      })();
+    }, IDLE_GRACE_MS);
+    idleTimer.unref?.();
+  };
+
   // Identity recorded in each session's write-lease lock file so a second
   // process trying to open the same session can be redirected to attach to THIS
   // daemon as a subscriber. The url is filled in after the handle resolves (it
@@ -569,13 +605,7 @@ async function cmdServeWeb(
           idleTimer = null;
         }
         if (count === 0 && !shuttingDown) {
-          idleTimer = setTimeout(() => {
-            process.stderr.write(
-              `[serve] no clients for ${IDLE_GRACE_MS / 1000}s — shutting down daemon\n`,
-            );
-            process.emit("SIGTERM");
-          }, IDLE_GRACE_MS);
-          idleTimer.unref?.();
+          armIdleShutdown();
         }
       },
     });
