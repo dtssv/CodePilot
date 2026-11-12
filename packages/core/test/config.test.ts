@@ -160,6 +160,22 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ convergence: { bogus: 1 } as never })).toThrow();
   });
 
+  it("accepts a codeMode runtime block", () => {
+    const vm = validateConfig({ codeMode: { runtime: "vm" } }) as {
+      codeMode?: { runtime?: string };
+    };
+    expect(vm.codeMode?.runtime).toBe("vm");
+    const sub = validateConfig({ codeMode: { runtime: "subprocess" } }) as {
+      codeMode?: { runtime?: string };
+    };
+    expect(sub.codeMode?.runtime).toBe("subprocess");
+  });
+
+  it("rejects an unknown codeMode runtime and extra key", () => {
+    expect(() => validateConfig({ codeMode: { runtime: "wasm" } as never })).toThrow();
+    expect(() => validateConfig({ codeMode: { bogus: 1 } as never })).toThrow();
+  });
+
   it("accepts a doomLoop threshold + exclude block", () => {
     const r = validateConfig({
       doomLoop: {

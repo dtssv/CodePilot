@@ -1053,6 +1053,12 @@ export interface CodepilotConfig {
   * names or `tool::glob` patterns that are never counted toward the
   * exact-repetition or rotating-batch layers (dedup replay still applies). */
   doomLoop?: DoomLoopConfig;
+ /** code_mode execution runtime. "vm" (default) runs the model's JavaScript in
+  * an in-process Node vm context; "subprocess" runs it in a separate Node child
+  * wrapped by the same OS sandbox as `bash` (a stronger isolation boundary,
+  * opt-in). The delegated tool calls are proxied back to the parent either way,
+  * so both runtimes expose the same API and the same path guard. */
+  codeMode?: { runtime?: "vm" | "subprocess" };
  /** Per-model tool-exposure downgrade. Each rule hides `drop` tools from any
   * model whose id glob-matches an entry in `models`. Applied after mode
   * filtering, so it can only remove tools. Lets a deployment keep the complex

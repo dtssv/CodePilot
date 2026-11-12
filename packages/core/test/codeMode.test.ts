@@ -500,3 +500,110 @@ describe("code_mode", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Subprocess runtime (opt-in): the model's JS runs in a separate Node child
+// wrapped by the same OS sandbox, with the tool API proxied back over stdio.
+// The observable contract (result, console capture, thrown errors, path guard)
+// must match the in-process vm runtime.
+// ---------------------------------------------------------------------------
+
+describe("code_mode subprocess runtime", () => {
+  // Sandbox mode "off" so the child is plain `sh -c node ...` on hosts without
+  // a seatbelt/bwrap backend; the path guard still runs inside the proxied
+  // file tools (which execute in the parent).
+  function subCtx(cwd: string): ToolContext {
+    return {
+      cwd,
+      signal: undefined,
+      sandbox: resolveSandbox({ mode: "off" }, cwd),
+      config: { codeMode: { runtime: "subprocess" } } as ToolContext["config"],
+      async artifact() {
+        return "art_x";
+      },
+      async readArtifact() {
+        return "";
+      },
+    };
+  }
+
+  it("returns the final value from the child", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    const r = await codeModeTool.execute({ code: "return 1 + 2;" }, subCtx(dir));
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toBe("3");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("captures console.log / console.error from the child", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    const r = await codeModeTool.execute(
+      { code: 'console.log("hello", "world");\nconsole.error("oops");\nreturn "v";' },
+      subCtx(dir),
+    );
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("hello world");
+    expect(r.content).toContain("oops");
+    expect(r.content).toContain("v");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("proxies tool calls back to the parent (writeFile → disk)", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    const r = await codeModeTool.execute(
+      {
+        code: [
+          'await writeFile("out.txt", "from subprocess");',
+          'return await readFile("out.txt");',
+        ].join("\n"),
+      },
+      subCtx(dir),
+    );
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("from subprocess");
+    expect(readFileSync(join(dir, "out.txt"), "utf-8")).toBe("from subprocess");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("surfaces a thrown error from the child", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    const r = await codeModeTool.execute(
+      { code: 'throw new Error("boom-sub");' },
+      subCtx(dir),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("boom-sub");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("propagates a proxied tool error (sandbox path guard) back to the child", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    // workspace-write so the path guard rejects an out-of-root write even
+    // though the child itself is unsandboxed on a backend-less host.
+    const ctx: ToolContext = {
+      ...subCtx(dir),
+      sandbox: resolveSandbox(
+        { mode: "workspace-write", fallback: "allow-unsandboxed" },
+        dir,
+      ),
+    };
+    const r = await codeModeTool.execute(
+      { code: 'await writeFile("/etc/evil.txt", "hacked");' },
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/sandbox|outside the writable roots/i);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("enforces the wall-clock timeout by killing the child", async () => {
+    const dir = mkdtempSync(join(realTmpdir(), "cm-sub-"));
+    const r = await codeModeTool.execute(
+      { code: "while (true) {}", timeout_ms: 500 },
+      subCtx(dir),
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/timed? ?out/i);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

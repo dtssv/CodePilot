@@ -665,6 +665,18 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // Loop-detection thresholds + per-tool exclusions. Unset = built-in
     // constants; see DoomLoopConfigSchema.
     doomLoop: DoomLoopConfigSchema,
+    // code_mode execution runtime. "vm" (default) runs the model's JavaScript
+    // in an in-process Node vm context; "subprocess" runs it in a separate
+    // Node child wrapped by the same OS sandbox as `bash`, so a stronger
+    // isolation boundary is available opt-in. The delegated tool calls are
+    // proxied back to the parent either way, so both runtimes expose the same
+    // API and the same path guard. Unset/absent keeps the in-process default.
+    codeMode: z
+      .object({
+        runtime: z.enum(["vm", "subprocess"]).optional(),
+      })
+      .strict()
+      .optional(),
     // Per-model tool-exposure downgrade. Some models serialize structured
     // tool calls poorly on the more complex tools (e.g. `code_mode`,
     // `apply_patch`), tripping over the schema instead of using a simpler
