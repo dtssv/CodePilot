@@ -459,6 +459,60 @@ describe("doom-loop read cache", () => {
   });
 });
 
+describe("pseudo tool-call in reply text", () => {
+  it("flags markup tool calls and ignores ordinary prose", async () => {
+    const { looksLikePseudoToolCall } = await import("../src/agent.js");
+    // Invocation markup the model sometimes prints instead of calling a tool.
+    expect(looksLikePseudoToolCall("<tool_call>read_file<arg_key>path</arg_key></tool_call>")).toBe(true);
+    expect(looksLikePseudoToolCall('<function_calls><invoke name="bash"></invoke></function_calls>')).toBe(true);
+    expect(looksLikePseudoToolCall('<parameter name="path">a.ts</parameter>')).toBe(true);
+    // Ordinary prose / code that merely mentions the words is NOT flagged.
+    expect(looksLikePseudoToolCall("I'll use read_file to open the tool_call handler.")).toBe(false);
+    expect(looksLikePseudoToolCall("The function_calls array holds pending work.")).toBe(false);
+    expect(looksLikePseudoToolCall("")).toBe(false);
+  });
+
+  it("nudges the model back to the structured channel, then yields a real call", async () => {
+    // Turn 1: the model writes a tool call as text markup — nothing executes.
+    // Turn 2 (after the nudge): it makes a REAL tool call and finishes.
+    const provider = new ScriptedProvider([
+      [
+        { kind: "text_delta", messageId: "m", text: "<tool_call>echo<arg_key>x</arg_key>hi</tool_call>" },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [call("t1", "a"), { kind: "done", finishReason: "tool_use" }],
+    ]);
+    const { deps: d, events, dir } = deps(provider);
+    await runAgent({ history: [], userText: "go" }, d);
+    // The model was re-engaged: a second request was made (the nudge resumed
+    // the turn rather than ending it on the markup).
+    expect(provider.calls.length).toBeGreaterThanOrEqual(2);
+    // The corrective instruction reached the model on that follow-up request.
+    const second = JSON.stringify(provider.calls[1]!.messages);
+    expect(second).toMatch(/structured tool-calling channel|NOT executed/);
+    // And the real tool ran, producing a tool_result in the transcript.
+    expect(
+      events.some((e) => e.type === "tool_result" && e.content === "echo:a"),
+    ).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("stops nudging after the bounded number of attempts", async () => {
+    // The model keeps writing markup every turn. The guard must not loop
+    // forever — after the cap it yields the turn to the user.
+    const markup: StreamEvent[] = [
+      { kind: "text_delta", messageId: "m", text: "<invoke name=\"echo\"><parameter name=\"x\">a</parameter></invoke>" },
+      { kind: "done", finishReason: "stop" },
+    ];
+    const provider = new ScriptedProvider([markup, markup, markup, markup, markup]);
+    const { deps: d, dir } = deps(provider);
+    await runAgent({ history: [], userText: "go" }, d);
+    // 1 initial + at most MAX_PSEUDO_TOOL_RESUMES (2) nudges = 3 requests.
+    expect(provider.calls.length).toBeLessThanOrEqual(3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("compaction", () => {
   it("keeps the latest plan when the turn that wrote it is summarised away", async () => {
     const events: Event[] = [{ type: "plan", steps: [{ id: "p", title: "step", status: "in_progress" }] }];

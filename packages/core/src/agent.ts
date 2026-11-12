@@ -507,6 +507,9 @@ export async function runAgent(
  /** At most one soft continue when the plan is still open and the model
   * yielded with incomplete-intent prose (not a question to the user). */
   let planSoftResumes = 0;
+ /** Bounded nudges when the model wrote a tool call as text markup instead of
+  * a real structured call (nothing executed). */
+  let pseudoToolResumes = 0;
 
   let hitMaxTurns = false;
   /** Sub-agents get one extra synthesis turn after the configured cap so a
@@ -1340,6 +1343,19 @@ export async function runAgent(
         continue;
       }
 
+      // The model wrote a tool call as text markup instead of making a real
+      // one (nothing executed). Nudge it back to the structured channel,
+      // bounded so a model that cannot emit structured calls can't loop.
+      if (
+        !sawError &&
+        pseudoToolResumes < MAX_PSEUDO_TOOL_RESUMES &&
+        looksLikePseudoToolCall(trimmed)
+      ) {
+        pseudoToolResumes++;
+        pendingProviderResume = PSEUDO_TOOL_CALL_RESUME;
+        continue;
+      }
+
       // Unfinished plan + incomplete-intent prose (not asking the user): one nudge.
       if (
         sawToolCalls &&
@@ -1725,6 +1741,10 @@ const MAX_TRUNCATION_RESUMES = 3;
 const MAX_INTERRUPT_RESUMES = 3;
 const MAX_EMPTY_STOP_RESUMES = 2;
 const MAX_PLAN_SOFT_RESUMES = 1;
+/** The model wrote a tool call as text markup instead of a real call. Nudge it
+ * back to the structured channel a bounded number of times, then stop so a
+ * model that simply cannot emit structured calls can't loop forever. */
+const MAX_PSEUDO_TOOL_RESUMES = 2;
 /** Proportional send-budget shrink steps applied on successive context-overflow
  * errors: first compact, then shrink to these fractions of the computed hard
  * budget. Bounded so overflow can't loop. */
@@ -1755,6 +1775,13 @@ const PLAN_SOFT_RESUME =
   "[system] Your plan still has unfinished steps, and your last reply looked incomplete. " +
   "Resume at the first unfinished step — do not repeat completed work. Keep calling tools until " +
   "the step's deliverable is done, or ask the user a clear question if you are blocked.";
+
+const PSEUDO_TOOL_CALL_RESUME =
+  "[system] Your last reply wrote a tool call as text markup (e.g. <tool_call> / <invoke> / " +
+  "<arg_key> / <parameter>) instead of making a real tool call. Text like that is NOT executed — " +
+  "it was shown to the user verbatim and nothing ran. Use the structured tool-calling channel: " +
+  "issue the tool call through the function/tool interface, never by writing XML/markup in your " +
+  "reply. Re-issue the call now.";
 
 const TRUNCATED_CALL =
   "This tool call was cut off by the output-token limit before its arguments were complete, so it " +
@@ -1806,6 +1833,34 @@ export function looksLikeIncompleteTurn(text: string): boolean {
 function hasUnparsedInput(tc: ToolUseBlock): boolean {
   const input = tc.input as Record<string, unknown> | null;
   return !!input && typeof input === "object" && "__raw" in input && Object.keys(input).length === 1;
+}
+
+/**
+ * The model tried to call a tool by writing the call as markup INTO its reply
+ * text instead of emitting a real structured tool call. Some models (seen with
+ * certain GLM builds) print `<tool_call>…<arg_key>…</arg_key>…` or Anthropic-
+ * style `<function_calls><invoke name=…><parameter …>` as prose — none of it
+ * reaches the structured tool channel, so nothing executes and the turn just
+ * ends with the markup shown to the user.
+ *
+ * We detect that shape and (bounded) feed back a correction telling the model
+ * to use the real tool channel. We do NOT parse the markup and run it: silently
+ * honoring an invented text protocol is how the wrong call gets executed. The
+ * match targets invocation markup specifically — an opening call wrapper, or an
+ * argument-key/parameter tag — so ordinary prose or code that merely mentions
+ * these words is not flagged.
+ */
+export function looksLikePseudoToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  return (
+    /<\s*tool_call\b/i.test(t) ||
+    /<\s*function_calls\b/i.test(t) ||
+    /<\s*invoke\b[^>]*\bname\s*=/i.test(t) ||
+    /<\s*arg_key\s*>/i.test(t) ||
+    /<\s*parameter\b[^>]*\bname\s*=/i.test(t) ||
+    /<\s*antml:/i.test(t)
+  );
 }
 
 
