@@ -120,8 +120,14 @@ type Task = {
   lastError?: string;
   idleAfterMs?: number;
   at?: string;
+  daysOfWeek?: number[];
+  cron?: string;
+  timezone?: string;
   runAt?: number;
   everyMinutes?: number;
+  delivery?: "new_session" | { sessionId: string };
+  paused?: boolean;
+  endsAt?: number;
   runCount?: number;
   model?: string;
   providerId?: string;
@@ -221,10 +227,13 @@ export function SettingsExtras({
   const [tasks, setTasks] = useState<Task[]>([]);
   const [idlePrompt, setIdlePrompt] = useState("");
   const [idleTitle, setIdleTitle] = useState("闲时任务");
-  const [taskKind, setTaskKind] = useState<"idle" | "once" | "daily" | "interval">("idle");
+  const [taskKind, setTaskKind] = useState<"idle" | "once" | "daily" | "weekly" | "interval" | "cron">("idle");
   const [taskAt, setTaskAt] = useState("09:00");
   const [taskOnceAt, setTaskOnceAt] = useState(""); // datetime-local value for one-time tasks
   const [taskEvery, setTaskEvery] = useState(60);
+  const [taskCron, setTaskCron] = useState("0 9 * * *");
+  const [taskTimezone, setTaskTimezone] = useState("");
+  const [taskWeekdays, setTaskWeekdays] = useState<number[]>([1, 2, 3, 4, 5]);
   const [idleModelKey, setIdleModelKey] = useState(""); // "" = default; else providerId::model
   const [idleAgentMode, setIdleAgentMode] = useState<"chat" | "plan" | "agent">("agent");
   const [scheduleModels, setScheduleModels] = useState<ScheduleModelOpt[]>([]);
@@ -736,7 +745,12 @@ export function SettingsExtras({
         ...(taskKind === "idle" ? { idleAfterMs: 10 * 60 * 1000 } : {}),
         ...(taskKind === "once" ? { runAt: taskOnceAt ? new Date(taskOnceAt).getTime() : Date.now() } : {}),
         ...(taskKind === "daily" ? { at: taskAt } : {}),
+        ...(taskKind === "weekly" ? { at: taskAt, daysOfWeek: taskWeekdays } : {}),
         ...(taskKind === "interval" ? { everyMinutes: Math.max(1, taskEvery) } : {}),
+        ...(taskKind === "cron" ? { cron: taskCron.trim() } : {}),
+        ...((taskKind === "daily" || taskKind === "weekly" || taskKind === "cron") && taskTimezone.trim()
+          ? { timezone: taskTimezone.trim() }
+          : {}),
         model,
         providerId,
         agentMode: idleAgentMode,
@@ -762,10 +776,16 @@ export function SettingsExtras({
     setIdleTitle(task.title);
     setIdlePrompt(task.prompt ?? "");
     setIdleAgentMode(task.agentMode ?? "agent");
-    if (task.kind === "idle" || task.kind === "once" || task.kind === "daily" || task.kind === "interval") {
+    if (
+      task.kind === "idle" || task.kind === "once" || task.kind === "daily" ||
+      task.kind === "weekly" || task.kind === "interval" || task.kind === "cron"
+    ) {
       setTaskKind(task.kind);
     }
     if (task.at) setTaskAt(task.at);
+    if (task.cron) setTaskCron(task.cron);
+    if (task.timezone) setTaskTimezone(task.timezone);
+    if (Array.isArray(task.daysOfWeek)) setTaskWeekdays(task.daysOfWeek);
     if (task.runAt) {
       // Convert epoch ms → local datetime-local string (YYYY-MM-DDTHH:mm).
       const d = new Date(task.runAt);
@@ -805,7 +825,12 @@ export function SettingsExtras({
         ...(taskKind === "idle" ? { idleAfterMs: 10 * 60 * 1000 } : {}),
         ...(taskKind === "once" ? { runAt: taskOnceAt ? new Date(taskOnceAt).getTime() : Date.now() } : {}),
         ...(taskKind === "daily" ? { at: taskAt } : {}),
+        ...(taskKind === "weekly" ? { at: taskAt, daysOfWeek: taskWeekdays } : {}),
         ...(taskKind === "interval" ? { everyMinutes: Math.max(1, taskEvery) } : {}),
+        ...(taskKind === "cron" ? { cron: taskCron.trim() } : {}),
+        ...((taskKind === "daily" || taskKind === "weekly" || taskKind === "cron") && taskTimezone.trim()
+          ? { timezone: taskTimezone.trim() }
+          : {}),
         model,
         providerId,
         agentMode: idleAgentMode,
@@ -1833,12 +1858,18 @@ export function SettingsExtras({
               <select
                 className="cp-input mt-0.5 w-full text-[12.5px]"
                 value={taskKind}
-                onChange={(e) => setTaskKind(e.target.value as "idle" | "once" | "daily" | "interval")}
+                onChange={(e) =>
+                  setTaskKind(
+                    e.target.value as "idle" | "once" | "daily" | "weekly" | "interval" | "cron",
+                  )
+                }
               >
                 <option value="idle">{t("When idle")}</option>
                 <option value="once">{t("Once")}</option>
                 <option value="daily">{t("Daily")}</option>
+                <option value="weekly">{t("Weekly")}</option>
                 <option value="interval">{t("Every N minutes")}</option>
+                <option value="cron">{t("Cron")}</option>
               </select>
             </label>
             {taskKind === "once" && (
@@ -1875,7 +1906,84 @@ export function SettingsExtras({
                 />
               </label>
             )}
+            {taskKind === "weekly" && (
+              <label className="block">
+                <span className="cp-eyebrow">{t("Run at")}</span>
+                <input
+                  type="time"
+                  className="cp-input mt-0.5 w-full text-[12.5px]"
+                  value={taskAt}
+                  onChange={(e) => setTaskAt(e.target.value)}
+                />
+              </label>
+            )}
+            {taskKind === "cron" && (
+              <label className="block">
+                <span className="cp-eyebrow">{t("Cron expression")}</span>
+                <input
+                  type="text"
+                  className="cp-input mt-0.5 w-full font-mono text-[12.5px]"
+                  value={taskCron}
+                  onChange={(e) => setTaskCron(e.target.value)}
+                  placeholder="0 9 * * 1-5"
+                />
+              </label>
+            )}
           </div>
+          {taskKind === "weekly" && (
+            <div className="block">
+              <span className="cp-eyebrow">{t("Weekdays")}</span>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {[
+                  { d: 0, label: t("Sun") },
+                  { d: 1, label: t("Mon") },
+                  { d: 2, label: t("Tue") },
+                  { d: 3, label: t("Wed") },
+                  { d: 4, label: t("Thu") },
+                  { d: 5, label: t("Fri") },
+                  { d: 6, label: t("Sat") },
+                ].map(({ d, label }) => {
+                  const on = taskWeekdays.includes(d);
+                  return (
+                    <button
+                      key={d}
+                      type="button"
+                      className="cp-chip text-[12px]"
+                      style={
+                        on
+                          ? {
+                              borderColor: "var(--color-accent)",
+                              color: "var(--color-ink)",
+                            }
+                          : undefined
+                      }
+                      onClick={() =>
+                        setTaskWeekdays((prev) =>
+                          prev.includes(d)
+                            ? prev.filter((x) => x !== d)
+                            : [...prev, d].sort((a, b) => a - b),
+                        )
+                      }
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {(taskKind === "daily" || taskKind === "weekly" || taskKind === "cron") && (
+            <label className="block">
+              <span className="cp-eyebrow">{t("Timezone (optional)")}</span>
+              <input
+                type="text"
+                className="cp-input mt-0.5 w-full text-[12.5px]"
+                value={taskTimezone}
+                onChange={(e) => setTaskTimezone(e.target.value)}
+                placeholder="America/New_York"
+              />
+            </label>
+          )}
           <div className="grid gap-2 sm:grid-cols-2">
             <label className="block">
               <span className="cp-eyebrow">{t("Model")}</span>
@@ -1940,10 +2048,14 @@ export function SettingsExtras({
                     ? new Date(task.runAt).toLocaleString()
                     : t("Once")
                   : task.kind === "daily"
-                    ? `${t("Daily")} ${task.at ?? ""}`.trim()
-                    : task.kind === "interval"
-                      ? `${t("Every N minutes")} (${task.everyMinutes ?? "?"})`
-                      : t("When idle");
+                    ? `${t("Daily")} ${task.at ?? ""}${task.timezone ? ` (${task.timezone})` : ""}`.trim()
+                    : task.kind === "weekly"
+                      ? `${t("Weekly")} ${task.at ?? ""} [${(task.daysOfWeek ?? []).join(",")}]${task.timezone ? ` (${task.timezone})` : ""}`.trim()
+                      : task.kind === "cron"
+                        ? `${t("Cron")} ${task.cron ?? ""}${task.timezone ? ` (${task.timezone})` : ""}`.trim()
+                        : task.kind === "interval"
+                          ? `${t("Every N minutes")} (${task.everyMinutes ?? "?"})`
+                          : t("When idle");
               return (
                 <div
                   key={task.id}

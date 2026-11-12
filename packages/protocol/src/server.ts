@@ -1018,11 +1018,17 @@ export function registerServer(
       title: string;
       prompt: string;
       cwd?: string;
-      kind: "idle" | "once" | "daily" | "interval";
+      kind: "idle" | "once" | "daily" | "weekly" | "interval" | "cron";
       at?: string;
+      daysOfWeek?: number[];
+      cron?: string;
+      timezone?: string;
       runAt?: number;
       everyMinutes?: number;
       idleAfterMs?: number;
+      delivery?: "new_session" | { sessionId: string };
+      paused?: boolean;
+      endsAt?: number;
       model?: string;
       providerId?: string;
       agentMode?: "chat" | "plan" | "agent";
@@ -1035,9 +1041,15 @@ export function registerServer(
       cwd: p.cwd || ctx.defaultCwd,
       kind: p.kind,
       at: p.at,
+      daysOfWeek: p.daysOfWeek,
+      cron: p.cron,
+      timezone: p.timezone,
       runAt: p.runAt,
       everyMinutes: p.everyMinutes,
       idleAfterMs: p.idleAfterMs,
+      delivery: p.delivery,
+      paused: p.paused,
+      endsAt: p.endsAt,
       model: p.model,
       providerId: p.providerId,
       agentMode: p.agentMode,
@@ -1050,9 +1062,15 @@ export function registerServer(
       prompt?: string;
       cwd?: string;
       at?: string;
+      daysOfWeek?: number[];
+      cron?: string;
+      timezone?: string;
       runAt?: number;
       everyMinutes?: number;
       idleAfterMs?: number;
+      delivery?: "new_session" | { sessionId: string };
+      paused?: boolean;
+      endsAt?: number;
       model?: string;
       providerId?: string;
       agentMode?: "chat" | "plan" | "agent";
@@ -1257,6 +1275,50 @@ export function anyLiveSessionBusy(): boolean {
     if (typeof live.session.isBusy === "function" && live.session.isBusy()) return true;
   }
   return false;
+}
+
+/**
+ * Deliver a scheduled run as a follow-up into an EXISTING session. If the
+ * session is already live in this process we reuse it (so the follow-up lands in
+ * the user's open conversation, queued behind a busy turn); otherwise we load it
+ * from disk by id, prompt, wait for the turn, and release it. Returns ok/error
+ * like the new-session delivery path.
+ */
+export async function deliverScheduledFollowup(
+  sessionId: string,
+  prompt: string,
+  loadSession: (id: string) => Promise<{ session: SessionLike; dispose: () => Promise<void> } | null>,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const existing = liveSessions.get(sessionId)?.session as SessionLike | undefined;
+    if (existing) {
+      // Live session: prompt() starts the turn or queues it as a follow-up when
+      // the session is busy. We do NOT wait here — the live session owns its own
+      // turn lifecycle and the user is watching it.
+      await existing.prompt(prompt);
+      return { ok: true };
+    }
+    const loaded = await loadSession(sessionId);
+    if (!loaded) return { ok: false, error: `session not found: ${sessionId}` };
+    try {
+      await loaded.session.prompt(prompt);
+      const deadline = Date.now() + 30 * 60 * 1000;
+      while (loaded.session.isBusy() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return { ok: true };
+    } finally {
+      await loaded.dispose().catch(() => {});
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The minimal Session surface the scheduler delivery path needs. */
+interface SessionLike {
+  prompt(text: string): Promise<unknown>;
+  isBusy(): boolean;
 }
 
 export interface ServerHandle {

@@ -693,7 +693,7 @@ async function cmdServeWeb(
 
   // Idle / scheduled tasks: run when no live session is busy.
   const { startSchedulerWatcher, createSession } = await import("@codepilot/core");
-  const { anyLiveSessionBusy } = await import("./server.js");
+  const { anyLiveSessionBusy, deliverScheduledFollowup } = await import("./server.js");
   let idleSince = Date.now();
   const scheduler = startSchedulerWatcher({
     isIdle: () => {
@@ -703,6 +703,18 @@ async function cmdServeWeb(
     },
     idleForMs: () => (anyLiveSessionBusy() ? 0 : Date.now() - idleSince),
     run: async (task) => {
+      // Follow-up delivery: post the prompt into an existing session instead of
+      // opening a fresh one, so results land in a conversation the user has.
+      if (task.delivery && task.delivery !== "new_session") {
+        return deliverScheduledFollowup(task.delivery.sessionId, task.prompt, async (id) => {
+          try {
+            const session = await createSession({ cwd: task.cwd, sessionId: id });
+            return { session, dispose: () => session.dispose() };
+          } catch {
+            return null;
+          }
+        });
+      }
       try {
         const agentMode = task.agentMode ?? "agent";
         const session = await createSession({
