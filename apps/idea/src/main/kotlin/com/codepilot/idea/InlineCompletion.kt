@@ -39,6 +39,17 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
 
     private val log = logger<CodepilotInlineCompletionProvider>()
 
+    /** Small client-side LRU. The hit that matters is backspace/retype: it
+     * resolves here with zero RPC round-trip. Empty results are cached too.
+     * Access-order + removeEldestEntry gives bounded LRU; wrapped synchronized
+     * because completions can arrive off several dispatcher threads. */
+    private val cache: MutableMap<String, String> =
+        java.util.Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(16, 0.75f, true) {
+                override fun removeEldestEntry(eldest: Map.Entry<String, String>): Boolean = size > CACHE_MAX
+            },
+        )
+
     override val id: InlineCompletionProviderID = InlineCompletionProviderID("CodePilot")
 
     override suspend fun getDebounceDelay(request: InlineCompletionRequest): Duration =
@@ -52,6 +63,7 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
 
         val document = request.document
         val offset = request.endOffset
+        val basePath = request.editor.project?.basePath
 
         // Read the document on a read action; cap the context like the VSCode side.
         val ctx = ReadAction.compute<CompletionContext?, RuntimeException> {
@@ -63,9 +75,21 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
             val rawSuffix = full.subSequence(offset, textLen).toString()
             val prefix = if (rawPrefix.length > PREFIX_CAP) rawPrefix.takeLast(PREFIX_CAP) else rawPrefix
             val suffix = if (rawSuffix.length > SUFFIX_CAP) rawSuffix.take(SUFFIX_CAP) else rawSuffix
-            val path = request.file?.virtualFile?.name ?: "untitled"
+            // Workspace-relative path (with directories), so the server and the
+            // cache key see the same stable identifier the other editor sends —
+            // fall back to the bare file name outside a project.
+            val vf = request.file?.virtualFile
+            val path = relativePath(vf?.path, basePath) ?: vf?.name ?: "untitled"
             CompletionContext(prefix, suffix, path)
         } ?: return InlineCompletionSuggestion.Empty
+
+        // Client cache: a hit returns instantly with NO RPC round-trip. Empty
+        // results are cached too, so backspace/retype over a spot that produced
+        // nothing also stays free.
+        val key = cacheKey(ctx.path, ctx.prefix, ctx.suffix)
+        cache.get(key)?.let { cached ->
+            return if (cached.isEmpty()) InlineCompletionSuggestion.Empty else suggestionOf(cached)
+        }
 
         val client = CodepilotService.getInstance().client() ?: return InlineCompletionSuggestion.Empty
 
@@ -94,11 +118,17 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
             throw c
         }
 
+        // Cache the outcome (including empty) under the context key.
+        cache.put(key, completion ?: "")
+
         if (completion.isNullOrEmpty()) return InlineCompletionSuggestion.Empty
-        return InlineCompletionSingleSuggestion.build {
-            emit(InlineCompletionGrayTextElement(completion))
-        }
+        return suggestionOf(completion)
     }
+
+    private fun suggestionOf(text: String): InlineCompletionSuggestion =
+        InlineCompletionSingleSuggestion.build {
+            emit(InlineCompletionGrayTextElement(text))
+        }
 
     private fun settingsState(): CodepilotSettings.State = CodepilotSettings.getInstance().state
 
@@ -120,11 +150,51 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
         private const val PREFIX_CAP = 4000
         private const val SUFFIX_CAP = 2000
 
+        /** Small client LRU — the hit that matters is backspace/retype. */
+        private const val CACHE_MAX = 64
+
         /** Monotonic source for per-request completion ids used to cancel a
          * superseded upstream call. */
         private val completionSeq = java.util.concurrent.atomic.AtomicLong(0)
 
         @Volatile
         private var warned = false
+
+        private fun cacheKey(path: String, prefix: String, suffix: String): String =
+            CompletionKeys.cacheKey(path, prefix, suffix)
+
+        private fun relativePath(absolute: String?, basePath: String?): String? =
+            CompletionKeys.relativePath(absolute, basePath)
+    }
+}
+
+/**
+ * Pure helpers for the inline-completion client cache: a stable, bounded cache
+ * key and workspace-relative path resolution. Kept separate (and `internal`)
+ * from the IntelliJ-coupled provider so they are unit-testable without a
+ * platform fixture.
+ */
+internal object CompletionKeys {
+    /** Tail of prefix + head of suffix is what determines the completion;
+     * hashing keeps the key bounded and stable under the context cap. */
+    fun cacheKey(path: String, prefix: String, suffix: String): String =
+        "$path\u0000${hash(prefix.takeLast(512))}\u0000${hash(suffix.take(256))}"
+
+    /** FNV-1a over 32 bits, rendered base36. Stable within a process. */
+    fun hash(s: String): String {
+        var h = -0x7ee3623b // 2166136261 as Int (FNV-1a offset basis)
+        for (c in s) {
+            h = h xor c.code
+            h *= 16777619
+        }
+        return (h.toLong() and 0xffffffffL).toString(36)
+    }
+
+    /** Workspace-relative path with directories, matching the VSCode side.
+     * Null when the file is outside the project (caller falls back to name). */
+    fun relativePath(absolute: String?, basePath: String?): String? {
+        if (absolute == null || basePath == null) return null
+        val prefix = if (basePath.endsWith("/")) basePath else "$basePath/"
+        return if (absolute.startsWith(prefix)) absolute.removePrefix(prefix) else null
     }
 }
