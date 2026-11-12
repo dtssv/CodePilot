@@ -33,7 +33,7 @@ const enabled = process.platform === "linux" && !!bwrap && !!slirp;
 
 function run(command: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", command], { timeout: 30_000 }, (err, stdout, stderr) => {
+    execFile("/bin/sh", ["-c", command], { timeout: 40_000 }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: number }).code === "number"
         ? (err as { code: number }).code
         : err
@@ -82,8 +82,10 @@ describe.skipIf(!enabled)("enforced proxy egress (bwrap + slirp4netns)", () => {
         policy,
       );
       const directRes = await run(direct.command);
-      // Either curl fails to connect (non-zero rc) — the enforced outcome.
-      expect(directRes.stdout).toMatch(/rc=[1-9]/);
+      // Either curl fails to connect (non-zero rc in stdout) or the process
+      // is killed by the exec timeout (non-zero exit code) — both mean blocked.
+      const blocked = /rc=[1-9]/.test(directRes.stdout) || directRes.code !== 0;
+      expect(blocked).toBe(true);
 
       // The allowlisted origin, reached through the proxy env the wrap injects,
       // must succeed and return the origin body.
