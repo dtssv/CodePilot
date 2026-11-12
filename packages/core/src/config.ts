@@ -187,13 +187,11 @@ export const SessionsConfigSchema = z
     // When the daemon starts, sweep the sessions directory for any session
     // whose last recorded status is in-flight (a run interrupted by a crash or
     // kill) and seal each to a clean idle before anyone reopens it. Default
-    // true; set false to defer sealing until the session is next opened.
+    // true; set false to defer sealing until the session is next opened. The
+    // sweep is seal-and-idle only — it never re-enters the agent loop, since a
+    // prior run's side-effecting tools may already have executed and a blind
+    // resume would risk double execution.
     reconcileOnBoot: z.boolean().optional(),
-    // After the boot sweep seals an interrupted session, re-enter the agent
-    // loop to continue its last turn. Default false — seal-and-idle only, since
-    // a prior run's side-effecting tools may already have executed and a blind
-    // resume risks double execution.
-    autoResumeAfterCrash: z.boolean().optional(),
     // Delete non-pinned sessions older than this many days by mtime. 0 (default)
     // never deletes; pinned sessions are always exempt. Swept at daemon startup.
     retentionDays: z.number().int().nonnegative().optional(),

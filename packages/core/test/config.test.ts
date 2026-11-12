@@ -123,10 +123,15 @@ describe("validateConfig", () => {
 
   it("accepts the sessions reconcile block", () => {
     const r = validateConfig({
-      sessions: { reconcileOnBoot: false, autoResumeAfterCrash: true },
-    }) as { sessions?: { reconcileOnBoot?: boolean; autoResumeAfterCrash?: boolean } };
+      sessions: { reconcileOnBoot: false },
+    }) as { sessions?: { reconcileOnBoot?: boolean } };
     expect(r.sessions?.reconcileOnBoot).toBe(false);
-    expect(r.sessions?.autoResumeAfterCrash).toBe(true);
+  });
+
+  it("rejects the removed autoResumeAfterCrash knob (strict schema)", () => {
+    expect(() =>
+      validateConfig({ sessions: { autoResumeAfterCrash: true } as never }),
+    ).toThrow();
   });
 
   it("accepts the openai responses apiStyle", () => {

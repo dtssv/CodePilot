@@ -1267,12 +1267,11 @@ export interface CodepilotConfig {
 export interface SessionsConfig {
  /** When the daemon starts, sweep the sessions directory for any session whose
   * last recorded status is in-flight (a run interrupted by a crash or kill) and
-  * seal each to a clean idle before anyone reopens it. Default true. */
+  * seal each to a clean idle before anyone reopens it. Default true. The sweep
+  * is seal-and-idle only — it never re-enters the agent loop, since a prior
+  * run's side-effecting tools may already have executed and a blind resume
+  * would risk double execution. */
   reconcileOnBoot?: boolean;
- /** After the boot sweep seals an interrupted session, re-enter the agent loop
-  * to continue its last turn. Default false — seal-and-idle only, since a prior
-  * run's side-effecting tools may already have executed. */
-  autoResumeAfterCrash?: boolean;
  /** Delete non-pinned sessions whose transcript is older than this many days
   * (by mtime). 0 (default) never deletes. Pinned sessions are always exempt.
   * Swept fail-soft at daemon startup. */
