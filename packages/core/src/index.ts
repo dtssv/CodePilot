@@ -252,6 +252,14 @@ export {
   reasoningEffortToChoice,
 } from "./reasoningEffort.js";
 export type { ReasoningEffort, ReasoningEffortChoice } from "./reasoningEffort.js";
+export {
+  MODEL_CATALOG,
+  lookupModelCatalog,
+  catalogEffortChoices,
+  catalogModalities,
+  catalogSuggestedSmall,
+} from "./modelCatalog.js";
+export type { ModelCatalogEntry } from "./modelCatalog.js";
 export { formatUploadNote, materializeUploads } from "./promptFiles.js";
 
 // ---- Agent runtime (pluggable loop) ----

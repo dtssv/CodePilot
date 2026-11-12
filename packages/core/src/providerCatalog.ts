@@ -19,6 +19,7 @@ import {
   resolveModelAlias,
 } from "./config.js";
 import { loadCatalogDocument } from "./remoteCatalog.js";
+import { catalogModalities } from "./modelCatalog.js";
 
 /** One row in the cross-provider model picker. */
 export interface SelectableModel {
@@ -423,7 +424,7 @@ export function parseRemoteModelEntry(raw: Record<string, unknown>): RemoteModel
  * from a local model table. User budget defaults to 200k when unknown.
  */
 export function resolveModelCapabilities(
-  _modelId: string,
+  modelId: string,
   remote?: Pick<RemoteModelInfo, "contextWindowMax" | "modalities" | "maxOutputTokens">,
   existing?: ModelCapabilities,
 ): ModelCapabilities {
@@ -438,12 +439,16 @@ export function resolveModelCapabilities(
       contextWindow = clampContextWindow(contextWindow, max);
     }
   }
+  // Modalities precedence: a prior user edit, then the live probe, then the
+  // declarative catalog for a known model, finally a bare text default.
   const modalities: ModelModality[] =
     existing?.modalities?.length
       ? existing.modalities
       : remote?.modalities?.length
         ? remote.modalities
-        : ["text"];
+        : catalogModalities(modelId)?.length
+          ? [...catalogModalities(modelId)!]
+          : ["text"];
   const normalized = modalities.includes("text")
     ? modalities
     : (["text", ...modalities] as ModelModality[]);

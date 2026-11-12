@@ -133,7 +133,7 @@ export interface ToolExposureRule {
  * tested against both the full id and the bare name after the last `/`, so a
  * rule written as `glm*` matches `jdcloud/glm-5.2` without the user having to
  * know the provider prefix. */
-function modelGlobMatch(pattern: string, modelId: string): boolean {
+export function modelGlobMatch(pattern: string, modelId: string): boolean {
   const re =
     "^" +
     pattern

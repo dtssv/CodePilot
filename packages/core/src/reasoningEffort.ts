@@ -2,9 +2,12 @@
  * Per-model reasoning / extended-thinking effort levels.
  *
  * OpenAI o-series & Anthropic extended thinking both map onto the shared
- * `reasoningEffort` config knob; which levels a model accepts is heuristic
- * based on the model id (and optional provider hint).
+ * `reasoningEffort` config knob. A declarative capability catalog is the
+ * primary source for which levels a known model accepts; models the catalog
+ * does not list fall back to id heuristics (and an optional provider hint).
  */
+
+import { catalogEffortChoices } from "./modelCatalog.js";
 
 export type ReasoningEffort = "low" | "medium" | "high";
 
@@ -24,6 +27,12 @@ export function reasoningEffortChoicesForModel(
 ): ReasoningEffortChoice[] {
   const m = model.trim().toLowerCase();
   if (!m) return [];
+
+  // The declarative catalog is the source of truth for known models; its
+  // entry wins over the id heuristics below (which only cover unlisted ids).
+  const declared = catalogEffortChoices(m);
+  if (declared) return [...declared];
+
   const p = (provider ?? "").trim().toLowerCase();
 
   // OpenAI / compatible reasoning models (o1, o3, o4, gpt-5, …).
