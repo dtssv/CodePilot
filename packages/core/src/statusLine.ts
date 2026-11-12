@@ -153,6 +153,7 @@ export function runStatusLine(
     child.stderr.on("data", () => { /* discard stderr */ });
     child.on("error", () => finish(false));
     child.on("close", (code) => finish(code === 0 && stdout.length > 0));
+    child.stdin?.on("error", () => finish(false));
 
  // Feed the payload on stdin and close it.
     try {
