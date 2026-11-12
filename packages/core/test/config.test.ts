@@ -202,10 +202,12 @@ describe("validateConfig", () => {
         seqRepeat: 5,
         pathWarnAt: 4,
         pathOverlap: 0.5,
+        seqRefuse: false,
         exclude: ["bash", "read_file::*logs/*"],
       },
-    }) as { doomLoop?: { refuseAt?: number; exclude?: string[] } };
+    }) as { doomLoop?: { refuseAt?: number; seqRefuse?: boolean; exclude?: string[] } };
     expect(r.doomLoop?.refuseAt).toBe(10);
+    expect(r.doomLoop?.seqRefuse).toBe(false);
     expect(r.doomLoop?.exclude).toEqual(["bash", "read_file::*logs/*"]);
   });
 

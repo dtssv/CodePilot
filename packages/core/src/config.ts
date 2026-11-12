@@ -143,6 +143,11 @@ export const DoomLoopConfigSchema = z
     seqWindow: z.number().int().min(2).max(1000).optional(),
     /** Overlap count within the window that trips a rotating loop (default 4). */
     seqRepeat: z.number().int().min(1).max(1000).optional(),
+    /** Whether a tripped rotating-batch loop (layer 2) REFUSES the call
+     * (default true) or only WARNS. Set false for a warn-only layer 2 that
+     * steers without a side-effecting hard refusal — the counterpart of
+     * `refuseAt: 0` for the exact-repetition layer. */
+    seqRefuse: z.boolean().optional(),
     /** Overlapping re-read count for `read_file` that WARNS (default 3). */
     pathWarnAt: z.number().int().min(1).max(1000).optional(),
     /** Window-overlap fraction counting as a re-read spiral (default 0.6). */

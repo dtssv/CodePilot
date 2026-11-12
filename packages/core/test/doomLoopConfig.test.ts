@@ -59,6 +59,27 @@ describe("DoomLoopDetector — configurable thresholds", () => {
     expect(r.refuse).toBe(true);
     expect(r.kind).toBe("seq");
   });
+
+  it("seqRefuse:false downgrades a rotating-batch loop to warn-only", () => {
+    // Same tight rotating pair, but layer 2 is set to warn instead of refuse —
+    // the counterpart of refuseAt:0 for the exact-repetition layer.
+    const d = new DoomLoopDetector(undefined, {
+      seqWindow: 2,
+      seqRepeat: 2,
+      seqRefuse: false,
+      refuseAt: 1000,
+    });
+    const a = { command: "a" };
+    const b = { command: "b" };
+    d.check("bash", a);
+    d.check("bash", b);
+    d.check("bash", a);
+    const r = d.check("bash", b);
+    expect(r.refuse).toBe(false);
+    expect(r.warn).toBe(true);
+    expect(r.kind).toBe("seq");
+    expect(r.message).toContain("repeating a batch");
+  });
 });
 
 describe("DoomLoopDetector — exclude", () => {

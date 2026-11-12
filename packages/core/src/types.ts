@@ -835,6 +835,9 @@ export interface DoomLoopConfig {
   seqWindow?: number;
   /** Overlap count within the window that trips a rotating loop (default 4). */
   seqRepeat?: number;
+  /** Whether a tripped rotating-batch loop (layer 2) REFUSES the call (default
+   * true) or only WARNS. The counterpart of `refuseAt: 0` for layer 2. */
+  seqRefuse?: boolean;
   /** Overlapping re-read count for `read_file` that WARNS (default 3). */
   pathWarnAt?: number;
   /** Window-overlap fraction counting as a re-read spiral (default 0.6). */

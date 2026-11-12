@@ -307,6 +307,8 @@ export interface DoomLoopOptions {
   refuseAt?: number;
   seqWindow?: number;
   seqRepeat?: number;
+  /** Whether a tripped rotating-batch loop refuses (default true) or warns. */
+  seqRefuse?: boolean;
   pathWarnAt?: number;
   pathOverlap?: number;
   /** Tool names or `tool::glob` patterns never counted toward layer 1/2. */
@@ -360,6 +362,7 @@ export class DoomLoopDetector {
   private readonly refuseAt: number;
   private readonly seqWindow: number;
   private readonly seqRepeat: number;
+  private readonly seqRefuse: boolean;
   private readonly pathWarnAt: number;
   private readonly pathOverlap: number;
   private readonly isExcluded: (toolName: string, sig: string) => boolean;
@@ -372,6 +375,7 @@ export class DoomLoopDetector {
     this.warnAt = options?.warnAt ?? WARN_THRESHOLD;
     this.seqWindow = options?.seqWindow ?? SEQ_WINDOW;
     this.seqRepeat = options?.seqRepeat ?? SEQ_REPEAT;
+    this.seqRefuse = options?.seqRefuse !== false;
     this.pathWarnAt = options?.pathWarnAt ?? PATH_WARN_THRESHOLD;
     this.pathOverlap = options?.pathOverlap ?? PATH_OVERLAP_THRESHOLD;
     this.isExcluded = compileExclude(options?.exclude ?? []);
@@ -478,13 +482,16 @@ export class DoomLoopDetector {
       };
     }
 
- // Layer 2: sequence-level (rotating) loop.
+ // Layer 2: sequence-level (rotating) loop. Refuses by default; `seqRefuse:
+ // false` downgrades it to a warn-only steer (the layer-2 counterpart of
+ // `refuseAt: 0`) for deployments that prefer never to hard-brake the hot
+ // path on a rotating batch.
     const seqHit = this.checkSequence();
     if (seqHit) {
       return {
         count,
-        refuse: true,
-        warn: false,
+        refuse: this.seqRefuse,
+        warn: !this.seqRefuse,
         kind: "seq",
         message:
           `doom_loop: you're repeating a batch of tool calls you already made in the same ` +
