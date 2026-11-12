@@ -17,6 +17,22 @@ export interface RetryOptions {
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
+/** Read an explicit `x-should-retry` directive from a response, if the provider
+ * sent one. Anthropic (and OpenAI-compatible gateways) use this header to
+ * override the status-based heuristic: `true` means "retry even though the
+ * status looks ambiguous", `false` means "do not retry even though the status
+ * is normally retryable" (e.g. a 429 the provider knows is terminal). Returns
+ * null when the header is absent or unparseable, leaving the status heuristic
+ * in charge. */
+export function shouldRetryHeader(res: Response): boolean | null {
+  const v = res.headers.get("x-should-retry");
+  if (v == null) return null;
+  const s = v.trim().toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return null;
+}
+
 /** A best-effort provider rate-limit snapshot parsed from response headers. */
 export interface ProviderRateLimit {
   requestsRemaining?: number;
@@ -119,7 +135,12 @@ export async function fetchWithRetry(
       await sleep(delay, opts.signal);
       continue;
     }
-    if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt >= maxRetries) {
+    // An explicit x-should-retry directive overrides the status heuristic in
+    // both directions: `false` stops immediately (even on a normally-retryable
+    // status), `true` retries an otherwise-non-retryable status.
+    const directive = shouldRetryHeader(res);
+    const retryable = directive === null ? RETRYABLE_STATUS.has(res.status) : directive;
+    if (res.ok || !retryable || attempt >= maxRetries) {
       return res;
     }
     const ra = retryAfterMs(res);
