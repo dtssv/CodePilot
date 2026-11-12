@@ -291,3 +291,155 @@ describe("OpenAIProvider Azure dialect", () => {
     expect(url).not.toContain(".com//openai");
   });
 });
+
+describe("OpenAIProvider Responses dialect", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function responsesProvider() {
+    return new OpenAIProvider({
+      apiStyle: "responses",
+      apiKey: "k",
+      baseURL: "https://example.com/v1",
+      defaultModel: "gpt-5",
+    });
+  }
+
+  it("posts to /v1/responses with instructions/input/flattened tools", async () => {
+    let url: string | undefined;
+    let body: Record<string, unknown> | undefined;
+    let headers: Record<string, string> | undefined;
+    vi.stubGlobal("fetch", async (u: string, init: RequestInit) => {
+      url = u;
+      headers = init.headers as Record<string, string>;
+      body = JSON.parse(init.body as string);
+      return sseResponse([
+        'event: response.completed\ndata: {"response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ]);
+    });
+    await collect(
+      responsesProvider().stream({
+        model: "gpt-5",
+        systemPrompt: "be terse",
+        maxTokens: 256,
+        reasoningEffort: "high",
+        tools: [{ name: "read_file", description: "read a file", inputSchema: { type: "object" } }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    );
+    expect(url).toBe("https://example.com/v1/responses");
+    expect(headers?.["authorization"]).toBe("Bearer k");
+    // System prompt → top-level instructions; messages → input items.
+    expect(body?.instructions).toBe("be terse");
+    expect(body?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
+    // Token cap is max_output_tokens; reasoning is an object.
+    expect(body?.max_output_tokens).toBe(256);
+    expect(body?.reasoning).toMatchObject({ effort: "high" });
+    // Tools are flattened (no nested function object).
+    expect(body?.tools).toEqual([
+      { type: "function", name: "read_file", description: "read a file", parameters: { type: "object" } },
+    ]);
+  });
+
+  it("maps output_text/reasoning deltas to text/thinking events in order", async () => {
+    vi.stubGlobal("fetch", async () =>
+      sseResponse([
+        'event: response.reasoning_summary_text.delta\ndata: {"delta":"let me "}\n\n',
+        'event: response.reasoning_summary_text.delta\ndata: {"delta":"think"}\n\n',
+        'event: response.output_text.delta\ndata: {"delta":"the answer"}\n\n',
+        'event: response.completed\ndata: {"response":{"usage":{"input_tokens":5,"output_tokens":3,"input_tokens_details":{"cached_tokens":2}}}}\n\n',
+      ]),
+    );
+    const events = await collect(
+      responsesProvider().stream({
+        model: "gpt-5",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    );
+    const thinking = events.filter((e) => e.kind === "thinking_delta");
+    const text = events.filter((e) => e.kind === "text_delta");
+    expect(thinking.map((e) => (e as { text: string }).text)).toEqual(["let me ", "think"]);
+    expect(text.map((e) => (e as { text: string }).text)).toEqual(["the answer"]);
+    expect(events.findIndex((e) => e.kind === "thinking_delta")).toBeLessThan(
+      events.findIndex((e) => e.kind === "text_delta"),
+    );
+    // Usage maps input_tokens/output_tokens → input/output, cached → cacheRead.
+    const usage = events.find((e) => e.kind === "usage") as
+      | { usage: { input: number; output: number; cacheRead?: number } }
+      | undefined;
+    expect(usage?.usage).toMatchObject({ input: 5, output: 3, cacheRead: 2 });
+    // The stream terminates with a done event (no [DONE] sentinel on the wire).
+    expect(events[events.length - 1]).toMatchObject({ kind: "done" });
+  });
+
+  it("assembles a tool call from added/arguments.delta/done events", async () => {
+    vi.stubGlobal("fetch", async () =>
+      sseResponse([
+        'event: response.output_item.added\ndata: {"item_id":"it1","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":""}}\n\n',
+        'event: response.function_call_arguments.delta\ndata: {"item_id":"it1","delta":"{\\"path\\":"}\n\n',
+        'event: response.function_call_arguments.delta\ndata: {"item_id":"it1","delta":"\\"a.ts\\"}"}\n\n',
+        'event: response.output_item.done\ndata: {"item_id":"it1","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}}\n\n',
+        'event: response.completed\ndata: {"response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ]),
+    );
+    const events = await collect(
+      responsesProvider().stream({
+        model: "gpt-5",
+        messages: [{ role: "user", content: [{ type: "text", text: "read a.ts" }] }],
+      }),
+    );
+    const deltas = events.filter((e) => e.kind === "tool_input_delta");
+    expect(deltas.length).toBe(2);
+    const call = events.find((e) => e.kind === "tool_call") as
+      | { toolCall: { id: string; name: string; input: unknown } }
+      | undefined;
+    expect(call?.toolCall).toMatchObject({ id: "call_1", name: "read_file", input: { path: "a.ts" } });
+    // Exactly one tool_call (no duplicate from the fallback flush).
+    expect(events.filter((e) => e.kind === "tool_call").length).toBe(1);
+  });
+
+  it("surfaces a failed response as an error event", async () => {
+    vi.stubGlobal("fetch", async () =>
+      sseResponse([
+        'event: response.failed\ndata: {"response":{"error":{"message":"model overloaded"}}}\n\n',
+      ]),
+    );
+    const events = await collect(
+      responsesProvider().stream({
+        model: "gpt-5",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    );
+    const err = events.find((e) => e.kind === "error") as { message: string } | undefined;
+    expect(err?.message).toBe("model overloaded");
+    // No done after an error (we return early).
+    expect(events.some((e) => e.kind === "done")).toBe(false);
+  });
+
+  it("maps tool_use history to function_call input items", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_u: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([
+        'event: response.completed\ndata: {"response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ]);
+    });
+    await collect(
+      responsesProvider().stream({
+        model: "gpt-5",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "read a.ts" }] },
+          { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "read_file", input: { path: "a.ts" } }] },
+          { role: "user", content: [{ type: "tool_result", toolCallId: "call_1", content: "contents" }] },
+        ],
+      }),
+    );
+    const input = body?.input as Array<Record<string, unknown>>;
+    expect(input).toContainEqual({
+      type: "function_call",
+      call_id: "call_1",
+      name: "read_file",
+      arguments: JSON.stringify({ path: "a.ts" }),
+    });
+    expect(input).toContainEqual({ type: "function_call_output", call_id: "call_1", output: "contents" });
+  });
+});

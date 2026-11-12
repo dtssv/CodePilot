@@ -129,6 +129,18 @@ describe("validateConfig", () => {
     expect(r.sessions?.autoResumeAfterCrash).toBe(true);
   });
 
+  it("accepts the openai responses apiStyle", () => {
+    const r = validateConfig({ provider: "openai", apiStyle: "responses" }) as {
+      apiStyle?: string;
+    };
+    expect(r.apiStyle).toBe("responses");
+    expect(validateConfig({ apiStyle: "chat" })).toBeTruthy();
+  });
+
+  it("rejects an unknown apiStyle", () => {
+    expect(() => validateConfig({ apiStyle: "grpc" as never })).toThrow();
+  });
+
   it("accepts a declarative status-line preset block", () => {
     const r = validateConfig({
       statusLine: { type: "preset", preset: "verbose", items: ["model", "context", "branch"] },

@@ -207,6 +207,8 @@ export function buildSingleProvider(config: CodepilotConfig): ChatProvider {
   switch (provider) {
     case "openai":
       return new OpenAIProvider({
+        // "responses" selects the /v1/responses dialect; default chat.
+        apiStyle: config.apiStyle === "responses" ? "responses" : "openai",
         apiKey: config.apiKey,
         baseURL: config.baseURL,
         defaultModel: config.model,

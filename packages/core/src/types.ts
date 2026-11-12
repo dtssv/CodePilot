@@ -752,6 +752,11 @@ export interface CodepilotConfig {
  /** Azure OpenAI `api-version` query param. Only used when `provider` is
  * `azure`; defaults to a recent GA version when omitted. */
   azureApiVersion?: string;
+ /** OpenAI API dialect. `chat` (default) uses `/v1/chat/completions`;
+ * `responses` uses the newer `/v1/responses` endpoint (tool calls and
+ * reasoning stream as named events). Only consulted when `provider` is
+ * `openai`; other providers ignore it. */
+  apiStyle?: "chat" | "responses";
   permissionMode?: PermissionMode;
   maxTokens?: number;
  /** Token threshold to trigger compaction. */

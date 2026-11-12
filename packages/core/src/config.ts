@@ -96,6 +96,8 @@ const ProviderPresetSchema = z
     smallModel: z.string().min(1).optional(),
  /** Azure OpenAI api-version (only used when provider is "azure"). */
     azureApiVersion: z.string().min(1).optional(),
+ /** OpenAI API dialect (only used when provider is "openai"). */
+    apiStyle: z.enum(["chat", "responses"]).optional(),
  /** Models offered in the picker for this preset. */
     models: z.array(z.string().min(1)).optional(),
  /** Per-model context ceiling + modalities (from `/models` fetch, user-editable). */
@@ -384,6 +386,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     apiKey: z.string().optional(),
     baseURL: z.string().url().optional(),
     azureApiVersion: z.string().min(1).optional(),
+    apiStyle: z.enum(["chat", "responses"]).optional(),
     permissionMode: z.enum(["ask", "auto-edit", "yolo", "auto", "dont-ask"]).optional(),
     agentMode: z.enum(["chat", "plan", "agent"]).optional(),
     maxTokens: z.number().int().positive().optional(),
@@ -1398,6 +1401,9 @@ export function useProvider(
   // models / modelCapabilities) are picker-only metadata that the flat runtime
   // config does not consume, so they intentionally do not flatten here.
   if (preset.azureApiVersion !== undefined) out.azureApiVersion = preset.azureApiVersion;
+  // apiStyle is likewise a runtime provider field (OpenAI chat vs responses
+  // dialect); flatten it so switching to a responses-style preset takes effect.
+  if (preset.apiStyle !== undefined) out.apiStyle = preset.apiStyle;
   if (preset.smallModel !== undefined) {
     out.smallModel = preset.smallModel;
   } else if (config.smallModel) {
