@@ -344,6 +344,14 @@ export const SandboxConfigSchema = z
     // Carve resolved `.git` out of the writable roots as OS-level read-only.
     // Default true. See types.ts SandboxConfig.protectGit.
     protectGit: z.boolean().optional(),
+    // How the git metadata dir is treated at the OS sandbox layer. Richer than
+    // the legacy boolean `protectGit`; when set it wins. See types.ts.
+    //   "protect"       — carve `.git` read-only (same as protectGit:true; default)
+    //   "allow-git-cli" — leave `.git` writable so `git commit`/`add` work under
+    //                     the sandbox without per-command escalation
+    //   "ask"           — alias of allow-git-cli at the OS layer; the file-tool
+    //                     `.git` write ask remains the interactive gate
+    gitWrite: z.enum(["protect", "allow-git-cli", "ask"]).optional(),
   })
   .strict();
 

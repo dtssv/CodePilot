@@ -176,6 +176,18 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ codeMode: { bogus: 1 } as never })).toThrow();
   });
 
+  it("accepts a sandbox gitWrite mode and rejects an unknown one", () => {
+    for (const gitWrite of ["protect", "allow-git-cli", "ask"] as const) {
+      const r = validateConfig({ sandbox: { gitWrite } }) as {
+        sandbox?: { gitWrite?: string };
+      };
+      expect(r.sandbox?.gitWrite).toBe(gitWrite);
+    }
+    expect(() =>
+      validateConfig({ sandbox: { gitWrite: "always" } as never }),
+    ).toThrow();
+  });
+
   it("accepts a doomLoop threshold + exclude block", () => {
     const r = validateConfig({
       doomLoop: {

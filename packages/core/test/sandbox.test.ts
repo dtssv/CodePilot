@@ -280,6 +280,39 @@ describe("buildSeatbeltProfile", () => {
     expect(profile).not.toContain(`${join(realpathSync(base), ".git")}"))`);
   });
 
+  it("gitWrite 'allow-git-cli' / 'ask' leave .git writable for the git binary", async () => {
+    for (const gitWrite of ["allow-git-cli", "ask"] as const) {
+      const base = await mkdtemp(join(tmpdir(), "sbx-git-cli-"));
+      await mkdir(join(base, ".git"));
+      const p = resolveSandbox({ gitWrite }, base);
+      // Not carved → `git commit` can write the object store under the sandbox.
+      expect(p.protectedSubpaths).toEqual([]);
+      const profile = buildSeatbeltProfile(p);
+      expect(profile).not.toContain(
+        `(deny file-write* (subpath ${JSON.stringify(join(realpathSync(base), ".git"))}))`,
+      );
+    }
+  });
+
+  it("gitWrite 'protect' carves .git read-only (explicit default)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-git-protect-"));
+    await mkdir(join(base, ".git"));
+    const gitDir = join(realpathSync(base), ".git");
+    const p = resolveSandbox({ gitWrite: "protect" }, base);
+    expect(p.protectedSubpaths.some((x) => realpathSync(x) === gitDir)).toBe(true);
+  });
+
+  it("gitWrite wins over the legacy protectGit boolean", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-git-both-"));
+    await mkdir(join(base, ".git"));
+    // protectGit:true would normally carve, but gitWrite:"allow-git-cli" wins.
+    const p = resolveSandbox({ protectGit: true, gitWrite: "allow-git-cli" }, base);
+    expect(p.protectedSubpaths).toEqual([]);
+    // And the reverse: protectGit:false but gitWrite:"protect" → carved.
+    const q = resolveSandbox({ protectGit: false, gitWrite: "protect" }, base);
+    expect(q.protectedSubpaths.length).toBeGreaterThan(0);
+  });
+
   it("follows a linked-worktree .git file to its gitdir and protects both", async () => {
     const base = await mkdtemp(join(tmpdir(), "sbx-wt-"));
     const real = realpathSync(base);

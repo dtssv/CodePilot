@@ -119,7 +119,15 @@ export function resolveSandbox(
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];
   const networkPolicy = normalizeNetworkPolicy(config?.network);
-  const protectGit = config?.protectGit !== false;
+  // gitWrite is the richer knob and wins when set; otherwise the legacy boolean
+  // `protectGit` decides. "allow-git-cli"/"ask" both leave `.git` writable at
+  // the OS layer so an ordinary `git commit` can write the object store without
+  // per-command escalation — the history-rewrite/hook-plant risk stays gated at
+  // the file-tool layer (a direct `.git/…` write still asks).
+  const protectGit =
+    config?.gitWrite !== undefined
+      ? config.gitWrite === "protect"
+      : config?.protectGit !== false;
   return {
     mode,
     network: networkPolicy.mode !== "off",
