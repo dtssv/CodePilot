@@ -30,6 +30,32 @@ export interface GeminiProviderOptions {
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
+// Map the shared `reasoningEffort` knob onto a Gemini 2.5 thinking budget (in
+// tokens), mirroring the Anthropic adapter's philosophy so a single
+// `reasoningEffort` setting works across providers. The values sit inside the
+// Gemini 2.5 Flash/Pro budget range. An explicit `thinkingBudget` always wins.
+const EFFORT_BUDGET: Record<"low" | "medium" | "high", number> = {
+  low: 4096,
+  medium: 10_000,
+  high: 24_000,
+};
+
+/**
+ * Resolve the effective Gemini thinking budget from an explicit budget or the
+ * shared effort knob. Returns 0 when thinking should stay off (no config
+ * emitted). Explicit budget wins; a 0/negative explicit budget disables.
+ */
+export function resolveGeminiThinkingBudget(
+  thinkingBudget: number | undefined,
+  reasoningEffort: "low" | "medium" | "high" | undefined,
+): number {
+  if (typeof thinkingBudget === "number") {
+    return thinkingBudget > 0 ? Math.floor(thinkingBudget) : 0;
+  }
+  if (reasoningEffort) return EFFORT_BUDGET[reasoningEffort];
+  return 0;
+}
+
 export class GeminiProvider implements ChatProvider {
   readonly name = "gemini";
   private readonly apiKey: string;
@@ -68,9 +94,13 @@ export class GeminiProvider implements ChatProvider {
     }
     const genConfig: Record<string, unknown> = {};
     if (opts.maxTokens) genConfig.maxOutputTokens = opts.maxTokens;
-    // Gemini 2.5 exposes a thinking budget; map the shared reasoning knob.
-    if (opts.thinkingBudget && opts.thinkingBudget > 0) {
-      genConfig.thinkingConfig = { thinkingBudget: Math.floor(opts.thinkingBudget) };
+    // Gemini 2.5 exposes a thinking budget; resolve it from an explicit budget
+    // or the shared reasoningEffort knob (explicit budget wins). Without this
+    // mapping, a model picked purely via `reasoningEffort` would silently drop
+    // the request's thinking config.
+    const thinkingBudget = resolveGeminiThinkingBudget(opts.thinkingBudget, opts.reasoningEffort);
+    if (thinkingBudget > 0) {
+      genConfig.thinkingConfig = { thinkingBudget };
     }
     if (Object.keys(genConfig).length > 0) body.generationConfig = genConfig;
 

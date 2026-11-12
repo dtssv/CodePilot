@@ -2,7 +2,7 @@
 // calls / usage) + message mapping. fetch is stubbed; no real API calls.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GeminiProvider, toGeminiContents } from "../src/providers/gemini.js";
+import { GeminiProvider, resolveGeminiThinkingBudget, toGeminiContents } from "../src/providers/gemini.js";
 import type { ProviderMessage, StreamEvent } from "../src/providers/types.js";
 
 function sseResponse(frames: string[]): Response {
@@ -121,6 +121,100 @@ describe("GeminiProvider streaming", () => {
       if (prevG !== undefined) process.env.GEMINI_API_KEY = prevG;
       if (prevA !== undefined) process.env.GOOGLE_API_KEY = prevA;
     }
+  });
+
+  it("maps reasoningEffort to a thinking budget when no explicit budget is set", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([chunk({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })]);
+    });
+    const p = new GeminiProvider({ apiKey: "k" });
+    await collect(
+      p.stream({
+        model: "gemini-2.5-pro",
+        reasoningEffort: "high",
+        messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+      }),
+    );
+    const gen = body?.generationConfig as { thinkingConfig?: { thinkingBudget?: number } } | undefined;
+    expect(gen?.thinkingConfig?.thinkingBudget).toBe(24_000);
+  });
+
+  it("prefers an explicit thinkingBudget over reasoningEffort", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([chunk({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })]);
+    });
+    const p = new GeminiProvider({ apiKey: "k" });
+    await collect(
+      p.stream({
+        model: "gemini-2.5-pro",
+        reasoningEffort: "high",
+        thinkingBudget: 2048,
+        messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+      }),
+    );
+    const gen = body?.generationConfig as { thinkingConfig?: { thinkingBudget?: number } } | undefined;
+    expect(gen?.thinkingConfig?.thinkingBudget).toBe(2048);
+  });
+
+  it("omits thinkingConfig when neither budget nor effort is set", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([chunk({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })]);
+    });
+    const p = new GeminiProvider({ apiKey: "k" });
+    await collect(
+      p.stream({
+        model: "gemini-2.5-flash",
+        messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+      }),
+    );
+    const gen = body?.generationConfig as { thinkingConfig?: unknown } | undefined;
+    expect(gen?.thinkingConfig).toBeUndefined();
+  });
+
+  it("disables thinking when the explicit budget is zero (effort ignored)", async () => {
+    let body: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse([chunk({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })]);
+    });
+    const p = new GeminiProvider({ apiKey: "k" });
+    await collect(
+      p.stream({
+        model: "gemini-2.5-pro",
+        reasoningEffort: "high",
+        thinkingBudget: 0,
+        messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+      }),
+    );
+    const gen = body?.generationConfig as { thinkingConfig?: unknown } | undefined;
+    expect(gen?.thinkingConfig).toBeUndefined();
+  });
+});
+
+describe("resolveGeminiThinkingBudget", () => {
+  it("maps each effort tier to a budget", () => {
+    expect(resolveGeminiThinkingBudget(undefined, "low")).toBe(4096);
+    expect(resolveGeminiThinkingBudget(undefined, "medium")).toBe(10_000);
+    expect(resolveGeminiThinkingBudget(undefined, "high")).toBe(24_000);
+  });
+
+  it("returns 0 (off) when neither is set", () => {
+    expect(resolveGeminiThinkingBudget(undefined, undefined)).toBe(0);
+  });
+
+  it("lets an explicit positive budget win and floors it", () => {
+    expect(resolveGeminiThinkingBudget(5000.7, "high")).toBe(5000);
+  });
+
+  it("treats a zero/negative explicit budget as off, ignoring effort", () => {
+    expect(resolveGeminiThinkingBudget(0, "high")).toBe(0);
+    expect(resolveGeminiThinkingBudget(-1, "high")).toBe(0);
   });
 });
 
