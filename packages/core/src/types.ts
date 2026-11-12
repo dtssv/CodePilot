@@ -139,6 +139,20 @@ type EventBody =
   * control event: never sent to the model, zero context cost.
   */
   | { type: "tool_started"; toolCallId: string; name: string }
+ /**
+  * Loop-detection telemetry. Emitted whenever a layer fires (warn / refuse /
+  * rotating-batch / path spiral / redundant re-ask) so operators can audit
+  * false positives by tool name and tune thresholds — it is NOT a boast about
+  * refusal rate. `count` is the exact-repetition count at the time (0 for the
+  * non-count layers). A control event: never sent to the model, zero context
+  * cost.
+  */
+  | {
+      type: "doom_loop";
+      kind: "warn" | "refuse" | "seq" | "path" | "ask_reask";
+      tool: string;
+      count: number;
+    }
   | {
       type: "tool_result";
       toolCallId: string;
@@ -751,6 +765,25 @@ export interface HooksConfig {
   Stop?: HookEntryConfig[];
 }
 
+/** Loop-detection thresholds + exclusions. Every field is optional; an unset
+ * field falls back to the built-in constant. See `CodepilotConfig.doomLoop`. */
+export interface DoomLoopConfig {
+  /** Exact-repetition count at which a call is WARNED (default 3). */
+  warnAt?: number;
+  /** Exact-repetition count at which a call is REFUSED (default 4). */
+  refuseAt?: number;
+  /** Sliding window size for rotating-batch detection (default 6). */
+  seqWindow?: number;
+  /** Overlap count within the window that trips a rotating loop (default 4). */
+  seqRepeat?: number;
+  /** Overlapping re-read count for `read_file` that WARNS (default 3). */
+  pathWarnAt?: number;
+  /** Window-overlap fraction counting as a re-read spiral (default 0.6). */
+  pathOverlap?: number;
+  /** Tool names or `tool::glob` patterns excluded from layer 1/2 counting. */
+  exclude?: string[];
+}
+
 export interface CodepilotConfig {
   provider?: ProviderName;
   model?: string;
@@ -968,6 +1001,11 @@ export interface CodepilotConfig {
   * doom-loop guard can't catch). Unset = a built-in default; `0` disables it.
   */
   convergenceCap?: number;
+ /** Loop-detection thresholds + exclusions. Every field defaults to a built-in
+  * constant, so an unset/empty object changes nothing. `exclude` lists tool
+  * names or `tool::glob` patterns that are never counted toward the
+  * exact-repetition or rotating-batch layers (dedup replay still applies). */
+  doomLoop?: DoomLoopConfig;
  /** Per-model tool-exposure downgrade. Each rule hides `drop` tools from any
   * model whose id glob-matches an entry in `models`. Applied after mode
   * filtering, so it can only remove tools. Lets a deployment keep the complex

@@ -362,7 +362,7 @@ export async function runAgent(
   const windDownAt = Math.min(maxTurns, convergenceCap);
   const agentMode: AgentMode = deps.agentMode ?? "agent";
   const produced: Event[] = [];
-  const doomLoop = new DoomLoopDetector(deps.dedupCache);
+  const doomLoop = new DoomLoopDetector(deps.dedupCache, deps.config.doomLoop);
  // Plan-progress tracking: if the model keeps calling tools but the plan
  // never advances (no step moves to completed/in_progress), it's spinning.
  // After PLAN_STALL_TURNS turns of no progress we surface a stall notice via

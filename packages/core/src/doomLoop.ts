@@ -213,6 +213,8 @@ export interface DoomLoopCheck {
   warn: boolean;
  /** Human-readable message for the model. */
   message: string;
+ /** Which detection layer fired, for telemetry. Absent when neither. */
+  kind?: "warn" | "refuse" | "seq" | "path" | "ask_reask";
 }
 
 export const WARN_THRESHOLD = 3;
@@ -298,6 +300,42 @@ export class DedupCache {
   }
 }
 
+/** Resolved loop-detection knobs (every field present) + an exclude matcher.
+ * Built from the user's optional config overlaid on the built-in constants. */
+export interface DoomLoopOptions {
+  warnAt?: number;
+  refuseAt?: number;
+  seqWindow?: number;
+  seqRepeat?: number;
+  pathWarnAt?: number;
+  pathOverlap?: number;
+  /** Tool names or `tool::glob` patterns never counted toward layer 1/2. */
+  exclude?: string[];
+}
+
+/** A resolved exclusion test. A pattern matches either the bare tool name or,
+ * when it contains `::`, the `tool::<inputGlob>` signature form — `*`/`?`
+ * globs, case-insensitive. */
+function compileExclude(patterns: readonly string[]): (toolName: string, sig: string) => boolean {
+  if (patterns.length === 0) return () => false;
+  const toRe = (pattern: string): RegExp => {
+    const body = pattern
+      .split(/(\*|\?)/)
+      .map((part) =>
+        part === "*" ? ".*" : part === "?" ? "." : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      )
+      .join("");
+    try {
+      return new RegExp("^" + body + "$", "i");
+    } catch {
+      return /$a^/; // never matches
+    }
+  };
+  const compiled = patterns.map((p) => ({ hasSig: p.includes("::"), re: toRe(p) }));
+  return (toolName: string, sig: string): boolean =>
+    compiled.some((c) => (c.hasSig ? c.re.test(sig) : c.re.test(toolName)));
+}
+
 export class DoomLoopDetector {
   private counts = new Map<string, number>();
  /** Ordered list of call signatures across the whole run, for
@@ -317,8 +355,26 @@ export class DoomLoopDetector {
  * defaults to a run-local cache when none is supplied (tests, subagents). */
   private readonly cache: DedupCache;
 
-  constructor(cache?: DedupCache) {
+ /** Resolved thresholds (user config overlaid on the built-in constants). */
+  private readonly warnAt: number;
+  private readonly refuseAt: number;
+  private readonly seqWindow: number;
+  private readonly seqRepeat: number;
+  private readonly pathWarnAt: number;
+  private readonly pathOverlap: number;
+  private readonly isExcluded: (toolName: string, sig: string) => boolean;
+
+  constructor(cache?: DedupCache, options?: DoomLoopOptions) {
     this.cache = cache ?? new DedupCache();
+    // 0 = "never refuse": fold it to infinity so the gate can't fire.
+    const refuse = options?.refuseAt;
+    this.refuseAt = refuse === 0 ? Number.POSITIVE_INFINITY : refuse ?? REFUSE_THRESHOLD;
+    this.warnAt = options?.warnAt ?? WARN_THRESHOLD;
+    this.seqWindow = options?.seqWindow ?? SEQ_WINDOW;
+    this.seqRepeat = options?.seqRepeat ?? SEQ_REPEAT;
+    this.pathWarnAt = options?.pathWarnAt ?? PATH_WARN_THRESHOLD;
+    this.pathOverlap = options?.pathOverlap ?? PATH_OVERLAP_THRESHOLD;
+    this.isExcluded = compileExclude(options?.exclude ?? []);
   }
 
  /** Thresholds exposed as static constants for callers that need to
@@ -337,9 +393,19 @@ export class DoomLoopDetector {
  * future detection. Callers that refuse must NOT execute the tool. */
   check(toolName: string, input: unknown): DoomLoopCheck {
     const sig = signature(toolName, input);
-    const count = (this.counts.get(sig) ?? 0) + 1;
-    this.counts.set(sig, count);
-    this.seq.push(sig);
+
+    // Excluded tools are never counted toward exact-repetition (layer 1) or
+    // rotating-batch (layer 2) detection — a legitimate idempotent poll or
+    // retry of such a tool must not be warned or refused. Their results are
+    // still deduped on replay (that path is keyed off the cache, not here).
+    // The ask_user_question re-ask guard and the read_file path layer below do
+    // not depend on these counters, so they still apply.
+    const excluded = this.isExcluded(toolName, sig);
+    const count = excluded ? 0 : (this.counts.get(sig) ?? 0) + 1;
+    if (!excluded) {
+      this.counts.set(sig, count);
+      this.seq.push(sig);
+    }
 
  // Interactive-question guard: refuse re-asking a question the user has
  // ALREADY answered this run. The judgement is "is the information already
@@ -360,6 +426,7 @@ export class DoomLoopDetector {
           count: 1,
           refuse: true,
           warn: false,
+          kind: "ask_reask",
           message:
             `You already have the user's answer to this question — do not ask it again ` +
             `(even reworded). Act on the answer you received and continue. If the user ` +
@@ -380,7 +447,7 @@ export class DoomLoopDetector {
       const prior = this.pathWindows.get(pk) ?? [];
       const overlapping =
         req !== null &&
-        prior.some((w) => windowOverlapFraction(req, w) >= PATH_OVERLAP_THRESHOLD);
+        prior.some((w) => windowOverlapFraction(req, w) >= this.pathOverlap);
       if (overlapping) {
         pathCount = (this.pathCounts.get(pk) ?? 0) + 1;
         this.pathCounts.set(pk, pathCount);
@@ -397,11 +464,12 @@ export class DoomLoopDetector {
     }
 
  // Layer 1: per-signature repetition.
-    if (count >= REFUSE_THRESHOLD) {
+    if (count >= this.refuseAt) {
       return {
         count,
         refuse: true,
         warn: false,
+        kind: "refuse",
         message:
           `doom_loop: you've called ${toolName} with the exact same input ${count} times ` +
           `without making progress. This is almost certainly a loop — STOP and try a ` +
@@ -417,6 +485,7 @@ export class DoomLoopDetector {
         count,
         refuse: true,
         warn: false,
+        kind: "seq",
         message:
           `doom_loop: you're repeating a batch of tool calls you already made in the same ` +
           `form (${seqHit} recent calls match earlier ones). You are re-exploring the same ` +
@@ -426,11 +495,12 @@ export class DoomLoopDetector {
       };
     }
 
-    if (count >= WARN_THRESHOLD) {
+    if (count >= this.warnAt) {
       return {
         count,
         refuse: false,
         warn: true,
+        kind: "warn",
         message:
           `doom_loop warning: this is the ${count}rd time you're calling ${toolName} with ` +
           `identical input. If the previous calls didn't solve the problem, repeating ` +
@@ -438,11 +508,12 @@ export class DoomLoopDetector {
       };
     }
 
-    if (pk && pathCount >= PATH_WARN_THRESHOLD) {
+    if (pk && pathCount >= this.pathWarnAt) {
       return {
         count,
         refuse: false,
         warn: true,
+        kind: "path",
         message:
           `doom_loop warning: you've re-read an OVERLAPPING window of the same file ` +
           `${pathCount} times — you keep re-fetching lines you already have. Reading a ` +
@@ -460,14 +531,14 @@ export class DoomLoopDetector {
  * SEQ_WINDOW-window immediately preceding them. Returns the overlap
  * count when it meets SEQ_REPEAT, else 0. */
   private checkSequence(): number {
-    const w = SEQ_WINDOW;
+    const w = this.seqWindow;
     if (this.seq.length < w * 2) return 0;
     const recent = this.seq.slice(this.seq.length - w);
     const prior = this.seq.slice(this.seq.length - w * 2, this.seq.length - w);
     const priorSet = new Set(prior);
     let overlap = 0;
     for (const s of recent) if (priorSet.has(s)) overlap++;
-    return overlap >= SEQ_REPEAT ? overlap : 0;
+    return overlap >= this.seqRepeat ? overlap : 0;
   }
 
  /** Return the current call count for a (tool, input) pair WITHOUT

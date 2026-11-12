@@ -141,6 +141,27 @@ describe("validateConfig", () => {
     expect(() => validateConfig({ apiStyle: "grpc" as never })).toThrow();
   });
 
+  it("accepts a doomLoop threshold + exclude block", () => {
+    const r = validateConfig({
+      doomLoop: {
+        warnAt: 5,
+        refuseAt: 10,
+        seqWindow: 8,
+        seqRepeat: 5,
+        pathWarnAt: 4,
+        pathOverlap: 0.5,
+        exclude: ["bash", "read_file::*logs/*"],
+      },
+    }) as { doomLoop?: { refuseAt?: number; exclude?: string[] } };
+    expect(r.doomLoop?.refuseAt).toBe(10);
+    expect(r.doomLoop?.exclude).toEqual(["bash", "read_file::*logs/*"]);
+  });
+
+  it("rejects an unknown doomLoop key / out-of-range overlap", () => {
+    expect(() => validateConfig({ doomLoop: { bogus: 1 } as never })).toThrow();
+    expect(() => validateConfig({ doomLoop: { pathOverlap: 2 } })).toThrow();
+  });
+
   it("accepts a declarative status-line preset block", () => {
     const r = validateConfig({
       statusLine: { type: "preset", preset: "verbose", items: ["model", "context", "branch"] },

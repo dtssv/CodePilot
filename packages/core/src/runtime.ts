@@ -24,7 +24,7 @@ import { runOneTool, type ToolExecResult } from "./agent-tools.js";
 import { DoomLoopDetector } from "./doomLoop.js";
 import { filterToolNames } from "./tools/modes.js";
 import { redactSecrets } from "./redact.js";
-import type { AgentMode, Event, ToolUseBlock } from "./types.js";
+import type { AgentMode, DoomLoopConfig, Event, ToolUseBlock } from "./types.js";
 
 /** Lifecycle state of a runtime instance. */
 export type AgentRuntimeState = "idle" | "running" | "waiting_permission";
@@ -205,6 +205,9 @@ export interface RuntimeToolkitOptions {
   setContextTransform?: (transform: PluginContextTransform) => void;
   /** Register the session's additive event sink. Fail-soft. */
   registerEventSink?: (sink: PluginEventSink) => void;
+  /** Loop-detection thresholds + exclusions for the toolkit's shared detector.
+   * Unset = built-in constants. */
+  doomLoop?: DoomLoopConfig;
 }
 
 /** Build a {@link RuntimeToolkit} bound to the core implementation. */
@@ -216,7 +219,7 @@ export function createRuntimeToolkit(opts: RuntimeToolkitOptions = {}): RuntimeT
   // loop builds its own detector (agent.ts) and passes it to runOneTool, but a
   // toolkit caller has no detector of its own. Sharing one across calls is what
   // makes repeat-call detection meaningful (a per-call detector never trips).
-  const doomLoop = new DoomLoopDetector();
+  const doomLoop = new DoomLoopDetector(undefined, opts.doomLoop);
   return {
     version: 4,
     registerTool: (def) => {

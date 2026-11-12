@@ -144,6 +144,12 @@ export async function runOneTool(
   let doomLoopPreWarn = "";
   if (doomLoop) {
     const dl = doomLoop.check(tc.name, tc.input);
+    // Telemetry: record which layer fired (if any) with the tool name and the
+    // exact-repetition count, so operators can audit false positives and tune
+    // thresholds. A zero-context control event — never shown to the model.
+    if (dl.kind) {
+      await emit({ type: "doom_loop", kind: dl.kind, tool: tc.name, count: dl.count });
+    }
     if (dl.refuse) {
       endToolSpan(new Error(dl.message));
       return {

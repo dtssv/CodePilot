@@ -125,6 +125,34 @@ export const SkillsConfigSchema = z
   .strict()
   .optional();
 
+/** Loop-detection thresholds and exclusions. Every field is optional and
+ * defaults to the built-in constant, so an empty object changes nothing. The
+ * hard-refuse gate (`refuseAt`) is deliberately conservative: when thresholds
+ * are tight a tool is better WARNED than refused, since a refusal has side
+ * effects on a legitimate retry or idempotent poll. `exclude` lists tool names
+ * or `tool::glob` patterns that are never counted toward the exact-repetition
+ * or sequence layers (their results are still deduped on replay). */
+export const DoomLoopConfigSchema = z
+  .object({
+    /** Exact-repetition count at which a tool call is WARNED (default 3). */
+    warnAt: z.number().int().min(1).max(1000).optional(),
+    /** Exact-repetition count at which a tool call is REFUSED (default 4).
+     * Set high (or 0) to effectively never hard-refuse. */
+    refuseAt: z.number().int().min(0).max(1000).optional(),
+    /** Sliding window size for rotating-batch detection (default 6). */
+    seqWindow: z.number().int().min(2).max(1000).optional(),
+    /** Overlap count within the window that trips a rotating loop (default 4). */
+    seqRepeat: z.number().int().min(1).max(1000).optional(),
+    /** Overlapping re-read count for `read_file` that WARNS (default 3). */
+    pathWarnAt: z.number().int().min(1).max(1000).optional(),
+    /** Window-overlap fraction counting as a re-read spiral (default 0.6). */
+    pathOverlap: z.number().min(0).max(1).optional(),
+    /** Tool names or `tool::glob` patterns excluded from layer 1/2 counting. */
+    exclude: z.array(z.string().min(1)).optional(),
+  })
+  .strict()
+  .optional();
+
 /** File + console logger configuration consumed by `logger.ts`. */
 export const LoggingConfigSchema = z
   .object({
@@ -612,6 +640,9 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // final turn, forcing the model to answer from what it already has instead
     // of spinning (e.g. a weak model re-verifying forever). 0 = disabled.
     convergenceCap: z.number().int().min(0).max(10_000).optional(),
+    // Loop-detection thresholds + per-tool exclusions. Unset = built-in
+    // constants; see DoomLoopConfigSchema.
+    doomLoop: DoomLoopConfigSchema,
     // Per-model tool-exposure downgrade. Some models serialize structured
     // tool calls poorly on the more complex tools (e.g. `code_mode`,
     // `apply_patch`), tripping over the schema instead of using a simpler
