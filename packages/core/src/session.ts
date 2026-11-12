@@ -1,26 +1,9 @@
 // Session: owns the tool registry, permissions, provider, and event log.
 // Persists events as JSONL under ~/.codepilot/sessions/<id>.jsonl.
 //
-// Enhancements (2025-Q1):
-// - Automatic session title: derived from the first user message; if a
-// small model is configured, a tighter 10-char title is produced and
-// cached. The model is asked via the smallModel provider; failures fall
-// back to a deterministic prefix.
-// - Checkpoint integration: a CheckpointHook is initialised in `init`;
-// on each prompt the hook inspects the event log and writes a fresh
-// checkpoint when triggered (token count, round count).
-// - searchSessions / exportSession: pure helpers, useful from CLI and
-// from `listSessions` enrichments.
-//
-// Module layout (2026-Q3 split):
-// - session.ts — the Session class itself (this file).
-// - session-mcp.ts — MCP server startup, tool registration, and the
-// `@mcp:` prompt-reference resolution.
-// - session-telemetry.ts— per-prompt span lifecycle (start/end).
-// - session-utils.ts — standalone helpers (paths, titles, providers,
-// createSession/listSessions/searchSessions/...).
-// The helpers moved to session-utils are re-exported at the bottom of this
-// file so existing `import { ... } from "./session.js"` callers keep working.
+// Module split (2026-Q3): session.ts (this file), session-mcp.ts (MCP startup
+// + `@mcp:` refs), session-telemetry.ts (span lifecycle), session-utils.ts
+// (helpers, re-exported here for backward-compatible imports).
 
 import { appendFile, mkdir, readFile, writeFile, stat, truncate } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -586,13 +569,10 @@ export class Session {
     if (this.sandbox.mode !== "off" && detectSandboxBackend() === "none" && this.sandbox.fallback === "deny") {
       this._sandboxUnavailable = true;
     }
- // Let the permission engine auto-allow actions confined to the sandbox
- // (writes inside writable roots; ordinary bash commands) — the process
- // sandbox already contains them, so prompting is friction without safety.
- // Only when the OS backend actually enforces the jail.
- // Always wire policy so out-of-root writes can prompt to expand
- // writablePaths. Bash auto-allow still requires OS enforcement inside
- // PermissionEngine (osEnforced flag).
+  // Auto-allow sandbox-confined actions (writable-root writes, ordinary bash)
+  // since the OS jail already contains them; wire policy so out-of-root writes
+  // can prompt to expand writablePaths. Bash auto-allow needs OS enforcement
+  // (osEnforced flag in PermissionEngine).
     this.permissions.setSandbox(this.sandbox, this.cwd);
     // Seed the engine's view of the in-boundary working set: delivery roots and
     // any configured extra working directories (the boundary policy itself is
@@ -701,14 +681,10 @@ export class Session {
     this.customAgents = await discoverCustomAgents(this.cwd, {
       extraDirs: this.pluginAgentDirs,
     }).catch(() => new Map<string, CustomAgent>());
-    // Discover skills and wire them: advertise in the prompt (via
-    // rebuildSystemPrompt below) AND back the `skill` tool store, so an
-    // installed skill can actually be loaded on demand (previously the tool
-    // was never registered — skills were dead). Plugin skill dirs are merged
-    // in as extraDirs so an installed plugin's skills reach the session too.
-    // Honour `config.skills`: `enabled: false` disables discovery entirely;
-    // `dirs` adds extra skill roots; `disabled` omits named skills (unioned
-    // with the user config's disabled list inside discoverSkills).
+    // Discover skills: advertise in the prompt and back the `skill` tool store
+    // so installed skills load on demand. Plugin skill dirs merge in as
+    // extraDirs. `config.skills`: `enabled:false` disables discovery; `dirs`
+    // adds roots; `disabled` omits named skills (unioned with user config).
     const skillsCfg = this.config.skills;
     if (skillsCfg?.enabled === false) {
       this.discoveredSkills = [];
@@ -1235,6 +1211,25 @@ export class Session {
       let turnImages = attachedImages;
       let turnFiles = savedUploads;
 
+      // Emit the user message before the first model round-trip so its bubble
+      // shows instantly. On a fresh prompt (not resume) we append/persist/notify
+      // here and tell the agent loop (userAlreadyEmitted) not to duplicate it.
+      const userEmittedEarly = !resume;
+      if (userEmittedEarly) {
+        const userEvent: Event = {
+          type: "message",
+          id: `msg_${randomUUID()}`,
+          role: "user",
+          content: [{ type: "text", text: turnText }],
+          ts: Date.now(),
+          ...(turnImages.length > 0 ? { images: turnImages } : {}),
+          ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
+        };
+        this.events.push(userEvent);
+        await this.persistEvent(userEvent).catch(() => undefined);
+        this.notify(userEvent);
+      }
+
       let firstPass = true;
       for (;;) {
         // Continues after Stop/stopVerify inject feedback for the model only
@@ -1244,12 +1239,16 @@ export class Session {
         // on the existing transcript with no new user event. Later passes are
         // Stop-hook continues, which use `systemContinue` instead.
         const isResume = resume && firstPass && !isStopContinue;
+        // The user event was already appended+surfaced above; only the first
+        // pass of a fresh prompt must suppress the loop's own emit.
+        const alreadyEmitted = userEmittedEarly && firstPass && !isStopContinue;
         firstPass = false;
         await runtime.prompt(
           {
             history: this.events,
             userText: isStopContinue ? "" : turnText,
             ...(isResume ? { resume: true } : {}),
+            ...(alreadyEmitted ? { userAlreadyEmitted: true } : {}),
             ...(isStopContinue
               ? { systemContinue: turnText }
               : {
@@ -1528,13 +1527,10 @@ export class Session {
     }
     const resolved = resolveModelAlias({ ...this.config, model }) ?? model;
     if (resolved === this.model && !providerId) return;
-    // Apply the new model's per-model capabilities (contextWindow,
-    // maxOutputTokens) from the active provider's `modelCapabilities`, not just
-    // the model name — otherwise a model-only switch keeps the previous model's
-    // window, so the context gauge and compaction geometry use a stale/default
-    // budget (e.g. a user-configured 128k model shown against the 200k
-    // fallback). `applyProviderAndModel` is a no-op for caps when none are
-    // configured, so plain switches are unaffected.
+    // Apply per-model capabilities (contextWindow, maxOutputTokens) from the
+    // provider's `modelCapabilities`, not just the model name — otherwise a
+    // model-only switch keeps a stale window. `applyProviderAndModel` is a
+    // no-op when no caps are configured.
     const applied = applyProviderAndModel(this.config, this.activeProviderId, resolved);
     this.model = applied.model;
     this.config = applied.config;
@@ -1820,9 +1816,8 @@ export class Session {
     const systemTokens = sp
       ? Math.max(0, estimateTokens(sp.full) - skillsTokens)
       : 0;
-    // Current user message: the last user turn is a distinct, user-legible slice
-    // of the conversation category. Surface it separately so the breakdown can
-    // show "this message vs. everything before it", the way Cursor does.
+    // Surface the last user turn separately so the breakdown can show
+    // "this message vs. everything before it".
     let lastMessageTokens = 0;
     for (let i = this.events.length - 1; i >= 0; i--) {
       const e = this.events[i]!;
@@ -2074,13 +2069,9 @@ export class Session {
     }
     this.redoStack.push(entry);
     await this.persistUndoBoundary("undo", entry);
-    // The file system has been rolled back to the turn baseline, but the
-    // transcript still carries this turn's tool_results claiming those writes
-    // happened. Left unreconciled, the model's next turn rebuilds provider
-    // messages from that stale transcript and works from a false premise
-    // ("foo.ts was written") against files that are actually reverted. Append
-    // a model-visible notice so the next turn sees the real state. Append-only
-    // (no event truncation) keeps the event-sourced log intact.
+    // The filesystem is reverted but the transcript still claims those writes
+    // happened. Append a model-visible notice so the next turn sees the real
+    // state. Append-only (no truncation) keeps the event-sourced log intact.
     const changed = [...new Set([...result.restored, ...result.deleted])].sort();
     const fileList = changed.length > 0 ? changed.join(", ") : "(no tracked files)";
     const notice: Event = {
@@ -3521,10 +3512,8 @@ export class Session {
       // Physical integrity: if the process crashed mid-append, the final line
       // can be a torn (incomplete) JSON fragment with no trailing newline. We
       // skip it when parsing (below), but a torn tail also poisons the NEXT
-      // append — appendFile would concatenate the new line onto the fragment,
-      // producing one corrupt line. So repair the file on load (write-open
-      // only): truncate back to the last complete `\n` boundary. A fully blank
-      // or newline-terminated file needs no repair.
+      // Repair a torn tail on write-open: truncate to the last complete `\n`
+      // boundary so appendFile doesn't concatenate onto a partial line.
       if (!this.readOnly) {
         await this.repairTornTail(path, text).catch(() => undefined);
       }
@@ -3643,10 +3632,9 @@ export class Session {
  // any tool call it left unanswered so the persisted JSONL is
  // self-consistent (every tool_call has a matching tool_result). The
  // provider-message builder already repairs dangling calls in-memory
- // (`closeOpenCalls`), but the on-disk log would otherwise keep an orphan
- // tool_call forever — breaking export, naive replay, and any consumer
- // that trusts the raw log. Persist the same side-effect-safe
- // same `INTERRUPTED_RESULT` as a real tool_result event.
+ // Seal orphan tool_calls on disk (the in-memory side is handled by
+ // `closeOpenCalls`) with the same `INTERRUPTED_RESULT` so the raw log
+ // stays valid for export and replay.
       const sealedToolCalls = await this.sealOrphanedToolCalls();
       const ev: Event = { type: "status", status: "idle" };
       this.events.push(ev);
@@ -4404,25 +4392,10 @@ export class Session {
     // re-bills a different prompt. Drop it so the estimate rebuilds from the
     // post-compaction event log.
     this.contextAnchor = null;
-    // Which events in the model-facing result are genuinely NEW (and so must be
-    // appended), versus turns already in the append-only log.
-    //
-    // Architecture (matches codex's `Compacted` checkpoint and opencode's
-    // `compaction` message + `seq` cursor): compaction appends ONLY the events
-    // it synthesised — the `compaction` summary boundary, and a rescued `plan`
-    // when it carried one forward. Everything else in `result.events` is the
-    // retained/folded tail (and verbatim carried pins), which is already on
-    // disk. It is NEVER re-appended: `liveTranscript` recomputes the model view
-    // from the summary's `keepFrom` at read time, and the full text stays in the
-    // JSONL (+ the Markdown archive).
-    //
-    // "New" is decided by stable link id, not object reference. `compact()`
-    // rebuilds kept events while folding ({...e}) and `persistEvent` stores a
-    // stamped copy in `this.persisted`, so a reference check misses already-
-    // logged turns and duplicates the whole tail (the doubled conclusion/summary
-    // on resume this fixes). A folded tool_result shares its original's link id,
-    // so it is correctly treated as already-persisted — the fold is a read-time
-    // view, not a new durable fact.
+    // compaction appends only what it synthesised (summary boundary + rescued
+    // plan); the retained tail is already on disk and never re-appended. "New"
+    // is decided by stable link id, not object reference, since `compact()`
+    // rebuilds kept events ({...e}) — a reference check would duplicate the tail.
     const newEvents = this.newCompactionEvents(result.events);
     if (result.droppedRange) {
  // The original transcript stays on disk; some UIs
@@ -4533,16 +4506,10 @@ export class Session {
 
   private async maybeCheckpoint(): Promise<void> {
     if (!this.checkpointHook) return;
-    // Checkpoint must capture pre-compaction state, so its token trigger has to
-    // sit strictly BELOW the compaction hard trigger — on every config. The old
-    // `resolveCompactionThreshold` (config window × 0.8, else the model's own
-    // threshold) is computed independently of `compactionGeometry.hardTrigger`:
-    // when `outputReserve` is large (big model `maxOutputTokens` or a user
-    // `maxTokens`), `hardTrigger = window − outputReserve` can drop below
-    // `0.8 × window`, so compaction would fire FIRST and the checkpoint would
-    // snapshot the already-summarised history. Deriving the threshold from the
-    // same geometry — and clamping it below `hardTrigger` — keeps the ordering
-    // invariant (checkpoint ≤ compaction) regardless of the reserve.
+    // Checkpoint trigger must sit strictly below the compaction hard trigger on
+    // every config, else compaction fires first and snapshots already-summarised
+    // history. Derive the threshold from `compactionGeometry` (clamped below
+    // `hardTrigger`) so the ordering holds regardless of `outputReserve`.
     const modelWindow = lookupContextWindow(this.model);
     const window = this.config.contextWindow ?? modelWindow.contextWindow;
     const { hardTrigger } = compactionGeometry({

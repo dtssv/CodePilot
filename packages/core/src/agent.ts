@@ -1,13 +1,9 @@
 // Agent loop. Streams from the ChatProvider, parses tool calls, runs the
-// permission check, executes tools in parallel, appends tool_results, and
-// loops until the model emits no more tool calls (or is cancelled).
-//
-// Module layout:
-// agent.ts — this file: types + runAgent turn loop
-// agent-messages.ts — buildProviderMessages / compactTranscriptToProviderMessages
-// / buildProviderToolDefs / streamOnce
-// agent-tools.ts — runOneTool (permission + hooks + doom-loop + Zod)
-// + emitTokenEstimateIfNeeded
+// Agent turn loop: builds provider messages, streams the model, runs permission
+// checks, executes tools in parallel, appends tool_results, and loops until the
+// model emits no more tool calls (or is cancelled).
+// Layout: agent.ts (this — types + loop); agent-messages.ts (provider messages
+// + tool defs + streamOnce); agent-tools.ts (runOneTool + token estimates).
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -294,6 +290,16 @@ export interface AgentRunInput {
    * NOT re-appended when the history is non-empty.
    */
   resume?: boolean;
+  /**
+   * The caller has ALREADY appended (and surfaced) the `role:"user"` message
+   * for this prompt into `history`, so the loop must not emit a second one.
+   * Used by the session to show the user's bubble immediately — before the
+   * per-turn preprocessing (recall, context shrink, provider build) and the
+   * first model round-trip — instead of waiting for the loop to emit it. The
+   * provider view is still rebuilt from `history` (which already carries this
+   * turn's user message), and `userText` remains the compaction fallback.
+   */
+  userAlreadyEmitted?: boolean;
 }
 
 export interface AgentRunResult {
@@ -462,7 +468,8 @@ export async function runAgent(
  // resume drives purely from the existing `history` (whose trailing user turn
  // is already there). Emitting a new user bubble for either would fake human
  // input in the UI / persisted JSONL.
-  const suppressUserEvent = !!input.systemContinue || !!input.resume;
+  const suppressUserEvent =
+    !!input.systemContinue || !!input.resume || !!input.userAlreadyEmitted;
   const userImages = suppressUserEvent ? undefined : input.images;
   let pendingProviderResume: string | null = input.systemContinue?.trim()
     ? input.systemContinue
