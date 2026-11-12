@@ -8,7 +8,7 @@
 // non-Linux dev machine and CI without slirp4netns), so it is a no-op there.
 
 import { describe, it, expect } from "vitest";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -29,7 +29,21 @@ const slirp = firstExisting([
   "/bin/slirp4netns",
   "/usr/local/bin/slirp4netns",
 ]);
-const enabled = process.platform === "linux" && !!bwrap && !!slirp;
+const binariesPresent = process.platform === "linux" && !!bwrap && !!slirp;
+// Verify bwrap can actually create a user+net namespace as non-root.
+// On some CI runners the kernel forbids unprivileged user namespaces, in
+// which case bwrap+slirp4netns deadlocks — skip instead of hanging.
+const enabled = binariesPresent && (() => {
+  try {
+    execFileSync(bwrap!, ["--unshare-user-try", "--unshare-net", "--", "/bin/true"], {
+      timeout: 5_000,
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function run(command: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {

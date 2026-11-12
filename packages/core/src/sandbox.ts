@@ -618,7 +618,7 @@ export function wrapCommand(
  // are translated the same way. Network restriction uses --unshare-net.
     const wslRoots = policy.writableRoots.map(winPathToWsl);
     const wslCwd = winPathToWsl(policy.writableRoots[0] ?? resolve("/"));
-    const args: string[] = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
+    const args: string[] = ["bwrap", "--unshare-user-try", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
     for (const root of wslRoots) {
       args.push("--bind", root, root);
     }
@@ -652,7 +652,7 @@ export function wrapCommand(
       backend,
     };
   }
-  const args: string[] = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
+  const args: string[] = ["bwrap", "--unshare-user-try", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
   for (const root of policy.writableRoots) {
     if (existsSync(root)) args.push("--bind", root, root);
   }
