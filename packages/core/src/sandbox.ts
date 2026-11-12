@@ -657,24 +657,29 @@ export function wrapCommand(
     };
   }
   if (backend === "landlock") {
-    // Landlock is a filesystem jail only — it cannot create a network namespace,
-    // so an enforced proxy (which needs slirp on an isolated namespace) cannot
-    // be guaranteed here. Fail closed rather than run with unconfined egress.
-    if (proxyMode) {
+    // Landlock is a FILESYSTEM jail only — it cannot create a network namespace.
+    // Any network restriction (an enforced proxy, or "off") therefore cannot be
+    // enforced here, so a restricted policy fails closed rather than silently
+    // running with full host egress: honoring "off"/"proxy" by doing nothing
+    // would be a lie. Only "full" (no restriction) is served under Landlock.
+    if (proxyMode || !policy.network) {
+      const want = proxyMode ? `"proxy"` : `"off"`;
       return {
         command: `echo ${shellQuote(
-          `[sandbox] denied: network mode "proxy" cannot be enforced under the ` +
-            `Landlock backend (no network namespace). Install bubblewrap + ` +
-            `slirp4netns for enforced-proxy egress, or set the network mode to "off"/"full".`,
+          `[sandbox] denied: network mode ${want} cannot be enforced under the ` +
+            `Landlock backend (a filesystem jail with no network namespace). ` +
+            `Install bubblewrap (+ slirp4netns for proxy egress) to restrict the ` +
+            `network, or set the network mode to "full".`,
         )} >&2; exit 126`,
         sandboxed: false,
         backend,
       };
     }
-    // The launcher restricts filesystem writes to the given roots (reads stay
-    // open, matching the bwrap "/ ro, roots rw" shape); protected metadata is
-    // not passed as a writable root, so it stays read-only. Network is left to
-    // the cooperative proxy env already exported above.
+    // The launcher grants write access to the given roots (reads stay open,
+    // matching the bwrap "/ ro, roots rw" shape). Protected metadata (`.git`)
+    // lives INSIDE a writable root, so it must be re-scoped read-only explicitly
+    // — the same carve bwrap does with a `--ro-bind` over the rw bind — rather
+    // than relying on it being "not granted" (it IS granted via its parent).
     const launcher =
       opts?.landlockPath !== undefined ? opts.landlockPath : landlockLauncherPath();
     if (!launcher) {
@@ -692,6 +697,12 @@ export function wrapCommand(
     const args: string[] = [launcher];
     for (const root of policy.writableRoots) {
       if (existsSync(root)) args.push("--rw", root);
+    }
+    // Carve protected metadata back out as read-only, AFTER the rw grants so the
+    // read-only scope wins for those subpaths (parity with the Seatbelt deny and
+    // the bwrap --ro-bind override).
+    for (const p of policy.protectedSubpaths) {
+      if (existsSync(p)) args.push("--ro", p);
     }
     args.push("--", "/bin/sh", "-c", command);
     return { command: args.map(shellQuote).join(" "), sandboxed: true, backend };

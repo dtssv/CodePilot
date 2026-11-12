@@ -588,6 +588,38 @@ describe("wrapCommand", () => {
     expect(w.command).toContain("-c");
   });
 
+  it("carves protected .git back out as --ro under Landlock (parity with bwrap)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-ll-git-"));
+    await mkdir(join(base, ".git"));
+    const p = resolveSandbox({ mode: "workspace-write", network: true }, base);
+    // The wrap emits the protected subpath verbatim (resolved, not realpath'd),
+    // so assert the exact path the policy carved.
+    const gitDir = p.protectedSubpaths[0]!;
+    expect(gitDir.endsWith(".git")).toBe(true);
+    const w = wrapCommand("echo hi", p, {
+      backend: "landlock",
+      landlockPath: "/usr/bin/codepilot-landlock",
+    });
+    expect(w.sandboxed).toBe(true);
+    // The writable root is granted rw, then .git is re-scoped read-only.
+    expect(w.command).toContain("--rw");
+    expect(w.command).toContain("--ro");
+    expect(w.command).toContain(gitDir);
+  });
+
+  it("fails closed under Landlock when the network is restricted (off)", () => {
+    const p = resolveSandbox({ mode: "workspace-write", network: false }, cwd);
+    const w = wrapCommand("curl https://example.com", p, {
+      backend: "landlock",
+      landlockPath: "/usr/bin/codepilot-landlock",
+    });
+    // Landlock cannot isolate the network, so a network-off policy refuses
+    // rather than running with full egress (which would be a silent lie).
+    expect(w.sandboxed).toBe(false);
+    expect(w.command).toContain("exit 126");
+    expect(w.command).toMatch(/network mode "off"/);
+  });
+
   it("fails closed under Landlock when the launcher is absent", () => {
     const p = resolveSandbox({ mode: "workspace-write", fallback: "deny" }, cwd);
     const w = wrapCommand("echo hi", p, { backend: "landlock", landlockPath: null });
