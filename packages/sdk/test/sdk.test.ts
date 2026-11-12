@@ -320,8 +320,66 @@ describe("run()", () => {
       replay: "/tmp/x.jsonl",
       model: "m",
       agentMode: "agent",
+      // First-class headless options.
+      maxTurns: 5,
+      allowedTools: ["read_file", "grep"],
+      permissionMode: "yolo",
+      signal: new AbortController().signal,
     };
     expect(opts.prompt).toBe("p");
+    expect(opts.maxTurns).toBe(5);
+    expect(opts.allowedTools).toEqual(["read_file", "grep"]);
+    expect(opts.permissionMode).toBe("yolo");
+  });
+});
+
+describe("first-class headless options", () => {
+  it("maxTurns / permissionMode fold into the session config", async () => {
+    writeFileSync(transcriptPath, transcript([{ text: "ok" }]));
+    const agent = await Agent.create(
+      baseOpts({ maxTurns: 7, permissionMode: "yolo" }),
+    );
+    // The shortcuts are reflected on the resolved session config.
+    const cfg = agent.session.getConfig() as { maxTurns?: number; permissionMode?: string };
+    expect(cfg.maxTurns).toBe(7);
+    expect(cfg.permissionMode).toBe("yolo");
+    await agent.dispose();
+  });
+
+  it("the explicit shortcut wins over the equivalent config key", async () => {
+    writeFileSync(transcriptPath, transcript([{ text: "ok" }]));
+    const agent = await Agent.create(
+      baseOpts({ config: { sandbox: { mode: "off" }, maxTurns: 1 }, maxTurns: 42 }),
+    );
+    const cfg = agent.session.getConfig() as { maxTurns?: number };
+    expect(cfg.maxTurns).toBe(42);
+    await agent.dispose();
+  });
+
+  it("allowedTools restricts the session's tool registry", async () => {
+    writeFileSync(transcriptPath, transcript([{ text: "ok" }]));
+    const agent = await Agent.create(baseOpts({ allowedTools: ["read_file"] }));
+    const names = agent.session.getToolNames();
+    expect(names).toContain("read_file");
+    expect(names).not.toContain("write_file");
+    await agent.dispose();
+  });
+
+  it("cancel() is a no-op when idle or disposed", async () => {
+    writeFileSync(transcriptPath, transcript([{ text: "ok" }]));
+    const agent = await Agent.create(baseOpts());
+    expect(() => agent.cancel()).not.toThrow();
+    await agent.dispose();
+    expect(() => agent.cancel()).not.toThrow();
+  });
+
+  it("an already-aborted signal cancels without throwing", async () => {
+    writeFileSync(transcriptPath, transcript([{ text: "ok" }]));
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const agent = await Agent.create(baseOpts({ signal: ctrl.signal }));
+    expect(agent.id).toBeTruthy();
+    await agent.dispose();
   });
 });
 

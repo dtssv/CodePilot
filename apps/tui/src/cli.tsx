@@ -472,7 +472,6 @@ async function main(): Promise<void> {
         session,
         prompt,
         format,
-        maxTurns: args.maxTurns,
         allowedTools: args.allowedTools,
       });
     } catch (err) {

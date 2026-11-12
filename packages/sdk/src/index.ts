@@ -32,6 +32,7 @@ import {
   type CodepilotConfig,
   type PermissionRequest,
   type PermissionDecision,
+  type PermissionMode,
   type QuestionRequest,
   type QuestionAnswers,
   type AgentMode,
@@ -61,6 +62,21 @@ export interface AgentCreateOptions {
  * mode — suitable for CI). For interactive use, provide a handler that
  * prompts the user. */
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionDecision>;
+ /** Permission mode (ask / auto-edit / yolo / auto / dont-ask). A first-class
+  * shortcut for `config.permissionMode`; the explicit field wins when both are
+  * set. Controls what the session does when no `onPermissionRequest` handler is
+  * supplied (e.g. "yolo" auto-approves). */
+  permissionMode?: PermissionMode;
+ /** Cap on agent turns for runs on this agent. A first-class shortcut for
+  * `config.maxTurns`; the explicit field wins when both are set. `0`/undefined
+  * means no limit. */
+  maxTurns?: number;
+ /** Restrict which tools the agent may use. When set and non-empty, the
+  * session's tool registry is filtered so the model only sees these tools. */
+  allowedTools?: string[];
+ /** Abort signal: when it fires, the agent's in-flight run is cancelled
+  * (equivalent to `agent.cancel()`). */
+  signal?: AbortSignal;
  /** Structured question handler (for ask_user_question / plan_done). */
   onAskUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
  /** Language-server diagnostics provider for the `diagnostics` tool. When unset
@@ -130,6 +146,9 @@ export class Agent {
         config = { ...config, ...opts.config };
       }
     }
+ // First-class shortcuts win over the merged config's equivalents.
+    if (opts.permissionMode !== undefined) config = { ...config, permissionMode: opts.permissionMode };
+    if (opts.maxTurns !== undefined) config = { ...config, maxTurns: opts.maxTurns };
 
  // Build the session.
     const sessionId = opts.sessionId ?? randomUUID();
@@ -151,7 +170,24 @@ export class Agent {
     });
 
     await session.init();
-    return new Agent(session);
+ // Restrict the tool surface the model sees, when requested.
+    if (opts.allowedTools && opts.allowedTools.length > 0) {
+      session.filterToolRegistry(opts.allowedTools);
+    }
+    const agent = new Agent(session);
+ // Wire the abort signal to cancel the in-flight run.
+    if (opts.signal) {
+      if (opts.signal.aborted) session.cancel();
+      else opts.signal.addEventListener("abort", () => agent.cancel(), { once: true });
+    }
+    return agent;
+  }
+
+ /** Cancel the agent's in-flight run, if any. Safe to call when idle or after
+  * dispose (a no-op then). */
+  cancel(): void {
+    if (this.disposed) return;
+    this.session.cancel();
   }
 
  /**

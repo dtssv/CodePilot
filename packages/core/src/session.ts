@@ -1661,6 +1661,12 @@ export class Session {
  * Used by headless/print mode (`--allowed-tools`) to restrict the agent
  * to a subset of tools for CI/scripting safety.
  */
+ /** Names of the tools currently available to the model (after any
+  * `filterToolRegistry`). Introspection for clients and tests. */
+  getToolNames(): string[] {
+    return this.toolRegistry.all().map((t) => t.name);
+  }
+
   filterToolRegistry(allowedTools: string[]): void {
     const allowed = new Set(allowedTools);
     const allTools = this.toolRegistry.all();

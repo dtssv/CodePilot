@@ -64,9 +64,9 @@ export interface HeadlessOptions {
   session: HeadlessSession;
   prompt: string;
   format: OutputFormat;
-  /** Maximum number of agent turns (maps to config.maxTurns). */
-  maxTurns?: number;
-  /** Restrict which tools the agent can use. */
+  /** Restrict which tools the agent can use. Turn limits are config-driven
+   * (`config.maxTurns`, applied at session creation), so there is no maxTurns
+   * option here. */
   allowedTools?: string[];
   /** Sink for every output line (a trailing newline is appended per line).
    * Defaults to `process.stdout.write`. Injected in tests and reused by every
@@ -91,9 +91,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<HeadlessResult
   if (allowedTools && allowedTools.length > 0) {
     session.filterToolRegistry(allowedTools);
   }
-
-  // maxTurns is expected to have been set via config at session creation time;
-  // it flows through CodepilotConfig.maxTurns into the agent loop.
 
   const events: Event[] = [];
   let hadToolCalls = false;

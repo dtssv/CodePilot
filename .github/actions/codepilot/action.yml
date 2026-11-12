@@ -30,9 +30,14 @@ inputs:
     default: json
   max-turns:
     description: >-
-      Maximum number of agentic turns. Maps to the `maxTurns` key of a
-      repo-level `.codepilot/config.json` written by this action (the CLI
-      has no --max-turns flag). Empty keeps the built-in default (50).
+      Maximum number of agentic turns, passed as `--max-turns`. Empty keeps the
+      built-in default (50).
+    required: false
+    default: ""
+  allowed-tools:
+    description: >-
+      Comma-separated list of tool names the agent may use (passed as
+      `--allowed-tools`). Empty allows the full tool set.
     required: false
     default: ""
   yolo:
@@ -106,22 +111,6 @@ runs:
         npm install -g @codepilot/tui
         echo "bin=$(command -v codepilot-tui)" >> "$GITHUB_OUTPUT"
 
-    - name: Apply max-turns config
-      if: inputs.max-turns != ''
-      shell: bash
-      working-directory: ${{ inputs.cwd }}
-      run: |
-        set -euo pipefail
-        mkdir -p .codepilot
-        if [ -f .codepilot/config.json ]; then
-          tmp="$(mktemp)"
-          jq --argjson n "${{ inputs.max-turns }}" '.maxTurns = $n' .codepilot/config.json > "$tmp"
-          mv "$tmp" .codepilot/config.json
-        else
-          jq -n --argjson n "${{ inputs.max-turns }}" '{ maxTurns: $n }' > .codepilot/config.json
-        fi
-        echo "Wrote .codepilot/config.json with maxTurns=${{ inputs.max-turns }}"
-
     - name: Run CodePilot
       id: run
       shell: bash
@@ -131,6 +120,8 @@ runs:
         PROMPT: ${{ inputs.prompt }}
         MODEL: ${{ inputs.model }}
         OUTPUT_FORMAT: ${{ inputs.output-format }}
+        MAX_TURNS: ${{ inputs.max-turns }}
+        ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
         YOLO: ${{ inputs.yolo }}
         GH_TOKEN: ${{ github.token }}
       run: |
@@ -139,6 +130,12 @@ runs:
         args=(--print --output-format "$OUTPUT_FORMAT" --cwd "${{ inputs.cwd }}")
         if [ -n "$MODEL" ]; then
           args+=(--model "$MODEL")
+        fi
+        if [ -n "$MAX_TURNS" ]; then
+          args+=(--max-turns "$MAX_TURNS")
+        fi
+        if [ -n "$ALLOWED_TOOLS" ]; then
+          args+=(--allowed-tools "$ALLOWED_TOOLS")
         fi
         if [ "$YOLO" = "true" ]; then
           args+=(--yolo)

@@ -114,7 +114,7 @@ Usage:
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
                        [--yolo] [--permission-mode ask|auto-edit|yolo|auto|dont-ask]
                        [--output-format text|json|stream-json] [--allowed-tools a,b]
-                       [--json] [--quiet]
+                       [--max-turns N] [--json] [--quiet]
                                          — --output-format selects machine output:
                                            json = one result object; stream-json =
                                            per-event NDJSON + closing result; text =
@@ -934,6 +934,8 @@ interface RunFlags {
   permissionMode: PermissionMode;
   /** Machine-readable output format; undefined means human text to stderr. */
   format?: OutputFormat;
+  /** Cap on agent turns for this run (maps to config.maxTurns). */
+  maxTurns?: number;
   quiet: boolean;
   yolo: boolean;
 }
@@ -951,12 +953,15 @@ function resolveRunFlags(flags: Record<string, string | boolean>): RunFlags {
   } else if (flags["json"] === true) {
     format = "stream-json";
   }
+  const rawMaxTurns = flags["max-turns"];
+  const maxTurns = typeof rawMaxTurns === "string" ? Number(rawMaxTurns) : undefined;
   return {
     model: flags["model"] as string | undefined,
     provider: flags["provider"] as string | undefined,
     cwd: flags["cwd"] as string | undefined,
     permissionMode: yolo ? "yolo" : mode ?? pickDefaultMode(),
     format,
+    maxTurns: Number.isFinite(maxTurns) && (maxTurns as number) >= 0 ? maxTurns : undefined,
     quiet: flags["quiet"] === true,
     yolo,
   };
@@ -1131,7 +1136,11 @@ async function cmdRun(
   const assistantBuf = new AssistantBuffer();
   const session = await createSession({
     cwd,
-    config: { ...(config ?? {}), permissionMode: opts.permissionMode },
+    config: {
+      ...(config ?? {}),
+      permissionMode: opts.permissionMode,
+      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+    },
     model: opts.model,
     onPermissionRequest: async (req) => {
  // Non-interactive fallback: when a tool needs approval we can't get, deny
