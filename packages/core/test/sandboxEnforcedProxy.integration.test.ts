@@ -33,7 +33,7 @@ const enabled = process.platform === "linux" && !!bwrap && !!slirp;
 
 function run(command: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", command], { timeout: 40_000 }, (err, stdout, stderr) => {
+    execFile("/bin/sh", ["-c", command], { timeout: 25_000 }, (err, stdout, stderr) => {
       const code = err && typeof (err as { code?: number }).code === "number"
         ? (err as { code: number }).code
         : err
@@ -45,7 +45,7 @@ function run(command: string): Promise<{ code: number; stdout: string; stderr: s
 }
 
 describe.skipIf(!enabled)("enforced proxy egress (bwrap + slirp4netns)", () => {
-  it("blocks a direct non-allowlisted connection and allows the proxy path", { timeout: 45_000 }, async () => {
+  it("blocks a direct non-allowlisted connection and allows the proxy path", { timeout: 35_000 }, async () => {
     // An allowlisted origin server the proxy will permit. We allow only its
     // host, so any OTHER destination must be refused by the proxy, and a RAW
     // socket to any public host must be unroutable (slirp binds outbound to
@@ -75,26 +75,20 @@ describe.skipIf(!enabled)("enforced proxy egress (bwrap + slirp4netns)", () => {
         proxyUrl: `http://127.0.0.1:${proxy.port}`,
       };
 
-      // A raw, proxy-ignoring connection to a public host must fail: with the
-      // network namespace confined to loopback-only outbound, it cannot route.
-      const direct = wrapCommand(
-        `curl --noproxy '*' --max-time 8 -s -o /dev/null -w '%{http_code}' http://93.184.216.34/ ; echo "rc=$?"`,
+      // Run both probes in a single bwrap invocation to halve setup overhead.
+      // Direct: proxy-ignoring connection to a public host must fail (slirp
+      // confines outbound to loopback, so it cannot route).
+      // Proxy: allowlisted origin through the injected proxy env must succeed.
+      const combined = wrapCommand(
+        `curl --noproxy '*' --connect-timeout 3 --max-time 5 -s -o /dev/null -w '%{http_code}' http://93.184.216.34/ ; echo "direct_rc=$?" ; curl --max-time 5 -s http://127.0.0.1:${originPort}/`,
         policy,
       );
-      const directRes = await run(direct.command);
-      // Either curl fails to connect (non-zero rc in stdout) or the process
-      // is killed by the exec timeout (non-zero exit code) — both mean blocked.
-      const blocked = /rc=[1-9]/.test(directRes.stdout) || directRes.code !== 0;
+      const res = await run(combined.command);
+      // Direct connection must fail (non-zero rc or process killed by timeout).
+      const blocked = /direct_rc=[1-9]/.test(res.stdout) || res.code !== 0;
       expect(blocked).toBe(true);
-
-      // The allowlisted origin, reached through the proxy env the wrap injects,
-      // must succeed and return the origin body.
-      const viaProxy = wrapCommand(
-        `curl --max-time 8 -s http://127.0.0.1:${originPort}/`,
-        policy,
-      );
-      const proxyRes = await run(viaProxy.command);
-      expect(proxyRes.stdout).toContain("ok-from-origin");
+      // Allowlisted origin through proxy must return the body.
+      expect(res.stdout).toContain("ok-from-origin");
     } finally {
       proxy?.close();
       await new Promise<void>((r) => (origin ? origin.close(() => r()) : r()));
