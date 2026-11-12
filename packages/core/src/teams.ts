@@ -504,6 +504,9 @@ export async function runTeam(
           "write-tool paths only, so files changed via bash/sed may be under-reported",
       );
     }
+    // Capture the git dirty-set baseline once before any member runs, so every
+    // member diffs against the same starting point regardless of parallel scheduling.
+    const baseline = gitEvidence ? await gitTouchedFiles(memberCwd) : new Set<string>();
     const results = await Promise.all(
       doers.map(async (d): Promise<TeamMemberResult> => {
         const memberObjective = objectives.get(d.index) ?? objective;
@@ -514,7 +517,7 @@ export async function runTeam(
             if (p) filesTouched.add(p);
           }
         };
-        const before = gitEvidence ? await gitTouchedFiles(memberCwd) : new Set<string>();
+        const before = baseline;
         await emit({
           from: "team",
           to: d.name,
