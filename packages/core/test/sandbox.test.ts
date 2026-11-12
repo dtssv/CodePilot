@@ -255,12 +255,23 @@ describe("buildSeatbeltProfile", () => {
     expect(profile).toContain('(literal "/dev/null")');
   });
 
-  it("carves a resolved .git directory out as read-only (protectGit default on)", async () => {
+  it("does NOT carve .git by default (git commit works without escalation)", async () => {
     const base = await mkdtemp(join(tmpdir(), "sbx-git-"));
+    await mkdir(join(base, ".git"));
+    // Default (neither gitWrite nor protectGit set): `.git` stays writable so an
+    // ordinary git commit writes the object store under the sandbox.
+    const p = resolveSandbox(undefined, base);
+    expect(p.protectedSubpaths).toEqual([]);
+    const profile = buildSeatbeltProfile(p);
+    expect(profile).not.toContain(`${join(realpathSync(base), ".git")}"))`);
+  });
+
+  it("carves a resolved .git directory out as read-only when protectGit:true", async () => {
+    const base = await mkdtemp(join(tmpdir(), "sbx-git-on-"));
     await mkdir(join(base, ".git"));
     const real = realpathSync(base);
     const gitDir = join(real, ".git");
-    const p = resolveSandbox(undefined, base);
+    const p = resolveSandbox({ protectGit: true }, base);
     expect(p.protectedSubpaths.some((x) => realpathSync(x) === gitDir)).toBe(true);
     const profile = buildSeatbeltProfile(p);
     expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(gitDir)}))`);
@@ -294,7 +305,7 @@ describe("buildSeatbeltProfile", () => {
     }
   });
 
-  it("gitWrite 'protect' carves .git read-only (explicit default)", async () => {
+  it("gitWrite 'protect' carves .git read-only", async () => {
     const base = await mkdtemp(join(tmpdir(), "sbx-git-protect-"));
     await mkdir(join(base, ".git"));
     const gitDir = join(realpathSync(base), ".git");
@@ -320,7 +331,7 @@ describe("buildSeatbeltProfile", () => {
     const gitdir = join(real, "shared", ".git", "worktrees", "wt");
     await mkdir(gitdir, { recursive: true });
     await writeFile(join(base, ".git"), `gitdir: ${gitdir}\n`, "utf8");
-    const p = resolveSandbox(undefined, base);
+    const p = resolveSandbox({ protectGit: true }, base);
     // The pointer file, the worktree gitdir, and the shared …/.git common dir.
     const reals = p.protectedSubpaths.map((x) => {
       try { return realpathSync(x); } catch { return x; }
@@ -591,7 +602,7 @@ describe("wrapCommand", () => {
   it("carves protected .git back out as --ro under Landlock (parity with bwrap)", async () => {
     const base = await mkdtemp(join(tmpdir(), "sbx-ll-git-"));
     await mkdir(join(base, ".git"));
-    const p = resolveSandbox({ mode: "workspace-write", network: true }, base);
+    const p = resolveSandbox({ mode: "workspace-write", network: true, protectGit: true }, base);
     // The wrap emits the protected subpath verbatim (resolved, not realpath'd),
     // so assert the exact path the policy carved.
     const gitDir = p.protectedSubpaths[0]!;

@@ -66,7 +66,8 @@ export interface ResolvedSandbox {
  /** Absolute paths carved out of the writable roots as read-only at the OS
   * layer, even though they sit inside a writable root. Protects repository
   * metadata (resolved `.git` directories) so an approved bash command cannot
-  * rewrite hooks/config/objects. Empty when `protectGit` is disabled. */
+  * rewrite hooks/config/objects. Empty by default (git CLI works under the
+  * sandbox); populated only when `gitWrite: "protect"` / `protectGit: true`. */
   protectedSubpaths: string[];
  /** Loopback proxy URL (http://127.0.0.1:PORT) when a "proxy" network policy
   * is active and the proxy has been started. Injected into bash as
@@ -119,15 +120,22 @@ export function resolveSandbox(
     ...(config?.writablePaths ?? []).map((p) => resolve(p)),
   ];
   const networkPolicy = normalizeNetworkPolicy(config?.network);
-  // gitWrite is the richer knob and wins when set; otherwise the legacy boolean
-  // `protectGit` decides. "allow-git-cli"/"ask" both leave `.git` writable at
-  // the OS layer so an ordinary `git commit` can write the object store without
-  // per-command escalation — the history-rewrite/hook-plant risk stays gated at
-  // the file-tool layer (a direct `.git/…` write still asks).
+  // Whether to carve `.git` read-only at the OS layer. The DEFAULT is NOT to
+  // carve it: an ordinary `git commit`/`add` writes the object store and refs,
+  // and OS-locking `.git` turns every commit into an escalation prompt — too
+  // heavy for a normal coding workflow. The real history-rewrite/hook-plant
+  // risk stays gated at the file-tool layer regardless (a direct `write_file`/
+  // `edit_file` into `.git/…` still asks), so the default trades the OS-level
+  // `.git` lock for the tool-level one rather than dropping the guard.
+  //
+  // Precedence: the richer `gitWrite` knob wins when set ("protect" carves,
+  // "allow-git-cli"/"ask" do not); otherwise the legacy boolean `protectGit`
+  // decides when IT is set (true carves, false does not); when neither is set
+  // the default is to leave `.git` writable.
   const protectGit =
     config?.gitWrite !== undefined
       ? config.gitWrite === "protect"
-      : config?.protectGit !== false;
+      : config?.protectGit === true;
   return {
     mode,
     network: networkPolicy.mode !== "off",

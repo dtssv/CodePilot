@@ -570,16 +570,19 @@ export interface SandboxConfig {
   * worktree's gitdir) out of the writable roots as read-only at the OS layer,
   * so an approved bash command cannot rewrite hooks/config/objects even though
   * the workspace is writable. File tools still gate `.git` writes separately.
-  * Default true; set false to allow direct `.git` writes under the sandbox.
+  * Unset leaves `.git` writable (so an ordinary `git commit` works without
+  * escalation); set true to carve it read-only. Superseded by `gitWrite` when
+  * that is set.
   */
   protectGit?: boolean;
  /**
   * How the resolved `.git` metadata dir is treated at the OS sandbox layer —
   * the richer form of `protectGit` (and the one that wins when both are set):
-  *  - "protect" (default): carve `.git` read-only at the OS layer, so no
+  *  - "protect": carve `.git` read-only at the OS layer, so no
   *    approved shell command can rewrite hooks/config/objects. Equivalent to
   *    `protectGit: true`.
-  *  - "allow-git-cli": leave `.git` writable under the sandbox so ordinary
+  *  - "allow-git-cli" (the default posture): leave `.git` writable under the
+  *    sandbox so ordinary
   *    `git commit` / `git add` (which write the object store and refs) work
   *    without per-command escalation. The real history-rewrite/hook-plant
   *    risk stays gated at the file-tool layer (a `write_file`/`edit_file`
@@ -587,7 +590,8 @@ export interface SandboxConfig {
   *    the tool-level one rather than removing the guard.
   *  - "ask": same OS posture as "allow-git-cli"; named to signal that the
   *    file-tool `.git` write confirmation is the gate.
-  * Unset falls back to `protectGit` (true → "protect", false → "allow-git-cli").
+  * Unset falls back to `protectGit` (true → "protect", false → "allow-git-cli");
+  * when neither is set the default is NOT to carve `.git` (git CLI works).
   */
   gitWrite?: "protect" | "allow-git-cli" | "ask";
 }
