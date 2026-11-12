@@ -32,6 +32,9 @@ import {
   listSessions,
   startSelfUpdateWatcher,
   runUpdateCheck,
+  runHeadless,
+  parseOutputFormat,
+  type OutputFormat,
   type AgentMode,
   type Event,
   type PermissionMode,
@@ -110,7 +113,14 @@ Usage:
                                          + 30s idle grace
   codepilot run "<task>" [--model M] [--provider P] [--cwd D]
                        [--yolo] [--permission-mode ask|auto-edit|yolo|auto|dont-ask]
+                       [--output-format text|json|stream-json] [--allowed-tools a,b]
                        [--json] [--quiet]
+                                         — --output-format selects machine output:
+                                           json = one result object; stream-json =
+                                           per-event NDJSON + closing result; text =
+                                           final answer only. --json is an alias for
+                                           --output-format stream-json. Without a
+                                           format, human text goes to stderr.
   codepilot goal "<objective>" [--max-rounds N] [--max-stalls N]
   codepilot agent [DIR] [--port N] [--no-open]
                                          — the agent app: task-oriented UI for
@@ -922,7 +932,8 @@ interface RunFlags {
   provider?: string;
   cwd?: string;
   permissionMode: PermissionMode;
-  json: boolean;
+  /** Machine-readable output format; undefined means human text to stderr. */
+  format?: OutputFormat;
   quiet: boolean;
   yolo: boolean;
 }
@@ -930,12 +941,22 @@ interface RunFlags {
 function resolveRunFlags(flags: Record<string, string | boolean>): RunFlags {
   const mode = (flags["permission-mode"] as PermissionMode | undefined) ?? null;
   const yolo = flags["yolo"] === true || mode === "yolo";
+  // Output format: explicit `--output-format text|json|stream-json`, or the
+  // legacy boolean `--json` alias (a raw event NDJSON stream historically) which
+  // now maps to `stream-json` — the same per-event NDJSON plus a closing result.
+  let format: OutputFormat | undefined;
+  const rawFormat = flags["output-format"];
+  if (typeof rawFormat === "string") {
+    format = parseOutputFormat(rawFormat);
+  } else if (flags["json"] === true) {
+    format = "stream-json";
+  }
   return {
     model: flags["model"] as string | undefined,
     provider: flags["provider"] as string | undefined,
     cwd: flags["cwd"] as string | undefined,
     permissionMode: yolo ? "yolo" : mode ?? pickDefaultMode(),
-    json: flags["json"] === true,
+    format,
     quiet: flags["quiet"] === true,
     yolo,
   };
@@ -1079,7 +1100,11 @@ async function cmdRun(
   const cwd = opts.cwd ?? process.cwd();
   const stderr_ = process.stderr;
   const stdout_ = process.stdout;
-  const writer = opts.json ? stdout_ : stderr_;
+  const machine = opts.format !== undefined;
+  const allowedTools =
+    typeof flags["allowed-tools"] === "string"
+      ? (flags["allowed-tools"] as string).split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
 
   let config;
   try {
@@ -1109,23 +1134,47 @@ async function cmdRun(
     config: { ...(config ?? {}), permissionMode: opts.permissionMode },
     model: opts.model,
     onPermissionRequest: async (req) => {
- // Non-interactive fallback (the spec: "需要 ask 时自动 deny 并在输出中说明").
+ // Non-interactive fallback: when a tool needs approval we can't get, deny
+ // and note it. Machine formats keep stdout clean for the contract, so the
+ // note goes to stderr there too.
       const note = `permission denied (non-interactive): ${req.toolName} — ${req.reason}\n`;
-      if (opts.json) {
-        writer.write(JSON.stringify({ type: "permission_denied", ...req }) + "\n");
-      } else if (!opts.quiet) {
-        stderr_.write("\n" + note);
-      }
+      if (!opts.quiet) stderr_.write("\n" + note);
  // If --yolo, honor it (we kept the mode='yolo' flag separately).
       if (opts.yolo) return "allow";
       return "deny";
     },
   });
 
-  if (!opts.quiet && !opts.json) {
+  if (!opts.quiet && !machine) {
     stderr_.write(`[codepilot] session=${session.id} cwd=${cwd} mode=${opts.permissionMode}\n`);
   }
 
+  // Machine formats (text / json / stream-json) use the shared headless
+  // contract so this entry point's output matches every other non-interactive
+  // surface byte-for-byte. The legacy boolean `--json` is an alias for
+  // stream-json (see resolveRunFlags).
+  if (machine) {
+    let result;
+    try {
+      result = await runHeadless({
+        session,
+        prompt: task,
+        format: opts.format!,
+        allowedTools,
+        write: (line) => void stdout_.write(line),
+      });
+    } finally {
+      try {
+        await session.dispose();
+      } catch {
+        /* ignore */
+      }
+      await killAllJobs().catch(() => {});
+    }
+    return result.subtype === "error" ? 1 : 0;
+  }
+
+ // Human text path: render events to stderr, keeping stdout clean.
  // Subscribe BEFORE prompt so events aren't missed. Session.subscribe replays
  // history (per core contract); we ignore history by only keeping events that
  // arrive after subscription. Implementation detail: we read the head offset.
@@ -1145,12 +1194,7 @@ async function cmdRun(
     }
     if (e.type === "message_delta") streamedIds.add(e.messageId);
     const alreadyStreamed = e.type === "message" && streamedIds.has(e.id);
-    if (opts.json) {
- // NDJSON event stream.
-      writer.write(JSON.stringify(e) + "\n");
-      return;
-    }
-    if (!opts.quiet) renderEventText(e, writer, alreadyStreamed);
+    if (!opts.quiet) renderEventText(e, stderr_, alreadyStreamed);
     if (e.type === "message_delta" && e.delta.type === "text") {
       assistantBuf.push(e.delta.text);
     } else if (e.type === "message" && e.role === "assistant") {
@@ -1171,11 +1215,7 @@ async function cmdRun(
   } catch (err) {
     exitCode = 1;
     const msg = err instanceof Error ? err.message : String(err);
-    if (opts.json) {
-      stdout_.write(JSON.stringify({ type: "error", message: msg }) + "\n");
-    } else {
-      stderr_.write(`\n[codepilot] error: ${msg}\n`);
-    }
+    stderr_.write(`\n[codepilot] error: ${msg}\n`);
   } finally {
     unsub();
     try {
@@ -1186,17 +1226,8 @@ async function cmdRun(
     await killAllJobs().catch(() => {});
   }
 
- // Final assistant text → stdout on success, regardless of --json (json users
- // already got deltas; we still emit a trailing summary line for convenience).
-  const finalText = assistantBuf.snapshot().trim();
-  if (finalText.length > 0) {
-    if (opts.json) {
-      stdout_.write(JSON.stringify({ type: "result", text: finalText }) + "\n");
-    } else {
- // Make sure the final newline is on its own line in non-json mode.
-      stderr_.write("\n");
-    }
-  }
+ // Trailing newline so the final answer sits on its own line.
+  if (assistantBuf.snapshot().trim().length > 0) stderr_.write("\n");
   return exitCode;
 }
 
@@ -1213,7 +1244,10 @@ async function cmdGoal(
   const cwd = opts.cwd ?? process.cwd();
   const stderr_ = process.stderr;
   const stdout_ = process.stdout;
-  const writer = opts.json ? stdout_ : stderr_;
+  // The goal command emits its own round-event NDJSON when any machine format
+  // is requested (`--json` or `--output-format json|stream-json`).
+  const json = opts.format !== undefined;
+  const writer = json ? stdout_ : stderr_;
 
   let config;
   try {
@@ -1235,7 +1269,7 @@ async function cmdGoal(
     requestId: string;
   }) => {
     const note = `permission denied (non-interactive): ${req.toolName} — ${req.reason}\n`;
-    if (opts.json) {
+    if (json) {
       writer.write(JSON.stringify({ type: "permission_denied", ...req }) + "\n");
     } else if (!opts.quiet) {
       stderr_.write("\n" + note);
@@ -1244,7 +1278,7 @@ async function cmdGoal(
     return "deny" as const;
   };
 
-  const onRound = opts.json
+  const onRound = json
     ? (round: number, status: string) => {
         stdout_.write(JSON.stringify({ type: "round", round, status }) + "\n");
       }
@@ -1263,7 +1297,7 @@ async function cmdGoal(
       onRound,
       onPermissionRequest,
     });
-    if (opts.json) {
+    if (json) {
       stdout_.write(JSON.stringify({ type: "result", ...result }) + "\n");
     } else {
       stderr_.write(`[goal] ${result.status}${result.reason ? `: ${result.reason}` : ""}\n`);
@@ -1271,7 +1305,7 @@ async function cmdGoal(
     return result.status === "completed" ? 0 : 1;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (opts.json) {
+    if (json) {
       stdout_.write(JSON.stringify({ type: "error", message: msg }) + "\n");
     } else {
       stderr_.write(`[goal] error: ${msg}\n`);

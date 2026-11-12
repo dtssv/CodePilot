@@ -923,6 +923,15 @@ export type { FileObservation, FreshnessResult } from "./fsObservation.js";
 // ---- Keyless transcript replay (test mode, no API key needed) ----
 export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";
 
+// ---- Headless (non-interactive / print-mode) output contract ----
+export {
+  runHeadless,
+  parseOutputFormat,
+  extractFinalAssistantText,
+  countAssistantTurns,
+} from "./headless.js";
+export type { OutputFormat, HeadlessResult, HeadlessOptions, HeadlessSession } from "./headless.js";
+
 // ---- Status line (declarative preset or custom script) ----
 export {
   runStatusLine,
