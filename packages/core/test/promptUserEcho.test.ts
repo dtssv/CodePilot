@@ -56,36 +56,50 @@ describe("user message is surfaced before the model responds", () => {
     return session;
   }
 
-  it("emits the user bubble before the first assistant token", async () => {
+  it("emits the user bubble before preprocessing and the first assistant token", async () => {
     const s = await makeSession();
     const order: string[] = [];
     s.subscribe((e: Event) => {
       if (e.type === "message" && e.role === "user") order.push("user");
+      // The `running` claim is appended only AFTER the per-turn preprocessing
+      // (@mcp, image mentions, uploads, memory recall) completes, so seeing the
+      // user bubble ahead of it proves the bubble is not blocked by that work.
+      else if (e.type === "status" && e.status === "running") order.push("claim");
       else if (e.type === "message_delta") order.push("assistant_delta");
       else if (e.type === "message" && e.role === "assistant") order.push("assistant");
     });
     await s.prompt("do the thing");
-    // The user message must be the FIRST content event, ahead of any assistant
-    // delta / message — it is surfaced before the model round-trip, not with it.
+    // The user bubble is the FIRST event — before the preprocessing claim and
+    // any assistant output (it is surfaced the instant the prompt is accepted).
     expect(order[0]).toBe("user");
+    const firstClaim = order.indexOf("claim");
+    expect(firstClaim).toBeGreaterThan(0);
     const firstAssistant = order.findIndex((x) => x.startsWith("assistant"));
-    expect(firstAssistant).toBeGreaterThan(0);
+    expect(firstAssistant).toBeGreaterThan(firstClaim);
   });
 
-  it("emits exactly one user message for a fresh prompt (no duplicate)", async () => {
+  it("persists exactly one user message and upserts the bubble by id", async () => {
     const s = await makeSession();
-    const userMsgs: Event[] = [];
+    const userMsgs: Extract<Event, { type: "message" }>[] = [];
     s.subscribe((e: Event) => {
       if (e.type === "message" && e.role === "user") userMsgs.push(e);
     });
     await s.prompt("just once please");
-    expect(userMsgs).toHaveLength(1);
-    const content = userMsgs[0] as Extract<Event, { type: "message" }>;
-    expect(content.content).toEqual([{ type: "text", text: "just once please" }]);
-    // And it is persisted exactly once in the transcript the agent sees.
+    // The UI is notified twice for the SAME id — an instant placeholder, then
+    // the authoritative event after preprocessing. Both carry the same message
+    // id, so the live reducer upserts a single bubble in place (not a dup).
+    expect(userMsgs.length).toBeGreaterThanOrEqual(1);
+    const ids = new Set(userMsgs.map((m) => m.id));
+    expect(ids.size).toBe(1);
+    const last = userMsgs[userMsgs.length - 1]!;
+    expect(last.content).toEqual([{ type: "text", text: "just once please" }]);
+    // Crucially, the transcript the agent sees + what gets persisted holds the
+    // user message EXACTLY ONCE: the placeholder is notify-only (never pushed),
+    // so the append-only JSONL stays single-line and replay yields no dup.
     const persisted = (s as unknown as { events: Event[] }).events.filter(
       (e) => e.type === "message" && e.role === "user",
     );
     expect(persisted).toHaveLength(1);
+    expect((persisted[0] as Extract<Event, { type: "message" }>).id).toBe(last.id);
   });
 });

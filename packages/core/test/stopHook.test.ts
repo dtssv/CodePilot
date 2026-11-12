@@ -135,8 +135,12 @@ exit 0
     await session.prompt("do the thing");
 
     expect(streamCalls).toBe(2);
+    // Dedupe by id: a fresh prompt notifies the same user id twice (instant
+    // placeholder + authoritative event), upserted into one bubble by the UI.
+    const seenUser = new Set<string>();
     const userTexts = events
       .filter((e): e is Extract<Event, { type: "message" }> => e.type === "message" && e.role === "user")
+      .filter((e) => (seenUser.has(e.id) ? false : (seenUser.add(e.id), true)))
       .map((e) => e.content.find((b) => b.type === "text" && "text" in b)?.text ?? "");
     expect(userTexts).toEqual(["do the thing"]);
     // Continue feedback reaches the model via systemContinue, not a user bubble.

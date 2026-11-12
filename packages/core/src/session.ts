@@ -1,9 +1,7 @@
 // Session: owns the tool registry, permissions, provider, and event log.
 // Persists events as JSONL under ~/.codepilot/sessions/<id>.jsonl.
-//
-// Module split (2026-Q3): session.ts (this file), session-mcp.ts (MCP startup
-// + `@mcp:` refs), session-telemetry.ts (span lifecycle), session-utils.ts
-// (helpers, re-exported here for backward-compatible imports).
+// Module split: session-mcp.ts (MCP startup), session-telemetry.ts (spans),
+// session-utils.ts (helpers, re-exported here).
 
 import { appendFile, mkdir, readFile, writeFile, stat, truncate } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -293,18 +291,11 @@ export class Session {
   private readonly dedupCache = new DedupCache();
   /** Read-before-write + staleness guard store (session-scoped). */
   private readonly fileObservations = new FileObservationStore();
- /** Mid-run steering messages queued via steer; drained each agent turn.
-  * `user` items are genuine human input and enter the transcript as user
-  * messages. `system` items are engine-generated notices (e.g. background
-  * job completion) and are injected into the per-turn runtime_context so
-  * they can never be mistaken for — or spoof — a user message.
-  *
-  * `delivery` controls when a `user` item is consumed:
-  *  - `"steer"`: the model should see it as soon as possible — at the next
-  *    injection boundary within the current logical turn (mid-stream before
-  *    any tool call, or right after a tool batch).
-  *  - `"followup"`: it waits for the next top-level user turn.
-  * `system` notices are always `"steer"`. */
+/**
+ * Mid-run steering messages drained each turn. `user` items enter the
+ * transcript; `system` notices inject into runtime_context. `delivery`:
+ * `"steer"` = this turn, `"followup"` = next top-level turn.
+ */
   private steeringQueue: SteeringItem[] = [];
  /** Aborts only the in-flight provider SSE so a mid-stream steer can be
   * injected without cancelling the whole run. Distinct from
@@ -352,12 +343,11 @@ export class Session {
   private title: string | null = null;
  /** Cached checkpoint hook — initialised in `init`. */
   private checkpointHook: CheckpointHook | null = null;
-  /** In-flight background checkpoint write, if any. The snapshot is built
-   * synchronously on the hot path; the slow small-model distillation + disk
-   * write run here so a completed turn is not held up by a checkpoint. At most
-   * one runs at a time (a new trigger while one is in flight is skipped —
-   * the next turn re-triggers). `dispose()` awaits this so a clean shutdown
-   * never drops a checkpoint. */
+  /**
+   * In-flight background checkpoint write, if any. Snapshot is built on the hot
+   * path; the slow distillation + disk write runs here so a completed turn is
+   * not blocked. At most one at a time; `dispose()` awaits it on shutdown.
+   */
   private pendingCheckpoint: Promise<void> | null = null;
  /** Aggregated usage across all prompts of this session. */
   private usageTotal = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -377,14 +367,11 @@ export class Session {
   private pendingRelevantMemories: string | null = null;
   /** Latest single-request provider `input` tokens (not cumulative). */
   private lastProviderInputTokens = 0;
-  /** Measured context anchor for the hybrid context estimate: the provider's
-   * last reported prompt size paired with the event-log length at that moment.
-   * `contextReport` reads `anchor.input` as ground truth and adds a heuristic
-   * estimate for only the events appended after the anchor, so a large
-   * tool_result landing after the last usage event is reflected immediately
-   * instead of waiting for the next response. Cleared on a model switch and at
-   * a compaction boundary (both re-bill the whole prompt, so the old
-   * measurement no longer anchors anything). */
+  /**
+   * Measured context anchor: provider's last prompt size + event-log length.
+   * `contextReport` reads `anchor.input` as ground truth, heuristically adding
+   * events appended after it. Cleared on model switch / compaction boundary.
+   */
   private contextAnchor: { input: number; eventCount: number } | null = null;
  /** Set when the session was loaded with a stale in-flight status (the prior
  * run was interrupted by a crash/restart). Drives a one-shot recovery
@@ -411,24 +398,20 @@ export class Session {
  /** Lock-file identity (daemon url/token) recorded in the lease so a second
   * opener can be redirected to attach to this owner as a subscriber. */
   private readonly lockIdentity?: SessionOptions["lockIdentity"];
- /** Turn-boundary pre-compaction cache. After a turn ends with tokens over a
- * soft threshold (but below the hard trigger), we compact in the background
- * while the user reads / thinks, and stash the result here keyed by a
- * fingerprint of the exact history it summarised. The next turn's
- * `maybeCompact` reuses it IFF the history is unchanged — turning an
- * otherwise blocking small-model summary into a free, already-done step.
- * A stale fingerprint (history moved on) discards it and falls back to the
- * normal synchronous path, so it can never apply an outdated summary. */
+/**
+ * Turn-boundary pre-compaction cache. After a turn over a soft threshold a
+ * background compaction runs and is stashed here keyed by a history
+ * fingerprint. The next turn reuses it iff unchanged; stale → synchronous.
+ */
   private precompact: { fingerprint: string; result: CompactionResult } | null = null;
  /** Guards against two overlapping background pre-compactions. */
   private precompactInFlight = false;
- /** Auto-compaction circuit breaker. `compactFailStreak` counts consecutive
-  * failed compactions (threw or made no change); `compactNoopStreak` counts
-  * compactions that succeeded but left the live transcript still at/over the
-  * hard trigger ("compacted but still full" — real thrashing). When either
-  * reaches `autoCompactMaxConsecutiveFailures`, auto-compaction (and its
-  * precompute) is disabled for the rest of the session; a successful MANUAL
-  * `/compact` that gets back under budget clears the breaker. */
+/**
+ * Auto-compaction circuit breaker. `compactFailStreak`/`compactNoopStreak`
+ * count failures and "still full" results; reaching
+ * `autoCompactMaxConsecutiveFailures` disables auto-compaction. Manual
+ * `/compact` back under budget clears it.
+ */
   private compactFailStreak = 0;
   private compactNoopStreak = 0;
   private autoCompactDisabled = false;
@@ -473,10 +456,9 @@ export class Session {
   /** The persistent shell shared across foreground bash calls. Lazily started. */
   private persistentShell: PersistentShell | null = null;
   /**
-   * Where intentional project deliverables should land for this task.
-   * Starts as `[cwd]`; extended from path tokens in user prompts and from
-   * mid-turn approval when a write falls outside. Distinct from sandbox
-   * writable roots.
+   * Where intentional project deliverables land for this task. Starts as
+   * `[cwd]`; extended from path tokens in prompts and mid-turn approval of
+   * out-of-cwd writes. Distinct from sandbox writable roots.
    */
   private deliveryRoots: string[] = [];
  /** Per-session registry of background sub-agents dispatched with
@@ -603,12 +585,10 @@ export class Session {
 
   /** Load from disk and configure registries. */
   async init(): Promise<void> {
- // Cross-process single-writer lease. Acquire BEFORE loading — loadFromDisk is
- // read-only but reconcileStaleStatus below appends a seal/idle, and every
- // later prompt appends, so the lease must already be held. A read-only open
- // skips the lease entirely and never writes. Throws SessionLockedError if a
- // live owner (another daemon / CLI) already holds it; the error carries the
- // owner's identity so a caller can redirect the client to attach there.
+ // Cross-process single-writer lease. Acquire BEFORE loading — later prompts
+ // append, so the lease must already be held. Read-only open skips it entirely.
+ // Throws SessionLockedError if a live owner holds it; the error carries the
+ // owner's identity so a caller can redirect the client there.
     if (!this.readOnly) {
       this.writerLease = acquireSessionLock(this.id, {
         ...(this.lockIdentity?.host ? { host: this.lockIdentity.host } : {}),
@@ -638,12 +618,9 @@ export class Session {
     await this.startNetProxyIfConfigured();
     this.registerBuiltins();
     await this.loadFromDisk();
- // Reconcile a stale "running" state: if the last persisted status is
- // `running`/`waiting_permission`, the prompt that set it was interrupted
- // by a crash or a server restart — there is no live run anymore. Without
- // this the UI shows the session as executing forever and the stop button
- // does nothing (there's no cancelController to abort). Stamp an `idle`
- // status so clients reflect reality on load.
+ // Reconcile a stale "running" status: the prompt that set it was
+ // interrupted by crash/restart — there is no live run. Stamp `idle` so
+ // clients reflect reality on load (the stop button otherwise does nothing).
     await this.reconcileStaleStatus();
  // Stamp cwd sidecar so listSessions can filter by workspace.
     await persistSessionCwd(this.id, this.cwd).catch(() => undefined);
@@ -880,6 +857,28 @@ export class Session {
     let effectivePrompt = resume ? text : (promptHook.rewrittenPrompt ?? text);
     let attachedImages: ImageAttachment[] = [];
     let savedUploads: Awaited<ReturnType<typeof materializeUploads>> = [];
+
+    // Show the user's bubble the instant the prompt is accepted — BEFORE the
+    // per-turn preprocessing (@mcp resolution, image mentions, uploads, and the
+    // query-time memory recall, which calls the small model over the network).
+    // Those steps run before the real user event is appended below, so without
+    // this the bubble only appears once they finish, right as the model starts
+    // replying. We NOTIFY a placeholder now (never persist it — the JSONL is
+    // append-only with no by-id dedup, so persisting here then again below
+    // would replay as two bubbles). The authoritative event is appended once,
+    // after preprocessing, reusing this same id so the live UI upserts the one
+    // bubble in place (web reducer matches by message id).
+    const userEventId = `msg_${randomUUID()}`;
+    if (!resume) {
+      this.notify({
+        type: "message",
+        id: userEventId,
+        role: "user",
+        content: [{ type: "text", text }],
+        ts: Date.now(),
+        ...(images && images.length > 0 ? { images } : {}),
+      });
+    }
 
     if (!resume) {
  // Wait for background MCP (if still starting) so tools / @mcp refs work.
@@ -1211,14 +1210,20 @@ export class Session {
       let turnImages = attachedImages;
       let turnFiles = savedUploads;
 
-      // Emit the user message before the first model round-trip so its bubble
-      // shows instantly. On a fresh prompt (not resume) we append/persist/notify
-      // here and tell the agent loop (userAlreadyEmitted) not to duplicate it.
+      // Append the authoritative user message now that preprocessing is done,
+      // so the transcript the model sees carries the final content (@mcp
+      // rewrite, mentioned images, upload note). On a fresh prompt (not resume)
+      // this is appended/persisted/notified ONCE, reusing the id of the
+      // placeholder bubble notified at the top of prompt(): persisting is
+      // deferred to here (the JSONL has no by-id dedup, so this stays a single
+      // line) and the final notify upserts the live bubble in place with the
+      // final content. The agent loop is told it is already in history
+      // (userAlreadyEmitted) so it does not emit a duplicate.
       const userEmittedEarly = !resume;
       if (userEmittedEarly) {
         const userEvent: Event = {
           type: "message",
-          id: `msg_${randomUUID()}`,
+          id: userEventId,
           role: "user",
           content: [{ type: "text", text: turnText }],
           ts: Date.now(),

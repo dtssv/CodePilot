@@ -10,10 +10,19 @@ import { Session } from "../src/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 
+// Distinct user bubbles by message id. A fresh prompt notifies the same id
+// twice — an instant placeholder then the authoritative event — which the UI
+// upserts into one bubble, so we dedupe by id to count real user messages.
 function userTexts(events: Event[]): string[] {
-  return events
-    .filter((e): e is Extract<Event, { type: "message" }> => e.type === "message" && e.role === "user")
-    .map((e) => e.content.find((b) => b.type === "text" && "text" in b)?.text ?? "");
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.type !== "message" || e.role !== "user") continue;
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    out.push(e.content.find((b) => b.type === "text" && "text" in b)?.text ?? "");
+  }
+  return out;
 }
 
 describe("Session.resumeLastTurn", () => {

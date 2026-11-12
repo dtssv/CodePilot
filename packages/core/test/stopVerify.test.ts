@@ -373,9 +373,14 @@ describe("Session built-in stopVerify", () => {
     expect(streamCalls).toBe(2);
     expect(judgeCalls).toBe(2);
     expect(events.some((e) => e.type === "stop_continue")).toBe(true);
+    // Dedupe by id: a fresh prompt notifies the same user id twice (instant
+    // placeholder + authoritative event), upserted into one bubble by the UI.
+    const seenUser = new Set<string>();
     const userMsgs = events.filter(
       (e): e is Extract<Event, { type: "message" }> =>
-        e.type === "message" && e.role === "user",
+        e.type === "message" &&
+        e.role === "user" &&
+        (seenUser.has(e.id) ? false : (seenUser.add(e.id), true)),
     );
     // Only the real user prompt — stopVerify continue must not fake a user bubble.
     expect(userMsgs).toHaveLength(1);
