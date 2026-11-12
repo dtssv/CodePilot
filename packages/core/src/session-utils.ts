@@ -197,9 +197,13 @@ export function buildProvider(config: CodepilotConfig) {
     chain.push(buildSingleProvider({ ...config, ...fb }));
   }
   if (chain.length === 1) return primary;
-  return new FallbackProvider(chain, (from, to, reason) => {
-    process.stderr.write(`[provider] failover ${from} → ${to}: ${reason}\n`);
-  });
+  return new FallbackProvider(
+    chain,
+    (from, to, reason, kind) => {
+      process.stderr.write(`[provider] failover ${from} → ${to} (${kind}): ${reason}\n`);
+    },
+    config.fallbackPolicy?.onQuota ?? "fail",
+  );
 }
 
 export function buildSingleProvider(config: CodepilotConfig): ChatProvider {

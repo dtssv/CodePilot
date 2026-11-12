@@ -100,12 +100,20 @@ describe("configurable redaction patterns (redact.patterns)", () => {
 });
 
 describe("isFailoverError / FallbackProvider", () => {
-  it("classifies transient vs permanent failures", () => {
+  it("cascades only transient pressure by default (auth/quota/invalid do not)", () => {
+    // Transient pressure cascades.
     expect(isFailoverError("429 Too Many Requests")).toBe(true);
     expect(isFailoverError("rate limit exceeded")).toBe(true);
-    expect(isFailoverError("quota exhausted")).toBe(true);
     expect(isFailoverError("ETIMEDOUT")).toBe(true);
+    expect(isFailoverError("Anthropic 503: overloaded")).toBe(true);
+    // Deterministic / account-scoped errors do NOT cascade by default.
+    expect(isFailoverError("quota exhausted")).toBe(false);
+    expect(isFailoverError("OpenAI 401: invalid api key")).toBe(false);
+    expect(isFailoverError("OpenAI 403: forbidden")).toBe(false);
     expect(isFailoverError("invalid_request_error: bad tool schema")).toBe(false);
+    // Quota cascades only when the policy opts in.
+    expect(isFailoverError("insufficient_quota", "next")).toBe(true);
+    expect(isFailoverError("insufficient_quota", "fail")).toBe(false);
   });
 
   function fakeProvider(
@@ -161,6 +169,67 @@ describe("isFailoverError / FallbackProvider", () => {
     const last = out[out.length - 1]!;
     expect(last.kind).toBe("error");
     expect((last as { message: string }).message).toContain("all providers failed");
+  });
+
+  it("does not cascade an auth (401) error to the backup", async () => {
+    const p = new FallbackProvider([
+      fakeProvider("primary", [{ kind: "error", message: "OpenAI 401: invalid api key" }]),
+      fakeProvider("backup", [{ kind: "text_delta", messageId: "m", text: "SHOULD NOT APPEAR" }, { kind: "done", finishReason: "stop" }]),
+    ]);
+    const out = await collect(p.stream({ model: "m", messages: [] }));
+    expect(out.some((e) => e.kind === "text_delta")).toBe(false);
+    expect(out.some((e) => e.kind === "provider_failover")).toBe(false);
+    const last = out[out.length - 1]!;
+    expect(last.kind).toBe("error");
+    expect((last as { message: string }).message).toContain("401");
+  });
+
+  it("does not cascade a quota error under the default policy", async () => {
+    const p = new FallbackProvider([
+      fakeProvider("primary", [{ kind: "error", message: "insufficient_quota: you exceeded your current quota" }]),
+      fakeProvider("backup", [{ kind: "text_delta", messageId: "m", text: "SHOULD NOT APPEAR" }, { kind: "done", finishReason: "stop" }]),
+    ]);
+    const out = await collect(p.stream({ model: "m", messages: [] }));
+    expect(out.some((e) => e.kind === "text_delta")).toBe(false);
+  });
+
+  it("cascades a quota error when onQuota is 'next'", async () => {
+    const p = new FallbackProvider(
+      [
+        fakeProvider("primary", [{ kind: "error", message: "insufficient_quota" }]),
+        fakeProvider("backup", [{ kind: "text_delta", messageId: "m", text: "ok from backup" }, { kind: "done", finishReason: "stop" }]),
+      ],
+      undefined,
+      "next",
+    );
+    const out = await collect(p.stream({ model: "m", messages: [] }));
+    expect(out.some((e) => e.kind === "text_delta" && e.text === "ok from backup")).toBe(true);
+  });
+
+  it("emits an observational provider_failover event on each switch", async () => {
+    const p = new FallbackProvider([
+      fakeProvider("primary", [{ kind: "error", message: "Anthropic 503: overloaded" }]),
+      fakeProvider("backup", [{ kind: "text_delta", messageId: "m", text: "ok" }, { kind: "done", finishReason: "stop" }]),
+    ]);
+    const out = await collect(p.stream({ model: "m", messages: [] }));
+    const fo = out.find((e) => e.kind === "provider_failover");
+    expect(fo).toBeDefined();
+    expect(fo && fo.kind === "provider_failover" && fo.from).toBe("primary");
+    expect(fo && fo.kind === "provider_failover" && fo.to).toBe("backup");
+    expect(fo && fo.kind === "provider_failover" && fo.failureKind).toBe("server_5xx");
+  });
+
+  it("notifies the onFailover observer with the structured kind", async () => {
+    const seen: Array<{ from: string; to: string; kind: string }> = [];
+    const p = new FallbackProvider(
+      [
+        fakeProvider("primary", [{ kind: "error", message: "429 rate limited" }]),
+        fakeProvider("backup", [{ kind: "text_delta", messageId: "m", text: "ok" }, { kind: "done", finishReason: "stop" }]),
+      ],
+      (from, to, _reason, kind) => seen.push({ from, to, kind }),
+    );
+    await collect(p.stream({ model: "m", messages: [] }));
+    expect(seen).toEqual([{ from: "primary", to: "backup", kind: "rate_limit" }]);
   });
 });
 

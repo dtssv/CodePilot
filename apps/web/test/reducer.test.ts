@@ -299,6 +299,15 @@ describe("side channels", () => {
     state = reducer(state, { type: "event", event: { type: "status", status: "idle" } });
     expect(state.turnBudget).toBeUndefined();
   });
+
+  it("surfaces a provider_failover as a transient notice without a row", () => {
+    const state = drive([
+      { type: "provider_failover", from: "openai", to: "anthropic", reason: "429", failureKind: "rate_limit" },
+    ]);
+    expect(state.rows).toHaveLength(0);
+    expect(state.notice).toMatch(/openai → anthropic/);
+    expect(state.notice).toMatch(/rate_limit/);
+  });
 });
 
 describe("status transitions", () => {

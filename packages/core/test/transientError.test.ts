@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { classifyProviderFailure, isTransientError } from "../src/transientError.js";
+import {
+  classifyProviderFailure,
+  classifyFailover,
+  shouldCascadeFailover,
+  isTransientError,
+} from "../src/transientError.js";
 import { isTransientError as fromAgent } from "../src/agent.js";
 import { isTransientJudgeFailure } from "../src/stopVerify.js";
 
@@ -119,5 +124,52 @@ describe("classifyProviderFailure", () => {
     expect(classifyProviderFailure("Anthropic 529: overloaded_error")).toBe("transient");
     expect(classifyProviderFailure("OpenAI 401: invalid api key")).toBe("fatal");
     expect(classifyProviderFailure("Model not found: gpt-nonexistent")).toBe("fatal");
+  });
+});
+
+describe("classifyFailover", () => {
+  it("maps framed HTTP status codes to a failover class", () => {
+    expect(classifyFailover("OpenAI 401: invalid api key")).toBe("auth");
+    expect(classifyFailover("OpenAI 403: forbidden")).toBe("auth");
+    expect(classifyFailover("OpenAI 400: bad request")).toBe("invalid_request");
+    expect(classifyFailover("OpenAI 404: model not found")).toBe("invalid_request");
+    expect(classifyFailover("OpenAI 429: Too Many Requests")).toBe("rate_limit");
+    expect(classifyFailover("Anthropic 529: overloaded_error")).toBe("overloaded");
+    expect(classifyFailover("Anthropic 503: service unavailable")).toBe("server_5xx");
+    // Retryable 4xx behave like transient pressure.
+    expect(classifyFailover("OpenAI 408: request timeout")).toBe("rate_limit");
+  });
+
+  it("splits a 429 into quota vs rate_limit by body phrasing", () => {
+    expect(classifyFailover("OpenAI 429: insufficient_quota, you exceeded your current quota")).toBe("quota");
+    expect(classifyFailover("OpenAI 429: rate limit reached, slow down")).toBe("rate_limit");
+  });
+
+  it("classifies status-less messages by phrasing", () => {
+    expect(classifyFailover("quota exhausted")).toBe("quota");
+    expect(classifyFailover("rate limit exceeded")).toBe("rate_limit");
+    expect(classifyFailover("upstream is overloaded, try again")).toBe("overloaded");
+    expect(classifyFailover("ETIMEDOUT")).toBe("transport");
+    expect(classifyFailover("fetch failed")).toBe("transport");
+    expect(classifyFailover("invalid api key")).toBe("auth");
+    expect(classifyFailover("totally unrecognised message")).toBe("other");
+  });
+});
+
+describe("shouldCascadeFailover", () => {
+  it("cascades only transient pressure by default", () => {
+    expect(shouldCascadeFailover("rate_limit")).toBe(true);
+    expect(shouldCascadeFailover("overloaded")).toBe(true);
+    expect(shouldCascadeFailover("server_5xx")).toBe(true);
+    expect(shouldCascadeFailover("transport")).toBe(true);
+    expect(shouldCascadeFailover("auth")).toBe(false);
+    expect(shouldCascadeFailover("invalid_request")).toBe(false);
+    expect(shouldCascadeFailover("other")).toBe(false);
+  });
+
+  it("gates quota on the policy", () => {
+    expect(shouldCascadeFailover("quota")).toBe(false); // default "fail"
+    expect(shouldCascadeFailover("quota", "fail")).toBe(false);
+    expect(shouldCascadeFailover("quota", "next")).toBe(true);
   });
 });

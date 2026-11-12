@@ -291,6 +291,17 @@ type EventBody =
       discardMessageId?: string;
       discardToolCallIds?: string[];
     }
+ /** The fallback chain switched to a backup provider before any content was
+  * produced. Carries the from/to provider names, the triggering error, and the
+  * structured failover class (rate_limit / overloaded / server_5xx / transport
+  * / quota). Observational only: never sent to the model, zero context cost. */
+  | {
+      type: "provider_failover";
+      from: string;
+      to: string;
+      reason: string;
+      failureKind: string;
+    }
  /** Live progress marker — what the run is waiting on right now (the model,
  * or the named tools). Not persisted. */
   | { type: "activity"; phase: "model" | "tools"; since: number; tools?: string[] }
@@ -1142,6 +1153,11 @@ export interface CodepilotConfig {
   hookSandbox?: boolean;
  /** Ordered backup providers for automatic failover (rate limit / outage). */
   fallbacks?: ProviderFallbackConfig[];
+ /** Failover routing policy for the `fallbacks` chain. Only transient pressure
+  * (rate-limit / overload / 5xx / transport) cascades by default; auth and
+  * invalid-request errors never cascade. `onQuota` governs an exhausted quota,
+  * which is usually account-wide: default "fail" (surface it) over "next". */
+  fallbackPolicy?: { onQuota?: "next" | "fail" };
  /** Max HTTP retries on transient errors (429/5xx). Default 8. */
   maxRetries?: number;
  /** Base delay for exponential backoff (ms). Default 2000. */

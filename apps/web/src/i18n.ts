@@ -225,6 +225,7 @@ const ZH: Record<string, string> = {
   Retry: "重试",
   "Retrying": "正在重试",
   "Connection hiccup, retrying": "网络波动，正在重试",
+  "Switched provider": "已切换服务商",
   "Something went wrong": "出错了",
   "Permission required": "需要你的批准",
   "CodePilot wants to run": "CodePilot 想要执行",

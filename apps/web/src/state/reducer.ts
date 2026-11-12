@@ -595,6 +595,14 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
         },
       };
 
+    case "provider_failover":
+      // Observational: the chain switched to a backup provider before any
+      // content was produced. Surface it as a transient notice (no sticky row).
+      return {
+        ...state,
+        notice: `${t("Switched provider")}: ${e.from} → ${e.to} (${e.failureKind})`,
+      };
+
     case "stop_continue": {
       const short =
         e.reason.length > 160 ? `${e.reason.slice(0, 157)}…` : e.reason;

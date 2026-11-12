@@ -111,7 +111,19 @@ export type StreamEvent =
     }
   | { kind: "usage"; usage: UsageInfo }
   | { kind: "done"; finishReason: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** Emitted by the fallback chain the moment it gives up on one provider and
+   * re-issues the request against the next — purely observational, so a host
+   * can surface which provider served the turn and why it switched. Carries the
+   * from/to provider names, the triggering error message, and the structured
+   * failover class. Never produced by a single provider's own stream. */
+  | {
+      kind: "provider_failover";
+      from: string;
+      to: string;
+      reason: string;
+      failureKind: string;
+    };
 
 export interface ChatProvider {
   readonly name: string;

@@ -1135,6 +1135,18 @@ export async function runAgent(
             case "error":
               error = ev.message;
               break;
+            case "provider_failover":
+              // The fallback chain switched to a backup before any content was
+              // produced. Surface it to the host (observational, non-persisted)
+              // so a UI can show which provider served the turn and why.
+              await emitAux({
+                type: "provider_failover",
+                from: ev.from,
+                to: ev.to,
+                reason: ev.reason,
+                failureKind: ev.failureKind,
+              });
+              break;
             case "done":
               finishReason = ev.finishReason;
               break;

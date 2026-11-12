@@ -771,6 +771,15 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     consistencyCheck: z.enum(["off", "warn", "throw"]).optional(),
     hooks: HooksConfigSchema.optional(),
     fallbacks: z.array(ProviderPresetSchema).optional(),
+    // Failover routing policy for the `fallbacks` chain. Only transient
+    // pressure (rate-limit / overload / 5xx / transport) cascades to the next
+    // provider by default; auth and invalid-request errors never cascade. An
+    // exhausted quota is usually account-wide, so `onQuota` defaults to "fail"
+    // (surface the error) rather than "next" (try a same-account backup).
+    fallbackPolicy: z
+      .object({ onQuota: z.enum(["next", "fail"]).optional() })
+      .strict()
+      .optional(),
  // Provider HTTP retry tuning (429/5xx backoff). Defaults are generous
  // (8 retries, 2s base, 60s cap) so rate-limited gateways don't abort
  // long runs. Override per-config when you know the provider's quota

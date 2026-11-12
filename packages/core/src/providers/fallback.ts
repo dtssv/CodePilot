@@ -21,37 +21,39 @@ import type {
   StreamChatOptions,
   StreamEvent,
 } from "./types.js";
+import {
+  classifyFailover,
+  shouldCascadeFailover,
+  type QuotaFailoverPolicy,
+} from "../transientError.js";
 
-const FAILOVER_PATTERNS = [
-  /rate.?limit/i,
-  /quota/i,
-  /insufficient/i,
-  /overloaded/i,
-  /\b401\b/,
-  /\b403\b/,
-  /\b429\b/,
-  /\b5\d\d\b/,
-  /ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND/,
-];
-
-export function isFailoverError(message: string): boolean {
-  return FAILOVER_PATTERNS.some((re) => re.test(message));
+/** Back-compat predicate: whether an error would cascade to the next provider
+ * under the default policy (quota does NOT cascade by default). Retained for
+ * callers that want a boolean; the chain itself uses the structured classifier
+ * so it can also honour a configured quota policy. */
+export function isFailoverError(message: string, onQuota: QuotaFailoverPolicy = "fail"): boolean {
+  return shouldCascadeFailover(classifyFailover(message), onQuota);
 }
 
 export class FallbackProvider implements ChatProvider {
   readonly name: string;
   readonly defaultModel: string;
   readonly smallModel: string;
+  private readonly onQuota: QuotaFailoverPolicy;
 
   constructor(
     private readonly chain: ChatProvider[],
- /** Optional observer notified on each failover (from, to, reason). */
-    private readonly onFailover?: (from: string, to: string, reason: string) => void
+ /** Optional observer notified on each failover (from, to, reason, kind). */
+    private readonly onFailover?: (from: string, to: string, reason: string, kind: string) => void,
+ /** Whether an exhausted quota cascades to the next provider. Default "fail"
+  * (quota is usually account-wide, so a same-account backup rarely helps). */
+    onQuota: QuotaFailoverPolicy = "fail",
   ) {
     if (chain.length === 0) throw new Error("FallbackProvider needs at least one provider");
     this.name = chain.map((p) => p.name).join(">");
     this.defaultModel = chain[0]!.defaultModel;
     this.smallModel = chain[0]!.smallModel;
+    this.onQuota = onQuota;
   }
 
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
@@ -63,7 +65,9 @@ export class FallbackProvider implements ChatProvider {
       try {
         for await (const ev of provider.stream(opts)) {
           if (ev.kind === "error") {
-            if (!producedContent && isFailoverError(ev.message)) {
+            // Only a pre-content error can cascade; once a provider has streamed
+            // real content we stay on it (switching mid-stream corrupts framing).
+            if (!producedContent && shouldCascadeFailover(classifyFailover(ev.message), this.onQuota)) {
               failed = ev.message;
               break;
             }
@@ -90,12 +94,18 @@ export class FallbackProvider implements ChatProvider {
       lastError = failed;
       const next = this.chain[i + 1];
       if (!next) break;
-      if (!isFailoverError(failed)) {
- // Non-transient errors (e.g. invalid request) should not cascade.
+      const kind = classifyFailover(failed);
+      if (!shouldCascadeFailover(kind, this.onQuota)) {
+        // Deterministic errors (auth, invalid request) and — by default —
+        // quota do not cascade: a backup would fail identically or is
+        // account-scoped, so burning the rest of the chain helps nothing.
         break;
       }
-      this.onFailover?.(provider.name, next.name, failed);
- // Loop continues with the next provider.
+      this.onFailover?.(provider.name, next.name, failed, kind);
+      // Surface the switch to the caller as an observational stream event so a
+      // host can show which provider served the turn and why it changed.
+      yield { kind: "provider_failover", from: provider.name, to: next.name, reason: failed, failureKind: kind };
+      // Loop continues with the next provider.
     }
     yield { kind: "error", message: `all providers failed; last error: ${lastError}` };
   }

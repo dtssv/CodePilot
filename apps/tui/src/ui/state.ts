@@ -568,6 +568,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             status: "thinking",
           };
         }
+        case "provider_failover":
+          // Observational: the chain switched to a backup provider. Surface a
+          // transient notice (no sticky row) so the user sees which served the
+          // turn and why.
+          return {
+            ...state,
+            notice: `Switched provider: ${ev.from} → ${ev.to} (${ev.failureKind})`,
+          };
         case "subagent":
           if (ev.event?.type !== "tool_call") return state;
           // Unique, stable label: the session-global runSeq (falls back to the

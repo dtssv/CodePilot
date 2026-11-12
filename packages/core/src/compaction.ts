@@ -199,6 +199,7 @@ function serializeEventForEstimate(e: Event): string {
     case "tool_started":
     case "doom_loop":
     case "turn_budget":
+    case "provider_failover":
       // Control events — not sent to the provider, so zero context cost.
       return "";
     case "request":
