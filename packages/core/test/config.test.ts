@@ -129,6 +129,30 @@ describe("validateConfig", () => {
     expect(r.sessions?.autoResumeAfterCrash).toBe(true);
   });
 
+  it("accepts a declarative status-line preset block", () => {
+    const r = validateConfig({
+      statusLine: { type: "preset", preset: "verbose", items: ["model", "context", "branch"] },
+    }) as { statusLine?: { type: string; preset?: string; items?: string[] } };
+    expect(r.statusLine?.type).toBe("preset");
+    expect(r.statusLine?.preset).toBe("verbose");
+    expect(r.statusLine?.items).toEqual(["model", "context", "branch"]);
+  });
+
+  it("accepts a custom status-line command block", () => {
+    const r = validateConfig({
+      statusLine: { type: "command", command: "~/bin/statusline.sh", timeoutMs: 1500 },
+    }) as { statusLine?: { type: string; command?: string; timeoutMs?: number } };
+    expect(r.statusLine?.type).toBe("command");
+    expect(r.statusLine?.command).toBe("~/bin/statusline.sh");
+    expect(r.statusLine?.timeoutMs).toBe(1500);
+  });
+
+  it("rejects an unknown status-line preset item", () => {
+    expect(() =>
+      validateConfig({ statusLine: { type: "preset", items: ["bogus"] } as never }),
+    ).toThrow();
+  });
+
   it("accepts the promptCache ttl block", () => {
     const r = validateConfig({ promptCache: { ttl: "1h" } }) as {
       promptCache?: { ttl?: string };

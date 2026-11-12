@@ -14,7 +14,17 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { AgentMode, StatusLineConfig } from "@codepilot/core";
-import { runStatusLine, buildPayload, DEFAULT_MODEL_CONTEXT_WINDOW } from "@codepilot/core";
+import {
+  runStatusLine,
+  buildPayload,
+  renderPresetStatusLine,
+  readGitBranch,
+  DEFAULT_MODEL_CONTEXT_WINDOW,
+} from "@codepilot/core";
+
+/** The camelCase rate-limit snapshot the session captures from provider headers
+ * (mapped into the status-line payload by buildPayload). */
+type RateLimitSnapshot = { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number };
 import type { TuiState } from "./state.js";
 import { color, formatTokens, glyph } from "./theme.js";
 
@@ -42,6 +52,7 @@ export function StatusBar({
   cwd,
   version,
   contextWindow,
+  rateLimit,
 }: {
   state: TuiState;
   statusLineConfig?: StatusLineConfig;
@@ -49,10 +60,19 @@ export function StatusBar({
   version: string;
  /** Active model's context window; falls back to the core default when unknown. */
   contextWindow?: number;
+ /** Latest provider rate-limit snapshot (fed into the status-line payload). */
+  rateLimit?: RateLimitSnapshot;
 }): React.ReactElement {
   const [customText, setCustomText] = React.useState<string | null>(null);
+  // Git branch for the status-line payload — read fail-soft and cached per cwd
+  // (a synchronous `git rev-parse` would be wasteful to run on every re-render).
+  const [gitBranch, setGitBranch] = React.useState<string | undefined>(undefined);
+  React.useEffect(() => {
+    setGitBranch(readGitBranch(cwd));
+  }, [cwd]);
 
- // Run the custom status-line script on state changes (debounced).
+ // Render the status line on state changes. A declarative preset renders
+ // in-process (synchronous); a custom script is spawned (debounced).
   React.useEffect(() => {
     if (!statusLineConfig) return;
     const totalInput = state.usage.input + (state.usage.cacheRead ?? 0);
@@ -70,7 +90,13 @@ export function StatusBar({
       contextWindowSize: windowSize,
       usedPercentage: usedPct,
       version,
+      gitBranch,
+      rateLimit,
     });
+    if (statusLineConfig.type === "preset") {
+      setCustomText(renderPresetStatusLine(statusLineConfig, payload));
+      return;
+    }
     let cancelled = false;
     const timer = setTimeout(() => {
       runStatusLine(statusLineConfig, payload, { cwd }).then((r) => {
@@ -78,9 +104,9 @@ export function StatusBar({
       });
     }, statusLineConfig.updateIntervalMs ?? 300);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [state.model, state.sessionId, state.usage, statusLineConfig, cwd, version, contextWindow]);
+  }, [state.model, state.sessionId, state.usage, statusLineConfig, cwd, version, contextWindow, gitBranch, rateLimit]);
 
- // Custom status line: render the script's stdout (preserving ANSI).
+ // Rendered status line: a preset's text or a script's stdout (ANSI preserved).
   if (statusLineConfig && customText !== null) {
     return (
       <Box paddingX={(statusLineConfig.padding ?? 0) + 1}>

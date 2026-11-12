@@ -2,7 +2,7 @@
 // No SDK dependency — uses fetch directly.
 
 import { parseSse } from "./sse.js";
-import { fetchWithRetry } from "./retry.js";
+import { fetchWithRetry, parseRateLimitHeaders } from "./retry.js";
 import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
@@ -215,6 +215,10 @@ export class AnthropicProvider implements ChatProvider {
         ? (attempt, delayMs, reason) => opts.onRetry!({ attempt, delayMs, reason })
         : undefined,
     });
+    if (opts.onRateLimit) {
+      const rl = parseRateLimitHeaders(res);
+      if (rl) opts.onRateLimit(rl);
+    }
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
       yield {

@@ -923,9 +923,24 @@ export type { FileObservation, FreshnessResult } from "./fsObservation.js";
 // ---- Keyless transcript replay (test mode, no API key needed) ----
 export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";
 
-// ---- Custom status-line script ----
-export { runStatusLine, buildPayload } from "./statusLine.js";
-export type { StatusLinePayload, StatusLineConfig, StatusLineResult } from "./statusLine.js";
+// ---- Status line (declarative preset or custom script) ----
+export {
+  runStatusLine,
+  buildPayload,
+  renderPresetStatusLine,
+  resolvePresetItems,
+  STATUS_LINE_PRESETS,
+} from "./statusLine.js";
+export type {
+  StatusLinePayload,
+  StatusLineConfig,
+  StatusLinePresetConfig,
+  StatusLineCommandConfig,
+  StatusLineResult,
+  StatusLineItem,
+  StatusLinePresetName,
+  RateLimitSnapshot,
+} from "./statusLine.js";
 
 // ---- OpenTelemetry-compatible telemetry (OTLP/HTTP-JSON export) ----
 export { Tracer, loadTelemetryConfig, getTracer, setTracer } from "./telemetry.js";

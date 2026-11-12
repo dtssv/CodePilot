@@ -364,6 +364,11 @@ export class Session {
   private pendingCheckpoint: Promise<void> | null = null;
  /** Aggregated usage across all prompts of this session. */
   private usageTotal = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+ /** Latest provider rate-limit snapshot, when a recent response carried
+  * rate-limit headers. Surfaced into the status-line payload. */
+  private rateLimitSnapshot:
+    | { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }
+    | undefined;
  /** Per-turn cache-relevant usage, for cache-waste attribution (`getCacheWaste`). */
   private cacheTurns: CacheTurn[] = [];
  /** True when the context changed (compaction/branch) just before the next
@@ -1186,6 +1191,9 @@ export class Session {
             });
             this.contextChangedForNextTurn = false;
           }
+        },
+        onRateLimit: (info) => {
+          this.rateLimitSnapshot = info;
         },
         // Mid-run compaction: agent already detected pressure (local estimate
         // OR last provider inputTokens). Force — do not re-gate on the local
@@ -2796,9 +2804,17 @@ export class Session {
     return this.cwd;
   }
 
- /** Status-line script configuration (for the TUI custom status bar). */
+ /** Status-line configuration (declarative preset or custom script). */
   getStatusLineConfig(): import("./types.js").StatusLineConfig | undefined {
     return this.config.statusLine;
+  }
+
+ /** Latest provider rate-limit snapshot, or undefined when none captured. Fed
+  * into the status-line payload so a preset/script can show remaining budget. */
+  getRateLimitSnapshot():
+    | { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }
+    | undefined {
+    return this.rateLimitSnapshot;
   }
 
   subscribe(listener: (e: Event) => void): () => void {

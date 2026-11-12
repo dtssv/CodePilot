@@ -1,21 +1,37 @@
 /**
- * Custom status-line script runner.
+ * Status-line rendering: a declarative preset or a custom script.
  *
- * When `config.statusLine` is set, the TUI spawns the configured command on
- * each status update, feeds it a JSON payload on stdin describing the
- * session, and renders the command's stdout as the status line. This lets
- * users customise the status bar with arbitrary scripts (git branch, context
- * usage bar, custom colors, etc.) without touching the TUI source.
+ * `config.statusLine` drives the status bar. Two shapes:
+ *   - `{ type: "preset", … }` — a built-in, declarative status line assembled
+ *     from a fixed set of items (model, mode, context gauge, git branch, …).
+ *     Users get a useful status bar with zero scripting: pick a named preset
+ *     ("default" / "minimal" / "verbose") or list the `items` to show.
+ *   - `{ type: "command", … }` — the TUI spawns the configured command on each
+ *     update, feeds it a JSON payload on stdin describing the session, and
+ *     renders the command's stdout. For arbitrary scripts (custom colors, extra
+ *     data) that the preset can't express. ANSI color codes are preserved.
  *
- * The command is spawned with `child_process.spawn` (no shell on Unix).
- * Updates are debounced at the configured interval. If a new update arrives
- * while a script is running, the in-flight process is killed and the new
- * invocation starts immediately. ANSI color codes in stdout are preserved.
+ * The command is spawned with `child_process.spawn` (no shell on Unix). Updates
+ * are debounced at the configured interval. If a new update arrives while a
+ * script is running, the in-flight process is killed and the new invocation
+ * starts immediately.
  *
  * @module statusLine
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
+import { basename } from "node:path";
+
+/** A snapshot of provider rate-limit state, surfaced into the payload when a
+ * recent response carried rate-limit headers. All fields best-effort. */
+export interface RateLimitSnapshot {
+  /** Requests remaining in the current window, when the provider reports it. */
+  requests_remaining?: number;
+  /** Tokens remaining in the current window, when reported. */
+  tokens_remaining?: number;
+  /** Seconds until the limit resets / the server asked us to wait, when known. */
+  resets_in_seconds?: number;
+}
 
 export interface StatusLinePayload {
   session_id: string;
@@ -33,6 +49,8 @@ export interface StatusLinePayload {
     current_dir: string;
     project_dir?: string;
     added_dirs: string[];
+    /** Current git branch (best-effort; absent outside a repo). */
+    git_branch?: string;
   };
   version: string;
   context_window: {
@@ -42,15 +60,52 @@ export interface StatusLinePayload {
     used_percentage: number | null;
     remaining_percentage: number | null;
   };
+  /** Provider rate-limit snapshot — present only when recent headers carried it. */
+  rate_limit?: RateLimitSnapshot;
 }
 
-export interface StatusLineConfig {
+/** The declarative items a preset status line can show, in render order. */
+export type StatusLineItem =
+  | "model"
+  | "mode"
+  | "context"
+  | "branch"
+  | "cwd"
+  | "session"
+  | "rate";
+
+/** Named built-in presets → the item list they render. */
+export const STATUS_LINE_PRESETS: Readonly<Record<string, readonly StatusLineItem[]>> = {
+  minimal: ["model", "context"],
+  default: ["model", "mode", "context", "branch"],
+  verbose: ["model", "mode", "context", "branch", "cwd", "rate"],
+};
+
+export type StatusLinePresetName = keyof typeof STATUS_LINE_PRESETS;
+
+/** A declarative, built-in status line. Renders in-process from the payload —
+ * no subprocess. `preset` picks a named item list; `items` overrides it. */
+export interface StatusLinePresetConfig {
+  type: "preset";
+  /** Named preset; ignored when `items` is given. Default "default". */
+  preset?: StatusLinePresetName;
+  /** Explicit item list (overrides `preset`). */
+  items?: StatusLineItem[];
+  padding?: number;
+  updateIntervalMs?: number;
+}
+
+/** A custom status-line script. The TUI spawns it per update and renders its
+ * stdout; the session payload is piped on stdin as JSON. */
+export interface StatusLineCommandConfig {
   type: "command";
   command: string;
   padding?: number;
   updateIntervalMs?: number;
   timeoutMs?: number;
 }
+
+export type StatusLineConfig = StatusLinePresetConfig | StatusLineCommandConfig;
 
 export interface StatusLineResult {
  /** The raw stdout text (may contain ANSI codes, may be multi-line). */
@@ -68,7 +123,7 @@ export interface StatusLineResult {
  * resolves once the command finishes or times out.
  */
 export function runStatusLine(
-  config: StatusLineConfig,
+  config: StatusLineCommandConfig,
   payload: StatusLinePayload,
   opts: { timeoutMs?: number; cwd?: string } = {}
 ): Promise<StatusLineResult> {
@@ -128,6 +183,66 @@ export function runStatusLine(
   });
 }
 
+/** Resolve the item list a preset config renders: explicit `items` win, else
+ * the named `preset`, else "default". Unknown names fall back to "default". */
+export function resolvePresetItems(config: StatusLinePresetConfig): readonly StatusLineItem[] {
+  if (config.items && config.items.length > 0) return config.items;
+  return STATUS_LINE_PRESETS[config.preset ?? "default"] ?? STATUS_LINE_PRESETS.default!;
+}
+
+/** Render one declarative item from the payload, or null when it has no data
+ * (e.g. no git branch, no rate-limit snapshot) so it is omitted cleanly. */
+function renderItem(item: StatusLineItem, p: StatusLinePayload): string | null {
+  switch (item) {
+    case "model":
+      return p.model.display_name || p.model.id || null;
+    case "mode":
+      // Permission/agent mode isn't in the payload; the preset surfaces the
+      // param summary when present (e.g. a reasoning setting), else nothing.
+      return p.model.param_summary || null;
+    case "context": {
+      const pct = p.context_window.used_percentage;
+      if (pct == null) return null;
+      return `ctx ${Math.round(pct)}%`;
+    }
+    case "branch":
+      return p.workspace.git_branch ? `⎇ ${p.workspace.git_branch}` : null;
+    case "cwd":
+      return basename(p.workspace.current_dir || p.cwd) || null;
+    case "session":
+      return p.session_id && p.session_id !== "—" ? p.session_id.slice(0, 8) : null;
+    case "rate": {
+      const r = p.rate_limit;
+      if (!r) return null;
+      const parts: string[] = [];
+      if (r.requests_remaining != null) parts.push(`${r.requests_remaining} req`);
+      if (r.tokens_remaining != null) parts.push(`${r.tokens_remaining} tok`);
+      if (r.resets_in_seconds != null) parts.push(`${r.resets_in_seconds}s`);
+      return parts.length ? parts.join(" ") : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Render a declarative preset status line from the payload — no subprocess.
+ * Items with no data are omitted; the rest are joined with " · ". Returns a
+ * plain string (no ANSI) the caller renders in its own style.
+ */
+export function renderPresetStatusLine(
+  config: StatusLinePresetConfig,
+  payload: StatusLinePayload,
+): string {
+  const items = resolvePresetItems(config);
+  const rendered: string[] = [];
+  for (const item of items) {
+    const text = renderItem(item, payload);
+    if (text) rendered.push(text);
+  }
+  return rendered.join(" · ");
+}
+
 /**
  * Build a `StatusLinePayload` from the session state available to the TUI.
  * Fields that the TUI doesn't track are omitted (absent in the JSON).
@@ -144,8 +259,23 @@ export function buildPayload(input: {
   contextWindowSize: number;
   usedPercentage: number | null;
   version: string;
+  /** Current git branch (best-effort; omit outside a repo). */
+  gitBranch?: string;
+  /** Latest provider rate-limit snapshot, in the camelCase shape the session
+   * captures from provider headers (omit when none captured). */
+  rateLimit?: { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number };
 }): StatusLinePayload {
   const remaining = input.usedPercentage != null ? 100 - input.usedPercentage : null;
+  // Map the camelCase provider snapshot to the payload's snake_case field;
+  // drop it entirely when it carries nothing.
+  let rateLimit: RateLimitSnapshot | undefined;
+  if (input.rateLimit) {
+    const r: RateLimitSnapshot = {};
+    if (input.rateLimit.requestsRemaining != null) r.requests_remaining = input.rateLimit.requestsRemaining;
+    if (input.rateLimit.tokensRemaining != null) r.tokens_remaining = input.rateLimit.tokensRemaining;
+    if (input.rateLimit.resetsInSeconds != null) r.resets_in_seconds = input.rateLimit.resetsInSeconds;
+    if (Object.keys(r).length > 0) rateLimit = r;
+  }
   return {
     session_id: input.sessionId,
     session_name: input.sessionName,
@@ -159,6 +289,7 @@ export function buildPayload(input: {
     workspace: {
       current_dir: input.cwd,
       added_dirs: [],
+      ...(input.gitBranch ? { git_branch: input.gitBranch } : {}),
     },
     version: input.version,
     context_window: {
@@ -168,5 +299,6 @@ export function buildPayload(input: {
       used_percentage: input.usedPercentage,
       remaining_percentage: remaining,
     },
+    ...(rateLimit ? { rate_limit: rateLimit } : {}),
   };
 }

@@ -1,6 +1,11 @@
 // Public type surface for @codepilot/core.
 // Public session/event types for the headless core API.
 
+// The status-line config union is owned by statusLine.ts (the module that
+// renders it); imported for use on CodepilotConfig and re-exported below so the
+// public config type surface stays here.
+import type { StatusLineConfig } from "./statusLine.js";
+
 export interface TextBlock {
   type: "text";
   text: string;
@@ -1104,9 +1109,10 @@ export interface CodepilotConfig {
  * teaching posture), this is a direct verbosity hint some providers
  * honour. Default undefined (provider default). */
   modelVerbosity?: "low" | "medium" | "high";
- /** Custom status-line script. When set, the TUI spawns
- * this command on each status update, feeds it a JSON payload on stdin
- * describing the session, and renders its stdout as the status line. */
+ /** Status line. Either a built-in declarative preset (`type: "preset"`) that
+ * renders model/mode/context/branch with no scripting, or a custom script
+ * (`type: "command"`) the TUI spawns per update, feeding it a JSON payload on
+ * stdin and rendering its stdout. */
   statusLine?: StatusLineConfig;
  /** Name of a registered `AgentRuntime` to drive this
  * session's agent loop instead of the built-in default loop. Undefined
@@ -1150,18 +1156,15 @@ export interface SessionsConfig {
   coldCompressAfterDays?: number;
 }
 
-export interface StatusLineConfig {
- /** Must be `"command"`. */
-  type: "command";
- /** Path to an executable or inline command. `~` is expanded. */
-  command: string;
- /** Horizontal inset (in characters) for the status line container. Default 0. */
-  padding?: number;
- /** Minimum interval between invocations in ms. Clamped to >= 300. Default 300. */
-  updateIntervalMs?: number;
- /** Maximum time the command may run before being killed. Default 2000. */
-  timeoutMs?: number;
-}
+// Re-export the status-line config shapes (owned by statusLine.ts) so the
+// public config type surface stays in one place.
+export type {
+  StatusLineConfig,
+  StatusLinePresetConfig,
+  StatusLineCommandConfig,
+  StatusLineItem,
+  StatusLinePresetName,
+} from "./statusLine.js";
 
 export interface WebFetchConfig {
  /** Hard allowlist of fetchable domains, matched by suffix (e.g. `github.com`

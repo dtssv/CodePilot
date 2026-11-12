@@ -456,6 +456,7 @@ export async function* streamOnce(
  * a prompt-start `<plan>` block when present; otherwise appended. */
     liveContext?: string;
     onRetry?: StreamChatOptions["onRetry"];
+    onRateLimit?: StreamChatOptions["onRateLimit"];
  /** Tool-call policy for this turn (see StreamChatOptions.toolChoice). */
     toolChoice?: StreamChatOptions["toolChoice"];
  /** Per-request mid-stream steer signal (see AgentDeps.getSteerSignal). */
@@ -539,6 +540,7 @@ export async function* streamOnce(
     promptCacheKey: deps.promptCacheKey,
     responseFormat: deps.responseFormat,
     onRetry: extra.onRetry,
+    onRateLimit: extra.onRateLimit,
     toolChoice: extra.toolChoice,
   });
 }

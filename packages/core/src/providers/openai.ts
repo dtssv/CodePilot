@@ -3,7 +3,7 @@
 // speaks the /v1/chat/completions streaming protocol.
 
 import { parseSse } from "./sse.js";
-import { fetchWithRetry, RateLimitAbortedError } from "./retry.js";
+import { fetchWithRetry, RateLimitAbortedError, parseRateLimitHeaders } from "./retry.js";
 import { mergeAdjacentRoles } from "./types.js";
 import type {
   ChatProvider,
@@ -181,6 +181,10 @@ export class OpenAIProvider implements ChatProvider {
         return;
       }
       throw err;
+    }
+    if (opts.onRateLimit) {
+      const rl = parseRateLimitHeaders(res);
+      if (rl) opts.onRateLimit(rl);
     }
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");

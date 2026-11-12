@@ -1673,6 +1673,7 @@ export function App(props: AppProps): React.ReactElement {
         statusLineConfig={session.getStatusLineConfig()}
         cwd={cwd}
         version="1.0.0"
+        rateLimit={session.getRateLimitSnapshot?.()}
       />
 
       {state.busy ? (

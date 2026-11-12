@@ -78,6 +78,10 @@ export interface StreamChatOptions {
   };
  /** Called before each transport-level retry (429 / 5xx / network). */
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
+ /** Called with a rate-limit snapshot when a provider response carried
+  * rate-limit headers. Best-effort and observational (the session surfaces the
+  * latest snapshot into the status-line payload). */
+  onRateLimit?: (info: { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }) => void;
  /**
   * Tool-call policy for this turn. `"auto"` (default) lets the model decide;
   * `"none"` hard-disables tool calls so the model MUST answer in text. The

@@ -17,6 +17,52 @@ export interface RetryOptions {
 
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
 
+/** A best-effort provider rate-limit snapshot parsed from response headers. */
+export interface ProviderRateLimit {
+  requestsRemaining?: number;
+  tokensRemaining?: number;
+  resetsInSeconds?: number;
+}
+
+function numHeader(res: Response, ...names: string[]): number | undefined {
+  for (const n of names) {
+    const v = res.headers.get(n);
+    if (v == null) continue;
+    const parsed = Number(v);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+/**
+ * Parse provider rate-limit headers into a normalized snapshot, or null when a
+ * response carries none. Handles the common families (Anthropic
+ * `anthropic-ratelimit-*`, OpenAI/DeepSeek `x-ratelimit-*`) plus a plain
+ * `retry-after` for the reset estimate. Pure + fail-soft: unknown providers
+ * simply yield fewer fields.
+ */
+export function parseRateLimitHeaders(res: Response): ProviderRateLimit | null {
+  const requestsRemaining = numHeader(
+    res,
+    "anthropic-ratelimit-requests-remaining",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining",
+  );
+  const tokensRemaining = numHeader(
+    res,
+    "anthropic-ratelimit-tokens-remaining",
+    "x-ratelimit-remaining-tokens",
+  );
+  let resetsInSeconds: number | undefined;
+  const retryAfter = retryAfterMs(res);
+  if (retryAfter != null) resetsInSeconds = Math.round(retryAfter / 1000);
+  const snapshot: ProviderRateLimit = {};
+  if (requestsRemaining !== undefined) snapshot.requestsRemaining = requestsRemaining;
+  if (tokensRemaining !== undefined) snapshot.tokensRemaining = tokensRemaining;
+  if (resetsInSeconds !== undefined) snapshot.resetsInSeconds = resetsInSeconds;
+  return Object.keys(snapshot).length > 0 ? snapshot : null;
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => resolve(), ms);

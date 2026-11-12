@@ -87,6 +87,10 @@ export interface AgentDeps {
   onEvent?: (e: Event) => void | Promise<void>;
  /** Called with each usage update. */
   onUsage?: (usage: { input: number; output: number; cacheRead?: number; cacheWrite?: number; costUSD?: number }) => void;
+ /** Called with a provider rate-limit snapshot when a response carried
+  * rate-limit headers. Observational — the session keeps the latest snapshot to
+  * surface in the status-line payload. Optional. */
+  onRateLimit?: (info: { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number }) => void;
  /**
  * Called after every assistant turn with the running session-level token
  * estimate. The estimate is produced by the segmented estimator in
@@ -1003,7 +1007,7 @@ export async function runAgent(
       );
       let degenerated = false;
       try {
-        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, toolChoice: lockToolsThisTurn ? "none" : undefined, steerSignal })) {
+        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, onRateLimit: deps.onRateLimit, toolChoice: lockToolsThisTurn ? "none" : undefined, steerSignal })) {
           if (deps.signal?.aborted) break;
           if (steerSignal?.aborted) { steeredMidStream = true; break; }
           switch (ev.kind) {

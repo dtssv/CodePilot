@@ -176,6 +176,38 @@ export const SessionsConfigSchema = z
   .strict()
   .optional();
 
+// Status line: a declarative preset (no scripting) or a custom command. A
+// discriminated union on `type`. Historically absent from this strict schema,
+// so writing `statusLine` to config.json was rejected even though the public
+// type allowed it — the same latent class fixed for reasoning/runtime earlier.
+export const StatusLineConfigSchema = z
+  .union([
+    z
+      .object({
+        type: z.literal("preset"),
+        // Named built-in preset; ignored when `items` is given. Default "default".
+        preset: z.enum(["minimal", "default", "verbose"]).optional(),
+        // Explicit item list (overrides the named preset).
+        items: z
+          .array(z.enum(["model", "mode", "context", "branch", "cwd", "session", "rate"]))
+          .optional(),
+        padding: z.number().int().nonnegative().optional(),
+        updateIntervalMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("command"),
+        // Executable or inline command; `~` is expanded. Payload piped on stdin.
+        command: z.string().min(1),
+        padding: z.number().int().nonnegative().optional(),
+        updateIntervalMs: z.number().int().positive().optional(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+  ])
+  .optional();
+
 export const McpServerConfigSchema = z.union([
  // stdio transport (default; `type` may be omitted for back-compat)
   z
@@ -702,6 +734,7 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     telemetry: TelemetryConfigSchema,
     usage: UsageConfigSchema,
     sessions: SessionsConfigSchema,
+    statusLine: StatusLineConfigSchema,
     webFetch: WebFetchConfigSchema.optional(),
     webSearch: WebSearchConfigSchema.optional(),
     imageGen: ImageGenConfigSchema.optional(),
