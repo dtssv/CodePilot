@@ -130,6 +130,17 @@ export class Engine extends EventEmitter {
     });
   }
 
+  /** Send a one-way JSON-RPC notification from the extension host (no reply is
+   * awaited). Used by host-owned fire-and-forget calls such as cancelling a
+   * superseded inline completion. Silently drops if the engine isn't running. */
+  notify(method: string, params: unknown): void {
+    try {
+      this.write(JSON.stringify({ jsonrpc: "2.0", method, params }));
+    } catch {
+      /* engine not running / pipe closed — nothing to cancel */
+    }
+  }
+
   /** Register a handler for a server→client request the extension host owns
    * directly (e.g. `diagnostics/request`, answered from `vscode.languages`).
    * Such a request is answered here and is NOT relayed to the webview. */

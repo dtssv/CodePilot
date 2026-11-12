@@ -69,17 +69,29 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
 
         val client = CodepilotService.getInstance().client() ?: return InlineCompletionSuggestion.Empty
 
-        // The client's request is blocking; run it off the EDT / coroutine dispatcher.
-        val completion = withContext(Dispatchers.IO) {
-            client.inlineComplete(
-                prefix = ctx.prefix,
-                suffix = ctx.suffix,
-                path = ctx.path,
-                maxTokens = s.completionMaxTokens.coerceAtLeast(1),
-                onDisabled = { reason ->
-                    if (reason == "no-small-model") warnNoSmallModelOnce()
-                },
-            )
+        // Own the requestId so a superseded request (the platform cancels the
+        // coroutine when a newer keystroke arrives) can tell the server to abort
+        // the upstream model call instead of letting it keep burning tokens.
+        val requestId = "idea-${completionSeq.incrementAndGet()}"
+
+        // The client's request is blocking; run it off the EDT / coroutine
+        // dispatcher. On cancellation, fire completion/cancel to the server.
+        val completion = try {
+            withContext(Dispatchers.IO) {
+                client.inlineComplete(
+                    prefix = ctx.prefix,
+                    suffix = ctx.suffix,
+                    path = ctx.path,
+                    maxTokens = s.completionMaxTokens.coerceAtLeast(1),
+                    requestId = requestId,
+                    onDisabled = { reason ->
+                        if (reason == "no-small-model") warnNoSmallModelOnce()
+                    },
+                )
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            client.cancelCompletion(requestId)
+            throw c
         }
 
         if (completion.isNullOrEmpty()) return InlineCompletionSuggestion.Empty
@@ -107,6 +119,10 @@ class CodepilotInlineCompletionProvider : DebouncedInlineCompletionProvider() {
     companion object {
         private const val PREFIX_CAP = 4000
         private const val SUFFIX_CAP = 2000
+
+        /** Monotonic source for per-request completion ids used to cancel a
+         * superseded upstream call. */
+        private val completionSeq = java.util.concurrent.atomic.AtomicLong(0)
 
         @Volatile
         private var warned = false

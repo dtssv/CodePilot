@@ -362,6 +362,9 @@ export interface InlineCompletionResult {
    * completion model" notice. */
   disabledReason?: string;
 }
+/** Cancel an in-flight inline completion by its requestId so the upstream model
+ * call is aborted (stops burning tokens on a suggestion the client discarded). */
+export interface CompletionCancelParams { requestId: string; }
 export interface WorkspaceStatParams { path: string; cwd?: string; }
 export interface WorkspaceStatResult { path: string; exists: boolean; size: number; hash: string; modifiedAt?: number; }
 export interface WorkspaceWatchParams { path?: string; cwd?: string; }
@@ -568,6 +571,7 @@ export function registerServer(
     remoteGrant: opts.remoteGrant,
     ...(opts.lockIdentity ? { lockIdentity: opts.lockIdentity } : {}),
     terminals: new TerminalHost(),
+    completionAborts: new Map(),
   };
 
   if (opts.remoteGrant) {
@@ -770,6 +774,9 @@ export function registerServer(
   peer.onRequest<GitCheckoutParams, GitGenericResult>("git/checkout", (p) => handleGitCheckout(ctx, p));
   peer.onRequest<{ cwd?: string; sessionId?: string }, GitCommitMessageResult>("git/commit-message", (p) => handleGitCommitMessage(ctx, p));
   peer.onRequest<InlineCompletionParams, InlineCompletionResult>("completion/inline", (p) => handleInlineCompletion(ctx, p));
+  // Cancel is fire-and-forget: the client doesn't wait on it, it just wants the
+  // superseded upstream call aborted. A notification keeps the client simple.
+  peer.onNotification<CompletionCancelParams>("completion/cancel", (p) => handleCompletionCancel(ctx, p));
   peer.onRequest<WorkspaceStatParams, WorkspaceStatResult>("workspace/stat", (p) => handleWorkspaceStat(ctx, p));
   peer.onRequest<WorkspaceWatchParams, WorkspaceWatchResult>("workspace/watch", (p) => handleWorkspaceWatch(ctx, p));
   peer.onRequest<Record<string, never>, SystemUpdateCheckResult>("system/update-check", () =>
@@ -1446,6 +1453,10 @@ interface ServerContext {
   lockIdentity?: { host?: string; url?: string; token?: string };
   /** Interactive PTYs owned by this connection. */
   terminals: TerminalHost;
+  /** In-flight inline completions keyed by the client's opaque requestId, so a
+   * `completion/cancel` notification can abort the upstream model call instead
+   * of letting a discarded completion keep burning tokens. */
+  completionAborts: Map<string, AbortController>;
 }
 
 /** Per-session bookkeeping kept off the session itself. */
@@ -3451,6 +3462,17 @@ async function handleInlineCompletion(ctx: ServerContext, params: InlineCompleti
 
   const maxTokens = params.maxTokens && params.maxTokens > 0 ? params.maxTokens : COMPLETION_MAX_TOKENS;
 
+  // Abort the upstream model call when the client cancels (completion/cancel)
+  // so a superseded completion stops burning tokens instead of running to
+  // completion. The controller is registered under the client's requestId; an
+  // already-registered id from a stale duplicate is aborted first.
+  ctx.completionAborts.get(requestId)?.abort();
+  const controller = new AbortController();
+  ctx.completionAborts.set(requestId, controller);
+  const clearAbort = (): void => {
+    if (ctx.completionAborts.get(requestId) === controller) ctx.completionAborts.delete(requestId);
+  };
+
   // Native FIM path (opt-in + provider supports it): one non-streaming call
   // with prefix+suffix, strictly lower latency than the chat wrapper. Falls
   // back to the chat path on any FIM error (fast-fail).
@@ -3461,10 +3483,13 @@ async function handleInlineCompletion(ctx: ServerContext, params: InlineCompleti
         prefix: params.prefix,
         suffix: params.suffix,
         maxTokens,
+        signal: controller.signal,
       });
       return { completion: cleanCompletion(r.text, params.prefix), requestId };
     } catch {
       return empty();
+    } finally {
+      clearAbort();
     }
   }
 
@@ -3476,18 +3501,32 @@ async function handleInlineCompletion(ctx: ServerContext, params: InlineCompleti
       systemPrompt: COMPLETION_SYSTEM_PROMPT,
       messages: [userMessage(prompt)],
       maxTokens,
+      signal: controller.signal,
     })) {
       if (ev.kind === "text_delta") raw += ev.text;
       else if (ev.kind === "error") throw new Error(ev.message);
     }
   } catch {
-    // Fast-fail: any error (including a rate-limit) yields no suggestion rather
-    // than a late one. The client simply shows nothing.
+    // Fast-fail: any error (including a rate-limit or an abort) yields no
+    // suggestion rather than a late one. The client simply shows nothing.
     return empty();
+  } finally {
+    clearAbort();
   }
 
   const completion = cleanCompletion(raw, params.prefix);
   return { completion, requestId };
+}
+
+/** Abort an in-flight inline completion by requestId. Idempotent: an unknown or
+ * already-finished id is a no-op. Fire-and-forget (no reply). */
+function handleCompletionCancel(ctx: ServerContext, params: CompletionCancelParams): void {
+  if (!ctx.initialized) return;
+  const controller = ctx.completionAborts.get(params.requestId);
+  if (controller) {
+    controller.abort();
+    ctx.completionAborts.delete(params.requestId);
+  }
 }
 
 const WATCH_DEBOUNCE_MS = 150;

@@ -53,8 +53,8 @@ function posToOffset(lines: string[], pos: vscode.Position): number {
   return off + pos.character;
 }
 
-function fakeEngine(request: Engine["request"]): Engine {
-  return { running: true, request } as unknown as Engine;
+function fakeEngine(request: Engine["request"], notify: Engine["notify"] = vi.fn()): Engine {
+  return { running: true, request, notify } as unknown as Engine;
 }
 
 describe("CompletionProvider", () => {
@@ -165,5 +165,38 @@ describe("CompletionProvider", () => {
       new CancellationTokenSource().token as never,
     );
     expect(res).toBeUndefined();
+  });
+
+  it("tells the server to cancel when the request is superseded mid-flight", async () => {
+    __resetAll();
+    // An RPC that settles only when its abort signal fires (as the real engine
+    // does), so the request rejects once the token is cancelled.
+    const req = vi.fn().mockImplementation((_m: string, _p: unknown, opts?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        const s = opts?.signal;
+        if (s) s.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }),
+    );
+    const engineNotify = vi.fn();
+    const p = new CompletionProvider(
+      fakeEngine(req as never, engineNotify as never),
+      () => settings(),
+      () => "/work",
+      () => {},
+    );
+    const d = doc("const a = ", 10);
+    const src = new CancellationTokenSource();
+    const resP = p.provideInlineCompletionItems(d as never, d.__cursor, {} as never, src.token as never);
+    // Let the handler issue the RPC, then supersede it.
+    await new Promise((r) => setTimeout(r, 0));
+    src.cancel();
+    await resP;
+    expect(engineNotify).toHaveBeenCalledTimes(1);
+    const [method, params] = engineNotify.mock.calls[0]!;
+    expect(method).toBe("completion/cancel");
+    expect(params).toMatchObject({ requestId: expect.any(String) });
+    // The requestId matches the one sent on the inline request.
+    const inlineReqId = (req.mock.calls[0]![1] as { requestId: string }).requestId;
+    expect((params as { requestId: string }).requestId).toBe(inlineReqId);
   });
 });

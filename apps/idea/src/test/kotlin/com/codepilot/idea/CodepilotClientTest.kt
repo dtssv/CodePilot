@@ -409,7 +409,7 @@ class CodepilotClientTest {
         val c = startClient(behavior)
         c.initialize("/repo", "ask")
 
-        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96)
+        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96, requestId = "r1")
         assertEquals("foo()", text)
     }
 
@@ -433,7 +433,7 @@ class CodepilotClientTest {
 
         var reported: String? = null
         val text = c.inlineComplete(
-            prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96,
+            prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96, requestId = "r2",
             onDisabled = { reported = it },
         )
         assertEquals(null, text)
@@ -455,7 +455,7 @@ class CodepilotClientTest {
         val c = startClient(behavior)
         c.initialize("/repo", "ask")
 
-        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96, timeoutMs = 200L)
+        val text = c.inlineComplete(prefix = "foo", suffix = "", path = "a.ts", maxTokens = 96, requestId = "r3", timeoutMs = 200L)
         assertEquals(null, text)
     }
 

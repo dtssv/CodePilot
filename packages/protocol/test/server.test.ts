@@ -1621,6 +1621,69 @@ describe("server / protocol handlers", () => {
     expect(res.disabledReason).toBe("no-small-model");
     expect(res.requestId).toBe("r2");
   });
+
+  it("completion/cancel aborts the in-flight upstream FIM call", async () => {
+    vi.mocked(loadConfig).mockResolvedValueOnce({
+      provider: "openai",
+      model: "deepseek-chat",
+      apiKey: "sk-secret-key-xyz",
+      baseURL: "https://api.deepseek.com/v1",
+      completion: { model: "deepseek-coder", fim: true },
+    } as any);
+
+    // The FIM fetch hangs until its abort signal fires, then rejects with an
+    // abort error — exactly how a real fetch behaves when cancelled. This lets
+    // us prove the cancel notification reaches the upstream call (if the signal
+    // were never threaded, this fetch would hang forever and the test times
+    // out).
+    let sawSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", (_u: string, init: RequestInit) => {
+      sawSignal = init.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        const s = init.signal;
+        if (s) {
+          if (s.aborted) return reject(new DOMException("aborted", "AbortError"));
+          s.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+            once: true,
+          });
+        }
+      });
+    });
+
+    const cwd = "/completion-cancel";
+    registerServer(server, { defaultCwd: cwd });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd,
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+
+    // Fire the completion but don't await it yet — it won't settle until we
+    // cancel (the upstream fetch is parked on the abort signal).
+    const pending = client.request<
+      { prefix: string; suffix: string; path: string; requestId: string; cwd: string },
+      { completion: string; requestId: string; disabledReason?: string }
+    >("completion/inline", {
+      prefix: "x = ",
+      suffix: "",
+      path: "a.py",
+      requestId: "cancel-me",
+      cwd,
+    });
+
+    // Give the handler a tick to issue the upstream fetch, then cancel.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sawSignal).toBeDefined();
+    client.notify("completion/cancel", { requestId: "cancel-me" });
+
+    // Fast-fail: an aborted upstream yields an empty completion, not a hang.
+    const res = await pending;
+    expect(res.completion).toBe("");
+    expect(res.requestId).toBe("cancel-me");
+
+    vi.unstubAllGlobals();
+  });
 });
 describe("multi-client session following", () => {
   const init = {

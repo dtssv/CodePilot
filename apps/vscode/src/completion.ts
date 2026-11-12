@@ -79,6 +79,17 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
     if (!this.engine.running) return undefined;
 
     const requestId = `c${++this.seq}`;
+    // When this request is superseded (token cancels), tell the server to abort
+    // the upstream model call so a discarded completion stops burning tokens —
+    // aborting the local RPC wait alone would leave the request running server-
+    // side. The notification is best-effort and fired at most once.
+    let cancelSent = false;
+    const sendCancel = (): void => {
+      if (cancelSent) return;
+      cancelSent = true;
+      this.engine.notify("completion/cancel", { requestId });
+    };
+    const cancelReg = token.onCancellationRequested(sendCancel);
     let res: InlineCompletionResult;
     try {
       res = await this.engine.request<InlineCompletionResult>(
@@ -94,8 +105,12 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
         { timeoutMs: REQUEST_TIMEOUT_MS, signal: toAbortSignal(token) },
       );
     } catch {
-      // Fast-fail: any error (timeout / abort / rate-limit) → no suggestion.
+      // Fast-fail: any error (timeout / abort / rate-limit) → no suggestion. If
+      // the abort came from cancellation, make sure the server hears it too.
+      sendCancel();
       return undefined;
+    } finally {
+      cancelReg.dispose();
     }
     if (token.isCancellationRequested) return undefined;
 

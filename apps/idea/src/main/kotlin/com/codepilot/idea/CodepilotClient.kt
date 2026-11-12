@@ -335,6 +335,7 @@ class CodepilotClient(
         suffix: String,
         path: String,
         maxTokens: Int,
+        requestId: String,
         timeoutMs: Long = 8_000,
         onDisabled: (reason: String) -> Unit = {},
     ): String? {
@@ -342,7 +343,7 @@ class CodepilotClient(
             addProperty("prefix", prefix)
             addProperty("suffix", suffix)
             addProperty("path", path)
-            addProperty("requestId", idGen.get().toString())
+            addProperty("requestId", requestId)
             addProperty("maxTokens", maxTokens)
         }
         return try {
@@ -357,6 +358,16 @@ class CodepilotClient(
             log.debug("inlineComplete failed: ${t.message}")
             null
         }
+    }
+
+    /**
+     * Cancel an in-flight inline completion by its requestId so the server
+     * aborts the upstream model call instead of letting a superseded completion
+     * keep burning tokens. Best-effort fire-and-forget.
+     */
+    fun cancelCompletion(requestId: String) {
+        val args = JsonObject().apply { addProperty("requestId", requestId) }
+        sendNotification("completion/cancel", args)
     }
 
  // ---------- Transport internals ----------
