@@ -43,7 +43,7 @@ export interface SubagentLspWiring {
 }
 
 export function buildSubagentToolRegistry(
-  agentType?: "explore" | "worker",
+  agentType?: "explore" | "plan" | "worker",
   lsp?: SubagentLspWiring,
 ): ToolRegistry {
   const r = new ToolRegistry();

@@ -134,6 +134,35 @@ You are a sub-agent invoked by a parent CodePilot agent via the \`task\` tool. Y
 
 - **Be terse.** The parent is paying for your tokens too. No preamble, no apology, no recap of the question. The structured conclusion is the entire output.`;
 
+/**
+ * Appended to {@link SUBAGENT_ROLE_BLOCK} for a built-in `plan` sub-agent: a
+ * read-only planning worker. It replaces the default Findings/Key-references/
+ * Recommendations conclusion with a plan structure and forbids claiming any
+ * code was changed (it has no write tools).
+ */
+export const SUBAGENT_PLAN_ROLE_BLOCK = `
+
+## Planning Sub-Agent
+
+You are a **plan** sub-agent: read-only. You investigate and produce a PLAN for the parent to execute — you do NOT edit files, run commands, or claim to have changed anything (you have no write or bash tools). If the objective asks you to implement something, plan the implementation; do not pretend to have done it.
+
+Override the conclusion format above with EXACTLY these sections:
+
+ ### Plan
+  - <ordered, concrete steps the parent (or a worker sub-agent) should take>
+
+ ### Critical files
+  - \`path/to/file.ts:42\` — why this file matters to the plan
+  - \`path/to/other.ts\` — ...
+
+ ### Risks
+  - <what could go wrong, edge cases, things to watch>
+
+ ### Open questions
+  - <decisions or missing information the parent must resolve; "none" if fully specified>
+
+If you are blocked from producing even a plan, return \`### Blocker\` with a one-sentence reason instead.`;
+
 export interface SubagentFactoryOptions {
   cwd: string;
   config: CodepilotConfig;
@@ -164,7 +193,7 @@ export interface SubagentFactoryOptions {
   * runs fresh. */
   getParentEvents?: () => Event[];
  /** Build the tool registry for the given agent type. */
-  buildToolRegistry: (agentType?: "explore" | "worker") => ToolRegistry;
+  buildToolRegistry: (agentType?: "explore" | "plan" | "worker") => ToolRegistry;
  /** Optional hook engine to fire SubagentStop events (may block + continue). */
   hooks?: {
     runSubagentStop: (
@@ -186,19 +215,26 @@ export function createSubagentRunner(
   factoryOpts: SubagentFactoryOptions
 ): SubagentRunner {
   return {
-    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath, context, forkMaxTokens, signal }) {
+    async run({ objective, cwd, agentType, tools, model, maxSteps, onEvent, onLiveEvent, depth, outputSchema, isolation, resumeSessionId, continueText, ownerId, sharedWorktreePath, context, forkMaxTokens, omitMemory, signal }) {
       const live = factoryOpts.getEndpoint?.();
       const opts: SubagentFactoryOptions = live
         ? { ...factoryOpts, config: live.config, model: live.model }
         : factoryOpts;
  // Resolve a custom agent definition when the type isn't a built-in.
-      const isBuiltin = agentType === "explore" || agentType === "worker" || agentType === undefined;
+      const isBuiltin =
+        agentType === "explore" ||
+        agentType === "plan" ||
+        agentType === "worker" ||
+        agentType === undefined;
       const custom = !isBuiltin && opts.resolveCustomAgent
         ? await opts.resolveCustomAgent(agentType!).catch(() => undefined)
         : undefined;
+ // The requested built-in type, before it is collapsed to a tool surface.
+ // "plan" shares explore's read-only surface but gets its own role/footer.
+      const isPlan = agentType === "plan" && !custom;
  // Effective type: custom agents use "worker" as the base tool surface
  // (so their frontmatter `tools` allowlist can narrow it); unknown
- // custom names fall back to "explore".
+ // custom names fall back to "explore". "plan" maps to the read-only surface.
       const effectiveType: "explore" | "worker" = custom ? "worker" : (agentType === "worker" ? "worker" : "explore");
       const effectiveModel =
         pickServedModel(opts, model) ??
@@ -391,8 +427,11 @@ export function createSubagentRunner(
       });
  // Memory is read from the parent cwd — a worktree sub-agent should
  // still see project/user memory, but it writes artifacts into its own
- // isolated checkout. Uses an isolated checkout for the sub-agent.
-      const memory = summariseMemory(await readMemory(cwd));
+ // isolated checkout. A `plan` sub-agent (or any caller passing omitMemory)
+ // runs without the memory index so it reasons only from the objective and
+ // what it reads.
+      const memory =
+        omitMemory || isPlan ? {} : summariseMemory(await readMemory(cwd));
  // Sub-agents always run in "agent" mode (the chat/plan restrictions
  // would be over-restrictive for a delegated worker, and the tool
  // surface itself is already mode-filtered upstream by `task` callers).
@@ -401,8 +440,10 @@ export function createSubagentRunner(
  // is prepended to the role block.
       const baseRoleBlock = custom
         ? `${custom.body}\n\n---\n\n${SUBAGENT_ROLE_BLOCK}`
-        : SUBAGENT_ROLE_BLOCK +
-          (effectiveType === "worker" ? `\n\nYou are a **worker** sub-agent: you may edit files and run commands. Verify your change before concluding.` : "");
+        : isPlan
+          ? `${SUBAGENT_ROLE_BLOCK}${SUBAGENT_PLAN_ROLE_BLOCK}`
+          : SUBAGENT_ROLE_BLOCK +
+            (effectiveType === "worker" ? `\n\nYou are a **worker** sub-agent: you may edit files and run commands. Verify your change before concluding.` : "");
  // When an output schema is requested, override the conclusion-format
  // instructions with a JSON contract so the parent can parse the
  // result programmatically.
@@ -426,7 +467,9 @@ export function createSubagentRunner(
       const userMessageId = `msg_${randomUUID()}`;
       const footer = outputSchema
         ? STRUCTURED_OUTPUT_FOOTER
-        : SUBAGENT_OBJECTIVE_FOOTER;
+        : isPlan
+          ? SUBAGENT_PLAN_FOOTER
+          : SUBAGENT_OBJECTIVE_FOOTER;
       // A resumed sub-agent already knows its role and prior context: send the
       // bare follow-up (no OBJECTIVE/role preamble). A fresh run gets the full
       // objective + conclusion-format footer.
@@ -640,7 +683,7 @@ export function createSubagentRunner(
           `the same files.`;
       }
  // SubagentStop: can block like Stop; continue the sub-agent with feedback.
-      const stopType = custom?.name ?? effectiveType;
+      const stopType = custom?.name ?? (isPlan ? "plan" : effectiveType);
       const stopCap =
         typeof opts.config.stopHookBlockCap === "number" && opts.config.stopHookBlockCap >= 0
           ? opts.config.stopHookBlockCap
@@ -753,6 +796,9 @@ export function createSubagentRunner(
  * role boundary right before the model starts reasoning.
  */
 const SUBAGENT_OBJECTIVE_FOOTER = `This is your only task. When you are done, your final assistant message must follow the structured conclusion format described in your system prompt (### Findings / ### Key references / ### Recommendations, or ### Blocker if blocked). Do not produce any other output.`;
+
+/** Objective footer for a built-in `plan` sub-agent — names the plan sections. */
+const SUBAGENT_PLAN_FOOTER = `This is your only task. Investigate (read-only), then your final assistant message must be a plan in the exact structure from your system prompt (### Plan / ### Critical files / ### Risks / ### Open questions, or ### Blocker if blocked). Do not claim to have edited anything. Do not produce any other output.`;
 
 /** Default token cap on an inherited (`context: "fork"`) parent history. Keeps
  * the fork seed from blowing the sub-agent's own budget; the older turns are

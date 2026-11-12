@@ -867,6 +867,8 @@ export type {
 // ---- Subagent isolation modes (re-exported from the task tool) ----
 export { ISOLATION_MODES } from "./tools/task.js";
 export type { Isolation } from "./tools/task.js";
+export { AGENT_TYPES } from "./tools/task.js";
+export type { AgentType } from "./tools/task.js";
 export { parseCsv } from "./tools/task.js";
 export { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 export { taskBoardTool } from "./tools/task_board.js";

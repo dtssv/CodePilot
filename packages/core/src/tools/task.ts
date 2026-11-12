@@ -1,13 +1,14 @@
 // task: dispatch sub-tasks to sub-agents. Supports single objective or a
 // parallel fan-out (`tasks: [...]`), plus named agent types that control the
-// tool surface ("explore" = read-only, "worker" = read+write).
+// tool surface ("explore"/"plan" = read-only, "worker" = read+write).
 //
 // A sub-agent returns only its final conclusion. By default it starts with a
 // fresh context; `context: "fork"` seeds it with the parent's visible history.
-// Single-task mode can run in the background (`run: "background"`): the call
-// returns immediately and a one-time completion summary is delivered later.
-// Parallel tasks run concurrently via Promise.all; each returns its own
-// structured conclusion.
+// A "plan" sub-agent is read-only and returns a structured plan. Single-task
+// mode can run in the background (`run: "background"`): the call returns
+// immediately and a one-time completion summary is delivered later. Parallel
+// tasks run concurrently via Promise.all; each returns its own structured
+// conclusion.
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -17,8 +18,9 @@ import { SubagentCache } from "../subagentCache.js";
 import { isTransientError } from "../transientError.js";
 import { BackgroundSubagentRegistry } from "./subagentJobs.js";
 
-/** Named sub-agent types. "explore" is read-only; "worker" may edit files. */
-export const AGENT_TYPES = ["explore", "worker"] as const;
+/** Named sub-agent types. "explore" and "plan" are read-only; "worker" may
+ * edit files. "plan" additionally structures its output as a plan. */
+export const AGENT_TYPES = ["explore", "plan", "worker"] as const;
 export type AgentType = (typeof AGENT_TYPES)[number];
 
 const taskSpec = z.object({
@@ -26,7 +28,7 @@ const taskSpec = z.object({
   agent_type: z
     .string()
     .optional()
-    .describe("\"explore\" (default, read-only) or \"worker\" (may edit files), or the name of a custom sub-agent advertised in your system prompt."),
+    .describe("\"explore\" (default, read-only), \"plan\" (read-only; returns a structured plan), or \"worker\" (may edit files), or the name of a custom sub-agent advertised in your system prompt."),
   tools: z
     .array(z.string())
     .optional()
@@ -117,7 +119,7 @@ const schema = z
     agent_type: z
       .string()
       .optional()
-      .describe("Agent type for single-task mode (default \"explore\"). May be a custom agent name."),
+      .describe("Agent type for single-task mode (default \"explore\"). Built-ins: \"explore\" (read-only), \"plan\" (read-only; returns a structured plan), \"worker\" (may edit files). May also be a custom agent name."),
     tools: z
       .array(z.string())
       .optional()
@@ -170,6 +172,15 @@ const schema = z
       .describe(
         "When `context: \"fork\"`, hard-cap the inherited history to this many " +
           "estimated tokens (older turns are folded/trimmed). Omit for a sensible default.",
+      ),
+    omit_memory: z
+      .boolean()
+      .optional()
+      .describe(
+        "Single-task mode: when true, the sub-agent's system prompt does NOT " +
+          "include the project/user memory index. Useful for a focused `plan` " +
+          "sub-agent that should reason only from the objective and what it reads. " +
+          "Default false.",
       ),
     continue_session_id: z
       .string()
@@ -304,6 +315,10 @@ export interface SubagentRunSpec {
  /** When forking, hard-cap the inherited history to this many estimated tokens
   * (older turns folded/trimmed). Omit for the runner's default. */
   forkMaxTokens?: number;
+ /** When true, the sub-agent's system prompt omits the project/user memory
+  * index (used by a focused `plan` sub-agent, or any caller that wants the
+  * agent to reason only from the objective + what it reads). */
+  omitMemory?: boolean;
  /** The follow-up message when continuing (defaults to `objective`). Sent
   * WITHOUT the "you are a sub-agent" preamble — the resumed agent already has
   * that context. */
@@ -514,7 +529,7 @@ export const taskTool: ToolDef<typeof schema> & {
   description:
     "Run sub-agents in isolated contexts; only their final conclusion returns. " +
     "Use for open-ended exploration or parallel independent work (`tasks: [...]`). " +
-    "Default `agent_type: \"explore\"` is read-only; use `\"worker\"` to edit. " +
+    "Default `agent_type: \"explore\"` is read-only; `\"plan\"` is read-only and returns a structured plan; use `\"worker\"` to edit. " +
     "Skip for a single read/grep. Write self-contained objectives. " +
     "`isolation: \"worktree\"` for mutating workers that must not touch the main tree. " +
     "`run: \"background\"` dispatches a single task without blocking (control with " +
@@ -644,6 +659,7 @@ export const taskTool: ToolDef<typeof schema> & {
         resumeSessionId: input.continue_session_id,
         context: input.context,
         forkMaxTokens: input.fork_max_tokens,
+        omitMemory: input.omit_memory,
         ownerId,
         signal: controller.signal,
       };
@@ -779,6 +795,7 @@ export const taskTool: ToolDef<typeof schema> & {
           resumeSessionId: input.continue_session_id,
           context: input.context,
           forkMaxTokens: input.fork_max_tokens,
+          omitMemory: input.omit_memory,
         },
       ];
     })();

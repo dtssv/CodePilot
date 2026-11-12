@@ -27,8 +27,20 @@ describe("buildSubagentToolRegistry", () => {
     expect(names.has("web_search")).toBe(true);
   });
 
+  it("gives plan sub-agents the explore read-only surface (no write/bash/task_board)", () => {
+    const names = new Set(buildSubagentToolRegistry("plan").all().map((t) => t.name));
+    for (const n of ["read_file", "glob", "grep", "ls", "read_artifact"]) {
+      expect(names.has(n)).toBe(true);
+    }
+    expect(names.has("web_fetch")).toBe(true);
+    expect(names.has("web_search")).toBe(true);
+    for (const n of ["write_file", "edit_file", "apply_patch", "bash", "task_board"]) {
+      expect(names.has(n)).toBe(false);
+    }
+  });
+
   it("never exposes plan_update, memory_write, or task to sub-agents", () => {
-    for (const type of ["explore", "worker"] as const) {
+    for (const type of ["explore", "plan", "worker"] as const) {
       const names = new Set(buildSubagentToolRegistry(type).all().map((t) => t.name));
       for (const n of ["plan_update", "memory_write", "task"]) {
         expect(names.has(n)).toBe(false);
@@ -38,7 +50,7 @@ describe("buildSubagentToolRegistry", () => {
 
   it("includes read-only lsp_navigate for every type when a manager is wired", () => {
     const lsp = { getManager: () => null, getCwd: () => "/work" };
-    for (const type of ["explore", "worker"] as const) {
+    for (const type of ["explore", "plan", "worker"] as const) {
       const names = new Set(buildSubagentToolRegistry(type, lsp).all().map((t) => t.name));
       expect(names.has("lsp_navigate")).toBe(true);
       // The host-backed diagnostics tool is never granted to sub-agents.
@@ -47,7 +59,7 @@ describe("buildSubagentToolRegistry", () => {
   });
 
   it("omits lsp_navigate when no language-server manager is wired", () => {
-    for (const type of ["explore", "worker"] as const) {
+    for (const type of ["explore", "plan", "worker"] as const) {
       const names = new Set(buildSubagentToolRegistry(type).all().map((t) => t.name));
       expect(names.has("lsp_navigate")).toBe(false);
     }

@@ -15,7 +15,7 @@
 // - PostToolUse matcher: tool_name regex
 // - PreCompact matcher: trigger (manual | auto)
 // - PostCompact matcher: trigger (manual | auto)
-// - SubagentStop matcher: agent_type (explore | worker | custom name) —
+// - SubagentStop matcher: agent_type (explore | plan | worker | custom name) —
 //   can BLOCK like Stop (exit 2 / decision JSON); sub-agent continues with
 //   feedback, capped by `stopHookBlockCap`.
 // - Notification matcher: "*" (legacy, fire-and-forget)
