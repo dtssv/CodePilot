@@ -69,6 +69,7 @@ import {
   readUserConfigFile,
   writeUserConfigFile,
   detectSandboxBackend,
+  buildSandboxUnavailable,
   templateToPreset,
   findProviderIdForFlat,
   applyUpdate,
@@ -645,7 +646,7 @@ export function registerServer(
   );
   peer.onRequest<
     { mode?: "off" | "workspace-write" | "read-only"; sessionId?: string },
-    { sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } }
+    { sandbox: SandboxStatusWire }
   >("config/setSandbox", (p) => handleConfigSetSandbox(ctx, p));
   peer.onRequest<
     {
@@ -1347,6 +1348,16 @@ export interface ServerHandle {
 }
 
 type McpOauthState = "idle" | "pending" | "authorized" | "error";
+
+/** Wire shape of the sandbox availability status returned by
+ * `config/setSandbox`. `reason` carries structured, platform-specific install
+ * guidance when the active mode has no usable OS backend (fail-closed). */
+type SandboxStatusWire = {
+  mode: "off" | "workspace-write" | "read-only";
+  unavailable: boolean;
+  backend: string;
+  reason?: { backend: string; platform: string; hint: string };
+};
 
 interface McpOauthEntry {
   state: McpOauthState;
@@ -2109,7 +2120,7 @@ async function handleConfigGet(
 async function handleConfigSetSandbox(
   ctx: ServerContext,
   params: { mode?: "off" | "workspace-write" | "read-only"; sessionId?: string },
-): Promise<{ sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } }> {
+): Promise<{ sandbox: SandboxStatusWire }> {
   assertInitialized(ctx);
   const mode = params?.mode;
   if (mode !== "off" && mode !== "workspace-write" && mode !== "read-only") {
@@ -2130,14 +2141,23 @@ async function handleConfigSetSandbox(
   await writeUserConfigFile(raw);
   // Hot-apply to the live session when the client names one, so the switch takes
   // effect immediately (from the next bash command) rather than next session.
-  let status: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string } = {
-    mode,
-    unavailable: false,
-    backend: detectSandboxBackend(),
-  };
+  let status: SandboxStatusWire = { mode, unavailable: false, backend: detectSandboxBackend() };
   if (params.sessionId) {
     const session = requireSession(ctx, params.sessionId);
-    status = session.setSandboxMode(mode);
+    const live = session.setSandboxMode(mode);
+    status = {
+      mode: live.mode,
+      unavailable: live.unavailable,
+      backend: live.backend,
+      reason: live.reason
+        ? { backend: live.reason.backend, platform: live.reason.platform, hint: live.reason.hint }
+        : undefined,
+    };
+  } else if (mode !== "off" && detectSandboxBackend() === "none") {
+    // No live session to probe fallback policy, but the configured mode clearly
+    // has no backend on this host — surface the structured guidance anyway.
+    const reason = buildSandboxUnavailable();
+    status.reason = { backend: reason.backend, platform: reason.platform, hint: reason.hint };
   }
   return { sandbox: status };
 }

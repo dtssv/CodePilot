@@ -153,10 +153,13 @@ import type { OutputStyle } from "./systemPrompt.js";
 import {
   resolveSandbox,
   detectSandboxBackend,
+  buildSandboxUnavailable,
   wrapCommand,
   addWritableRoot,
   isWriteOutsideSandbox,
   type ResolvedSandbox,
+  type SandboxBackend,
+  type SandboxUnavailable,
 } from "./sandbox.js";
 import { readUserConfigFile, writeUserConfigFile } from "./providerCatalog.js";
 import { DedupCache } from "./doomLoop.js";
@@ -232,6 +235,17 @@ interface SteeringItem {
   source: "user" | "system";
   text: string;
   delivery: "steer" | "followup";
+}
+
+/** Sandbox availability status returned by {@link Session.getSandboxStatus} and
+ * {@link Session.setSandboxMode}. When `unavailable` is true the active sandbox
+ * mode has no usable OS backend and bash is being refused (fail-closed);
+ * `reason` then carries structured, platform-specific install guidance. */
+export interface SandboxStatus {
+  mode: ResolvedSandbox["mode"];
+  unavailable: boolean;
+  backend: SandboxBackend;
+  reason?: SandboxUnavailable;
 }
 
 export class Session {
@@ -2618,11 +2632,7 @@ export class Session {
    * through the same `resolveSandbox` + `setSandbox` path as startup, so there is
    * no second code path that could drift from the real enforcement.
    */
-  setSandboxMode(mode: ResolvedSandbox["mode"]): {
-    mode: ResolvedSandbox["mode"];
-    unavailable: boolean;
-    backend: string;
-  } {
+  setSandboxMode(mode: ResolvedSandbox["mode"]): SandboxStatus {
     // Preserve the operator's other sandbox settings (network/writablePaths/
     // fallback); only the mode changes.
     this.config = {
@@ -2655,12 +2665,15 @@ export class Session {
  /** Sandbox availability status. When `unavailable` is true, bash commands
  * are being refused because sandbox mode is active but no OS backend
  * exists and fallback is "deny". The host should surface this to the
- * user (e.g. a warning banner). */
-  getSandboxStatus(): { mode: ResolvedSandbox["mode"]; unavailable: boolean; backend: string } {
+ * user (e.g. a warning banner) — `reason` carries structured, platform
+ * specific install guidance when unavailable. */
+  getSandboxStatus(): SandboxStatus {
+    const backend = detectSandboxBackend();
     return {
       mode: this.sandbox.mode,
       unavailable: this._sandboxUnavailable,
-      backend: detectSandboxBackend(),
+      backend,
+      reason: this._sandboxUnavailable ? buildSandboxUnavailable() : undefined,
     };
   }
 
@@ -3973,7 +3986,7 @@ export class Session {
             sb.writableRoots.map((r) => `  - ${r}`).join("\n")
           : "";
       const warn = this._sandboxUnavailable
-        ? "\nWARNING: no OS sandbox backend (sandbox-exec/bwrap) is available on this host; `bash` commands will be REFUSED. Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
+        ? `\nWARNING: no OS sandbox backend is available on this host; \`bash\` commands will be REFUSED. ${buildSandboxUnavailable().hint}`
         : "";
       return header + roots + warn;
     })();

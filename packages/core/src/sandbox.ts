@@ -205,13 +205,63 @@ export interface WrappedCommand {
  /** Shell args prefix (e.g. ["-e"] for wsl.exe). */
   shellArgs?: string[];
   sandboxed: boolean;
- /** "seatbelt" | "bwrap" | "wsl-bwrap" | "none" */
-  backend: "seatbelt" | "bwrap" | "wsl-bwrap" | "none";
+ /** "seatbelt" | "bwrap" | "landlock" | "wsl-bwrap" | "none" */
+  backend: "seatbelt" | "bwrap" | "landlock" | "wsl-bwrap" | "none";
  /** Human-readable note to prefix to output when unsandboxed. */
   warning?: string;
+ /** When no backend could sandbox the command (fail-closed), a structured
+  * description of why — surfaced to the host UI so it can show an actionable
+  * banner instead of only the model-facing refusal. */
+  unavailable?: SandboxUnavailable;
 }
 
 export type SandboxBackend = WrappedCommand["backend"];
+
+/**
+ * Structured "no sandbox backend available" descriptor. Carried on a fail-closed
+ * WrappedCommand (and mirrored on the session's sandbox status) so a host can
+ * render platform-specific install guidance rather than parsing a message.
+ */
+export interface SandboxUnavailable {
+  /** The backend that was attempted/expected for this platform (here "none"). */
+  backend: SandboxBackend;
+  /** The host platform the probe ran on (`process.platform`). */
+  platform: NodeJS.Platform;
+  /** One-line actionable guidance for restoring a working sandbox. */
+  hint: string;
+}
+
+/** Platform-specific guidance for restoring a working OS sandbox backend. */
+export function sandboxUnavailableHint(platform: NodeJS.Platform = process.platform): string {
+  switch (platform) {
+    case "linux":
+      return (
+        "No OS sandbox backend found. Install bubblewrap (e.g. `apt install bubblewrap`), " +
+        "or a Landlock launcher, or set sandbox.mode=\"off\" / sandbox.fallback=\"allow-unsandboxed\"."
+      );
+    case "win32":
+      return (
+        "No OS sandbox backend found. CodePilot sandboxes Windows through WSL2 with bubblewrap: " +
+        "install WSL2 (`wsl --install`) and bubblewrap inside the default distro " +
+        "(`apt install bubblewrap`), or set sandbox.mode=\"off\" / sandbox.fallback=\"allow-unsandboxed\"."
+      );
+    case "darwin":
+      return (
+        "sandbox-exec (Seatbelt) was not found at /usr/bin/sandbox-exec. " +
+        "Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
+      );
+    default:
+      return (
+        `No OS sandbox backend is available on this platform (${platform}). ` +
+        "Set sandbox.mode=\"off\" or sandbox.fallback=\"allow-unsandboxed\" to override."
+      );
+  }
+}
+
+/** Build the structured unavailable descriptor for the current platform. */
+export function buildSandboxUnavailable(platform: NodeJS.Platform = process.platform): SandboxUnavailable {
+  return { backend: "none", platform, hint: sandboxUnavailableHint(platform) };
+}
 
 let cachedBackend: SandboxBackend | null = null;
 
@@ -229,7 +279,46 @@ function probeWslBwrap(): boolean {
   }
 }
 
-/** Probe the host for an available sandbox backend. Cached per process. */
+let cachedLandlock: string | null | undefined = undefined;
+
+/** Resolve a Landlock launcher binary, or null when none is installed.
+ *
+ * Landlock is a kernel LSM that restricts a process's filesystem access without
+ * needing user namespaces (which some hardened hosts disable, breaking bwrap).
+ * We don't embed the kernel syscalls ourselves; instead we look for a small
+ * launcher helper on PATH-like fixed locations — either our own bundled
+ * `codepilot-landlock` or a known standalone launcher — and exec the command
+ * under it. Probed the same way as bwrap/slirp (fixed paths) and cached. The
+ * launcher is a filesystem jail only; network restriction still relies on the
+ * namespace/proxy machinery, so it is a write-scoping fallback, not a full
+ * replacement for bwrap. */
+export function landlockLauncherPath(): string | null {
+  if (cachedLandlock !== undefined) return cachedLandlock;
+  if (process.platform !== "linux") {
+    cachedLandlock = null;
+    return cachedLandlock;
+  }
+  for (const p of [
+    "/usr/bin/codepilot-landlock",
+    "/usr/local/bin/codepilot-landlock",
+    "/usr/bin/landlock-sandboxer",
+    "/usr/local/bin/landlock-sandboxer",
+  ]) {
+    if (existsSync(p)) {
+      cachedLandlock = p;
+      return cachedLandlock;
+    }
+  }
+  cachedLandlock = null;
+  return cachedLandlock;
+}
+
+/** Probe the host for an available sandbox backend. Cached per process.
+ *
+ * Linux order: bubblewrap first (full namespace jail), then a Landlock launcher
+ * as a write-scoping fallback for hosts where user namespaces are disabled.
+ * Windows is sandboxed through WSL2 + bubblewrap. No backend → "none"
+ * (fail-closed at the wrap seam). */
 export function detectSandboxBackend(): SandboxBackend {
   if (cachedBackend) return cachedBackend;
   if (process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
@@ -239,6 +328,8 @@ export function detectSandboxBackend(): SandboxBackend {
     (existsSync("/usr/bin/bwrap") || existsSync("/bin/bwrap") || existsSync("/usr/local/bin/bwrap"))
   ) {
     cachedBackend = "bwrap";
+  } else if (process.platform === "linux" && landlockLauncherPath()) {
+    cachedBackend = "landlock";
   } else if (probeWslBwrap()) {
     cachedBackend = "wsl-bwrap";
   } else {
@@ -251,6 +342,7 @@ export function detectSandboxBackend(): SandboxBackend {
 export function resetSandboxBackendCache(): void {
   cachedBackend = null;
   cachedSlirp = null;
+  cachedLandlock = undefined;
 }
 
 let cachedSlirp: string | null | undefined = undefined;
@@ -495,6 +587,8 @@ export function wrapCommand(
     backend?: SandboxBackend;
     /** Test seam: force the slirp4netns path (or null for "absent"). */
     slirpPath?: string | null;
+    /** Test seam: force the Landlock launcher path (or null for "absent"). */
+    landlockPath?: string | null;
   },
 ): WrappedCommand {
   if (policy.mode === "off") {
@@ -524,6 +618,7 @@ export function wrapCommand(
     command = withProxyEnv(command, policy);
   }
   if (backend === "none") {
+    const unavailable = buildSandboxUnavailable();
     if (policy.fallback === "allow-unsandboxed") {
       return {
         command,
@@ -531,18 +626,18 @@ export function wrapCommand(
         backend: "none",
         warning:
           `[sandbox] WARNING: no OS sandbox available on this host ` +
-          `(${process.platform}); command is running UNSANDBOXED. ` +
-          `Install bubblewrap (Linux) or set sandbox.fallback="deny".`,
+          `(${process.platform}); command is running UNSANDBOXED. ${unavailable.hint}`,
+        unavailable,
       };
     }
     return {
       command: `echo ${shellQuote(
         `[sandbox] denied: sandbox mode "${policy.mode}" is configured but no ` +
-          `OS sandbox (sandbox-exec / bwrap) is available on this host. ` +
-          `Set sandbox.mode="off" or sandbox.fallback="allow-unsandboxed" to override.`
+          `OS sandbox backend is available on this host. ${unavailable.hint}`
       )} >&2; exit 126`,
       sandboxed: false,
       backend: "none",
+      unavailable,
     };
   }
   if (backend === "seatbelt") {
@@ -552,6 +647,46 @@ export function wrapCommand(
       sandboxed: true,
       backend,
     };
+  }
+  if (backend === "landlock") {
+    // Landlock is a filesystem jail only — it cannot create a network namespace,
+    // so an enforced proxy (which needs slirp on an isolated namespace) cannot
+    // be guaranteed here. Fail closed rather than run with unconfined egress.
+    if (proxyMode) {
+      return {
+        command: `echo ${shellQuote(
+          `[sandbox] denied: network mode "proxy" cannot be enforced under the ` +
+            `Landlock backend (no network namespace). Install bubblewrap + ` +
+            `slirp4netns for enforced-proxy egress, or set the network mode to "off"/"full".`,
+        )} >&2; exit 126`,
+        sandboxed: false,
+        backend,
+      };
+    }
+    // The launcher restricts filesystem writes to the given roots (reads stay
+    // open, matching the bwrap "/ ro, roots rw" shape); protected metadata is
+    // not passed as a writable root, so it stays read-only. Network is left to
+    // the cooperative proxy env already exported above.
+    const launcher =
+      opts?.landlockPath !== undefined ? opts.landlockPath : landlockLauncherPath();
+    if (!launcher) {
+      const unavailable = buildSandboxUnavailable();
+      return {
+        command: `echo ${shellQuote(
+          `[sandbox] denied: the Landlock backend was selected but no launcher ` +
+            `is installed. ${unavailable.hint}`,
+        )} >&2; exit 126`,
+        sandboxed: false,
+        backend: "none",
+        unavailable,
+      };
+    }
+    const args: string[] = [launcher];
+    for (const root of policy.writableRoots) {
+      if (existsSync(root)) args.push("--rw", root);
+    }
+    args.push("--", "/bin/sh", "-c", command);
+    return { command: args.map(shellQuote).join(" "), sandboxed: true, backend };
   }
   if (backend === "wsl-bwrap") {
  // Windows path: re-exec the command inside the default WSL distro under

@@ -20,6 +20,8 @@ import {
   wrapCommand,
   detectSandboxBackend,
   modelShellEnv,
+  sandboxUnavailableHint,
+  buildSandboxUnavailable,
 } from "../src/sandbox.js";
 import { mkdtemp, writeFile, symlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -537,5 +539,90 @@ describe("wrapCommand", () => {
     expect(w.backend).toBe("bwrap");
     expect(w.command).not.toContain("slirp4netns");
     expect(w.command).not.toContain("--unshare-net"); // network:true
+  });
+
+  it("wraps with a Landlock launcher, binding writable roots rw", () => {
+    const p = resolveSandbox({ mode: "workspace-write", network: true, writablePaths: [cwd] }, cwd);
+    const w = wrapCommand("echo hi", p, {
+      backend: "landlock",
+      landlockPath: "/usr/bin/codepilot-landlock",
+    });
+    expect(w.sandboxed).toBe(true);
+    expect(w.backend).toBe("landlock");
+    expect(w.command).toContain("codepilot-landlock");
+    // Each writable root is passed through as an --rw argument.
+    expect(w.command).toContain("--rw");
+    expect(w.command).toContain("-c");
+  });
+
+  it("fails closed under Landlock when the launcher is absent", () => {
+    const p = resolveSandbox({ mode: "workspace-write", fallback: "deny" }, cwd);
+    const w = wrapCommand("echo hi", p, { backend: "landlock", landlockPath: null });
+    expect(w.sandboxed).toBe(false);
+    expect(w.backend).toBe("none");
+    expect(w.command).toContain("exit 126");
+    // The structured descriptor is attached for the host UI.
+    expect(w.unavailable).toBeDefined();
+    expect(w.unavailable?.hint).toBeTruthy();
+  });
+
+  it("fails closed under Landlock in proxy mode (no network namespace)", () => {
+    const p = {
+      ...resolveSandbox({ network: { mode: "proxy", allow: ["*.npmjs.org"] } }, cwd),
+      proxyUrl: "http://127.0.0.1:54321",
+    };
+    const w = wrapCommand("curl https://example.com", p, {
+      backend: "landlock",
+      landlockPath: "/usr/bin/codepilot-landlock",
+    });
+    expect(w.sandboxed).toBe(false);
+    expect(w.command).toContain("exit 126");
+    expect(w.command).toContain("proxy");
+  });
+
+  it("attaches a structured unavailable descriptor when no backend and fallback=deny", () => {
+    const p = resolveSandbox({ mode: "workspace-write", fallback: "deny" }, cwd);
+    const w = wrapCommand("echo hi", p, { backend: "none" });
+    expect(w.sandboxed).toBe(false);
+    expect(w.command).toContain("exit 126");
+    expect(w.unavailable).toBeDefined();
+    expect(w.unavailable?.backend).toBe("none");
+    expect(w.unavailable?.platform).toBe(process.platform);
+    expect(w.unavailable?.hint).toBeTruthy();
+  });
+
+  it("attaches the structured descriptor on the allow-unsandboxed warning too", () => {
+    const p = resolveSandbox({ mode: "workspace-write", fallback: "allow-unsandboxed" }, cwd);
+    const w = wrapCommand("echo hi", p, { backend: "none" });
+    expect(w.sandboxed).toBe(false);
+    expect(w.warning).toMatch(/UNSANDBOXED/);
+    expect(w.unavailable).toBeDefined();
+    expect(w.unavailable?.hint).toBeTruthy();
+  });
+});
+
+describe("sandboxUnavailableHint", () => {
+  it("gives a Linux bubblewrap/Landlock install hint", () => {
+    const h = sandboxUnavailableHint("linux");
+    expect(h).toMatch(/bubblewrap/i);
+    expect(h).toMatch(/landlock/i);
+  });
+
+  it("gives a Windows WSL2 install hint", () => {
+    const h = sandboxUnavailableHint("win32");
+    expect(h).toMatch(/WSL2/);
+    expect(h).toMatch(/wsl --install/);
+  });
+
+  it("gives a macOS Seatbelt hint", () => {
+    const h = sandboxUnavailableHint("darwin");
+    expect(h).toMatch(/sandbox-exec|Seatbelt/i);
+  });
+
+  it("builds a descriptor carrying backend/platform/hint", () => {
+    const d = buildSandboxUnavailable("win32");
+    expect(d.backend).toBe("none");
+    expect(d.platform).toBe("win32");
+    expect(d.hint).toMatch(/WSL2/);
   });
 });

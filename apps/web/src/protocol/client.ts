@@ -1221,7 +1221,12 @@ export class CodepilotClient {
     mode: "off" | "workspace-write" | "read-only";
     sessionId?: string;
   }): Promise<{
-    sandbox: { mode: "off" | "workspace-write" | "read-only"; unavailable: boolean; backend: string };
+    sandbox: {
+      mode: "off" | "workspace-write" | "read-only";
+      unavailable: boolean;
+      backend: string;
+      reason?: { backend: string; platform: string; hint: string };
+    };
   }> {
     return this.call("config/setSandbox", patch);
   }

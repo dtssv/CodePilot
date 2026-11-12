@@ -132,7 +132,10 @@ export {
   wrapCommand,
   buildSeatbeltProfile,
   detectSandboxBackend,
+  landlockLauncherPath,
   slirp4netnsPath,
+  sandboxUnavailableHint,
+  buildSandboxUnavailable,
   assertPathAllowed,
   assertPathAllowedAsync,
   addWritableRoot,
@@ -147,6 +150,7 @@ export type {
   ResolvedSandbox,
   WrappedCommand,
   SandboxBackend,
+  SandboxUnavailable,
   PathCheckResult,
 } from "./sandbox.js";
 export { startNetProxy, parseAuthority } from "./netProxy.js";
@@ -333,6 +337,7 @@ export type {
 // session-utils.ts (standalone helpers). Both are re-exported here so the
 // public API is unchanged.
 export { Session } from "./session.js";
+export type { SandboxStatus } from "./session.js";
 export {
   acquireSessionLock,
   readSessionLock,

@@ -37,6 +37,22 @@ describe("Session — setSandboxMode (live sandbox switch)", () => {
     await s.dispose();
   });
 
+  it("mirrors the structured unavailable reason on the status", async () => {
+    const s = await createSession({ cwd: workDir });
+    const status = s.getSandboxStatus();
+    // On a host with a real backend, nothing is unavailable and no reason is
+    // attached; on a backend-less host (fail-closed), the structured reason
+    // carries the platform and an actionable hint.
+    if (status.unavailable) {
+      expect(status.reason).toBeDefined();
+      expect(status.reason!.platform).toBe(process.platform);
+      expect(status.reason!.hint).toBeTruthy();
+    } else {
+      expect(status.reason).toBeUndefined();
+    }
+    await s.dispose();
+  });
+
   it("switches off → read-only → workspace-write and the policy follows", async () => {
     const s = await createSession({ cwd: workDir });
     s.setSandboxMode("off");

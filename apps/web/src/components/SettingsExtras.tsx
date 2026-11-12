@@ -421,11 +421,11 @@ export function SettingsExtras({
           ),
         );
       } else if (r.sandbox.unavailable) {
-        setNotice(
-          t(
-            "Sandbox set, but no OS sandbox backend is available on this host — bash will refuse to run (fail-closed). Install the backend or set the sandbox to off.",
-          ),
+        const base = t(
+          "Sandbox set, but no OS sandbox backend is available on this host — bash will refuse to run (fail-closed). Install the backend or set the sandbox to off.",
         );
+        // Prefer the server's platform-specific install guidance when present.
+        setNotice(r.sandbox.reason?.hint ? `${base} ${r.sandbox.reason.hint}` : base);
       } else {
         setNotice(
           next === "read-only"
