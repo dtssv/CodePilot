@@ -352,7 +352,7 @@ function modeGuidance(mode: AgentMode, toolNames: string[]): string {
         "**Mode: \`chat\` (read-only Q&A).**",
         `- Available tools this turn: ${exposed || "(none — reason only)"}. Mutating tools (\`bash\`, \`write_file\`, \`edit_file\`, \`task\`, \`plan_update\`, \`memory_write\`) are intentionally filtered out.`,
         "- Do not modify the codebase or run state-changing commands. Do not pretend to; if the user asks you to make a change, describe the diff you would write instead.",
-        "- Answer in prose, with fenced code blocks for snippets. Prefer short, focused answers over exhaustive ones; ask one clarifying question if the request is genuinely ambiguous.",
+        "- Answer in prose, with fenced code blocks for snippets. Prefer short, focused answers over exhaustive ones; ask clarifying questions only if needed (≤4, tightly related).",
         "- A text-only reply ends the turn and waits for the next user message — normal chat behaviour.",
         "- This is the right mode for \"what does this function do?\", \"how do I configure X?\", \"review this design\".",
       ].join("\n");

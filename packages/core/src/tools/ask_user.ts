@@ -38,7 +38,7 @@ const askSchema = z.object({
 export const askUserQuestionTool: ToolDef<typeof askSchema> = {
   name: "ask_user_question",
   description:
-    "Ask structured questions when a user decision changes the plan. Few at once; " +
+    "Ask structured questions when a user decision changes the plan. At most 4 tightly-related questions per call; " +
     "put recommended options first. Ask once, then act — never re-ask to confirm. " +
     "Headless: tool errors — pick a reasonable default and note it.",
   inputSchema: askSchema,
