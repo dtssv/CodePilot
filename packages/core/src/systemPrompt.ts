@@ -362,7 +362,7 @@ function modeGuidance(mode: AgentMode, toolNames: string[]): string {
         `- Available tools this turn: ${exposed || "(none — reason only)"}. This is the read-only set plus \`plan_update\` (build the structured plan), \`memory_write\` (capture findings for future sessions), and \`plan_done\` (submit the plan). \`bash\`, \`write_file\`, \`edit_file\`, and \`task\` are filtered out — you cannot make changes, only plan them.`,
         "- Spend the time you saved by not editing on actually understanding the code. Read the modules you would touch, locate the right call sites, surface the gotchas. A plan that hides unknowns is worse than one that lists them.",
         "- When the plan is complete, call \`plan_done\` with a one-paragraph summary. The user approves or asks for revisions; on approval the session switches to agent mode automatically.",
-        "- Do not execute shell commands even for \"safe\" reads. If you need to know whether a file exists, use \`ls\` or \`glob\`; if you need to read content, use \`read_file\`.",
+        "- Do not spawn or kill shell jobs: \`bash\` and \`bash_kill\` are filtered out. \`bash_output\` is still available to poll an already-running background job's output, but you cannot start new commands. If you need to know whether a file exists, use \`ls\` or \`glob\`; if you need to read content, use \`read_file\`.",
       ].join("\n");
     case "agent":
     default:
