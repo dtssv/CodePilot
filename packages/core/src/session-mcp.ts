@@ -4,15 +4,81 @@
 // JSON-Schema subset MCP servers use into Zod.
 
 import { z } from "zod";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   McpManager,
   resolveMcpReferences,
   normalizeMcpToolName,
 } from "./mcp.js";
 import { acquireSharedMcp } from "./mcp-pool.js";
+import {
+  McpTrustStore,
+  mcpServerConfigHash,
+  listProjectMcpServers,
+  approveProjectMcpServer,
+  type ProjectMcpServer,
+} from "./mcpTrust.js";
+import { loadConfigWithSources } from "./config.js";
+import { projectStatePath } from "./projectState.js";
 import type { McpServerRequestHandler } from "./mcp-types.js";
 import type { ToolRegistry } from "./tools/types.js";
 import type { CodepilotConfig, SessionOptions } from "./types.js";
+
+/** Server names defined in PROJECT-scoped files (`<cwd>/.codepilot/config.json`
+ * and `<cwd>/.mcp.json`). These can arrive with someone else's code, so they
+ * are the ones gated by trust-on-first-use. User-level / managed servers are
+ * the user's own and are never gated here. Best-effort and fail-closed for the
+ * gate: a name that cannot be read simply isn't matched, and a project server
+ * only ever starts after an explicit approval, so a parse miss never opens the
+ * gate. */
+export function projectSourcedMcpServerNames(cwd: string): Set<string> {
+  const names = new Set<string>();
+  const addFrom = (path: string, pick: (parsed: Record<string, unknown>) => unknown) => {
+    if (!existsSync(path)) return;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      const servers = pick(parsed);
+      if (servers && typeof servers === "object") {
+        for (const name of Object.keys(servers as Record<string, unknown>)) names.add(name);
+      }
+    } catch {
+      /* malformed project file → contributes no names (gate stays closed) */
+    }
+  };
+  // Repo config: mcpServers lives under the top-level key.
+  addFrom(join(cwd, ".codepilot", "config.json"), (p) => p.mcpServers);
+  // Project .mcp.json: a bare { mcpServers: {...} } at the repo root.
+  addFrom(join(cwd, ".mcp.json"), (p) => p.mcpServers);
+  return names;
+}
+
+/** Per-project trust-file path for the MCP TOFU gate. Matches what the Session
+ * passes to `startMcp`, so an approval made via the RPC surface is the same
+ * record the gate later checks. */
+export function mcpTrustFileForCwd(cwd: string): string {
+  return projectStatePath(cwd, "mcp-trust.json");
+}
+
+/** List project-sourced MCP servers for a workspace with their approval status.
+ * Loads the effective (merged/interpolated) config so the hash matches what the
+ * gate checks at session start. */
+export async function listProjectMcpServersForCwd(cwd: string): Promise<ProjectMcpServer[]> {
+  const projectNames = projectSourcedMcpServerNames(cwd);
+  if (projectNames.size === 0) return [];
+  const { config } = await loadConfigWithSources(cwd);
+  const effective = (config.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
+  return listProjectMcpServers(projectNames, effective, mcpTrustFileForCwd(cwd));
+}
+
+/** Approve a project-sourced MCP server for a workspace at its current effective
+ * config. Throws if the name is not project-sourced. */
+export async function approveProjectMcpServerForCwd(cwd: string, name: string): Promise<void> {
+  const projectNames = projectSourcedMcpServerNames(cwd);
+  const { config } = await loadConfigWithSources(cwd);
+  const effective = (config.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
+  await approveProjectMcpServer(name, projectNames, effective, mcpTrustFileForCwd(cwd));
+}
 
 /** Minimal structural view of the Session fields startMcp needs. Uses a
  * callback for the (private) tool registry to avoid a public type cycle. */
@@ -44,6 +110,10 @@ export interface SessionMcpHost {
  /** Stash the unregister fn for the inbound-notification handler so the session
   * can detach it on dispose (same rationale as the reverse-request cleanup). */
   setMcpNotificationCleanup?(unregister: () => void): void;
+ /** Override for the project-sourced MCP trust-file path. Defaults to
+  * `~/.codepilot/mcp-trust.json`. Present so tests can point the TOFU gate at a
+  * temp file instead of the user's real store. */
+  readonly mcpTrustFile?: string;
 }
 
 /** Whether an inbound MCP notification matches the allowlist. An entry matches
@@ -93,6 +163,12 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
   const allowed = host.config.mcpAllowedServers;
   const hasAllowlist = Array.isArray(allowed) && allowed.length > 0;
   const allowSet = hasAllowlist ? new Set(allowed) : null;
+  // Trust-on-first-use gate for PROJECT-sourced servers: a server shipped in a
+  // project file can run an arbitrary command, so it must be approved before it
+  // is launched. User-level / managed servers are the user's own and skip this.
+  const projectNames = projectSourcedMcpServerNames(host.cwd);
+  const trust = new McpTrustStore(host.mcpTrustFile);
+  if (projectNames.size > 0) await trust.load();
   const active = Object.fromEntries(
     Object.entries(host.config.mcpServers).filter(([name, cfg]) => {
       if (cfg?.disabled) return false;
@@ -101,6 +177,18 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
           `[session] MCP server "${name}" is not in mcpAllowedServers — refusing to start\n`,
         );
         return false;
+      }
+      if (projectNames.has(name)) {
+        const hash = mcpServerConfigHash(cfg);
+        if (!trust.isTrusted(name, hash)) {
+          process.stderr.write(
+            `[session] MCP server "${name}" is defined in a project file and has not been ` +
+              `approved — refusing to start. It can run an arbitrary command from this ` +
+              `repository. Review it, then approve it to launch it (the approval is ` +
+              `remembered per-project and re-checked if its command changes).\n`,
+          );
+          return false;
+        }
       }
       return true;
     }),

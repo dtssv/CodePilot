@@ -3418,6 +3418,7 @@ export class Session {
     return startMcpImpl({
       config: this.config,
       cwd: this.cwd,
+      mcpTrustFile: projectStatePath(this.cwd, "mcp-trust.json"),
       onMcpOpenAuthUrl: this.onMcpOpenAuthUrl,
       onMcpServerRequest: this.onMcpServerRequest,
       withToolRegistry: (fn) => fn(this.toolRegistry),

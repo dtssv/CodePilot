@@ -997,6 +997,20 @@ export {
   pluginContentHash,
   defaultPluginTrustPath,
 } from "./plugins-trust.js";
+export {
+  McpTrustStore,
+  mcpServerConfigHash,
+  defaultMcpTrustPath,
+  listProjectMcpServers,
+  approveProjectMcpServer,
+} from "./mcpTrust.js";
+export type { ProjectMcpServer } from "./mcpTrust.js";
+export {
+  projectSourcedMcpServerNames,
+  mcpTrustFileForCwd,
+  listProjectMcpServersForCwd,
+  approveProjectMcpServerForCwd,
+} from "./session-mcp.js";
 export type {
   PluginManifest,
   PluginProviderTemplate,

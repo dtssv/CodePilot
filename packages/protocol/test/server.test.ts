@@ -625,6 +625,34 @@ describe("server / protocol handlers", () => {
     expect(stored.custom).toBeUndefined();
   });
 
+  it("mcp/list-project returns an empty list for a workspace with no project MCP servers", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const res = await client.request<
+      { cwd?: string },
+      { servers: Array<{ name: string; summary: string; trusted: boolean }> }
+    >("mcp/list-project", {});
+    expect(res.servers).toEqual([]);
+  });
+
+  it("mcp/approve-project rejects a name that is not project-sourced", async () => {
+    registerServer(server, { defaultCwd: "/tmp" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/tmp",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    await expect(
+      client.request("mcp/approve-project", { name: "not-a-project-server" }),
+    ).rejects.toThrow();
+  });
+
   it("config/setOnboarded stamps the shared first-run marker idempotently", async () => {
     registerServer(server, { defaultCwd: "/tmp" });
     await client.request("initialize", {

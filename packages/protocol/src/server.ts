@@ -90,6 +90,8 @@ import {
   listInstalledMcpServers,
   setMcpServerEnabled,
   inspectMcpServer,
+  listProjectMcpServersForCwd,
+  approveProjectMcpServerForCwd,
   listPluginMarket,
   searchMarketplace,
   installPlugin,
@@ -819,6 +821,26 @@ export function registerServer(
         cwd: ctx.defaultCwd,
         openAuthUrl: makeMcpOpenAuthUrl(ctx),
       });
+    },
+  );
+  // Project-sourced MCP servers (from a repo's `.codepilot/config.json` /
+  // `.mcp.json`) are gated: they launch only after the user approves them,
+  // since they can run an arbitrary command shipped with someone else's code.
+  peer.onRequest<
+    { cwd?: string },
+    { servers: Awaited<ReturnType<typeof listProjectMcpServersForCwd>> }
+  >("mcp/list-project", async (p) => ({
+    servers: await listProjectMcpServersForCwd(p?.cwd ?? ctx.defaultCwd),
+  }));
+  peer.onRequest<{ name: string; cwd?: string }, { name: string; message: string }>(
+    "mcp/approve-project",
+    async (p) => {
+      if (!p?.name?.trim()) throw new RpcError(ErrorCode.InvalidParams, "name required");
+      await approveProjectMcpServerForCwd(p.cwd ?? ctx.defaultCwd, p.name);
+      return {
+        name: p.name,
+        message: `Approved project MCP server "${p.name}". New sessions may launch it.`,
+      };
     },
   );
   peer.onRequest<{ name: string }, { state: McpOauthState; url?: string; error?: string }>(
