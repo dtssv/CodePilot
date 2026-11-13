@@ -455,6 +455,16 @@ export class PermissionEngine {
     if (tool.permission === "read") {
       return { decision: "allow", reason: "read-only tool" };
     }
+    // Self-declared destructive MCP tool: the server annotated it
+    // `destructiveHint`, so it is NOT a side-effect-free network call and must
+    // not be silently auto-allowed. Force an interactive ask (soft — auto mode
+    // may still adjudicate, and an explicit allow rule matched above already
+    // won). yolo is explicit user intent, so it is exempt and falls through to
+    // the auto-allow below. A lying server can only omit this hint, so honouring
+    // it never grants privilege — it only ever adds friction.
+    if (tool.mcpMeta?.destructiveHint === true && this.mode !== "yolo") {
+      return "ask";
+    }
     // Network tools (web_search / web_fetch / MCP network) have no local
     // side effects — auto-allow in every mode. Domain denylists on web_fetch
     // still refuse specific hosts inside the tool.

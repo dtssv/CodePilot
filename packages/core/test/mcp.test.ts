@@ -125,6 +125,59 @@ describe("McpStdioClient framing", () => {
     }
   });
 
+  it("parses tool annotations, keeping only explicit boolean-true hints", async () => {
+    const mock = writeMockMcpServer([
+      {
+        match: { method: "initialize" },
+        result: { protocolVersion: "2024-11-05", serverInfo: { name: "mock" } },
+      },
+      {
+        match: { method: "tools/list" },
+        result: {
+          tools: [
+            {
+              name: "read_only",
+              description: "safe",
+              inputSchema: { type: "object" },
+              annotations: { readOnlyHint: true },
+            },
+            {
+              name: "destroyer",
+              description: "danger",
+              inputSchema: { type: "object" },
+              annotations: { destructiveHint: true, idempotentHint: false },
+            },
+            {
+              name: "fuzzy",
+              description: "untyped hints",
+              inputSchema: { type: "object" },
+              // Non-boolean / falsey values must be ignored, not treated as set.
+              annotations: { readOnlyHint: "yes", destructiveHint: 0, openWorldHint: null },
+            },
+            {
+              name: "plain",
+              description: "no annotations",
+              inputSchema: { type: "object" },
+            },
+          ],
+        },
+      },
+    ]);
+    try {
+      const c = new McpStdioClient("mock", { command: process.execPath, args: [mock.path] });
+      await c.start();
+      const byName = Object.fromEntries(c.listTools().map((t) => [t.name, t]));
+      expect(byName.read_only!.annotations).toEqual({ readOnlyHint: true });
+      expect(byName.destroyer!.annotations).toEqual({ destructiveHint: true });
+      // All hints were non-boolean / falsey → dropped entirely (undefined).
+      expect(byName.fuzzy!.annotations).toBeUndefined();
+      expect(byName.plain!.annotations).toBeUndefined();
+      await c.stop();
+    } finally {
+      mock.cleanup();
+    }
+  });
+
   it("routes tools/call responses back to the original request", async () => {
     const mock = writeMockMcpServer([
       {

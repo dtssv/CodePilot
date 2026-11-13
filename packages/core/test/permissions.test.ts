@@ -287,6 +287,65 @@ describe("PermissionEngine with real built-in tools", () => {
     });
   });
 
+  it("auto-allows a normal (non-destructive) MCP network tool", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const t: ToolDef = {
+      ...makeTool("mcp__gh__list_issues", "network"),
+      source: "mcp",
+      mcpMeta: { server: "gh", toolName: "list_issues", jsonSchema: {} },
+    };
+    expect(e.preflight(t, {})).toEqual({
+      decision: "allow",
+      reason: "network tool (no local side effects)",
+    });
+  });
+
+  it("asks for a self-declared destructive MCP tool instead of silently allowing", () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const t: ToolDef = {
+      ...makeTool("mcp__gh__delete_repo", "network"),
+      source: "mcp",
+      mcpMeta: { server: "gh", toolName: "delete_repo", jsonSchema: {}, destructiveHint: true },
+    };
+    expect(e.preflight(t, {})).toBe("ask");
+  });
+
+  it("auto-approve mode does not silently allow a destructive MCP tool", () => {
+    // auto-edit is a non-yolo auto mode; a destructive MCP call must still ask.
+    const e = new PermissionEngine({ permissionMode: "auto-edit" });
+    const t: ToolDef = {
+      ...makeTool("mcp__db__drop_table", "network"),
+      source: "mcp",
+      mcpMeta: { server: "db", toolName: "drop_table", jsonSchema: {}, destructiveHint: true },
+    };
+    expect(e.preflight(t, {})).toBe("ask");
+  });
+
+  it("yolo mode still allows a destructive MCP tool (explicit user intent)", () => {
+    const e = new PermissionEngine({ permissionMode: "yolo" });
+    const t: ToolDef = {
+      ...makeTool("mcp__db__drop_table", "network"),
+      source: "mcp",
+      mcpMeta: { server: "db", toolName: "drop_table", jsonSchema: {}, destructiveHint: true },
+    };
+    // The destructive check is excluded under yolo; the call falls through to
+    // the network auto-allow. Either way the decision is allow (explicit intent).
+    const r = e.preflight(t, {});
+    expect(typeof r === "object" && r.decision).toBe("allow");
+  });
+
+  it("honours an explicit allow rule even for a destructive MCP tool", () => {
+    // A user who said "always allow this tool" wins over the destructive ask.
+    const e = new PermissionEngine({ permissionMode: "ask", autoApprove: ["mcp__db__drop_table"] });
+    const t: ToolDef = {
+      ...makeTool("mcp__db__drop_table", "network"),
+      source: "mcp",
+      mcpMeta: { server: "db", toolName: "drop_table", jsonSchema: {}, destructiveHint: true },
+    };
+    const r = e.preflight(t, {});
+    expect(typeof r === "object" && r.decision).toBe("allow");
+  });
+
   it("PermissionEngine with a ToolRegistry", () => {
     const r = new ToolRegistry();
     r.register(readFileTool);

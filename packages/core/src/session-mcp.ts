@@ -173,21 +173,41 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
 function registerMcpTool(
   host: SessionMcpHost,
   mgr: McpManager,
-  t: { server: string; name: string; description: string; inputSchema: Record<string, unknown> },
+  t: {
+    server: string;
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    annotations?: import("./mcp-types.js").McpToolAnnotations;
+  },
   requestHandler?: ((server: string, method: string, params: unknown) => Promise<unknown>) | null,
 ): void {
  // Normalize the tool name to fit provider limits (64 chars) and prevent
  // collisions between long names. The original (server, name) pair is
  // captured in the closure so invocation is unaffected.
   const registeredName = normalizeMcpToolName(t.server, t.name);
+  // Permission tier from the server's self-reported hints (untrusted; used only
+  // to relax a no-op case or to make a destructive tool stricter, never to gain
+  // privilege). A read-only tool maps to the "read" tier (semantically accurate
+  // — it has no side effects); everything else stays "network" (no local side
+  // effects at the tier level). A self-declared destructive tool keeps the
+  // "network" tier but carries `destructiveHint`, which the permission engine
+  // turns into an interactive ask instead of a silent allow.
+  const readOnly = t.annotations?.readOnlyHint === true;
+  const destructive = !readOnly && t.annotations?.destructiveHint === true;
   host.withToolRegistry((registry) =>
     registry.register({
       name: registeredName,
       description: `[mcp:${t.server}] ${t.description}`,
       inputSchema: jsonSchemaToZod(t.inputSchema),
-      permission: "network",
+      permission: readOnly ? "read" : "network",
       source: "mcp",
-      mcpMeta: { server: t.server, toolName: t.name, jsonSchema: t.inputSchema },
+      mcpMeta: {
+        server: t.server,
+        toolName: t.name,
+        jsonSchema: t.inputSchema,
+        ...(destructive ? { destructiveHint: true } : {}),
+      },
       execute: async (input) => {
         const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
         // Pass this session's reverse-request handler so a reverse request the

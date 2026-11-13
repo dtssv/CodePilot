@@ -141,9 +141,14 @@ export function makeMcpMetaTool(getRegistry: () => ToolRegistry): ToolDef<typeof
       }
       if (input.action === "describe") {
         const raw = target.mcpMeta?.jsonSchema ?? {};
+        // Surface the server's self-reported destructive hint so the model
+        // (and, downstream, the user prompt) knows this call may need approval.
+        const destructiveNote = target.mcpMeta?.destructiveHint
+          ? "\n\n⚠️ The server marks this tool as potentially destructive — it may require your confirmation to run."
+          : "";
         return {
           content:
-            `${target.name}\n${target.description}\n\nInput schema (JSON):\n` +
+            `${target.name}\n${target.description}${destructiveNote}\n\nInput schema (JSON):\n` +
             "```json\n" + JSON.stringify(raw, null, 2) + "\n```",
         };
       }

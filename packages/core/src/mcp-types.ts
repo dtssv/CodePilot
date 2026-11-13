@@ -25,12 +25,30 @@ export const MCP_TOOL_NAME_MAX_LENGTH = 64;
 // Public types
 // ---------------------------------------------------------------------------
 
+/** Behaviour hints a server may attach to a tool (MCP `tool.annotations`).
+ * These are SELF-REPORTED by the server and therefore untrusted: honour them
+ * only to make approval STRICTER (a self-declared destructive tool asks) or
+ * where a relaxation has no security effect — never to bypass a safety floor.
+ * A lying server can only omit a hint, not gain privilege by setting one. */
+export interface McpToolAnnotations {
+  /** The tool does not modify its environment. */
+  readOnlyHint?: boolean;
+  /** The tool may perform destructive updates (only meaningful when not read-only). */
+  destructiveHint?: boolean;
+  /** Repeated calls with the same args have no additional effect. */
+  idempotentHint?: boolean;
+  /** The tool interacts with an open, external world (e.g. the internet). */
+  openWorldHint?: boolean;
+}
+
 /** A tool advertised by an MCP server. */
 export interface McpToolDescriptor {
   server: string;
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Self-reported behaviour hints; see {@link McpToolAnnotations}. */
+  annotations?: McpToolAnnotations;
 }
 
 export interface McpInvokeRequest {

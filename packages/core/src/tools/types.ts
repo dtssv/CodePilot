@@ -131,8 +131,16 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
    */
   source?: "mcp" | "plugin";
   /** For `source: "mcp"`: the server + original tool name + raw JSON schema,
-   * used by the `mcp` meta-tool to describe/call it on demand. */
-  mcpMeta?: { server: string; toolName: string; jsonSchema: unknown };
+   * used by the `mcp` meta-tool to describe/call it on demand. `destructiveHint`
+   * is the server's SELF-REPORTED "this may perform destructive updates" flag;
+   * the permission engine uses it only to make approval stricter (ask instead
+   * of silently allowing a network-tier MCP call) — never to grant privilege. */
+  mcpMeta?: {
+    server: string;
+    toolName: string;
+    jsonSchema: unknown;
+    destructiveHint?: boolean;
+  };
 }
 
 /**

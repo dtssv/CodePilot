@@ -42,6 +42,26 @@ type Pending = {
   reject: (e: Error) => void;
 };
 
+/** Normalize a server's self-reported tool annotations to only the hints that
+ * are explicitly boolean `true`. Any other shape (absent, null, non-boolean) is
+ * dropped, so a hint can never silently change behaviour unless the server
+ * clearly asserted it. Returns `undefined` when no usable hint is present (keeps
+ * the descriptor clean and the "unknown" case explicit). */
+function pickBoolHints(a: {
+  readOnlyHint?: unknown;
+  destructiveHint?: unknown;
+  idempotentHint?: unknown;
+  openWorldHint?: unknown;
+} | undefined): import("./mcp-types.js").McpToolAnnotations | undefined {
+  if (!a || typeof a !== "object") return undefined;
+  const out: import("./mcp-types.js").McpToolAnnotations = {};
+  if (a.readOnlyHint === true) out.readOnlyHint = true;
+  if (a.destructiveHint === true) out.destructiveHint = true;
+  if (a.idempotentHint === true) out.idempotentHint = true;
+  if (a.openWorldHint === true) out.openWorldHint = true;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // BaseJsonRpcClient
 // ---------------------------------------------------------------------------
@@ -314,7 +334,17 @@ export abstract class BaseJsonRpcClient implements McpClient {
 
   private async refreshTools(): Promise<void> {
     const res = (await this.request("tools/list", {})) as {
-      tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
+      tools?: Array<{
+        name: string;
+        description?: string;
+        inputSchema?: Record<string, unknown>;
+        annotations?: {
+          readOnlyHint?: unknown;
+          destructiveHint?: unknown;
+          idempotentHint?: unknown;
+          openWorldHint?: unknown;
+        };
+      }>;
     };
     if (!res.tools) {
       this.tools = [];
@@ -325,6 +355,9 @@ export abstract class BaseJsonRpcClient implements McpClient {
       name: t.name,
       description: t.description ?? "",
       inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+      // Only keep hints that are explicitly boolean true — treat any other
+      // shape (missing, null, string) as "unknown", never as a privilege grant.
+      annotations: pickBoolHints(t.annotations),
     }));
   }
 
