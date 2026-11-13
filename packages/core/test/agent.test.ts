@@ -76,6 +76,18 @@ function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   // A write-permission tool so tests can simulate durable progress (resets the
   // no-progress stall streak), mirroring write_file/edit_file.
   tools.register(makeTool("write_file", "write", "wrote!"));
+  // A read tool in EXPLORATION_READ_TOOLS that echoes a distinct body per call
+  // (the input `x`), so a varied call is a dedup-cache MISS and reads as NEW
+  // evidence — exercising the exploration-stall track rather than the write one.
+  tools.register({
+    name: "read_file",
+    description: "mock read_file",
+    inputSchema: z.object({ x: z.string() }),
+    permission: "read" as const,
+    async execute(input: { x: string }) {
+      return { content: `file body for ${input.x}` };
+    },
+  });
   const artifacts = new ArtifactStore(join(cwd, ".codepilot", "artifacts"));
   return {
     artifacts,
@@ -572,6 +584,236 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     const lockedIdx = provider.calls.findIndex((c) => c.toolChoice === "none");
     expect(lockedIdx).toBeGreaterThanOrEqual(0);
     expect(lockedIdx).toBeLessThan(8);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Exploration-stall track: a pure read-only investigation (no writes) that
+  // keeps surfacing NEW evidence must NOT be wound down by the write ladder
+  // (8/12/16) — only by the wider exploration ladder (12/18/24). These pin that
+  // interaction and the gating of "new evidence".
+  function liveText(opts: StreamChatOptions): string {
+    return opts.messages
+      .filter((m) => m.role === "system")
+      .flatMap((m) => m.content)
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("\n");
+  }
+
+  // Genuinely distinct per-turn intents (consecutive bigram-Jaccard well below
+  // the 0.7 reworded-spin veto), so a turn's new read actually resets the
+  // exploration track instead of being vetoed as restated spinning.
+  const DISTINCT_INTENTS = [
+    "Checking how the parser tokenizes nested blocks.",
+    "Now I want to understand database retry timing.",
+    "Let me trace where the auth header gets dropped.",
+    "Investigating the cache eviction policy next.",
+    "Does the scheduler respect task priority ordering?",
+    "Looking into why websocket frames arrive late.",
+    "Examining the migration that renamed the column.",
+    "Reading the retry backoff math for correctness.",
+    "Where does the config loader resolve defaults?",
+    "Tracing the signal that cancels an in-flight job.",
+    "How are temp files cleaned up on a crash here.",
+    "Verifying the hash function distributes evenly.",
+    "What path does an upload take before storage?",
+    "Finding the lock that guards the write queue.",
+    "Does compaction ever drop a pinned message?",
+    "Studying how the sandbox maps host directories.",
+    "Which module owns the session index rebuild?",
+    "Checking the fallback when sqlite open fails.",
+    "Reviewing the topological order of subtasks.",
+    "How does the provider choose a small model?",
+    "Reading the redaction patterns for secrets.",
+    "Where is the turn budget ceiling computed?",
+    "Tracing a steer message through the drain.",
+    "Examining the artifact spill threshold logic.",
+    "What triggers a force compaction on overflow?",
+    "Looking at the plan-step status transitions.",
+    "How are MCP resources listed and cached?",
+    "Finding where image mentions get resolved.",
+    "Does the reducer upsert user events by id?",
+    "Checking the heartbeat on the daemon socket.",
+  ];
+
+  it("does not let the write ladder kill a read-only probe that keeps finding new evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 14 read_file turns, each with distinct input (dedup-cache MISS → new
+    // evidence) and distinct intent text (no reworded-spin veto). This passes
+    // the write ladder's lock point (16 is above 14, but the key check is that
+    // the 8/12 soft/strong nudges — which tell it to "go write something" — do
+    // NOT fire, because exploration progress resets turnsSinceNoProgress).
+    provider.responses = [];
+    for (let i = 0; i < 14; i++) {
+      provider.responses.push([
+        { kind: "text_delta", messageId: `m${i}`, text: DISTINCT_INTENTS[i]! },
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "read_file", input: { x: `src/file_${i}.ts` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "fin", text: "root cause identified" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500;
+    const r = await runAgent({ history: [], userText: "find the root cause" }, deps);
+    // Ran all 14 probes + final text; never locked.
+    expect(r.finalText).toBe("root cause identified");
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
+    // The write ladder's "no durable progress / go write something" nudges must
+    // never have fired — this is a legitimate read-only investigation.
+    const allSys = provider.calls.map(liveText).join("\n---\n");
+    expect(allSys).not.toMatch(/no durable progress/i);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("winds down a read-only run at the exploration lock even while each read is 'new'", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.honorToolChoiceNone = true;
+    // 30 read_file turns, each with distinct input (always new evidence) and
+    // distinct intent (no veto). The write ladder is held off, but the wider
+    // exploration ladder (lock at 24) must eventually force synthesis so a
+    // read-only run that keeps finding trivially-"new" reads still terminates.
+    provider.responses = [];
+    for (let i = 0; i < 30; i++) {
+      provider.responses.push([
+        { kind: "text_delta", messageId: `m${i}`, text: DISTINCT_INTENTS[i]! },
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "read_file", input: { x: `src/file_${i}.ts` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500;
+    const r = await runAgent({ history: [], userText: "keep exploring" }, deps);
+    // The exploration lock (24) fires: streak hits 24 at the end of turn index
+    // 23, so the lock turn is call index 24 → 25 calls total.
+    expect(provider.calls.length).toBe(25);
+    expect(provider.calls[24]!.toolChoice).toBe("none");
+    // Exactly one locking turn; it soft-lands on text.
+    expect(provider.calls.filter((c) => c.toolChoice === "none").length).toBe(1);
+    expect(r.events.some((e) => e.type === "error")).toBe(false);
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("treats a repeated identical read as no new evidence (dedup replay is spinning)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.honorToolChoiceNone = true;
+    // 20 read_file turns with the SAME input every turn → after the first, every
+    // call is a dedup-cache replay ([dedup: prefix) = NOT new evidence. With no
+    // exploration progress and no writes, the write ladder (lock at 16) governs,
+    // firing well before the exploration ladder would. Intent varies so the veto
+    // is not what stops it — the dedup replay is.
+    provider.responses = [];
+    for (let i = 0; i < 20; i++) {
+      provider.responses.push([
+        { kind: "text_delta", messageId: `m${i}`, text: `Attempt ${i}: let me look again at the configuration file contents here.` },
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "read_file", input: { x: "same/path.ts" } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500;
+    const r = await runAgent({ history: [], userText: "re-read in circles" }, deps);
+    // The FIRST read is genuinely new evidence (resets the streak at turn 0);
+    // every later identical read is a dedup replay = not new, so the write
+    // ladder (lock at 16) governs from turn 1 → lock at call index 17 → 18
+    // calls. The exploration ladder (24) never gets there.
+    expect(provider.calls.length).toBe(18);
+    expect(provider.calls[17]!.toolChoice).toBe("none");
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("vetoes an exploration reset when the intent is reworded spinning", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.honorToolChoiceNone = true;
+    // Distinct read inputs (each is 'new' by the dedup test) BUT the intent text
+    // is near-identical every turn (reworded spin). The similarity veto must
+    // cancel the write-ladder hold-off, so the write ladder (lock at 16) governs
+    // — NOT the wider exploration ladder (24).
+    provider.responses = [];
+    for (let i = 0; i < 20; i++) {
+      provider.responses.push([
+        { kind: "text_delta", messageId: `m${i}`, text: "Next I will check the handler to understand the failure." },
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "read_file", input: { x: `src/file_${i}.ts` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = f.deps();
+    delete (deps as { maxTurns?: number }).maxTurns;
+    deps.config = { ...deps.config };
+    delete deps.config.maxTurns;
+    deps.convergenceCap = 500;
+    const r = await runAgent({ history: [], userText: "reworded spin" }, deps);
+    // Turn 0 has no prior intent to compare against, so its new read resets the
+    // streak; from turn 1 on, the near-identical intent trips the veto and the
+    // write ladder (lock at 16) governs → lock at call index 17 → 18 calls. The
+    // exploration ladder (24) never gets there.
+    expect(provider.calls.length).toBe(18);
+    expect(provider.calls[17]!.toolChoice).toBe("none");
+    expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not count an empty read result as new evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.honorToolChoiceNone = true;
+    // A read tool that returns empty output every turn: never new evidence, so
+    // the write ladder (lock at 16) governs. Register an empty-returning grep.
+    const tools = new ToolRegistry();
+    tools.register(makeTool("echo", "read", "echoed!"));
+    tools.register(makeTool("write_file", "write", "wrote!"));
+    tools.register({
+      name: "grep",
+      description: "mock grep",
+      inputSchema: z.object({ x: z.string() }),
+      permission: "read" as const,
+      async execute() {
+        return { content: "" };
+      },
+    });
+    const artifacts = new ArtifactStore(join(dir, ".codepilot", "artifacts"));
+    provider.responses = [];
+    for (let i = 0; i < 20; i++) {
+      provider.responses.push([
+        { kind: "text_delta", messageId: `m${i}`, text: `Search ${i}: looking for a distinct symbol number ${i} across the tree.` },
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "grep", input: { x: `sym${i}` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const deps: AgentDeps = {
+      provider,
+      tools,
+      artifacts,
+      permissions: new PermissionEngine({ permissionMode: "auto-edit" }),
+      config: { provider: "anthropic" },
+      cwd: dir,
+      convergenceCap: 500,
+    };
+    const r = await runAgent({ history: [], userText: "empty searches" }, deps);
+    // No new evidence (empty output) → write ladder locks at 16 → 17 calls.
+    expect(provider.calls.length).toBe(17);
+    expect(provider.calls[16]!.toolChoice).toBe("none");
     expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });

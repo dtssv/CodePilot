@@ -3,7 +3,7 @@
 // (rotating batches), and path-level read_file overlap (soft budget, never refuses).
 
 /** Signature of a single tool call: tool name + stable input hash. */
-function signature(toolName: string, input: unknown): string {
+export function signature(toolName: string, input: unknown): string {
  // Stable serialization: sort object keys so {a:1,b:2} === {b:2,a:1}.
   const stable = canonicalize(input);
   return `${toolName}::${stable}`;

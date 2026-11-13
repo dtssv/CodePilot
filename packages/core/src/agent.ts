@@ -28,7 +28,13 @@ import type {
 import type { ResolvedSandbox } from "./sandbox.js";
 import type { HookEngine } from "./hooks.js";
 import { redactSecrets, type RedactionPattern } from "./redact.js";
-import { DoomLoopDetector, type DedupCache } from "./doomLoop.js";
+import {
+  DoomLoopDetector,
+  type DedupCache,
+  signature as toolSignature,
+  questionSimilarity,
+  QUESTION_SIMILARITY_THRESHOLD,
+} from "./doomLoop.js";
 import { consistencyAssertEnabled, assertConsistency } from "./consistency.js";
 import { applyContextTransform } from "./contextTransform.js";
 import { detectRunawayRepetition } from "./textDegeneration.js";
@@ -341,6 +347,25 @@ export async function runAgent(
  // backstop for a model that keeps reading / re-running variant bash without
  // changing state. Reset on durable progress; drives the NO_PROGRESS_* ladder.
   let turnsSinceNoProgress = 0;
+ // Exploration-progress stall counter: the read-only analogue of
+ // turnsSinceNoProgress. A pure investigation (debugging, code reading) makes
+ // no durable writes, so the write-centric ladder above would wind it down
+ // even while it is genuinely closing in on a root cause. This track resets
+ // when a turn surfaces NEW evidence (a first read of a file/window, a grep/
+ // glob hitting a path not seen before, or a non-empty read command not run
+ // before this turn) and extends when a read-only turn only re-reads the same
+ // ground. It is deliberately more lenient than the write ladder (debugging
+ // runs long) but still lands on the same lock backstop so a true spin stops.
+ let turnsSinceNoExploration = 0;
+ // Signatures of non-dedupable read commands (bash/lsp_navigate) already run —
+ // a repeat with the same args is not new evidence even if its output differs
+ // slightly. Dedupable reads (read_file/grep/glob/ls) are judged instead by the
+ // dedup-cache replay prefix the tool layer already stamps on a repeat.
+ const seenReadCommandSigs = new Set<string>();
+ // The previous turn's assistant "intent" text, for the reworded-spin guard:
+ // reading a new file but restating the same next-step plan verbatim is not
+ // real progress, so a high-similarity intent vetoes an exploration reset.
+ let priorIntentText = "";
  // Plan mode exists to produce a plan, not to execute — so nudge it toward
  // synthesis sooner (3 stalled turns) than a full agent run (4). Chat mode
  // has no plan to stall on.
@@ -489,6 +514,10 @@ export async function runAgent(
  // memory_write, or a plan advance). Set while processing tool results below;
  // drives the progress-gated stall counter at the end of the turn.
     let madeDurableProgress = false;
+ // Whether this turn surfaced NEW read-only evidence (a first read / fresh
+ // grep / not-before-run command). Resets the exploration-stall track so a
+ // debug session that never writes is not throttled while it is still learning.
+    let madeExplorationProgress = false;
 
  // Drain queued steering. Genuine user input enters the transcript as a
  // user message (so the model acts on it immediately and it persists on
@@ -584,6 +613,39 @@ export async function runAgent(
         "You have made no durable progress (no writes or edits) for several turns. If you keep " +
           "reading/re-running commands without acting, you are likely spinning — take a concrete " +
           "action (edit, write, or answer) rather than gathering more evidence.",
+      );
+    }
+
+    // Exploration-stall ladder: the read-only path for investigations that keep
+    // surfacing new evidence (so the write ladder above is held off) but have
+    // gone very long. The nudges are about SYNTHESIS, not "go write something"
+    // — a read-only debug task may have nothing to write — escalating to the
+    // same tool lock. Only fires when the write ladder has not already locked.
+    if (!lockToolsThisTurn && turnsSinceNoExploration >= NO_EXPLORATION_LOCK_TURNS) {
+      lockToolsThisTurn = true;
+      systemSteerNotices.push(
+        deps.isSubagent
+          ? "You have read and searched for many turns. Even if each turn turned up something, " +
+              "you are past the point of diminishing returns. Do NOT call any more tools. Write " +
+              "your structured conclusion NOW (### Findings / ### Key references / " +
+              "### Recommendations, or ### Blocker) from what you already have, and note what is " +
+              "still unverified."
+          : "You have read and searched for many turns without reaching a conclusion. Do NOT call " +
+              "any more tools. Using only what you already have, state your findings now: the most " +
+              "likely explanation, the evidence for it, and what remains unverified or blocked — " +
+              "rather than continuing to gather more.",
+      );
+    } else if (!lockToolsThisTurn && turnsSinceNoExploration >= NO_EXPLORATION_STRONG_TURNS) {
+      systemSteerNotices.push(
+        "You have spent many turns reading and searching. Step back and synthesize: state your " +
+          "current best explanation and the evidence for it, and decide whether you already have " +
+          "enough to answer or act, instead of gathering more.",
+      );
+    } else if (!lockToolsThisTurn && turnsSinceNoExploration >= NO_EXPLORATION_SOFT_TURNS) {
+      systemSteerNotices.push(
+        "You have been exploring for several turns. Make sure each read is still narrowing things " +
+          "down; if you are circling, summarize what you have found and form a hypothesis rather " +
+          "than reading more.",
       );
     }
 
@@ -1343,6 +1405,12 @@ export async function runAgent(
           madeDurableProgress = true;
         }
       }
+ // Exploration-progress signal (read-only analogue). A durable write already
+ // counts as progress above; this only matters for turns with no write, where
+ // "did we learn something new" is the honest progress question.
+      if (isNewReadEvidence(tc.name, r, seenReadCommandSigs, tc.input)) {
+        madeExplorationProgress = true;
+      }
  // Secret redaction: credentials must never reach the transcript, the
  // model context or artifacts (see redact.ts).
       let safeContent = redactSecrets(r.content, deps.redactPatterns);
@@ -1472,14 +1540,40 @@ export async function runAgent(
     if (toolCalls.length > 0 && planProgressSig === planSigBefore && planProgressSig !== "") {
       turnsSincePlanProgress++;
     }
- // Progress-gated stall accounting: a turn that made durable progress resets
- // the streak; a turn that ran tools without any durable progress extends it.
- // A turn with no tool calls at all is not counted (the model is answering).
-    if (madeDurableProgress) {
+ // Reworded-spin guard shared by both ladders: reading a fresh file while
+ // restating the previous turn's plan near-verbatim ("next I'll check X") is
+ // not real progress, so a high-similarity intent cancels the exploration
+ // reset. Computed once per turn.
+    const turnIntent = assistantText.join("").trim();
+    const rewordedSpin =
+      turnIntent !== "" &&
+      priorIntentText !== "" &&
+      questionSimilarity(turnIntent, priorIntentText) >= QUESTION_SIMILARITY_THRESHOLD;
+ // Genuine exploration progress = new read-only evidence that is not reworded
+ // spinning. Treated as progress by BOTH ladders: a pure investigation makes
+ // no writes, so without this the write ladder (8/12/16) would wind down a
+ // debug session that is still turning up facts. The wider exploration ladder
+ // (12/18/24) is the real backstop that still stops a read-only run eventually.
+    const exploringForward = madeExplorationProgress && !rewordedSpin;
+ // Progress-gated stall accounting: a turn that made durable progress (or is
+ // exploring forward) resets the streak; a turn that ran tools without either
+ // extends it. A turn with no tool calls at all is not counted (the model is
+ // answering).
+    if (madeDurableProgress || exploringForward) {
       turnsSinceNoProgress = 0;
     } else if (toolCalls.length > 0) {
       turnsSinceNoProgress++;
     }
+ // Exploration-stall accounting: only a durable write fully resets this wider
+ // track. Exploring forward does NOT reset it — it only avoids the write
+ // ladder above — so a session that keeps finding "new" reads forever still
+ // climbs to the exploration lock and is made to synthesize.
+    if (madeDurableProgress) {
+      turnsSinceNoExploration = 0;
+    } else if (toolCalls.length > 0) {
+      turnsSinceNoExploration++;
+    }
+    if (turnIntent !== "") priorIntentText = turnIntent;
     // "Deny & stop" ends the prompt cleanly after this turn's results are
     // recorded — like a user Stop, but the session is not cleared.
     if (abortedByPermission) break;
@@ -1604,12 +1698,75 @@ const NO_PROGRESS_SOFT_TURNS = 8;
 const NO_PROGRESS_STRONG_TURNS = 12;
 const NO_PROGRESS_LOCK_TURNS = 16;
 
+/** Exploration-stall ladder — the read-only analogue of the no-progress ladder,
+ * for investigations (debugging, code reading) that legitimately never write.
+ * Deliberately wider than the write ladder because reading toward a root cause
+ * takes more turns than editing, but still terminates: a turn that surfaces no
+ * NEW evidence (only re-reads the same ground) extends the streak, and the lock
+ * tier reuses the same wind-down backstop as the write ladder. */
+const NO_EXPLORATION_SOFT_TURNS = 12;
+const NO_EXPLORATION_STRONG_TURNS = 18;
+const NO_EXPLORATION_LOCK_TURNS = 24;
+
+/** Read-only tools whose repeated calls are evaluated for "new evidence". A
+ * fresh read / first-seen grep hit / not-before-run command resets the
+ * exploration streak; a cached-replay read or a re-hit of known paths does not.
+ * `bash`/`lsp_navigate` are read-ish here only for the evidence signal — they
+ * are NOT treated as durable progress. */
+const EXPLORATION_READ_TOOLS = new Set([
+  "read_file",
+  "grep",
+  "glob",
+  "ls",
+  "bash",
+  "lsp_navigate",
+]);
+
 /** Tools (by name) whose successful call counts as durable progress even though
  * their permission is "read": `task` delivers a sub-agent conclusion and
  * `memory_write` commits durable knowledge. Write-permission tools (write_file,
  * edit_file, apply_patch, notebook_edit, …) are detected by permission, not
  * name, so this list stays small. */
 const DURABLE_PROGRESS_TOOLS = new Set(["task", "memory_write"]);
+
+/**
+ * Whether a successful read-only tool result is NEW evidence (fresh ground) vs
+ * a repeat of what the investigation already saw. Drives the exploration-stall
+ * track so a genuine debug session (which never writes) is not wound down while
+ * it keeps turning up new facts, yet a model re-reading the same files/windows
+ * in circles still converges.
+ *
+ * - read_file / grep / glob / ls (dedupable): the tool layer serves a repeated
+ *   identical call from the dedup cache and stamps a `[dedup:` prefix, so a
+ *   result WITHOUT that prefix is a first-time read → new evidence. A varied
+ *   call (new pattern / new window past the overlap threshold) also misses the
+ *   cache and so counts, which is correct — it is a new probe.
+ * - bash / lsp_navigate (not dedupable): judged by command signature — a repeat
+ *   with identical args is not new evidence; a non-empty first run is. Mutating
+ *   the set is the caller's job (so a repeat within the SAME turn still counts
+ *   once), hence `seen` is passed in.
+ * - Empty output is never new evidence.
+ */
+function isNewReadEvidence(
+  toolName: string,
+  result: ToolExecResult,
+  seenReadCommandSigs: Set<string>,
+  input: unknown,
+): boolean {
+  if (result.isError) return false;
+  if (!EXPLORATION_READ_TOOLS.has(toolName)) return false;
+  const body = result.content ?? "";
+  if (body.trim() === "") return false;
+  // Dedupable reads: a cache replay prefix means we have seen this exact ground.
+  if (toolName === "read_file" || toolName === "grep" || toolName === "glob" || toolName === "ls") {
+    return !body.startsWith("[dedup:");
+  }
+  // bash / lsp_navigate: signature-based first-run check.
+  const sig = toolSignature(toolName, input);
+  if (seenReadCommandSigs.has(sig)) return false;
+  seenReadCommandSigs.add(sig);
+  return true;
+}
 
 const MAX_TRUNCATION_RESUMES = 3;
 /** Max consecutive mid-stream interrupts resumed by continuation before we
