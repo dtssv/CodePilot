@@ -357,6 +357,13 @@ export async function runAgent(
  // ground. It is deliberately more lenient than the write ladder (debugging
  // runs long) but still lands on the same lock backstop so a true spin stops.
  let turnsSinceNoExploration = 0;
+ // Consecutive-failure counter: turns whose executed (non-aborted) tool calls
+ // ALL errored, with none succeeding. Orthogonal to the progress ladders — a
+ // run can be "failing" (every attempt errors) in ways those do not single
+ // out — so it drives its own notice telling the model to change approach or
+ // report a blocker rather than retry the same failing operation. A turn with
+ // any successful tool call resets it; a turn with no tool calls is neutral.
+ let consecutiveFailureTurns = 0;
  // Signatures of non-dedupable read commands (bash/lsp_navigate) already run —
  // a repeat with the same args is not new evidence even if its output differs
  // slightly. Dedupable reads (read_file/grep/glob/ls) are judged instead by the
@@ -518,6 +525,11 @@ export async function runAgent(
  // grep / not-before-run command). Resets the exploration-stall track so a
  // debug session that never writes is not throttled while it is still learning.
     let madeExplorationProgress = false;
+ // Per-turn tool outcome tally for the consecutive-failure track. A permission
+ // abort (deny & stop) is the user's call, not a model-fixable failure, so it
+ // counts as neither success nor failure here.
+    let turnToolSuccesses = 0;
+    let turnToolFailures = 0;
 
  // Drain queued steering. Genuine user input enters the transcript as a
  // user message (so the model acts on it immediately and it persists on
@@ -646,6 +658,27 @@ export async function runAgent(
         "You have been exploring for several turns. Make sure each read is still narrowing things " +
           "down; if you are circling, summarize what you have found and form a hypothesis rather " +
           "than reading more.",
+      );
+    }
+
+    // Consecutive-failure notice: orthogonal to the progress ladders above.
+    // When several turns in a row land only tool errors, retrying the same way
+    // is unlikely to work — so steer toward a DIFFERENT approach or an honest
+    // blocker report. Deliberately does NOT lock tools (a different operation
+    // may well succeed) and is tier-stable (no count embedded) so same-tier
+    // turns share a cacheable tail. Suppressed once the tools are being locked
+    // anyway, to avoid piling a second directive on the same turn.
+    if (!lockToolsThisTurn && consecutiveFailureTurns >= CONSECUTIVE_FAILURE_NOTICE_TURNS) {
+      systemSteerNotices.push(
+        deps.isSubagent
+          ? "Several turns in a row produced only tool errors. Retrying the same way is unlikely " +
+              "to work. Change approach — a different tool, path, or command — or, if you are " +
+              "genuinely blocked, stop and report the blocker (### Blocker) with what you tried " +
+              "and the exact errors, instead of repeating failing calls."
+          : "Several turns in a row produced only tool errors. Retrying the same way is unlikely " +
+              "to work. Step back and change approach — a different tool, path, or command — or, " +
+              "if you are genuinely blocked, tell the user what is blocked, what you tried, and " +
+              "the exact errors, rather than repeating failing calls.",
       );
     }
 
@@ -1411,6 +1444,12 @@ export async function runAgent(
       if (isNewReadEvidence(tc.name, r, seenReadCommandSigs, tc.input)) {
         madeExplorationProgress = true;
       }
+ // Consecutive-failure tally. A permission abort is the user's decision, not a
+ // model-fixable tool failure, so it is excluded from both counts.
+      if (!r.aborted) {
+        if (r.isError) turnToolFailures++;
+        else turnToolSuccesses++;
+      }
  // Secret redaction: credentials must never reach the transcript, the
  // model context or artifacts (see redact.ts).
       let safeContent = redactSecrets(r.content, deps.redactPatterns);
@@ -1574,6 +1613,17 @@ export async function runAgent(
       turnsSinceNoExploration++;
     }
     if (turnIntent !== "") priorIntentText = turnIntent;
+ // Consecutive-failure accounting. A turn that ran tools and had at least one
+ // succeed resets the streak; a turn whose every executed (non-aborted) call
+ // errored extends it. A turn that ran no tools is neutral (the model is
+ // thinking/answering, not failing). This is independent of the progress
+ // ladders: those ask "did state change / did we learn something"; this asks
+ // "are the attempts even landing".
+    if (turnToolSuccesses > 0) {
+      consecutiveFailureTurns = 0;
+    } else if (turnToolFailures > 0) {
+      consecutiveFailureTurns++;
+    }
     // "Deny & stop" ends the prompt cleanly after this turn's results are
     // recorded — like a user Stop, but the session is not cleared.
     if (abortedByPermission) break;
@@ -1707,6 +1757,14 @@ const NO_PROGRESS_LOCK_TURNS = 16;
 const NO_EXPLORATION_SOFT_TURNS = 12;
 const NO_EXPLORATION_STRONG_TURNS = 18;
 const NO_EXPLORATION_LOCK_TURNS = 24;
+
+/** Consecutive all-error turns before the failure notice fires. Orthogonal to
+ * the progress ladders: it catches a run whose attempts keep erroring (not a
+ * slow-progress spin), and steers toward a different approach or an honest
+ * blocker report. Mirrors the common "3 consecutive execution failures is a
+ * blocker" heuristic; it nudges rather than locks, since a different operation
+ * may still succeed. */
+const CONSECUTIVE_FAILURE_NOTICE_TURNS = 3;
 
 /** Read-only tools whose repeated calls are evaluated for "new evidence". A
  * fresh read / first-seen grep hit / not-before-run command resets the

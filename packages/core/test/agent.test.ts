@@ -69,6 +69,20 @@ function makeTool(
   };
 }
 
+// A tool that always reports an execution failure (isError), for the
+// consecutive-failure track.
+function makeErrorTool(name: string, perm: "read" | "write" | "execute" | "network", message: string) {
+  return {
+    name,
+    description: `mock failing ${name}`,
+    inputSchema: z.object({ x: z.string() }),
+    permission: perm,
+    async execute() {
+      return { content: message, isError: true };
+    },
+  };
+}
+
 function makeDeps(cwd: string, provider: MockProvider, autoEdit = true) {
   const tools = new ToolRegistry();
   const echo = makeTool("echo", "read", "echoed!");
@@ -815,6 +829,114 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     expect(provider.calls.length).toBe(17);
     expect(provider.calls[16]!.toolChoice).toBe("none");
     expect(r.events.some((e) => e.type === "status" && e.status === "idle")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Consecutive-failure track (orthogonal to the progress ladders): several
+  // turns in a row of only tool errors steer the model to change approach or
+  // report a blocker, WITHOUT locking tools.
+  function depsWithErrorTool(dir: string, provider: MockProvider): AgentDeps {
+    const tools = new ToolRegistry();
+    tools.register(makeTool("echo", "read", "echoed!"));
+    tools.register(makeTool("write_file", "write", "wrote!"));
+    tools.register(makeErrorTool("run", "execute", "Error: command failed with exit code 1"));
+    const artifacts = new ArtifactStore(join(dir, ".codepilot", "artifacts"));
+    const deps: AgentDeps = {
+      provider,
+      tools,
+      artifacts,
+      permissions: new PermissionEngine({ permissionMode: "auto-edit" }),
+      config: { provider: "anthropic" },
+      cwd: dir,
+      convergenceCap: 500,
+      // A minimal system prompt so the per-turn runtime_context (which carries
+      // steer notices) is emitted as a system message the test can inspect.
+      systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
+    };
+    return deps;
+  }
+
+  it("nudges to change approach after consecutive all-error turns (no tool lock)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // 5 turns of a failing tool, then a final text turn. The notice must fire
+    // on the turn AFTER the 3rd failure (streak reaches 3 at the end of turn 2,
+    // so turn index 3 carries it) and tools must NOT be locked.
+    provider.responses = [];
+    for (let i = 0; i < 5; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "run", input: { x: `cmd${i}` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "fin", text: "I am blocked: the command keeps failing." },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const deps = depsWithErrorTool(dir, provider);
+    const r = await runAgent({ history: [], userText: "run the build" }, deps);
+    const sysPerTurn = provider.calls.map((c) =>
+      c.messages
+        .filter((m) => m.role === "system")
+        .flatMap((m) => m.content)
+        .map((b) => (b.type === "text" ? b.text : ""))
+        .join("\n"),
+    );
+    // The failure notice is present from the turn after the 3rd failure on.
+    expect(sysPerTurn[3]).toMatch(/only tool errors/i);
+    // It does not lock tools — a different approach may still work.
+    expect(provider.calls.every((c) => c.toolChoice === undefined)).toBe(true);
+    // Earlier turns (before the streak hit 3) carry no failure notice.
+    expect(sysPerTurn[0]).not.toMatch(/only tool errors/i);
+    expect(sysPerTurn[2]).not.toMatch(/only tool errors/i);
+    expect(r.finalText).toMatch(/blocked/i);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resets the consecutive-failure streak on any successful tool call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    // fail, fail, SUCCEED, fail, fail — the success at turn 2 resets the streak,
+    // so it never reaches 3 and the failure notice never fires.
+    provider.responses = [
+      [{ kind: "tool_call", messageId: "m0", toolCall: { type: "tool_use", id: "t0", name: "run", input: { x: "a" } } }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "tool_call", messageId: "m1", toolCall: { type: "tool_use", id: "t1", name: "run", input: { x: "b" } } }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "tool_call", messageId: "m2", toolCall: { type: "tool_use", id: "t2", name: "echo", input: { x: "ok" } } }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "tool_call", messageId: "m3", toolCall: { type: "tool_use", id: "t3", name: "run", input: { x: "c" } } }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "tool_call", messageId: "m4", toolCall: { type: "tool_use", id: "t4", name: "run", input: { x: "d" } } }, { kind: "done", finishReason: "stop" }],
+      [{ kind: "text_delta", messageId: "fin", text: "done" }, { kind: "done", finishReason: "stop" }],
+    ];
+    const deps = depsWithErrorTool(dir, provider);
+    const r = await runAgent({ history: [], userText: "mixed outcomes" }, deps);
+    const allSys = provider.calls
+      .map((c) => c.messages.filter((m) => m.role === "system").flatMap((m) => m.content).map((b) => (b.type === "text" ? b.text : "")).join("\n"))
+      .join("\n---\n");
+    expect(allSys).not.toMatch(/only tool errors/i);
+    expect(r.finalText).toBe("done");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("gives a sub-agent a blocker-report variant of the failure notice", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [];
+    for (let i = 0; i < 5; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "run", input: { x: `cmd${i}` } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    provider.responses.push([
+      { kind: "text_delta", messageId: "fin", text: "### Blocker\n- command fails" },
+      { kind: "done", finishReason: "stop" },
+    ]);
+    const deps = { ...depsWithErrorTool(dir, provider), isSubagent: true };
+    await runAgent({ history: [], userText: "run the build" }, deps);
+    const sysPerTurn = provider.calls.map((c) =>
+      c.messages.filter((m) => m.role === "system").flatMap((m) => m.content).map((b) => (b.type === "text" ? b.text : "")).join("\n"),
+    );
+    expect(sysPerTurn[3]).toMatch(/only tool errors/i);
+    expect(sysPerTurn[3]).toMatch(/Blocker/);
     rmSync(dir, { recursive: true, force: true });
   });
 });
