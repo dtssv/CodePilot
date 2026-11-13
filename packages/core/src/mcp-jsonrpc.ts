@@ -14,6 +14,7 @@ import type {
   McpServerRequestHandler,
   McpToolDescriptor,
 } from "./mcp-types.js";
+import { sanitizeUntrustedMcpText } from "./mcpResultSanitize.js";
 
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope types
@@ -114,7 +115,9 @@ export abstract class BaseJsonRpcClient implements McpClient {
     const text = result.content
       .map((c) => (c.type === "text" ? c.text ?? "" : JSON.stringify(c)))
       .join("\n");
-    return { content: text, isError: result.isError };
+    // Untrusted-data hardening: the result comes from an external server, so
+    // strip hidden code points that could smuggle instructions to the model.
+    return { content: sanitizeUntrustedMcpText(text), isError: result.isError };
   }
 
   listTools(): McpToolDescriptor[] {
@@ -133,7 +136,13 @@ export abstract class BaseJsonRpcClient implements McpClient {
     const result = (await this.request("resources/read", { uri })) as {
       contents?: McpResourceReadResult["contents"];
     };
-    return { contents: result.contents ?? [] };
+    // Untrusted-data hardening: resource text is external server content that
+    // gets inlined into the prompt (@mcp: references), so strip hidden code
+    // points the same way tool results are cleaned. Binary blobs are left as-is.
+    const contents = (result.contents ?? []).map((c) =>
+      typeof c.text === "string" ? { ...c, text: sanitizeUntrustedMcpText(c.text) } : c,
+    );
+    return { contents };
   }
 
   listPrompts(): McpPromptDescriptor[] {
