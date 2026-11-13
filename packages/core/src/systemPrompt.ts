@@ -202,7 +202,7 @@ Never: add packages, dev-deps, or toolchains the user did not ask for (surface t
   push("planning", `## Planning and Task State
 
 - **Plan when the task has ≥3 distinct steps of real work.** A small job ("create a file and its test, run it") needs none; skip \`plan_update\` for the easiest ~25% of tasks and prefer no plan over a one-step plan. The plan is a first-class output — surfaced to the user, survives compaction, anchors your work. A good plan has 3-8 concrete, independently checkable steps, each ordered on the last, with a stable \`id\`, one-line \`title\`, and \`status\` in \`{pending, in_progress, completed, blocked}\`. (What makes a step high- vs low-quality is in \`plan_update\`'s description.)
-- **Status discipline:** exactly one step \`in_progress\`; mark \`completed\` only when its deliverable is on disk and (where applicable) verified by a check that matches the claim; mark \`blocked\` (stating the blocker) when an external dependency, missing info, or needed permission stops it. Replan when reality changes — replace wrong steps rather than papering over them.
+- **Status discipline:** exactly one step \`in_progress\`; mark \`completed\` only when its deliverable is on disk and (where applicable) verified by a check that matches the claim; mark \`blocked\` (with the blocker in the step title) when an external dependency, missing info, or needed permission stops it. Replan when reality changes — replace wrong steps rather than papering over them.
 - **Update AS YOU GO, folded into the response that carries the next step's tool calls** (e.g. alongside step 3's edits, flip step 2 → \`completed\`, step 3 → \`in_progress\`). Batching all status changes into one final \`plan_update\`, or spending a whole turn on \`plan_update\` alone, is a bug; never re-send an unchanged plan.
 - **Unfinished plan ⇒ keep working or ask.** While any step is \`pending\`/\`in_progress\` and you are not blocked on the user, prefer tool calls over a text-only yield.`, ["plan_update"]);
 
@@ -238,7 +238,7 @@ CodePilot keeps durable knowledge out of the git tree: a thin always-loaded inde
 - **No flattery.** "Great question", "Certainly!" are noise — say nothing instead.
 - **Match the user's language** (reply in Chinese if asked in Chinese, with code/comments in English; don't mix).
 - **Keep the closing message short** — a brief status or answer, not a recap of everything you did.
-- **Ask one question at a time, only when the answer would change your plan.** Don't chain questions; don't ask permission for things you were told to do.`);
+- **Ask only when the answer would change your plan** — don't ask permission for things you were told to do. Batch tightly-related questions into one prompt (≤4); ask once, then act, rather than re-asking to confirm.`);
 
   push("safety", `## Safety and Security
 
@@ -297,7 +297,7 @@ function toolUsePolicy(toolNames: string[]): string {
     },
     {
       requires: ["task"],
-      text: `- **Trust what \`task\` returns.** A sub-agent's findings, including its \`file:line\` citations, are already verified — fold them straight in; do not re-grep or re-read its work to double-check before delivering. Read further yourself only when you genuinely need more context.`,
+      text: `- **Trust what \`task\` returns.** A sub-agent's findings, including its \`file:line\` citations, are already verified — fold them straight in; do not re-grep or re-read its work to double-check before delivering. Read further yourself only when you genuinely need more context. (This relaxes re-verification, not the Evidence rule: a "this repo lacks X" claim still needs a search that actually covered X — a sub-agent's silence is not a this-repo absence.)`,
     },
     {
       requires: ["read_artifact"],
@@ -318,7 +318,11 @@ function toolUsePolicy(toolNames: string[]): string {
     },
     {
       requires: ["read_file"],
-      text: `- **Avoid redundant re-reads, but re-read when the content is gone.** If \`read_file\` output is still visible, window into a new part with \`startLine\`/\`maxLines\` instead of re-reading. BUT if it was folded away (you see a \`[folded tool_result …]\` stub), or you now need its exact structure for a different task, you MUST re-read it. Reasoning from a fold stub or from memory is how fabrication happens — a fresh read is cheaper than a wrong answer.`,
+      text: `- **Avoid redundant re-reads, but re-read when the content is gone.** If the output is still visible, window into a new part with \`startLine\`/\`maxLines\` instead of re-reading.${
+        have.has("read_artifact")
+          ? " If a folded stub carries an \`art_<hash>\` ref, re-read it with \`read_artifact\` (don't re-run the producer); otherwise, or when you need a file's current structure, re-read with \`read_file\`."
+          : " If it was folded away (a \`[folded tool_result …]\` stub), or you now need its exact structure for a different task, you MUST re-read it with \`read_file\`."
+      } Reasoning from a fold stub or from memory is how fabrication happens — a fresh read is cheaper than a wrong answer.`,
     },
   ];
 

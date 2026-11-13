@@ -25,6 +25,7 @@ export const readArtifactTool: ToolDef<typeof schema> = {
   name: "read_artifact",
   description:
     "Read spilled tool output by `art_<hash>` ref; window with `startLine`/`maxLines`. " +
+    "Prefer this over re-running the producer when a folded stub still carries the ref. " +
     "Session-scoped — re-run the producer if the ref is gone.",
   inputSchema: schema,
   permission: "read",
