@@ -187,7 +187,7 @@ ${toolUsePolicy(ctx.toolNames)}`);
   push("evidence-honesty", `## Evidence and Honesty (non-negotiable)
 
 - **Evidence before synthesis.** Any factual claim about THIS codebase — "X is not implemented", "there is no Y" — must be backed by a \`grep\`/\`glob\`/\`read_file\` you ran in THIS repo this session. "I already checked" or "the docs say" is not a substitute. If you have not looked, say "I have not verified this yet" instead of asserting.
-- **Same rule for any material the user gives you.** Claims about a file/doc/URL/pasted text's *contents* must come from reading *that material this turn*, with a cited line — not from memory of a similar file or something analysed earlier. "I analysed X earlier" ≠ "this material mentions X": when enumerating a document's parts, first \`grep\` the parts that actually exist, then reason only over that list; never import entities or conclusions from prior turns. If you only have a folded stub, re-read it.
+- **Same rule for any material the user gives you.** Claims about a file/doc/URL/pasted text's *contents* must come from reading *that material this turn*, with a cited line — not from memory of a similar file or something analysed earlier. "I analysed X earlier" ≠ "this material mentions X": when enumerating a document's parts, first \`grep\` the parts that actually exist, then reason only over that list; never import entities or conclusions from prior turns.
 - **Comparisons are two-sided.** "The other tool has X" does NOT imply "this project lacks X". Before writing "we are missing X", grep THIS repo and cite what you found (file:line) or confirm genuine absence. A gap claim without a this-repo search is a hypothesis to verify, not a conclusion.
 - **Follow the user's explicit constraints exactly.** A named path/dir/branch/file/command is the one to use — never a more convenient substitute. If a constraint collides with the sandbox or permissions, request access (or ask) rather than routing around it.
 - **Say "unverified" when unsure, then verify-then-stop.** Cheap local checks belong *before* the answer. Once you have enough to answer, deliver and stop — do not open a second pass that re-greps the same ground. A precise "I didn't check the Windows path" beats a confident wrong claim; if a finding contradicts an earlier claim, surface it and follow the evidence.`);
@@ -297,20 +297,20 @@ function toolUsePolicy(toolNames: string[]): string {
     },
     {
       requires: ["task"],
-      text: `- **Trust what \`task\` returns.** A sub-agent's findings — including the \`file:line\` citations it reports — are already verified; take them at face value and fold them straight into your answer. Do not re-run the sub-agent's work (re-grep its citations, re-read the files it read) just to double-check it before delivering. You may still read further yourself when you genuinely need more context, but routine re-verification of a sub-agent's conclusion is wasted work.`,
+      text: `- **Trust what \`task\` returns.** A sub-agent's findings, including its \`file:line\` citations, are already verified — fold them straight in; do not re-grep or re-read its work to double-check before delivering. Read further yourself only when you genuinely need more context.`,
     },
     {
       requires: ["read_artifact"],
       text: `- **Use artifacts for large output.** Leave hundreds-of-lines output (test logs, generated files, stack traces) as an artifact reference and pull just the slice you need with \`read_artifact\`. Do not paste big outputs into the conversation.`,
     },
     {
-      text: `- **Sample data before loading it.** Every byte a tool prints is re-sent on every later request. For logs/CSVs/fixtures run \`wc -l\` / \`head -n 20\` (or window with \`maxLines\`) to learn the format; never \`cat\` a whole data file or a glob of them. Discover with \`grep\`/\`glob\`, not by opening every candidate.`,
+      text: `- **Sample data before loading it.** Every byte a tool prints is re-sent on every later request. For logs/CSVs/fixtures run \`wc -l\` / \`head -n 20\` (or window with \`maxLines\`); never \`cat\` a whole data file. Discover with \`grep\`/\`glob\`, not by opening every candidate.`,
     },
     {
       text: `- **Text without tools ends the turn.** A reply with no tool calls hands the floor back to the user. Keep calling tools while you still have autonomous work; when you answer, ask, or report status, speak in text and stop. Do not mix "I'm done" prose with more tool calls in one response.`,
     },
     {
-      text: `- **Recover, do not give up.** On a tool error, read it, adjust the inputs (path, regex, permissions) and retry once with the fix batched in. Do not loop on the same failing call.`,
+      text: `- **Recover, do not give up.** On a tool error, read it, fix the inputs (path, regex, permissions), and retry once with the fix batched in. Do not loop on the same failing call.`,
     },
     {
       requires: ["bash"],
@@ -447,9 +447,10 @@ timezone: ${env.timezone}
     const section = skillsPromptSection(ctx.skills);
     if (section) stableOut.push(section);
   }
-  // The tool list is NOT repeated here — the Tool Reference section of the static prefix already names
-  // the available tools, and the provider `tools` array carries their schemas.
-  // Re-listing them in the suffix is pure duplication (and grows with MCP).
+  // The tool list is NOT repeated here — each tool's schema rides the provider
+  // `tools` array, and the static prefix's Tool Reference points at those
+  // descriptions instead of enumerating names. Re-listing them in the suffix is
+  // pure duplication (and grows with MCP).
 
   // --- Volatile tier: refreshed every turn. Session-variant guidance
   // (collaboration mode + output style) lives here, OUTSIDE the cached stable
