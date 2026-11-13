@@ -56,44 +56,42 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).toMatch(/Evidence before synthesis/);
     expect(out.staticPrefix).toMatch(/Comparisons are two-sided/);
     expect(out.staticPrefix).toMatch(/Follow the user's explicit constraints exactly/);
-    expect(out.staticPrefix).toMatch(/Verify before you conclude/);
+    expect(out.staticPrefix).toMatch(/verify-then-stop/);
   });
 
   it("splits brownfield vs greenfield conventions", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Brownfield \(default\)/);
-    expect(out.staticPrefix).toMatch(/Greenfield \(no prior code/);
-    expect(out.staticPrefix).toMatch(/fully research/);
-    expect(out.staticPrefix).toMatch(/Do not stand up heavy verification scaffolding/);
+    expect(out.staticPrefix).toMatch(/brownfield default/);
+    expect(out.staticPrefix).toMatch(/Greenfield/);
+    expect(out.staticPrefix).toMatch(/research until gates are concrete/);
+    expect(out.staticPrefix).toMatch(/something real to exercise/);
   });
 
-  it("teaches plan quality without binding to a fixed workflow", async () => {
+  it("keeps plan quality guidance out of the static prefix (it lives in plan_update)", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan_update"] });
-    expect(out.staticPrefix).toMatch(/Plan quality/);
-    expect(out.staticPrefix).toMatch(/Do not plan a check you cannot perform/);
-    expect(out.staticPrefix).toMatch(/edit→check→edit micro-loop/);
     expect(out.staticPrefix).toMatch(/independently checkable/);
-    // Must NOT prescribe a fixed research→implement→verify workflow or scenario examples.
+    expect(out.staticPrefix).toMatch(/plan_update`'s description/);
+    // The high/low teaching contrast was moved to the tool description; the
+    // static prefix must NOT carry it (or any fixed research→implement workflow).
+    expect(out.staticPrefix).not.toMatch(/teach by contrast/);
     expect(out.staticPrefix).not.toMatch(/research\/study/);
-    expect(out.staticPrefix).not.toMatch(/assert the 404/);
   });
 
   it("distinguishes structure checks from behaviour checks", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Structure checks ≠ behaviour checks/);
     expect(out.staticPrefix).toMatch(/Define success before volume/);
-    expect(out.staticPrefix).toMatch(/Verify at milestones, not after every edit/);
+    expect(out.staticPrefix).toMatch(/verify at milestones, not after every edit/);
   });
 
   it("contains every always-on section heading (tool-independent)", async () => {
     const out = await buildSystemPrompt(baseCtx);
     for (const heading of [
-      "Identity and Environment",
+      "CodePilot — Software Engineering Agent",
       "Tool-Use Policy",
       "Code Conventions",
       "Testing and Verification",
       "Git Etiquette",
-      "Token Efficiency",
       "Communication Style",
       "Safety and Security",
       "Tool Reference",
@@ -123,10 +121,12 @@ describe("buildSystemPrompt static prefix", () => {
     expect(full.staticPrefix).toContain("External Context (MCP)");
   });
 
-  it("includes the configured tool list", async () => {
+  it("does not duplicate the tool-name list in the static prefix (names live in the tools array)", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "bash"] });
-    expect(out.staticPrefix).toContain("`read_file`");
-    expect(out.staticPrefix).toContain("`bash`");
+    // The Tool Reference section points at each tool's own description rather
+    // than re-listing names (which already ride the provider `tools` array).
+    expect(out.staticPrefix).toContain("Tool Reference");
+    expect(out.staticPrefix).not.toMatch(/Available tools: `read_file`/);
   });
 
   it("advertises discovered skills in the stable cached block", async () => {
@@ -145,9 +145,11 @@ describe("buildSystemPrompt static prefix", () => {
     expect(empty.stableContext).not.toContain("<skills>");
   });
 
-  it("renders a fallback when no tools are exposed", async () => {
+  it("renders without a tool-name list even when no tools are exposed", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: [] });
-    expect(out.staticPrefix).toMatch(/none — reason only|no tools exposed/);
+    // No crash, and the Tool Reference section still renders (it no longer
+    // enumerates tool names, so an empty toolset needs no special fallback).
+    expect(out.staticPrefix).toContain("Tool Reference");
   });
 
   it("appends a project-specific notes block when extra is given", async () => {
@@ -393,7 +395,7 @@ describe("buildSystemPrompt dynamic suffix", () => {
     // The Memory section is capability-gated on `memory_write` (philosophy A).
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["memory_write"] });
     expect(out.staticPrefix).toContain("progressive disclosure");
-    expect(out.staticPrefix).toContain("Topic files");
+    expect(out.staticPrefix).toContain("topic files");
   });
 
   it("memory block falls back to 'no memory files yet' when both are empty", async () => {
@@ -455,16 +457,16 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(b.volatileSuffix).toContain("work");
   });
 
-  it("does not duplicate the tool list in the suffix (names live in §12 + the tools array)", async () => {
+  it("does not duplicate a tool list in the suffix (names live in the tools array)", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
       toolNames: ["bash", "edit_file"],
     });
     // The redundant <tools> block was removed to avoid re-listing tools every
-    // turn (grows with MCP). §12 of the static prefix names them instead.
+    // turn (grows with MCP). The static prefix no longer enumerates them either
+    // — each tool's own description plus the provider `tools` array is the manual.
     expect(out.dynamicSuffix).not.toContain("<tools>");
-    expect(out.staticPrefix).toContain("bash");
-    expect(out.staticPrefix).toContain("edit_file");
+    expect(out.staticPrefix).not.toMatch(/Available tools:/);
   });
 });
 
@@ -491,7 +493,7 @@ describe("buildSystemPrompt C4 contracts", () => {
   it("required sections are present under every mode", async () => {
     for (const mode of ["chat", "plan", "agent"] as const) {
       const out = await buildSystemPrompt({ ...baseCtx, mode, toolNames: ["read_file"] });
-      expect(out.staticPrefix, `identity missing in ${mode}`).toContain("Identity and Environment");
+      expect(out.staticPrefix, `identity missing in ${mode}`).toContain("CodePilot — Software Engineering Agent");
       expect(out.staticPrefix, `evidence/honesty missing in ${mode}`).toContain("Evidence and Honesty");
       expect(out.staticPrefix, `safety missing in ${mode}`).toContain("Safety and Security");
     }

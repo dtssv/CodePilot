@@ -22,7 +22,12 @@ export const planUpdateTool: ToolDef<typeof schema> = {
     "Replace the structured plan (survives compaction). Use for tasks with ≥3 real steps; " +
     "skip for roughly the easiest ~25%. Each step: `{id, title, status}` " +
     "(pending|in_progress|completed|blocked). Update when status changes, in the SAME response " +
-    "as that step's tool calls — never plan_update alone. Keep 3–8 steps; put blockers in the title.",
+    "as that step's tool calls — never plan_update alone. Keep 3–8 steps; put blockers in the title. " +
+    "A high-quality step is concrete, independently checkable, and ordered on the last; any check it " +
+    "claims must be one the project supports and the task calls for. Low-quality: a step whose check " +
+    "does not test its claim (a syntax/parse pass standing in for a behaviour check), or a tight " +
+    "edit→check→edit micro-loop as the main cadence. Do not plan a check you cannot perform — if you " +
+    "cannot verify something, say so rather than adding a step that only pretends to.",
   inputSchema: schema,
   permission: "read",
   async execute(input) {
