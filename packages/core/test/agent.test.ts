@@ -8,17 +8,17 @@ import {
   hasUnfinishedPlan,
   isWaitingForUser,
   looksLikeIncompleteTurn,
-} from "../src/agent.js";
+} from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type {
   ChatProvider,
   StreamChatOptions,
   StreamEvent,
 } from "../src/providers/types.js";
-import type { AgentDeps } from "../src/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 import type { Event } from "../src/types.js";
 
 class MockProvider implements ChatProvider {
@@ -492,6 +492,32 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("plan sub-agent wind-down asks for Plan sections, not Findings", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [];
+    for (let i = 0; i < 3; i++) {
+      provider.responses.push([
+        { kind: "tool_call", messageId: `m${i}`, toolCall: { type: "tool_use", id: `t${i}`, name: "echo", input: { x: String(i) } } },
+        { kind: "done", finishReason: "stop" },
+      ]);
+    }
+    const f = makeDeps(dir, provider);
+    const deps = {
+      ...f.deps(),
+      maxTurns: 2,
+      isSubagent: true,
+      subagentProfile: "plan" as const,
+      systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
+    };
+    await runAgent({ history: [], userText: "go" }, deps);
+    const nudges = provider.calls.map(systemText).join("\n---\n");
+    expect(nudges).toMatch(/### Plan/);
+    expect(nudges).toMatch(/Critical files|Blocker/);
+    expect(nudges).not.toMatch(/### Findings/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("drives the wind-down from config.convergence.cap", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
@@ -957,6 +983,64 @@ describe("runAgent (mock provider)", () => {
     const r = await runAgent({ history: [], userText: "hello" }, f.deps());
     expect(r.finalText).toBe("hi there");
     expect(r.hadToolCalls).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("onUsage receives per-turn deltas and ignores duplicate usage snapshots", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-"));
+    const provider = new MockProvider();
+    provider.responses = [
+      [
+        { kind: "text_delta", messageId: "m1", text: "ok" },
+        { kind: "usage", usage: { input: 100, output: 10, cacheRead: 40 } },
+        { kind: "usage", usage: { input: 100, output: 10, cacheRead: 40 } },
+        { kind: "done", finishReason: "stop" },
+      ],
+      [
+        { kind: "text_delta", messageId: "m2", text: "done" },
+        { kind: "usage", usage: { input: 200, output: 5, cacheRead: 150 } },
+        { kind: "usage", usage: { input: 200, output: 5, cacheRead: 150 } },
+        { kind: "done", finishReason: "stop" },
+      ],
+    ];
+    // Force a second turn via a tool call on the first response.
+    provider.responses[0] = [
+      {
+        kind: "tool_call",
+        messageId: "m1",
+        toolCall: { type: "tool_use", id: "t1", name: "echo", input: { x: "y" } },
+      },
+      { kind: "usage", usage: { input: 100, output: 10, cacheRead: 40 } },
+      { kind: "usage", usage: { input: 100, output: 10, cacheRead: 40 } },
+      { kind: "done", finishReason: "tool_use" },
+    ];
+    const f = makeDeps(dir, provider);
+    const deltas: Array<{ input: number; output: number; cacheRead?: number }> = [];
+    const usageTotal = { input: 0, output: 0, cacheRead: 0 };
+    const r = await runAgent(
+      { history: [], userText: "go" },
+      {
+        ...f.deps(),
+        onUsage: (u) => {
+          deltas.push({
+            input: u.input ?? 0,
+            output: u.output ?? 0,
+            cacheRead: u.cacheRead,
+          });
+          usageTotal.input += u.input ?? 0;
+          usageTotal.output += u.output ?? 0;
+          usageTotal.cacheRead += u.cacheRead ?? 0;
+        },
+      },
+    );
+    expect(r.finalText).toBe("done");
+    expect(deltas).toEqual([
+      { input: 100, output: 10, cacheRead: 40 },
+      { input: 200, output: 5, cacheRead: 150 },
+    ]);
+    expect(usageTotal).toEqual({ input: 300, output: 15, cacheRead: 190 });
+    const usageEvents = r.events.filter((e) => e.type === "usage");
+    expect(usageEvents).toHaveLength(2);
     rmSync(dir, { recursive: true, force: true });
   });
 

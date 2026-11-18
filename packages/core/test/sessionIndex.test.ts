@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync, unlinkSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { openSessionIndex, type SessionIndex } from "../src/sessionIndex.js";
-import { compressSessionText } from "../src/session-utils.js";
+import { openSessionIndex, type SessionIndex } from "../src/session/sessionIndex.js";
+import { compressSessionText } from "../src/session/session-utils.js";
 
 function writeSession(
   dir: string,

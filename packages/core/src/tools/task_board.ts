@@ -6,7 +6,7 @@
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import { TaskBoard, type TaskSnapshot } from "../taskBoard.js";
+import { TaskBoard, type TaskSnapshot } from "../subagent/taskBoard.js";
 
 const schema = z.object({
   action: z

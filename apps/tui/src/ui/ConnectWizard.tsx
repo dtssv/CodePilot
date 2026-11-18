@@ -220,6 +220,7 @@ async function savePreset(
     smallModel: template.smallModel,
     models,
     modelCapabilities,
+    apiStyle: template.apiStyle,
   };
   await upsertUserProvider(id, preset);
   const primary = models[0]!;
@@ -230,6 +231,8 @@ async function savePreset(
     smallModel: preset.smallModel,
     baseURL: preset.baseURL,
     apiKey: preset.apiKey,
+    apiStyle: preset.apiStyle,
+    headers: preset.headers,
     contextWindow: modelCapabilities[primary]?.contextWindow,
   });
 }

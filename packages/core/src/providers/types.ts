@@ -42,6 +42,15 @@ export interface StreamChatOptions {
   messages: ProviderMessage[];
   tools?: ProviderToolDef[];
   systemPrompt?: string;
+  /**
+   * Multi-block system prompt. When set, Anthropic sends
+   * each non-empty part as its own system content block with `cache_control`,
+   * so a change to the stable env/memory tier does not invalidate the static
+   * policy prefix cache. Other providers join the parts with `\n\n` into
+   * `systemPrompt`. Prefer this over a single concatenated string when both
+   * staticPrefix and stableContext are available.
+   */
+  systemPromptBlocks?: string[];
  /** Cache-control breakpoint hint (Anthropic). */
   cacheControl?: boolean;
  /** Stable cache-affinity key (OpenAI `prompt_cache_key`). Routes requests

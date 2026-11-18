@@ -19,12 +19,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Session } from "../src/session.js";
+import { Session } from "../src/session/session.js";
 import {
   sessionPath,
   SESSIONS_DIR,
   recoverSuspendedSessions,
-} from "../src/session-utils.js";
+} from "../src/session/session-utils.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 

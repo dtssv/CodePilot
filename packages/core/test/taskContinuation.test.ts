@@ -65,6 +65,35 @@ describe("task tool — unique ids & runSeq", () => {
   });
 });
 
+describe("task tool — turn budget handoff", () => {
+  it("surfaces [turn budget reached] so the parent can resume without asking the user", async () => {
+    const specs: SubagentRunSpec[] = [];
+    const tool = taskTool;
+    tool.runner = {
+      async run(spec: SubagentRunSpec): Promise<SubagentRunResult> {
+        specs.push(spec);
+        return {
+          conclusion:
+            "### Findings\n- done\n\n[turn budget reached: 1, 1 tool step(s). Parent: resume with continue_session_id if more work is needed; do not re-dispatch the same objective.]",
+          steps: 1,
+          ok: true,
+          sessionId: spec.ownerId ?? "sub_budget",
+          reachedTurnBudget: true,
+        };
+      },
+    };
+    tool._sem = undefined;
+    tool._spawned = 0;
+    tool._runSeq = 0;
+
+    const r = await tool.execute({ objective: "ping", maxSteps: 1 } as never, ctxWith([]) as never);
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toMatch(/\[turn budget reached\]/);
+    expect(r.content).toMatch(/continue_session_id/);
+    expect(r.content).toMatch(/turn budget reached: 1/);
+  });
+});
+
 describe("task tool — continue an existing sub-agent", () => {
   it("passes resumeSessionId through so the runner continues the same run", async () => {
     const mock = makeMockRunner();

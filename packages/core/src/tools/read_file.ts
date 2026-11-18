@@ -6,7 +6,7 @@ import { stat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardPath } from "./_shared.js";
-import { hashFileContent } from "../fsObservation.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 
 const schema = z.object({
   path: z.string().describe("Path to the file (absolute or relative to cwd)."),
@@ -40,10 +40,11 @@ const DEFAULT_MAX_READ_BYTES = 64 * 1024 * 1024;
 export const readFileTool: ToolDef<typeof schema> = {
   name: "read_file",
   description:
-    "Read a text file (`N→line` numbering). Prefer `grep`/`glob` for discovery; don't " +
-    "re-read unchanged files. Window large files with `startLine`/`maxLines`; >~60KB " +
-    "spills to an artifact (`read_artifact`). Files over the read-size limit (default " +
-    "64 MiB) are refused — use bash (`head`/`sed`/`grep`) for those. Required before editing.",
+    "Read a text file (`N→line` numbering). Required for source — shell `cat`/`head`/`for…cat` " +
+    "is refused. Discover with `grep`/`glob` first; don't re-read unchanged files. Parallelise " +
+    "independent reads in one turn (README + failing sources together). Window with " +
+    "`startLine`/`maxLines`; >~60KB spills to an artifact (`read_artifact`). Over the " +
+    "read-size limit (default 64 MiB) → refuse.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
@@ -112,7 +113,7 @@ export const readFileTool: ToolDef<typeof schema> = {
         numbered;
     }
     // Record the observation so a later edit_file/write_file/apply_patch can
-    // assert read-before-write and detect a stale (externally changed) file.
+    // seed the observation store so later edits can detect a stale file.
     // The content hash lets a subsequent write survive a jittered mtime when
     // the bytes are actually unchanged.
     ctx.observeFile?.(p, { mtimeMs: st.mtimeMs, size: st.size }, hashFileContent(buf));
@@ -120,7 +121,7 @@ export const readFileTool: ToolDef<typeof schema> = {
   },
 };
 
-function formatLine(n: number, text: string): string {
+export function formatLine(n: number, text: string): string {
   const body =
     text.length > MAX_LINE_CHARS
       ? text.slice(0, MAX_LINE_CHARS) + `… [${text.length - MAX_LINE_CHARS} chars truncated]`

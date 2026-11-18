@@ -3,7 +3,7 @@ import {
   reasoningEffortChoicesForModel,
   reasoningEffortFromChoice,
   supportsReasoningEffort,
-} from "../src/reasoningEffort.js";
+} from "../src/config/reasoningEffort.js";
 
 describe("reasoningEffortChoicesForModel", () => {
   it("exposes low/medium/high for OpenAI o-series", () => {

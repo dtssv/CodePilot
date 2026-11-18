@@ -2,17 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAgent } from "../src/agent.js";
+import { runAgent } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type {
   ChatProvider,
   StreamChatOptions,
   StreamEvent,
 } from "../src/providers/types.js";
-import type { AgentDeps } from "../src/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 
 class MockProvider implements ChatProvider {
   readonly name = "mock";

@@ -8,7 +8,7 @@
 // written against the same `RuntimeToolkit` a plugin gets, so neither can
 // reach anything a plugin could not.
 
-import { runtimeRegistry } from "../runtime.js";
+import { runtimeRegistry } from "../agent/runtime.js";
 import { auditRuntimeFactory } from "./audit.js";
 import { mctsRuntimeFactory } from "./mcts.js";
 

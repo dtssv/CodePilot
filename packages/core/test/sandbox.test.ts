@@ -17,14 +17,18 @@ import {
   looksLikeSandboxWriteDenial,
   looksLikeSandboxNetworkDenial,
   winPathToWsl,
+  bwrapSensitiveMasks,
   wrapCommand,
   detectSandboxBackend,
   modelShellEnv,
   sandboxUnavailableHint,
   buildSandboxUnavailable,
-} from "../src/sandbox.js";
+  formatSandboxPromptNote,
+  SANDBOX_PROMPT_EXTRA_ROOTS_CAP,
+} from "../src/sandbox/sandbox.js";
 import { mkdtemp, writeFile, symlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -228,12 +232,29 @@ describe("buildSeatbeltProfile", () => {
     expect(profile).toContain('(allow network-outbound (remote ip "localhost:54321"))');
   });
 
-  it("leaves network open in proxy mode when the proxy is not started yet", () => {
-    // No proxyUrl → cooperative/best-effort, so the profile must not lock the
-    // network down (that would block the un-proxied command entirely).
+  it("fails closed in proxy mode when no proxy is running", () => {
+    // No proxyUrl means the proxy failed to start; falling back to full egress
+    // would silently bypass the allowlist.
     const p = resolveSandbox({ network: { mode: "proxy", allow: ["x"] } }, cwd);
     const profile = buildSeatbeltProfile(p);
-    expect(profile).not.toContain("(deny network*)");
+    expect(profile).toContain("(deny network*)");
+    expect(profile).not.toContain("allow network-outbound");
+    const bwrap = wrapCommand("true", p, { backend: "bwrap", slirpPath: null });
+    expect(bwrap.command).toContain("'--unshare-net'");
+  });
+
+  it("keeps CodePilot's own control files read-only inside the jail", () => {
+    const p = resolveSandbox(undefined, cwd);
+    const profile = buildSeatbeltProfile(p);
+    const home = homedir();
+    for (const name of ["config.json", "plugins", "bin", "mcp-trust.json"]) {
+      expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(join(home, ".codepilot", name))}))`);
+    }
+    expect(profile).toContain(
+      `(deny file-read* (subpath ${JSON.stringify(join(home, ".codepilot", "server.json"))}))`,
+    );
+    // The project-state dir itself stays writable.
+    expect(profile).toContain(`(allow file-write* (subpath ${JSON.stringify(join(home, ".codepilot"))}))`);
   });
 
   it("does not touch network for full mode", () => {
@@ -434,6 +455,27 @@ describe("sensitivePathHit (mode-independent sensitive-path floor)", () => {
   });
 });
 
+describe("bwrapSensitiveMasks", () => {
+  it("hides directories with tmpfs and files with /dev/null; skips missing paths", async () => {
+    const d = await mkdtemp(join(tmpdir(), "cp-mask-"));
+    await mkdir(join(d, ".ssh"));
+    await writeFile(join(d, "credentials"), "secret");
+    const args = bwrapSensitiveMasks([join(d, ".ssh"), join(d, "credentials"), join(d, "missing")]);
+    expect(args).toEqual([
+      "--tmpfs", join(d, ".ssh"),
+      "--ro-bind", "/dev/null", join(d, "credentials"),
+    ]);
+  });
+
+  it("maps the in-jail path through toJail", async () => {
+    const d = await mkdtemp(join(tmpdir(), "cp-mask-"));
+    await mkdir(join(d, ".gnupg"));
+    expect(bwrapSensitiveMasks([join(d, ".gnupg")], (p) => `/mnt/x${p}`)).toEqual([
+      "--tmpfs", `/mnt/x${join(d, ".gnupg")}`,
+    ]);
+  });
+});
+
 describe("winPathToWsl", () => {
   it("translates drive-letter paths", () => {
     expect(winPathToWsl("C:\\Users\\bob\\repo")).toBe("/mnt/c/Users/bob/repo");
@@ -492,6 +534,27 @@ describe("modelShellEnv", () => {
     const env = modelShellEnv({ A: "1", B: undefined } as NodeJS.ProcessEnv);
     expect(env.A).toBe("1");
     expect("B" in env).toBe(false);
+  });
+
+  it("inherits secrets by default; excludeSecrets withholds them except passthrough", () => {
+    const base = {
+      PATH: "/usr/bin",
+      SSH_AUTH_SOCK: "/tmp/agent.sock",
+      ANTHROPIC_API_KEY: "a",
+      openai_api_key: "b",
+      GITHUB_TOKEN: "c",
+      AWS_SECRET_ACCESS_KEY: "d",
+      PGPASSWORD: "e",
+      GOOGLE_APPLICATION_CREDENTIALS: "f",
+      NPM_TOKEN: "g",
+    };
+    expect(modelShellEnv(base).ANTHROPIC_API_KEY).toBe("a");
+    const env = modelShellEnv(base, { excludeSecrets: true });
+    expect(Object.keys(env).filter((k) => k in base).sort()).toEqual(["PATH", "SSH_AUTH_SOCK"]);
+    const opened = modelShellEnv(base, { excludeSecrets: true, passthrough: ["GITHUB_TOKEN", "AWS_*"] });
+    expect(opened.GITHUB_TOKEN).toBe("c");
+    expect(opened.AWS_SECRET_ACCESS_KEY).toBe("d");
+    expect(opened.NPM_TOKEN).toBeUndefined();
   });
 });
 
@@ -700,5 +763,62 @@ describe("sandboxUnavailableHint", () => {
     expect(d.backend).toBe("none");
     expect(d.platform).toBe("win32");
     expect(d.hint).toMatch(/WSL2/);
+  });
+});
+
+describe("formatSandboxPromptNote", () => {
+  it("describes defaults in prose and lists only extra roots", () => {
+    const note = formatSandboxPromptNote({
+      mode: "workspace-write",
+      network: true,
+      extraWritablePaths: ["/work/extra-a", "/work/extra-b"],
+    });
+    expect(note).toContain("mode=workspace-write");
+    expect(note).toContain("network=allowed");
+    expect(note).toContain("OS jail: cwd + OS temp + ~/.codepilot + 2 extra");
+    expect(note).toContain("request access; do not tweak-and-retry");
+    expect(note).toContain("  - /work/extra-a");
+    expect(note).toContain("  - /work/extra-b");
+    // Defaults must not be enumerated (was the cache/prompt bloat).
+    expect(note).not.toContain("/tmp");
+    expect(note).not.toContain("/private/tmp");
+    expect(note).not.toMatch(/Writable roots \(OS sandbox/);
+  });
+
+  it("omits the extras block when there are no grants", () => {
+    const note = formatSandboxPromptNote({
+      mode: "workspace-write",
+      network: false,
+      extraWritablePaths: [],
+    });
+    expect(note).toContain("network=blocked");
+    expect(note).toContain("OS jail: cwd + OS temp + ~/.codepilot.");
+    expect(note).not.toContain("Extra writable roots");
+    expect(note).not.toMatch(/\+ \d+ extra/);
+  });
+
+  it("caps listed extras and reports how many were omitted", () => {
+    const extras = Array.from({ length: SANDBOX_PROMPT_EXTRA_ROOTS_CAP + 3 }, (_, i) => `/extra/${i}`);
+    const note = formatSandboxPromptNote({
+      mode: "read-only",
+      network: false,
+      extraWritablePaths: extras,
+    });
+    expect(note).toContain(`+ ${extras.length} extra`);
+    expect(note).toContain("  - /extra/0");
+    expect(note).toContain(`  - /extra/${SANDBOX_PROMPT_EXTRA_ROOTS_CAP - 1}`);
+    expect(note).not.toContain(`  - /extra/${SANDBOX_PROMPT_EXTRA_ROOTS_CAP}`);
+    expect(note).toContain("(+3 more not listed");
+  });
+
+  it("appends the unavailable-backend warning when given a hint", () => {
+    const note = formatSandboxPromptNote({
+      mode: "workspace-write",
+      network: true,
+      extraWritablePaths: [],
+      unavailableHint: "install bubblewrap",
+    });
+    expect(note).toMatch(/WARNING: no OS sandbox backend/);
+    expect(note).toContain("install bubblewrap");
   });
 });

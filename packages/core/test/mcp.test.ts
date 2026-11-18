@@ -12,7 +12,7 @@ import {
   mcpToolName,
   mcpResourceToolName,
   parseMcpToolName,
-} from "../src/mcp.js";
+} from "../src/mcp/mcp.js";
 
 // ---------------------------------------------------------------------------
 // Mock MCP server helpers

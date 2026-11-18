@@ -1,0 +1,685 @@
+// Skill system: discovers SKILL.md folders (frontmatter + markdown body),
+// advertises name + description in the system prompt, and loads the full body
+// on demand via the `skill` tool (progressive disclosure). Source priority:
+// project, user, ecosystem-compat (.claude/.agents/.opencode), extra, built-in.
+// `config.skills.enabled:false` disables all; `disabled` omits named skills.
+
+import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join, dirname, isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface Skill {
+ /** Canonical skill name (from frontmatter, or the folder name as fallback). */
+  name: string;
+ /** One-line description shown in the system prompt summary. */
+  description: string;
+ /** Optional hint for when the skill should be invoked. */
+  when?: string;
+ /** Optional list of tool names the skill expects to use. */
+  tools?: string[];
+ /** Absolute path to the SKILL.md file on disk. */
+  path: string;
+ /** Absolute path to the skill directory. */
+  dir: string;
+ /** Which source this skill came from. */
+  source: SkillSource;
+ /** Full markdown body (frontmatter stripped). */
+  body: string;
+ /** When true, the skill is discovered and still loadable by name (via the
+ * `skill` tool / slash / RPC), but is NOT advertised in the `<skills>` prompt
+ * section — it does not occupy the model's description budget and the model
+ * will not pick it on its own. Default false. Orthogonal to
+ * `config.skills.disabled` (which omits the skill entirely). */
+  userInvocableOnly?: boolean;
+}
+
+export type SkillSource = "project" | "user" | "builtin" | "compat";
+
+export interface DiscoverOptions {
+  /** Override the project-local skills directory (defaults to `<cwd>/.codepilot/skills`). */
+  projectDir?: string;
+  /** Override the user-global skills directory (defaults to `~/.codepilot/skills`). */
+  userDir?: string;
+  /** Override the built-in skills directory. Defaults to the directory shipped
+ * with `@codepilot/core` (resolved from this module's location). */
+  builtinDir?: string;
+  /** Extra explicit skill directories to scan (lowest priority after builtins). */
+  extraDirs?: string[];
+  /** Also scan ecosystem-compatible skill roots (default true). */
+  includeCompatDirs?: boolean;
+  /** Skill names to omit (from `config.skills.disabled`). Empty = include all. */
+  disabledNames?: readonly string[];
+  /** When false, skip reading `~/.codepilot/config.json` for disabled names. Default true. */
+  applyConfigDisabled?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter parser (deliberately minimal)
+// ---------------------------------------------------------------------------
+
+/** Parse a SKILL.md into frontmatter keys + body. Only `name`, `description`,
+ * `when`, `tools`, `user-invocable-only` are recognised; lists use YAML flow
+ * `[a,b,c]` or repeated `- ` keys. No anchors/includes (no full YAML parser). */
+export function parseSkillMd(
+  text: string
+): { name?: string; description?: string; when?: string; tools?: string[]; userInvocableOnly?: boolean } {
+  const out: {
+    name?: string;
+    description?: string;
+    when?: string;
+    tools?: string[];
+    userInvocableOnly?: boolean;
+  } = {};
+ // Detect leading frontmatter: must start with `---` on its own line.
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0 || lines[0]?.trim() !== "---") return out;
+ // Find the closing `---`.
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]?.trim() === "---") {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) return out;
+
+  const fmLines = lines.slice(1, end);
+  let currentKey: string | null = null;
+  for (const raw of fmLines) {
+    const line = raw.replace(/\s+$/, "");
+    if (line.length === 0) continue;
+    if (/^\s/.test(line) && currentKey) {
+ // Continuation — list item under the current key.
+      const trimmed = line.trim();
+      if (currentKey === "tools") {
+        if (trimmed.startsWith("- ")) {
+          out.tools = out.tools ?? [];
+          out.tools.push(trimmed.slice(2).trim());
+        }
+      }
+      continue;
+    }
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
+    if (!m) continue;
+    const key = m[1]!.toLowerCase();
+    const value = (m[2] ?? "").trim();
+    currentKey = key;
+    if (value.length === 0) continue; // list starts on next line
+    if (key === "name") out.name = stripQuotes(value);
+    else if (key === "description") out.description = stripQuotes(value);
+    else if (key === "when") out.when = stripQuotes(value);
+    else if (key === "user-invocable-only" || key === "disable-model-invocation") {
+      // Both spellings mean the same thing: discover + user-loadable, but keep
+      // it out of the model-facing <skills> catalog. Accepts true/yes/1.
+      out.userInvocableOnly = /^(true|yes|1)$/i.test(stripQuotes(value));
+    } else if (key === "tools") {
+ // Either flow list `[a, b, c]` or a single bare value.
+      const flow = value.match(/^\[(.*)\]$/);
+      if (flow) {
+        out.tools = flow[1]!
+          .split(",")
+          .map((s) => stripQuotes(s.trim()))
+          .filter((s) => s.length > 0);
+      } else {
+        out.tools = [stripQuotes(value)];
+      }
+    }
+  }
+  return out;
+}
+
+function stripQuotes(s: string): string {
+  if (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+// ---------------------------------------------------------------------------
+
+const BUILTIN_SKILLS_DIR_HINT = ["skills"]; // relative to packages/core/
+
+/** Resolve the built-in skills directory relative to this module, so the
+ * result is stable regardless of caller cwd. */
+export function defaultBuiltinSkillsDir(): string {
+  // Source: <pkg>/src/skills/skills.ts → <pkg>; dist: <pkg>/dist/skills/skills.js → <pkg>.
+  const here = fileURLToPath(import.meta.url);
+  const pkgRoot = resolve(dirname(here), "..", "..");
+  return join(pkgRoot, ...BUILTIN_SKILLS_DIR_HINT);
+}
+
+/** Walk a directory looking for immediate subdirectories that contain a
+ * `SKILL.md`. Non-recursive on purpose — each skill is exactly one folder.
+ * Missing directories are not an error — they simply return `[]`, and the
+ * caller falls back to the embedded built-in skills. */
+async function scanDirForSkills(
+  dir: string,
+  source: SkillSource
+): Promise<Skill[]> {
+  if (!existsSync(dir)) return [];
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const out: Skill[] = [];
+  for (const entry of entries) {
+    if (entry.startsWith(".")) continue;
+    const skillDir = join(dir, entry);
+    let st;
+    try {
+      st = await stat(skillDir);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    const skillPath = join(skillDir, "SKILL.md");
+    let text: string;
+    try {
+      text = await readFile(skillPath, "utf-8");
+    } catch {
+      continue;
+    }
+    const fm = parseSkillMd(text);
+    const body = stripFrontmatter(text);
+    const name = fm.name ?? entry;
+    out.push({
+      name,
+      description: fm.description ?? "",
+      when: fm.when,
+      tools: fm.tools,
+      path: skillPath,
+      dir: skillDir,
+      source,
+      body,
+      userInvocableOnly: fm.userInvocableOnly,
+    });
+  }
+  return out;
+}
+
+/** Build a `Skill` from the embedded `BUILTIN_SKILLS` table. We assign the
+ * on-disk path to a synthetic placeholder under the resolved builtin dir so
+ * the field is always a real absolute path; tests and production code can
+ * rely on `path` being non-empty. */
+function builtinSkillObjects(): Skill[] {
+  const dir = defaultBuiltinSkillsDir();
+  const out: Skill[] = [];
+  for (const b of BUILTIN_SKILLS) {
+    const fm = parseSkillMd(b.markdown);
+    out.push({
+      name: fm.name ?? b.name,
+      description: fm.description ?? "",
+      when: fm.when,
+      tools: fm.tools,
+      path: join(dir, b.name, "SKILL.md"),
+      dir: join(dir, b.name),
+      source: "builtin",
+      body: stripFrontmatter(b.markdown),
+      userInvocableOnly: fm.userInvocableOnly,
+    });
+  }
+  return out;
+}
+
+function stripFrontmatter(text: string): string {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0 || lines[0]?.trim() !== "---") return text;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]?.trim() === "---") {
+      return lines.slice(i + 1).join("\n").replace(/^\s*\n/, "");
+    }
+  }
+  return text;
+}
+
+/** Discover skills from all sources. First definition of a name wins
+ * (project > user > compat > builtin). `extraDirs` is scanned after builtins
+ * with the `project` label. Built-ins prefer on-disk `packages/core/skills/`,
+ * falling back to the embedded `BUILTIN_SKILLS` table. */
+export async function discoverSkills(
+  cwd: string,
+  extraDirs: string[] | string | DiscoverOptions = []
+): Promise<Skill[]> {
+  const opts: DiscoverOptions =
+    typeof extraDirs === "string" || Array.isArray(extraDirs)
+      ? { extraDirs: Array.isArray(extraDirs) ? extraDirs : [extraDirs] }
+      : extraDirs;
+  const projectDir =
+    opts.projectDir ?? join(cwd, ".codepilot", "skills");
+  const userDir = opts.userDir ?? join(homedir(), ".codepilot", "skills");
+  const builtinDir = opts.builtinDir ?? defaultBuiltinSkillsDir();
+  const extra = opts.extraDirs ?? [];
+
+  const collected: Skill[] = [];
+  const seen = new Set<string>();
+  const add = (s: Skill) => {
+    if (seen.has(s.name)) return;
+    seen.add(s.name);
+    collected.push(s);
+  };
+
+  const projectSkills = await scanDirForSkills(projectDir, "project");
+  for (const s of projectSkills) add(s);
+  const userSkills = await scanDirForSkills(userDir, "user");
+  for (const s of userSkills) add(s);
+
+  // Ecosystem-compatible skill roots.
+  if (opts.includeCompatDirs !== false) {
+    const home = homedir();
+    const compatDirs = [
+      join(cwd, ".claude", "skills"),
+      join(cwd, ".agents", "skills"),
+      join(cwd, ".opencode", "skills"),
+      join(home, ".claude", "skills"),
+      join(home, ".agents", "skills"),
+      join(home, ".config", "opencode", "skills"),
+    ];
+    for (const d of compatDirs) {
+      const more = await scanDirForSkills(d, "compat");
+      for (const s of more) add(s);
+    }
+  }
+
+  for (const ed of extra) {
+    if (!ed) continue;
+    const abs = isAbsolute(ed) ? ed : resolve(cwd, ed);
+    const more = await scanDirForSkills(abs, "project");
+    for (const s of more) add(s);
+  }
+ // Built-ins: prefer on-disk (lets the source tree override), fall back to
+ // the embedded table.
+  const onDiskBuiltins = await scanDirForSkills(builtinDir, "builtin");
+  if (onDiskBuiltins.length > 0) {
+    for (const s of onDiskBuiltins) add(s);
+  } else {
+    for (const s of builtinSkillObjects()) add(s);
+  }
+
+ // Stable order: by source priority, then alphabetically by name.
+  const priority: Record<SkillSource, number> = {
+    project: 0,
+    user: 1,
+    compat: 2,
+    builtin: 3,
+  };
+  collected.sort((a, b) => {
+    const pa = priority[a.source] - priority[b.source];
+    if (pa !== 0) return pa;
+    return a.name.localeCompare(b.name);
+  });
+
+  const disabled = new Set<string>(
+    (opts.disabledNames ?? []).map((n) => n.trim()).filter(Boolean),
+  );
+  if (opts.applyConfigDisabled !== false) {
+    for (const n of await readDisabledSkillNames()) disabled.add(n);
+  }
+  if (disabled.size === 0) return collected;
+  return collected.filter((s) => !disabled.has(s.name));
+}
+
+/** Names listed in `~/.codepilot/config.json` → `skills.disabled`. */
+export async function readDisabledSkillNames(): Promise<string[]> {
+  try {
+    const raw = await readFile(join(homedir(), ".codepilot", "config.json"), "utf-8");
+    const cfg = JSON.parse(raw) as { skills?: { disabled?: unknown } };
+    const list = cfg.skills?.disabled;
+    if (!Array.isArray(list)) return [];
+    return list.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Matching
+// ---------------------------------------------------------------------------
+
+/** Find the best skill for a query (case-insensitive): exact name, then
+ * substring, then keyword in name/description/`when`. Returns `null` if none
+ * match. */
+export function matchSkill(skills: Skill[], query: string): Skill | null {
+  const q = query.trim().toLowerCase();
+  if (q.length === 0) return null;
+ // 1. exact name
+  for (const s of skills) {
+    if (s.name.toLowerCase() === q) return s;
+  }
+ // 2. name substring
+  for (const s of skills) {
+    if (s.name.toLowerCase().includes(q)) return s;
+  }
+ // 3. keyword in name / description / when
+  for (const s of skills) {
+    const hay = `${s.name} ${s.description} ${s.when ?? ""}`.toLowerCase();
+    if (hay.includes(q)) return s;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// System-prompt section (progressive disclosure)
+// ---------------------------------------------------------------------------
+
+/** Render the system-prompt skill list: name + one-line description only.
+ * Full instructions load on demand via the `skill` tool to keep the prefix
+ * small. */
+export function skillsPromptSection(skills: Skill[]): string {
+  // Skills flagged user-invocable-only are discovered and still loadable by
+  // name, but omitted from the model-facing catalog so they do not occupy the
+  // description budget and the model will not pick them on its own.
+  const advertised = skills.filter((s) => !s.userInvocableOnly);
+  if (advertised.length === 0) return "";
+  const lines: string[] = [];
+  lines.push(`<skills>`);
+  lines.push(
+    "The following skills are available. Each one is a reusable instruction " +
+      "set you can load on demand by calling the `skill` tool with the skill " +
+      "name. Load when the user request matches a description — pick the **single " +
+      "best** match (load a second only if scopes do not overlap); **no match → do not load**. The tool returns " +
+      "the full body: **append** it (replaces only the one-line blurb above). Core " +
+      "Safety / Evidence / Git always win over any skill; if two loaded skills " +
+      "conflict, the later load wins for workflow steps only."
+  );
+  for (const s of advertised) {
+    const when = s.when ? ` — when: ${s.when}` : "";
+    const tools = s.tools && s.tools.length > 0 ? ` [tools: ${s.tools.join(", ")}]` : "";
+    lines.push(`- \`${s.name}\`: ${s.description || "(no description)"}${when}${tools}`);
+  }
+  lines.push(`</skills>`);
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: load a single skill by name (used by the `skill` tool)
+// ---------------------------------------------------------------------------
+
+/** Look up a skill by exact name in a pre-discovered list. */
+export function findSkill(skills: Skill[], name: string): Skill | null {
+  for (const s of skills) {
+    if (s.name === name) return s;
+  }
+ // case-insensitive fallback
+  const lower = name.toLowerCase();
+  for (const s of skills) {
+    if (s.name.toLowerCase() === lower) return s;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Built-in skill body (embedded so the package is self-contained).
+// ---------------------------------------------------------------------------
+//
+// The SKILL.md files also live in `packages/core/skills/` for on-disk reading,
+// but we embed the markdown so discovery doesn't depend on installation layout
+// (pnpm flattening / npm hoisting). Discovery falls back to the on-disk copy
+// if present, else constructs the Skill from these.
+
+export const BUILTIN_SKILLS: ReadonlyArray<{ name: string; markdown: string }> = [
+  {
+    name: "commit",
+    markdown: `---
+name: commit
+description: Generate a Conventional Commits message and create a single logical commit for the current staged/unstaged work.
+when: The user asks to commit, save, or record the current change.
+tools:
+  - bash
+  - read_file
+  - grep
+---
+
+# commit
+
+Use this skill when the user asks to commit the current change set.
+
+## Workflow
+
+1. Inspect the working tree:
+   - \`git status --short\`
+   - \`git diff --stat\`
+   - \`git log -5 --oneline\` to confirm the project's commit style.
+
+2. Decide what belongs in the commit. The default is **one logical commit** for
+   everything the user just asked for. If the change set mixes unrelated concerns
+   (e.g. a feature and a refactor), stop and ask the user before splitting.
+
+3. Stage the relevant files with \`git add <paths>\`. Do **not** stage
+   \`.codepilot/\`, \`dist/\`, \`node_modules/\`, or anything covered by
+   \`.gitignore\`.
+
+4. Write the commit message in **Conventional Commits** format:
+
+       <type>(<scope>)<!>: <short summary>
+
+       <body — explain WHY, not what. Wrap at 72 cols.>
+
+       <footer — references, breaking-change notes>
+
+   - \`type\` is one of \`feat\`, \`fix\`, \`chore\`, \`docs\`, \`refactor\`,
+     \`test\`, \`perf\`, \`build\`, \`ci\`, \`style\`, \`revert\`.
+   - \`!\` marks a breaking change.
+   - Subject ≤ 72 chars, imperative mood, no trailing period.
+   - If the project uses a different convention (look at \`git log\`), follow
+     that instead.
+
+5. Create the commit with \`git commit -m "<subject>\" -m "<body>"\`. Use a
+   single \`-m\` per paragraph for clean formatting.
+
+6. Do **not** push, force-push, amend, or rewrite history. If the user asked
+   for any of those, confirm before doing it.
+
+7. Report the new commit's short SHA and subject in your final message.
+`,
+  },
+  {
+    name: "review",
+    markdown: `---
+name: review
+description: Read a diff (staged, unstaged, or branch-vs-base) and produce a structured code review with severity-tagged findings.
+when: The user asks to review, audit, or critique a change.
+tools:
+  - bash
+  - read_file
+  - grep
+---
+
+# review
+
+Use this skill when the user asks for a code review of a change set.
+
+## Workflow
+
+1. Determine the diff to review. Pick the right one:
+   - Working tree: \`git diff\`
+   - Staged: \`git diff --cached\`
+   - vs. main: \`git diff main...HEAD\`
+   - A specific commit: \`git show <sha>\`
+   If unclear, ask the user.
+
+2. Read the surrounding code for any region that is non-obvious. Do not
+   review in a vacuum — context matters for naming, error handling, and
+   invariant checks.
+
+3. Walk the diff in source order. For each hunk, check:
+   - **Correctness**: Does the code do what it claims? Are there off-by-one,
+     null/undefined, async/await, or resource-leak bugs?
+   - **Edge cases**: Empty inputs, very large inputs, concurrent access,
+     partial failure.
+   - **API surface**: Are public signatures backwards-compatible? Is the new
+     error contract documented?
+   - **Tests**: Is the change covered? Are the new tests meaningful (not
+     tautological)?
+   - **Naming / readability**: Would a new contributor understand this in 6
+     months?
+   - **Security**: Any untrusted input that reaches a sink? Any new secret
+     handling?
+   - **Performance**: Any obvious O(n²) where O(n) is available? Any
+     accidental work in hot paths?
+
+4. Output the review as a Markdown list. Tag each finding with a severity:
+
+   - \`[blocker]\` — must fix before merge (correctness, security, data loss).
+   - \`[major]\` — should fix; meaningful defect or maintainability hit.
+   - \`[minor]\` — nitpick; would-be-nice polish.
+   - \`[nit]\` — style / preference only.
+
+   For each finding, cite the file and line range, quote the relevant code,
+   and propose a concrete fix.
+
+5. End the review with a short **summary**:
+   - Overall verdict (\`approve\`, \`request changes\`, \`comment\`).
+   - One-line per-file takeaway.
+   - Anything you explicitly did **not** review (e.g. generated code,
+     vendored dependencies).
+`,
+  },
+  {
+    name: "skill-creator",
+    markdown: `---
+name: skill-creator
+description: Create, improve, and edit CodePilot skills (SKILL.md). Use whenever the user wants to create a skill, write /skill-creator, turn a workflow into a skill, or edit an existing skill under ~/.codepilot/skills or .codepilot/skills.
+when: The user asks to create or improve a skill, mentions skill-creator, or wants to capture a repeatable workflow as a skill.
+tools:
+  - write_file
+  - edit_file
+  - read_file
+  - bash
+  - grep
+---
+
+# skill-creator
+
+Help the user create or improve a **CodePilot skill** — a folder with \`SKILL.md\` that the agent loads on demand via the \`skill\` tool.
+
+## CodePilot skill locations
+
+| Scope | Path | When to use |
+|-------|------|-------------|
+| User (default) | \`~/.codepilot/skills/<name>/SKILL.md\` | Personal skills across projects |
+| Project | \`<cwd>/.codepilot/skills/<name>/SKILL.md\` | Shared with the repo |
+| Builtin | shipped with CodePilot | Do not overwrite; copy to user/project to customize |
+
+Directory name **must** match frontmatter \`name\` (lowercase, digits, hyphens).
+
+## Capture intent
+
+If the conversation already contains a workflow ("turn this into a skill"), extract steps, tools, corrections, and I/O formats first. Otherwise ask:
+
+1. What should this skill enable the agent to do?
+2. When should it trigger? (phrases / contexts)
+3. Expected output format?
+4. User-global or project-local?
+
+Confirm before writing files.
+
+## Write SKILL.md
+
+\`\`\`markdown
+---
+name: my-skill
+description: What it does AND when to use it (include trigger phrases; be a bit pushy so it is not under-triggered).
+when: Optional short hint.
+tools:
+  - read_file
+  - bash
+---
+
+# my-skill
+
+## Workflow
+1. …
+2. …
+
+## Examples
+…
+\`\`\`
+
+### Description rules
+
+- Third person; include **what** + **when**.
+- Put all "when to use" info in \`description\`, not only in the body.
+- Prefer imperative steps in the body; keep body under ~500 lines.
+- Optional: \`references/\`, \`scripts/\`, \`assets/\` next to \`SKILL.md\` for progressive disclosure.
+
+### Writing style
+
+Prefer explaining *why* over heavy MUSTs. Stay general; avoid malware or deceptive skills.
+
+## After writing
+
+1. Write the file with \`write_file\` / \`edit_file\`.
+2. Tell the user the path and that **new sessions** pick it up (or reload).
+3. Suggest a short test prompt they can send to verify triggering.
+4. Offer to iterate on the description if it under-triggers.
+
+## Editing existing skills
+
+- User/project skills: edit the \`SKILL.md\` in place.
+- Builtin skills: copy to \`~/.codepilot/skills/<name>/SKILL.md\` first (user copy wins), then edit.
+- Settings → 技能 also allows viewing/editing markdown; keep that file valid.
+
+## Do not
+
+- Create skills under Cursor-only paths (\`~/.cursor/skills-cursor/\`).
+- Invent secrets or hard-code API keys into skills.
+- Overwrite project skills without asking when a user copy would suffice.
+`,
+  },
+  {
+    name: "verify",
+    markdown: `---
+name: verify
+description: Run the project's relevant verification (test, build, lint, or acceptance check) and report the command plus exit outcome before claiming work is done.
+when: At a milestone or before claiming the task done (not after every tiny edit); or when the user asks to verify / check / confirm the change.
+tools:
+  - bash
+  - read_file
+  - grep
+  - glob
+  - diagnostics
+---
+
+# verify
+
+Use this skill when work needs evidence of correctness — not a task-specific
+checklist, a generic verify-before-done gate.
+
+## Workflow
+
+1. Infer the right verify command from the repo (package scripts, Makefile,
+   CI config, or project memory). Prefer the narrowest useful check first
+   (unit/file-level), then broaden if the change is cross-cutting.
+2. Run it with \`bash\` (or \`diagnostics\` when language-server feedback is enough).
+3. On failure: read the failure, fix the root cause, re-run. Do not disable
+   assertions or skip tests to force green.
+4. On success: state the command and exit code in your reply. Only then mark
+   related plan steps \`completed\` or claim the task done.
+
+## Notes
+
+- A visual comparison (e.g. \`read_image\`) is warranted only when the task
+  supplies a concrete visual reference to match — a mockup, a design, a "make
+  it look like X". Then compare the result against that same reference near
+  completion, in addition to any build step — not an edit↔screenshot loop.
+  Building UI from a description with no such reference does not call for
+  screenshotting it; a clean build/run is the check.
+- If verification is impossible (missing tooling, no network, no harness), say
+  so explicitly instead of pretending the change was verified.
+`,
+  },
+];

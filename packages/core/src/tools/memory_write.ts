@@ -1,17 +1,16 @@
 // memory_write: append durable knowledge to project-state MEMORY.md
-// or user-level MEMORY.md, mirroring into a progressive index + topic files
-// (thin index in the prompt; full notes via read_file). Auto-allowed and
-// UI-silent. `section` lands the entry under a MEMORY.md heading; optional
-// `topic`/`category` override the progressive-disclosure target.
+// or user-level MEMORY.md, mirroring into progressive notes/ (capped inbox).
+// Call only when the user explicitly asked to remember this turn;
+// permission engine asks before every write (see memory.agentWrite).
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import type { AutoMemoryCategory } from "../autoMemory.js";
+import type { AutoMemoryCategory } from "../memory/autoMemory.js";
 
 const schema = z.object({
   scope: z.enum(["project", "user"]).default("project").describe("Target memory file."),
-  title: z.string().describe("Short heading for the entry (also the index bullet)."),
-  content: z.string().describe("Full body — stored in the progressive topic file."),
+  title: z.string().describe("Short heading for the entry (also the index bullet hook, ≤~150 chars)."),
+  content: z.string().describe("Full body — stored under progressive memory notes/."),
   section: z
     .enum([
       "Project context",
@@ -20,14 +19,11 @@ const schema = z.object({
       "Discovered durable knowledge",
     ])
     .optional()
-    .describe("Optional MEMORY.md section. Also selects the default topic file."),
+    .describe("Optional MEMORY.md section. Also selects the default taxonomy tag."),
   topic: z
     .string()
     .optional()
-    .describe(
-      "Optional progressive topic slug (e.g. architecture, testing). " +
-        "Writes ~/.codepilot/memory/<hash>/<topic>.md. Defaults from section/classifier.",
-    ),
+    .describe("Taxonomy hint (overview|architecture|standards|knowledge|user|feedback|reference)."),
   category: z
     .enum(["user", "feedback", "project", "reference"])
     .optional()
@@ -52,16 +48,13 @@ export interface MemorySink {
 export const memoryWriteTool: ToolDef<typeof schema> & { sink?: MemorySink } = {
   name: "memory_write",
   description:
-    "Silently append durable knowledge to project/user memory and the progressive " +
-    "index+topic store (not the workspace). Use for facts future sessions need. " +
-    "Not for today's task/plan. Do not narrate this step. " +
-    "Prefer a specific `section` or `topic` so later sessions can read_file only that topic. " +
-    "Default to project scope (silent). Reserve user scope for a genuine cross-repo " +
-    "user preference or constraint — it injects into every future session and needs the " +
-    "user's confirmation, so do not use it for one-off procedures or project-specific facts.",
+    "Append one durable memory note (`section`/`topic`, short title). Default `scope=project`; " +
+    "`scope=user` only for lasting cross-repo preferences. When to write: system Memory section; " +
+    "writes ask for confirmation unless yolo.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
+    void ctx;
     if (!this.sink) {
       return { content: "memory sink not configured for this session", isError: true };
     }

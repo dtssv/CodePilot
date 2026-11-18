@@ -14,7 +14,7 @@ import {
   classifyFailover,
   shouldCascadeFailover,
   type QuotaFailoverPolicy,
-} from "../transientError.js";
+} from "../agent/transientError.js";
 
 /** Back-compat predicate: whether an error would cascade to the next provider
  * under the default policy (quota does NOT cascade by default). Retained for

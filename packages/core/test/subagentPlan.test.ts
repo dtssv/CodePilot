@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSubagentRunner, SUBAGENT_PLAN_ROLE_BLOCK } from "../src/subagent.js";
+import { createSubagentRunner, SUBAGENT_PLAN_ROLE_BLOCK } from "../src/subagent/subagent.js";
 import { buildSubagentToolRegistry } from "../src/tools/subagentTools.js";
 import type { CodepilotConfig } from "../src/types.js";
 
@@ -44,13 +44,10 @@ function fakeModel(reply: string): Promise<{ server: Server; url: string; bodies
 
 describe("plan sub-agent type — role block", () => {
   it("the plan role block names the plan structure and forbids editing", () => {
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/Planning Sub-Agent/);
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toContain("### Plan");
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toContain("### Critical files");
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toContain("### Risks");
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toContain("### Open questions");
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/read-only/);
-    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/do NOT edit files/);
+    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/Plan sub-agent/);
+    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/READ-ONLY/);
+    expect(SUBAGENT_PLAN_ROLE_BLOCK).toMatch(/task footer/);
+    expect(SUBAGENT_PLAN_ROLE_BLOCK).not.toContain("### Plan");
   });
 });
 
@@ -116,10 +113,12 @@ describe("plan sub-agent type — runner integration", () => {
     const system = (body.system as string) ?? JSON.stringify(messages.find((m) => m.role === "system")?.content ?? "");
     const all = JSON.stringify(messages) + String(system);
     // Plan structure advertised in the system prompt…
-    expect(all).toContain("Planning Sub-Agent");
+    expect(all).toContain("Plan sub-agent");
     expect(all).toContain("### Critical files");
-    // …and the first user message carries the plan footer, not the Findings one.
-    expect(all).toMatch(/### Plan \/ ### Critical files \/ ### Risks \/ ### Open questions/);
+    // …and the first user message carries the plan field-shape footer, not Findings.
+    expect(all).toMatch(/### Plan[\s\S]*### Critical files[\s\S]*### Risks[\s\S]*### Open questions/);
+    expect(all).toMatch(/Do not wait for another turn/);
+    expect(all).not.toMatch(/### Findings/);
     // Defaults to the small model (no explicit `model` passed).
     expect(body.model).toBe("fake-small");
   });
@@ -154,7 +153,7 @@ describe("plan sub-agent type — runner integration", () => {
     });
     const all = JSON.stringify(bodies[before]!);
     // The built-in plan role block is used, not the custom body.
-    expect(all).toContain("Planning Sub-Agent");
+    expect(all).toContain("Plan sub-agent");
     expect(all).not.toContain("CUSTOM_PLAN_BODY");
   });
 });

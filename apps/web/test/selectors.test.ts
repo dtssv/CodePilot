@@ -5,13 +5,17 @@ import { initialState, reducer, type AppState } from "../src/state/reducer.js";
 import {
   currentActivity,
   dateBucket,
+  deriveUsageMetrics,
   endsInError,
+  formatCacheRatio,
   formatDuration,
   groupRows,
   lastUserPrompt,
   planProgress,
   toolCategory,
+  toolFilePaths,
   toolTarget,
+  toolVerb,
   touchedFiles,
 } from "../src/state/selectors.js";
 
@@ -204,6 +208,20 @@ describe("derived views", () => {
     expect(toolTarget({ command: "ls   -la\n" })).toBe("ls -la");
     expect(toolTarget({ path: "src/a.ts" })).toBe("src/a.ts");
     expect(toolTarget({ x: 1 })).toBe("");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/a.ts",
+      "*** Add File: src/b.ts",
+      "*** End Patch",
+    ].join("\n");
+    expect(toolTarget({ patch })).toBe("src/a.ts · + src/b.ts");
+    expect(toolFilePaths({ patch })).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(toolVerb("apply_patch", { patch })).toBe("Edited");
+    expect(
+      toolVerb("apply_patch", {
+        patch: "*** Begin Patch\n*** Add File: n.ts\n*** End Patch",
+      }),
+    ).toBe("Wrote");
   });
 
   it("formats durations and date buckets", () => {
@@ -214,5 +232,25 @@ describe("derived views", () => {
     expect(dateBucket(now - 60_000, now)).toBe("Today");
     expect(dateBucket(now - 20 * 3_600_000, now)).toBe("Yesterday");
     expect(dateBucket(now - 3 * 86_400_000, now)).toBe("Earlier");
+  });
+
+  it("derives total / cache / ratio (OpenAI inclusive vs Anthropic additive)", () => {
+    // OpenAI: cached ⊆ prompt_tokens.
+    const openai = deriveUsageMetrics({ input: 1000, output: 50, cacheRead: 800 });
+    expect(openai.total).toBe(1050);
+    expect(openai.cache).toBe(800);
+    expect(openai.cacheRatio).toBeCloseTo(0.8);
+    expect(formatCacheRatio(openai.cacheRatio)).toBe("80%");
+
+    // Anthropic: cache fields are additive; cacheRead can exceed input.
+    const anthropic = deriveUsageMetrics({
+      input: 200,
+      output: 40,
+      cacheRead: 5000,
+      cacheWrite: 100,
+    });
+    expect(anthropic.total).toBe(200 + 40 + 5000 + 100);
+    expect(anthropic.cache).toBe(5100);
+    expect(anthropic.cacheRatio).toBeCloseTo(5000 / (200 + 5000 + 100));
   });
 });

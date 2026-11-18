@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasVisibleAssistantContent, splitThinking, stripThinking, stripGoalStatus, type ThinkingSegment } from "../src/stripThinking.js";
+import { hasVisibleAssistantContent, splitThinking, stripThinking, stripGoalStatus, type ThinkingSegment } from "../src/compaction/stripThinking.js";
 
 describe("stripThinking", () => {
   it("removes closed think blocks and keeps the answer", () => {

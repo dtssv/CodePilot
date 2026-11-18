@@ -4,9 +4,9 @@ import {
   classifyFailover,
   shouldCascadeFailover,
   isTransientError,
-} from "../src/transientError.js";
-import { isTransientError as fromAgent } from "../src/agent.js";
-import { isTransientJudgeFailure } from "../src/stopVerify.js";
+} from "../src/agent/transientError.js";
+import { isTransientError as fromAgent } from "../src/agent/agent.js";
+import { isTransientJudgeFailure } from "../src/agent/stopVerify.js";
 
 describe("isTransientError (shared classifier)", () => {
   it("matches the network / errno / timeout / overload / rate-limit families", () => {

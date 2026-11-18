@@ -13,8 +13,8 @@ import {
   IMAGE_TOKEN_ESTIMATE,
   lookupContextWindow,
   resolveCompactionThreshold,
-} from "../src/tokens.js";
-import { estimateEventTokens } from "../src/compaction.js";
+} from "../src/compaction/tokens.js";
+import { estimateEventTokens } from "../src/compaction/compaction.js";
 import type { Event } from "../src/types.js";
 
 describe("estimateTokens", () => {
@@ -93,15 +93,18 @@ describe("pluggable tokenizer", () => {
     expect(estimateEventsTokens(["ab", "cde"], (s) => s)).toBe(5);
   });
 
-  it("tryLoadRealTokenizer is a no-op (keeps heuristic) when the package is absent", async () => {
-    // gpt-tokenizer is not a declared dependency; the loader must not throw
-    // and must leave the heuristic active when it cannot be imported.
-    const ok = await tryLoadRealTokenizer();
-    expect(typeof ok).toBe("boolean");
-    if (!ok) {
-      expect(hasRealTokenizer()).toBe(false);
-      expect(getActiveTokenizer()).toBe(heuristicTokens);
-    }
+  it("tryLoadRealTokenizer installs the BPE tokenizer", async () => {
+    resetTokenizer();
+    expect(await tryLoadRealTokenizer()).toBe(true);
+    expect(hasRealTokenizer()).toBe(true);
+    expect(estimateTokens("hello world")).toBe(2);
+    // Code is where the heuristic undercounts most.
+    const code = "export function f(a: number[]): Record<string, number> { return { n: a.length }; }\n".repeat(40);
+    const bpe = estimateTokens(code);
+    expect(bpe).toBeGreaterThan(heuristicTokens(code) * 1.3);
+    // Long strings are memoised: a repeat lookup returns the same count.
+    expect(estimateTokens(code)).toBe(bpe);
+    resetTokenizer();
   });
 });
 

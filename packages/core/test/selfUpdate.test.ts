@@ -8,7 +8,7 @@ import {
   resetSelfUpdateWatcherForTests,
   runUpdateCheck,
   startSelfUpdateWatcher,
-} from "../src/selfUpdate.js";
+} from "../src/config/selfUpdate.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

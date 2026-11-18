@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { readFileTool } from "../src/tools/read_file.js";
 import { editFileTool } from "../src/tools/edit_file.js";
 import { writeFileTool } from "../src/tools/write_file.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 let dir: string;

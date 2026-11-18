@@ -5,8 +5,8 @@
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import type { Skill } from "../skills.js";
-import { findSkill, matchSkill } from "../skills.js";
+import type { Skill } from "../skills/skills.js";
+import { findSkill, matchSkill } from "../skills/skills.js";
 
 const schema = z.object({
   name: z
@@ -36,7 +36,7 @@ class DefaultSkillStore implements SkillStore {
   }
   private async ensureLoaded(): Promise<Skill[]> {
     if (this.cache) return this.cache;
-    const { discoverSkills } = await import("../skills.js");
+    const { discoverSkills } = await import("../skills/skills.js");
     this.cache = await discoverSkills(this.cwd);
     return this.cache;
   }
@@ -94,13 +94,10 @@ export function createSkillTool(): SkillToolHandle {
   const tool: ToolDef<typeof schema> = {
     name: "skill",
     description:
-      "Load the full instructions of a named skill. Use this when the user request " +
-      "matches one of the skills advertised in the system prompt's `<skills>` " +
-      "section. The tool returns the skill's complete markdown body — treat it as " +
-      "the source of truth for the workflow you should follow. If the name does not " +
-      "match exactly, the tool tries a substring / keyword search and returns the " +
-      "best match. Call once per skill at the start of the task; do not call it " +
-      "repeatedly for the same skill.",
+      "Load a named skill's full markdown body (workflow checklist/commands). " +
+      "Append it for this task; it does not override CodePilot core Safety/Evidence/Git. " +
+      "Use when the user request matches a skill in `<skills>`. Exact name first, " +
+      "else substring/keyword match. Call once per skill at task start.",
     inputSchema: schema,
     permission: "read",
     async execute(input, ctx) {

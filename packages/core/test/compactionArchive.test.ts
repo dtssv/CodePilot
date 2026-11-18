@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSession, deleteSession, getSessionsDir } from "../src/session.js";
-import { historyArchivePath } from "../src/session-utils.js";
-import { estimateEventTokens, renderTranscriptArchive } from "../src/compaction.js";
-import { estimateTokens } from "../src/tokens.js";
+import { createSession, deleteSession, getSessionsDir } from "../src/session/session.js";
+import { historyArchivePath } from "../src/session/session-utils.js";
+import { estimateEventTokens, renderTranscriptArchive } from "../src/compaction/compaction.js";
+import { estimateTokens } from "../src/compaction/tokens.js";
 import type { Event } from "../src/types.js";
 
 const tempHome = process.env.HOME ?? tmpdir();
@@ -64,7 +64,10 @@ describe("compaction keeps the dropped turns reachable", () => {
     const events: Event[] = [
       { type: "message", id: "u0", role: "user", content: [{ type: "text", text: "设计一个消息重试方案" }] },
       { type: "message", id: "a0", role: "assistant", content: [{ type: "text", text: design }] },
+      { type: "tool_call", id: "r0", name: "read_file", input: { path: "retry.ts" } },
+      { type: "tool_result", toolCallId: "r0", name: "read_file", content: "     1\texport const RETRIES = 1;" },
     ];
+    writeFileSync(join(workDir, "retry.ts"), "export const RETRIES = 5;\n");
     for (let i = 1; i <= 20; i++) {
       const words = (tag: string): string => Array.from({ length: 150 }, (_, k) => `${tag}${i}w${k}`).join(" ");
       events.push({ type: "message", id: `u${i}`, role: "user", content: [{ type: "text", text: `电影推荐 ${words("q")}` }] });
@@ -82,6 +85,8 @@ describe("compaction keeps the dropped turns reachable", () => {
       model: "fake",
       config: {
         sandbox: { mode: "off" },
+        // The size bounds above are calibrated against the heuristic estimator.
+        preciseTokens: false,
         contextWindow: 8_000,
  // Estimated history (4.5K–7.5K tokens) sits between this trigger (4K) and
  // the full window: only the configured threshold makes it compact.
@@ -101,6 +106,11 @@ describe("compaction keeps the dropped turns reachable", () => {
     expect(compactEv?.type).toBe("compaction");
     const archive = historyArchivePath(id);
     expect(compactEv && compactEv.type === "compaction" && compactEv.summary).toContain(archive);
+    // The dropped read of retry.ts comes back with the file's CURRENT content.
+    const summary = compactEv && compactEv.type === "compaction" ? compactEv.summary : "";
+    expect(summary).toContain("<restored_files>");
+    expect(summary).toContain(`## ${join(workDir, "retry.ts")} (1 lines)`);
+    expect(summary).toContain("export const RETRIES = 5;");
     const live = session.getEvents();
     expect(live[0]?.type).toBe("compaction");
     expect(live.some((e) => e.type === "message" && e.id === "a0")).toBe(false);

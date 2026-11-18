@@ -55,7 +55,7 @@ export { PROVIDER_NAMES } from "./types.js";
 export { PERMISSION_PRESETS } from "./types.js";
 
 // ---- Config ----
-export { loadConfig, mergeConfig } from "./config.js";
+export { loadConfig, mergeConfig } from "./config/config.js";
 
 // ---- Providers ----
 export {
@@ -111,6 +111,7 @@ export {
   filterToolsByModeFromRegistry,
   filterToolNames,
   filterToolsByModel,
+  chainDiagnostics,
 } from "./tools/index.js";
 export type {
   ToolDef,
@@ -125,8 +126,8 @@ export type {
 } from "./tools/index.js";
 
 // ---- Permissions ----
-export { PermissionEngine, matchRule, persistRule } from "./permissions.js";
-export type { PermissionCheckResult } from "./permissions.js";
+export { PermissionEngine, matchRule, persistRule } from "./permissions/permissions.js";
+export type { PermissionCheckResult } from "./permissions/permissions.js";
 
 // ---- Sandbox ----
 export {
@@ -138,6 +139,8 @@ export {
   slirp4netnsPath,
   sandboxUnavailableHint,
   buildSandboxUnavailable,
+  formatSandboxPromptNote,
+  SANDBOX_PROMPT_EXTRA_ROOTS_CAP,
   assertPathAllowed,
   assertPathAllowedAsync,
   addWritableRoot,
@@ -147,23 +150,23 @@ export {
   checkDangerousCommand,
   winPathToWsl,
   SENSITIVE_READ_PATHS,
-} from "./sandbox.js";
+} from "./sandbox/sandbox.js";
 export type {
   ResolvedSandbox,
   WrappedCommand,
   SandboxBackend,
   SandboxUnavailable,
   PathCheckResult,
-} from "./sandbox.js";
-export { startNetProxy, parseAuthority } from "./netProxy.js";
-export type { NetProxyPolicy, RunningNetProxy } from "./netProxy.js";
+} from "./sandbox/sandbox.js";
+export { startNetProxy, parseAuthority } from "./workspace/netProxy.js";
+export type { NetProxyPolicy, RunningNetProxy } from "./workspace/netProxy.js";
 
 // ---- Hooks ----
-export { HookEngine, hashCommand } from "./hooks.js";
-export type { HookEvent, HookEntry, PreHookResult, PostHookResult } from "./hooks.js";
+export { HookEngine, hashCommand } from "./hooks/hooks.js";
+export type { HookEvent, HookEntry, PreHookResult, PostHookResult } from "./hooks/hooks.js";
 
 // ---- Redaction ----
-export { redactSecrets, containsSecretShape } from "./redact.js";
+export { redactSecrets, containsSecretShape } from "./permissions/redact.js";
 
 // ---- Provider fallback ----
 export { FallbackProvider, isFailoverError } from "./providers/fallback.js";
@@ -172,6 +175,8 @@ export { FallbackProvider, isFailoverError } from "./providers/fallback.js";
 export {
   readMemory,
   readLayeredProjectMemory,
+  readProjectInstructions,
+  PROJECT_INSTRUCTIONS_MAX_BYTES,
   FileMemorySink,
   summariseMemory,
   memoryFileExists,
@@ -181,8 +186,8 @@ export {
   AGENTS_MEMORY_NAME,
   MEMORY_CANDIDATE_NAMES,
   USER_MEMORY_PATH,
-} from "./memory.js";
-export type { MemoryContents } from "./memory.js";
+} from "./memory/memory.js";
+export type { MemoryContents } from "./memory/memory.js";
 export {
   MEMORY_TOPICS,
   autoMemoryDir,
@@ -190,31 +195,44 @@ export {
   classifyNote,
   clearAutoMemory,
   loadAutoMemoryIndex,
+  loadAutoMemoryPromptStub,
+  truncateIndexBullet,
+  INDEX_BULLET_MAX_CHARS,
   resolveMemoryTopic,
   sanitizeTopic,
+  clampToCanonicalTopic,
   writeAutoMemoryNote,
-} from "./autoMemory.js";
+  writeAdHocMemoryNote,
+  MEMORY_SUMMARY_NAME,
+  NOTES_DIRNAME,
+  MAX_AD_HOC_NOTES,
+} from "./memory/autoMemory.js";
 // projectHash is exported from projectState.js (same implementation).
 export type {
   AutoMemoryCategory,
   AutoMemoryConfig,
   AutoMemoryNote,
   MemoryTopic,
-} from "./autoMemory.js";
+} from "./memory/autoMemory.js";
 export {
   extractSessionMemory,
   maybeConsolidateMemory,
-} from "./memoryConsolidation.js";
-export { recallRelevantMemories, DEFAULT_RECALL_MAX } from "./memoryRecall.js";
-export type { RecallOptions } from "./memoryRecall.js";
+} from "./memory/memoryConsolidation.js";
+export {
+  recallRelevantMemories,
+  recallRelevantMemoriesDetailed,
+  DEFAULT_RECALL_MAX,
+  RECALL_SESSION_MAX_CHARS,
+} from "./memory/memoryRecall.js";
+export type { RecallOptions, RecallResult } from "./memory/memoryRecall.js";
 export type {
   MemoryConsolidationConfig,
   MemoryPipelineDeps,
-} from "./memoryConsolidation.js";
+} from "./memory/memoryConsolidation.js";
 
 // ---- System prompt ----
-export { buildSystemPrompt } from "./systemPrompt.js";
-export type { SystemPromptContext, SystemPromptResult } from "./systemPrompt.js";
+export { buildSystemPrompt } from "./systemPrompt/index.js";
+export type { SystemPromptContext, SystemPromptResult } from "./systemPrompt/index.js";
 
 // ---- Delivery roots (task deliverable targets; ≠ sandbox writable) ----
 export {
@@ -224,7 +242,7 @@ export {
   mergeDeliveryRoots,
   normalizeRoot,
   rootFromPathToken,
-} from "./deliveryRoots.js";
+} from "./workspace/deliveryRoots.js";
 
 // ---- Compaction ----
 export {
@@ -235,38 +253,38 @@ export {
   buildLocalHandoffSummary,
   estimateEventTokens,
   extractPlan,
-} from "./compaction.js";
+} from "./compaction/compaction.js";
 export type {
   CompactionOptions,
   CompactionResult,
   CompactionDecision,
-} from "./compaction.js";
+} from "./compaction/compaction.js";
 
 // ---- MCP ----
-export { McpStdioClient, McpManager, mcpToolName, parseMcpToolName } from "./mcp.js";
-export type { McpToolDescriptor, McpInvokeRequest, McpInvokeResult } from "./mcp.js";
+export { McpStdioClient, McpManager, mcpToolName, parseMcpToolName } from "./mcp/mcp.js";
+export type { McpToolDescriptor, McpInvokeRequest, McpInvokeResult } from "./mcp/mcp.js";
 
 // ---- Agent ----
-export { runAgent } from "./agent.js";
-export type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent.js";
-export { stripThinking, splitThinking, hasVisibleAssistantContent, stripGoalStatus } from "./stripThinking.js";
-export type { ThinkingSegment } from "./stripThinking.js";
+export { runAgent } from "./agent/agent.js";
+export type { AgentDeps, AgentRunInput, AgentRunResult } from "./agent/agent.js";
+export { stripThinking, splitThinking, hasVisibleAssistantContent, stripGoalStatus } from "./compaction/stripThinking.js";
+export type { ThinkingSegment } from "./compaction/stripThinking.js";
 export {
   reasoningEffortChoicesForModel,
   supportsReasoningEffort,
   reasoningEffortFromChoice,
   reasoningEffortToChoice,
-} from "./reasoningEffort.js";
-export type { ReasoningEffort, ReasoningEffortChoice } from "./reasoningEffort.js";
+} from "./config/reasoningEffort.js";
+export type { ReasoningEffort, ReasoningEffortChoice } from "./config/reasoningEffort.js";
 export {
   MODEL_CATALOG,
   lookupModelCatalog,
   catalogEffortChoices,
   catalogModalities,
   catalogSuggestedSmall,
-} from "./modelCatalog.js";
-export type { ModelCatalogEntry } from "./modelCatalog.js";
-export { formatUploadNote, materializeUploads } from "./promptFiles.js";
+} from "./config/modelCatalog.js";
+export type { ModelCatalogEntry } from "./config/modelCatalog.js";
+export { formatUploadNote, materializeUploads } from "./workspace/promptFiles.js";
 
 // ---- Agent runtime (pluggable loop) ----
 export {
@@ -275,7 +293,7 @@ export {
   DefaultRuntime,
   createRuntimeToolkit,
   DEFAULT_RUNTIME_NAME,
-} from "./runtime.js";
+} from "./agent/runtime.js";
 export type {
   AgentRuntime,
   AgentRuntimeState,
@@ -288,7 +306,7 @@ export type {
   PluginContextMessage,
   PluginContextTransform,
   PluginEventSink,
-} from "./runtime.js";
+} from "./agent/runtime.js";
 // Example runtimes; importing registers "audit" + "mcts" (inert until used).
 export {
   registerBuiltinRuntimes,
@@ -321,7 +339,7 @@ export {
   renderTeamResult,
   TEAM_ROLES,
   MERGE_STRATEGIES,
-} from "./teams.js";
+} from "./subagent/teams.js";
 export type {
   TeamRole,
   MergeStrategy,
@@ -332,30 +350,30 @@ export type {
   TeamRunResult,
   TeamRunDeps,
   TeamVote,
-} from "./teams.js";
+} from "./subagent/teams.js";
 
 // ---- Session ----
 // The session module was split into session.ts (the Session class) +
 // session-utils.ts (standalone helpers). Both are re-exported here so the
 // public API is unchanged.
-export { Session } from "./session.js";
-export type { SandboxStatus } from "./session.js";
+export { Session } from "./session/session.js";
+export type { SandboxStatus } from "./session/session.js";
 export {
   acquireSessionLock,
   readSessionLock,
   liveSessionLockOwner,
   sessionLockPath,
   SessionLockedError,
-} from "./sessionLock.js";
-export type { SessionLockOwner, SessionLease } from "./sessionLock.js";
+} from "./session/sessionLock.js";
+export type { SessionLockOwner, SessionLease } from "./session/sessionLock.js";
 export {
   gcProjectArtifacts,
   collectSessionArtifactRefs,
   sessionIdsInProject,
-} from "./artifactGc.js";
-export type { ArtifactGcResult } from "./artifactGc.js";
-export { openSessionIndex } from "./sessionIndex.js";
-export type { SessionIndex, SuspendedSession } from "./sessionIndex.js";
+} from "./workspace/artifactGc.js";
+export type { ArtifactGcResult } from "./workspace/artifactGc.js";
+export { openSessionIndex } from "./session/sessionIndex.js";
+export type { SessionIndex, SuspendedSession } from "./session/sessionIndex.js";
 export {
   createSession,
   listSessions,
@@ -370,22 +388,22 @@ export {
   loadCwdFromDisk,
   persistSessionCwd,
   buildSingleProvider,
-} from "./session-utils.js";
-export type { RecoveredSession, ReconcileSummary } from "./session-utils.js";
+} from "./session/session-utils.js";
+export type { RecoveredSession, ReconcileSummary } from "./session/session-utils.js";
 export {
   sweepSessionRetention,
   compressColdSessions,
   freezeSession,
   thawSession,
   isSessionCold,
-} from "./sessionCompression.js";
+} from "./session/sessionCompression.js";
 export type {
   RetentionSweepResult,
   ColdCompressResult,
-} from "./sessionCompression.js";
+} from "./session/sessionCompression.js";
 
 // ---- Goal ----
-export { runGoal, driveGoalRounds } from "./goal.js";
+export { runGoal, driveGoalRounds } from "./subagent/goal.js";
 
 // ---- Inline (Tab) code completion ----
 export {
@@ -395,11 +413,11 @@ export {
   COMPLETION_SYSTEM_PROMPT,
   COMPLETION_MAX_TOKENS,
   COMPLETION_MAX_LINES,
-} from "./completion.js";
+} from "./agent/completion.js";
 export type {
   InlineCompletionInput,
   CompletionModelDecision,
-} from "./completion.js";
+} from "./agent/completion.js";
 
 // ---- Config (v2 layered loader) ----
 // NOTE: `loadConfig` and `mergeConfig` are already exported above in the
@@ -426,7 +444,7 @@ export {
   TelemetryConfigSchema,
   UsageConfigSchema,
   McpServerConfigSchema,
-} from "./config.js";
+} from "./config/config.js";
 export type {
   ModelsConfig,
   ModelModality,
@@ -440,13 +458,13 @@ export type {
   ResolvedCodepilotConfig,
   ConfigLayer,
   LoadConfigResult,
-} from "./config.js";
+} from "./config/config.js";
 export {
   DEFAULT_MODEL_CONTEXT_WINDOW,
   DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   ModelModalitySchema,
   ModelCapabilitiesSchema,
-} from "./config.js";
+} from "./config/config.js";
 export {
   PROVIDER_TEMPLATES,
   listProviderTemplates,
@@ -470,13 +488,21 @@ export {
   parseModalities,
   parseRemoteModelEntry,
   resolveModelCapabilities,
-} from "./providerCatalog.js";
+} from "./config/providerCatalog.js";
+export {
+  SECRET_PREFIX,
+  isEncryptedSecret,
+  encryptSecret,
+  decryptSecret,
+  encryptSecretFields,
+  decryptSecretFields,
+} from "./config/secretCrypto.js";
 export type {
   SelectableModel,
   ProviderTemplate,
   RedactedProviderPreset,
   RemoteModelInfo,
-} from "./providerCatalog.js";
+} from "./config/providerCatalog.js";
 
 // ---- Bundles (config + resources export/import) ----
 export {
@@ -488,13 +514,13 @@ export {
   validateBundle,
   importBundle,
   importBundleFromFile,
-} from "./bundle.js";
+} from "./config/bundle.js";
 export type {
   CodepilotBundle,
   ExportBundleOptions,
   ImportBundleOptions,
   ImportBundleResult,
-} from "./bundle.js";
+} from "./config/bundle.js";
 
 // ---- Logger ----
 export {
@@ -507,7 +533,7 @@ export {
   clearLogsDir,
   __resetLoggerForTests,
   LOG_LEVELS,
-} from "./logger.js";
+} from "./telemetry/logger.js";
 export type {
   Logger,
   LoggerConfig,
@@ -515,7 +541,7 @@ export type {
   LogLevel,
   LogRecord,
   LogSink,
-} from "./logger.js";
+} from "./telemetry/logger.js";
 
 // ---- Skills ----
 export {
@@ -526,8 +552,8 @@ export {
   skillsPromptSection,
   defaultBuiltinSkillsDir,
   BUILTIN_SKILLS,
-} from "./skills.js";
-export type { Skill, SkillSource, DiscoverOptions } from "./skills.js";
+} from "./skills/skills.js";
+export type { Skill, SkillSource, DiscoverOptions } from "./skills/skills.js";
 
 export {
   specsDir,
@@ -536,17 +562,17 @@ export {
   parseAcceptanceCriteria,
   parseTasks,
   specCoverage,
-} from "./specs.js";
+} from "./workspace/specs.js";
 export type {
   SpecFeature,
   SpecTask,
   SpecAcceptanceCriterion,
-} from "./specs.js";
+} from "./workspace/specs.js";
 
 export { skillTool, createSkillTool, StaticSkillStore, setDefaultSkillStore } from "./tools/skill.js";
 export type { SkillStore, SkillToolHandle } from "./tools/skill.js";
-export { LspManager, languageIdForPath, parseLocations, DEFAULT_LSP_SERVERS } from "./lsp.js";
-export type { LspServerConfig, LspLocation, LspPosition } from "./lsp.js";
+export { LspManager, languageIdForPath, parseLocations, DEFAULT_LSP_SERVERS } from "./workspace/lsp.js";
+export type { LspServerConfig, LspLocation, LspPosition } from "./workspace/lsp.js";
 export { makeLspNavigateTool } from "./tools/lsp_navigate.js";
 
 // ---- Slash commands (custom /name commands from .codepilot/commands/*.md) ----
@@ -564,7 +590,7 @@ export {
   userCommandsDir,
   commandFilePath,
   commandDir,
-} from "./slashCommands.js";
+} from "./skills/slashCommands.js";
 export type {
   SlashCommand,
   SlashCommandSource,
@@ -572,13 +598,13 @@ export type {
   DiscoverSlashCommandsOptions,
   DiscoverSlashCommandsResult,
   ResolveResult,
-} from "./slashCommands.js";
+} from "./skills/slashCommands.js";
 
 // ---- MCP (extended — adds SSE, resources, prompts, fail-soft) ----
 // Note: McpStdioClient, McpManager, mcpToolName, parseMcpToolName,
 // McpToolDescriptor, McpInvokeRequest, McpInvokeResult are already
 // exported above in the legacy "MCP" block.
-export { McpSseClient, isMcpSseConfig, mcpResourceToolName, MCP_REF_REGEX, parseMcpReference, resolveMcpReferences } from "./mcp.js";
+export { McpSseClient, isMcpSseConfig, mcpResourceToolName, MCP_REF_REGEX, parseMcpReference, resolveMcpReferences } from "./mcp/mcp.js";
 export type {
   McpResourceDescriptor,
   McpResourceReadResult,
@@ -591,7 +617,7 @@ export type {
   McpServerRequestHandler,
   McpElicitationResult,
   McpSamplingResult,
-} from "./mcp.js";
+} from "./mcp/mcp.js";
 
 // ---- Tokens (estimator + per-model context windows) ----
 export {
@@ -609,32 +635,32 @@ export {
   lookupContextWindow,
   resolveCompactionThreshold,
   estimateCostUSD,
-} from "./tokens.js";
-export type { TokenEstimator, ModelContextWindow, ModelCost } from "./tokens.js";
+} from "./compaction/tokens.js";
+export type { TokenEstimator, ModelContextWindow, ModelCost } from "./compaction/tokens.js";
 
 // ---- Prompt-cache analysis ----
 export {
   analyzeCacheWaste,
   DEFAULT_CACHE_TTL_MS,
   CACHE_MISS_NOISE_FLOOR,
-} from "./cacheStats.js";
+} from "./compaction/cacheStats.js";
 export type {
   CacheTurn,
   CacheMiss,
   CacheMissCause,
   CacheWasteReport,
-} from "./cacheStats.js";
+} from "./compaction/cacheStats.js";
 export {
   decideCacheWarm,
   cacheTtlMs,
   CACHE_WARM_TTL_FRACTION,
   CACHE_WARM_MIN_SAVINGS_USD,
-} from "./cacheWarmer.js";
-export type { CacheWarmDecision, CacheWarmInput } from "./cacheWarmer.js";
+} from "./compaction/cacheWarmer.js";
+export type { CacheWarmDecision, CacheWarmInput } from "./compaction/cacheWarmer.js";
 
 // ---- Audit log (structured tool-call record) ----
-export { AuditLogger, readAuditLog, auditDir } from "./audit.js";
-export type { AuditRecord } from "./audit.js";
+export { AuditLogger, readAuditLog, auditDir } from "./telemetry/audit.js";
+export type { AuditRecord } from "./telemetry/audit.js";
 
 // ---- Per-project runtime state (~/.codepilot/projects/<hash>/) ----
 export {
@@ -643,7 +669,7 @@ export {
   projectStatePath,
   scratchDir,
   ensureProjectState,
-} from "./projectState.js";
+} from "./workspace/projectState.js";
 
 // ---- Checkpoints (cross-session memory files) ----
 export {
@@ -661,7 +687,7 @@ export {
   legacyCheckpointPath,
   summariseCheckpointForPrompt,
   makeCheckpointHook,
-} from "./checkpoints.js";
+} from "./session/checkpoints.js";
 export type {
   CheckpointSection,
   CheckpointOptions,
@@ -669,10 +695,7 @@ export type {
   CheckpointSnapshot,
   CheckpointHook,
   WriteCheckpointResult,
-} from "./checkpoints.js";
-
-export { SubagentCache, SUBAGENT_CACHE_TTL_MS } from "./subagentCache.js";
-export type { CachedConclusion, SubagentCacheKey } from "./subagentCache.js";
+} from "./session/checkpoints.js";
 
 // ---- Snapshots (checkpoint rewind) ----
 export {
@@ -680,11 +703,11 @@ export {
   rewindToSnapshot,
   listSnapshots,
   deleteSnapshot,
-} from "./snapshots.js";
+} from "./session/snapshots.js";
 
 // ---- /init project guidance ----
-export { initProjectGuidance } from "./projectInit.js";
-export type { InitProjectOptions, InitProjectResult } from "./projectInit.js";
+export { initProjectGuidance } from "./config/projectInit.js";
+export type { InitProjectOptions, InitProjectResult } from "./config/projectInit.js";
 
 // ---- One-time QR remote control ----
 export {
@@ -694,14 +717,14 @@ export {
   remoteGrantAllows,
   revokeAllRemoteControl,
   cancelUnusedPairings,
-} from "./remoteControl.js";
+} from "./workspace/remoteControl.js";
 export type {
   MintRemotePairingOpts,
   MintRemotePairingResult,
   RedeemRemotePairingResult,
   RemoteGrant,
   RemotePairing,
-} from "./remoteControl.js";
+} from "./workspace/remoteControl.js";
 
 // ---- Scheduled / idle tasks ----
 export {
@@ -712,17 +735,17 @@ export {
   removeScheduledTask,
   schedulerTick,
   startSchedulerWatcher,
-} from "./scheduler.js";
+} from "./agent/scheduler.js";
 export type {
   ScheduledTask,
   ScheduledTaskKind,
   ScheduledDelivery,
   SchedulerTickContext,
   SchedulerWatcherHandle,
-} from "./scheduler.js";
+} from "./agent/scheduler.js";
 
 // ---- LAN advertise (phone QR) ----
-export { listLanIPv4, advertiseUrl, isLoopbackHost } from "./netAdvertise.js";
+export { listLanIPv4, advertiseUrl, isLoopbackHost } from "./workspace/netAdvertise.js";
 
 // ---- MCP marketplace links + paste JSON ----
 export {
@@ -732,7 +755,7 @@ export {
   setMcpServerEnabled,
   inspectMcpServer,
   authorizeMcpServer,
-} from "./mcpRegistry.js";
+} from "./mcp/mcpRegistry.js";
 export type {
   McpMarketLink,
   InstallMcpJsonResult,
@@ -742,13 +765,13 @@ export type {
   McpCapabilityTool,
   McpCapabilityResource,
   McpCapabilityPrompt,
-} from "./mcpRegistry.js";
+} from "./mcp/mcpRegistry.js";
 export {
   acquireSharedMcp,
   releaseSharedMcp,
   mcpServersKey,
   resetMcpPoolForTests,
-} from "./mcp-pool.js";
+} from "./mcp/mcp-pool.js";
 
 // ---- Office connectors (Feishu / DingTalk / …) ----
 export {
@@ -762,7 +785,7 @@ export {
   updateConnector,
   setConnectorEnabled,
   connectorInstalled,
-} from "./connectors.js";
+} from "./config/connectors.js";
 
 // ---- Skills install / enable / disable ----
 export {
@@ -779,7 +802,7 @@ export {
   saveSkillContent,
   saveSkillFile,
   SKILL_CREATOR_STARTER_PROMPT,
-} from "./skillManage.js";
+} from "./skills/skillManage.js";
 export type {
   ManagedSkill,
   ManagedSkillState,
@@ -791,8 +814,8 @@ export type {
   SkillListQuery,
   SkillListPage,
   SkillListTab,
-} from "./skillManage.js";
-export { readDisabledSkillNames } from "./skills.js";
+} from "./skills/skillManage.js";
+export { readDisabledSkillNames } from "./skills/skills.js";
 
 // ---- Remote catalogs (GitHub JSON, once-per-day update) ----
 export {
@@ -800,10 +823,10 @@ export {
   refreshAllCatalogs,
   shouldAttemptDailyUpdate,
   resetCatalogMemoryForTests,
-} from "./remoteCatalog.js";
-export type { CatalogName, CacheFile as CatalogCacheFile } from "./remoteCatalog.js";
-export { listSearchEngines, SEARCH_ENGINES } from "./searchEngines.js";
-export type { SearchEngineTemplate } from "./searchEngines.js";
+} from "./config/remoteCatalog.js";
+export type { CatalogName, CacheFile as CatalogCacheFile } from "./config/remoteCatalog.js";
+export { listSearchEngines, SEARCH_ENGINES } from "./config/searchEngines.js";
+export type { SearchEngineTemplate } from "./config/searchEngines.js";
 export type {
   ConnectorRecipe,
   ConnectorKind,
@@ -816,7 +839,7 @@ export type {
   CatalogListTab,
   ConnectorListQuery,
   ConnectorListPage,
-} from "./connectors.js";
+} from "./config/connectors.js";
 
 // ---- Memory (structured sections) ----
 export {
@@ -825,8 +848,8 @@ export {
   renderMemory,
   classifySection,
   summariseMemoryText,
-} from "./memory.js";
-export type { MemorySection as MemorySectionName, ParsedMemory } from "./memory.js";
+} from "./memory/memory.js";
+export type { MemorySection as MemorySectionName, ParsedMemory } from "./memory/memory.js";
 
 // ---- Session (auto-title, search, export, rich summary) ----
 export {
@@ -834,13 +857,13 @@ export {
   searchSessions,
   exportSession,
   deleteSession,
-} from "./session-utils.js";
+} from "./session/session-utils.js";
 export type {
   RichSessionSummary,
   SessionExportFormat,
   SessionState,
-} from "./session-utils.js";
-export { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./eventMeta.js";
+} from "./session/session-utils.js";
+export { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "./telemetry/eventMeta.js";
 export {
   DAY_MS,
   applyUpdate,
@@ -853,13 +876,13 @@ export {
   resetSelfUpdateWatcherForTests,
   runUpdateCheck,
   startSelfUpdateWatcher,
-} from "./selfUpdate.js";
+} from "./config/selfUpdate.js";
 export type {
   EngineUpdateInfo,
   SelfUpdateOptions,
   SelfUpdateWatcherHandle,
   UpdateCheckResult,
-} from "./selfUpdate.js";
+} from "./config/selfUpdate.js";
 
 // ---- Session internals (split modules — MCP wiring + prompt telemetry) ----
 export {
@@ -867,14 +890,14 @@ export {
   resolveSessionMcpReferences,
   jsonSchemaToZod,
   compileJsonSchema,
-} from "./session-mcp.js";
-export type { SessionMcpHost } from "./session-mcp.js";
-export { startPromptSpan, endPromptSpan } from "./session-telemetry.js";
-export type { PromptSpan } from "./session-telemetry.js";
+} from "./mcp/sessionBind.js";
+export type { SessionMcpHost } from "./mcp/sessionBind.js";
+export { startPromptSpan, endPromptSpan } from "./session/session-telemetry.js";
+export type { PromptSpan } from "./session/session-telemetry.js";
 
 // ---- Goal (checkpoint callback + structured blocked reason) ----
-export { goalPromptBody, COMPLETION_MARKERS } from "./goal.js";
-export type { GoalRunOptionsEx, GoalCheckpointInfo } from "./goal.js";
+export { goalPromptBody, COMPLETION_MARKERS } from "./subagent/goal.js";
+export type { GoalRunOptionsEx, GoalCheckpointInfo } from "./subagent/goal.js";
 
 // ---- Worktree isolation for sub-agents ----
 export {
@@ -883,13 +906,13 @@ export {
   resolveRepoRoot,
   worktreeDiffStat,
   isGitAvailable,
-} from "./worktree.js";
+} from "./workspace/worktree.js";
 export type {
   WorktreeHandle,
   WorktreeCreateOptions,
   WorktreeCreateResult,
   WorktreeRemoveResult,
-} from "./worktree.js";
+} from "./workspace/worktree.js";
 
 // ---- Subagent isolation modes (re-exported from the task tool) ----
 export { ISOLATION_MODES } from "./tools/task.js";
@@ -899,8 +922,8 @@ export type { AgentType } from "./tools/task.js";
 export { parseCsv } from "./tools/task.js";
 export { buildSubagentToolRegistry } from "./tools/subagentTools.js";
 export { taskBoardTool } from "./tools/task_board.js";
-export { TaskBoard, foldTasks } from "./taskBoard.js";
-export type { TaskBoardEntry, TaskSnapshot, TaskStatus, TaskBoardResult } from "./taskBoard.js";
+export { TaskBoard, foldTasks } from "./subagent/taskBoard.js";
+export type { TaskBoardEntry, TaskSnapshot, TaskStatus, TaskBoardResult } from "./subagent/taskBoard.js";
 
 // ---- Runtime management & introspection (/mcp /hooks /agents /skills /context) ----
 export {
@@ -913,31 +936,31 @@ export {
   describeSkills,
   formatSkills,
   formatContext,
-} from "./management.js";
+} from "./agent/management.js";
 export type {
   McpSummary,
   HooksSummary,
   AgentsSummary,
   SkillsSummary,
   ContextSummary,
-} from "./management.js";
+} from "./agent/management.js";
 
 // ---- MCP tool-name normalization (64-char limit + hash collision prevention) ----
-export { normalizeMcpToolName, buildMcpToolNameMap, MCP_TOOL_NAME_MAX_LENGTH } from "./mcp.js";
+export { normalizeMcpToolName, buildMcpToolNameMap, MCP_TOOL_NAME_MAX_LENGTH } from "./mcp/mcp.js";
 
 // ---- Consistency assertion (model-visible equals logged, debug/test only) ----
-export { consistencyAssertEnabled, assertConsistency, ConsistencyError } from "./consistency.js";
-export { applyContextTransform, validateTransformedView } from "./contextTransform.js";
-export type { ContextTransformCheck } from "./contextTransform.js";
-export { BoundedSinkQueue } from "./sessionSink.js";
-export type { SessionEventSink, BoundedSinkQueueOptions } from "./sessionSink.js";
-export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./builtinCommands.js";
-export type { BuiltinCommand, BuiltinCommandScope, CommandKind } from "./builtinCommands.js";
-export { FileObservationStore, hashFileContent } from "./fsObservation.js";
-export type { FileObservation, FreshnessResult } from "./fsObservation.js";
+export { consistencyAssertEnabled, assertConsistency, ConsistencyError } from "./agent/consistency.js";
+export { applyContextTransform, validateTransformedView } from "./compaction/contextTransform.js";
+export type { ContextTransformCheck } from "./compaction/contextTransform.js";
+export { BoundedSinkQueue } from "./session/sessionSink.js";
+export type { SessionEventSink, BoundedSinkQueueOptions } from "./session/sessionSink.js";
+export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./skills/builtinCommands.js";
+export type { BuiltinCommand, BuiltinCommandScope, CommandKind } from "./skills/builtinCommands.js";
+export { FileObservationStore, hashFileContent } from "./workspace/fsObservation.js";
+export type { FileObservation, FreshnessResult, CheckFreshOptions } from "./workspace/fsObservation.js";
 
 // ---- Keyless transcript replay (test mode, no API key needed) ----
-export { ReplayProvider, extractReplayTurns } from "./replayProvider.js";
+export { ReplayProvider, extractReplayTurns } from "./agent/replayProvider.js";
 
 // ---- Headless (non-interactive / print-mode) output contract ----
 export {
@@ -945,8 +968,8 @@ export {
   parseOutputFormat,
   extractFinalAssistantText,
   countAssistantTurns,
-} from "./headless.js";
-export type { OutputFormat, HeadlessResult, HeadlessOptions, HeadlessSession } from "./headless.js";
+} from "./agent/headless.js";
+export type { OutputFormat, HeadlessResult, HeadlessOptions, HeadlessSession } from "./agent/headless.js";
 
 // ---- Status line (declarative preset or custom script) ----
 export {
@@ -955,7 +978,7 @@ export {
   renderPresetStatusLine,
   resolvePresetItems,
   STATUS_LINE_PRESETS,
-} from "./statusLine.js";
+} from "./config/statusLine.js";
 export type {
   StatusLinePayload,
   StatusLineConfig,
@@ -965,11 +988,11 @@ export type {
   StatusLineItem,
   StatusLinePresetName,
   RateLimitSnapshot,
-} from "./statusLine.js";
+} from "./config/statusLine.js";
 
 // ---- OpenTelemetry-compatible telemetry (OTLP/HTTP-JSON export) ----
-export { Tracer, loadTelemetryConfig, getTracer, setTracer } from "./telemetry.js";
-export type { Span, TelemetryConfig as OtelTelemetryConfig } from "./telemetry.js";
+export { Tracer, loadTelemetryConfig, getTracer, setTracer } from "./telemetry/telemetry.js";
+export type { Span, TelemetryConfig as OtelTelemetryConfig } from "./telemetry/telemetry.js";
 
 // ---- Plugins (bundled, distributable extensions + marketplace) ----
 export {
@@ -987,30 +1010,40 @@ export {
   describePluginCapabilities,
   derivePluginName,
   loadPluginRuntimes,
+  pluginSensitiveTrusted,
+  trustPlugin,
   initPluginRuntimes,
   pluginDefaultRuntime,
   pluginPermissionReport,
   PLUGIN_PERMISSIONS,
-} from "./plugins.js";
+} from "./plugins/plugins.js";
 export {
   PluginTrustStore,
   pluginContentHash,
   defaultPluginTrustPath,
-} from "./plugins-trust.js";
+} from "./plugins/plugins-trust.js";
 export {
   McpTrustStore,
   mcpServerConfigHash,
   defaultMcpTrustPath,
   listProjectMcpServers,
   approveProjectMcpServer,
-} from "./mcpTrust.js";
-export type { ProjectMcpServer } from "./mcpTrust.js";
+} from "./mcp/mcpTrust.js";
+export type { ProjectMcpServer } from "./mcp/mcpTrust.js";
+export {
+  defaultFolderTrustPath,
+  findTrustedFolder,
+  isFolderTrusted,
+  isBroadFolder,
+  trustFolder,
+} from "./permissions/folderTrust.js";
+export type { TrustedFolder, FolderTrustOptions } from "./permissions/folderTrust.js";
 export {
   projectSourcedMcpServerNames,
   mcpTrustFileForCwd,
   listProjectMcpServersForCwd,
   approveProjectMcpServerForCwd,
-} from "./session-mcp.js";
+} from "./mcp/sessionBind.js";
 export type {
   PluginManifest,
   PluginProviderTemplate,
@@ -1024,5 +1057,5 @@ export type {
   PluginRuntimeLoadResult,
   PluginRuntimeInit,
   InitPluginRuntimesOptions,
-} from "./plugins.js";
+} from "./plugins/plugins.js";
 

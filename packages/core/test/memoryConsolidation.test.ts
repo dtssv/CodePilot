@@ -8,12 +8,12 @@ import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { autoMemoryDir } from "../src/autoMemory.js";
+import { autoMemoryDir } from "../src/memory/autoMemory.js";
 import {
   extractSessionMemory,
   type MemoryPipelineDeps,
   maybeConsolidateMemory,
-} from "../src/memoryConsolidation.js";
+} from "../src/memory/memoryConsolidation.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 
@@ -65,6 +65,22 @@ describe("memory consolidation — Phase 1 extraction", () => {
   let cwd: string;
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), "memcon-"));
+  });
+
+  it("clamps a model-supplied topic to the fixed taxonomy (no path escape)", async () => {
+    const reply = JSON.stringify([
+      { topic: "../../escape", category: "project", summary: "s1", body: "b1" },
+      { topic: "testing", category: "project", summary: "s2", body: "b2" },
+    ]);
+    const deps: MemoryPipelineDeps = { cwd, provider: fakeProvider(reply), config: { enabled: true } };
+    const events = [msg("user", `${FILLER} anything`), msg("assistant", "ok")];
+    expect(await extractSessionMemory(events, deps)).toBe(2);
+    const dir = autoMemoryDir(cwd);
+    const drafts = (await readdir(join(dir, "drafts"))).filter((f) => f.endsWith(".json"));
+    const topics = await Promise.all(
+      drafts.map(async (f) => JSON.parse(await readFile(join(dir, "drafts", f), "utf-8")).topic),
+    );
+    expect(topics).toEqual(["knowledge", "knowledge"]);
   });
 
   it("writes structured drafts and advances the schedule", async () => {
@@ -211,7 +227,8 @@ describe("memory consolidation — Phase 2 dual gate", () => {
 
     const index = await readFile(join(dir, "MEMORY.md"), "utf-8");
     expect(index).toContain("append-only JSONL");
-    expect(index).toContain("architecture.md");
+    expect(index).toContain("- architecture");
+    expect(index).not.toContain("architecture.md");
 
     // Drafts consumed, schedule reset.
     const drafts = await readdir(join(dir, "drafts"));

@@ -15,7 +15,7 @@ import {
   STATUS_LINE_PRESETS,
   type StatusLinePresetConfig,
   type StatusLineCommandConfig,
-} from "../src/statusLine.js";
+} from "../src/config/statusLine.js";
 
 const dirs: string[] = [];
 afterEach(() => {

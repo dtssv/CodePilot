@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HookEngine } from "../src/hooks.js";
-import { Session } from "../src/session.js";
+import { HookEngine } from "../src/hooks/hooks.js";
+import { Session } from "../src/session/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 

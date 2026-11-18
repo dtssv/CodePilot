@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSession } from "../src/session.js";
+import { createSession } from "../src/session/session.js";
 
 const tempHome = process.env.HOME ?? tmpdir();
 

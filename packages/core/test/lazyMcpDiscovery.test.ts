@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { buildProviderToolDefs, decideLazyMcp, listAdvertisedToolNames } from "../src/agent-messages.js";
+import { buildProviderToolDefs, decideLazyMcp, listAdvertisedToolNames } from "../src/agent/agent-messages.js";
 import { makeMcpMetaTool, makeToolCatalogTool } from "../src/tools/mcp_tool.js";
 import { ToolRegistry, type ToolDef } from "../src/tools/types.js";
 
@@ -60,8 +60,9 @@ describe("lazy MCP tool discovery", () => {
     // auto (default) switches at the threshold.
     expect(decideLazyMcp(8, "auto", 8)).toBe(false);
     expect(decideLazyMcp(9, "auto", 8)).toBe(true);
-    expect(decideLazyMcp(9, undefined, undefined)).toBe(true); // default threshold 8
-    expect(decideLazyMcp(8, undefined, undefined)).toBe(false);
+    expect(decideLazyMcp(3, undefined, undefined)).toBe(true); // default threshold 2
+    expect(decideLazyMcp(2, undefined, undefined)).toBe(false);
+    expect(decideLazyMcp(1, undefined, undefined)).toBe(false);
   });
 
   it("hides individual MCP tools from the provider list when lazy", () => {

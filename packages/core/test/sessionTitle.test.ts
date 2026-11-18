@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeTitle, deriveTitleFromText } from "../src/session-utils.js";
+import { sanitizeTitle, deriveTitleFromText } from "../src/session/session-utils.js";
 
 describe("sanitizeTitle", () => {
   it("strips closed think blocks and keeps the answer", () => {

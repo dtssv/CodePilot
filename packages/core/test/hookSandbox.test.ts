@@ -5,8 +5,8 @@
 
 import { describe, expect, it } from "vitest";
 import { tmpdir } from "node:os";
-import { runCommandHook } from "../src/hooks-handlers.js";
-import { resolveSandbox, detectSandboxBackend } from "../src/sandbox.js";
+import { runCommandHook } from "../src/hooks/hooks-handlers.js";
+import { resolveSandbox, detectSandboxBackend } from "../src/sandbox/sandbox.js";
 
 const cwd = tmpdir();
 

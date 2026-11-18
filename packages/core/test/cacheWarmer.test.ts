@@ -11,7 +11,7 @@ import {
   CACHE_WARM_TTL_FRACTION,
   CACHE_WARM_MIN_SAVINGS_USD,
   type CacheWarmInput,
-} from "../src/cacheWarmer.js";
+} from "../src/compaction/cacheWarmer.js";
 
 function base(p: Partial<CacheWarmInput> = {}): CacheWarmInput {
   return {

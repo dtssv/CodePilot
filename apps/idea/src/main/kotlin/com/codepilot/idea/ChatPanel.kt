@@ -10,6 +10,7 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.options.ShowSettingsUtil
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
@@ -119,23 +120,23 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
             override fun actionPerformed(e: ActionEvent?) { sendCurrentInput() }
         })
     }
-    private val sendButton = JButton("Send").apply {
+    private val sendButton = JButton(CodePilotBundle.message("chat.send")).apply {
         addActionListener { sendCurrentInput() }
         isEnabled = false
     }
-    private val cancelButton = JButton("Cancel").apply {
+    private val cancelButton = JButton(CodePilotBundle.message("chat.cancel")).apply {
         addActionListener { cancelCurrent() }
         isEnabled = false
     }
-    private val newSessionButton = JButton("New Session").apply {
+    private val newSessionButton = JButton(CodePilotBundle.message("chat.newSession")).apply {
         addActionListener { startNewSession() }
     }
-    private val reconnectButton = JButton("Reconnect").apply {
+    private val reconnectButton = JButton(CodePilotBundle.message("chat.reconnect")).apply {
         toolTipText = "Restart the CodePilot engine connection."
         addActionListener { reconnect() }
         isVisible = false
     }
-    private val statusLabel = JLabel("Starting…").apply {
+    private val statusLabel = JLabel(CodePilotBundle.message("chat.starting")).apply {
         horizontalAlignment = JLabel.LEFT
         border = BorderFactory.createEmptyBorder(2, 8, 2, 8)
         foreground = JBColor.GRAY
@@ -143,25 +144,25 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
 
  // Mode toggle (Ask / Plan / Agent).
     private val modeGroup = ButtonGroup()
-    private val askToggle = JToggleButton("Ask").apply {
-        toolTipText = "Chat — read-only Q&A. No file edits or commands."
+    private val askToggle = JToggleButton(CodePilotBundle.message("chat.ask")).apply {
+        toolTipText = CodePilotBundle.message("chat.ask.hint")
         isFocusable = false
         actionCommand = "chat"
     }
-    private val planToggle = JToggleButton("Plan").apply {
-        toolTipText = "Plan — read-only exploration, write a plan before acting."
+    private val planToggle = JToggleButton(CodePilotBundle.message("chat.plan")).apply {
+        toolTipText = CodePilotBundle.message("chat.plan.hint")
         isFocusable = false
         actionCommand = "plan"
     }
-    private val agentToggle = JToggleButton("Agent").apply {
-        toolTipText = "Agent — full autonomy: edits files and runs commands (default)."
+    private val agentToggle = JToggleButton(CodePilotBundle.message("chat.agent")).apply {
+        toolTipText = CodePilotBundle.message("chat.agent.hint")
         isFocusable = false
         actionCommand = "agent"
     }
     private val modeBar = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.X_AXIS)
         border = BorderFactory.createEmptyBorder(2, 8, 4, 8)
-        add(JLabel("Mode:"))
+        add(JLabel(CodePilotBundle.message("chat.mode")))
         add(Box.createHorizontalStrut(6))
  // Register in group so only one is selected at a time.
         listOf(askToggle, planToggle, agentToggle).forEach { btn ->
@@ -246,7 +247,7 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
     }
 
  /** Drop an editor selection into the composer as a reference, without sending
-  * (Cursor "Add to Chat"). When [newChat] is true, open a fresh session first. */
+ * without sending. When [newChat] is true, open a fresh session first. */
     override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
         if (newChat) startNewSession()
         val tagged = buildString {
@@ -255,6 +256,13 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
             append("\n// @").append(filePath).append("\n").append(snippet).append("\n```")
         }
         prefillInput(tagged)
+    }
+
+    /** Swing fallback has no Settings sheet — open the IDE CodePilot configurable. */
+    override fun openSettings() {
+        SwingUtilities.invokeLater {
+            ShowSettingsUtil.getInstance().showSettingsDialog(project, CodepilotSettingsConfigurable::class.java)
+        }
     }
 
  // ----- Subsystem wire-up -----
@@ -409,15 +417,24 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
  /** Permission dialog with Allow / Always / Deny buttons. */
     private fun askUserPermission(toolName: String, reason: String, input: String): String {
         val detail = buildString {
-            append("Tool: ").append(toolName).append("\n")
-            if (reason.isNotEmpty()) append("Reason: ").append(reason).append("\n")
-            if (input.isNotEmpty()) append("Input:\n").append(prettyJson(input).take(1024))
+            append(CodePilotBundle.message("chat.permission.tool")).append(" ").append(toolName).append("\n")
+            if (reason.isNotEmpty()) {
+                append(CodePilotBundle.message("chat.permission.reason")).append(" ").append(reason).append("\n")
+            }
+            if (input.isNotEmpty()) {
+                append(CodePilotBundle.message("chat.permission.input")).append("\n")
+                    .append(prettyJson(input).take(1024))
+            }
         }
-        val options = arrayOf("Allow", "Always", "Deny")
+        val options = arrayOf(
+            CodePilotBundle.message("chat.permission.allow"),
+            CodePilotBundle.message("chat.permission.always"),
+            CodePilotBundle.message("chat.permission.deny"),
+        )
         val choice = JOptionPane.showOptionDialog(
             component,
             detail,
-            "CodePilot wants to use $toolName",
+            CodePilotBundle.message("chat.permission.title", toolName),
             JOptionPane.DEFAULT_OPTION,
             JOptionPane.WARNING_MESSAGE,
             null,

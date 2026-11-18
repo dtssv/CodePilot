@@ -1,6 +1,7 @@
 // Anthropic prompt-cache breakpoint tests (fetch stubbed, no real API calls).
 //
-// CodePilot places up to 3 cache_control breakpoints: system block, last tool
+// CodePilot places up to 4 cache_control breakpoints: system block(s)
+// (static policy + optional stable env/memory), last tool
 // definition, and the stable conversation-history prefix. The tool breakpoint
 // is gated by `cacheControlOnTools` so a compat gateway that rejects
 // cache_control inside a tool definition can drop ONLY that one while keeping
@@ -131,6 +132,30 @@ describe("AnthropicProvider cache TTL", () => {
     const tools = body.tools as Array<Record<string, unknown>>;
     expect(tools[tools.length - 1]!.cache_control).toEqual({ type: "ephemeral" });
     expect(headers["anthropic-beta"]).not.toContain("extended-cache-ttl");
+  });
+
+  it("sends each systemPromptBlocks entry as its own cache_control block", async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse(MINIMAL_STREAM);
+    });
+    const p = new AnthropicProvider({ apiKey: "k" });
+    await drain(
+      p.stream({
+        model: "claude-sonnet-4-5",
+        systemPrompt: "joined fallback",
+        systemPromptBlocks: ["# policy", "<environment>\ncwd: /x\n</environment>"],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: TOOLS,
+      }),
+    );
+    const sys = body.system as Array<Record<string, unknown>>;
+    expect(sys).toHaveLength(2);
+    expect(sys[0]!.text).toBe("# policy");
+    expect(sys[1]!.text).toContain("<environment>");
+    expect(sys[0]!.cache_control).toEqual({ type: "ephemeral" });
+    expect(sys[1]!.cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("attaches ttl:1h to every breakpoint and sends the extended beta header", async () => {

@@ -1,8 +1,15 @@
 // web_search backend selection + per-backend request shaping (fetch stubbed).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveSearchBackend, resolveSearchLocale, webSearchTool } from "../src/tools/web_search.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import {
+  filterSearchHitsByDomain,
+  formatSearchResultsForModel,
+  hostMatchesDomain,
+  resolveSearchBackend,
+  resolveSearchLocale,
+  webSearchTool,
+} from "../src/tools/web_search.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 import type { CodepilotConfig } from "../src/types.js";
 
@@ -446,6 +453,43 @@ describe("webSearchTool backends", () => {
     expect(seenAuth).toBe("Bearer pasted-key-abc");
   });
 
+  it("custom: webSearch.env fills ${ENV} before apiKey fallback (e.g. SEARXNG_URL)", async () => {
+    vi.stubEnv("SEARXNG_URL", "");
+    vi.stubEnv("OTHER_KEY", "");
+    let seenUrl: string | undefined;
+    let seenAuth: string | undefined;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      seenUrl = url;
+      seenAuth = (init.headers as Record<string, string>).Authorization;
+      return new Response(
+        JSON.stringify({ results: [{ title: "S", url: "https://s.io", content: "c" }] }),
+        { status: 200 },
+      );
+    });
+    const r = await webSearchTool.execute(
+      { query: "hello world" },
+      ctx({
+        webSearch: {
+          provider: "custom",
+          engineId: "searxng",
+          apiKey: "should-not-overwrite-url",
+          env: { SEARXNG_URL: "https://searx.local" },
+          custom: {
+            url: "${SEARXNG_URL}/search?q={query}&format=json",
+            headers: { Authorization: "Bearer ${OTHER_KEY}" },
+            resultsPath: "results",
+            fields: { title: "title", url: "url", snippet: "content" },
+          },
+        },
+      }),
+    );
+    expect(r.isError).toBeFalsy();
+    expect(seenUrl).toBe("https://searx.local/search?q=hello%20world&format=json");
+    // OTHER_KEY unset in env/cfg → falls back to apiKey.
+    expect(seenAuth).toBe("Bearer should-not-overwrite-url");
+    expect(r.content).toContain("via searxng");
+  });
+
   it("falls back to Bing HTML when DuckDuckGo is unreachable", async () => {
     vi.stubEnv("BRAVE_API_KEY", "");
     vi.stubEnv("SERPER_API_KEY", "");
@@ -470,5 +514,69 @@ describe("webSearchTool backends", () => {
     expect(urls.some((u) => u.includes("bing.com"))).toBe(true);
     expect(r.content).toContain("Bing Title");
     expect(r.content).toContain("https://b.dev/page");
+    expect(r.content).toContain("[Bing Title](https://b.dev/page)");
+    expect(r.content).toContain("CITATION REQUIREMENTS");
+  });
+});
+
+describe("search result domain filters + citation formatting", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("hostMatchesDomain accepts exact and subdomain", () => {
+    expect(hostMatchesDomain("docs.python.org", "docs.python.org")).toBe(true);
+    expect(hostMatchesDomain("docs.python.org", "python.org")).toBe(true);
+    expect(hostMatchesDomain("evilpython.org", "python.org")).toBe(false);
+  });
+
+  it("filterSearchHitsByDomain applies allow then block", () => {
+    const hits = [
+      { title: "A", url: "https://docs.python.org/3/", snippet: "a" },
+      { title: "B", url: "https://blog.example.com/x", snippet: "b" },
+      { title: "C", url: "https://spam.example.com/y", snippet: "c" },
+    ];
+    expect(filterSearchHitsByDomain(hits, ["python.org"], undefined).map((h) => h.title)).toEqual([
+      "A",
+    ]);
+    expect(filterSearchHitsByDomain(hits, undefined, ["spam.example.com"]).map((h) => h.title)).toEqual([
+      "A",
+      "B",
+    ]);
+  });
+
+  it("formatSearchResultsForModel uses markdown links and a citation reminder", () => {
+    const text = formatSearchResultsForModel("rust async", [
+      { title: "Tokio", url: "https://tokio.rs/", snippet: "async runtime" },
+    ]);
+    expect(text).toContain("[Tokio](https://tokio.rs/)");
+    expect(text).toContain("Sources:");
+    expect(text).toContain("web_fetch");
+  });
+
+  it("web_search drops blocked domains from tool input", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            web: {
+              results: [
+                { title: "Keep", url: "https://docs.example.com/a", description: "ok" },
+                { title: "Drop", url: "https://ads.tracker.io/x", description: "no" },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    const r = await webSearchTool.execute(
+      { query: "q", blocked_domains: ["tracker.io"] },
+      ctx({ webSearch: { provider: "brave", apiKey: "bk" } }),
+    );
+    expect(r.content).toContain("[Keep](https://docs.example.com/a)");
+    expect(r.content).not.toContain("tracker.io");
+    expect(r.content).toContain("CITATION REQUIREMENTS");
   });
 });

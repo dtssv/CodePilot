@@ -23,8 +23,8 @@ import {
   getSkillContent,
   installSkillFromArchive,
   installSkillFromSource,
-} from "../src/skillManage.js";
-import { getUserConfigPath } from "../src/config.js";
+} from "../src/skills/skillManage.js";
+import { getUserConfigPath } from "../src/config/config.js";
 
 // getUserConfigPath()/defaultSkillsDir() are home-anchored; HOME is a temp dir
 // (test/setup.ts). Snapshot + restore the shared user config so enable/disable

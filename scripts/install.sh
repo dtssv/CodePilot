@@ -237,7 +237,66 @@ ensure_path() {
   esac
 }
 
+# Stop a live shared daemon (if any) and remember whether to restart it after
+# replacing the binary. Reads ~/.codepilot/serve.json; falls back to pkill.
+stop_daemon() {
+  DAEMON_WAS_RUNNING=false
+  DAEMON_RESTART_PORT=18765
+  DAEMON_RESTART_HOST=""
+  local info="$PREFIX/serve.json"
+  if [[ -f "$info" ]]; then
+    local pid port host
+    pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$info" | head -n1)
+    port=$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$info" | head -n1)
+    host=$(sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$info" | head -n1)
+    [[ -n "$port" ]] && DAEMON_RESTART_PORT="$port"
+    [[ -n "$host" && "$host" != "127.0.0.1" && "$host" != "localhost" ]] && DAEMON_RESTART_HOST="$host"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      DAEMON_WAS_RUNNING=true
+      echo -e "${MUTED}Stopping running daemon ${NC}(pid $pid)…"
+      kill "$pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+      done
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  fi
+  # Catch daemons whose serve.json was already cleared.
+  if pgrep -f '[c]odepilot serve --daemon' >/dev/null 2>&1; then
+    DAEMON_WAS_RUNNING=true
+    pkill -f '[c]odepilot serve --daemon' 2>/dev/null || true
+    sleep 0.5
+  fi
+  rm -f "$PREFIX/serve.json" "$PREFIX/server.json" 2>/dev/null || true
+}
+
+restart_daemon_if_needed() {
+  [[ "${DAEMON_WAS_RUNNING:-false}" == "true" ]] || return 0
+  local bin="$BIN_DIR/codepilot${EXE}"
+  [[ -x "$bin" ]] || return 0
+  echo -e "${MUTED}Restarting shared daemon…${NC}"
+  local args=(serve --daemon --port "${DAEMON_RESTART_PORT:-18765}")
+  if [[ -n "${DAEMON_RESTART_HOST:-}" ]]; then
+    args+=(--host "$DAEMON_RESTART_HOST")
+  fi
+  # Detached: install script must not wait on the daemon.
+  nohup "$bin" "${args[@]}" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  # Brief wait so serve.json appears for clients that attach immediately.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -f "$PREFIX/serve.json" ]] && break
+    sleep 0.2
+  done
+  if [[ -f "$PREFIX/serve.json" ]]; then
+    echo -e "${MUTED}Daemon restarted.${NC}"
+  else
+    echo -e "${MUTED}Daemon restart launched (clients will attach when ready).${NC}"
+  fi
+}
+
 need_cmd curl
+stop_daemon
 if [[ -n "$DIST_DIR" ]]; then
   install_from_dist
 else
@@ -245,6 +304,7 @@ else
 fi
 verify_install
 ensure_path
+restart_daemon_if_needed
 
 echo ""
 echo -e "${MUTED}Done. Start with:${NC}"

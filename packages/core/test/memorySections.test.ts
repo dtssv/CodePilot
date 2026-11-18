@@ -9,7 +9,7 @@ import {
   summariseMemoryText,
   FileMemorySink,
   MEMORY_SECTIONS,
-} from "../src/memory.js";
+} from "../src/memory/memory.js";
 
 describe("parseMemory", () => {
   it("returns empty sections for empty input", () => {

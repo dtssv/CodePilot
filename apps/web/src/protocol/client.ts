@@ -3,7 +3,7 @@
 // `@codepilot/core` imports are `import type` (build-time erased) so no Node
 // code reaches the bundle; runtime import is the dep-free `@codepilot/protocol/rpc`.
 
-import { Peer, RpcError, PROTOCOL_VERSION, type RpcTransport } from "@codepilot/protocol/rpc";
+import { Peer, RpcError, PROTOCOL_VERSION } from "@codepilot/protocol/rpc";
 import type {
   AgentMode,
   Event,
@@ -13,7 +13,6 @@ import type {
   PermissionMode,
   PluginCapabilityReport,
   QuestionAnswers,
-  QuestionSpec,
   SessionSummary,
 } from "@codepilot/core";
 import type {
@@ -27,239 +26,33 @@ import type {
 } from "@codepilot/protocol";
 
 import { BrowserWebSocketTransport, waitForOpen } from "./transport.js";
+import { buildUrl } from "./clientErrors.js";
+import * as clientConfig from "./clientConfig.js";
+import * as clientPlugins from "./clientPlugins.js";
+import * as clientSession from "./clientSession.js";
+import * as clientWorkspace from "./clientWorkspace.js";
+import type {
+  ClientCallbacks,
+  ClientRpcHost,
+  ConfigProviderPreset,
+  ConfigProviderRedacted,
+  ConfigSnapshot,
+  ConnectOptions,
+  ContextReport,
+  CustomSearchTemplateInfo,
+  OpenedTransport,
+  RemoteModelInfo,
+  SessionOptions,
+  TransportOpener,
+  WorkspaceChangedParams,
+} from "./clientTypes.js";
 
 // Single source of truth: the protocol version comes from the dependency-free
 // @codepilot/protocol/rpc module (same constant the server advertises), not a
 // local literal that could drift on a version bump. Re-exported for callers.
 export { PROTOCOL_VERSION };
-
-export interface PendingPermission {
-  requestId: string;
-  sessionId: string;
-  toolName: string;
-  input: unknown;
-  reason: string;
- /** Out-of-sandbox write: allow adds this folder (always also persists). */
-  sandboxExpand?: { path: string };
-}
-
-/** Context-window usage report (mirrors core Session.contextReport). */
-export interface ContextReport {
-  /** Event-log-only token total (back-compat). */
-  totalTokens: number;
-  /** Full per-turn send estimate: event log + system prompt + skills + tool/MCP
-   * schemas. The schemas + system prompt ride every request but live outside
-   * the event log, so this exceeds `totalTokens` and drives the gauge. */
-  sentTokens?: number;
-  /** Provider-reported prompt size from the last request (0 until the first
-   * response). Most accurate numerator when > 0. */
-  providerInputTokens?: number;
-  window: number;
-  triggerThreshold: number;
-  triggerFraction: number;
-  usagePercent: number;
-  autoCompactEnabled: boolean;
-  byEventType: { type: string; tokens: number; count: number }[];
-  byCategory?: { category: string; tokens: number; isDeferred?: boolean }[];
-  topFileReads: { path: string; reads: number; tokens: number }[];
-  duplicateReads: { path: string; reads: number }[];
-}
-
-export interface PendingQuestion {
-  requestId: string;
-  sessionId: string;
-  questions: QuestionSpec[];
-}
-
-export interface ClientCallbacks {
-  onEvent(sessionId: string, event: Event): void;
-  onPermission(req: PendingPermission): void;
-  onQuestion(req: PendingQuestion): void;
- /** Another client following the session answered this request. */
-  onPromptResolved?(kind: "permission" | "question", requestId: string): void;
- /** Transport went away — the UI should offer to reconnect. */
-  onClose(reason?: string): void;
- /** Automatic reconnect succeeded after a transport drop. */
-  onReconnected?(init: InitializeResult): void;
- /** Automatic reconnect is being attempted. */
-  onReconnecting?(attempt: number, delayMs: number): void;
-  /** A watched workspace directory changed on disk (debounced). */
-  onWorkspaceChanged?(params: WorkspaceChangedParams): void;
-  /** MCP OAuth: open / show this authorization URL (loopback callback pending). */
-  onMcpOauthRequired?(params: { name: string; url: string }): void;
-  /** The server's `diagnostics` tool asks the host for LSP diagnostics. A host
-   * with a language server returns them inline; a browser with none should
-   * return `{ unavailable: true }`. When this callback is absent the client
-   * replies `unavailable` so the tool falls back to its "use bash" guidance. */
-  onDiagnosticsRequest?(params: DiagnosticsRequestParams): Promise<DiagnosticsRequestResult>;
-}
-
-export interface WorkspaceChangedParams {
-  path: string;
-  kinds: Array<"rename" | "change">;
- /** Set when the server-side watcher failed; fall back to polling. */
-  error?: string;
-}
-
-export interface ConnectOptions {
- /** `ws://host:port/rpc` — the token is appended from `token`. */
-  url: string;
-  token?: string;
- /** Optional until the user opens a workspace folder. */
-  cwd?: string;
-  permissionMode?: PermissionMode;
-}
-
-export type ModelModality = "text" | "image" | "audio" | "video";
-
-export interface ModelCapabilities {
- /** Provider-reported ceiling when `/models` returns it; otherwise omitted. */
-  contextWindowMax?: number;
-  contextWindow: number;
-  modalities: ModelModality[];
-  maxOutputTokens?: number;
-}
-
-export interface RemoteModelInfo {
-  id: string;
-  contextWindowMax?: number;
-  modalities?: ModelModality[];
-  maxOutputTokens?: number;
-}
-
-/** Writable provider preset for `config/upsertProvider`. */
-export interface ConfigProviderPreset {
-  provider: "anthropic" | "openai" | "copilot";
-  displayName?: string;
-  baseURL?: string;
-  apiKey?: string;
-  model?: string;
-  smallModel?: string;
-  models?: string[];
-  modelCapabilities?: Record<string, ModelCapabilities>;
-}
-
-/** Redacted preset returned by `config/get` (no full apiKey). */
-export interface ConfigProviderRedacted {
-  provider: "anthropic" | "openai" | "copilot";
-  displayName?: string;
-  baseURL?: string;
-  hasApiKey: boolean;
-  apiKeyHint?: string;
-  model?: string;
-  smallModel?: string;
-  models?: string[];
-  modelCapabilities?: Record<string, ModelCapabilities>;
-}
-
-export interface SelectableModelInfo {
-  id: string;
-  providerId: string;
-  providerLabel: string;
-  model: string;
-  kind: "chat" | "small";
-}
-
-export interface ProviderTemplateInfo {
-  id: string;
-  displayName: string;
-  provider: "anthropic" | "openai" | "copilot";
-  baseURL?: string;
-  models?: string[];
-  smallModel?: string;
-  description?: string;
-  requiresBaseURL?: boolean;
-}
-
-/** HTTP template for a `custom` web_search backend. */
-export interface CustomSearchTemplateInfo {
-  method?: "GET" | "POST";
-  url: string;
-  headers?: Record<string, string>;
-  body?: string;
-  resultsPath?: string;
-  fields?: { title?: string; url?: string; snippet?: string };
-}
-
-/** One ready-made search engine from the catalog. */
-export interface SearchEngineInfo {
-  id: string;
-  displayName: string;
-  description?: string;
-  signupUrl?: string;
-  needsKey?: boolean;
-  keyEnvVar?: string;
-  template: CustomSearchTemplateInfo;
-}
-
-export interface ConfigSnapshot {
-  active: {
-    provider?: string;
-    model?: string;
-    smallModel?: string;
-    baseURL?: string;
-    providerId?: string;
-    hasApiKey: boolean;
-    apiKeyHint?: string;
-    onboardedAt?: string;
-  };
-  providers: Record<string, ConfigProviderRedacted>;
-  selectableModels: SelectableModelInfo[];
-  templates: ProviderTemplateInfo[];
-  imageGen?: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean };
-  webSearch?: {
-    provider?: string;
-    hasApiKey: boolean;
-    customUrl?: string;
-    engines: SearchEngineInfo[];
-  };
-  sandbox?: { mode: "off" | "workspace-write" | "read-only" };
-}
-
-export interface SessionOptions {
-  cwd?: string;
-  permissionMode?: PermissionMode;
- /** Reported to the server as `clientInfo.name`. */
-  clientName?: string;
-}
-
-/** A live transport plus the hooks the client needs to manage it. */
-export interface OpenedTransport {
-  transport: RpcTransport;
-  close(): void;
-  onClose(listener: () => void): void;
-}
-
-/** Opens a fresh transport; called again for every automatic reconnect. */
-export type TransportOpener = () => Promise<OpenedTransport>;
-
-/**
- * Build the WebSocket URL. The token travels as a query parameter because a
- * browser cannot set headers on a WebSocket handshake.
- */
-export function buildUrl(url: string, token?: string): string {
-  if (!token) return url;
-  const u = new URL(url);
-  u.searchParams.set("token", token);
-  return u.toString();
-}
-
-/**
- * Split a pasted `codepilot serve --web` URL into its parts, so the user can
- * paste the line the CLI printed instead of filling two fields.
- */
-export function parseServeUrl(input: string): { url: string; token?: string } {
-  const trimmed = input.trim();
-  try {
-    const u = new URL(trimmed);
-    const token = u.searchParams.get("token") ?? undefined;
-    u.searchParams.delete("token");
- // `URL` keeps a trailing "?" once the only param is removed.
-    return { url: u.toString().replace(/\?$/, ""), token };
-  } catch {
-    return { url: trimmed };
-  }
-}
+export * from "./clientTypes.js";
+export * from "./clientErrors.js";
 
 export class CodepilotClient {
   private peer: Peer | null = null;
@@ -482,33 +275,42 @@ export class CodepilotClient {
 
  // ----- protocol methods -----
 
+  private rpcHost(): ClientRpcHost {
+    return { call: (method, params) => this.call(method, params) };
+  }
+
   async newSession(params: {
     cwd?: string;
     model?: string;
     agentMode?: AgentMode;
     systemPromptExtra?: string;
   }): Promise<string> {
-    const { sessionId } = await this.call<{ sessionId: string }>("session/new", params);
-    return sessionId;
+    return clientSession.newSession(this.rpcHost(), params);
   }
 
   async resumeSession(
     sessionId: string,
-    opts?: { readOnly?: boolean },
+    opts?: { readOnly?: boolean; historyLimit?: number },
   ): Promise<SessionResumeResult> {
-    return this.call<SessionResumeResult>("session/resume", {
-      sessionId,
-      ...(opts?.readOnly ? { readOnly: true } : {}),
-    });
+    return clientSession.resumeSession(this.rpcHost(), sessionId, opts);
+  }
+
+  /** Older history page for a resumed session (`before` from a prior resume). */
+  async sessionHistory(
+    sessionId: string,
+    before: number,
+    limit?: number,
+  ): Promise<{ events: Event[]; historyTruncated: boolean; historyBefore?: number }> {
+    return clientSession.sessionHistory(this.rpcHost(), sessionId, before, limit);
   }
 
   async listWorkspace(path = ".", cwd?: string): Promise<{ path: string; entries: Array<{ name: string; path: string; kind: "file" | "directory"; size?: number }> }> {
-    return this.call("workspace/list", { path, cwd });
+    return clientWorkspace.listWorkspace(this.rpcHost(), path, cwd);
   }
 
  /** Native folder dialog on the serve host (may return null if cancelled). */
   async pickFolder(): Promise<{ path: string | null; supported: boolean }> {
-    return this.call("workspace/pickFolder", {});
+    return clientWorkspace.pickFolder(this.rpcHost());
   }
 
  /** Browse absolute directories on the serve host (folder picker UI). */
@@ -518,28 +320,28 @@ export class CodepilotClient {
     entries: Array<{ name: string; path: string; kind: "file" | "directory" }>;
     roots: Array<{ label: string; path: string }>;
   }> {
-    return this.call("workspace/browse", { path });
+    return clientWorkspace.browseWorkspace(this.rpcHost(), path);
   }
 
   async workspaceStat(path: string, cwd?: string): Promise<{ path: string; exists: boolean; size: number; hash: string; modifiedAt?: number }> {
-    return this.call("workspace/stat", { path, cwd });
+    return clientWorkspace.workspaceStat(this.rpcHost(), path, cwd);
   }
 
   /** Manual compaction (`/compact`): summarise now, keep going on the task. */
   async sessionCompact(sessionId: string, focus?: string): Promise<{ ok: true }> {
-    return this.call("session/compact", { sessionId, ...(focus ? { focus } : {}) });
+    return clientSession.sessionCompact(this.rpcHost(), sessionId, focus);
   }
 
   /** Task boundary (`/clear`): archive context, continue with a clean slate. */
   async sessionClearContext(sessionId: string, reason?: string): Promise<{ cleared: boolean }> {
-    return this.call("session/clear-context", { sessionId, reason });
+    return clientSession.sessionClearContext(this.rpcHost(), sessionId, reason);
   }
 
   /** Context-window usage report for the live session: totals + a semantic
    * breakdown (system prompt, skills, tool/MCP schemas, conversation,
    * sub-agents). Used by the context-usage panel. */
   async sessionContextReport(sessionId: string): Promise<ContextReport> {
-    return this.call("session/contextReport", { sessionId });
+    return clientSession.sessionContextReport(this.rpcHost(), sessionId);
   }
 
   /** Exact prompt token count via the server's provider count-tokens API,
@@ -548,7 +350,7 @@ export class CodepilotClient {
   async sessionContextCountPrecise(
     sessionId: string,
   ): Promise<{ inputTokens: number } | null> {
-    return this.call("session/contextCountPrecise", { sessionId });
+    return clientSession.sessionContextCountPrecise(this.rpcHost(), sessionId);
   }
 
   /** List slash commands for the `/` menu (shared built-ins + md commands).
@@ -564,7 +366,7 @@ export class CodepilotClient {
     }>;
     warnings: string[];
   }> {
-    return this.call("commands/list", { cwd });
+    return clientWorkspace.commandsList(this.rpcHost(), cwd);
   }
 
   /** `@`-mention completion candidates (file/dir/mcp/git/skill). */
@@ -574,68 +376,68 @@ export class CodepilotClient {
   ): Promise<{
     candidates: Array<{ kind: "file" | "dir" | "mcp" | "git" | "skill"; value: string; label: string; detail?: string }>;
   }> {
-    return this.call("workspace/complete", { query, ...opts });
+    return clientWorkspace.workspaceComplete(this.rpcHost(), query, opts);
   }
 
  /** Subscribe to debounced disk-change notifications for a directory. */
   async watchWorkspace(path = ".", cwd?: string): Promise<{ watching: boolean; path: string }> {
-    return this.call("workspace/watch", { path, cwd });
+    return clientWorkspace.watchWorkspace(this.rpcHost(), path, cwd);
   }
 
   async gitDiff(path?: string, staged = false, cwd?: string): Promise<{ path?: string; diff: string; truncated: boolean }> {
-    return this.call("workspace/git-diff", { path, staged, cwd });
+    return clientWorkspace.gitDiff(this.rpcHost(), path, staged, cwd);
   }
 
   async gitStatus(cwd?: string): Promise<{ branch: string; files: Array<{ path: string; index: string; worktree: string; status: string }> }> {
-    return this.call("workspace/git-status", { cwd });
+    return clientWorkspace.gitStatus(this.rpcHost(), cwd);
   }
 
   async gitBranches(cwd?: string): Promise<{ current: string; branches: Array<{ name: string; current: boolean; upstream?: string; ahead?: number; behind?: number }>; tags: string[]; detached: boolean }> {
-    return this.call("git/branches", { cwd });
+    return clientWorkspace.gitBranches(this.rpcHost(), cwd);
   }
 
   async gitInit(cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/init", { cwd });
+    return clientWorkspace.gitInit(this.rpcHost(), cwd);
   }
 
   async gitStage(paths?: string[], cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/stage", { paths, cwd });
+    return clientWorkspace.gitStage(this.rpcHost(), paths, cwd);
   }
 
   async gitUnstage(paths?: string[], cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/unstage", { paths, cwd });
+    return clientWorkspace.gitUnstage(this.rpcHost(), paths, cwd);
   }
 
   async gitCommit(message: string, all = false, cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/commit", { message, all, cwd });
+    return clientWorkspace.gitCommit(this.rpcHost(), message, all, cwd);
   }
 
   async gitPush(opts: { remote?: string; branch?: string; setUpstream?: boolean; cwd?: string } = {}): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/push", opts);
+    return clientWorkspace.gitPush(this.rpcHost(), opts);
   }
 
   async gitPull(opts: { remote?: string; branch?: string; cwd?: string } = {}): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/pull", opts);
+    return clientWorkspace.gitPull(this.rpcHost(), opts);
   }
 
   async gitFetch(cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/fetch", { cwd });
+    return clientWorkspace.gitFetch(this.rpcHost(), cwd);
   }
 
   async gitCheckout(branch: string, create = false, cwd?: string): Promise<{ ok: boolean; output: string }> {
-    return this.call("git/checkout", { branch, create, cwd });
+    return clientWorkspace.gitCheckout(this.rpcHost(), branch, create, cwd);
   }
 
   async gitCommitMessage(cwd?: string, sessionId?: string): Promise<{ message: string }> {
-    return this.call("git/commit-message", { cwd, sessionId });
+    return clientWorkspace.gitCommitMessage(this.rpcHost(), cwd, sessionId);
   }
 
   async writeWorkspace(path: string, content: string, expectedSize?: number, expectedHash?: string, cwd?: string): Promise<{ path: string; size: number; hash: string }> {
-    return this.call("workspace/write", { path, content, expectedSize, expectedHash, cwd });
+    return clientWorkspace.writeWorkspace(this.rpcHost(), path, content, expectedSize, expectedHash, cwd);
   }
 
   async searchWorkspace(query: string, path = ".", maxResults = 100, cwd?: string): Promise<{ matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }> {
-    return this.call("workspace/search", { query, path, maxResults, cwd });
+    return clientWorkspace.searchWorkspace(this.rpcHost(), query, path, maxResults, cwd);
   }
 
   async readWorkspace(path: string, cwd?: string): Promise<{
@@ -647,7 +449,7 @@ export class CodepilotClient {
     encoding?: "utf8" | "base64";
     mediaType?: string;
   }> {
-    return this.call("workspace/read", { path, cwd });
+    return clientWorkspace.readWorkspace(this.rpcHost(), path, cwd);
   }
 
   /** Resolve a (bare/relative) path to an absolute one the host can open,
@@ -657,7 +459,7 @@ export class CodepilotClient {
     absolute: string;
     exists: boolean;
   }> {
-    return this.call("workspace/resolve", { path, cwd });
+    return clientWorkspace.resolveWorkspace(this.rpcHost(), path, cwd);
   }
 
   /** Engine (CLI/daemon) update channel — not the IDE plugin / VSIX. */
@@ -672,7 +474,7 @@ export class CodepilotClient {
       canAutoApply: boolean;
     };
   }> {
-    return this.call("system/update-check", {});
+    return clientPlugins.checkEngineUpdate(this.rpcHost());
   }
 
   async applyEngineUpdate(): Promise<{
@@ -680,7 +482,7 @@ export class CodepilotClient {
     version: string;
     message?: string;
   }> {
-    return this.call("system/update-apply", {});
+    return clientPlugins.applyEngineUpdate(this.rpcHost());
   }
 
   async mintRemotePairing(opts: {
@@ -698,13 +500,13 @@ export class CodepilotClient {
     warning?: string;
     lanIp?: string;
   }> {
-    return this.call("remote/pair-mint", opts);
+    return clientPlugins.mintRemotePairing(this.rpcHost(), opts);
   }
 
   async listMcpMarkets(): Promise<{
     markets: Array<{ id: string; name: string; description: string; url: string }>;
   }> {
-    return this.call("mcp/markets", {});
+    return clientPlugins.listMcpMarkets(this.rpcHost());
   }
 
   async installMcpJson(json: string, name?: string): Promise<{
@@ -712,7 +514,7 @@ export class CodepilotClient {
     names: string[];
     message: string;
   }> {
-    return this.call("mcp/install-json", { json, name });
+    return clientPlugins.installMcpJson(this.rpcHost(), json, name);
   }
 
   async listInstalledMcp(): Promise<{
@@ -725,14 +527,14 @@ export class CodepilotClient {
       type?: string;
     }>;
   }> {
-    return this.call("mcp/list", {});
+    return clientPlugins.listInstalledMcp(this.rpcHost());
   }
 
   async setMcpEnabled(
     name: string,
     enabled: boolean,
   ): Promise<{ name: string; enabled: boolean; message: string }> {
-    return this.call("mcp/set-enabled", { name, enabled });
+    return clientPlugins.setMcpEnabled(this.rpcHost(), name, enabled);
   }
 
   async inspectMcp(name: string): Promise<{
@@ -744,7 +546,7 @@ export class CodepilotClient {
     error?: string;
     needsAuth?: boolean;
   }> {
-    return this.call("mcp/inspect", { name });
+    return clientPlugins.inspectMcp(this.rpcHost(), name);
   }
 
   async startMcpOauth(name: string): Promise<{
@@ -752,7 +554,7 @@ export class CodepilotClient {
     url?: string;
     error?: string;
   }> {
-    return this.call("mcp/oauth-start", { name });
+    return clientPlugins.startMcpOauth(this.rpcHost(), name);
   }
 
   async mcpOauthStatus(name: string): Promise<{
@@ -760,11 +562,11 @@ export class CodepilotClient {
     url?: string;
     error?: string;
   }> {
-    return this.call("mcp/oauth-status", { name });
+    return clientPlugins.mcpOauthStatus(this.rpcHost(), name);
   }
 
   async cancelMcpOauth(name: string): Promise<{ state: "idle" | "pending" | "authorized" | "error" }> {
-    return this.call("mcp/oauth-cancel", { name });
+    return clientPlugins.cancelMcpOauth(this.rpcHost(), name);
   }
 
   async listPluginMarket(query?: string): Promise<{
@@ -778,7 +580,7 @@ export class CodepilotClient {
     }>;
     describe: Record<string, string>;
   }> {
-    return this.call("plugins/market", query ? { query } : {});
+    return clientPlugins.listPluginMarket(this.rpcHost(), query);
   }
 
   async listInstalledPlugins(): Promise<{
@@ -788,40 +590,57 @@ export class CodepilotClient {
       version: string;
       source: string;
       enabled: boolean;
+      /** False when the plugin's hooks / MCP servers / runtime await approval. */
+      trusted?: boolean;
     }>;
   }> {
-    return this.call("plugins/list", {});
+    return clientPlugins.listInstalledPlugins(this.rpcHost());
+  }
+
+  async trustPlugin(name: string): Promise<{ trusted: boolean }> {
+    return clientPlugins.trustPlugin(this.rpcHost(), name);
   }
 
   async inspectPlugin(source: string): Promise<PluginCapabilityReport> {
-    return this.call("plugins/inspect", { source });
+    return clientPlugins.inspectPlugin(this.rpcHost(), source);
   }
 
   async installPlugin(source: string, force?: boolean): Promise<{ name: string; path: string }> {
-    return this.call("plugins/install", force ? { source, force } : { source });
+    return clientPlugins.installPlugin(this.rpcHost(), source, force);
   }
 
   async uninstallPlugin(name: string): Promise<{ removed: boolean }> {
-    return this.call("plugins/uninstall", { name });
+    return clientPlugins.uninstallPlugin(this.rpcHost(), name);
   }
 
   async revokeAllRemote(): Promise<{ revoked: boolean }> {
-    return this.call("remote/revoke-all", {});
+    return clientPlugins.revokeAllRemote(this.rpcHost());
   }
 
   async initWorkspace(opts?: {
     force?: boolean;
     filename?: "AGENTS.md" | "CODEPILOT.md";
   }): Promise<{ path: string; created: boolean; skipped: boolean }> {
-    return this.call("workspace/init", opts ?? {});
+    return clientWorkspace.initWorkspace(this.rpcHost(), opts);
   }
 
   async undoSession(sessionId: string): Promise<{ restored: string[]; deleted: string[]; label: string }> {
-    return this.call("session/undo", { sessionId });
+    return clientSession.undoSession(this.rpcHost(), sessionId);
   }
 
   async redoSession(sessionId: string): Promise<{ restored: string[]; deleted: string[]; label: string }> {
-    return this.call("session/redo", { sessionId });
+    return clientSession.redoSession(this.rpcHost(), sessionId);
+  }
+
+  async rewindTargets(sessionId: string): Promise<Array<{ messageId: string; text: string; ts?: number }>> {
+    return clientSession.rewindTargets(this.rpcHost(), sessionId);
+  }
+
+  async rewindSession(
+    sessionId: string,
+    opts?: { messageId?: string; files?: boolean },
+  ): Promise<{ messageId: string; text: string; turns: number; restored: string[]; deleted: string[] }> {
+    return clientSession.rewindSession(this.rpcHost(), sessionId, opts);
   }
 
   async listConnectors(opts?: {
@@ -835,28 +654,28 @@ export class CodepilotClient {
     offset: number;
     limit: number;
   }> {
-    return this.call("connectors/list", opts ?? {});
+    return clientPlugins.listConnectors(this.rpcHost(), opts);
   }
 
   async installConnector(
     connectorId: string,
     values: Record<string, string>,
   ): Promise<{ mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }> {
-    return this.call("connectors/install", { connectorId, values });
+    return clientPlugins.installConnector(this.rpcHost(), connectorId, values);
   }
 
   async updateConnector(
     connectorId: string,
     values: Record<string, string>,
   ): Promise<{ mcpName?: string; skillPath?: string; mcpConfigPath: string; message: string }> {
-    return this.call("connectors/update", { connectorId, values });
+    return clientPlugins.updateConnector(this.rpcHost(), connectorId, values);
   }
 
   async setConnectorEnabled(
     connectorId: string,
     enabled: boolean,
   ): Promise<{ connectorId: string; enabled: boolean; message: string }> {
-    return this.call("connectors/set-enabled", { connectorId, enabled });
+    return clientPlugins.setConnectorEnabled(this.rpcHost(), connectorId, enabled);
   }
 
   async listSkills(opts?: {
@@ -878,11 +697,11 @@ export class CodepilotClient {
     offset: number;
     limit: number;
   }> {
-    return this.call("skills/list", opts ?? {});
+    return clientPlugins.listSkills(this.rpcHost(), opts);
   }
 
   async installSkill(connectorId: string): Promise<{ skillPath: string; message: string }> {
-    return this.call("skills/install", { connectorId });
+    return clientPlugins.installSkill(this.rpcHost(), connectorId);
   }
 
   async installSkillArchive(
@@ -894,7 +713,7 @@ export class CodepilotClient {
     skillPaths: string[];
     message: string;
   }> {
-    return this.call("skills/install-archive", { filename, dataBase64 });
+    return clientPlugins.installSkillArchive(this.rpcHost(), filename, dataBase64);
   }
 
   /**
@@ -908,14 +727,14 @@ export class CodepilotClient {
     skillPaths: string[];
     message: string;
   }> {
-    return this.call("skills/install-source", { source });
+    return clientPlugins.installSkillSource(this.rpcHost(), source);
   }
 
   async setSkillEnabled(
     name: string,
     enabled: boolean,
   ): Promise<{ name: string; enabled: boolean; message: string }> {
-    return this.call("skills/set-enabled", { name, enabled });
+    return clientPlugins.setSkillEnabled(this.rpcHost(), name, enabled);
   }
 
   async getSkillContent(name: string): Promise<{
@@ -928,7 +747,7 @@ export class CodepilotClient {
     rootDir?: string;
     files?: string[];
   }> {
-    return this.call("skills/get", { name });
+    return clientPlugins.getSkillContent(this.rpcHost(), name);
   }
 
   async getSkillFile(
@@ -941,14 +760,14 @@ export class CodepilotClient {
     rootDir: string;
     readOnlySource: boolean;
   }> {
-    return this.call("skills/get-file", { name, relativePath });
+    return clientPlugins.getSkillFile(this.rpcHost(), name, relativePath);
   }
 
   async saveSkillContent(
     name: string,
     markdown: string,
   ): Promise<{ name: string; path: string; message: string }> {
-    return this.call("skills/save", { name, markdown });
+    return clientPlugins.saveSkillContent(this.rpcHost(), name, markdown);
   }
 
   async saveSkillFile(
@@ -956,15 +775,15 @@ export class CodepilotClient {
     relativePath: string,
     content: string,
   ): Promise<{ name: string; path: string; message: string }> {
-    return this.call("skills/save-file", { name, relativePath, content });
+    return clientPlugins.saveSkillFile(this.rpcHost(), name, relativePath, content);
   }
 
   async skillCreatorPrompt(): Promise<{ prompt: string }> {
-    return this.call("skills/creator-prompt", {});
+    return clientPlugins.skillCreatorPrompt(this.rpcHost());
   }
 
   async listScheduledTasks(): Promise<{ tasks: unknown[] }> {
-    return this.call("schedule/list", {});
+    return clientPlugins.listScheduledTasks(this.rpcHost());
   }
 
   async addScheduledTask(task: {
@@ -986,7 +805,7 @@ export class CodepilotClient {
     providerId?: string;
     agentMode?: "chat" | "plan" | "agent";
   }): Promise<{ task: unknown }> {
-    return this.call("schedule/add", task);
+    return clientPlugins.addScheduledTask(this.rpcHost(), task);
   }
 
   async updateScheduledTask(
@@ -1011,18 +830,18 @@ export class CodepilotClient {
       enabled?: boolean;
     },
   ): Promise<{ task: unknown }> {
-    return this.call("schedule/update", { id, ...patch });
+    return clientPlugins.updateScheduledTask(this.rpcHost(), id, patch);
   }
 
   async removeScheduledTask(id: string): Promise<{ removed: boolean }> {
-    return this.call("schedule/remove", { id });
+    return clientPlugins.removeScheduledTask(this.rpcHost(), id);
   }
 
   async listTerminalShells(): Promise<{
     platform: "darwin" | "linux" | "win32" | "other";
     shells: Array<{ id: string; path: string; label: string }>;
   }> {
-    return this.call("terminal/list-shells", {});
+    return clientSession.listTerminalShells(this.rpcHost());
   }
 
   async openTerminal(opts: {
@@ -1031,19 +850,19 @@ export class CodepilotClient {
     cols?: number;
     rows?: number;
   }): Promise<{ terminalId: string; shell: string }> {
-    return this.call("terminal/open", opts);
+    return clientSession.openTerminal(this.rpcHost(), opts);
   }
 
   async writeTerminal(terminalId: string, data: string): Promise<void> {
-    await this.call("terminal/write", { terminalId, data });
+    return clientSession.writeTerminal(this.rpcHost(), terminalId, data);
   }
 
   async resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void> {
-    await this.call("terminal/resize", { terminalId, cols, rows });
+    return clientSession.resizeTerminal(this.rpcHost(), terminalId, cols, rows);
   }
 
   async closeTerminal(terminalId: string): Promise<void> {
-    await this.call("terminal/close", { terminalId });
+    return clientSession.closeTerminal(this.rpcHost(), terminalId);
   }
 
  /**
@@ -1051,11 +870,7 @@ export class CodepilotClient {
  * (client groups them by workspace).
  */
   async listSessions(cwd?: string): Promise<SessionSummary[]> {
-    const { sessions } = await this.call<{ sessions: SessionSummary[] }>(
-      "session/list",
-      cwd ? { cwd } : {},
-    );
-    return sessions;
+    return clientSession.listSessions(this.rpcHost(), cwd);
   }
 
  /**
@@ -1080,12 +895,12 @@ export class CodepilotClient {
 
   /** Pin / unpin a session (pin is one-per-workspace, enforced server-side). */
   async pinSession(sessionId: string, pinned: boolean): Promise<void> {
-    await this.call("session/pin", { sessionId, pinned });
+    return clientSession.pinSession(this.rpcHost(), sessionId, pinned);
   }
 
   /** Archive / unarchive a session (archived sessions are hidden by default). */
   async archiveSession(sessionId: string, archived: boolean): Promise<void> {
-    await this.call("session/archive", { sessionId, archived });
+    return clientSession.archiveSession(this.rpcHost(), sessionId, archived);
   }
 
   async send(
@@ -1095,35 +910,22 @@ export class CodepilotClient {
     files?: PromptFile[],
     delivery?: "auto" | "queue" | "steer",
   ): Promise<{ delivery: "started" | "queued" | "steered" }> {
-    const params: {
-      sessionId: string;
-      text: string;
-      images?: ImageAttachment[];
-      files?: PromptFile[];
-      delivery?: "auto" | "queue" | "steer";
-    } = {
-      sessionId,
-      text,
-    };
-    if (images?.length) params.images = images;
-    if (files?.length) params.files = files;
-    if (delivery) params.delivery = delivery;
-    return this.call("prompt/send", params);
+    return clientSession.send(this.rpcHost(), sessionId, text, images, files, delivery);
   }
 
   async removeFollowUp(sessionId: string, id: string): Promise<void> {
-    await this.call("prompt/followup/remove", { sessionId, id });
+    return clientSession.removeFollowUp(this.rpcHost(), sessionId, id);
   }
 
   async updateFollowUp(sessionId: string, id: string, text: string): Promise<void> {
-    await this.call("prompt/followup/update", { sessionId, id, text });
+    return clientSession.updateFollowUp(this.rpcHost(), sessionId, id, text);
   }
 
   async sendFollowUpNow(
     sessionId: string,
     id: string,
   ): Promise<{ delivery: "steered" | "started" | "missing" }> {
-    return this.call("prompt/followup/sendNow", { sessionId, id });
+    return clientSession.sendFollowUpNow(this.rpcHost(), sessionId, id);
   }
 
   /**
@@ -1134,15 +936,15 @@ export class CodepilotClient {
   async resumeTurn(
     sessionId: string,
   ): Promise<{ delivery: "started" | "queued" | "noop" }> {
-    return this.call("prompt/resume", { sessionId });
+    return clientSession.resumeTurn(this.rpcHost(), sessionId);
   }
 
   async cancel(sessionId: string): Promise<void> {
-    await this.call("prompt/cancel", { sessionId });
+    return clientSession.cancel(this.rpcHost(), sessionId);
   }
 
   async setMode(sessionId: string, mode: AgentMode): Promise<void> {
-    await this.call("session/setMode", { sessionId, mode });
+    return clientSession.setMode(this.rpcHost(), sessionId, mode);
   }
 
   async setModel(
@@ -1155,12 +957,7 @@ export class CodepilotClient {
     providerId?: string;
     reasoningEffort?: "low" | "medium" | "high";
   }> {
-    return this.call("session/setModel", {
-      sessionId,
-      model,
-      providerId,
-      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-    });
+    return clientSession.setModel(this.rpcHost(), sessionId, model, providerId, reasoningEffort);
   }
 
   async getEndpoint(sessionId: string): Promise<{
@@ -1170,11 +967,11 @@ export class CodepilotClient {
     baseURL?: string;
     reasoningEffort?: "low" | "medium" | "high";
   }> {
-    return this.call("session/getEndpoint", { sessionId });
+    return clientSession.getEndpoint(this.rpcHost(), sessionId);
   }
 
   async getConfig(cwd?: string): Promise<ConfigSnapshot> {
-    return this.call("config/get", { cwd });
+    return clientConfig.getConfig(this.rpcHost(), cwd);
   }
 
   async setImageGen(patch: {
@@ -1183,7 +980,7 @@ export class CodepilotClient {
     model?: string;
     enabled?: boolean;
   }): Promise<{ imageGen: { baseURL?: string; model?: string; enabled: boolean; hasApiKey: boolean } }> {
-    return this.call("config/setImageGen", patch);
+    return clientConfig.setImageGen(this.rpcHost(), patch);
   }
 
   /**
@@ -1195,14 +992,25 @@ export class CodepilotClient {
     provider?: "duckduckgo" | "brave" | "serper" | "google" | "custom";
     apiKey?: string;
     cx?: string;
-    custom?: CustomSearchTemplateInfo;
-  }): Promise<{ webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }> {
-    return this.call("config/setWebSearch", patch);
+    engineId?: string | null;
+    env?: Record<string, string> | null;
+    custom?: CustomSearchTemplateInfo | null;
+  }): Promise<{
+    webSearch: {
+      provider?: string;
+      hasApiKey: boolean;
+      customUrl?: string;
+      engineId?: string;
+      custom?: CustomSearchTemplateInfo;
+      env?: Record<string, string>;
+    };
+  }> {
+    return clientConfig.setWebSearch(this.rpcHost(), patch);
   }
 
   /** Stamp the first-run marker in the shared config (idempotent). */
   async setOnboarded(): Promise<{ onboardedAt: string }> {
-    return this.call("config/setOnboarded", {});
+    return clientConfig.setOnboarded(this.rpcHost());
   }
 
   /**
@@ -1221,7 +1029,7 @@ export class CodepilotClient {
       reason?: { backend: string; platform: string; hint: string };
     };
   }> {
-    return this.call("config/setSandbox", patch);
+    return clientConfig.setSandbox(this.rpcHost(), patch);
   }
 
   async upsertProvider(
@@ -1229,49 +1037,32 @@ export class CodepilotClient {
     preset: ConfigProviderPreset,
     opts?: { setActive?: boolean; sessionId?: string },
   ): Promise<{ providers: Record<string, ConfigProviderRedacted> }> {
-    return this.call("config/upsertProvider", {
-      id,
-      preset,
-      setActive: opts?.setActive,
-      sessionId: opts?.sessionId,
-    });
+    return clientConfig.upsertProvider(this.rpcHost(), id, preset, opts);
   }
 
   async deleteProvider(id: string): Promise<{ providers: Record<string, ConfigProviderRedacted> }> {
-    return this.call("config/deleteProvider", { id });
+    return clientConfig.deleteProvider(this.rpcHost(), id);
   }
 
   async setActiveProvider(
     providerId: string,
     opts?: { model?: string; sessionId?: string; persist?: boolean },
   ): Promise<{ model: string; providerId: string }> {
-    return this.call("config/setActive", {
-      providerId,
-      model: opts?.model,
-      sessionId: opts?.sessionId,
-      persist: opts?.persist,
-    });
+    return clientConfig.setActiveProvider(this.rpcHost(), providerId, opts);
   }
 
   async listRemoteModels(opts: {
     providerId?: string;
-    provider?: "anthropic" | "openai" | "copilot";
+    provider?: "anthropic" | "openai" | "copilot" | "gemini" | "azure";
     baseURL?: string;
     apiKey?: string;
+    headers?: Record<string, string>;
   }): Promise<RemoteModelInfo[]> {
-    const { models } = await this.call<{ models: RemoteModelInfo[] }>(
-      "config/listRemoteModels",
-      opts,
-    );
-    return models;
+    return clientConfig.listRemoteModels(this.rpcHost(), opts);
   }
 
   async fork(sessionId: string, atEventIndex?: number): Promise<string> {
-    const { sessionId: forked } = await this.call<{ sessionId: string }>(
-      "session/fork",
-      { sessionId, atEventIndex },
-    );
-    return forked;
+    return clientSession.fork(this.rpcHost(), sessionId, atEventIndex);
   }
 
   async respondPermission(
@@ -1279,14 +1070,7 @@ export class CodepilotClient {
     decision: PermissionDecision | "abort",
     feedback?: string,
   ): Promise<void> {
-    // Decline-with-feedback: a deny may carry a correction the model sees as
-    // the tool result. Only sent on deny with non-empty text. `abort` = "deny &
-    // stop": refuse this call and end the whole prompt/turn.
-    const params =
-      decision === "deny" && feedback && feedback.trim().length > 0
-        ? { requestId, decision, feedback: feedback.trim() }
-        : { requestId, decision };
-    await this.call("permission/respond", params);
+    return clientSession.respondPermission(this.rpcHost(), requestId, decision, feedback);
   }
 
   /** Persisted permission rules for a scope (repo default). */
@@ -1294,7 +1078,7 @@ export class CodepilotClient {
     sessionId: string,
     scope: "repo" | "user" = "repo",
   ): Promise<{ scope: "repo" | "user"; allow: string[]; ask: string[]; deny: string[] }> {
-    return this.call("permissions/list", { sessionId, scope });
+    return clientSession.listPermissions(this.rpcHost(), sessionId, scope);
   }
 
   /** Persist a permission rule and hot-apply it to the live session. */
@@ -1304,7 +1088,7 @@ export class CodepilotClient {
     effect: "allow" | "ask" | "deny",
     scope: "repo" | "user" = "repo",
   ): Promise<{ path: string }> {
-    return this.call("permissions/add", { sessionId, rule, effect, scope });
+    return clientSession.addPermission(this.rpcHost(), sessionId, rule, effect, scope);
   }
 
   /** Delete a persisted permission rule and hot-apply the removal. */
@@ -1314,14 +1098,14 @@ export class CodepilotClient {
     effect: "allow" | "ask" | "deny",
     scope: "repo" | "user" = "repo",
   ): Promise<{ removed: boolean }> {
-    return this.call("permissions/remove", { sessionId, rule, effect, scope });
+    return clientSession.removePermission(this.rpcHost(), sessionId, rule, effect, scope);
   }
 
   async respondQuestion(
     requestId: string,
     answers: QuestionAnswers,
   ): Promise<void> {
-    await this.call("question/respond", { requestId, answers });
+    return clientSession.respondQuestion(this.rpcHost(), requestId, answers);
   }
 
   private async call<R>(method: string, params?: unknown): Promise<R> {
@@ -1338,17 +1122,4 @@ export class CodepilotClient {
     this.callbacks.onClose(reason);
     this.scheduleReconnect();
   }
-}
-
-/** Human-readable message for an RPC failure. */
-export function describeError(err: unknown): string {
-  if (err instanceof RpcError) {
- // -32000 is SessionNotFound: the common case after a server restart, and
- // "session not found" alone does not tell the user what to do about it.
-    if (err.code === -32000) {
-      return `${err.message} — the server may have restarted; pick or start another session`;
-    }
-    return err.message;
-  }
-  return err instanceof Error ? err.message : String(err);
 }

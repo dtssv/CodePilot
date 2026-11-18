@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { discoverCustomAgents, parseAgentFile } from "../src/customAgents.js";
+import { discoverCustomAgents, parseAgentFile } from "../src/skills/customAgents.js";
 
 function writeAgent(dir: string, name: string, description = "an agent", body = "body"): void {
   mkdirSync(dir, { recursive: true });

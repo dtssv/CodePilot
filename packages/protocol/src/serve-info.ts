@@ -108,3 +108,30 @@ export async function readLiveServeInfo(): Promise<ServeInfo | null> {
   }
   return info;
 }
+
+/** Default path of the installed unified CLI binary. */
+export function installedDaemonBinaryPath(): string {
+  const name = process.platform === "win32" ? "codepilot.exe" : "codepilot";
+  return join(homedir(), ".codepilot", "bin", name);
+}
+
+/**
+ * True when `~/.codepilot/bin/codepilot` is newer than the running daemon's
+ * `startedAt` (install/upgrade replaced the binary under a live process).
+ * Callers should kill + respawn so the new build is what clients talk to.
+ */
+export async function isDaemonBinaryStale(
+  info: ServeInfo,
+  binaryPath: string = installedDaemonBinaryPath(),
+): Promise<boolean> {
+  try {
+    const { stat } = await import("node:fs/promises");
+    const st = await stat(binaryPath);
+    const started = Date.parse(info.startedAt);
+    if (!Number.isFinite(started)) return false;
+    // 2s skew so a daemon we just spawned is never treated as stale.
+    return st.mtimeMs > started + 2_000;
+  } catch {
+    return false;
+  }
+}

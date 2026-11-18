@@ -2,12 +2,12 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { PermissionEngine, matchRule } from "../src/permissions.js";
+import { PermissionEngine, matchRule } from "../src/permissions/permissions.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import type { ToolDef } from "../src/tools/types.js";
 import { readFileTool, bashTool, writeFileTool, bashKillTool } from "../src/tools/index.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 
 function makeTool(name: string, perm: "read" | "write" | "execute" | "network"): ToolDef {
   return {
@@ -37,6 +37,23 @@ describe("PermissionEngine", () => {
     });
   });
 
+  it("asks for a bash command that names a credential path, even read-only or under yolo", () => {
+    const bash = makeTool("bash", "execute");
+    for (const mode of ["ask", "auto-edit", "yolo"] as const) {
+      const e = new PermissionEngine({
+        permissionMode: mode,
+        permissions: { allow: ["bash(cat *)"] },
+      });
+      expect(e.preflight(bash, { command: "cat ~/.ssh/id_rsa" })).toBe("ask");
+      expect(e.preflight(bash, { command: "ls && cat $HOME/.aws/credentials" })).toBe("ask");
+    }
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    expect(e.preflight(bash, { command: "cat README.md" })).toEqual({
+      decision: "allow",
+      reason: "read-only command",
+    });
+  });
+
   it("auto-edit allows write tools", () => {
     const e = new PermissionEngine({ permissionMode: "auto-edit" });
     const t = makeTool("w", "write");
@@ -61,35 +78,44 @@ describe("PermissionEngine", () => {
   describe("memory_write scope gating", () => {
     const mem = makeTool("memory_write", "read");
 
-    it("auto-allows project-scope writes silently in any mode", () => {
+    it("default (explicit): asks for every memory_write including project scope", () => {
       for (const permissionMode of ["ask", "auto-edit"] as const) {
         const e = new PermissionEngine({ permissionMode });
-        expect(e.preflight(mem, { scope: "project", title: "t", content: "c" })).toEqual({
-          decision: "allow",
-          reason: "memory_write (project scope) is silent and auto-allowed",
-        });
+        expect(e.preflight(mem, { scope: "project", title: "t", content: "c" })).toBe("ask");
+        expect(e.preflight(mem, { title: "t", content: "c" })).toBe("ask");
+        expect(e.preflight(mem, { scope: "user", title: "t", content: "c" })).toBe("ask");
       }
     });
 
-    it("auto-allows when scope is omitted (defaults to project)", () => {
-      const e = new PermissionEngine({ permissionMode: "ask" });
-      expect(e.preflight(mem, { title: "t", content: "c" })).toEqual({
+    it("legacy free: auto-allows project-scope writes silently", () => {
+      const e = new PermissionEngine({
+        permissionMode: "ask",
+        memory: { agentWrite: "free" },
+      });
+      expect(e.preflight(mem, { scope: "project", title: "t", content: "c" })).toEqual({
         decision: "allow",
         reason: "memory_write (project scope) is silent and auto-allowed",
       });
-    });
-
-    it("asks before writing user (global) scope", () => {
-      const e = new PermissionEngine({ permissionMode: "auto-edit" });
       expect(e.preflight(mem, { scope: "user", title: "t", content: "c" })).toBe("ask");
     });
 
-    it("still auto-allows user scope under yolo", () => {
+    it("still auto-allows under yolo (explicit or free)", () => {
       const e = new PermissionEngine({ permissionMode: "yolo" });
       expect(e.preflight(mem, { scope: "user", title: "t", content: "c" })).toEqual({
         decision: "allow",
-        reason: "memory_write (project scope) is silent and auto-allowed",
+        reason: "memory_write allowed under yolo",
       });
+    });
+
+    it("buildRequest reason names the memory scope", () => {
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      expect(e.buildRequest("r1", mem, { scope: "user", title: "t", content: "c" }).reason).toMatch(
+        /scope=user/,
+      );
+      expect(e.buildRequest("r2", mem, { scope: "project", title: "t", content: "c" }).reason).toMatch(
+        /scope=project/,
+      );
+      expect(e.buildRequest("r3", mem, { title: "t", content: "c" }).reason).toMatch(/scope=project/);
     });
   });
 
@@ -475,7 +501,7 @@ describe("persisted-rule file CRUD", () => {
     const dir = await mkdtemp(join(tmpdir(), "perm-crud-"));
     try {
       const { persistRule, listPersistedRules, removePersistedRule } = await import(
-        "../src/permissions.js"
+        "../src/permissions/permissions.js"
       );
       expect(await listPersistedRules(dir, "repo")).toEqual({ allow: [], ask: [], deny: [] });
       await persistRule(dir, "bash(npm test *)", "allow", "repo");

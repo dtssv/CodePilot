@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { join, isAbsolute } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
-import { hashFileContent } from "../fsObservation.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 
 // ---------------------------------------------------------------------------
 // Notebook JSON types (minimal subset of nbformat v4)
@@ -125,19 +125,8 @@ function fromSourceArray(src: string[]): string {
 export const notebookEditTool: ToolDef<typeof schema> = {
   name: "notebook_edit",
   description:
-    "Edit a Jupyter notebook (.ipynb) cell by index. Supports three modes:\n" +
-    "  - 'replace' (default): replace the source of an existing cell.\n" +
-    "  - 'insert': insert a new cell before the given index.\n" +
-    "  - 'delete': delete the cell at the given index.\n\n" +
-    "When to use: editing Jupyter notebooks — adding code cells, updating " +
-    "markdown explanations, removing obsolete cells. The notebook's JSON " +
-    "structure (cell IDs, metadata, outputs) is preserved; only the targeted " +
-    "cell is affected.\n" +
-    "When NOT to use: for regular source files, use `edit_file` or `write_file`. " +
-    "For reading a notebook, use `read_file` (it returns the raw JSON; you can " +
-    "parse the cells array yourself).\n\n" +
-    "The `new_source` is the full cell content. Cell types: 'code' (executable), " +
-    "'markdown' (rich text), 'raw' (literal/nbconvert).",
+    "Edit a .ipynb cell by index: replace (default), insert, or delete. " +
+    "Preserves notebook JSON outside the target cell. For regular files use edit_file/write_file; to read use read_file.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
@@ -147,11 +136,8 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     if (delivery) return delivery;
     const path = resolvePath(input.notebook_path, ctx.cwd);
 
-    // notebook_edit always targets an existing notebook and locates cells by
-    // index — so it depends even more than edit_file on the agent knowing the
-    // file's current state. Apply the same read-before-write + staleness guard
-    // as the other write tools: the notebook must have been read this session
-    // and must not have changed on disk since.
+    // Cell-index edits are blind without a view of the notebook — require a
+    // prior read_file this session, and block if the file went stale since.
     let preStat: { mtimeMs: number; size: number } | null = null;
     try {
       const st = await stat(path);
@@ -159,12 +145,10 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     } catch {
       preStat = null;
     }
-    // Supply a lazy reader so a jittered mtime on unchanged bytes does not
-    // block the edit; the raw file is read only if the mtime/size gate reports
-    // stale.
-    const fresh = await guardFreshWrite(ctx, path, preStat, undefined, () =>
-      readFile(path).catch(() => null),
-    );
+    const fresh = await guardFreshWrite(ctx, path, preStat, undefined, {
+      requireObserved: true,
+      readCurrent: () => readFile(path).catch(() => null),
+    });
     if (fresh) return fresh;
 
     let nb: Notebook;

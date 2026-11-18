@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { McpManager } from "../src/mcp.js";
+import { McpManager } from "../src/mcp/mcp.js";
 
 /** A mock MCP server that, on a `tools/call` to `ask`, initiates a reverse
  * `elicitation/create` request to the client and echoes back whatever the

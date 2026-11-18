@@ -7,36 +7,22 @@
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
 
-// Model-initiated goals get a wide cap so the loop can actually finish long
-// work rather than stopping half-way. The host may clamp this.
-export const DEFAULT_MODEL_GOAL_ROUNDS = 100;
+/** Default round cap when the model omits `maxRounds`. Keep in sync with
+ * `driveGoalRounds` (same value). Hosts may still clamp lower. */
+export const DEFAULT_MODEL_GOAL_ROUNDS = 50;
 
 const schema = z.object({
   objective: z
     .string()
     .min(1)
-    .describe(
-      "The long-horizon objective, stated so it stays meaningful across many " +
-        "rounds (e.g. 'migrate the auth module to the new token API and get all " +
-        "tests green'). This is re-anchored every round, so make it self-contained.",
-    ),
+    .describe("Self-contained long-horizon objective (re-anchored every round)."),
   maxRounds: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe(
-      "Optional cap on driving rounds. Leave unset for the default. The loop " +
-        "runs until you report completed/blocked or it hits this cap — the cap " +
-        "is a safety bound, not a target; reaching it surfaces as a resumable " +
-        "round-limit, not a silent stop.",
-    ),
-  reason: z
-    .string()
-    .optional()
-    .describe(
-      "One short line on why this warrants a goal loop rather than a single turn.",
-    ),
+    .describe("Optional round cap (default 50); safety bound, not a target."),
+  reason: z.string().optional().describe("Why a goal loop (vs one turn / plan_update)."),
 });
 
 export interface StartGoalHandle {
@@ -53,14 +39,8 @@ export interface StartGoalTool extends ToolDef<typeof schema> {
 export const startGoalTool: StartGoalTool = {
   name: "start_goal",
   description:
-    "Escalate the CURRENT task into a long-horizon goal loop: autonomous multi-round execution " +
-    "that keeps driving until the objective is met, you report blocked, or a round cap is hit. Use " +
-    "it when the task is genuinely large and multi-step — spanning many edits, verifications, and " +
-    "rounds of work that will not fit a single turn — so it benefits from a plan + per-round " +
-    "re-anchoring + checkpointing. Each round you re-read the plan, advance one step, VERIFY it, " +
-    "and only emit `<goal_status>completed</goal_status>` once a verification has passed. Do NOT " +
-    "use it for ordinary single-turn tasks, or just to 'keep going' — only at the start of a real " +
-    "long-horizon objective. When unsure, don't call it.",
+    "Start a host-driven multi-round goal loop (plan+verify each round). Default maxRounds: 50. " +
+    "When to escalate vs `plan_update`: system Long-horizon goals section.",
   inputSchema: schema,
   permission: "read",
   async execute(input, _ctx) {
@@ -74,7 +54,11 @@ export const startGoalTool: StartGoalTool = {
           "start_goal is not available in this host; continue the task in the current turn.",
       };
     }
-    const accepted = await handle(input.objective, input.maxRounds, input.reason);
+    const accepted = await handle(
+      input.objective,
+      input.maxRounds ?? DEFAULT_MODEL_GOAL_ROUNDS,
+      input.reason,
+    );
     if (!accepted) {
       return {
         content:

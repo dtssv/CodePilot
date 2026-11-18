@@ -18,7 +18,7 @@ import {
   listScheduledTasks,
   removeScheduledTask,
   hasPendingScheduledTasks,
-} from "../src/scheduler.js";
+} from "../src/agent/scheduler.js";
 
 const STORE = join(homedir(), ".codepilot", "scheduled-tasks.json");
 

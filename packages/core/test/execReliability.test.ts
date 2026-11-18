@@ -1,11 +1,11 @@
-// Execution-reliability guards: read-before-write + staleness (FileObservationStore),
+// Execution-reliability guards: staleness after observe (FileObservationStore),
 // CRLF preservation.
 
 import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileObservationStore, hashFileContent } from "../src/fsObservation.js";
+import { FileObservationStore, hashFileContent } from "../src/workspace/fsObservation.js";
 import { detectLineEnding, editFileTool, applyEdit } from "../src/tools/edit_file.js";
 import { writeFileTool } from "../src/tools/write_file.js";
 import { readFileTool } from "../src/tools/read_file.js";
@@ -23,20 +23,27 @@ function ctxWith(dir: string, store: FileObservationStore): ToolContext {
     artifact: async () => "art_test",
     readArtifact: async () => "",
     observeFile: (p, s, h) => store.observe(p, s, h),
-    checkFileFresh: (p, s, h) => store.checkFresh(p, s, h),
+    checkFileFresh: (p, s, h, opts) => store.checkFresh(p, s, h, opts),
     reobserveFile: (p, s, h) => store.reobserveAfterWrite(p, s, h),
   } as ToolContext;
 }
 
-describe("FileObservationStore (read-before-write + staleness)", () => {
+describe("FileObservationStore (staleness guard)", () => {
   it("allows creating a new file (no prior observation needed)", () => {
     const store = new FileObservationStore();
     expect(store.checkFresh("/x/new.ts", null)).toEqual({ ok: true });
   });
 
-  it("blocks editing an unobserved existing file", () => {
+  it("allows editing an unobserved existing file by default (context-match is the gate)", () => {
     const store = new FileObservationStore();
-    const res = store.checkFresh("/x/a.ts", { mtimeMs: 1, size: 10 });
+    expect(store.checkFresh("/x/a.ts", { mtimeMs: 1, size: 10 })).toEqual({ ok: true });
+  });
+
+  it("blocks unobserved existing files only when requireObserved is set", () => {
+    const store = new FileObservationStore();
+    const res = store.checkFresh("/x/a.ts", { mtimeMs: 1, size: 10 }, undefined, {
+      requireObserved: true,
+    });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toBe("unobserved");
   });
@@ -114,8 +121,8 @@ describe("hashFileContent", () => {
   });
 });
 
-describe("edit_file read-before-write guard (end to end)", () => {
-  it("refuses to edit a file never read this session", async () => {
+describe("edit_file staleness guard (end to end)", () => {
+  it("allows edit when search matches disk even if never read_file'd", async () => {
     const dir = tmp();
     const p = join(dir, "a.ts");
     writeFileSync(p, "const x = 1;\n");
@@ -124,9 +131,20 @@ describe("edit_file read-before-write guard (end to end)", () => {
       { path: "a.ts", search: "const x = 1;", replace: "const x = 2;" },
       ctxWith(dir, store),
     );
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("const x = 2;\n");
+  });
+
+  it("still fails when search does not match disk (wrong location)", async () => {
+    const dir = tmp();
+    const p = join(dir, "a.ts");
+    writeFileSync(p, "const x = 1;\n");
+    const store = new FileObservationStore();
+    const res = await editFileTool.execute(
+      { path: "a.ts", search: "const x = 999;", replace: "const x = 2;" },
+      ctxWith(dir, store),
+    );
     expect(res.isError).toBe(true);
-    expect(res.content).toMatch(/not read it in this session/);
-    // File untouched.
     expect(readFileSync(p, "utf-8")).toBe("const x = 1;\n");
   });
 
@@ -145,42 +163,38 @@ describe("edit_file read-before-write guard (end to end)", () => {
     expect(readFileSync(p, "utf-8")).toBe("const x = 2;\n");
   });
 
-  it("blocks a stale edit when the file changed after read", async () => {
+  it("applies when search still matches after an external change (no stale gate)", async () => {
     const dir = tmp();
     const p = join(dir, "a.ts");
     writeFileSync(p, "const x = 1;\n");
     const store = new FileObservationStore();
     const ctx = ctxWith(dir, store);
     await readFileTool.execute({ path: "a.ts" }, ctx);
-    // Simulate an external change (different size + mtime).
+    // External append — search still unique against live disk → allow.
     writeFileSync(p, "const x = 1;\nconst y = 9;\n");
     const res = await editFileTool.execute(
       { path: "a.ts", search: "const x = 1;", replace: "const x = 2;" },
       ctx,
     );
-    expect(res.isError).toBe(true);
-    expect(res.content).toMatch(/changed on disk/);
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("const x = 2;\nconst y = 9;\n");
   });
 
-  it("allows the edit when only mtime moved but content is identical", async () => {
+  it("fails on match miss after external change (match gate, not fs_guard)", async () => {
     const dir = tmp();
     const p = join(dir, "a.ts");
     writeFileSync(p, "const x = 1;\n");
     const store = new FileObservationStore();
     const ctx = ctxWith(dir, store);
     await readFileTool.execute({ path: "a.ts" }, ctx);
-    // Rewrite identical bytes and bump the mtime far into the future — the
-    // mtime gate would flag stale, but the content hash rescues it.
-    const future = new Date(Date.now() + 60_000);
-    writeFileSync(p, "const x = 1;\n");
-    const { utimesSync } = await import("node:fs");
-    utimesSync(p, future, future);
+    writeFileSync(p, "const x = 99;\n");
     const res = await editFileTool.execute(
       { path: "a.ts", search: "const x = 1;", replace: "const x = 2;" },
       ctx,
     );
-    expect(res.isError).toBeUndefined();
-    expect(readFileSync(p, "utf-8")).toBe("const x = 2;\n");
+    expect(res.isError).toBe(true);
+    expect(res.content).not.toMatch(/fs_guard/);
+    expect(readFileSync(p, "utf-8")).toBe("const x = 99;\n");
   });
 });
 
@@ -195,7 +209,7 @@ describe("write_file overwrite guard", () => {
     expect(res.isError).toBeUndefined();
   });
 
-  it("blocks overwriting an existing, unread file", async () => {
+  it("allows overwriting an existing, unread file (no hard read gate)", async () => {
     const dir = tmp();
     const p = join(dir, "a.ts");
     writeFileSync(p, "old\n");
@@ -204,8 +218,8 @@ describe("write_file overwrite guard", () => {
       { path: "a.ts", content: "new\n" },
       ctxWith(dir, store),
     );
-    expect(res.isError).toBe(true);
-    expect(readFileSync(p, "utf-8")).toBe("old\n");
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("new\n");
   });
 
   it("allows an overwrite when only mtime moved but content is identical (lazy reader)", async () => {
@@ -227,7 +241,7 @@ describe("write_file overwrite guard", () => {
   });
 });
 
-describe("notebook_edit read-before-write + staleness guard", () => {
+describe("notebook_edit requireObserved + staleness guard", () => {
   const nb = (cells: number) =>
     JSON.stringify({
       cells: Array.from({ length: cells }, (_, i) => ({

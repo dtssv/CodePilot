@@ -2,20 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runGoal } from "../src/goal.js";
-import { getSessionsDir, deleteSession } from "../src/session.js";
+import { runGoal } from "../src/subagent/goal.js";
+import { getSessionsDir, deleteSession } from "../src/session/session.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type {
   ChatProvider,
   StreamChatOptions,
   StreamEvent,
 } from "../src/providers/types.js";
-import { runAgent } from "../src/agent.js";
-import { readCheckpoint, checkpointPath } from "../src/checkpoints.js";
-import { writeCheckpoint } from "../src/checkpoints.js";
+import { runAgent } from "../src/agent/agent.js";
+import { readCheckpoint, checkpointPath } from "../src/session/checkpoints.js";
+import { writeCheckpoint } from "../src/session/checkpoints.js";
 import { mkdirSync } from "node:fs";
 
 /** A mock provider that emits a single assistant message and then a
@@ -67,7 +67,7 @@ describe("runGoal — checkpoint integration", () => {
  // + the file system.
     const sessionId = "test-cb-completed";
     await writeCheckpoint(workDir, sessionId, []);
-    const { appendCheckpointRound } = await import("../src/checkpoints.js");
+    const { appendCheckpointRound } = await import("../src/session/checkpoints.js");
     await appendCheckpointRound(workDir, sessionId, 1, "running", undefined, undefined);
     await appendCheckpointRound(workDir, sessionId, 2, "completed", "all done", undefined);
     const text = await readCheckpoint(workDir, sessionId);
@@ -79,7 +79,7 @@ describe("runGoal — checkpoint integration", () => {
   it("writes a structured blocked_reason into the checkpoint", async () => {
     const sessionId = "test-cb-blocked";
     await writeCheckpoint(workDir, sessionId, []);
-    const { appendCheckpointRound } = await import("../src/checkpoints.js");
+    const { appendCheckpointRound } = await import("../src/session/checkpoints.js");
     await appendCheckpointRound(
       workDir,
       sessionId,
@@ -113,7 +113,7 @@ describe("driveGoalRounds — busy session does not spin / pile up round prompts
   });
 
   it("waits for the session to drain before scanning when prompt() returns 'queued'", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
 
     // A minimal Session-shaped fake that reproduces the real race: the session
     // is "busy", so prompt() enqueues (returns "queued") instead of executing.
@@ -146,7 +146,7 @@ describe("driveGoalRounds — busy session does not spin / pile up round prompts
         ];
       },
       getEvents: () => events.slice(),
-    } as unknown as import("../src/session.js").Session;
+    } as unknown as import("../src/session/session.js").Session;
 
     const result = await driveGoalRounds(fakeSession, {
       objective: "do the thing",
@@ -187,7 +187,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
       },
       waitUntilIdle: async () => {},
       getEvents: () => events.slice(),
-    } as unknown as import("../src/session.js").Session;
+    } as unknown as import("../src/session/session.js").Session;
     return { session };
   }
 
@@ -200,7 +200,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   const writeOk = (id: string) => ({ type: "tool_result", toolCallId: id, name: "write_file", content: "ok" });
 
   it("forces blocked after maxStalls consecutive no-progress rounds", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     // Every round the agent only narrates — no writes, no shell, no plan step
     // completed, no status marker. With maxStalls=3 it must stop at round 3,
     // not burn all 20 rounds.
@@ -220,7 +220,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   });
 
   it("resets the stall counter when a round makes a write", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     // Rounds: idle, idle, PRODUCTIVE (a write), idle, idle, then completed.
     // The productive round at index 2 resets the counter, so with maxStalls=3
     // the loop never force-blocks and instead reaches the completion marker.
@@ -247,7 +247,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   });
 
   it("does not force-block when stall detection is disabled (maxStalls=0)", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     const rounds = Array.from({ length: 4 }, () => [assistant("idle")]);
     const { session } = fakeStallSession(rounds);
     const onStall: unknown[] = [];
@@ -263,7 +263,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   });
 
   it("stops on a structured goal_status event (dual channel, no text marker)", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     // The round carries NO <goal_status> text marker — only the structured
     // goal_status event the tool emits. The loop must still complete.
     const rounds: Array<Array<Record<string, unknown>>> = [
@@ -282,7 +282,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   });
 
   it("still completes via the text marker when no goal_status event is present", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     const rounds: Array<Array<Record<string, unknown>>> = [
       [assistant("<goal_status>completed</goal_status>")],
     ];
@@ -295,7 +295,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
   });
 
   it("a structured blocked event carries its reason into the result", async () => {
-    const { driveGoalRounds } = await import("../src/goal.js");
+    const { driveGoalRounds } = await import("../src/subagent/goal.js");
     const rounds: Array<Array<Record<string, unknown>>> = [
       [
         { type: "goal_status", status: "blocked", reason: "needs GH_TOKEN" },
@@ -316,7 +316,7 @@ describe("driveGoalRounds — harness-level stall detection", () => {
 describe("extractBlockedReason via goalPromptBody behaviour", () => {
   it("recognises the standard marker set", async () => {
  // Smoke test for the exported regex array.
-    const { COMPLETION_MARKERS } = await import("../src/goal.js");
+    const { COMPLETION_MARKERS } = await import("../src/subagent/goal.js");
     expect(COMPLETION_MARKERS.length).toBe(2);
     expect(/completed/i.test(COMPLETION_MARKERS[0]!.source)).toBe(true);
     expect(/blocked/i.test(COMPLETION_MARKERS[1]!.source)).toBe(true);

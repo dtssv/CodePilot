@@ -8,7 +8,7 @@ import {
   projectStatePath,
   projectStateRoot,
   scratchDir,
-} from "../src/projectState.js";
+} from "../src/workspace/projectState.js";
 
 describe("projectState", () => {
   it("roots runtime state under ~/.codepilot/projects/<hash>", () => {

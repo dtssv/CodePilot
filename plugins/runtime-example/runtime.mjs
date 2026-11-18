@@ -49,12 +49,12 @@ class PrimerRuntime {
         primer = this.#toolkit.redactToolOutput(listing.content).slice(0, 4000);
       }
 
- // Phase 2: delegate. Appending to `dynamicSuffix` keeps the cached
- // static prefix intact, so prompt caching still works.
+ // Phase 2: delegate. Append to the volatile per-turn tier so the cached
+ // static + stable system blocks stay byte-identical for prompt caching.
       const runDeps = primer
         ? {
             ...deps,
-            systemPrompt: appendSuffix(
+            systemPrompt: appendVolatile(
               deps.systemPrompt,
               `<workspace_listing>\n${primer}\n</workspace_listing>`,
             ),
@@ -76,12 +76,16 @@ class PrimerRuntime {
   }
 }
 
-function appendSuffix(prompt, extra) {
-  if (!prompt) return { staticPrefix: "", dynamicSuffix: extra, full: extra };
+function appendVolatile(prompt, extra) {
+  if (!prompt) {
+    return { staticPrefix: "", dynamicSuffix: "", volatileSuffix: extra, full: extra };
+  }
+  const base = prompt.volatileSuffix ?? "";
+  const volatileSuffix = [base, extra].filter((s) => s && s.trim().length > 0).join("\n\n");
   return {
-    staticPrefix: prompt.staticPrefix,
-    dynamicSuffix: [prompt.dynamicSuffix, extra].filter(Boolean).join("\n\n"),
-    full: [prompt.full, extra].filter(Boolean).join("\n\n"),
+    ...prompt,
+    volatileSuffix,
+    full: [prompt.full, extra].filter((s) => s && s.trim().length > 0).join("\n\n"),
   };
 }
 

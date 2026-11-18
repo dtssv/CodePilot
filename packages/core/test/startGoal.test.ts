@@ -34,7 +34,7 @@ describe("start_goal", () => {
     const onStartGoal = vi.fn(async () => true);
     const tool = { ...startGoalTool, onStartGoal };
     const r = await tool.execute({ objective: "migrate auth module" }, ctx());
-    expect(onStartGoal).toHaveBeenCalledWith("migrate auth module", undefined, undefined);
+    expect(onStartGoal).toHaveBeenCalledWith("migrate auth module", 50, undefined);
     const gr = goalRequest(r.blocks);
     expect(gr?.type).toBe("goal_request");
     expect(gr?.objective).toBe("migrate auth module");

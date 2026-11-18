@@ -4,6 +4,7 @@
 // - drives the status bar (connection + cumulative token usage).
 
 import * as vscode from "vscode";
+import { nls } from "./nls.js";
 import type { AgentMode, PermissionMode } from "./types.js";
 
 export interface CodepilotSettings {
@@ -159,10 +160,10 @@ export class StatusBar implements vscode.Disposable {
       this.state === "ready"
         ? "CodePilot"
         : this.state === "busy"
-        ? "CodePilot (busy)"
+        ? nls("CodePilot (busy)")
         : this.state === "error"
-        ? "CodePilot (error)"
-        : "CodePilot (connecting)";
+        ? nls("CodePilot (error)")
+        : nls("CodePilot (connecting)");
     const mode = this.mode ? `  ·  ${modeLabel(this.mode)}` : "";
     const usage =
       this.cumulative.input + this.cumulative.output > 0
@@ -182,11 +183,11 @@ export class StatusBar implements vscode.Disposable {
 export function modeLabel(mode: AgentMode): string {
   switch (mode) {
     case "chat":
-      return "Ask";
+      return nls("Ask");
     case "plan":
-      return "Plan";
+      return nls("Plan");
     case "agent":
-      return "Agent";
+      return nls("Agent");
   }
 }
 

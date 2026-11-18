@@ -3,7 +3,18 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { defaultEnvironmentProvider } from "../src/env.js";
+import { defaultEnvironmentProvider, formatClockNow } from "../src/config/env.js";
+
+describe("formatClockNow", () => {
+  it("emits ISO-8601 UTC truncated to whole seconds (no milliseconds)", () => {
+    expect(formatClockNow(new Date("2026-11-17T05:19:44.725Z"))).toBe(
+      "2026-11-17T05:19:44Z",
+    );
+    expect(formatClockNow(new Date("2026-11-17T05:19:44.000Z"))).toBe(
+      "2026-11-17T05:19:44Z",
+    );
+  });
+});
 
 describe("defaultEnvironmentProvider", () => {
   it("returns a non-empty snapshot for a real cwd", async () => {
@@ -12,7 +23,7 @@ describe("defaultEnvironmentProvider", () => {
     expect(snap.os.length).toBeGreaterThan(0);
     expect(snap.shell.length).toBeGreaterThan(0);
     expect(snap.node).toMatch(/^v\d+\./);
-    expect(snap.now).toMatch(/T/);
+    expect(snap.now).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(snap.timezone.length).toBeGreaterThan(0);
  // host / user should be non-empty on a real machine.
     expect(snap.hostname.length).toBeGreaterThan(0);

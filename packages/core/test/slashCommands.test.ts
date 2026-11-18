@@ -18,7 +18,7 @@ import {
   commandFilePath,
   commandDir,
   type SlashCommand,
-} from "../src/slashCommands.js";
+} from "../src/skills/slashCommands.js";
 
 function writeCommand(
   dir: string,

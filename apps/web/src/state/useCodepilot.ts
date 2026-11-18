@@ -17,6 +17,7 @@ import {
   CodepilotClient,
   describeError,
   parseServeUrl,
+  sessionLockedOwner,
   type PendingPermission,
   type PendingQuestion,
 } from "../protocol/client.js";
@@ -95,6 +96,8 @@ export interface Codepilot {
   notify(text?: string): void;
  /** Leave the current session and show the home/empty screen. */
   closeSession(): void;
+  /** Page in older transcript events when the user scrolls near the top. */
+  loadOlderHistory(): Promise<void>;
 }
 
 export function useCodepilot(): Codepilot {
@@ -165,13 +168,19 @@ export function useCodepilot(): Codepilot {
   // Keep the ref used by onEvent pointed at the latest refreshSessions.
   refreshSessionsRef.current = () => void refreshSessions();
 
+  type OpenResumeOpts = { redirected: boolean; noticeOnOk?: string };
+  const openResumedSessionRef = useRef<(id: string, opts: OpenResumeOpts) => Promise<void>>(
+    async () => undefined,
+  );
+
   async function resumeCurrent(): Promise<void> {
     const id = live.current.sessionId;
     if (id) {
       try {
-        const { sessionId, events } = await client.resumeSession(id);
-        dispatch({ type: "session-opened", sessionId, agentMode: live.current.agentMode, history: events });
-        dispatch({ type: "notice", text: "reconnected — session restored" });
+        await openResumedSessionRef.current(id, {
+          redirected: false,
+          noticeOnOk: "reconnected — session restored",
+        });
       } catch (err) {
         dispatch({ type: "session-opened", sessionId: "", agentMode: live.current.agentMode });
         dispatch({ type: "notice", text: describeError(err) });
@@ -216,12 +225,132 @@ export function useCodepilot(): Codepilot {
     [client, refreshSessions],
   );
 
+  function normalizeWsUrl(url: string): string {
+    try {
+      const u = new URL(url);
+      u.search = "";
+      u.hash = "";
+      return u.toString().replace(/\/$/, "");
+    } catch {
+      return url.replace(/\/$/, "");
+    }
+  }
+
+  /** Apply a resume result, then backfill older history in the background. */
+  function applyResumeResult(
+    res: {
+      sessionId: string;
+      events: import("@codepilot/core").Event[];
+      historyTruncated?: boolean;
+      historyBefore?: number;
+      readOnly?: boolean;
+    },
+    notice?: string,
+  ): void {
+    const historyBefore =
+      res.historyTruncated && res.historyBefore !== undefined ? res.historyBefore : undefined;
+    // Patch live BEFORE dispatch/backfill: React has not re-rendered yet, so
+    // `live.current = state` still points at the previous session — without
+    // this, backfill sees a sessionId mismatch and exits on the first line.
+    live.current = {
+      ...live.current,
+      sessionId: res.sessionId,
+      historyBefore,
+      readOnly: res.readOnly === true,
+    };
+    dispatch({
+      type: "session-opened",
+      sessionId: res.sessionId,
+      agentMode: live.current.agentMode,
+      history: res.events,
+      ...(historyBefore !== undefined ? { historyBefore } : {}),
+      ...(res.readOnly ? { readOnly: true } : {}),
+    });
+    if (notice) dispatch({ type: "notice", text: notice });
+    if (historyBefore !== undefined) {
+      void backfillHistory(res.sessionId, historyBefore);
+    }
+  }
+
+  const historyInflight = useRef(false);
+
+  async function backfillHistory(sessionId: string, before: number): Promise<void> {
+    // Keep paging until the full display history is in the UI (no hard page
+    // cap — long sessions used to stop ~5k events above the resume tail).
+    // Seed from `before`; subsequent iterations prefer live.historyBefore so a
+    // concurrent near-top loadOlderHistory advances the same pointer.
+    let cursor: number | undefined = before;
+    while (cursor !== undefined) {
+      if (live.current.sessionId !== sessionId) return;
+      const liveCursor = live.current.historyBefore;
+      if (liveCursor === undefined) return;
+      cursor = liveCursor;
+      if (historyInflight.current) {
+        await new Promise<void>((r) => setTimeout(r, 16));
+        continue;
+      }
+      historyInflight.current = true;
+      try {
+        const chunk = await client.sessionHistory(sessionId, cursor);
+        if (live.current.sessionId !== sessionId) return;
+        if (live.current.historyBefore !== cursor) continue;
+        const nextBefore = chunk.historyTruncated ? chunk.historyBefore : undefined;
+        live.current = { ...live.current, historyBefore: nextBefore };
+        dispatch({
+          type: "history-prepend",
+          events: chunk.events,
+          historyTruncated: chunk.historyTruncated,
+          historyBefore: chunk.historyBefore,
+        });
+        cursor = nextBefore;
+      } catch {
+        return;
+      } finally {
+        historyInflight.current = false;
+      }
+      // Yield so React can paint / preserve scroll between pages.
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+
+  const loadOlderHistory = useCallback(async (): Promise<void> => {
+    const sessionId = live.current.sessionId;
+    const before = live.current.historyBefore;
+    if (!sessionId || before === undefined || historyInflight.current) return;
+    historyInflight.current = true;
+    try {
+      const chunk = await client.sessionHistory(sessionId, before);
+      if (live.current.sessionId !== sessionId) return;
+      if (live.current.historyBefore !== before) return;
+      const nextBefore = chunk.historyTruncated ? chunk.historyBefore : undefined;
+      live.current = { ...live.current, historyBefore: nextBefore };
+      dispatch({
+        type: "history-prepend",
+        events: chunk.events,
+        historyTruncated: chunk.historyTruncated,
+        historyBefore: chunk.historyBefore,
+      });
+    } catch {
+      /* fail-soft: layout near-top retry / scroll will try again */
+    } finally {
+      historyInflight.current = false;
+    }
+  }, [client]);
+
   const connectHost = useCallback(
     async (bridge: HostBridge, cwd: string, clientName: string) => {
       dispatch({ type: "connecting" });
       try {
-        const init = await client.connectTransport(bridgeOpener(bridge), { cwd, clientName });
-        dispatch({ type: "connected", cwd, modes: init.capabilities.modes });
+        const effectiveCwd = cwd.trim();
+        const init = await client.connectTransport(bridgeOpener(bridge), {
+          cwd: effectiveCwd || undefined,
+          clientName,
+        });
+        dispatch({ type: "connected", cwd: effectiveCwd, modes: init.capabilities.modes });
+        if (effectiveCwd) {
+          const ws = addWorkspace(effectiveCwd);
+          setWorkspaces(ws);
+        }
         await refreshSessions();
       } catch (err) {
         dispatch({ type: "disconnected", error: describeError(err) });
@@ -379,11 +508,54 @@ export function useCodepilot(): Codepilot {
     [client],
   );
 
+  openResumedSessionRef.current = async (id, opts) => {
+    try {
+      const res = await client.resumeSession(id);
+      applyResumeResult(res, opts.noticeOnOk);
+      void syncEndpoint(id);
+    } catch (err) {
+      const owner = sessionLockedOwner(err);
+      if (!owner) throw err;
+
+      if (!opts.redirected && owner.url) {
+        const target = lastWs.current;
+        const sameUrl =
+          target &&
+          normalizeWsUrl(target.url) === normalizeWsUrl(owner.url) &&
+          (target.token || "") === (owner.token || "");
+        if (!sameUrl) {
+          dispatch({
+            type: "notice",
+            text: `Session is live on another CodePilot (pid ${owner.pid}) — switching…`,
+          });
+          const cwd = target?.cwd ?? live.current.cwd;
+          await connect({
+            url: owner.url,
+            token: owner.token ?? "",
+            cwd: cwd || undefined,
+          });
+          await openResumedSessionRef.current(id, {
+            redirected: true,
+            noticeOnOk: `Attached to live session (pid ${owner.pid})`,
+          });
+          return;
+        }
+      }
+
+      const res = await client.resumeSession(id, { readOnly: true });
+      applyResumeResult(
+        res,
+        `Read-only: session is held by pid ${owner.pid}. Close that client to edit, or open it on the holding daemon.`,
+      );
+      void syncEndpoint(id);
+    }
+  };
+
   const newSession = useCallback(
     async (mode?: AgentMode) => {
       const cwd = live.current.cwd;
       if (!cwd) {
-        dispatch({ type: "notice", text: "Open a workspace folder first" });
+        dispatch({ type: "notice", text: "Open a workspace folder first." });
         return undefined;
       }
       const agentMode = mode ?? live.current.agentMode;
@@ -439,17 +611,15 @@ export function useCodepilot(): Codepilot {
   const resumeSession = useCallback(
     async (id: string) => {
       try {
- // Do not switch workspace on resume — cwd is fixed until the user
- // explicitly opens/changes the folder.
-        const { sessionId, events } = await client.resumeSession(id);
-        live.current = { ...live.current, sessionId };
-        dispatch({ type: "session-opened", sessionId, agentMode: live.current.agentMode, history: events });
-        void syncEndpoint(sessionId);
+        // Do not switch workspace on resume — cwd is fixed until the user
+        // explicitly opens/changes the folder.
+        await openResumedSessionRef.current(id, { redirected: false });
+        live.current = { ...live.current, sessionId: id };
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });
       }
     },
-    [client, syncEndpoint],
+    [client, connect, syncEndpoint],
   );
 
   const forkSession = useCallback(async () => {
@@ -457,10 +627,9 @@ export function useCodepilot(): Codepilot {
     if (!id) return;
     try {
       const forked = await client.fork(id);
-      const { sessionId, events } = await client.resumeSession(forked);
-      live.current = { ...live.current, sessionId };
-      dispatch({ type: "session-opened", sessionId, agentMode: live.current.agentMode, history: events });
-      dispatch({ type: "notice", text: `forked → ${sessionId}` });
+      const res = await client.resumeSession(forked);
+      live.current = { ...live.current, sessionId: res.sessionId };
+      applyResumeResult(res, `forked → ${res.sessionId}`);
       await refreshSessions();
     } catch (err) {
       dispatch({ type: "notice", text: describeError(err) });
@@ -501,6 +670,13 @@ export function useCodepilot(): Codepilot {
       files?: PromptFile[],
       delivery?: "auto" | "queue" | "steer",
     ) => {
+      if (live.current.readOnly) {
+        dispatch({
+          type: "notice",
+          text: "This session is read-only (held by another process). Re-open it on the holding daemon to send.",
+        });
+        throw new Error("session is read-only");
+      }
       const id = live.current.sessionId ?? (await newSession());
       if (!id) throw new Error("could not open a session");
       await sendTo(id, text, images, files, delivery);
@@ -726,6 +902,7 @@ export function useCodepilot(): Codepilot {
     answerQuestion,
     notify,
     closeSession,
+    loadOlderHistory,
   };
 }
 

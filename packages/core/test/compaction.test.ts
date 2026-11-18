@@ -10,10 +10,10 @@ import {
   compactionGeometry,
   DEFAULT_COMPACTION_FRACTION,
   SOFT_COMPACTION_RATIO,
-} from "../src/compaction.js";
+} from "../src/compaction/compaction.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
 import type { ChatProvider } from "../src/providers/types.js";
-import { buildProviderMessages } from "../src/agent-messages.js";
+import { buildProviderMessages } from "../src/agent/agent-messages.js";
 
 function makeEvents(): Event[] {
   const events: Event[] = [];

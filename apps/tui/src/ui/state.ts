@@ -55,6 +55,25 @@ export interface ToolRow {
   resultIsError?: boolean;
   artifactRef?: string;
   status: "running" | "ok" | "error";
+ /** Raw tool input, for the detail viewer. */
+  input?: unknown;
+ /** Sub-agents dispatched by this call (task / spawn_agent), by fan-out index. */
+  subagents?: SubagentRun[];
+}
+
+/** One sub-agent run nested under the tool call that dispatched it. */
+export interface SubagentRun {
+  index: number;
+  objective: string;
+  sessionId?: string;
+  runSeq?: number;
+  background?: boolean;
+  state: "running" | "ok" | "failed" | "interrupted";
+  steps: ToolRow[];
+ /** Latest assistant text from the sub-agent (its conclusion once finished). */
+  text: string;
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 /** UI status derived from core status events + our own knowledge. */
@@ -210,6 +229,10 @@ export function summarizeInput(_name: string, input: unknown): string {
   if (input === null || input === undefined) return "";
   if (typeof input === "string") return truncate(input, 80);
   if (typeof input !== "object") return truncate(String(input), 80);
+ // Prefer the human-facing subject (paths / command) over raw field dumps —
+ // especially apply_patch, whose only field is a long `patch` body.
+  const subject = toolTarget(input);
+  if (subject) return truncate(subject, 120);
  // Pick a few well-known fields first, then fall back to all primitives.
   const obj = input as Record<string, unknown>;
   const preferredKeys = ["file_path", "path", "command", "cmd", "pattern", "query", "url", "title", "objective", "content"];
@@ -222,6 +245,7 @@ export function summarizeInput(_name: string, input: unknown): string {
   if (parts.length === 0) {
     for (const [k, v] of Object.entries(obj)) {
       if (parts.length >= 3) break;
+      if (k === "patch") continue;
       if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
         parts.push(`${k}=${truncate(String(v), 40)}`);
       }
@@ -241,7 +265,7 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
-function newToolRow(id: string, name: string, input: unknown): ToolRow {
+function newToolRow(id: string, name: string, input: unknown, at?: number): ToolRow {
   return {
     id,
     name,
@@ -250,9 +274,132 @@ function newToolRow(id: string, name: string, input: unknown): ToolRow {
     target: toolTarget(input),
     ...changeCounts(name, input),
     status: "running",
-    startedAt: Date.now(),
+    startedAt: at ?? Date.now(),
+    input,
   };
 }
+
+function finishToolRow(
+  tool: ToolRow,
+  ev: { content: string; isError?: boolean; artifactRef?: string },
+  at?: number,
+): ToolRow {
+  const finishedAt = at ?? Date.now();
+ // A parent result means every sub-agent is done; close any that never got a
+ // terminal state event so the Static snapshot does not freeze on "working".
+  const subagents = tool.subagents?.map((r) =>
+    r.state === "running"
+      ? { ...r, state: (ev.isError ? "failed" : "ok") as SubagentRun["state"], finishedAt }
+      : r,
+  );
+  return {
+    ...tool,
+    resultText: ev.content,
+    resultIsError: ev.isError,
+    artifactRef: ev.artifactRef,
+    status: ev.isError ? "error" : "ok",
+    finishedAt,
+    ...(subagents ? { subagents } : {}),
+  };
+}
+
+/** Fold one `subagent` event into the dispatching tool row. */
+function applySubagent(tool: ToolRow, ev: Extract<Event, { type: "subagent" }>): ToolRow {
+  const runs = (tool.subagents ?? []).slice();
+  let i = runs.findIndex((r) => r.index === ev.index);
+  if (i < 0) {
+    runs.push({
+      index: ev.index,
+      objective: ev.objective,
+      state: "running",
+      steps: [],
+      text: "",
+      startedAt: ev.ts ?? Date.now(),
+    });
+    runs.sort((a, b) => a.index - b.index);
+    i = runs.findIndex((r) => r.index === ev.index);
+  }
+  const run: SubagentRun = { ...runs[i]! };
+  if (ev.sessionId) run.sessionId = ev.sessionId;
+  if (ev.runSeq !== undefined) run.runSeq = ev.runSeq;
+  if (ev.background) run.background = true;
+  if (ev.state) {
+    run.state = ev.state;
+    if (ev.state !== "running") run.finishedAt = ev.ts ?? Date.now();
+  }
+  const inner = ev.event;
+ // A call rejected before it runs (unknown tool, denied) reports its result
+ // ahead of the tool_call, so either event may create the step.
+  const addCall = (id: string, name: string, input: unknown, at?: number): void => {
+    const existing = run.steps.find((s) => s.id === id);
+    if (!existing) {
+      run.steps = [...run.steps, newToolRow(id, name, input, at)];
+    } else if (existing.input === undefined) {
+      const fresh = newToolRow(id, name, input, existing.startedAt);
+      run.steps = run.steps.map((s) => (s.id === id ? { ...s, input, target: fresh.target, inputSummary: fresh.inputSummary } : s));
+    }
+  };
+  if (inner?.type === "tool_call") {
+    addCall(inner.id, inner.name, inner.input, inner.ts ?? ev.ts);
+  } else if (inner?.type === "tool_result") {
+    const at = inner.ts ?? ev.ts;
+    if (!run.steps.some((s) => s.id === inner.toolCallId)) {
+      run.steps = [...run.steps, { ...newToolRow(inner.toolCallId, inner.name, undefined, at), input: undefined }];
+    }
+    run.steps = run.steps.map((s) => (s.id === inner.toolCallId ? finishToolRow(s, inner, at) : s));
+  } else if (inner?.type === "message_delta" && inner.delta?.type === "text" && inner.delta.text) {
+    // Live assistant tokens from the sub-agent — without this the task row
+    // stays empty until the final message, which looks like a silent reply.
+    run.text = (run.text ?? "") + inner.delta.text;
+  } else if (inner?.type === "message" && inner.role === "assistant") {
+    const text = inner.content.filter(isTextBlock).map((b) => b.text).join("").trim();
+    if (text) run.text = text;
+    for (const t of inner.content.filter(isToolUseBlock)) addCall(t.id, t.name, t.input, inner.ts ?? ev.ts);
+  }
+  runs[i] = run;
+  return { ...tool, subagents: runs };
+}
+
+/** Stable identity for a row, used as the `<Static>` key once it is printed. */
+export function rowKeys(rows: readonly Row[]): string[] {
+  const seen = new Map<string, number>();
+  return rows.map((r) => {
+    const base =
+      r.kind === "user" ? `u:${r.id}`
+      : r.kind === "assistant" ? `a:${r.msg.id}`
+      : r.kind === "tool" ? `t:${r.tool.id}`
+ // A goal row is updated in place each round; key it by status so the
+ // finished state prints as a new item.
+      : r.kind === "goal" ? `goal:${r.status}`
+      : `${r.kind}:${"at" in r ? r.at : 0}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return n === 0 ? base : `${base}#${n}`;
+  });
+}
+
+/**
+ * How many leading rows are final and can be printed once into terminal
+ * scrollback. Streaming messages, running tools and transient retry banners
+ * are still changing, so the prefix stops at the first of them; once the turn
+ * is idle everything left is final.
+ */
+export function settledCount(rows: readonly Row[], busy: boolean): number {
+  if (!busy) return rows.length;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+ // The prompt's bubble is re-sent with its final content right after it
+ // appears, so hold it back until something follows it.
+    if (r.kind === "user" && i === rows.length - 1) return i;
+    if (r.kind === "assistant" && r.msg.streaming) return i;
+    if (r.kind === "tool" && r.tool.status === "running") return i;
+    if (r.kind === "retry") return i;
+    if (r.kind === "error" && r.recoverable && TRANSIENT_ERROR.test(r.message)) return i;
+  }
+  return rows.length;
+}
+
+const TRANSIENT_ERROR = /\b429\b|rate.?limit|too many requests|overloaded|sustaining heavy rate-limiting/i;
 
 function isTextBlock(b: ContentBlock): b is TextBlock {
   return b.type === "text";
@@ -352,6 +499,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           const toolUses = ev.content.filter(isToolUseBlock);
           const toolResults = ev.content.filter(isToolResultBlock);
           if (ev.role === "user") {
+ // Core notifies a placeholder bubble first and re-sends the final
+ // content under the same id, so upsert rather than append.
+            const at = state.rows.findIndex((r) => r.kind === "user" && r.id === ev.id);
+            if (at >= 0) {
+              const rows = state.rows.slice();
+              rows[at] = { kind: "user", id: ev.id, text };
+              return { ...state, rows };
+            }
             return {
               ...state,
               rows: [...state.rows, { kind: "user", id: ev.id, text }],
@@ -371,7 +526,13 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           const rows = state.rows.slice();
  // Replace the last streaming assistant (if any) with the final version.
           let replaced = false;
-          for (let i = rows.length - 1; i >= 0; i--) {
+          const same = rows.findIndex((r) => r.kind === "assistant" && r.msg.id === ev.id);
+          if (same >= 0) {
+            const prev = rows[same] as Extract<Row, { kind: "assistant" }>;
+            rows[same] = { kind: "assistant", msg: { ...newMsg, reasoning: reasoningFromBlocks || prev.msg.reasoning || newMsg.reasoning } };
+            replaced = true;
+          }
+          for (let i = rows.length - 1; i >= 0 && !replaced; i--) {
             const r = rows[i]!;
             if (r.kind === "assistant" && r.msg.streaming) {
  // Prefer persisted reasoning blocks; fall back to streamed deltas.
@@ -398,10 +559,16 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
               (r) => r.kind === "tool" && r.tool.id === id,
             );
             if (!exists) {
-              rows.push({ kind: "tool", tool: newToolRow(id, t.name, t.input) });
+              rows.push({ kind: "tool", tool: newToolRow(id, t.name, t.input, ev.ts) });
             }
           }
           for (const tr of toolResults) {
+            const at = rows.findIndex((r) => r.kind === "tool" && r.tool.id === tr.toolCallId);
+            if (at >= 0) {
+              const prev = rows[at] as Extract<Row, { kind: "tool" }>;
+              if (prev.tool.status === "running") rows[at] = { kind: "tool", tool: finishToolRow(prev.tool, tr, ev.ts) };
+              continue;
+            }
             rows.push({
               kind: "tool",
               tool: {
@@ -426,26 +593,26 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
  // if needed. Text and reasoning share the same row.
  // Clear transient retry banners (e.g. HTTP 429) once the stream resumes.
             const rows = clearTransientRetryRows(state.rows.slice());
-            let target: MessageRow | undefined;
+            let at = -1;
             for (let i = rows.length - 1; i >= 0; i--) {
               const r = rows[i]!;
               if (r.kind === "assistant" && r.msg.streaming) {
-                target = r.msg;
+                at = i;
                 break;
               }
             }
-            if (target === undefined) {
-              const fresh: MessageRow = {
-                id: ev.messageId,
-                role: "assistant",
-                text: "",
-                streaming: true,
-              };
-              rows.push({ kind: "assistant", msg: fresh });
-              target = fresh;
+            if (at < 0) {
+              rows.push({ kind: "assistant", msg: { id: ev.messageId, role: "assistant", text: "", streaming: true } });
+              at = rows.length - 1;
             }
-            if (d.type === "reasoning") target.reasoning = (target.reasoning ?? "") + d.text;
-            else target.text += d.text;
+            const cur = (rows[at] as Extract<Row, { kind: "assistant" }>).msg;
+            rows[at] = {
+              kind: "assistant",
+              msg:
+                d.type === "reasoning"
+                  ? { ...cur, reasoning: (cur.reasoning ?? "") + d.text }
+                  : { ...cur, text: cur.text + d.text },
+            };
             return { ...state, rows, status: "thinking" };
           }
  // tool_input_json deltas update the running tool row's input summary.
@@ -460,7 +627,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             rows: [
               ...clearTransientRetryRows(state.rows),
-              { kind: "tool", tool: newToolRow(ev.id, ev.name, ev.input) },
+              { kind: "tool", tool: newToolRow(ev.id, ev.name, ev.input, ev.ts) },
             ],
           };
         }
@@ -469,17 +636,7 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           for (let i = rows.length - 1; i >= 0; i--) {
             const r = rows[i]!;
             if (r.kind === "tool" && r.tool.id === ev.toolCallId) {
-              rows[i] = {
-                kind: "tool",
-                tool: {
-                  ...r.tool,
-                  resultText: ev.content,
-                  resultIsError: ev.isError,
-                  artifactRef: ev.artifactRef,
-                  status: ev.isError ? "error" : "ok",
-                  finishedAt: Date.now(),
-                },
-              };
+              rows[i] = { kind: "tool", tool: finishToolRow(r.tool, ev, ev.ts) };
               return { ...state, rows, status: state.busy ? "thinking" : state.status };
             }
           }
@@ -570,8 +727,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             notice: `Switched provider: ${ev.from} → ${ev.to} (${ev.failureKind})`,
           };
-        case "subagent":
-          if (ev.event?.type !== "tool_call") return state;
+        case "subagent": {
+          const at = state.rows.findIndex((r) => r.kind === "tool" && r.tool.id === ev.parentToolCallId);
+          let rows = state.rows;
+          if (at >= 0) {
+            rows = state.rows.slice();
+            rows[at] = { kind: "tool", tool: applySubagent((rows[at] as Extract<Row, { kind: "tool" }>).tool, ev) };
+          }
+          if (ev.event?.type !== "tool_call") return rows === state.rows ? state : { ...state, rows };
           // Unique, stable label: the session-global runSeq (falls back to the
           // per-fan-out index) plus a short slice of the sub-agent's id, so
           // repeated single-task dispatches no longer all read as "#1".
@@ -579,12 +742,14 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
           const idShort = ev.sessionId ? ` ${ev.sessionId.slice(-6)}` : "";
           return {
             ...state,
+            rows,
             activity: {
               phase: "tools",
               since: state.activity?.since ?? Date.now(),
               tools: [`task #${seq}${idShort} → ${ev.event.name}`],
             },
           };
+        }
         case "status":
           return {
             ...state,

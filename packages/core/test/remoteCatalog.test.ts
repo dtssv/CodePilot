@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
   shouldAttemptDailyUpdate,
   resetCatalogMemoryForTests,
-} from "../src/remoteCatalog.js";
+} from "../src/config/remoteCatalog.js";
 
 describe("shouldAttemptDailyUpdate", () => {
   it("attempts when there is no cache", () => {
@@ -43,21 +43,21 @@ describe("resetCatalogMemoryForTests", () => {
 // Smoke: listConnectors / listProviderTemplates use bundled catalog offline.
 describe("catalog list (bundled)", () => {
   it("lists connectors from bundled JSON", async () => {
-    const { listConnectors } = await import("../src/connectors.js");
+    const { listConnectors } = await import("../src/config/connectors.js");
     const list = await listConnectors();
     expect(list.length).toBeGreaterThan(0);
     expect(list.some((c) => c.id === "feishu")).toBe(true);
   });
 
   it("lists provider templates from bundled JSON", async () => {
-    const { listProviderTemplates } = await import("../src/providerCatalog.js");
+    const { listProviderTemplates } = await import("../src/config/providerCatalog.js");
     const list = await listProviderTemplates();
     expect(list.length).toBeGreaterThan(0);
     expect(list.some((t) => t.id === "deepseek")).toBe(true);
   });
 
   it("lists search engines from bundled JSON, each a usable custom template", async () => {
-    const { listSearchEngines } = await import("../src/searchEngines.js");
+    const { listSearchEngines } = await import("../src/config/searchEngines.js");
     const list = await listSearchEngines();
     expect(list.length).toBeGreaterThan(0);
     const brave = list.find((e) => e.id === "brave");

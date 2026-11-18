@@ -13,8 +13,8 @@ import {
   templateToPreset,
   nextProviderId,
   listProviderTemplates,
-} from "../src/providerCatalog.js";
-import type { ResolvedCodepilotConfig } from "../src/config.js";
+} from "../src/config/providerCatalog.js";
+import type { ResolvedCodepilotConfig } from "../src/config/config.js";
 
 describe("listSelectableModels", () => {
   it("lists models across named providers", () => {

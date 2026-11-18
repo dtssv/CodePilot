@@ -4,7 +4,7 @@
 import type { z } from "zod";
 import { zodToJsonSchema as zodToJsonSchemaLib } from "zod-to-json-schema";
 import type { ContentBlock, QuestionRequest, QuestionAnswers } from "../types.js";
-import type { ResolvedSandbox } from "../sandbox.js";
+import type { ResolvedSandbox } from "../sandbox/sandbox.js";
 
 export type PermissionLevel = "read" | "write" | "execute" | "network";
 
@@ -35,7 +35,7 @@ export interface ToolContext {
  * Persistent shell for foreground `bash` calls, so `cd`, `export`, and
  * background jobs persist across calls. Absent in test harnesses.
  */
-  persistentShell?: { run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("../persistentShell.js").PersistentShellResult> };
+  persistentShell?: { run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("../sandbox/persistentShell.js").PersistentShellResult> };
  /**
  * LSP / language-server diagnostics provider (host-supplied). When
  * present, the `diagnostics` tool reads from it; otherwise the tool
@@ -82,9 +82,10 @@ export interface ToolContext {
     opts: { persist: boolean },
   ) => Promise<void> | void;
   /**
-   * File-observation store (read-before-write + staleness guard). Read tools
-   * call `observeFile` after a read; write tools call `checkFileFresh` before
-   * mutating and `reobserveFile` after. Optional — tools fall back to no guard.
+   * File-observation store (staleness guard for blind replaces). Read tools
+   * call `observeFile` after a read; blind writers (`write_file`, notebook)
+   * call `checkFileFresh` before mutating. Surgical editors (`edit_file`,
+   * apply_patch Update) skip it — live-disk match is the gate. Optional.
    */
   observeFile?: (
     absPath: string,
@@ -95,12 +96,16 @@ export interface ToolContext {
     absPath: string,
     currentStat: { mtimeMs: number; size: number } | null,
     currentContentHash?: string,
-  ) => import("../fsObservation.js").FreshnessResult;
+    opts?: import("../workspace/fsObservation.js").CheckFreshOptions,
+  ) => import("../workspace/fsObservation.js").FreshnessResult;
   reobserveFile?: (
     absPath: string,
     stat: { mtimeMs: number; size: number },
     contentHash?: string,
   ) => void;
+  /** Run after a successful write: configured formatters, then new
+   * language-server errors. Returns a note for the tool result ("" if none). */
+  postWrite?: import("../workspace/postWrite.js").PostWrite;
 }
 
 export interface ToolResult {

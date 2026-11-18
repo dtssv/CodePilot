@@ -51,6 +51,7 @@ class HostRelayTest {
         val init = delivered[0]
         assertEquals("/work", init["cwd"].asString)
         assertEquals("light", init["theme"].asString)
+        assertEquals("zh", init["locale"].asString)
         assertEquals("idea", init["surface"].asString)
         assertEquals("ready", delivered[2]["state"].asString)
         assertEquals(1, engine.starts)
@@ -123,9 +124,35 @@ class HostRelayTest {
     }
 
     @Test
+    fun `openSettings expands and notifies the page`() {
+        var expanded = 0
+        var restored = 0
+        val relay = HostRelay(
+            deliver = { delivered += JsonParser.parseString(it).asJsonObject },
+            init = { HostInit(cwd = "/work", theme = "light", locale = "zh") },
+            onExpandForSettings = { expanded++ },
+            onRestoreAfterSettings = { restored++ },
+        ).also { it.engine = engine }
+        relay.fromPage("""{"type":"ready"}""")
+        delivered.clear()
+        relay.fromPage("""{"type":"openSettings"}""")
+        assertEquals(1, expanded)
+        assertTrue(delivered.isEmpty())
+        relay.openSettings()
+        assertEquals(2, expanded)
+        assertEquals("host/openSettings", delivered.single()["type"].asString)
+        relay.fromPage("""{"type":"closeSettings"}""")
+        assertEquals(1, restored)
+    }
+
+    @Test
     fun `withPreset injects before the app scripts`() {
-        val out = withPreset("<html><head><title>x</title></head></html>", "dark")
-        assertTrue(out.startsWith("<html><head><script>window.__codepilotHost={kind:\"idea\",theme:\"dark\"}</script><title>"))
+        val out = withPreset("<html><head><title>x</title></head></html>", "dark", "zh-CN")
+        assertTrue(
+            out.startsWith(
+                "<html><head><script>window.__codepilotHost={kind:\"idea\",theme:\"dark\",locale:\"zh-CN\"}</script><title>",
+            ),
+        )
     }
 
     @Test

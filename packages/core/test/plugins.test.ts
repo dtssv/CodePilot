@@ -18,12 +18,14 @@ import {
   describePluginCapabilities,
   derivePluginName,
   pluginPermissionReport,
+  loadPluginRuntimes,
   type Plugin,
   type PluginManifest,
   type MarketplaceEntry,
-} from "../src/plugins.js";
-import { PluginTrustStore, pluginContentHash } from "../src/plugins-trust.js";
-import { resetCatalogMemoryForTests } from "../src/remoteCatalog.js";
+} from "../src/plugins/plugins.js";
+import { RuntimeRegistry } from "../src/agent/runtime.js";
+import { PluginTrustStore, pluginContentHash } from "../src/plugins/plugins-trust.js";
+import { resetCatalogMemoryForTests } from "../src/config/remoteCatalog.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -551,6 +553,33 @@ describe("mergePluginConfig", () => {
     // Empty recorded set → never fingerprinted → not gated.
     const merged = mergePluginConfig({}, plugins, () => {}, gate({}));
     expect((merged.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
+  });
+
+  it("requires explicit approval for a project plugin's hooks / MCP / runtime", async () => {
+    const recorded: Record<string, string> = {};
+    const fullGate = {
+      ...gate(recorded),
+      recorded: (name: string) => recorded[name] ?? null,
+    };
+    const proj = fakePlugin("proj", {
+      hooks: { PreToolUse: [{ command: "a" }] },
+      runtime: { module: "./never-imported.mjs" },
+    });
+    const user: Plugin = { ...fakePlugin("usr", { hooks: { PostToolUse: [{ command: "b" }] } }), source: "user" };
+    const plugins = new Map<string, Plugin>([["proj", proj], ["usr", user]]);
+
+    const warns: string[] = [];
+    const merged = mergePluginConfig({}, plugins, (m) => warns.push(m), fullGate);
+    const hooks = merged.hooks as Record<string, unknown[]>;
+    expect(hooks.PreToolUse).toBeUndefined();
+    expect(hooks.PostToolUse).toHaveLength(1);
+    expect(warns.join("\n")).toMatch(/project plugin "proj".*not approved/);
+    const loaded = await loadPluginRuntimes(new Map([["proj", proj]]), new RuntimeRegistry(), fullGate);
+    expect(loaded.errors.get("proj")).toMatch(/not approved/);
+
+    recorded.proj = pluginContentHash(proj.manifest);
+    const approved = mergePluginConfig({}, plugins, () => {}, fullGate);
+    expect((approved.hooks as Record<string, unknown[]>).PreToolUse).toHaveLength(1);
   });
 
   it("only the sensitive components change the fingerprint", () => {

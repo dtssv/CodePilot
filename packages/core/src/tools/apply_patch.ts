@@ -9,8 +9,8 @@ import { readFile, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
-import { hashFileContent } from "../fsObservation.js";
+import { guardDeliveryWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 
 const schema = z.object({
   patch: z
@@ -261,19 +261,42 @@ function spliceIn(
   return out;
 }
 
+/** Count `+` / `-` lines in update hunks (context ignored). */
+function hunkLineStats(hunks: Hunk[] | undefined): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const h of hunks ?? []) {
+    for (const l of h.lines) {
+      if (l.type === "add") added++;
+      else if (l.type === "del") removed++;
+    }
+  }
+  return { added, removed };
+}
+
+/** e.g. `+3/-1`, `+5`, `-2`, or empty when both zero. */
+function formatLineStats(added: number, removed: number): string {
+  if (added <= 0 && removed <= 0) return "";
+  const parts: string[] = [];
+  if (added > 0) parts.push(`+${added}`);
+  if (removed > 0) parts.push(`-${removed}`);
+  return parts.join("/");
+}
+
+/** Line count for add/delete summaries (trailing empty split ignored like editors). */
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  return text.replace(/\r\n/g, "\n").split("\n").length;
+}
+
 export const applyPatchTool: ToolDef<typeof schema> = {
   name: "apply_patch",
   description:
-    "Atomic multi-file patch (all-or-nothing). Format:\n" +
-    "*** Begin Patch\n" +
-    "*** Add File: path — full content — *** End File\n" +
-    "*** Delete File: path\n" +
-    "*** Update File: path — @@ hunks with ` `/`-`/`+` lines — *** End File\n" +
-    "*** End Patch\n" +
-    "`*** End File` may be omitted when the next file header or `*** End Patch` follows. " +
-    "Must have read updated files earlier; copy context/`-` lines without line-number prefixes. " +
-    "Add File only CREATES a new file — if the path already exists it is refused " +
-    "(read it and use Update File instead of blindly overwriting).",
+    "Atomic multi-file patch (all-or-nothing). Prefer when several files or hunks change together. " +
+    "Envelope: `*** Begin Patch` … `*** End Patch` with `*** Add File: path` (create only — existing path refused), " +
+    "`*** Delete File: path`, or `*** Update File: path` + `@@` hunks (` `/`-`/`+` lines, no line-number prefixes; " +
+    "context must match disk). On hunk failure: adjust context from the error — do not resubmit the same patch. " +
+    "Do not mix with edit_file/write_file on the same path in the same fix set (later turns too) — re-patch instead.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
@@ -296,78 +319,66 @@ export const applyPatchTool: ToolDef<typeof schema> = {
     }
 
  // 2. Read all files that will be updated (so we can roll back cleanly).
+    // Update File: no fs_guard — hunks must match live disk (peer apply_patch).
+    // Add File: refuse if the path already exists (use Update / write_file).
     const originals = new Map<string, string>();
-    // Add File targets that already existed but were observed fresh this session
-    // — allowed as a full replace, and reobserved after the write.
-    const existingAddTargets = new Set<string>();
     for (const op of ops) {
       if (op.kind === "update") {
-        const p = resolve(ctx.cwd, op.path);
-        let preStat: { mtimeMs: number; size: number } | null = null;
         try {
-          const s = await stat(p);
-          preStat = { mtimeMs: s.mtimeMs, size: s.size };
-          originals.set(op.path, await readFile(p, "utf-8"));
+          originals.set(op.path, await readFile(resolve(ctx.cwd, op.path), "utf-8"));
         } catch (err) {
           return {
             content: `failed to read ${op.path}: ${(err as Error).message}`,
             isError: true,
           };
         }
-        // Read-before-write + staleness: an update must target a file read
-        // this session that has not changed on disk since. We already hold the
-        // current content, so pass it for the content-equality fallback.
-        const fresh = await guardFreshWrite(ctx, p, preStat, originals.get(op.path));
-        if (fresh) return fresh;
       } else if (op.kind === "add") {
-        // Add File creates a new file; if the target exists, clobbering it would
-        // discard unread contents. Allow only when the file was observed this
-        // session and is still fresh (then a full replace); otherwise refuse and
-        // point at Update / write_file.
         const p = resolve(ctx.cwd, op.path);
         if (existsSync(p)) {
-          let preStat: { mtimeMs: number; size: number } | null = null;
-          let current: string | null = null;
-          try {
-            const s = await stat(p);
-            preStat = { mtimeMs: s.mtimeMs, size: s.size };
-            current = await readFile(p, "utf-8");
-          } catch {
-            preStat = null;
-          }
-          const fresh =
-            current === null
-              ? ({ content: "", isError: true } as const)
-              : await guardFreshWrite(ctx, p, preStat, current);
-          if (fresh) {
-            return {
-              content:
-                `apply_patch: "Add File ${op.path}" targets a file that already exists. ` +
-                `Add File only creates new files. To change it, read it first and use an ` +
-                `Update File hunk (or write_file) so the edit is based on its current contents, ` +
-                `not a blind overwrite.`,
-              isError: true,
-            };
-          }
-          // Observed + fresh: treat as a full replace and reobserve after write.
-          existingAddTargets.add(op.path);
+          return {
+            content:
+              `apply_patch: "Add File ${op.path}" targets a file that already exists. ` +
+              `Add File only creates new files. To change it, use an Update File hunk ` +
+              `(or write_file) whose context matches the current contents — not a blind overwrite.`,
+            isError: true,
+          };
         }
       }
     }
 
  // 3. Compute all new contents (apply hunks) BEFORE writing anything.
-    const writes: { path: string; content: string }[] = [];
-    const deletes: string[] = [];
-    const adds: { path: string; content: string }[] = [];
+    // Same-path Update ops chain onto the evolving buffer — otherwise a second
+    // `*** Update File: x` would re-apply against the original and clobber the first.
+    const writes: { path: string; content: string; added: number; removed: number }[] = [];
+    const deletes: { path: string; removed: number }[] = [];
+    const adds: { path: string; content: string; added: number }[] = [];
+    const pendingUpdates = new Map<string, { content: string; added: number; removed: number }>();
     try {
       for (const op of ops) {
         if (op.kind === "add") {
-          adds.push({ path: op.path, content: op.content ?? "" });
+          const content = op.content ?? "";
+          adds.push({ path: op.path, content, added: countLines(content) });
         } else if (op.kind === "delete") {
-          deletes.push(op.path);
+          const prior = originals.get(op.path);
+          let removed = 0;
+          if (prior !== undefined) {
+            removed = countLines(prior);
+          } else {
+            try {
+              removed = countLines(await readFile(resolve(ctx.cwd, op.path), "utf-8"));
+            } catch {
+              removed = 0;
+            }
+          }
+          deletes.push({ path: op.path, removed });
         } else {
-          const original = originals.get(op.path)!;
-          let working = original;
+          const prev = pendingUpdates.get(op.path);
+          let working = prev?.content ?? originals.get(op.path)!;
+          let added = prev?.added ?? 0;
+          let removed = prev?.removed ?? 0;
+          const stats = hunkLineStats(op.hunks);
+          added += stats.added;
+          removed += stats.removed;
           for (let hi = 0; hi < (op.hunks ?? []).length; hi++) {
             try {
               working = applyHunk(working, op.hunks![hi]!);
@@ -377,8 +388,11 @@ export const applyPatchTool: ToolDef<typeof schema> = {
               );
             }
           }
-          writes.push({ path: op.path, content: working });
+          pendingUpdates.set(op.path, { content: working, added, removed });
         }
+      }
+      for (const [path, u] of pendingUpdates) {
+        writes.push({ path, content: u.content, added: u.added, removed: u.removed });
       }
     } catch (err) {
       return { content: `apply failed (no files written): ${(err as Error).message}`, isError: true };
@@ -391,23 +405,18 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         const p = resolve(ctx.cwd, a.path);
         await mkdir(dirname(p), { recursive: true });
         await writeFile(p, a.content, "utf-8");
-        // A full replace of an observed-fresh file re-enters the observation
-        // graph so a later edit this session is not flagged stale against it.
-        if (existingAddTargets.has(a.path)) {
-          try {
-            const s = await stat(p);
-            ctx.reobserveFile?.(
-              p,
-              { mtimeMs: s.mtimeMs, size: s.size },
-              hashFileContent(Buffer.from(a.content, "utf-8")),
-            );
-          } catch {
-            /* best-effort */
-          }
-          summary.push(`~ replaced ${a.path}`);
-        } else {
-          summary.push(`+ added ${a.path}`);
+        try {
+          const s = await stat(p);
+          ctx.reobserveFile?.(
+            p,
+            { mtimeMs: s.mtimeMs, size: s.size },
+            hashFileContent(Buffer.from(a.content, "utf-8")),
+          );
+        } catch {
+          /* best-effort */
         }
+        const stats = formatLineStats(a.added, 0);
+        summary.push(`+ added ${a.path}${stats ? ` (${stats})` : ""}`);
       }
       for (const w of writes) {
         const p = resolve(ctx.cwd, w.path);
@@ -422,12 +431,14 @@ export const applyPatchTool: ToolDef<typeof schema> = {
         } catch {
           /* best-effort */
         }
-        summary.push(`~ updated ${w.path}`);
+        const stats = formatLineStats(w.added, w.removed);
+        summary.push(`~ updated ${w.path}${stats ? ` (${stats})` : ""}`);
       }
       for (const d of deletes) {
-        const p = resolve(ctx.cwd, d);
+        const p = resolve(ctx.cwd, d.path);
         if (existsSync(p)) await rm(p);
-        summary.push(`- deleted ${d}`);
+        const stats = formatLineStats(0, d.removed);
+        summary.push(`- deleted ${d.path}${stats ? ` (${stats})` : ""}`);
       }
     } catch (err) {
       return {
@@ -436,8 +447,10 @@ export const applyPatchTool: ToolDef<typeof schema> = {
       };
     }
 
+    const touched = [...adds, ...writes].map((f) => resolve(ctx.cwd, f.path));
+    const note = (await ctx.postWrite?.(touched, ctx)) ?? "";
     return {
-      content: `applied ${ops.length} file operation(s) atomically:\n${summary.join("\n")}`,
+      content: `applied ${ops.length} file operation(s) atomically:\n${summary.join("\n")}${note}`,
     };
   },
 };

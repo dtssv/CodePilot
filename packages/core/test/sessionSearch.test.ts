@@ -10,7 +10,7 @@ import {
   deleteSession,
   getSessionsDir,
   resetSessionIndex,
-} from "../src/session.js";
+} from "../src/session/session.js";
 import type { Event } from "../src/types.js";
 
 const tempHome = process.env.HOME ?? tmpdir();

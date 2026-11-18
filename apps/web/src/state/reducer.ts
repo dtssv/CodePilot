@@ -48,9 +48,13 @@ export interface AppState {
  * parallel tool calls raise several at once, and other sessions' prompts
  * wait here until the user switches back to them. */
   pending?: PendingPrompts;
-  sessions: { id: string; title: string; updatedAt: number; cwd: string }[];
+  sessions: { id: string; title: string; updatedAt: number; cwd: string; liveWriterPid?: number }[];
  /** Follow-up prompts waiting while the current run is busy. */
   followUps?: FollowUpItem[];
+  /** Exclusive index for `session/history` backfill; absent when history is complete. */
+  historyBefore?: number;
+  /** True while this handle is a read-only snapshot of a lease held elsewhere. */
+  readOnly?: boolean;
 }
 
 export interface SubagentRun {
@@ -79,7 +83,20 @@ export type Action =
   | { type: "disconnected"; error?: string }
   | { type: "reconnecting"; attempt: number }
   | { type: "reconnected" }
-  | { type: "session-opened"; sessionId: string; agentMode: AgentMode; history?: Event[] }
+  | {
+      type: "session-opened";
+      sessionId: string;
+      agentMode: AgentMode;
+      history?: Event[];
+      historyBefore?: number;
+      readOnly?: boolean;
+    }
+  | {
+      type: "history-prepend";
+      events: Event[];
+      historyBefore?: number;
+      historyTruncated: boolean;
+    }
   | { type: "event"; event: Event }
   | { type: "sending" }
   | { type: "permission"; req: PendingPermission }
@@ -154,6 +171,8 @@ export function reducer(state: AppState, action: Action): AppState {
         lastRequest: undefined,
         permission: undefined,
         question: undefined,
+        historyBefore: action.historyBefore,
+        readOnly: action.readOnly === true,
       };
  // Replay runs the same per-event logic (`applyEvent`) with `replay=true`,
  // folding each event into one private `rows` accumulator in place instead of
@@ -166,6 +185,26 @@ export function reducer(state: AppState, action: Action): AppState {
       }
       replayed = { ...replayed, rows: clearTransientRetryRows(replayed.rows) };
       return showPrompts(replayed, state.pending, false);
+    }
+    case "history-prepend": {
+      // Fold older events into a fresh prefix, then put them ahead of the
+      // already-painted tail without replaying the whole transcript.
+      let prefix: AppState = {
+        ...state,
+        rows: [],
+        plan: [],
+        usage: { input: 0, output: 0 },
+        subagents: undefined,
+        followUps: undefined,
+      };
+      for (const event of action.events) {
+        prefix = applyEvent(prefix, event, true);
+      }
+      return {
+        ...state,
+        rows: [...clearTransientRetryRows(prefix.rows), ...state.rows],
+        historyBefore: action.historyTruncated ? action.historyBefore : undefined,
+      };
     }
  // The prompt is not added here: `agent.ts` appends the user message as an
  // `event` like everything else, so an optimistic row would double it.
@@ -231,6 +270,7 @@ export function reducer(state: AppState, action: Action): AppState {
         lastRequest: undefined,
         permission: undefined,
         question: undefined,
+        historyBefore: undefined,
         pending,
       };
     }

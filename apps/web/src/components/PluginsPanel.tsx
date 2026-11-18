@@ -67,6 +67,7 @@ type InstalledPlugin = {
   version: string;
   source: string;
   enabled: boolean;
+  trusted?: boolean;
 };
 
 export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
@@ -164,6 +165,21 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
       setReportError(undefined);
       setSourceInput("");
       setView("list");
+      await reload();
+    } catch (err) {
+      setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doTrust = async (name: string): Promise<void> => {
+    setBusy(true);
+    setNotice(undefined);
+    setError(undefined);
+    try {
+      await client.trustPlugin(name);
+      setNotice(`${t("Approved")} ${name} — ${t("restart the session to activate it.")}`);
       await reload();
     } catch (err) {
       setError(describeError(err));
@@ -329,9 +345,21 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
                       )}
                     </span>
                     <span className="mt-0.5 block truncate text-[11px] text-[var(--color-ink-faint)]">
-                      {p.description}
+                      {p.trusted === false
+                        ? t("Hooks / MCP / runtime disabled until you approve this plugin.")
+                        : p.description}
                     </span>
                   </span>
+                  {p.trusted === false && (
+                    <button
+                      type="button"
+                      className="cp-btn-ghost shrink-0 py-1 text-[11px]"
+                      disabled={busy}
+                      onClick={() => void doTrust(p.name)}
+                    >
+                      {t("Approve")}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="cp-btn-ghost shrink-0 py-1 text-[11px]"

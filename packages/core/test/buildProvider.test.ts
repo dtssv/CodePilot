@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProvider } from "../src/session-utils.js";
+import { buildProvider } from "../src/session/session-utils.js";
 import type { CodepilotConfig } from "../src/types.js";
 
 // Guards the shared provider factory that both the main session AND sub-agents

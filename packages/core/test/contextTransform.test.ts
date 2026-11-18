@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyContextTransform,
   validateTransformedView,
-} from "../src/contextTransform.js";
+} from "../src/compaction/contextTransform.js";
 import type { ProviderMessage } from "../src/providers/types.js";
 
 const baseView: ProviderMessage[] = [

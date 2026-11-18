@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { summariseMemory, readMemory, FileMemorySink, projectMemoryPath, readLayeredProjectMemory } from "../src/memory.js";
+import { summariseMemory, readMemory, FileMemorySink, projectMemoryPath, readLayeredProjectMemory, readProjectInstructions } from "../src/memory/memory.js";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -56,6 +56,21 @@ describe("readLayeredProjectMemory", () => {
   function initRepo(dir: string): void {
     execFileSync("git", ["init", "-q"], { cwd: dir });
   }
+
+  it("readProjectInstructions caps the injected text and says where the rest is", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-cap-"));
+    initRepo(dir);
+    writeFileSync(join(dir, "AGENTS.md"), `keep-me\n${"汉".repeat(5000)}`, "utf-8");
+    const full = await readProjectInstructions(dir);
+    expect(full).toContain("keep-me");
+    expect(full).not.toContain("truncated");
+    const capped = await readProjectInstructions(dir, { maxBytes: 1000 });
+    expect(capped).toContain("keep-me");
+    expect(capped).toMatch(/instructions truncated at 1000 bytes/);
+    expect(capped).not.toContain("\uFFFD");
+    expect(await readProjectInstructions(dir, { maxBytes: 0 })).toBeUndefined();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("reads a CLAUDE.md-only repo", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-claude-"));

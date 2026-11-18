@@ -122,14 +122,76 @@ export const CATEGORY_ACTIVE: Record<ToolCategory, string> = {
   other: "Calling",
 };
 
+export type PatchTouch = { op: "add" | "update" | "delete"; path: string };
+
+/** File ops declared in an apply_patch body (headers only — no full parse). */
+export function patchTouches(patch: string): PatchTouch[] {
+  const out: PatchTouch[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    for (const [prefix, op] of [
+      ["*** Add File: ", "add"],
+      ["*** Update File: ", "update"],
+      ["*** Delete File: ", "delete"],
+    ] as const) {
+      if (line.startsWith(prefix)) {
+        const path = line.slice(prefix.length).trim();
+        if (path) out.push({ op, path });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** Paths a tool call touches (single-file fields or apply_patch headers). */
+export function toolFilePaths(input: unknown): string[] {
+  if (input === undefined || input === null || typeof input !== "object") return [];
+  const o = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filePath", "notebook_path"]) {
+    const v = o[key];
+    if (typeof v === "string" && v.trim() !== "") return [v.trim()];
+  }
+  if (typeof o.patch === "string") return patchTouches(o.patch).map((t) => t.path);
+  return [];
+}
+
+/**
+ * Action verb for a tool step. Prefer what happened (Wrote / Edited / Read…)
+ * over the tool's internal name — apply_patch Add-only reads as Wrote.
+ */
+export function toolVerb(name: string, input?: unknown): string {
+  const cat = toolCategory(name);
+  if (input && typeof input === "object") {
+    const patch = (input as Record<string, unknown>).patch;
+    if (typeof patch === "string") {
+      const touches = patchTouches(patch);
+      if (touches.length > 0 && touches.every((t) => t.op === "add")) return CATEGORY_VERB.write;
+      if (touches.length > 0 && touches.every((t) => t.op === "delete")) return "Deleted";
+    }
+  }
+  if (cat === "other") return name;
+  return CATEGORY_VERB[cat];
+}
+
 /** The one-line target of a tool call: path, command, pattern, url… */
 export function toolTarget(input: unknown): string {
   if (input === undefined || input === null) return "";
   if (typeof input !== "object") return oneLine(String(input), 120);
   const o = input as Record<string, unknown>;
-  for (const key of ["command", "path", "file_path", "pattern", "query", "url", "objective", "description", "ref"]) {
+  for (const key of ["command", "path", "file_path", "filePath", "notebook_path", "pattern", "query", "url", "objective", "description", "ref"]) {
     const v = o[key];
     if (typeof v === "string" && v.trim() !== "") return oneLine(v, 120);
+  }
+  if (typeof o.patch === "string") {
+    const touches = patchTouches(o.patch);
+    if (touches.length > 0) {
+      return oneLine(
+        touches
+          .map((t) => (t.op === "add" ? `+ ${t.path}` : t.op === "delete" ? `− ${t.path}` : t.path))
+          .join(" · "),
+        120,
+      );
+    }
   }
   return "";
 }
@@ -141,6 +203,16 @@ export function changeCounts(name: string, input: unknown): { added: number; rem
   const lines = (v: unknown): number => (typeof v === "string" && v !== "" ? v.replace(/\n$/, "").split("\n").length : 0);
   const cat = toolCategory(name);
   if (cat === "write" && typeof o.content === "string") return { added: lines(o.content), removed: 0 };
+  if (typeof o.patch === "string") {
+    let added = 0;
+    let removed = 0;
+    for (const line of o.patch.split(/\r?\n/)) {
+      if (line.startsWith("*** ") || line.startsWith("@@")) continue;
+      if (line.startsWith("+") && !line.startsWith("+++")) added++;
+      else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+    }
+    if (added > 0 || removed > 0) return { added, removed };
+  }
   if (cat === "edit") {
     const before = o.search ?? o.old_string ?? o.old_str;
     const after = o.replace ?? o.new_string ?? o.new_str;

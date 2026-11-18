@@ -5,12 +5,22 @@
 // tabs for file edits.
 
 import * as vscode from "vscode";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { SettingsStore, StatusBar, modeLabel } from "./config.js";
+import {
+  configureApiKeyWithIdeUi,
+  openIdeSettings,
+  openUserConfigFile,
+  registerConfigSync,
+} from "./configSync.js";
 import { CompletionProvider } from "./completion.js";
 import { Engine, tapServerLine } from "./engine.js";
+import { nls } from "./nls.js";
 import { ChatViewProvider } from "./sidebar.js";
+import { SettingsView } from "./settingsView.js";
 import { AGENT_MODES, type AgentMode, type Event } from "./types.js";
 import { notifyExtensionUpdateIfAvailable, runCheckUpdatesCommand } from "./updates.js";
 
@@ -18,11 +28,44 @@ const OUTPUT = vscode.window.createOutputChannel("CodePilot");
 
 let engine: Engine | null = null;
 let view: ChatViewProvider | null = null;
+let settingsView: SettingsView | null = null;
+
+const ACTIVE_CWD_KEY = "codepilot.activeCwd";
+
+function listWorkspaceFolders(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+}
+
+function defaultFallbackCwd(): string {
+  const fallback = join(homedir(), "CodePilot");
+  try {
+    mkdirSync(fallback, { recursive: true });
+  } catch {
+    /* best-effort; engine may still start with the path */
+  }
+  return fallback;
+}
+
+/**
+ * Active IDE folder: remembered pick if still in the multi-root set, else the
+ * first folder, else `~/CodePilot` when the window has no folder open.
+ */
+function resolveWorkspaceCwd(context: vscode.ExtensionContext): string {
+  const folders = listWorkspaceFolders();
+  if (folders.length === 0) return defaultFallbackCwd();
+  const remembered = context.workspaceState.get<string>(ACTIVE_CWD_KEY);
+  if (remembered && folders.some((f) => f === remembered)) return remembered;
+  return folders[0]!;
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const settings = new SettingsStore();
   const statusBar = new StatusBar("codepilot.openSidebar");
-  const cwd = (): string => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  const cwd = (): string => resolveWorkspaceCwd(context);
+  const folders = (): string[] => {
+    const list = listWorkspaceFolders();
+    return list.length > 0 ? list : [cwd()];
+  };
   process.env.CODEPILOT_CLIENT_VERSION = String(context.extension.packageJSON.version ?? "");
 
   const bundledCli = vscode.Uri.joinPath(context.extensionUri, "resources", "codepilot-cli.cjs").fsPath;
@@ -58,19 +101,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   view = new ChatViewProvider(context, {
     engine,
     cwd,
+    folders,
+    onSetCwd: (next) => {
+      const allowed = folders();
+      if (!allowed.some((f) => f === next)) return;
+      void context.workspaceState.update(ACTIVE_CWD_KEY, next);
+    },
+    onOpenWideSettings: () => settingsView?.show(),
     log: (line) => OUTPUT.appendLine(line),
     onEngineError: (message) => {
       OUTPUT.appendLine(`[engine] ${message}`);
       void vscode.window
         .showErrorMessage(
-          `CodePilot could not start the engine: ${message}. Install/rebuild the extension (bundled engine) or set \`codepilot.cliPath\` / \`codepilot.serverPath\`.`,
-          "Open Settings",
+          nls(
+            "CodePilot could not start the engine: {0}. Install/rebuild the extension (bundled engine) or set `codepilot.cliPath` / `codepilot.serverPath`.",
+            message,
+          ),
+          nls("Open Settings"),
         )
         .then((choice) => {
-          if (choice) void vscode.commands.executeCommand("workbench.action.openSettings", "codepilot");
+          if (choice) settingsView?.show();
         });
     },
   });
+
+  settingsView = new SettingsView(context, {
+    engine,
+    cwd,
+    folders,
+    log: (line) => OUTPUT.appendLine(line),
+  });
+
+  registerConfigSync(context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("codepilot.chatView", view, {
@@ -79,7 +141,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     settings,
     statusBar,
     { dispose: () => view?.dispose() },
+    { dispose: () => settingsView?.dispose() },
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      const active = cwd();
+      // Drop a remembered pick that left the multi-root set.
+      const remembered = context.workspaceState.get<string>(ACTIVE_CWD_KEY);
+      if (remembered && remembered !== active) {
+        void context.workspaceState.update(ACTIVE_CWD_KEY, active);
+      }
+      view?.notifyWorkspace(active, folders());
+    }),
     vscode.commands.registerCommand("codepilot.openSidebar", focusView),
+    // Wide editor Settings panel (sidebar cannot set an exact width).
+    vscode.commands.registerCommand("codepilot.openSettings", () => settingsView?.show()),
+    // Optional: VS Code extension-host prefs (cli path, …); synced scalars → ~/.codepilot.
+    vscode.commands.registerCommand("codepilot.openIdeSettings", () => void openIdeSettings()),
+    vscode.commands.registerCommand("codepilot.setApiKey", () => void configureApiKeyWithIdeUi()),
+    vscode.commands.registerCommand("codepilot.editUserConfig", () => void openUserConfigFile()),
+    vscode.commands.registerCommand("codepilot.switchWorkspace", async () => {
+      const list = folders();
+      if (list.length <= 1) {
+        void vscode.window.showInformationMessage(
+          list[0]
+            ? nls("CodePilot workspace: {0}", list[0])
+            : nls("CodePilot: open a folder in the window, or it will use ~/CodePilot."),
+        );
+        return;
+      }
+      const active = cwd();
+      const pick = await vscode.window.showQuickPick(
+        list.map((f) => ({
+          label: f.split(/[/\\]/).filter(Boolean).pop() || f,
+          description: f,
+          picked: f === active,
+          cwd: f,
+        })),
+        {
+          title: nls("CodePilot: Switch Workspace Folder"),
+          placeHolder: nls("Select the active folder"),
+        },
+      );
+      if (!pick) return;
+      void context.workspaceState.update(ACTIVE_CWD_KEY, pick.cwd);
+      view?.notifyWorkspace(pick.cwd, list);
+    }),
     vscode.commands.registerCommand("codepilot.newSession", async () => {
       await focusView();
       view?.command({ name: "new" });
@@ -87,13 +192,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codepilot.cancel", () => view?.command({ name: "cancel" })),
     vscode.commands.registerCommand("codepilot.switchMode", async () => {
       const hints: Record<AgentMode, string> = {
-        chat: "Ask — read-only Q&A",
-        plan: "Plan — read-only exploration + planning",
-        agent: "Agent — full autonomous execution",
+        chat: nls("Ask — read-only Q&A"),
+        plan: nls("Plan — read-only exploration + planning"),
+        agent: nls("Agent — full autonomous execution"),
       };
       const pick = await vscode.window.showQuickPick(
         AGENT_MODES.map((m) => ({ label: modeLabel(m), description: hints[m], picked: m === mode, mode: m })),
-        { title: "CodePilot: Switch Mode", placeHolder: "Select collaboration mode" },
+        {
+          title: nls("CodePilot: Switch Mode"),
+          placeHolder: nls("Select collaboration mode"),
+        },
       );
       if (!pick) return;
       mode = pick.mode;
@@ -134,6 +242,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  settingsView?.dispose();
+  settingsView = null;
   engine?.stop();
   engine = null;
   view = null;
@@ -153,7 +263,7 @@ async function addSelection(newChat: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const selected = editor?.document.getText(editor.selection);
   if (!editor || !selected) {
-    void vscode.window.showInformationMessage("CodePilot: select some code first.");
+    void vscode.window.showInformationMessage(nls("CodePilot: select some code first."));
     return;
   }
   const sel = editor.selection;
@@ -174,20 +284,20 @@ async function askSelection(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const selected = editor?.document.getText(editor.selection);
   if (!editor || !selected) {
-    void vscode.window.showInformationMessage("CodePilot: select some code first.");
+    void vscode.window.showInformationMessage(nls("CodePilot: select some code first."));
     return;
   }
   const sel = editor.selection;
   const rel = vscode.workspace.asRelativePath(editor.document.uri);
   const question = await vscode.window.showInputBox({
-    title: "Ask CodePilot about the selection",
+    title: nls("Ask CodePilot about the selection"),
     prompt: `${rel} (lines ${sel.start.line + 1}–${sel.end.line + 1})`,
-    placeHolder: "What do you want to know?",
+    placeHolder: nls("What do you want to know?"),
   });
   if (question === undefined) return;
   const fence = "```";
   const text =
-    `${question || "Explain this code."}\n\n` +
+    `${question || nls("Explain this code.")}\n\n` +
     `${fence}${editor.document.languageId}\n// @${rel} L${sel.start.line + 1}-${sel.end.line + 1}\n${selected}\n${fence}`;
   await focusView();
   view?.prompt(text, true);
@@ -196,7 +306,7 @@ async function askSelection(): Promise<void> {
 async function promptOnActiveFile(task: string): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    void vscode.window.showInformationMessage("CodePilot: open a file first.");
+    void vscode.window.showInformationMessage(nls("CodePilot: open a file first."));
     return;
   }
   const rel = vscode.workspace.asRelativePath(editor.document.uri);
@@ -348,6 +458,6 @@ function detectLanguage(path: string): string {
 
 function pathToUri(p: string): vscode.Uri {
   if (p.startsWith("file://")) return vscode.Uri.parse(p);
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  return vscode.Uri.file(root && !p.startsWith("/") ? `${root}/${p}` : p);
+  const root = listWorkspaceFolders()[0] ?? defaultFallbackCwd();
+  return vscode.Uri.file(isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) ? p : join(root, p));
 }

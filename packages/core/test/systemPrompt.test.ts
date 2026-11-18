@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt, assembleSections, type StaticSection } from "../src/systemPrompt.js";
-import type { EnvironmentProvider, EnvironmentSnapshot } from "../src/env.js";
+import { buildSystemPrompt, assembleSections, type StaticSection } from "../src/systemPrompt/index.js";
+import type { EnvironmentProvider, EnvironmentSnapshot } from "../src/config/env.js";
+import { taskTool } from "../src/tools/task.js";
 
 /**
  * Deterministic env provider for tests. The system prompt dynamic suffix
@@ -12,12 +13,15 @@ const fakeEnv: EnvironmentProvider = {
   async snapshot(cwd: string): Promise<EnvironmentSnapshot> {
     return {
       os: "linux 6.0.0 x64",
+      platform: "linux",
+      arch: "x64",
+      release: "6.0.0",
       hostname: "ci-runner",
       user: "ci",
       shell: "/bin/bash",
       node: "v20.10.0",
       cwd,
-      now: "2025-01-01T00:00:00.000Z",
+      now: "2025-01-01T00:00:00Z",
       timezone: "UTC",
       git: { inRepo: false },
     };
@@ -45,59 +49,194 @@ describe("buildSystemPrompt static prefix", () => {
   it("requires researching the target before mutating", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Research before you mutate/);
-    expect(out.staticPrefix).toMatch(/study phase/);
-    // Must not prescribe a fixed study→implement→verify cadence template.
+    expect(out.staticPrefix).not.toMatch(/study phase/);
     expect(out.staticPrefix).not.toMatch(/study → implement/);
+  });
+
+  it("subagent prompts use dedicated specialist templates, not parent block assembly", async () => {
+    const parent = await buildSystemPrompt({ ...baseCtx, mode: "agent" });
+    expect(parent.volatileSuffix).toContain("Collaboration Modes");
+    expect(parent.volatileSuffix).toMatch(/Keep calling tools while work remains/);
+    expect(parent.staticPrefix).toMatch(/Do not yield early just to wait/);
+    expect(parent.staticPrefix).toMatch(/Unclear asks in a code workspace/);
+    expect(parent.staticPrefix).toMatch(/Git Etiquette/);
+    expect(parent.staticPrefix).toMatch(/Tone and style/);
+
+    const explore = await buildSystemPrompt({
+      ...baseCtx,
+      mode: "agent",
+      subagent: true,
+      subagentProfile: "explore",
+    });
+    expect(explore.volatileSuffix).not.toContain("Worker turn");
+    expect(explore.volatileSuffix).not.toContain("Collaboration Modes");
+    expect(explore.volatileSuffix).toMatch(/role: subagent/);
+    expect(explore.volatileSuffix).toMatch(/profile: explore/);
+    expect(explore.staticPrefix).toMatch(/Explore sub-agent/);
+    expect(explore.staticPrefix).toMatch(/READ-ONLY/);
+    expect(explore.staticPrefix).toMatch(/Throwaway \*\*read-only\*\* search specialist/);
+    expect(explore.staticPrefix).toMatch(/do not force a code-edit framing/i);
+    expect(explore.staticPrefix).toMatch(/\*\*Safety\.\*\*/);
+    expect(explore.staticPrefix).toMatch(/task footer/);
+    expect(explore.staticPrefix).toMatch(/\*\*Conclusion\.\*\*/);
+    expect(explore.staticPrefix).not.toMatch(/### Findings/);
+    expect(explore.staticPrefix).not.toMatch(/Project-Specific Notes/);
+    expect(explore.staticPrefix).not.toMatch(/Unclear asks in a code workspace/);
+    expect(explore.staticPrefix).not.toMatch(/# Doing tasks/);
+    expect(explore.staticPrefix).not.toMatch(/Git Etiquette/);
+    expect(explore.staticPrefix).not.toMatch(/Tone and style/);
+    expect(explore.staticPrefix).not.toMatch(/Code Conventions/);
+    expect(explore.staticPrefix).not.toMatch(/Testing and Verification/);
+    expect(explore.staticPrefix).not.toMatch(/Research before you mutate/);
+    expect(explore.staticPrefix).not.toMatch(/## Sub-Agent Role/);
+    expect(explore.staticPrefix.length).toBeLessThan(2200);
+
+    const worker = await buildSystemPrompt({
+      ...baseCtx,
+      mode: "agent",
+      subagent: true,
+      subagentProfile: "worker",
+      toolNames: ["bash", "edit_file", "read_file"],
+    });
+    expect(worker.staticPrefix).toMatch(/Worker sub-agent/);
+    expect(worker.staticPrefix).toMatch(/Verify/);
+    expect(worker.staticPrefix).not.toMatch(/Code Conventions/);
+    expect(worker.staticPrefix).not.toMatch(/Testing and Verification/);
+    expect(worker.staticPrefix.length).toBeGreaterThan(explore.staticPrefix.length);
+    expect(worker.staticPrefix.length).toBeLessThan(2800);
+
+    const plan = await buildSystemPrompt({
+      ...baseCtx,
+      mode: "agent",
+      subagent: true,
+      subagentProfile: "plan",
+    });
+    expect(plan.staticPrefix).toMatch(/Plan sub-agent/);
+    expect(plan.staticPrefix).toMatch(/task footer/);
+    expect(plan.staticPrefix).not.toMatch(/### Plan/);
+    expect(plan.staticPrefix).not.toMatch(/### Findings/);
+  });
+
+  it("keeps task principles in system; API knobs live on the task tool", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["task", "read_file", "grep", "ask_user_question", "read_artifact"],
+    });
+    // Principles stay in the static prefix…
+    expect(out.staticPrefix).toMatch(/Trust what `task` returns/);
+    expect(out.staticPrefix).toMatch(/Sample-verify/);
+    expect(out.staticPrefix).toMatch(/summarise and stop/);
+    expect(out.staticPrefix).toMatch(/continue_session_id/);
+    expect(out.staticPrefix).toMatch(/Ask the user vs explore/);
+    expect(out.staticPrefix).toMatch(/Instruction priority/);
+    expect(out.staticPrefix).toMatch(/sandbox \/ permission \/ mode marks/);
+    expect(out.staticPrefix).toMatch(/explicitly asks to spawn/);
+    expect(out.staticPrefix).toMatch(/\*\*one\*\* OBJECTIVE/);
+    expect(out.staticPrefix).toMatch(/Blocker/);
+    expect(out.staticPrefix).toMatch(/at most once/);
+    // …API manuals and regression examples do not.
+    expect(out.staticPrefix).not.toMatch(/omit_memory: true/);
+    expect(out.staticPrefix).not.toMatch(/subagentMaxThreads/);
+    expect(out.staticPrefix).not.toMatch(/cannot grant parent-only/);
+    expect(out.staticPrefix).not.toMatch(/ping then telnet/);
+    expect(out.staticPrefix).not.toMatch(/do not re-grep to double-check/);
+    // API knobs belong on the task tool description (single home).
+    expect(taskTool.description).toMatch(/omit_memory: true/);
+    expect(taskTool.description).toMatch(/subagentMaxThreads/);
+    expect(taskTool.description).toMatch(/cannot grant parent-only/);
+    expect(taskTool.description).toMatch(/fork_max_tokens/);
+  });
+
+  it("gates long-horizon goal guidance on start_goal", async () => {
+    const bare = await buildSystemPrompt(baseCtx);
+    expect(bare.staticPrefix).not.toContain("Long-horizon goals");
+    const withGoal = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["start_goal", "plan_update"],
+    });
+    expect(withGoal.staticPrefix).toContain("Long-horizon goals");
+    expect(withGoal.staticPrefix).toMatch(/Ordinary refactors/);
   });
 
   it("carries the evidence/honesty discipline (anti-laziness rules)", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).toMatch(/Evidence and Honesty/);
     expect(out.staticPrefix).toMatch(/Evidence before synthesis/);
-    expect(out.staticPrefix).toMatch(/Comparisons are two-sided/);
-    expect(out.staticPrefix).toMatch(/Follow the user's explicit constraints exactly/);
-    expect(out.staticPrefix).toMatch(/verify-then-stop/);
+    expect(out.staticPrefix).toMatch(/Never infer this repo lacks X/);
+    expect(out.staticPrefix).not.toMatch(/Comparisons are two-sided/);
+    expect(out.staticPrefix).toMatch(/Obey named paths\/commands exactly/);
+    expect(out.staticPrefix).toMatch(/prefer "unverified" over guessing/);
   });
 
   it("splits brownfield vs greenfield conventions", async () => {
-    const out = await buildSystemPrompt(baseCtx);
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "edit_file"],
+    });
     expect(out.staticPrefix).toMatch(/brownfield default/);
     expect(out.staticPrefix).toMatch(/Greenfield/);
-    expect(out.staticPrefix).toMatch(/research until gates are concrete/);
+    expect(out.staticPrefix).toMatch(/gates are concrete/);
     expect(out.staticPrefix).toMatch(/something real to exercise/);
+    const readOnly = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "grep"],
+    });
+    expect(readOnly.staticPrefix).not.toContain("Code Conventions");
   });
 
-  it("keeps plan quality guidance out of the static prefix (it lives in plan_update)", async () => {
+  it("keeps planning principles in the static prefix; field detail on plan_update", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan_update"] });
-    expect(out.staticPrefix).toMatch(/independently checkable/);
-    expect(out.staticPrefix).toMatch(/plan_update`'s description/);
-    // The high/low teaching contrast was moved to the tool description; the
-    // static prefix must NOT carry it (or any fixed research→implement workflow).
+    expect(out.staticPrefix).toMatch(/One primary tracker/);
+    expect(out.staticPrefix).toMatch(/Plan when ≥3 mutate\/verify\/decision/);
+    expect(out.staticPrefix).toMatch(/do \*\*not\*\* count/);
+    expect(out.staticPrefix).toMatch(/plan-only turn/);
+    expect(out.staticPrefix).not.toMatch(/Layers \(do not double-track\)/);
     expect(out.staticPrefix).not.toMatch(/teach by contrast/);
     expect(out.staticPrefix).not.toMatch(/research\/study/);
+    expect(out.staticPrefix).not.toMatch(/easiest ~25%/);
+    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    expect(planUpdateTool.description).toMatch(/non-file outcome/);
+    expect(planUpdateTool.description).toMatch(/start_goal/);
   });
 
-  it("distinguishes structure checks from behaviour checks", async () => {
-    const out = await buildSystemPrompt(baseCtx);
-    expect(out.staticPrefix).toMatch(/Structure checks ≠ behaviour checks/);
-    expect(out.staticPrefix).toMatch(/Define success before volume/);
-    expect(out.staticPrefix).toMatch(/verify at milestones, not after every edit/);
+  it("gates testing guidance on mutating tools", async () => {
+    const readOnly = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "grep", "glob"],
+    });
+    expect(readOnly.staticPrefix).not.toContain("Testing and Verification");
+    const withMutators = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "edit_file", "bash"],
+    });
+    expect(withMutators.staticPrefix).toContain("Testing and Verification");
+    expect(withMutators.staticPrefix).toMatch(/Structure ≠ behaviour/);
+    expect(withMutators.staticPrefix).toMatch(/Verify at milestones/);
+    expect(withMutators.staticPrefix).toMatch(/Done when:/);
+    expect(withMutators.staticPrefix).not.toMatch(/No automated behaviour tests/);
   });
 
   it("contains every always-on section heading (tool-independent)", async () => {
-    const out = await buildSystemPrompt(baseCtx);
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "edit_file", "bash"],
+    });
     for (const heading of [
       "CodePilot — Software Engineering Agent",
+      "# System",
+      "# Doing tasks",
       "Tool-Use Policy",
       "Code Conventions",
       "Testing and Verification",
       "Git Etiquette",
-      "Communication Style",
+      "# Tone and style",
       "Safety and Security",
-      "Tool Reference",
+      "Done when:",
     ]) {
       expect(out.staticPrefix).toContain(heading);
     }
+    expect(out.staticPrefix).not.toContain("# Output efficiency");
+    expect(out.staticPrefix).not.toContain("Tool Reference");
     // Collaboration Modes is session-variant: it rides the volatile tail so a
     // mode switch does not bust the cached prefix.
     expect(out.staticPrefix).not.toContain("Collaboration Modes");
@@ -109,7 +248,7 @@ describe("buildSystemPrompt static prefix", () => {
     // tool the session cannot call is pure waste — philosophy A).
     const bare = await buildSystemPrompt(baseCtx);
     expect(bare.staticPrefix).not.toContain("Planning and Task State");
-    expect(bare.staticPrefix).not.toContain("## Memory");
+    expect(bare.staticPrefix).not.toContain("# Memory");
     expect(bare.staticPrefix).not.toContain("External Context (MCP)");
     // Expose the tools: the matching sections appear.
     const full = await buildSystemPrompt({
@@ -117,15 +256,14 @@ describe("buildSystemPrompt static prefix", () => {
       toolNames: ["plan_update", "memory_write", "mcp__github__search"],
     });
     expect(full.staticPrefix).toContain("Planning and Task State");
-    expect(full.staticPrefix).toContain("## Memory");
+    expect(full.staticPrefix).toContain("# Memory");
     expect(full.staticPrefix).toContain("External Context (MCP)");
   });
 
   it("does not duplicate the tool-name list in the static prefix (names live in the tools array)", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "bash"] });
-    // The Tool Reference section points at each tool's own description rather
-    // than re-listing names (which already ride the provider `tools` array).
-    expect(out.staticPrefix).toContain("Tool Reference");
+    // Tool manuals live in each tool's description; system only has cross-tool policy.
+    expect(out.staticPrefix).toContain("Each tool's `description` is its manual");
     expect(out.staticPrefix).not.toMatch(/Available tools: `read_file`/);
   });
 
@@ -147,9 +285,8 @@ describe("buildSystemPrompt static prefix", () => {
 
   it("renders without a tool-name list even when no tools are exposed", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: [] });
-    // No crash, and the Tool Reference section still renders (it no longer
-    // enumerates tool names, so an empty toolset needs no special fallback).
-    expect(out.staticPrefix).toContain("Tool Reference");
+    expect(out.staticPrefix).toContain("Each tool's `description` is its manual");
+    expect(out.staticPrefix).not.toMatch(/Available tools:/);
   });
 
   it("appends a project-specific notes block when extra is given", async () => {
@@ -164,6 +301,25 @@ describe("buildSystemPrompt static prefix", () => {
   it("omits the project-specific notes block when extra is empty/undefined", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, extra: undefined });
     expect(out.staticPrefix).not.toMatch(/Project-Specific Notes/);
+  });
+
+  it("puts sessionNotes in the volatile tail, not the cached prefix", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      sessionNotes: "Sandbox: mode=seatbelt, network=blocked.",
+    });
+    expect(out.volatileSuffix).toContain("<session_notes>");
+    expect(out.volatileSuffix).toContain("Sandbox: mode=seatbelt");
+    expect(out.staticPrefix).not.toContain("Sandbox: mode=seatbelt");
+    expect(out.stableContext).not.toContain("Sandbox: mode=seatbelt");
+  });
+
+  it("surfaces live permissionMode in <runtime>", async () => {
+    const ask = await buildSystemPrompt(baseCtx);
+    expect(ask.volatileSuffix).toMatch(/permission: ask/);
+    const yolo = await buildSystemPrompt({ ...baseCtx, permissionMode: "yolo" });
+    expect(yolo.volatileSuffix).toMatch(/permission: yolo/);
+    expect(yolo.stableContext).not.toMatch(/permission: yolo/);
   });
 
   it("the static prefix does NOT include any time/cwd/git memory strings (cache-friendly)", async () => {
@@ -195,7 +351,7 @@ describe("buildSystemPrompt mode paragraphs", () => {
     });
     expect(out.volatileSuffix).toMatch(/Mode: `chat`/);
     expect(out.volatileSuffix).toMatch(/read-only/);
-    expect(out.volatileSuffix).toMatch(/Do not modify the codebase/);
+    expect(out.volatileSuffix).toMatch(/Do not change the codebase/);
  // Tool list reflects filtered tools.
     expect(out.staticPrefix).toContain("`read_file`");
   });
@@ -214,7 +370,7 @@ describe("buildSystemPrompt mode paragraphs", () => {
   it("agent mode adds the full-autonomy guidance", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, mode: "agent", toolNames: ["bash"] });
     expect(out.volatileSuffix).toMatch(/Mode: `agent`/);
-    expect(out.volatileSuffix).toMatch(/Principle of least surprise/);
+    expect(out.volatileSuffix).toMatch(/Least surprise/);
   });
 
   it("defaults to agent when omitted", async () => {
@@ -251,7 +407,7 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("scratch_dir:");
     expect(out.dynamicSuffix).toContain("project_state_dir:");
     // `now` is volatile and no longer inside <environment>.
-    expect(out.volatileSuffix).toContain("now: 2025-01-01T00:00:00.000Z");
+    expect(out.volatileSuffix).toContain("now: 2025-01-01T00:00:00Z");
     expect(out.dynamicSuffix).toContain("</environment>");
   });
 
@@ -296,7 +452,9 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("<git>");
     expect(out.dynamicSuffix).toContain("in_repo: true");
     expect(out.dynamicSuffix).toContain("branch: main");
-    expect(out.dynamicSuffix).toContain("last_commit: abc1234");
+    // last_commit is omitted from the stable <git> block (churns on every
+    // commit and would bust the prompt cache); agents fetch tip on demand.
+    expect(out.dynamicSuffix).not.toContain("last_commit:");
     expect(out.dynamicSuffix).toContain("</git>");
     // Dirty working-tree is not injected (peer parity); only identity lives in <git>.
     expect(out.volatileSuffix).not.toContain("working_tree:");
@@ -308,18 +466,22 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("not a git working tree");
   });
 
-  it("injects the progressive index and advertises project/user memory paths (not full text)", async () => {
+  it("injects a progressive stub and advertises project/user memory paths (not full text)", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
       memory: {
         project: "## Section A\nproject-body-text",
         user: "## Pref\nuser-body-text",
-        progressive: "INDEX",
+        progressive: "dir: `/mem`\ntopics: 3 · index_bullets: 12",
       },
     });
     expect(out.dynamicSuffix).toContain("<memory>");
-    expect(out.dynamicSuffix).toContain("### Progressive index");
-    expect(out.dynamicSuffix).toContain("INDEX");
+    expect(out.dynamicSuffix).toContain("### Progressive memory");
+    expect(out.dynamicSuffix).toContain("dir: `/mem`");
+    // Lean env: hostname / user / node are not injected.
+    expect(out.dynamicSuffix).not.toMatch(/^hostname:/m);
+    expect(out.dynamicSuffix).not.toMatch(/^user:/m);
+    expect(out.dynamicSuffix).not.toMatch(/^node:/m);
     // Project/user memory are advertised by path + headings, not pasted in full.
     expect(out.dynamicSuffix).toContain("Project memory available");
     expect(out.dynamicSuffix).toContain("User memory available");
@@ -329,13 +491,27 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("</memory>");
   });
 
+  it("injects workspace instruction files verbatim, ranked in the priority ladder", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      memory: {
+        instructions: "<!-- from /repo/AGENTS.md -->\n## Rules\n- Run `pnpm test` before done.",
+        project: "## Section A\nproject-body-text",
+      },
+    });
+    expect(out.dynamicSuffix).toContain("<project_instructions>");
+    expect(out.dynamicSuffix).toContain("- Run `pnpm test` before done.");
+    expect(out.dynamicSuffix).not.toContain("project-body-text");
+    expect(out.staticPrefix).toMatch(/3\. \*\*`<project_instructions>`\*\*/);
+  });
+
   it("frames memory headings as a table of contents, not instructions", async () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
       memory: {
         project: "## Use headless Chrome for screenshots\nbody",
         user: "## Some preference\nbody",
-        progressive: "- [project] once used technique X (2026-01-01)",
+        progressive: "dir: `/mem`\ntopics: 1",
       },
     });
     // The heading is still advertised (so the model can read_file it)…
@@ -344,7 +520,7 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(out.dynamicSuffix).toContain("table of contents");
     expect(out.dynamicSuffix).toContain("not actions to take");
     expect(out.dynamicSuffix).toContain("does not mean use it now");
-    // Progressive index carries the same "reference, not instruction" framing.
+    // Progressive stub carries the same "reference, not instruction" framing.
     expect(out.dynamicSuffix).toContain("not instructions for this task");
   });
 
@@ -395,12 +571,33 @@ describe("buildSystemPrompt dynamic suffix", () => {
     // The Memory section is capability-gated on `memory_write` (philosophy A).
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["memory_write"] });
     expect(out.staticPrefix).toContain("progressive disclosure");
-    expect(out.staticPrefix).toContain("topic files");
+    expect(out.staticPrefix).toContain("relevant_memories");
+    expect(out.staticPrefix).toMatch(/do \*\*not\*\* dump the handbook/);
+    expect(out.staticPrefix).toContain("Write policy");
+    expect(out.staticPrefix).toMatch(/only.*explicitly asked/i);
+    expect(out.staticPrefix).toContain("lasting conventions");
+    expect(out.staticPrefix).toContain("one-off task decisions");
   });
 
-  it("memory block falls back to 'no memory files yet' when both are empty", async () => {
+  it("omits the memory block when there is nothing to advertise", async () => {
     const out = await buildSystemPrompt(baseCtx);
-    expect(out.dynamicSuffix).toContain("no memory files yet");
+    expect(out.dynamicSuffix).not.toContain("<memory>");
+    expect(out.dynamicSuffix).not.toContain("no memory files yet");
+  });
+
+  it("uses open-set safety wording (examples, not an exhaustive path list)", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.staticPrefix).toContain("similar paths");
+    expect(out.staticPrefix).toContain("non-exhaustive");
+    expect(out.staticPrefix).toMatch(/Content rule/);
+    expect(out.staticPrefix).toMatch(/similar high-risk/);
+    expect(out.staticPrefix).not.toContain("`/etc/shadow`");
+  });
+
+  it("does not inject a redundant platform field alongside os", async () => {
+    const out = await buildSystemPrompt(baseCtx);
+    expect(out.stableContext).toMatch(/^os:/m);
+    expect(out.stableContext).not.toMatch(/^platform:/m);
   });
 
   it("contains a <plan> block that mirrors the input plan with status markers", async () => {
@@ -545,7 +742,7 @@ describe("buildSystemPrompt C4 contracts", () => {
 
   it("decidable conditions: planning uses ≥3-steps, not the vague 'non-trivial task'", async () => {
     const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "plan_update"] });
-    expect(out.staticPrefix).toContain("≥3 distinct steps");
+    expect(out.staticPrefix).toContain("≥3 mutate/verify/decision steps");
     // The planning rule no longer hinges on the undecidable "non-trivial".
     const planStart = out.staticPrefix.indexOf("## Planning and Task State");
     expect(planStart, "Planning section not found").toBeGreaterThanOrEqual(0);
@@ -554,15 +751,17 @@ describe("buildSystemPrompt C4 contracts", () => {
     expect(planBlock).not.toMatch(/non-trivial task/);
   });
 
-  // C4 writing-rule B (single source of truth): a rule has one home. The
-  // re-read/fold-exception rule is owned by §2; other sections must point to it,
-  // not restate it. Guards against the cross-section duplication C4 flagged.
-  it("dedup: the fold-exception re-read rule appears once (owned by §2)", async () => {
-    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "edit_file", "bash"] });
-    const foldMentions = out.staticPrefix.match(/folded away|fold stub/g) ?? [];
-    // §2's bullet uses "folded away" + "fold stub"; no other section should
-    // restate the fold exception. Allow the single §2 bullet (≤2 phrase hits).
-    expect(foldMentions.length, "fold-exception rule restated outside §2").toBeLessThanOrEqual(2);
+  // Re-read-when-gone / unread-after-compaction lives once in Tool-Use Policy.
+  it("dedup: the unread-after-compaction re-read rule appears once", async () => {
+    const out = await buildSystemPrompt({
+      ...baseCtx,
+      toolNames: ["read_file", "edit_file", "bash", "read_artifact"],
+    });
+    const unreadMentions = out.staticPrefix.match(/treat as \*\*unread\*\*/g) ?? [];
+    expect(unreadMentions.length).toBe(1);
+    expect(out.staticPrefix).toMatch(/Do not yield early just to wait/);
+    expect(out.staticPrefix).toMatch(/User messages this turn are instructions/);
+    expect(out.staticPrefix).toMatch(/Ask when the answer would change the plan or risk profile/);
   });
 });
 

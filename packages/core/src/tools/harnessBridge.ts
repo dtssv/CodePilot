@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { spawn } from "node:child_process";
 import type { ToolDef } from "./types.js";
-import { wrapCommand, resolveSandbox } from "../sandbox.js";
+import { wrapCommand, resolveSandbox } from "../sandbox/sandbox.js";
 import { runCodexAppServerTurn } from "./harnessCodexProto.js";
 
 /** Hard cap on combined stdout+stderr returned to the model. */
@@ -297,25 +297,12 @@ function runHarnessCommand(
 export const harnessBridgeTool: ToolDef<typeof schema> = {
   name: "harness_bridge",
   description:
-    "Invoke an external AI coding harness (claude-code, codex, or a custom CLI) " +
-    "as a sub-agent. The harness runs as a sandboxed subprocess in one-shot mode, " +
-    "receives your prompt, and its final output is returned to you.\n\n" +
-    "When to use: delegating a self-contained task to a different agent runtime " +
-    "(e.g. a second opinion from another CLI harness), or " +
-    "bridging to an in-house harness via harness=\"custom\".\n" +
-    "When NOT to use: work you can do yourself with the built-in tools, or tasks " +
-    "that need interactive back-and-forth (the subprocess gets no stdin).\n\n" +
-    "Built-in harnesses: \"claude-code\" runs `claude -p --output-format json` " +
-    "(requires the `claude` CLI in PATH) and returns the JSON envelope's `result` " +
-    "field; \"codex\" runs `codex exec` (requires the `codex` CLI in PATH) and " +
-    "returns stdout. \"custom\" runs `custom_command custom_args... <prompt>` and " +
-    "returns stdout. Output is truncated at 100KB; the default timeout is 2 " +
-    "minutes (max 10). The subprocess inherits this session's OS sandbox " +
-    "restrictions (write access confined to the workspace).\n" +
-    "Backend: by default the CLI is scraped. Set backend=\"protocol\" with " +
-    "harness=\"codex\" to drive its app-server protocol for a structured final " +
-    "answer; this is only honoured when enabled in config and otherwise falls " +
-    "back to the CLI.",
+    "One-shot sandboxed subprocess to an external harness (`claude-code`, `codex`, or `custom`). " +
+    "Use for a self-contained second opinion / in-house CLI — not for work you can do with built-in tools, " +
+    "and not for interactive stdin. " +
+    "`claude-code` → `claude -p --output-format json` (result field); `codex` → `codex exec` stdout; " +
+    "`custom` → `custom_command … <prompt>` stdout. Output capped at 100KB; timeout default 2m (max 10). " +
+    "Optional `backend:\"protocol\"` with `harness:\"codex\"` when enabled in config; otherwise CLI scrape.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

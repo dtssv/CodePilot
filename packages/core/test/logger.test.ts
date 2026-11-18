@@ -9,7 +9,7 @@ import {
   clearLogsDir,
   __resetLoggerForTests,
   LOG_LEVELS,
-} from "../src/logger.js";
+} from "../src/telemetry/logger.js";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync, readdirSync, rmSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -9,13 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { runAgent } from "../src/agent.js";
-import type { AgentDeps } from "../src/agent.js";
+import { runAgent } from "../src/agent/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import type { ToolContext } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
 import { spillHeadTail, ARTIFACT_THRESHOLD } from "../src/tools/_shared.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 
 class ToolThenDoneProvider implements ChatProvider {

@@ -12,12 +12,23 @@ export type HostKind = "vscode" | "idea";
 
 export type HostToUi =
   | { type: "rpc"; line: string }
-  | { type: "host/init"; cwd: string; theme?: "light" | "dark"; locale?: string; surface?: HostKind }
+  | {
+      type: "host/init";
+      cwd: string;
+      /** All IDE workspace folders (multi-root). When set, the UI seeds these
+       * as switchable workspaces; `cwd` is the active one. */
+      folders?: string[];
+      theme?: "light" | "dark";
+      locale?: string;
+      surface?: HostKind;
+    }
   | { type: "host/engine"; state: "starting" | "ready" | "stopped"; error?: string }
   | { type: "host/theme"; theme: "light" | "dark" }
   | { type: "host/prompt"; text: string; send?: boolean }
   | { type: "host/command"; name: "new" | "cancel" }
-  | { type: "host/command"; name: "mode"; mode: AgentMode };
+  | { type: "host/command"; name: "mode"; mode: AgentMode }
+  /** Host asks the UI to open the in-panel Settings sheet (same webview). */
+  | { type: "host/openSettings" };
 
 export type UiToHost =
   | { type: "rpc"; line: string }
@@ -27,14 +38,26 @@ export type UiToHost =
   /** Insert code at the host editor's caret (or replace its selection). The
    * host writes the active editor — this never touches disk, so it carries no
    * apply/write semantics; the user still edits and saves as usual. */
-  | { type: "insertText"; text: string };
+  | { type: "insertText"; text: string }
+  /** Tell the IDE host which workspace folder is active (multi-root pick). */
+  | { type: "setCwd"; cwd: string }
+  /** Ask the IDE to expand/focus this chat panel before showing in-panel settings. */
+  | { type: "openSettings" }
+  /** Settings sheet closed — host may restore the prior IDE layout. */
+  | { type: "closeSettings" };
 
 declare global {
   interface Window {
     acquireVsCodeApi?: () => { postMessage(msg: unknown): void };
     __codepilotHostPost?: (json: string) => void;
     __codepilotReceive?: (json: string) => void;
-    __codepilotHost?: { kind?: HostKind; theme?: "light" | "dark" };
+    __codepilotHost?: {
+      kind?: HostKind;
+      theme?: "light" | "dark";
+      locale?: string;
+      /** When `settings`, the page opens the settings sheet immediately. */
+      view?: "chat" | "settings";
+    };
   }
 }
 

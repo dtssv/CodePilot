@@ -7,14 +7,17 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import { createRequire } from "node:module";
-import { isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 
 import {
   readLiveServeInfo,
+  isDaemonBinaryStale,
+  clearServeInfo,
   type ServeInfo,
 } from "@codepilot/protocol/serve-info";
+import { parseReference } from "@codepilot/protocol/paths";
 
 import { findWebRoot, initialFolder, loadSettings, saveSettings } from "./settings.js";
 
@@ -44,23 +47,80 @@ function resolveWebRoot(): string | null {
   ]);
 }
 
-/** Resolve the shared-daemon launch command (Electron running as plain Node). */
+/**
+ * Prefer the installed unified `codepilot` binary for the shared daemon.
+ * Spawning Electron (`process.execPath` + ELECTRON_RUN_AS_NODE) ties the
+ * daemon's lifetime to the Desktop app — quitting the window can take the
+ * server down and leave an attached TUI unable to run tasks.
+ */
+function resolveSharedDaemonBinary(): string | null {
+  const name = process.platform === "win32" ? "codepilot.exe" : "codepilot";
+  const candidates = [join(os.homedir(), ".codepilot", "bin", name)];
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir) candidates.push(join(dir, name));
+  }
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * Resolve the shared-daemon launch command. Requires a real `codepilot` binary
+ * so quitting Desktop cannot tear down the server other clients (TUI / IDE)
+ * still share. Never spawn via Electron `execPath` + ELECTRON_RUN_AS_NODE.
+ */
 function daemonLaunch(): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
-  // Electron's own binary can run arbitrary Node scripts with this flag set.
-  const cliEntry = resolve(require.resolve("@codepilot/protocol/package.json"), "..", "dist", "cli.js");
-  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1", CODEPILOT_CLIENT: "desktop" };
-  const args = [cliEntry, "serve", "--daemon", "--port", String(DAEMON_PORT)];
   // Serve the SPA over HTTP so a paired phone can load it: /remote/pair
   // redirects to `GET /?token=…`, which needs a static web root or the phone
   // hits the "requires a WebSocket upgrade" page. The CLI auto-detect can't
   // find the app's resources/web, so pass it explicitly.
   const webRoot = webRootPath ?? resolveWebRoot();
-  if (webRoot) args.push("--web-root", webRoot);
+  const serveArgs = ["serve", "--daemon", "--port", String(DAEMON_PORT)];
+  if (webRoot) serveArgs.push("--web-root", webRoot);
   // LAN access (opt-in): bind all interfaces so a phone on the same Wi‑Fi can
   // reach the QR remote-control URL. Token auth stays on; serve.json still
   // advertises loopback so local discovery is unaffected.
-  if (settings.lanAccess) args.push("--host", "0.0.0.0");
-  return { command: process.execPath, args, env };
+  if (settings.lanAccess) serveArgs.push("--host", "0.0.0.0");
+
+  const bin = resolveSharedDaemonBinary();
+  if (!bin) {
+    throw new Error(
+      "Shared daemon needs the CodePilot CLI at ~/.codepilot/bin/codepilot " +
+        "(or on PATH). Install the CLI, then reopen Desktop — do not host the " +
+        "daemon inside the Electron app (quitting would kill it for TUI/IDE).",
+    );
+  }
+  return {
+    command: bin,
+    args: serveArgs,
+    env: { ...process.env, CODEPILOT_CLIENT: "desktop" },
+  };
+}
+
+/**
+ * Spawn the shared daemon fully detached from Desktop's process group.
+ * `detached: true` already calls setsid(2) on Unix via libuv — do not wrap
+ * with the Linux-only `setsid` CLI (ENOENT on macOS).
+ */
+function spawnSharedDaemon(
+  command: string,
+  args: string[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv },
+): ReturnType<typeof spawn> {
+  const child = spawn(command, args, {
+    cwd: opts.cwd,
+    env: opts.env,
+    stdio: ["ignore", "ignore", "ignore"],
+    detached: true,
+    windowsHide: true,
+  });
+  try {
+    child.unref();
+  } catch {
+    /* ignore */
+  }
+  return child;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -73,15 +133,20 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   const existing = await readLiveServeInfo();
   if (existing) {
-    // Reuse only if it has the extended git ops AND its bind matches the
-    // LAN-access preference (a loopback-only daemon would leave the phone's
-    // QR URL unreachable). Replace a mismatched daemon.
-    if ((await daemonHasGit(existing)) && (await daemonBindMatchesPref())) return existing;
+    // Install/upgrade replaced the CLI binary — recycle the daemon so Desktop
+    // talks to the new build (encrypted secrets, idle-exit, …).
+    const staleBinary = await isDaemonBinaryStale(existing);
+    // Reuse a live daemon that speaks git. Do NOT kill it for a LAN-bind
+    // mismatch — that replaces the token mid-flight and leaves TUI/IDE
+    // clients hammering a dead credential. Bind changes go through the
+    // explicit restartDaemon path (settings toggle).
+    if (!staleBinary && (await daemonHasGit(existing))) return existing;
     try {
       process.kill(existing.pid);
     } catch {
       /* already gone */
     }
+    await clearServeInfo();
     // Wait for the old daemon to release the port (not just clear serve.json).
     // Binding before the port is free causes EADDRINUSE. Poll the port, ~8s.
     for (let i = 0; i < 40; i++) {
@@ -102,17 +167,10 @@ async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   }
 
   const launch = daemonLaunch();
-  const child = spawn(launch.command, launch.args, {
+  const child = spawnSharedDaemon(launch.command, launch.args, {
     cwd,
     env: launch.env,
-    stdio: ["ignore", "ignore", "ignore"],
-    detached: true,
   });
-  try {
-    child.unref();
-  } catch {
-    /* ignore */
-  }
 
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -226,28 +284,6 @@ async function freeStaleDaemonPort(port: number): Promise<void> {
   } catch {
     /* best-effort; caller re-polls and handles the EADDRINUSE race */
   }
-}
-
-/** This machine's primary IPv4 LAN address, or undefined when offline. */
-function lanIp(): string | undefined {
-  for (const addrs of Object.values(os.networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family === "IPv4" && !a.internal) return a.address;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Does the running daemon's bind match the LAN-access preference? Probe the
- * LAN IP directly (serve.json always advertises loopback). Returns true when
- * no change is needed.
- */
-async function daemonBindMatchesPref(): Promise<boolean> {
-  if (!settings.lanAccess) return true; // off: don't care about the bind
-  const ip = lanIp();
-  if (!ip) return true; // offline: LAN bind is moot, avoid churn
-  return portInUse(DAEMON_PORT, ip); // on: must be reachable over the LAN
 }
 
 /** Probe a running daemon's initialize capabilities for the extended git ops. */
@@ -500,8 +536,11 @@ ipcMain.handle("codepilot:pick-folder", async (ev) => {
 });
 
 ipcMain.handle("codepilot:open-path", async (_ev, path: unknown) => {
-  if (typeof path !== "string" || !isAbsolute(path)) return;
-  const err = await shell.openPath(path);
+  if (typeof path !== "string") return;
+  // Strip `foo.ts:79` anchors so the OS open never treats `:79` as part of the path.
+  const cleaned = parseReference(path).path;
+  if (!isAbsolute(cleaned)) return;
+  const err = await shell.openPath(cleaned);
   if (err) dialog.showErrorBox("CodePilot Agent", err);
 });
 

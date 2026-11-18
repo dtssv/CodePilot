@@ -24,6 +24,19 @@ export function parseSlash(text: string): { name: string; args: string } | null 
   return { name: m[1]!.toLowerCase(), args: (m[2] ?? "").trim() };
 }
 
+export function parseRewindArgs(args: string): { count: number; files: boolean } {
+  const parts = args.split(/\s+/).filter(Boolean);
+  const n = Number(parts.find((p) => /^\d+$/.test(p)) ?? 1);
+  return { count: Math.max(1, n), files: !parts.includes("--keep-files") };
+}
+
+export function rewindFileSummary(r: { restored: string[]; deleted: string[] }): string {
+  const parts = [];
+  if (r.restored.length) parts.push(`${r.restored.length} restored`);
+  if (r.deleted.length) parts.push(`${r.deleted.length} deleted`);
+  return parts.length ? ` — files: ${parts.join(", ")}` : "";
+}
+
 const MODE_COMMANDS: Record<string, AgentMode> = {
   plan: "plan",
   agent: "agent",
@@ -102,6 +115,26 @@ export async function interpretSlash(
       ui.setNotice?.(`${name}: ${r.label}`);
     } catch {
       ui.setNotice?.(`Nothing to ${name}.`);
+    }
+    return { handled: true };
+  }
+
+  // --- /rewind [n] [--keep-files]: drop the last n prompts (and their file
+  //     edits unless --keep-files), then reload the trimmed history.
+  if (name === "rewind" && sessionId) {
+    const opts = parseRewindArgs(args);
+    try {
+      const targets = await cp.client.rewindTargets(sessionId);
+      const target = targets[targets.length - opts.count];
+      if (!target) {
+        ui.setNotice?.("Nothing to rewind.");
+        return { handled: true };
+      }
+      const r = await cp.client.rewindSession(sessionId, { messageId: target.messageId, files: opts.files });
+      await cp.resumeSession(sessionId);
+      ui.setNotice?.(`Rewound ${r.turns} prompt(s) to "${r.text.slice(0, 60)}"${rewindFileSummary(r)}`);
+    } catch (err) {
+      ui.setNotice?.(`Rewind failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return { handled: true };
   }

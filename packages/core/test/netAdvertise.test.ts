@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advertiseUrl, isLoopbackHost } from "../src/netAdvertise.js";
+import { advertiseUrl, isLoopbackHost } from "../src/workspace/netAdvertise.js";
 
 describe("advertiseUrl", () => {
   it("detects loopback hosts", () => {

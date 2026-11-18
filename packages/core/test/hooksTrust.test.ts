@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { HookEngine } from "../src/hooks.js";
+import { HookEngine } from "../src/hooks/hooks.js";
 
 describe("hook trust", () => {
   it("skips an unapproved command hook and says so once", async () => {

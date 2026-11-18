@@ -11,14 +11,21 @@ import { existsSync, readFileSync } from "node:fs";
 import * as vscode from "vscode";
 
 import type { Engine } from "./engine.js";
+import { nls } from "./nls.js";
 import type { AgentMode } from "./types.js";
 
 export type HostCommand = { name: "new" } | { name: "cancel" } | { name: "mode"; mode: AgentMode };
 
 export interface ChatViewOptions {
   engine: Engine;
- /** Workspace root shown in the UI (the engine runs there). */
+ /** Active workspace root shown in the UI (the engine runs there). */
   cwd(): string;
+ /** All IDE folders for multi-root workspaces (includes the active cwd). */
+  folders(): string[];
+ /** Persist the user's active-folder pick (multi-root). */
+  onSetCwd?(cwd: string): void;
+ /** Open Settings in a wide editor WebviewPanel (sidebar cannot set exact width). */
+  onOpenWideSettings?(): void | Promise<void>;
  /** Called after the engine (re)started on the webview's request. */
   onEngineError?(message: string): void;
   log?(line: string): void;
@@ -29,7 +36,10 @@ type FromWebview =
   | { type: "ready" }
   | { type: "restart" }
   | { type: "openFile"; path: string; line?: number }
-  | { type: "insertText"; text: string };
+  | { type: "insertText"; text: string }
+  | { type: "setCwd"; cwd: string }
+  | { type: "openSettings" }
+  | { type: "closeSettings" };
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | null = null;
@@ -71,6 +81,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: "host/command", ...cmd });
   }
 
+  /** Open Settings in the wide editor panel (same Desktop Settings UI). */
+  showSettings(): void {
+    void this.opts.onOpenWideSettings?.();
+  }
+
+  /** Push the current workspace root(s) to the UI (folder open/close/switch). */
+  notifyWorkspace(cwd: string, folderList?: string[]): void {
+    const folders = folderList ?? this.opts.folders();
+    this.post({
+      type: "host/init",
+      cwd,
+      folders,
+      theme: themeOf(vscode.window.activeColorTheme?.kind),
+      locale: vscode.env?.language,
+      surface: "vscode",
+    });
+  }
+
   dispose(): void {
     for (const d of this.disposables) d.dispose();
   }
@@ -86,13 +114,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case "ready":
-        this.post({
-          type: "host/init",
-          cwd: this.opts.cwd(),
-          theme: themeOf(vscode.window.activeColorTheme?.kind),
-          locale: vscode.env?.language,
-          surface: "vscode",
-        });
+        this.notifyWorkspace(this.opts.cwd());
         this.ensureEngine();
         return;
       case "restart":
@@ -105,6 +127,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "insertText":
         void this.insertText(msg.text);
         return;
+      case "setCwd":
+        if (typeof msg.cwd === "string" && msg.cwd.trim()) {
+          this.opts.onSetCwd?.(msg.cwd.trim());
+        }
+        return;
+      case "openSettings":
+        void this.opts.onOpenWideSettings?.();
+        return;
+      case "closeSettings":
+        return;
     }
   }
 
@@ -114,7 +146,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       void vscode.window.showInformationMessage(
-        "CodePilot: open a file and place the cursor where the code should go.",
+        nls("CodePilot: open a file and place the cursor where the code should go."),
       );
       return;
     }
@@ -144,14 +176,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async openFile(rawPath: string, line?: number): Promise<void> {
     const root = this.opts.cwd();
-    // Defensive: strip a trailing `:line[:col]` anchor if a caller passed the
-    // raw `src/foo.ts:42` string, and adopt the line when none was given.
-    const anchor = /^(.*?[^/\\]):(\d{1,9})(?::\d{1,9})?$/.exec(rawPath);
-    const pathHasShape = anchor ? /[\\/]|\.[a-z0-9]{1,16}$/i.test(anchor[1]!) : false;
-    const path = anchor && pathHasShape ? anchor[1]! : rawPath;
-    if (line === undefined && anchor && pathHasShape) {
-      const n = Number(anchor[2]);
-      if (Number.isFinite(n) && n > 0) line = n;
+    // Strip trailing `:line[:col]` so we never open a non-existent `foo.ts:79`.
+    // Keep in sync with `@codepilot/protocol/paths` parseReference.
+    const anchor = /:(\d{1,9})(?::(\d{1,9}))?$/.exec(rawPath.trim());
+    let path = rawPath.trim();
+    if (anchor) {
+      const head = path.slice(0, anchor.index);
+      const pathLike = /[\\/]|\.[a-z0-9]{1,16}$/i.test(head);
+      if (pathLike && head.length > 0) {
+        path = head;
+        if (line === undefined) {
+          const n = Number(anchor[1]);
+          if (Number.isFinite(n) && n > 0) line = n;
+        }
+      }
     }
     const uri = path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)
       ? vscode.Uri.file(path)
@@ -171,20 +209,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private post(msg: unknown): void {
     if (!this.view) {
- // Engine output before the view exists has no reader; only keep the
- // host-level messages that set the view up.
+      // Engine output before the view exists has no reader; only keep the
+      // host-level messages that set the view up.
       const type = (msg as { type?: string }).type;
       if (type === "host/prompt" || type === "host/command") this.pending.push(msg);
       return;
     }
-    while (this.pending.length > 0) void this.view.webview.postMessage(this.pending.shift());
-    void this.view.webview.postMessage(msg);
+    try {
+      while (this.pending.length > 0) {
+        const next = this.pending.shift();
+        if (next !== undefined) void this.view.webview.postMessage(next);
+      }
+      void this.view.webview.postMessage(msg);
+    } catch (err) {
+      // WebviewView can dispose while the engine is still emitting lines.
+      const text = err instanceof Error ? err.message : String(err);
+      if (/disposed/i.test(text)) {
+        this.view = null;
+        return;
+      }
+      this.opts.log?.(`webview post: ${text}`);
+    }
   }
 
   private renderHtml(cspSource: string): string {
     const file = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "webview", "index.html").fsPath;
     if (!existsSync(file)) return missingBuildHtml(cspSource);
-    return injectCsp(readFileSync(file, "utf8"), cspSource, randomBytes(16).toString("base64"));
+    const locale = vscode.env.language || "en";
+    const theme = themeOf(vscode.window.activeColorTheme?.kind);
+    const boot =
+      `<script>window.__codepilotHost=${JSON.stringify({
+        kind: "vscode",
+        locale,
+        theme,
+        view: "chat",
+      })};</script>`;
+    let html = readFileSync(file, "utf8");
+    html = html.replace("<head>", `<head>\n${boot}`);
+    return injectCsp(html, cspSource, randomBytes(16).toString("base64"));
   }
 }
 

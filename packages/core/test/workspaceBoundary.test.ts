@@ -5,9 +5,9 @@
 // same check covers file tools and bash output redirections.
 
 import { describe, expect, it } from "vitest";
-import { PermissionEngine } from "../src/permissions.js";
-import { resolveSandbox } from "../src/sandbox.js";
-import { extractRedirectWriteTargets } from "../src/commandSafety.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
+import { extractRedirectWriteTargets } from "../src/permissions/commandSafety.js";
 import { z } from "zod";
 import type { ToolDef } from "../src/tools/types.js";
 

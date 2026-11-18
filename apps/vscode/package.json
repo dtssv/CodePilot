@@ -1,7 +1,7 @@
 {
   "name": "codepilot-vscode",
-  "displayName": "CodePilot",
-  "description": "Token-efficient, long-horizon coding agent — CodePilot VSCode client",
+  "displayName": "%codepilot.displayName%",
+  "description": "%codepilot.description%",
   "publisher": "codepilot",
   "version": "1.0.0",
   "private": true,
@@ -13,7 +13,7 @@
   },
   "type": "module",
   "icon": "media/icon-128.png",
-  "main": "./dist/extension.js",
+  "main": "./dist/extension.cjs",
   "engines": {
     "vscode": "^1.90.0",
     "node": ">=20"
@@ -25,58 +25,83 @@
     "commands": [
       {
         "command": "codepilot.openSidebar",
-        "title": "CodePilot: Open Chat",
+        "title": "%codepilot.command.openSidebar.title%",
         "category": "CodePilot",
         "icon": "$(comment-discussion)"
       },
       {
         "command": "codepilot.newSession",
-        "title": "CodePilot: New Session",
+        "title": "%codepilot.command.newSession.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.cancel",
-        "title": "CodePilot: Cancel Running Prompt",
+        "title": "%codepilot.command.cancel.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.switchMode",
-        "title": "CodePilot: Switch Mode",
+        "title": "%codepilot.command.switchMode.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.addToChat",
-        "title": "CodePilot: Add Selection to Chat",
+        "title": "%codepilot.command.addToChat.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.addToNewChat",
-        "title": "CodePilot: Add Selection to New Chat",
+        "title": "%codepilot.command.addToNewChat.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.askSelection",
-        "title": "CodePilot: Ask about selection",
+        "title": "%codepilot.command.askSelection.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.explainFile",
-        "title": "CodePilot: Explain this file",
+        "title": "%codepilot.command.explainFile.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.fixFile",
-        "title": "CodePilot: Fix this file",
+        "title": "%codepilot.command.fixFile.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.showOutput",
-        "title": "CodePilot: Show Output Channel",
+        "title": "%codepilot.command.showOutput.title%",
         "category": "CodePilot"
       },
       {
         "command": "codepilot.checkUpdates",
-        "title": "CodePilot: Check Extension Update",
+        "title": "%codepilot.command.checkUpdates.title%",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.openSettings",
+        "title": "%codepilot.command.openSettings.title%",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.openIdeSettings",
+        "title": "%codepilot.command.openIdeSettings.title%",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.setApiKey",
+        "title": "%codepilot.command.setApiKey.title%",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.editUserConfig",
+        "title": "%codepilot.command.editUserConfig.title%",
+        "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.switchWorkspace",
+        "title": "%codepilot.command.switchWorkspace.title%",
         "category": "CodePilot"
       }
     ],
@@ -84,7 +109,7 @@
       "activitybar": [
         {
           "id": "codepilot",
-          "title": "CodePilot",
+          "title": "%codepilot.viewsContainers.codepilot.title%",
           "icon": "media/icon.svg"
         }
       ]
@@ -94,7 +119,7 @@
         {
           "type": "webview",
           "id": "codepilot.chatView",
-          "name": "Chat",
+          "name": "%codepilot.views.chat.name%",
           "contextualTitle": "CodePilot"
         }
       ]
@@ -105,17 +130,17 @@
         "codepilot.serverPath": {
           "type": "string",
           "default": "codepilot",
-          "description": "Path to the system `codepilot` CLI (fallback when the bundled engine is missing). Used for `engineMode: shared` spawn and `stdio` mode."
+          "description": "%codepilot.config.serverPath%"
         },
         "codepilot.cliPath": {
           "type": "string",
           "default": "",
-          "description": "Optional path to a CodePilot CLI entry (cli.js / codepilot-cli.cjs). When empty, the extension uses the bundled engine under resources/, then falls back to serverPath."
+          "description": "%codepilot.config.cliPath%"
         },
         "codepilot.nodePath": {
           "type": "string",
           "default": "node",
-          "description": "Path to the node executable used to launch the bundled / cliPath engine."
+          "description": "%codepilot.config.nodePath%"
         },
         "codepilot.engineMode": {
           "type": "string",
@@ -124,7 +149,7 @@
             "stdio"
           ],
           "default": "shared",
-          "description": "shared (default): attach to an existing local CodePilot daemon or spawn the bundled one over WebSocket. stdio: private legacy `codepilot serve` process (debug)."
+          "description": "%codepilot.config.engineMode%"
         },
         "codepilot.permissionMode": {
           "type": "string",
@@ -134,12 +159,12 @@
             "yolo"
           ],
           "default": "ask",
-          "description": "Default permission mode passed during the `initialize` handshake."
+          "description": "%codepilot.config.permissionMode%"
         },
         "codepilot.model": {
           "type": "string",
           "default": "",
-          "description": "Optional default model id passed to `session/new` (e.g. claude-sonnet-4.5)."
+          "description": "%codepilot.config.model%"
         },
         "codepilot.provider": {
           "type": "string",
@@ -150,12 +175,12 @@
             ""
           ],
           "default": "",
-          "description": "Optional default provider name."
+          "description": "%codepilot.config.provider%"
         },
         "codepilot.systemPromptExtra": {
           "type": "string",
           "default": "",
-          "description": "Extra system prompt text appended to every new session."
+          "description": "%codepilot.config.systemPromptExtra%"
         },
         "codepilot.autoApprove": {
           "type": "array",
@@ -163,17 +188,17 @@
             "type": "string"
           },
           "default": [],
-          "description": "Tool names or bash command regexes that auto-approve."
+          "description": "%codepilot.config.autoApprove%"
         },
         "codepilot.showDiff": {
           "type": "boolean",
           "default": true,
-          "description": "When true, edit_file/write_file tool calls open a vscode.diff tab."
+          "description": "%codepilot.config.showDiff%"
         },
         "codepilot.protocolVersion": {
           "type": "number",
           "default": 1,
-          "description": "Headless protocol version to negotiate."
+          "description": "%codepilot.config.protocolVersion%"
         },
         "codepilot.agentMode": {
           "type": "string",
@@ -183,22 +208,22 @@
             "agent"
           ],
           "default": "agent",
-          "description": "Default collaboration mode for new sessions (Ask / Plan / Agent). The webview and `CodePilot: Switch Mode` can override this at runtime; `session/setMode` is supported on an open session."
+          "description": "%codepilot.config.agentMode%"
         },
         "codepilot.completion.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable inline (Tab) code completion as you type. Runs on your existing provider but requires a lightweight `smallModel` distinct from your main chat model (e.g. a local Ollama qwen2.5-coder, or a free Groq / Gemini Flash model) — otherwise it stays off."
+          "description": "%codepilot.config.completion.enabled%"
         },
         "codepilot.completion.debounceMs": {
           "type": "number",
           "default": 200,
-          "description": "Milliseconds to wait after you stop typing before requesting an inline completion."
+          "description": "%codepilot.config.completion.debounceMs%"
         },
         "codepilot.completion.maxTokens": {
           "type": "number",
           "default": 96,
-          "description": "Soft cap on inline completion length (tokens). Smaller is faster and cheaper."
+          "description": "%codepilot.config.completion.maxTokens%"
         }
       }
     },

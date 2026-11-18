@@ -4,9 +4,9 @@ import {
   catalogModalities,
   catalogSuggestedSmall,
   lookupModelCatalog,
-} from "../src/modelCatalog.js";
-import { reasoningEffortChoicesForModel } from "../src/reasoningEffort.js";
-import { resolveModelCapabilities } from "../src/providerCatalog.js";
+} from "../src/config/modelCatalog.js";
+import { reasoningEffortChoicesForModel } from "../src/config/reasoningEffort.js";
+import { resolveModelCapabilities } from "../src/config/providerCatalog.js";
 
 describe("model catalog lookup", () => {
   it("matches known families by id glob, most-specific first", () => {

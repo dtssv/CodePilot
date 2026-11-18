@@ -11,7 +11,7 @@ import {
   DEFAULT_CACHE_TTL_MS,
   CACHE_MISS_NOISE_FLOOR,
   type CacheTurn,
-} from "../src/cacheStats.js";
+} from "../src/compaction/cacheStats.js";
 
 const MODEL = "claude-sonnet-4-5";
 

@@ -8,7 +8,7 @@ import {
   installConnector,
   updateConnector,
   setConnectorEnabled,
-} from "../src/connectors.js";
+} from "../src/config/connectors.js";
 
 describe("connectors", () => {
   it("catalog includes office connectors with auth links", async () => {

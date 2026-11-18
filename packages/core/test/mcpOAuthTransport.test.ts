@@ -1,6 +1,6 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
-import { McpHttpClient } from "../src/mcp.js";
+import { McpHttpClient } from "../src/mcp/mcp.js";
 
 /**
  * Verify that McpHttpClient, when it receives a 401 with a

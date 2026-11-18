@@ -3,8 +3,8 @@ import {
   assertConsistency,
   ConsistencyError,
   consistencyAssertEnabled,
-} from "../src/consistency.js";
-import { compactTranscriptToProviderMessages } from "../src/agent-messages.js";
+} from "../src/agent/consistency.js";
+import { compactTranscriptToProviderMessages } from "../src/agent/agent-messages.js";
 import type { Event } from "../src/types.js";
 import type { ProviderMessage } from "../src/providers/types.js";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DoomLoopDetector } from "../src/doomLoop.js";
+import { DoomLoopDetector } from "../src/agent/doomLoop.js";
 
 // Loop-detection thresholds and the per-tool exclusion list are configurable.
 // Defaults equal the built-in constants, so an empty/absent config is a no-op;

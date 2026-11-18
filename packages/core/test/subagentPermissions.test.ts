@@ -6,9 +6,9 @@
 // own permissionMode) gives the sub-agent a fresh engine.
 
 import { describe, expect, it } from "vitest";
-import { resolveSubagentPermissions, resolveWorktreeRoots } from "../src/subagent.js";
-import { PermissionEngine } from "../src/permissions.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSubagentPermissions, resolveWorktreeRoots } from "../src/subagent/subagent.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 
 describe("resolveSubagentPermissions", () => {
   it("inherits the parent engine by default (built-in agent, no policy)", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DoomLoopDetector } from "../src/doomLoop.js";
+import { DoomLoopDetector } from "../src/agent/doomLoop.js";
 
 // The old "mutation burst" brake (N consecutive edits on the same path without
 // an intervening verify command => warn then refuse) was removed. It was a

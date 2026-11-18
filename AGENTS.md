@@ -1,113 +1,122 @@
-# AGENTS.md — CodePilot project instructions
+# AGENTS.md — CodePilot
 
-## Project context
+Instructions for agents working in this repository. Prefer facts found in this
+tree over assumptions. Keep this file short and current when rules change.
 
-CodePilot is a headless software-engineering agent core (`packages/core`) with thin
-multi-surface clients (TUI, VSCode, IntelliJ, Web, Desktop) over a JSON-RPC
-protocol (`packages/protocol`). The agent loop, tools, sandbox, compaction,
-sub-agents and MCP integration all live in `packages/core/src`.
+## Overview
 
-Layout:
-- `packages/core` — agent loop, tools, sandbox, compaction, sessions, MCP.
-- `packages/protocol` — JSON-RPC server/client, workspace RPCs.
-- `packages/sdk` — programmatic SDK.
-- `apps/{web,desktop,vscode,idea}` — client surfaces.
+CodePilot is a software-engineering agent: a headless engine plus thin clients
+over JSON-RPC.
 
-## Rules
+| Path | Role |
+|------|------|
+| `packages/core` | Agent loop, tools, sandbox, sessions, compaction, MCP |
+| `packages/protocol` | JSON-RPC server/client, CLI serve/daemon, workspace RPCs |
+| `packages/sdk` | Programmatic SDK |
+| `apps/tui` | Terminal UI (also the unified `codepilot` binary entry) |
+| `apps/web` | Web UI (embedded in CLI binary; also staged into Desktop) |
+| `apps/desktop` | Electron desktop app |
+| `apps/vscode`, `apps/idea` | IDE extensions |
 
-These are hard rules for any agent working in this repo. They exist because the
-observed failure modes here were: asserting "X isn't implemented" without
-checking, ignoring a user-specified path, and declaring "done" without a true
-end-to-end check.
+`packages/core/src` is split by capability folders (not separate packages):
+`agent`, `session`, `sandbox`, `permissions`, `compaction`, `mcp`, `subagent`,
+`skills`, `memory`, `hooks`, `plugins`, `workspace`, `config`, `telemetry`,
+plus existing `providers`, `tools`, `systemPrompt`, `runtimes`. Public API stays
+`index.ts` / `types.ts` at the package root of `src`. Session composes
+capability binders (`mcp/sessionBind`, `plugins/sessionBind`,
+`sandbox/sessionBind`, `permissions/sessionBind`, `compaction/sessionBind`,
+`providers/sessionProviders`); those folders own their session-facing bind
+modules — do not dump new capability wiring into more `session/session-*.ts`
+files.
 
-- **Evidence before synthesis.** Every claim that this repo lacks or has some
-  capability MUST be backed by a `grep`/`glob`/`read_file` you ran in THIS repo.
-  "The other tool has X" never implies "we lack X" — search here first and cite
-  `file:line`, or state it is an unverified hypothesis. Do not let "already
-  checked" override a cheap local check.
-- **Obey explicit user constraints.** If the user names a path/dir/branch/file,
-  use exactly that. Never substitute a convenient alternative (e.g. cloning to
-  `/tmp` when a path was given). If the sandbox blocks a user-named path, request
-  that path's permission — do not silently route around it.
-- **Verify before "done".** After any code change you MUST run, from the repo root:
-  `corepack pnpm --filter @codepilot/core test` (and the affected package's
-  tests), plus `corepack pnpm -r typecheck`. For a change touching a built
-  surface, build it. Report the actual result, not an assumption.
-- **Keep the workspace clean.** Clone external source and put scratch/output under
-  `/Users/<you>/source` or the session scratch dir — never inside this repo.
-  Do not leave third-party trees (e.g. `opencode/`, `codex/`) in the project root.
-- **Say "unverified" when unsure.** A precise "I didn't check the Windows path"
-  beats a confident wrong claim. Trust evidence over speculation; when a finding
-  contradicts an earlier claim, surface the discrepancy and follow the evidence.
-- **Large research goes to sub-agents.** Delegate open-ended source exploration to
-  the `task` tool so the parent context stays small; the sub-agent returns a
-  conclusion, not its raw exploration.
+Node `>=20`. Package manager: `corepack pnpm` (see root `packageManager`).
 
-## Architecture decisions
+## Hard rules
 
-- Persistence is append-only JSONL event sourcing (one file per session), not a
-  database. This is intentional: single-writer-per-session sequential access
-  makes append+replay optimal, and gives free crash recovery. Do not "upgrade"
-  the source of truth to SQLite. A *derived, fail-soft* SQLite index is allowed
-  and exists (`sessionIndex.ts`, `docs/design/B-sqlite-session-index.md`): the
-  hot `session/list`/`searchSessions` RPCs would otherwise re-scan and JSON-parse
-  every session's JSONL on each UI event in the shared daemon. Invariants: JSONL
-  stays the source of truth, the index is rebuildable and may be deleted at any
-  time, and `openSessionIndex` returns null on any failure so callers fall back
-  to the full-scan path. Native deps (`better-sqlite3`) must track the repo's
-  Node floor (`engines.node` `>=20`) — a native addon above that floor aborts the
-  process on older runtimes, which the fail-soft try/catch cannot recover from.
-- Context management is client-side: layered fold + small-model compaction +
-  turn-boundary pre-compaction. Providers with implicit prompt caching
-  (OpenAI/Gemini) are handled by keeping a stable prefix; Anthropic gets explicit
-  cache-control breakpoints.
-- The OS sandbox is seatbelt (macOS) / bwrap (Linux) / wsl-bwrap (Windows).
-  Sub-agent tools are a curated registry (explore = read + web research;
-  worker = + write/execute).
+1. **Evidence before claims.** Before saying this repo has or lacks a capability,
+   search or read here and cite `path:line`, or mark the claim **unverified**.
+   Do not infer from other products.
+2. **Honor explicit paths.** If the user names a path, branch, or file, use that
+   exact location. Do not silently redirect. If the sandbox blocks it, ask for
+   permission instead of working around it.
+3. **Verify before “done”.** After code changes, from the repo root run:
+   - `corepack pnpm --filter @codepilot/core test`
+   - tests for every other package you touched
+   - `corepack pnpm -r typecheck`
+   - build any packaged surface you changed  
+   Report real command output, not assumptions.
+4. **Keep the tree clean.** Put clones, dumps, and scratch under a personal
+   scratch directory — never under this repo root. Do not leave third-party
+   checkouts in the project.
+5. **Say unverified when unsure.** A precise gap beats a confident wrong claim.
+   If new evidence contradicts an earlier statement, say so and follow evidence.
+6. **Large exploration → `task`.** Broad multi-hop research belongs in a
+   sub-agent; return a conclusion, not a raw dump, into the parent thread.
 
-## Discovered durable knowledge
+## Invariants (do not casually reverse)
 
-- Build/test the core: `corepack pnpm --filter @codepilot/core build|test`.
-- Full typecheck: `corepack pnpm -r typecheck`.
-- Package + reinstall the desktop app (macOS):
-  `PACKAGE_TARGETS=mac node scripts/package/desktop.mjs`, then copy
-  `dist/release/desktop/mac-arm64/CodePilot Agent.app` to `/Applications` and
-  `xattr -dr com.apple.quarantine`.
-- Self-contained **unified** `codepilot` binary (what `scripts/install.{sh,ps1}`
-  download — no Node at runtime). One pipeline:
-  - **`scripts/package/cli.mjs` + `bundle-bun.mjs`**: **Bun `--compile`** of the
-    TUI entry (`apps/tui/dist/cli.js`). The single binary is both the interactive
-    TUI (bare `codepilot`) and the command surface (`codepilot web` / `serve` /
-    `run` / …) — the TUI entry routes `CLI_COMMANDS` first tokens to the protocol
-    CLI's `runProtocolCli`. pkg is retired: the TUI is ESM and Ink/yoga use
-    top-level await, which esbuild can't emit as CJS and pkg can't run from its
-    snapshot FS. Bun handles ESM+TLA+native addons and CAN cross-compile all 6
-    targets from one host, but embeds host-arch native addons, so CI builds each
-    on its native runner for a correct `better_sqlite3.node`.
-    `bundle-bun.mjs` stubs Ink's dev-only `react-devtools-core` and inlines
-    core's `require("../package.json")` version probe.
-  - **web is embedded in the binary**, not a separate asset. `cli.mjs` builds the
-    web SPA then runs `scripts/package/gen-web-vfs.mjs` to overwrite
-    `packages/protocol/dist/web-vfs.generated.js` with `import … with { type:
-    "file" }` lines (one per `apps/web/dist` file) — this runs AFTER `tsc` (the
-    committed source VFS stays empty so it type-checks) and BEFORE the Bun
-    compile. At runtime `materializeEmbeddedWeb` (`web-embed.ts`) copies the
-    embedded files to a temp dir with `readFileSync`/`writeFileSync` (`cpSync`
-    can't read Bun's `/$bunfs` virtual FS) and the existing static server serves
-    them; the source/npm build falls back to `detectWebRoot`.
-  - **Bun `--compile` gotchas** (don't reintroduce): a module reached via a
-    **nested/second dynamic `import`** inside a compiled binary loses both its
-    `node:http` bind and its `with { type: "file" }` embeds (works fine under
-    `bun run`), so the protocol CLI imports `ws.js` statically and the TUI entry
-    imports `runProtocolCli` statically. Every module in a compiled binary shares
-    the same `import.meta.url`/`Bun.main`/`argv[1]`, so the protocol CLI's
-    self-exec guard can't detect "am I the entry" — the TUI entry imports
-    `./unifiedMarker.js` first to set `globalThis.__CODEPILOT_UNIFIED__`, which
-    `isDirectEntry()` checks to stay dormant.
-  - `scripts/install.sh` / `.ps1` download a single `codepilot-<target>` into
-    `~/.codepilot/bin`; `install.cmd` is a thin PowerShell shim.
-    `CODEPILOT_DIST_DIR=dist/release` installs from a local build for testing.
-    Verify a binary is truly self-contained with a node-free PATH:
-    `env -i HOME=$HOME PATH=.../bin:/usr/bin:/bin codepilot --help`.
-- `AGENTS.md` (this file) and `CODEPILOT.md` are both read as project memory by
-  `packages/core/src/memory.ts`. Keep this file current when rules change.
+- **Session source of truth is append-only JSONL** (one file per session), not a
+  database. A derived, fail-soft SQLite index for list/search is allowed and
+  must remain rebuildable / deletable; JSONL stays authoritative.
+- **Native addons** (e.g. `better-sqlite3`) must stay compatible with
+  `engines.node` (`>=20`). A higher native ABI can crash the process before
+  fail-soft paths run.
+- **OS sandbox:** seatbelt (macOS), bwrap (Linux), wsl-bwrap (Windows).
+- **Sub-agent tool sets are a curated registry** (explore = read + research;
+  worker = that plus write/execute) — not an open plugin free-for-all.
+- **Prompt cache:** keep a stable prefix for providers with implicit caching;
+  Anthropic uses explicit cache-control breakpoints.
+
+## Commands
+
+```bash
+# Build / check
+corepack pnpm --filter @codepilot/core build
+corepack pnpm --filter @codepilot/core test
+corepack pnpm -r typecheck
+
+# Dev
+corepack pnpm --filter @codepilot/tui dev
+corepack pnpm --filter @codepilot/desktop start
+
+# Package CLI (unified binary → dist/release/cli/)
+PACKAGE_TARGETS=mac corepack pnpm package:cli
+CODEPILOT_DIST_DIR=dist/release scripts/install.sh   # → ~/.codepilot/bin
+
+# Package Desktop (embeds apps/web/dist; separate from CLI install)
+PACKAGE_TARGETS=mac node scripts/package/desktop.mjs
+# Install: copy dist/release/desktop/mac-arm64/CodePilot\ Agent.app → /Applications
+# then: xattr -dr com.apple.quarantine "/Applications/CodePilot Agent.app"
+```
+
+`package:cli` updates the CLI/daemon binary only. **Desktop App embeds its own
+web UI** — UI fixes for the App require `package:desktop` (and reinstalling the
+`.app`), not only `package:cli`.
+
+Local install from a build: `CODEPILOT_DIST_DIR=dist/release`. Smoke a
+node-free binary with a minimal `PATH` that still includes `~/.codepilot/bin`.
+
+## Packaging pitfalls (unified binary)
+
+- Prefer **static** imports for modules that must bind `node:http` or embed
+  `with { type: "file" }` assets inside a Bun `--compile` binary; nested dynamic
+  `import()` can drop those in the compiled artifact.
+- In a compiled binary, modules share one `import.meta.url` / entry identity —
+  do not assume a nested module can detect “am I the process entry?” the same
+  way as under `bun run`.
+- Native addons are host-arch; cross-compile of JS does not fix
+  `better_sqlite3.node` — build each target on a matching runner when shipping.
+
+## Style
+
+- Match local patterns: TypeScript ESM, existing lint/format (`biome`), existing
+  test layout (vitest under each package).
+- Prefer small, focused diffs. Do not refactor unrelated code or add docs the
+  user did not ask for.
+- Do not commit unless the user asks.
+
+## Project memory
+
+This file and `CODEPILOT.md` (when present) are loaded as project instructions
+by the agent (`packages/core` memory). Update rules here when durable process
+or architecture constraints change; put ephemeral notes elsewhere.

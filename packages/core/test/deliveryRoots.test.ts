@@ -7,7 +7,7 @@ import {
   mergeDeliveryRoots,
   normalizeRoot,
   rootFromPathToken,
-} from "../src/deliveryRoots.js";
+} from "../src/workspace/deliveryRoots.js";
 import { guardDeliveryWrite } from "../src/tools/_shared.js";
 import type { ToolContext } from "../src/tools/types.js";
 

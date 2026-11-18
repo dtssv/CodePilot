@@ -3,13 +3,13 @@
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { ToolContext, ToolResult } from "./types.js";
-import { assertPathAllowed, assertPathAllowedAsync } from "../sandbox.js";
-import { hashFileContent } from "../fsObservation.js";
+import { assertPathAllowed, assertPathAllowedAsync } from "../sandbox/sandbox.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 import {
   isUnderDeliveryRoots,
   mergeDeliveryRoots,
   normalizeRoot,
-} from "../deliveryRoots.js";
+} from "../workspace/deliveryRoots.js";
 
 /**
  * Directory *names* that glob/grep skip by default (unless the caller passes
@@ -237,31 +237,42 @@ async function adoptDeliveryRoot(
   roots.push(...merged);
 }
 
+export interface GuardFreshWriteOptions {
+  /** Lazy reader for the content-equality fallback when mtime jittered. */
+  readCurrent?: () => Promise<Buffer | string | null>;
+  /**
+   * Refuse existing files never observed this session. Default false — surgical
+   * edits rely on patch/`old_string` matching live disk instead.
+   */
+  requireObserved?: boolean;
+}
+
 /**
- * Read-before-write + staleness guard for a write/edit target: null to proceed
- * or an error ToolResult. `currentStat` (null = create); `currentContent`/
- * `readCurrent` enable the content-equality fallback for a jittered mtime.
+ * Staleness guard for a write/edit target: null to proceed or an error
+ * ToolResult. `currentStat` (null = create); `currentContent` enables an eager
+ * content-equality fallback for a jittered mtime.
  */
 export async function guardFreshWrite(
   ctx: ToolContext,
   absPath: string,
   currentStat: { mtimeMs: number; size: number } | null,
   currentContent?: Buffer | string,
-  readCurrent?: () => Promise<Buffer | string | null>,
+  opts?: GuardFreshWriteOptions,
 ): Promise<ToolResult | null> {
   if (!ctx.checkFileFresh) return null;
   const toHash = (c: Buffer | string): string =>
     hashFileContent(Buffer.isBuffer(c) ? c : Buffer.from(c, "utf-8"));
   const eagerHash = currentContent === undefined ? undefined : toHash(currentContent);
-  const res = ctx.checkFileFresh(absPath, currentStat, eagerHash);
+  const freshOpts = opts?.requireObserved ? { requireObserved: true } : undefined;
+  const res = ctx.checkFileFresh(absPath, currentStat, eagerHash, freshOpts);
   if (res.ok) return null;
   // Only a stale verdict on an existing file can be rescued by content equality.
   // Lazily read the current bytes (if a reader was supplied) and re-check.
-  if (res.reason === "stale" && eagerHash === undefined && readCurrent) {
+  if (res.reason === "stale" && eagerHash === undefined && opts?.readCurrent) {
     try {
-      const bytes = await readCurrent();
+      const bytes = await opts.readCurrent();
       if (bytes !== null) {
-        const retry = ctx.checkFileFresh(absPath, currentStat, toHash(bytes));
+        const retry = ctx.checkFileFresh(absPath, currentStat, toHash(bytes), freshOpts);
         if (retry.ok) return null;
       }
     } catch {

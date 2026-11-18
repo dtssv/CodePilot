@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server, request as httpRequest } from "node:http";
-import { startNetProxy, parseAuthority, type RunningNetProxy } from "../src/netProxy.js";
-import { resolveSandbox, wrapCommand } from "../src/sandbox.js";
+import { startNetProxy, parseAuthority, type RunningNetProxy } from "../src/workspace/netProxy.js";
+import { resolveSandbox, wrapCommand } from "../src/sandbox/sandbox.js";
 
 describe("parseAuthority", () => {
   it("splits host:port and defaults the port", () => {

@@ -8,11 +8,11 @@ import { join } from "node:path";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { z } from "zod";
 
-import { runAgent, type AgentDeps } from "../src/agent.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { runAgent, type AgentDeps } from "../src/agent/agent.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
 import { ToolRegistry } from "../src/tools/types.js";
-import type { PermissionClassifier } from "../src/permissionClassifier.js";
+import type { PermissionClassifier } from "../src/permissions/permissionClassifier.js";
 import type {
   ChatProvider,
   StreamChatOptions,

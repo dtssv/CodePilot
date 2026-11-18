@@ -51,8 +51,9 @@ export interface GrepHit {
 export const grepTool: ToolDef<typeof schema> = {
   name: "grep",
   description:
-    "Regex search over file contents (`file:line: snippet`). Optional `include` glob; " +
-    "`context` lines default 1. Prefer over `read_file` for discovery; use `glob` for names.",
+    "Regex search over file contents (`file:line: snippet`). Prefer over shell `grep`/`rg` " +
+    "and over reading whole files. Optional `include` glob; `context` default 1. " +
+    "Parallelise independent greps/reads in one turn. Use `glob` for names only.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
@@ -206,14 +207,14 @@ async function runRipgrep(
  * Match lines are `path:line:text`; context lines are `path-line-text`; `--`
  * separates hit groups. Each match + its surrounding context collapses into one
  * hit, mirroring the walker (context lines are already supplied by rg). */
-export function parseRipgrep(out: string, base: string, _ctxLines: number, cap: number): GrepHit[] {
+export function parseRipgrep(out: string, base: string, ctxLines: number, cap: number): GrepHit[] {
   const hits: GrepHit[] = [];
   if (out.length === 0) return hits;
   let entries: { file: string; line: number; raw: string; isMatch: boolean }[] = [];
   for (const rawLine of out.split("\n")) {
     if (rawLine === "") continue;
     if (rawLine === "--") {
-      finalizeGroup(entries, hits, base);
+      finalizeGroup(entries, hits, base, ctxLines);
       entries = [];
       if (hits.length >= cap) break;
       continue;
@@ -221,7 +222,7 @@ export function parseRipgrep(out: string, base: string, _ctxLines: number, cap: 
     const parsed = parseRgLine(rawLine);
     if (parsed) entries.push(parsed);
   }
-  if (hits.length < cap) finalizeGroup(entries, hits, base);
+  if (hits.length < cap) finalizeGroup(entries, hits, base, ctxLines);
   return hits.slice(0, cap);
 }
 
@@ -237,30 +238,31 @@ function parseRgLine(
   return { file: m[1]!, line: Number(m[2]!) - 1, raw: m[3]!, isMatch: mMatch !== null };
 }
 
-/** Turn a group of rg lines into GrepHit(s). With `--context 0` rg emits no
- * context lines and no `--` separators, so each match line is its own hit; with
- * context, a group is one match plus its surrounding `-` context lines, which
- * collapse into a single hit's text (mirroring the walker). */
+/** Turn a group of rg lines into GrepHit(s). rg merges overlapping context
+ * windows, so one `--`-delimited group can hold several matches; each match
+ * becomes its own hit carrying `ctxLines` of context, and a match already
+ * inside the previous hit's window is skipped — the walker's exact behaviour. */
 function finalizeGroup(
   entries: { file: string; line: number; raw: string; isMatch: boolean }[],
   hits: GrepHit[],
   base: string,
+  ctxLines: number,
 ): void {
-  if (entries.length === 0) return;
-  const hasContext = entries.some((e) => !e.isMatch);
-  if (!hasContext) {
-    // No context lines: one hit per match line.
-    for (const e of entries) {
-      hits.push({ file: relativeToBase(e.file, base), line: e.line, text: e.raw });
-    }
-    return;
+  let windowEnd = -1;
+  let windowFile = "";
+  for (const m of entries) {
+    if (!m.isMatch) continue;
+    if (m.file === windowFile && m.line < windowEnd) continue;
+    const lo = m.line - ctxLines;
+    const hi = m.line + ctxLines;
+    const text = entries
+      .filter((e) => e.file === m.file && e.line >= lo && e.line <= hi)
+      .map((e) => e.raw)
+      .join("\n");
+    hits.push({ file: relativeToBase(m.file, base), line: m.line, text });
+    windowFile = m.file;
+    windowEnd = hi + 1;
   }
-  const match = entries.find((e) => e.isMatch) ?? entries[0]!;
-  hits.push({
-    file: relativeToBase(match.file, base),
-    line: match.line,
-    text: entries.map((e) => e.raw).join("\n"),
-  });
 }
 
 /** rg may print absolute or base-relative paths; normalize to base-relative. */

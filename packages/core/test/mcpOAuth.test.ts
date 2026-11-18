@@ -14,7 +14,7 @@ import {
   type McpTokenBundle,
   type McpOAuthServerConfig,
   type AuthorizationServerMetadata,
-} from "../src/mcpOAuth.js";
+} from "../src/mcp/mcpOAuth.js";
 
 // ---------------------------------------------------------------------------
 // PKCE

@@ -8,14 +8,14 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { z } from "zod";
 
-import { initPluginRuntimes } from "../src/plugins.js";
-import { discoverPlugins, loadPluginRuntimes } from "../src/plugins.js";
-import { RuntimeRegistry, createRuntimeToolkit, runtimeRegistry } from "../src/runtime.js";
-import { createSession } from "../src/session-utils.js";
+import { initPluginRuntimes } from "../src/plugins/plugins.js";
+import { discoverPlugins, loadPluginRuntimes } from "../src/plugins/plugins.js";
+import { RuntimeRegistry, createRuntimeToolkit, runtimeRegistry } from "../src/agent/runtime.js";
+import { createSession } from "../src/session/session-utils.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
-import type { AgentDeps } from "../src/agent.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 import type { Event } from "../src/types.js";
 import type {
   ChatProvider,
@@ -43,6 +43,9 @@ export default {
 `;
 
 let base: string;
+
+/** Approves every plugin (tests exercise loading, not the trust gate). */
+const APPROVE_ALL = { isTrusted: () => true };
 
 function writePlugin(
   name: string,
@@ -82,7 +85,7 @@ describe("initPluginRuntimes", () => {
       { "runtime.mjs": DEMO_MODULE },
     );
     const reg = new RuntimeRegistry();
-    const init = await initPluginRuntimes(base, { registry: reg, userDir: join(base, "none") });
+    const init = await initPluginRuntimes(base, { registry: reg, userDir: join(base, "none"), trust: APPROVE_ALL });
     expect(init.registered.get("demo")).toBe("demo-runtime");
     expect(init.errors.size).toBe(0);
     expect(init.defaultRuntime).toBe("demo-runtime");
@@ -99,7 +102,7 @@ describe("initPluginRuntimes", () => {
       runtime: { module: "./missing.mjs", name: "broken-runtime", default: true },
     });
     const reg = new RuntimeRegistry();
-    const init = await initPluginRuntimes(base, { registry: reg, userDir: join(base, "none") });
+    const init = await initPluginRuntimes(base, { registry: reg, userDir: join(base, "none"), trust: APPROVE_ALL });
     expect(init.errors.get("broken")).toMatch(/not found/);
     expect(init.defaultRuntime).toBeUndefined();
     expect(reg.has("broken-runtime")).toBe(false);
@@ -121,6 +124,7 @@ describe("initPluginRuntimes", () => {
         registry: new RuntimeRegistry(),
         userDir: join(base, "none"),
         existingRuntime: "something-else",
+        trust: APPROVE_ALL,
       }),
     ).rejects.toThrow(/multiple plugins declare a default runtime/);
   });
@@ -142,6 +146,7 @@ describe("createSession + plugin runtimes", () => {
       cwd: base,
       model: "mock-large",
       runtime: "demo-runtime",
+      pluginTrust: APPROVE_ALL,
     });
     expect(session.getRuntimeName()).toBe("demo-runtime");
     expect(session.getRuntime().name).toBe("demo-runtime");
@@ -158,7 +163,7 @@ describe("createSession + plugin runtimes", () => {
       },
       { "runtime.mjs": DEMO_MODULE },
     );
-    const session = await createSession({ cwd: base, model: "mock-large" });
+    const session = await createSession({ cwd: base, model: "mock-large", pluginTrust: APPROVE_ALL });
     expect(session.getRuntimeName()).toBe("demo-runtime");
   });
 
@@ -177,6 +182,7 @@ describe("createSession + plugin runtimes", () => {
       cwd: base,
       model: "mock-large",
       runtime: "default",
+      pluginTrust: APPROVE_ALL,
     });
     expect(session.getRuntimeName()).toBe("default");
   });
@@ -200,6 +206,26 @@ describe("createSession + plugin runtimes", () => {
     expect(session.getRuntimeName()).toBe("default");
   });
 
+  it("does not load a repo plugin's runtime until it is approved", async () => {
+    writePlugin(
+      "demo",
+      {
+        name: "demo",
+        description: "d",
+        version: "1.0.0",
+        runtime: { module: "./runtime.mjs", default: true },
+      },
+      { "runtime.mjs": DEMO_MODULE },
+    );
+    const session = await createSession({
+      cwd: base,
+      model: "mock-large",
+      pluginTrust: { isTrusted: () => true, recorded: () => null },
+    });
+    expect(session.getRuntimeName()).toBe("default");
+    expect(runtimeRegistry.has("demo-runtime")).toBe(false);
+  });
+
   it("survives a plugin whose runtime module is broken", async () => {
     writePlugin("broken", {
       name: "broken",
@@ -207,7 +233,7 @@ describe("createSession + plugin runtimes", () => {
       version: "1.0.0",
       runtime: { module: "./missing.mjs", name: "broken-runtime", default: true },
     });
-    const session = await createSession({ cwd: base, model: "mock-large" });
+    const session = await createSession({ cwd: base, pluginTrust: APPROVE_ALL, model: "mock-large" });
     expect(session.getRuntimeName()).toBe("default");
   });
 });
@@ -307,7 +333,7 @@ describe("createSession wires plugin skills / agents / hooks", () => {
         "agents/helper.md": "---\nname: plugin-helper\ndescription: a plugin agent\n---\nhelp body",
       },
     );
-    const session = await createSession({ cwd: base, model: "mock-large" });
+    const session = await createSession({ cwd: base, pluginTrust: APPROVE_ALL, model: "mock-large" });
     try {
       // Hooks: the plugin's PreToolUse hook is live on the engine.
       const pre = session.getHookEngine().listHooks("PreToolUse");
@@ -359,7 +385,7 @@ describe("createSession wires plugin skills / agents / hooks", () => {
 
     // The session must be created successfully despite the broken/hostile
     // plugins — none of them can abort createSession.
-    const session = await createSession({ cwd: base, model: "mock-large" });
+    const session = await createSession({ cwd: base, pluginTrust: APPROVE_ALL, model: "mock-large" });
     try {
       // The GOOD plugin's contributions are all present.
       const prompt = session.getSystemPrompt()?.full ?? "";
@@ -475,7 +501,7 @@ describe("plugin-registered tools reach the session", () => {
     );
     const provider = new ToolCallingProvider("reverse_text");
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -513,7 +539,7 @@ describe("plugin-registered tools reach the session", () => {
     );
     const provider = new ToolCallingProvider("bash");
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -552,7 +578,7 @@ describe("plugin-registered tools reach the session", () => {
     );
     const provider = new ToolCallingProvider("boom");
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -634,7 +660,7 @@ describe("plugin context transform reaches the provider view", () => {
     writeTransformPlugin();
     const provider = new RecordingProvider();
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -660,7 +686,7 @@ describe("plugin context transform reaches the provider view", () => {
     writeTransformPlugin();
     const provider = new RecordingProvider();
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -729,7 +755,7 @@ describe("plugin event sink mirrors the JSONL log", () => {
     writeSinkPlugin();
     const provider = new RecordingProvider();
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
@@ -759,7 +785,7 @@ describe("plugin event sink mirrors the JSONL log", () => {
     writeSinkPlugin();
     const provider = new RecordingProvider();
     const session = await createSession({
-      cwd: base,
+      cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
       config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,

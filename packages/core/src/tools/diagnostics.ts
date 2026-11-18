@@ -25,11 +25,42 @@ export interface Diagnostic {
 }
 
 export interface DiagnosticsProvider {
- /** Return diagnostics for a single file. Empty array if clean. */
-  forFile(path: string): Promise<Diagnostic[]>;
- /** Return all diagnostics in the workspace (capped by the provider). */
-  forWorkspace(): Promise<{ path: string; diagnostics: Diagnostic[] }[]>;
+ /** Return diagnostics for a single file. Empty array if clean; null when this
+  * provider cannot answer (no IDE / language server), so a fallback may. */
+  forFile(path: string): Promise<Diagnostic[] | null>;
+ /** Return all diagnostics in the workspace (capped by the provider); null
+  * when unavailable. */
+  forWorkspace(): Promise<{ path: string; diagnostics: Diagnostic[] }[] | null>;
 }
+
+/** Ask each provider in order; the first non-null answer wins. */
+export function chainDiagnostics(
+  ...providers: (DiagnosticsProvider | undefined)[]
+): DiagnosticsProvider | undefined {
+  const list = providers.filter((p): p is DiagnosticsProvider => p !== undefined);
+  if (list.length <= 1) return list[0];
+  return {
+    async forFile(path) {
+      for (const p of list) {
+        const r = await p.forFile(path).catch(() => null);
+        if (r !== null) return r;
+      }
+      return null;
+    },
+    async forWorkspace() {
+      for (const p of list) {
+        const r = await p.forWorkspace().catch(() => null);
+        if (r !== null) return r;
+      }
+      return null;
+    },
+  };
+}
+
+const UNAVAILABLE =
+  "diagnostics are not available in this host — no IDE or language server " +
+  "answered. Use `bash` to run the type-checker / linter directly " +
+  "(e.g. `tsc --noEmit`, `eslint .`).";
 
 /** Output caps so a provider returning a large set can't flood the turn. The
  * host may also cap its own results; these are a final safety bound here. */
@@ -66,13 +97,7 @@ export const diagnosticsTool: ToolDef<typeof schema> & {
   permission: "read",
   async execute(input, ctx) {
     if (!diagnosticsTool.provider && !ctx.diagnosticsProvider) {
-      return {
-        content:
-          "diagnostics are not available in this host — the IDE/LSP is not " +
-          "connected. Use `bash` to run the type-checker / linter directly " +
-          "(e.g. `tsc --noEmit`, `eslint .`).",
-        isError: false,
-      };
+      return { content: UNAVAILABLE, isError: false };
     }
     const provider = ctx.diagnosticsProvider ?? diagnosticsTool.provider!;
     const minSeverity = input.severity ?? "error";
@@ -87,6 +112,7 @@ export const diagnosticsTool: ToolDef<typeof schema> & {
     try {
       if (input.path) {
         const all = await provider.forFile(input.path);
+        if (all === null) return { content: UNAVAILABLE, isError: false };
         const filtered = all.filter((d) => order[d.severity] <= order[minSeverity]);
         if (filtered.length === 0) {
           return { content: `no ${minSeverity}+ diagnostics in ${input.path}` };
@@ -102,6 +128,7 @@ export const diagnosticsTool: ToolDef<typeof schema> & {
         return { content: shown.join("\n") + footer };
       }
       const groups = await provider.forWorkspace();
+      if (groups === null) return { content: UNAVAILABLE, isError: false };
       const lines: string[] = [];
       let total = 0;
       let files = 0;

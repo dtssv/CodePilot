@@ -9,7 +9,7 @@ import { parseBingHtml, parseDuckDuckGoHtml } from "../src/tools/web_search.js";
 import { bashTool, elideBinaryLines } from "../src/tools/bash.js";
 import { bashOutputTool } from "../src/tools/bash_output.js";
 import { bashKillTool } from "../src/tools/bash_kill.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 describe("htmlToText", () => {

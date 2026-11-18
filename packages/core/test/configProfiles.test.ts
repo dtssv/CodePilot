@@ -16,7 +16,7 @@ import {
   applyConfigPatch,
   validateConfig,
   type ResolvedCodepilotConfig,
-} from "../src/config.js";
+} from "../src/config/config.js";
 import {
   exportBundle,
   importBundle,
@@ -24,7 +24,7 @@ import {
   parseBundle,
   BUNDLE_VERSION,
   type CodepilotBundle,
-} from "../src/bundle.js";
+} from "../src/config/bundle.js";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

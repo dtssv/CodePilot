@@ -8,8 +8,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { projectStatePath } from "../projectState.js";
-import { modelShellEnv } from "../sandbox.js";
+import { projectStatePath } from "../workspace/projectState.js";
+import { modelShellEnv, type ShellEnvOptions } from "../sandbox/sandbox.js";
 
 export interface JobMeta {
   id: string;
@@ -134,6 +134,8 @@ export interface SpawnJobSpec {
   shellArgs: string[];
   sandboxed: boolean;
   sandboxBackend: string;
+  /** `shellEnv` config: optional secret filtering for the job's environment. */
+  shellEnv?: ShellEnvOptions;
 }
 
 /** Spawn a detached background job. Returns the job record immediately. */
@@ -151,7 +153,7 @@ export async function spawnBackgroundJob(spec: SpawnJobSpec): Promise<Background
   // and the engine can cascade-kill on shutdown.
   const proc = spawn(spec.shell, [...spec.shellArgs, spec.command], {
     cwd: spec.cwd,
-    env: modelShellEnv(),
+    env: modelShellEnv(process.env, spec.shellEnv),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });

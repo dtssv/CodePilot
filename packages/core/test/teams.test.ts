@@ -20,7 +20,7 @@ import {
   renderTeamResult,
   type TeamMemberResult,
   type TeamSpec,
-} from "../src/teams.js";
+} from "../src/subagent/teams.js";
 import type { SubagentRunner, SubagentRunSpec } from "../src/tools/task.js";
 import type { Event, TeamMessageEvent } from "../src/types.js";
 
@@ -649,7 +649,7 @@ describe("runTeam", () => {
   it("seeds the task board from assignments only when team_board is on", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "team-board-"));
     try {
-      const { TaskBoard } = await import("../src/taskBoard.js");
+      const { TaskBoard } = await import("../src/subagent/taskBoard.js");
 
       // team_board OFF (default): no board file / no tasks.
       const offRunner = fakeRunner({ fallback: "done" });

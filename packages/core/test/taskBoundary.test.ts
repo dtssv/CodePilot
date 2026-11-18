@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSession, getSessionsDir } from "../src/session.js";
+import { createSession, getSessionsDir } from "../src/session/session.js";
 import type { Event } from "../src/types.js";
 
 const tempHome = process.env.HOME ?? tmpdir();

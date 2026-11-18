@@ -18,6 +18,10 @@
       "types": "./dist/rpc.d.ts",
       "import": "./dist/rpc.js"
     },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "import": "./dist/paths.js"
+    },
     "./acp": {
       "types": "./dist/acp.d.ts",
       "import": "./dist/acp.js"

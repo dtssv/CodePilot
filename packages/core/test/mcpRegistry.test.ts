@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installMcpJson, listMcpMarkets } from "../src/mcpRegistry.js";
+import { installMcpJson, listMcpMarkets } from "../src/mcp/mcpRegistry.js";
 
 describe("listMcpMarkets", () => {
   it("returns open marketplace links", async () => {

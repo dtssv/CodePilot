@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runCodexAppServerTurn } from "../src/tools/harnessCodexProto.js";
 import { harnessBridgeTool } from "../src/tools/harnessBridge.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 /** A fake `codex app-server`: a Node script that speaks the JSONL protocol —

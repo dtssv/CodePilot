@@ -7,9 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   recallRelevantMemories,
+  recallRelevantMemoriesDetailed,
   RECALL_TOTAL_CHARS,
-} from "../src/memoryRecall.js";
-import { autoMemoryDir } from "../src/autoMemory.js";
+} from "../src/memory/memoryRecall.js";
+import { autoMemoryDir } from "../src/memory/autoMemory.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 
 /** A small-model stub that "selects" by echoing a fixed JSON array of paths. */
@@ -131,6 +132,32 @@ describe("recallRelevantMemories", () => {
     expect(block).not.toBeNull();
     // Whole block stays within the total cap (+ small framing overhead).
     expect(block!.length).toBeLessThan(RECALL_TOTAL_CHARS + 500);
+  });
+
+  it("stops when the session cumulative recall budget is exhausted", async () => {
+    root = mkdtempSync(join(tmpdir(), "recall-"));
+    seedMemory(root, cwd, {
+      "a.md": "- [project] alpha note\n" + "body ".repeat(200),
+    });
+    const first = await recallRelevantMemoriesDetailed({
+      provider: selectorProvider("[]"),
+      cwd,
+      query: "alpha",
+      rootDir: root,
+      sessionBytesUsed: 0,
+      sessionMaxChars: 500,
+    });
+    expect(first).not.toBeNull();
+    expect(first!.attachedChars).toBeGreaterThan(0);
+    const second = await recallRelevantMemories({
+      provider: selectorProvider("[]"),
+      cwd,
+      query: "alpha again",
+      rootDir: root,
+      sessionBytesUsed: 500,
+      sessionMaxChars: 500,
+    });
+    expect(second).toBeNull();
   });
 
   it("returns null when there are no topic files", async () => {

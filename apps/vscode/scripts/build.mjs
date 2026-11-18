@@ -1,15 +1,16 @@
 // esbuild bundle script.
 //
-// Bundles src/extension.ts into dist/extension.js as CommonJS (VSCode loads
-// extensions with `require`, regardless of the package.json `type` field).
-// `vscode` is treated as an external module so it isn't inlined.
+// Bundles src/extension.ts into dist/extension.cjs as CommonJS. The package
+// has `"type": "module"` for build scripts, so the entry MUST use a `.cjs`
+// suffix — otherwise VS Code treats `extension.js` as ESM and activation
+// fails with `module is not defined`. `vscode` stays external.
 // Also copies the web embed UI and (when protocol is built) the bundled
 // CodePilot CLI into resources/ so install-only works without a system CLI.
 
 import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,7 +23,7 @@ const watch = process.argv.includes("--watch");
 const config = {
   entryPoints: [resolve(root, "src/extension.ts")],
   bundle: true,
-  outfile: resolve(root, "dist/extension.js"),
+  outfile: resolve(root, "dist/extension.cjs"),
   format: "cjs",
   platform: "node",
   target: "node20",
@@ -66,6 +67,11 @@ function bundleEngineCli() {
 async function run() {
   copyWebview();
   bundleEngineCli();
+  // Drop the pre-.cjs entry so vsce never ships a stale ESM-looking main.
+  for (const stale of ["extension.js", "extension.js.map"]) {
+    const p = resolve(root, "dist", stale);
+    if (existsSync(p)) rmSync(p);
+  }
   if (watch) {
     const ctx = await context(config);
     await ctx.watch();

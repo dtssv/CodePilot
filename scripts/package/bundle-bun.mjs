@@ -43,13 +43,13 @@ const fixups = {
       contents: "export default { connectToDevTools() {} };",
       loader: "js",
     }));
-    // @codepilot/core probes its own version via require("../package.json"),
+    // @codepilot/core probes its own version via require("…/package.json"),
     // which has no backing file in Bun's virtual FS. Inline it to a literal
     // (mirrors scripts/package/bundle-node.mjs for the CLI).
     b.onLoad({ filter: /packages[\\/]core[\\/]dist[\\/].*\.js$/ }, (args) => {
       let code = readFileSync(args.path, "utf8");
       code = code.replace(
-        /\brequire\s*\(\s*["'](?:\.\.\/package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
+        /\brequire\s*\(\s*["'](?:(?:\.\.\/)+package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
         PKG_LITERAL,
       );
       return { contents: code, loader: "js" };

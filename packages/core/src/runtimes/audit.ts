@@ -3,14 +3,14 @@
 // tool table and re-checking each call via the mode gate; and a missing required
 // section costs another reformat turn. Everything else is inherited via the toolkit.
 
-import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent.js";
+import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent/agent.js";
 import type {
   AgentRuntime,
   AgentRuntimeState,
   RuntimeFactory,
   RuntimeFactoryDeps,
   RuntimeToolkit,
-} from "../runtime.js";
+} from "../agent/runtime.js";
 import type { AgentMode } from "../types.js";
 import { aborted, mergeRunResults, withPromptSuffix } from "./_shared.js";
 

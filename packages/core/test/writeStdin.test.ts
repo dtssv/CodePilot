@@ -8,7 +8,7 @@ import { writeStdinTool } from "../src/tools/write_stdin.js";
 import { bashTool } from "../src/tools/bash.js";
 import { bashKillTool } from "../src/tools/bash_kill.js";
 import { bashOutputTool } from "../src/tools/bash_output.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 describe("write_stdin tool", () => {

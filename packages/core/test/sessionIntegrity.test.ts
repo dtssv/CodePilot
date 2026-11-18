@@ -13,14 +13,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Session } from "../src/session.js";
-import { sessionPath, SESSIONS_DIR, deleteSession } from "../src/session-utils.js";
+import { Session } from "../src/session/session.js";
+import { sessionPath, SESSIONS_DIR, deleteSession } from "../src/session/session-utils.js";
 import {
   gcProjectArtifacts,
   collectSessionArtifactRefs,
-} from "../src/artifactGc.js";
+} from "../src/workspace/artifactGc.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { projectStatePath } from "../src/projectState.js";
+import { projectStatePath } from "../src/workspace/projectState.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 

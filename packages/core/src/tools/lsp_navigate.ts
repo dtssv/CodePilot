@@ -6,7 +6,7 @@
 
 import { z } from "zod";
 import type { ToolDef, ToolContext } from "./types.js";
-import { parseLocations, type LspManager } from "../lsp.js";
+import { parseLocations, type LspManager } from "../workspace/lsp.js";
 
 const schema = z.object({
   action: z
@@ -36,13 +36,8 @@ export function makeLspNavigateTool(
   return {
     name: "lsp_navigate",
     description:
-      "Navigate code precisely with a language server: go-to-definition, " +
-      "find-references, or hover (type/signature). Prefer this over grep when " +
-      "you have an exact file + line/column for a symbol — it follows imports " +
-      "and resolves overloads. Provide 1-based `line`/`column` pointing at the " +
-      "identifier. If no language server is available for the file, it says so; " +
-      "then fall back to grep. Built-in support: TypeScript/JavaScript; other " +
-      "languages require an `lsp.servers` config entry.",
+      "LSP navigate: definition | references | hover at 1-based `line`/`column`. " +
+      "Built-in TS/JS; other languages need `lsp.servers`. No server → fall back to grep.",
     inputSchema: schema,
     permission: "read",
     async execute(input, ctx: ToolContext) {

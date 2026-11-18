@@ -11,7 +11,7 @@ import {
   BUILTIN_COMMANDS,
   sharedBuiltinCommands,
   type BuiltinCommand,
-} from "../src/builtinCommands.js";
+} from "../src/skills/builtinCommands.js";
 
 describe("built-in command catalog", () => {
   it("has a unique name for every command", () => {
@@ -36,7 +36,7 @@ describe("built-in command catalog", () => {
     expect(shared.every((c) => c.scope === "shared")).toBe(true);
     const sharedNames = new Set(shared.map((c) => c.name));
     // Terminal-only affordances are never advertised to GUI surfaces.
-    for (const terminalOnly of ["exit", "connect", "remote", "setup", "theme", "web"]) {
+    for (const terminalOnly of ["exit", "connect", "remote", "setup", "theme", "vim", "web"]) {
       expect(sharedNames.has(terminalOnly)).toBe(false);
     }
     // Core cross-surface commands are advertised.

@@ -11,11 +11,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { McpManager } from "../src/mcp.js";
+import { McpManager } from "../src/mcp/mcp.js";
 import {
   inboundNotificationAllowed,
   formatInboundNotification,
-} from "../src/session-mcp.js";
+} from "../src/mcp/sessionBind.js";
 
 /** A mock MCP server that, on a `tools/call` to `ping`, sends a server
  * notification (`notifications/message`) BEFORE the tool result. The

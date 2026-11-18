@@ -16,7 +16,7 @@ import {
   deletePlanFile,
   planSlug,
   plansDir,
-} from "../src/plans.js";
+} from "../src/subagent/plans.js";
 import type { PlanStep } from "../src/types.js";
 
 let cwd: string;

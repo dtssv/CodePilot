@@ -3,14 +3,14 @@
 // phase can modify the working tree. Cost: N + 2 provider runs per prompt.
 
 import { randomUUID } from "node:crypto";
-import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent.js";
+import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent/agent.js";
 import type {
   AgentRuntime,
   AgentRuntimeState,
   RuntimeFactory,
   RuntimeFactoryDeps,
   RuntimeToolkit,
-} from "../runtime.js";
+} from "../agent/runtime.js";
 import type { AgentMode, Event } from "../types.js";
 import { aborted, mergeRunResults, withPromptSuffix } from "./_shared.js";
 

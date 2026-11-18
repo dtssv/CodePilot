@@ -4,8 +4,8 @@ import {
   buildClassificationInput,
   createPromptPermissionClassifier,
   parseClassification,
-} from "../src/permissionClassifier.js";
-import { PermissionEngine } from "../src/permissions.js";
+} from "../src/permissions/permissionClassifier.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type { ToolDef } from "../src/tools/types.js";
 
 function makeTool(name: string, perm: "read" | "write" | "execute" | "network"): ToolDef {

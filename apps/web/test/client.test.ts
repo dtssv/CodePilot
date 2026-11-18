@@ -9,6 +9,7 @@ import {
   CodepilotClient,
   describeError,
   parseServeUrl,
+  sessionLockedOwner,
   type PendingPermission,
   type PendingQuestion,
 } from "../src/protocol/client.js";
@@ -182,6 +183,27 @@ describe("describeError", () => {
     expect(describeError(new RpcError(-32602, "bad params"))).toBe("bad params");
     expect(describeError(new Error("boom"))).toBe("boom");
     expect(describeError("plain")).toBe("plain");
+  });
+
+  it("explains SESSION_LOCKED and exposes the owner payload", () => {
+    const withUrl = new RpcError(-32002, "owned by pid 1", {
+      sessionId: "s1",
+      owner: { pid: 99, url: "ws://127.0.0.1:18765/rpc", token: "t" },
+    });
+    expect(describeError(withUrl)).toMatch(/attaching to that daemon/i);
+    expect(sessionLockedOwner(withUrl)).toEqual({
+      pid: 99,
+      url: "ws://127.0.0.1:18765/rpc",
+      token: "t",
+    });
+
+    const noUrl = new RpcError(-32002, "owned by pid 2", {
+      sessionId: "s2",
+      owner: { pid: 42 },
+    });
+    expect(describeError(noUrl)).toMatch(/read-only/i);
+    expect(sessionLockedOwner(noUrl)?.pid).toBe(42);
+    expect(sessionLockedOwner(new Error("x"))).toBeNull();
   });
 });
 

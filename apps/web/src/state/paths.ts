@@ -1,21 +1,24 @@
+/** Path helpers for transcript links and the in-app file preview.
+ * Anchor-aware (`foo.ts:42`) detection reuses the protocol parser so web and
+ * server strip `:line[:col]` the same way. Import via `@codepilot/protocol/paths`
+ * (not the package root) so the browser bundle never pulls in the RPC server. */
+
+import {
+  looksLikeWorkspacePath as protocolLooksLike,
+  parseReference,
+  type ParsedReference,
+} from "@codepilot/protocol/paths";
+
+export { parseReference, type ParsedReference };
+
 /** Heuristic: does this string look like a workspace file path worth previewing? */
 export function looksLikeWorkspacePath(raw: string): boolean {
-  const s = raw.trim();
-  if (!s || s.length > 260) return false;
-  if (/\s/.test(s) || s.includes("\n") || s.includes("\0")) return false;
-  if (/^(https?|mailto|data):/i.test(s)) return false;
-  if (/^[a-z0-9+-]+:\/\//i.test(s)) return false;
-  // Bare tool names / flags
-  if (/^-+/.test(s)) return false;
-  // Has an extension, or a path separator
-  if (/\.[a-z0-9]{1,16}$/i.test(s)) return true;
-  if (s.includes("/") || s.includes("\\")) return true;
-  return false;
+  return protocolLooksLike(raw);
 }
 
-/** Prefer preview-in-app for these kinds. */
+/** Prefer preview-in-app for these kinds. Strips a trailing `:line[:col]` first. */
 export function previewKind(path: string): "markdown" | "image" | "code" | "text" {
-  const lower = path.toLowerCase();
+  const lower = parseReference(path).path.toLowerCase();
   if (/\.(md|markdown|mdx)$/.test(lower)) return "markdown";
   if (/\.(png|jpe?g|gif|webp|svg|bmp|ico)$/.test(lower)) return "image";
   if (

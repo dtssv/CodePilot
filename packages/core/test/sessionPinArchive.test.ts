@@ -10,7 +10,7 @@ import {
   setSessionPinned,
   resetSessionIndex,
   persistSessionCwd,
-} from "../src/session.js";
+} from "../src/session/session.js";
 
 const tempHome = process.env.HOME ?? tmpdir();
 

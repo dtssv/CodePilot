@@ -8,7 +8,7 @@ import {
   useProvider,
   resolveModelAlias,
   DEFAULT_CONFIG,
-} from "../src/config.js";
+} from "../src/config/config.js";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -599,6 +599,48 @@ describe("useProvider", () => {
     const r = useProvider(cfg as any, "az");
     expect(r.provider).toBe("azure");
     expect(r.azureApiVersion).toBe("2024-10-21");
+  });
+  it("flattens apiStyle and custom request headers", () => {
+    const cfg = {
+      providers: {
+        oc: {
+          provider: "openai" as const,
+          baseURL: "https://opencode.example/inference/openai/v1",
+          apiKey: "k",
+          model: "gpt-x",
+          apiStyle: "responses" as const,
+          headers: { "X-Custom": "1", Authorization: "should-not-replace-auth" },
+        },
+      },
+    };
+    const r = useProvider(cfg as any, "oc");
+    expect(r.apiStyle).toBe("responses");
+    expect(r.headers).toEqual({
+      "X-Custom": "1",
+      Authorization: "should-not-replace-auth",
+    });
+  });
+  it("clears headers when switching to a preset without them", () => {
+    const cfg = {
+      headers: { "X-Old": "1" },
+      providers: {
+        plain: { provider: "openai" as const, baseURL: "https://x.test", model: "m" },
+      },
+    };
+    const r = useProvider(cfg as any, "plain");
+    expect(r.headers).toBeUndefined();
+  });
+  it("accepts headers on a provider preset", () => {
+    const r = validateConfig({
+      providers: {
+        gw: {
+          provider: "openai",
+          baseURL: "https://x.test/v1",
+          headers: { "HTTP-Referer": "https://app.example" },
+        },
+      },
+    }) as { providers?: Record<string, { headers?: Record<string, string> }> };
+    expect(r.providers?.gw?.headers?.["HTTP-Referer"]).toBe("https://app.example");
   });
   it("drops a smallModel inherited from a different endpoint", () => {
     const cfg = {

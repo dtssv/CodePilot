@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { streamOnce } from "../src/agent-messages.js";
+import { streamOnce } from "../src/agent/agent-messages.js";
 import { buildOpenAIMessages } from "../src/providers/openai.js";
 import type { ChatProvider, ProviderMessage, StreamChatOptions } from "../src/providers/types.js";
-import type { AgentDeps } from "../src/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 
 function captureProvider(): { provider: ChatProvider; sent: () => ProviderMessage[] } {
   let sent: ProviderMessage[] = [];
@@ -59,10 +59,11 @@ describe("runtime_context placement", () => {
 
   it("does not emit two consecutive system messages through the OpenAI adapter (sub-agent first turn)", async () => {
     // First turn: [user, system(runtime)]. Adapter prepends systemPrompt, demotes
-    // the trailing runtime system to user, then merges adjacent users.
+    // the trailing runtime system to user, and keeps it SEPARATE from the task
+    // so the volatile `now:` does not bust the OpenAI/CCR prefix cache.
     const { provider, sent } = captureProvider();
     const messages: ProviderMessage[] = [
-      { role: "user", content: [{ type: "text", text: "OBJECTIVE: review the repo" }] },
+      { role: "user", content: [{ type: "text", text: "review the repo" }] },
     ];
     await drain(streamOnce(provider, deps, messages, [], "x"));
     const oai = buildOpenAIMessages("BIG SYSTEM PROMPT", sent()) as Array<{
@@ -74,10 +75,12 @@ describe("runtime_context placement", () => {
     }
     expect(oai[0]!.role).toBe("system");
     expect(String(oai[0]!.content)).toContain("BIG SYSTEM PROMPT");
-    // Runtime lands in the (merged) trailing user message after demotion.
+    // Task stays its own user turn; demoted runtime is a trailing user.
+    expect(oai[1]!.role).toBe("user");
+    expect(JSON.stringify(oai[1]!.content)).toContain("review the repo");
+    expect(JSON.stringify(oai[1]!.content)).not.toContain("<runtime_context>");
     expect(oai[oai.length - 1]!.role).toBe("user");
     expect(JSON.stringify(oai[oai.length - 1]!.content)).toContain("<runtime_context>");
-    expect(JSON.stringify(oai[oai.length - 1]!.content)).toContain("OBJECTIVE: review the repo");
   });
 
   it("never splits an assistant tool_use from its tool_result (OpenAI/GLM invalid_argument guard)", async () => {

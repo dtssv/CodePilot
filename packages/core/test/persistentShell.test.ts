@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { PersistentShell } from "../src/persistentShell.js";
+import { PersistentShell } from "../src/sandbox/persistentShell.js";
 
 describe("PersistentShell", () => {
   let shell: PersistentShell | null = null;
@@ -9,6 +9,18 @@ describe("PersistentShell", () => {
     shell?.close();
     shell = null;
   });
+
+  it("withholds secret-looking env vars when excludeSecrets is on", async () => {
+    shell = new PersistentShell({
+      cwd: tmpdir(),
+      shell: "/bin/sh",
+      shellArgs: [],
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", MY_API_KEY: "k1", GH_TOKEN: "k2", PLAIN: "p" },
+      shellEnv: { excludeSecrets: true, passthrough: ["GH_*"] },
+    });
+    const r = await shell.run('echo "[$MY_API_KEY][$GH_TOKEN][$PLAIN]"', { timeout: 5_000 });
+    expect(r.stdout.trim()).toBe("[][k2][p]");
+  }, 20_000);
 
   it("runs parallel run() calls one at a time and resolves every one", async () => {
     shell = new PersistentShell({ cwd: tmpdir(), shell: "/bin/sh", shellArgs: [] });

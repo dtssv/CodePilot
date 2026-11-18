@@ -14,65 +14,48 @@ import {
   looksLikeSandboxWriteDenial,
   looksLikeSandboxNetworkDenial,
   modelShellEnv,
-} from "../sandbox.js";
+  type ShellEnvOptions,
+} from "../sandbox/sandbox.js";
 import { spillHeadTail } from "./_shared.js";
 import { spawnBackgroundJob } from "./bashJobs.js";
 
 const schema = z.object({
-  command: z
-    .string()
-    .describe(
-      "Required. The shell command string to execute via /bin/sh -c " +
-        "(e.g. builds, tests, scripts, network fetches). This is the only way to run a process.",
-    ),
+  command: z.string().describe("Shell command via /bin/sh -c (builds, tests, scripts, network)."),
   timeout: z
     .number()
     .int()
     .positive()
     .max(600_000)
     .optional()
-    .describe("Max wall-clock time in ms (default 60_000). Ignored for background jobs."),
+    .describe("Max wall-clock ms (default 60_000). Ignored for background jobs."),
   cwd: z.string().optional().describe("Override working directory."),
   run_in_background: z
     .boolean()
     .optional()
-    .describe(
-      "Run detached and return a job id immediately. Use for long-running or long-lived " +
-        "processes (servers, watchers, rendering/compute jobs) that can outlive a foreground " +
-        "timeout. Poll with `bash_output`, stop with `bash_kill`.",
-    ),
+    .describe("Detach; returns job id. Poll `bash_output`, stop `bash_kill`."),
   escalate_sandbox: z
     .boolean()
     .optional()
     .describe(
-      "Run THIS ONE command WITHOUT the OS sandbox (full host access), after a user " +
-        "approval prompt. Use only when a command FAILED because the sandbox blocked it " +
-        "— e.g. a dev server that needs the network while the sandbox denies it, or a " +
-        "write the jail refuses. The escalation is for this single call only; it does " +
-        "NOT change the session's sandbox. Always pair with `justification`. Do not use " +
-        "it pre-emptively — try the normal (sandboxed) command first.",
+      "THIS ONE command without OS sandbox (user must approve). Only after a sandboxed " +
+        "attempt failed on the jail; pair with `justification`; does not change session policy.",
     ),
   justification: z
     .string()
     .optional()
-    .describe(
-      "Required with `escalate_sandbox`: one sentence shown to the user explaining why " +
-        "this exact command needs to run outside the sandbox.",
-    ),
+    .describe("Required with `escalate_sandbox`: one sentence why this command needs host access."),
 });
 
 export const bashTool: ToolDef<typeof schema> = {
   name: "bash",
   description:
-    "Execute a shell command (`command` required). Use for builds, tests, package managers, " +
-    "network fetches, and any other process the task needs. " +
-    "Not for creating or editing project files — use `write_file` / `edit_file` for that; " +
-    "prefer `read_file` / `grep` / `glob` over shell for reading code. " +
-    "Default timeout 60s (max 10m); output >8KB spills to an artifact (`read_artifact`). " +
-    "Set `run_in_background: true` for long-lived jobs, then `bash_output` / `bash_kill`. " +
-    "Foreground calls share one shell (`cd`/`export` persist). " +
-    "OS sandbox limits writes to the workspace, `/tmp`, and `~/.codepilot`; put run " +
-    "artifacts (generated files, caches, zips) under session `scratch_dir`, not `cwd/.tmp`.",
+    "Run a shell command for builds, tests, git, installs, and process control. " +
+    "Prefer dedicated tools when they fit: read_file (not cat/head/tail), " +
+    "edit_file/apply_patch (not sed/awk), write_file (not echo>/heredoc), " +
+    "grep/glob (not find/grep/rg). Independent bash + file tools may share one turn. " +
+    "Default timeout 60s (max 10m); large output → artifact. " +
+    "Background: run_in_background + bash_output/bash_kill — after detach, do independent " +
+    "work; poll sparingly. Scratch → scratch_dir, not cwd/.tmp.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -98,6 +81,7 @@ export const bashTool: ToolDef<typeof schema> = {
         shellArgs: wrapped.shellArgs ?? defaultShellArgs(),
         sandboxed: wrapped.sandboxed,
         sandboxBackend: wrapped.backend,
+        shellEnv: ctx.config?.shellEnv,
       });
       return {
         content:
@@ -137,6 +121,7 @@ export const bashTool: ToolDef<typeof schema> = {
         signal: ctx.signal,
         shell: wrapped.shell ?? defaultShell(),
         shellArgs: wrapped.shellArgs ?? defaultShellArgs(),
+        shellEnv: ctx.config?.shellEnv,
       });
       stdout = r.stdout;
       stderr = r.stderr;
@@ -248,6 +233,7 @@ interface RunOpts {
   signal?: AbortSignal;
   shell: string;
   shellArgs: string[];
+  shellEnv?: ShellEnvOptions;
 }
 
 interface RunResult {
@@ -273,7 +259,7 @@ function runCommand(cmd: string, opts: RunOpts): Promise<RunResult> {
  // screenshot/dev-server command.
     const child = spawn(opts.shell, [...opts.shellArgs, cmd], {
       cwd: opts.cwd,
-      env: modelShellEnv(),
+      env: modelShellEnv(process.env, opts.shellEnv),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });

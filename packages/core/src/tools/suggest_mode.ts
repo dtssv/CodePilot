@@ -31,11 +31,9 @@ export interface SuggestModeTool extends ToolDef<typeof schema> {
 export const suggestModeTool: SuggestModeTool = {
   name: "suggest_mode",
   description:
-    "Propose switching the collaboration mode (chat/plan/agent) when the task would be better " +
-    "served in another mode — e.g. suggest 'plan' before a large multi-step change so you design " +
-    "first, or 'agent' once a plan is ready to execute. The USER confirms the switch (unless they " +
-    "opted into auto-accept). Use sparingly, only at a genuine inflection point; do not toggle modes " +
-    "every turn. If you are already in the right mode, do not call this.",
+    "Propose switching collaboration mode (chat|plan|agent). User confirms unless " +
+    "auto-accept is on. Call only at a real inflection; skip if already in the right mode. " +
+    "If the user declines a switch, do not re-propose that same target until they ask.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

@@ -5,9 +5,8 @@ import { render } from "ink";
 import React from "react";
 import { describe, expect, it } from "vitest";
 
-import { BlockView } from "../src/ui/EventView.js";
+import { TranscriptItem } from "../src/ui/TranscriptView.js";
 import { initialState, reducer, type TuiState } from "../src/ui/state.js";
-import { groupRows } from "../src/ui/transcript.js";
 
 const plan = (a: PlanStep["status"], b: PlanStep["status"]): PlanStep[] => [
   { id: "1", title: "Survey the project", status: a },
@@ -35,35 +34,6 @@ const SESSION: Event[] = [
   { type: "message", id: "a1", role: "assistant", content: [{ type: "text", text: "Done. I wrote **REPORT.md**." }] },
 ];
 
-describe("groupRows", () => {
-  it("collapses tools, drops usage, and keeps only the latest plan in full", () => {
-    const blocks = groupRows(run(SESSION).rows);
-    expect(blocks.map((b) => b.kind)).toEqual(["user", "assistant_turn"]);
-    const turn = blocks[1];
-    expect(turn?.kind).toBe("assistant_turn");
-    if (turn?.kind !== "assistant_turn") return;
-    expect(turn.parts.map((p) => (p.kind === "plan" ? `plan:${p.latest}` : p.kind))).toEqual([
-      "plan:false",
-      "steps",
-      "plan:true",
-      "steps",
-      "message",
-    ]);
-    const first = turn.parts[1];
-    expect(first?.kind === "steps" && first.tools.map((t) => t.target)).toEqual(["README.md", "npm test"]);
-    const write = turn.parts[3];
-    expect(write?.kind === "steps" && write.tools[0]).toMatchObject({ category: "write", added: 3 });
-  });
-
-  it("hides plan_update calls and tool-only assistant turns", () => {
-    const s = run([
-      { type: "message", id: "a0", role: "assistant", content: [] },
-      { type: "tool_call", id: "p", name: "plan_update", input: { steps: [] } },
-    ]);
-    expect(groupRows(s.rows)).toEqual([]);
-  });
-});
-
 describe("retry", () => {
   it("drops the failed attempt's output and keeps one notice", () => {
     const retry = (attempt: number): Event => ({
@@ -86,7 +56,7 @@ describe("retry", () => {
   });
 });
 
-/** Render blocks to plain text through Ink. */
+/** Render rows to plain text through Ink. */
 function renderText(state: TuiState): string {
   const out = Object.assign(new EventEmitter(), {
     columns: 100,
@@ -101,11 +71,11 @@ function renderText(state: TuiState): string {
   const el = React.createElement(
     React.Fragment,
     null,
-    groupRows(state.rows).map((b) => React.createElement(BlockView, { key: b.key, block: b })),
+    state.rows.map((row, i) => React.createElement(TranscriptItem, { key: i, row })),
   );
   const app = render(el, { stdout: out as never, debug: true, patchConsole: false });
   app.unmount();
- // biome-ignore lint/suspicious/noControlCharactersInRegex: strip ANSI
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: strip ANSI
   return (out.frames.at(-1) ?? "").replace(/\u001b\[[0-9;]*m/g, "");
 }
 
@@ -114,14 +84,14 @@ describe("rendering", () => {
   it.skipIf(!!process.env.CI)("uses the shared step vocabulary", () => {
     const text = renderText(run(SESSION));
     expect(text).toContain("› Analyze this project");
-    expect(text).toContain("✓ 2 steps");
-    expect(text).toContain("✓ Read README.md");
-    expect(text).toContain("✓ Ran npm test");
-    expect(text).toContain("│ 3 passed");
-    expect(text).toContain("✓ Wrote REPORT.md +3");
-    expect(text).toContain("plan updated 0/2");
-    expect(text).toContain("Plan 1/2");
- // One assistant glyph for the whole turn (一问一答), not per message.
+    expect(text).toContain("Read");
+    expect(text).toContain("README.md");
+    expect(text).toContain("Bash");
+    expect(text).toContain("npm test");
+    expect(text).toContain("3 passed");
+    expect(text).toContain("Write");
+    expect(text).toContain("REPORT.md");
+    expect(text).toContain("Plan");
     expect(text).toContain("◆");
     expect(text).toContain("Done. I wrote REPORT.md.");
     expect(text).not.toContain("usage");

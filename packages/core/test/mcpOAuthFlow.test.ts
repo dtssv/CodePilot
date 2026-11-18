@@ -1,6 +1,6 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
-import { authorize, type AuthorizationServerMetadata } from "../src/mcpOAuth.js";
+import { authorize, type AuthorizationServerMetadata } from "../src/mcp/mcpOAuth.js";
 
 /** Spin up a tiny HTTP server that plays all OAuth roles for one flow:
  * - GET /.well-known/oauth-protected-resource → resource metadata JSON

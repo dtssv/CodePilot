@@ -11,6 +11,8 @@ import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.openapi.wm.ex.ToolWindowEx
 import com.intellij.ui.JBColor
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
@@ -43,10 +45,12 @@ class WebChatPanel private constructor(
 
     private val relay = HostRelay(
         deliver = ::deliver,
-        init = { HostInit(cwd = cwd, theme = currentTheme(), locale = Locale.getDefault().language) },
+        init = { HostInit(cwd = cwd, theme = currentTheme(), locale = Locale.getDefault().toLanguageTag()) },
         openFile = ::openFile,
         insertText = ::insertText,
         onEngineError = { log.warn("codepilot engine: $it") },
+        onExpandForSettings = ::expandToolWindow,
+        onRestoreAfterSettings = ::restoreToolWindow,
     )
 
     private val engine = SharedEngineProcess(
@@ -83,8 +87,54 @@ class WebChatPanel private constructor(
         }, browser.cefBrowser)
         ApplicationManager.getApplication().messageBus.connect(disposable)
             .subscribe(LafManagerListener.TOPIC, LafManagerListener { relay.theme(currentTheme()) })
-        browser.loadHTML(withPreset(html, currentTheme()))
+        browser.loadHTML(withPreset(html, currentTheme(), Locale.getDefault().toLanguageTag()))
     }
+
+    private var widthBeforeSettings: Int = 0
+
+    /** Focus + stretch the CodePilot tool window so in-panel Settings has room. */
+    private fun expandToolWindow() {
+        ApplicationManager.getApplication().invokeLater {
+            val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return@invokeLater
+            tw.show(null)
+            tw.activate({
+                // Wait one layout pass — width is often 0 before the first show.
+                ApplicationManager.getApplication().invokeLater {
+                    try {
+                        val ex = tw as? ToolWindowEx ?: return@invokeLater
+                        val current = tw.component.width.coerceAtLeast(0)
+                        widthBeforeSettings = current
+                        val frameW = tw.component.topLevelAncestor?.width?.takeIf { it > 0 } ?: 1400
+                        val target = (frameW * 55 / 100).coerceIn(720, 1100)
+                        if (current < target) {
+                            ex.stretchWidth(target - current)
+                            log.info("CodePilot settings expand: ${current}px → ${target}px")
+                        }
+                    } catch (t: Throwable) {
+                        log.info("stretchWidth unavailable: ${t.message}")
+                    }
+                }
+            }, true)
+        }
+    }
+
+    /** Shrink back toward the pre-settings width after Settings closes. */
+    private fun restoreToolWindow() {
+        ApplicationManager.getApplication().invokeLater {
+            val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return@invokeLater
+            try {
+                val ex = tw as? ToolWindowEx ?: return@invokeLater
+                val target = if (widthBeforeSettings > 0) widthBeforeSettings else 420
+                val current = tw.component.width.coerceAtLeast(0)
+                if (current > target) ex.stretchWidth(target - current)
+            } catch (t: Throwable) {
+                log.info("restore stretchWidth unavailable: ${t.message}")
+            }
+        }
+    }
+
+    /** Command-palette / actions: expand panel and open the Settings sheet. */
+    override fun openSettings() = relay.openSettings()
 
     override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
         val rel = project.basePath?.let { base -> File(filePath).relativeToOrNull(File(base))?.path } ?: filePath

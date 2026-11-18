@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeUntrustedMcpText } from "../src/mcpResultSanitize.js";
+import { sanitizeUntrustedMcpText } from "../src/mcp/mcpResultSanitize.js";
 
 // MCP server output is untrusted. The sanitizer strips invisible/ambiguous
 // code points used to smuggle hidden instructions past a human reviewer while

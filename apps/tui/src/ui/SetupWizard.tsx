@@ -224,7 +224,11 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
               setStep({ kind: "saving" });
               try {
                 await patchUserConfig((raw) => {
-                  raw.webSearch = { provider: "custom", custom: engine.template };
+                  raw.webSearch = {
+                    provider: "custom",
+                    engineId: engine.id,
+                    custom: engine.template,
+                  };
                 });
                 summary.current.push(`Search → ${engine.displayName}`);
                 setStep({ kind: "image-ask" });
@@ -272,6 +276,7 @@ export function SetupWizard(props: SetupWizardProps): React.ReactElement {
                   // template and the key so resolveSearchBackend passes it along.
                   raw.webSearch = {
                     provider: "custom",
+                    engineId: engine.id,
                     custom: engine.template,
                     apiKey,
                   };

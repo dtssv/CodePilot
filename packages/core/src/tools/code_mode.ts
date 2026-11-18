@@ -21,7 +21,7 @@ import { bashTool } from "./bash.js";
 import { grepTool } from "./grep.js";
 import { globTool } from "./glob.js";
 import { lsTool } from "./ls.js";
-import { resolveSandbox, wrapCommand, modelShellEnv } from "../sandbox.js";
+import { resolveSandbox, wrapCommand, modelShellEnv } from "../sandbox/sandbox.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -323,7 +323,7 @@ async function runInSubprocess(
   await new Promise<void>((resolve) => {
     const child = spawn(shell, [...shellArgs, wrapped.command], {
       cwd: ctx.cwd,
-      env: modelShellEnv(),
+      env: modelShellEnv(process.env, ctx.config?.shellEnv),
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });
@@ -481,28 +481,11 @@ function shellQuoteArg(s: string): string {
 export const codeModeTool: ToolDef<typeof schema> = {
   name: "code_mode",
   description:
-    "Execute a JavaScript code snippet in a sandboxed environment with access " +
-    "to the SDK's tool API. Plain JavaScript only — the code is not transpiled, " +
-    "so TypeScript-only syntax (type annotations, `as`, interfaces) will fail. " +
-    "The following async functions are available inside the sandbox:\n\n" +
-    "  readFile(path)                    → read_file tool\n" +
-    "  writeFile(path, content)          → write_file tool\n" +
-    "  editFile(path, oldStr, newStr)    → edit_file tool\n" +
-    "  bash(command, timeout_ms?)        → bash tool\n" +
-    "  grep(pattern, path?)              → grep tool\n" +
-    "  glob(pattern)                     → glob tool\n" +
-    "  ls(path?)                         → ls tool\n\n" +
-    "Each call still enforces the OS sandbox and path guard, but in-code calls " +
-    "do NOT re-run the interactive permission prompt or hooks — this tool is " +
-    "execute-tier and only offered in `agent` mode, where broad execute is " +
-    "already granted. console.log / console.error output is captured and " +
-    "returned. The value of the last expression (or `return` value at top " +
-    "level) is included in the result; large output spills to an artifact " +
-    "(retrieve any slice with read_artifact).\n\n" +
-    "When to use: multi-step operations that benefit from control flow " +
-    "(loops, conditionals, string manipulation) — e.g. read several files, " +
-    "transform content, write results. When NOT to use: single tool calls " +
-    "(use the dedicated tools directly).",
+    "Run plain JavaScript (no TypeScript) in a sandbox with async helpers: " +
+    "readFile, writeFile, editFile, bash, grep, glob, ls. " +
+    "OS sandbox/path guard still apply; no per-call permission prompts (agent mode only). " +
+    "Use for multi-step control flow; prefer dedicated tools for a single call. " +
+    "Large output spills to an artifact (read_artifact).",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

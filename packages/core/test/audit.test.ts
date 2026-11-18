@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuditLogger, readAuditLog, type AuditRecord } from "../src/audit.js";
+import { AuditLogger, readAuditLog, type AuditRecord } from "../src/telemetry/audit.js";
 import type { Event } from "../src/types.js";
 
 let dir: string;

@@ -1,4 +1,4 @@
-// Mid-stream steering (B1): a user correction that arrives while the model is
+// Mid-stream steering: a user correction that arrives while the model is
 // still emitting a turn cuts the provider stream at a safe boundary (before any
 // tool call), keeps the partial text, and re-samples with the correction as a
 // user message — all within the same prompt, without marking the run cancelled.
@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { runAgent } from "../src/agent.js";
-import type { AgentDeps } from "../src/agent.js";
+import { runAgent } from "../src/agent/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type { ChatProvider, StreamChatOptions, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 
@@ -65,7 +65,7 @@ function deps(cwd: string, provider: ChatProvider, extra: Partial<AgentDeps> = {
   };
 }
 
-describe("runAgent mid-stream steering (B1)", () => {
+describe("runAgent mid-stream steering", () => {
   it("cuts the stream on a pending user steer, keeps partial text, re-samples with the correction", async () => {
     const dir = mkdtempSync(join(tmpdir(), "midsteer-"));
     const emitted: Event[] = [];

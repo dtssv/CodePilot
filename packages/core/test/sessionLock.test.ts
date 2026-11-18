@@ -12,11 +12,11 @@ import {
   liveSessionLockOwner,
   sessionLockPath,
   SessionLockedError,
-} from "../src/sessionLock.js";
-import { SESSIONS_DIR, sessionPath } from "../src/session-utils.js";
+} from "../src/session/sessionLock.js";
+import { SESSIONS_DIR, sessionPath } from "../src/session/session-utils.js";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { Session } from "../src/session.js";
+import { Session } from "../src/session/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 

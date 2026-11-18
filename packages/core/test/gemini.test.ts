@@ -35,6 +35,31 @@ async function collect(stream: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 describe("GeminiProvider streaming", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("honours a custom gateway baseURL and request headers", async () => {
+    let captured: { url: string; headers: Record<string, string> } | undefined;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      captured = { url, headers: init.headers as Record<string, string> };
+      return sseResponse([
+        chunk({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }),
+      ]);
+    });
+    const p = new GeminiProvider({
+      apiKey: "k",
+      baseURL: "https://gateway.example/inference/google/v1beta",
+      headers: { "X-Gateway": "1" },
+    });
+    await collect(
+      p.stream({
+        model: "gemini-2.5-flash",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    );
+    expect(captured?.url).toBe(
+      "https://gateway.example/inference/google/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=k",
+    );
+    expect(captured?.headers["X-Gateway"]).toBe("1");
+  });
+
   it("sends system instruction + tools and parses text, tool calls and usage", async () => {
     let captured: { url: string; body: Record<string, unknown> } | undefined;
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {

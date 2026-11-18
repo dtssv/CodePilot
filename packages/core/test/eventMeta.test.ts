@@ -3,10 +3,10 @@ import {
   CORE_VERSION,
   linkIdForEvent,
   stampEventMeta,
-} from "../src/eventMeta.js";
+} from "../src/telemetry/eventMeta.js";
 import type { Event } from "../src/types.js";
-import { compactTranscriptToProviderMessages } from "../src/agent-messages.js";
-import { renderMarkdownTranscript } from "../src/session-utils.js";
+import { compactTranscriptToProviderMessages } from "../src/agent/agent-messages.js";
+import { renderMarkdownTranscript } from "../src/session/session-utils.js";
 
 describe("eventMeta", () => {
   it("stamps cwd / parent / version onto events", () => {

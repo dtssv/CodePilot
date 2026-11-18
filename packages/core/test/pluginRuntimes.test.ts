@@ -7,8 +7,8 @@ import {
   discoverPlugins,
   mergePluginConfig,
   loadPluginRuntimes,
-} from "../src/plugins.js";
-import { RuntimeRegistry, type AgentRuntime } from "../src/runtime.js";
+} from "../src/plugins/plugins.js";
+import { RuntimeRegistry, type AgentRuntime } from "../src/agent/runtime.js";
 
 let base: string;
 let projPlugins: string;

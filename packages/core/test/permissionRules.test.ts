@@ -9,8 +9,8 @@ import {
   matchRule,
   persistRule,
   stripLeadingCd,
-} from "../src/permissions.js";
-import { resolveSandbox } from "../src/sandbox.js";
+} from "../src/permissions/permissions.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolDef } from "../src/tools/types.js";
 import { z } from "zod";
 

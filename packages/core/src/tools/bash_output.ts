@@ -18,8 +18,9 @@ const schema = z.object({
 export const bashOutputTool: ToolDef<typeof schema> = {
   name: "bash_output",
   description:
-    "Status + log tail for a background `bash` job (`job_id`). Poll with small " +
-    "`tail` while waiting; larger `tail` when diagnosing.",
+    "Status + log tail for a background `bash` job (`job_id`). Poll sparingly with a small " +
+    "`tail` — between polls prefer other independent work; larger `tail` when diagnosing. " +
+    "Do not tight-loop sleep/poll.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

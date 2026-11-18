@@ -22,8 +22,9 @@ const schema = z.object({
 export const globTool: ToolDef<typeof schema> = {
   name: "glob",
   description:
-    "Find files by glob (e.g. `src/**/*.ts`). Skips node_modules/.git/dist. " +
-    "Use `grep` for contents, `ls` for one directory.",
+    "Find files by glob (e.g. `src/**/*.ts`). Prefer over shell `find`. " +
+    "Skips node_modules/.git/dist. Use `grep` for contents, `ls` for one directory. " +
+    "Safe to call in parallel with `grep`/`read_file`/`bash(test)`.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {

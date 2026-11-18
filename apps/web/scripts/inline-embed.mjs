@@ -32,6 +32,18 @@ html = html.replace(/<script\s+type="module"[^>]*src="([^"]+)"[^>]*><\/script>\s
   return "";
 });
 
+// Idempotent: a prior run (or a host that already inlined) leaves <style> /
+// <script type="module"> without href/src. Treat that as done.
+const alreadyInlined =
+  styles.length === 0 &&
+  scripts.length === 0 &&
+  /<style[\s>]/.test(html) &&
+  /<script\s+type="module">/.test(html);
+if (alreadyInlined) {
+  rmSync(join(dir, "assets"), { recursive: true, force: true });
+  console.log(`inline-embed: ${indexPath} already inlined (${(html.length / 1024).toFixed(0)} KiB)`);
+  process.exit(0);
+}
 if (styles.length === 0 || scripts.length === 0) {
   throw new Error("inline-embed: expected one stylesheet and one module script in dist-embed/index.html");
 }

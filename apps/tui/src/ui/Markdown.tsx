@@ -327,6 +327,7 @@ function MarkdownBlocks({ text, dimColor }: { text: string; dimColor?: boolean }
                 borderColor={palette.edge}
                 flexDirection="column"
                 paddingX={1}
+                alignSelf="flex-start"
               >
                 {(b.lang ?? "") !== "" ? (
                   <Text color={palette.faint}>

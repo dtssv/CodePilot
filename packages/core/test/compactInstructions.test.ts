@@ -12,10 +12,10 @@ import {
   composeSummaryPrompt,
   mergeCompactInstructions,
   SUMMARY_SYSTEM_PROMPT,
-} from "../src/compaction.js";
-import { extractCompactInstructions } from "../src/memory.js";
-import { interpretDecision } from "../src/hooks-handlers.js";
-import { HookEngine } from "../src/hooks.js";
+} from "../src/compaction/compaction.js";
+import { extractCompactInstructions } from "../src/memory/memory.js";
+import { interpretDecision } from "../src/hooks/hooks-handlers.js";
+import { HookEngine } from "../src/hooks/hooks.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
 import type { ChatProvider } from "../src/providers/types.js";
 

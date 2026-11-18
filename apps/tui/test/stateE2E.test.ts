@@ -132,7 +132,7 @@ describe("TUI state machine — end-to-end session lifecycle", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0]!.tool.name).toBe("bash");
     expect(tools[0]!.tool.status).toBe("running");
-    expect(tools[0]!.tool.inputSummary).toContain("command=ls");
+    expect(tools[0]!.tool.inputSummary).toContain("ls");
 
  // 7. Tool result.
     state = reducer(state, {

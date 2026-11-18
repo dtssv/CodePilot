@@ -14,12 +14,12 @@ const { acquireMock } = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock("../src/mcp-pool.js", () => ({
+vi.mock("../src/mcp/mcp-pool.js", () => ({
   acquireSharedMcp: acquireMock,
   releaseSharedMcp: async () => {},
 }));
 
-import { startMcp, type SessionMcpHost } from "../src/session-mcp.js";
+import { startMcp, type SessionMcpHost } from "../src/mcp/sessionBind.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import type { CodepilotConfig } from "../src/types.js";
 

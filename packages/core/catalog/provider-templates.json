@@ -127,19 +127,37 @@
     },
     {
       "id": "custom-openai",
-      "displayName": "Custom (OpenAI protocol)",
+      "displayName": "Custom (OpenAI Chat Completions)",
       "provider": "openai",
+      "apiStyle": "chat",
       "models": [],
       "requiresBaseURL": true,
-      "description": "Any Chat Completions gateway. Requires a baseURL."
+      "description": "OpenAI Chat Completions (/v1/chat/completions). Requires a baseURL; optional custom headers."
+    },
+    {
+      "id": "custom-openai-responses",
+      "displayName": "Custom (OpenAI Responses)",
+      "provider": "openai",
+      "apiStyle": "responses",
+      "models": [],
+      "requiresBaseURL": true,
+      "description": "OpenAI Responses API (/v1/responses). Requires a baseURL; optional custom headers."
     },
     {
       "id": "custom-anthropic",
-      "displayName": "Custom (Claude protocol)",
+      "displayName": "Custom (Anthropic Messages)",
       "provider": "anthropic",
       "models": [],
       "requiresBaseURL": true,
-      "description": "Any Anthropic Messages-compatible gateway. Requires a baseURL."
+      "description": "Anthropic Messages (/v1/messages). Requires a baseURL; optional custom headers."
+    },
+    {
+      "id": "custom-gemini",
+      "displayName": "Custom (Google Gemini)",
+      "provider": "gemini",
+      "models": [],
+      "requiresBaseURL": true,
+      "description": "Gemini generateContent (/v1beta/models/<model>:streamGenerateContent). Requires a baseURL."
     },
     {
       "id": "azure-openai",

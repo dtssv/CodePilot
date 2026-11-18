@@ -52,16 +52,8 @@ const schema = z.object({
 export const writeStdinTool: ToolDef<typeof schema> = {
   name: "write_stdin",
   description:
-    "Send text to the stdin of a background job started with " +
-    "`bash(run_in_background: true)`. This lets you interact with running " +
-    "REPLs, dev servers, and CLIs that read stdin — e.g. answer a Y/N prompt, " +
-    "type a command into a running shell, or pipe data into a process.\n\n" +
-    "When to use: a background process is waiting for input (its log shows a " +
-    "prompt or it's blocked on a read), and you need to send a response.\n" +
-    "When NOT to use: for one-shot commands — use `bash` directly. For reading " +
-    "output, use `bash_output`.\n\n" +
-    "A newline is appended automatically (most tools expect it). Set `raw: true` " +
-    "to send exact bytes without a trailing newline.",
+    "Write to stdin of a background `bash` job (`job_id`). Appends a newline " +
+    "unless `raw: true`. For one-shot commands use `bash`; for logs use `bash_output`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {

@@ -10,6 +10,8 @@ import { createConnection } from "node:net";
 import {
   readLiveServeInfo,
   serveInfoWsUrl,
+  isDaemonBinaryStale,
+  clearServeInfo,
   type ServeInfo,
 } from "./serve-info.js";
 
@@ -90,7 +92,27 @@ export async function discoverOrSpawnDaemon(
   opts: DiscoverOrSpawnOptions,
 ): Promise<DiscoverOrSpawnResult> {
   const existing = await readLiveServeInfo();
-  if (existing) return { info: existing, owned: null };
+  if (existing) {
+    // Install/upgrade replaced ~/.codepilot/bin/codepilot under a live daemon —
+    // recycle so clients pick up the new binary (schema, idle-exit, …).
+    if (await isDaemonBinaryStale(existing)) {
+      try {
+        process.kill(existing.pid);
+      } catch {
+        /* already gone */
+      }
+      await clearServeInfo();
+      const port = portFromArgs(opts.args);
+      if (port !== null) {
+        for (let i = 0; i < 40; i++) {
+          if (!(await portInUse(port))) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+    } else {
+      return { info: existing, owned: null };
+    }
+  }
 
   // Port held but no (loopback) serve.json: a live daemon is almost certainly
   // there but momentarily undiscoverable (e.g. its lockfile was cleared by a
@@ -100,10 +122,30 @@ export async function discoverOrSpawnDaemon(
   const port = portFromArgs(opts.args);
   if (port !== null && (await portInUse(port))) {
     const republished = await waitForLiveServeInfo(opts.waitMs ?? 15_000);
-    if (republished) return { info: republished, owned: null };
+    if (republished) {
+      if (!(await isDaemonBinaryStale(republished))) {
+        return { info: republished, owned: null };
+      }
+      try {
+        process.kill(republished.pid);
+      } catch {
+        /* ignore */
+      }
+      await clearServeInfo();
+      for (let i = 0; i < 40; i++) {
+        if (!(await portInUse(port))) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
   }
 
-  const spawner = opts.spawner ?? spawn;
+  // Default spawner: `detached: true` makes the child a new session leader via
+  // setsid(2) on Unix (Node/libuv) so it survives TUI/Desktop/IDE parent exit.
+  // Do not wrap with the `setsid` CLI — it is Linux-only (ENOENT on macOS).
+  // Tests pass a custom `spawner` and keep the plain spawn path.
+  const defaultSpawner: Spawner = (command, args, options) =>
+    spawn(command, args, { ...options, detached: true });
+  const spawner = opts.spawner ?? defaultSpawner;
   const child = spawner(opts.command, [...opts.args], {
     cwd: opts.cwd,
     env: opts.env,
@@ -117,8 +159,8 @@ export async function discoverOrSpawnDaemon(
   } catch {
     /* ignore */
   }
-  // Detach so the extension host exit does not take the shared daemon with it
-  // while other clients may still be connected. Idle grace stops it later.
+  // Detach so one client exiting does not take the shared daemon with it
+  // while other UIs may still be connected. Idle grace stops it later.
   try {
     child.unref();
   } catch {

@@ -1,7 +1,7 @@
 // OpenAI provider request-shape tests (fetch stubbed, no real API calls).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenAIProvider } from "../src/providers/openai.js";
+import { mapOpenAIUsage, OpenAIProvider } from "../src/providers/openai.js";
 import type { StreamEvent } from "../src/providers/types.js";
 
 function sseResponse(frames: string[]): Response {
@@ -76,6 +76,46 @@ describe("OpenAIProvider request shape", () => {
     expect(url).toBe("https://example.com/v1/chat/completions");
     expect(headers?.authorization).toBe("Bearer k");
     expect(headers && "api-key" in headers).toBe(false);
+  });
+
+  it("merges custom headers but keeps Bearer auth winning", async () => {
+    let headers: Record<string, string> | undefined;
+    vi.stubGlobal("fetch", async (_u: string, init: RequestInit) => {
+      headers = init.headers as Record<string, string>;
+      return sseResponse(DONE);
+    });
+    const p = new OpenAIProvider({
+      apiKey: "k",
+      baseURL: "https://example.com/inference/openai/v1",
+      headers: {
+        "X-Title": "CodePilot",
+        Authorization: "Bearer overwritten",
+      },
+    });
+    await collect(
+      p.stream({ model: "gpt-4o", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    );
+    expect(headers?.["X-Title"]).toBe("CodePilot");
+    expect(headers?.authorization).toBe("Bearer k");
+  });
+
+  it("posts Responses dialect under an inference gateway baseURL", async () => {
+    let url: string | undefined;
+    vi.stubGlobal("fetch", async (u: string) => {
+      url = u;
+      return sseResponse([
+        'event: response.completed\ndata: {"response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n',
+      ]);
+    });
+    const p = new OpenAIProvider({
+      apiStyle: "responses",
+      apiKey: "k",
+      baseURL: "https://gateway.example/inference/openai/v1",
+    });
+    await collect(
+      p.stream({ model: "gpt-5", messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }),
+    );
+    expect(url).toBe("https://gateway.example/inference/openai/v1/responses");
   });
 
   it("emits response_format json_schema when responseFormat is set", async () => {
@@ -441,5 +481,34 @@ describe("OpenAIProvider Responses dialect", () => {
       arguments: JSON.stringify({ path: "a.ts" }),
     });
     expect(input).toContainEqual({ type: "function_call_output", call_id: "call_1", output: "contents" });
+  });
+});
+
+describe("mapOpenAIUsage", () => {
+  it("maps chat + DeepSeek + Anthropic-gateway cache fields", () => {
+    expect(
+      mapOpenAIUsage({
+        prompt_tokens: 100,
+        completion_tokens: 10,
+        prompt_tokens_details: { cached_tokens: 80 },
+      }),
+    ).toMatchObject({ input: 100, output: 10, cacheRead: 80 });
+
+    expect(
+      mapOpenAIUsage({
+        prompt_tokens: 50,
+        completion_tokens: 5,
+        prompt_cache_hit_tokens: 40,
+      }),
+    ).toMatchObject({ input: 50, output: 5, cacheRead: 40 });
+
+    expect(
+      mapOpenAIUsage({
+        input_tokens: 20,
+        output_tokens: 3,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 200,
+      }),
+    ).toMatchObject({ input: 20, output: 3, cacheRead: 1000, cacheWrite: 200 });
   });
 });

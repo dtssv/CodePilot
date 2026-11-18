@@ -5,7 +5,7 @@ import {
   cleanCompletion,
   COMPLETION_SYSTEM_PROMPT,
   COMPLETION_MAX_LINES,
-} from "../src/completion.js";
+} from "../src/agent/completion.js";
 
 describe("decideCompletionModel", () => {
   it("runs on the small model when it is distinct from the main model", () => {

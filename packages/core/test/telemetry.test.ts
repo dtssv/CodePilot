@@ -8,7 +8,7 @@ import {
   setTracer,
   type Span,
   type TelemetryConfig,
-} from "../src/telemetry.js";
+} from "../src/telemetry/telemetry.js";
 
 function enabledConfig(endpoint: string, extra: Partial<TelemetryConfig> = {}): TelemetryConfig {
   return {
@@ -402,7 +402,7 @@ describe("flush() OTLP export", () => {
   });
 
   it("Session.dispose flushes buffered spans so a fast exit never drops the last batch", async () => {
-    const { createSession } = await import("../src/session.js");
+    const { createSession } = await import("../src/session/session.js");
     const tracer = new Tracer(enabledConfig(endpoint));
     setTracer(tracer);
     try {

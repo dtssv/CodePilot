@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SubagentStore } from "../src/subagentStore.js";
+import { SubagentStore } from "../src/subagent/subagentStore.js";
 import type { Event } from "../src/types.js";
 
 const msg = (id: string, text: string): Event => ({

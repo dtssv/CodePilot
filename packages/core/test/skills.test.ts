@@ -12,7 +12,7 @@ import {
   BUILTIN_SKILLS,
   defaultBuiltinSkillsDir,
   type Skill,
-} from "../src/skills.js";
+} from "../src/skills/skills.js";
 import { skillTool, StaticSkillStore, createSkillTool } from "../src/tools/skill.js";
 
 function writeSkill(
@@ -294,6 +294,11 @@ describe("skillsPromptSection", () => {
     expect(out).toMatch(/Commit the current change/);
     expect(out).toMatch(/when: user says commit/);
     expect(out).toMatch(/\[tools: bash\]/);
+    expect(out).toMatch(/append/i);
+    expect(out).toMatch(/single\s+\*\*best\*\*|single best/i);
+    expect(out).toMatch(/no match → do not load/i);
+    expect(out).toMatch(/Core Safety/);
+    expect(out).not.toMatch(/replaces the abstract description/);
   });
 
   it("omits user-invocable-only skills from the model-facing catalog", () => {

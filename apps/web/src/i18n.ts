@@ -43,14 +43,32 @@ const ZH: Record<string, string> = {
   "Adds another key / endpoint": "添加另一个密钥 / 端点",
   "Select a provider on the left.": "请从左侧选择服务商。",
   "Select an endpoint on the left, or add a new one.": "请从左侧选择端点，或添加新端点。",
+  "Select an endpoint above, or add a new one.": "请从上方选择端点，或添加新端点。",
+  "Saved to ~/.codepilot/config.json": "保存到 ~/.codepilot/config.json",
   "No endpoints yet — add one below.": "还没有端点 — 点下方添加。",
   "New endpoint": "新端点",
   "Custom OpenAI-compatible": "自定义 OpenAI 兼容",
-  "Custom (OpenAI protocol)": "自定义（OpenAI 协议）",
-  "Custom (Claude protocol)": "自定义（Claude 协议）",
+  "Custom (OpenAI protocol)": "自定义（OpenAI Chat Completions）",
+  "Custom (Claude protocol)": "自定义（Anthropic Messages）",
+  "Custom (OpenAI Chat Completions)": "自定义（OpenAI Chat Completions）",
+  "Custom (OpenAI Responses)": "自定义（OpenAI Responses）",
+  "Custom (Anthropic Messages)": "自定义（Anthropic Messages）",
+  "Custom (Google Gemini)": "自定义（Google Gemini）",
   Protocol: "协议",
-  "OpenAI protocol": "OpenAI 协议",
-  "Claude protocol": "Claude 协议",
+  "OpenAI protocol": "OpenAI Chat Completions",
+  "Claude protocol": "Anthropic Messages",
+  "OpenAI Chat Completions": "OpenAI Chat Completions",
+  "OpenAI Responses": "OpenAI Responses",
+  "Anthropic Messages": "Anthropic Messages",
+  "Google Gemini": "Google Gemini",
+  "GitHub Copilot": "GitHub Copilot",
+  "Azure OpenAI": "Azure OpenAI",
+  baseURL: "Base URL",
+  apiKey: "API Key",
+  "Request headers": "请求头",
+  "Add header": "添加请求头",
+  "Optional. Merged into every request (auth still wins).":
+    "可选。会合并进每次请求（鉴权头仍以服务商为准）。",
   "Endpoint is built-in — no baseURL needed.": "内置端点，无需填写 baseURL。",
   "Paste API key": "粘贴 API Key",
   "Fetch models": "获取模型列表",
@@ -109,11 +127,17 @@ const ZH: Record<string, string> = {
   Mode: "模式",
   TTFT: "首 Token",
   Duration: "耗时",
+  "Total tokens": "总 tokens",
   "Input tokens": "输入 tokens",
   "Output tokens": "输出 tokens",
+  Cache: "缓存",
+  "Cache ratio": "缓存占比",
   "Cache read": "缓存读",
   "Cache write": "缓存写",
   Cost: "费用",
+  in: "输入",
+  out: "输出",
+  cache: "缓存",
   Input: "输入",
   "Show result": "显示结果",
   "Hide result": "隐藏结果",
@@ -127,6 +151,9 @@ const ZH: Record<string, string> = {
   "Remote control": "远程控制",
   "Open a workspace to start chatting.": "打开工作区后开始对话。",
   "Open a workspace folder to start chatting.": "打开工作区后开始对话。",
+  "Open a workspace folder first.": "请先打开工作区文件夹。",
+  "Switch workspace folder": "切换工作区目录",
+  "Workspace folders": "工作区目录",
   "Sessions are tied to a workspace. Open one or more from the sidebar.":
     "会话与工作区绑定。可在侧栏打开一个或多个工作区。",
   "Sessions are tied to a folder. Open one or more workspaces from the sidebar.":
@@ -506,6 +533,7 @@ const ZH: Record<string, string> = {
   "Show less": "收起",
   Created: "新建",
   Edited: "修改",
+  Deleted: "删除",
   "Read": "读取",
   "Searched": "搜索",
   "Ran command": "运行命令",
@@ -579,6 +607,9 @@ const ZH: Record<string, string> = {
   "Side effects": "副作用",
   "No side effects (skills only)": "无副作用（仅技能）",
   "restart the session to activate it.": "重启会话以启用。",
+  Approve: "批准",
+  Approved: "已批准",
+  "Hooks / MCP / runtime disabled until you approve this plugin.": "钩子 / MCP / 运行时在你批准该插件前不会加载。",
   "No marketplace entries available.": "暂无可用的市场条目。",
   "No matching plugins.": "没有匹配的插件。",
   Current: "当前版本",
@@ -686,6 +717,15 @@ function detectLocale(): Locale {
     if (forced) return forced;
     const saved = readSavedLocale();
     if (saved) return saved;
+    // IDE webview often has navigator.language=en even when the host UI is
+    // Chinese — prefer the bootstrap locale injected by the extension/IDE.
+    const hostLocale =
+      typeof window !== "undefined"
+        ? normalizeLocale(
+            (window as Window & { __codepilotHost?: { locale?: string } }).__codepilotHost?.locale,
+          )
+        : undefined;
+    if (hostLocale) return hostLocale;
     return normalizeLocale(navigator.language) ?? "en";
   } catch {
     return "en";
@@ -752,6 +792,8 @@ export function setLocale(
 /** Apply IDE/host locale only when the user has not chosen a language yet. */
 export function applyHostLocale(locale: string | undefined): void {
   if (hasSavedLocale()) return;
+  // Prefer the host language even if detectLocale already picked navigator.en
+  // inside an IDE webview (Electron often reports en-US there).
   setLocale(locale, { persist: false });
 }
 

@@ -2,7 +2,7 @@
 // by-category breakdown with per-category proportions.
 
 import { describe, expect, it } from "vitest";
-import { formatContext, type ContextSummary } from "../src/management.js";
+import { formatContext, type ContextSummary } from "../src/agent/management.js";
 
 function base(): ContextSummary {
   return {

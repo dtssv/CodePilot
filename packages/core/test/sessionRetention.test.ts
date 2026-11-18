@@ -27,7 +27,7 @@ import {
   exportSession,
   setSessionPinned,
   stateSidecarPath,
-} from "../src/session-utils.js";
+} from "../src/session/session-utils.js";
 import {
   freezeSession,
   thawSession,
@@ -35,8 +35,8 @@ import {
   sweepSessionRetention,
   compressColdSessions,
   readColdSessionText,
-} from "../src/sessionCompression.js";
-import { Session } from "../src/session.js";
+} from "../src/session/sessionCompression.js";
+import { Session } from "../src/session/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { CodepilotConfig, Event } from "../src/types.js";
 

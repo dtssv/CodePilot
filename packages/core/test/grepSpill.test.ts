@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { grepTool, parseRipgrep } from "../src/tools/grep.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 describe("grep tool large-output spill", () => {
@@ -97,6 +97,17 @@ describe("grep tool include / path", () => {
     expect(inDir.content).toContain("notes.md:1");
     const inFile = await grepTool.execute({ pattern: "subscribe", path: "packages/a/src/server.ts" }, ctx());
     expect(inFile.content).toContain("server.ts:1");
+  });
+});
+
+describe("parseRipgrep", () => {
+  it("splits a merged context group into one hit per match, like the walker", () => {
+    // rg merges the overlapping windows of lines 1 and 3 into one group.
+    const out = "a.txt:1:needle one\na.txt-2-plain\na.txt:3:needle two\n--\nb.txt:9:needle\n";
+    const hits = parseRipgrep(out, "/base", 1, 50);
+    expect(hits.map((h) => `${h.file}:${h.line + 1}`)).toEqual(["a.txt:1", "a.txt:3", "b.txt:9"]);
+    expect(hits[0]!.text).toBe("needle one\nplain");
+    expect(hits[1]!.text).toBe("plain\nneedle two");
   });
 });
 

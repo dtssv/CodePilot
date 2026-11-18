@@ -3,8 +3,8 @@ import {
   normalizeMcpToolName,
   buildMcpToolNameMap,
   MCP_TOOL_NAME_MAX_LENGTH,
-} from "../src/mcp.js";
-import type { McpToolDescriptor } from "../src/mcp-types.js";
+} from "../src/mcp/mcp.js";
+import type { McpToolDescriptor } from "../src/mcp/mcp-types.js";
 
 // normalizeMcpToolName exists solely to keep MCP tool names within the
 // provider function-name limit (64 chars) while staying unique. It had no

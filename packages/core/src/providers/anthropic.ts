@@ -33,6 +33,8 @@ export interface AnthropicProviderOptions {
    * breakpoint and sends the extended-cache-ttl beta header; endpoints that
    * don't support it ignore the field and fall back to 5m. */
   cacheTtl?: "5m" | "1h";
+  /** Extra HTTP headers merged into every request (auth headers still win). */
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -88,6 +90,7 @@ export class AnthropicProvider implements ChatProvider {
    * ephemeral form (API default 5m). */
   private readonly cacheControl: { type: "ephemeral"; ttl?: "1h" };
   private readonly extendedTtl: boolean;
+  private readonly extraHeaders: Record<string, string>;
 
   constructor(opts: AnthropicProviderOptions = {}) {
     const key = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -98,6 +101,7 @@ export class AnthropicProvider implements ChatProvider {
     }
     this.apiKey = key;
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.extraHeaders = { ...(opts.headers ?? {}) };
     this.defaultModel = opts.defaultModel ?? "claude-sonnet-4-5";
     this.smallModel = opts.smallModel ?? "claude-haiku-4-5";
     this.enableCaching = opts.enableCaching ?? true;
@@ -119,15 +123,18 @@ export class AnthropicProvider implements ChatProvider {
       : baseMaxTokens;
 
     // Budgeted prompt-cache breakpoint placement: Anthropic allows up to 4
-    // `cache_control` breakpoints. Fill them by priority — system block, last
-    // tool, then the stable conversation-history tail — counting the first two
-    // so history gets the remainder. Never mark the volatile runtime_context /
-    // current turn. Count is reported as usage telemetry below.
+    // `cache_control` breakpoints. Prefer multi-block system (static policy +
+    // stable env/memory) so a memory-index change does not invalidate the
+    // policy prefix first (stable). Then last tool, then history.
+    // Never mark the volatile runtime_context / current turn.
     const BREAKPOINT_CAP = 4;
-    const systemCached = !!opts.systemPrompt && this.enableCaching;
+    const systemParts = (opts.systemPromptBlocks?.filter((p) => p.trim().length > 0)
+      ?? (opts.systemPrompt ? [opts.systemPrompt] : []));
+    const systemCached = systemParts.length > 0 && this.enableCaching;
+    const systemBreakpoints = systemCached ? systemParts.length : 0;
     const toolCached =
       !!opts.tools && opts.tools.length > 0 && this.enableCaching && this.cacheControlOnTools;
-    const fixedBreakpoints = (systemCached ? 1 : 0) + (toolCached ? 1 : 0);
+    const fixedBreakpoints = systemBreakpoints + (toolCached ? 1 : 0);
     const historyBudget = Math.max(0, BREAKPOINT_CAP - fixedBreakpoints);
 
     const anthropicMessages = mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage));
@@ -148,17 +155,17 @@ export class AnthropicProvider implements ChatProvider {
     if (thinkingOn) {
       body.thinking = { type: "enabled", budget_tokens: budget };
     }
-    if (opts.systemPrompt) {
+    if (systemParts.length > 0) {
       if (this.enableCaching) {
-        body.system = [
-          {
-            type: "text",
-            text: opts.systemPrompt,
-            cache_control: this.cacheControl,
-          },
-        ];
+        body.system = systemParts.map((text) => ({
+          type: "text",
+          text,
+          cache_control: this.cacheControl,
+        }));
+      } else if (systemParts.length === 1) {
+        body.system = systemParts[0];
       } else {
-        body.system = opts.systemPrompt;
+        body.system = systemParts.map((text) => ({ type: "text", text }));
       }
     }
     if (opts.tools && opts.tools.length > 0) {
@@ -176,11 +183,13 @@ export class AnthropicProvider implements ChatProvider {
     }
 
     const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/messages`;
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      "x-api-key": this.apiKey,
-      "anthropic-version": API_VERSION,
-    };
+    const headers: Record<string, string> = { ...this.extraHeaders };
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === "x-api-key") delete headers[k];
+    }
+    headers["content-type"] = "application/json";
+    headers["anthropic-version"] = API_VERSION;
+    headers["x-api-key"] = this.apiKey;
     if (this.enableCaching) {
       headers["anthropic-beta"] = BETA_PROMPT_CACHING;
       if (this.extendedTtl) {
@@ -360,15 +369,18 @@ export class AnthropicProvider implements ChatProvider {
       }));
     }
     const url = `${this.baseURL}${this.baseURL.endsWith("/v1") ? "" : "/v1"}/messages/count_tokens`;
+    const countHeaders: Record<string, string> = { ...this.extraHeaders };
+    for (const k of Object.keys(countHeaders)) {
+      if (k.toLowerCase() === "x-api-key") delete countHeaders[k];
+    }
+    countHeaders["content-type"] = "application/json";
+    countHeaders["anthropic-version"] = API_VERSION;
+    countHeaders["x-api-key"] = this.apiKey;
     const res = await fetchWithRetry(
       url,
       {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": this.apiKey,
-          "anthropic-version": API_VERSION,
-        },
+        headers: countHeaders,
         body: JSON.stringify(body),
         signal: opts.signal,
       },

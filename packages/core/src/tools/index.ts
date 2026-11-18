@@ -21,7 +21,7 @@ export { writeFileTool } from "./write_file.js";
 export { editFileTool, applyEdit } from "./edit_file.js";
 export type { EditOutcome } from "./edit_file.js";
 export { applyPatchTool, parsePatch } from "./apply_patch.js";
-export { diagnosticsTool } from "./diagnostics.js";
+export { diagnosticsTool, chainDiagnostics } from "./diagnostics.js";
 export type { Diagnostic, DiagnosticsProvider } from "./diagnostics.js";
 export { globTool } from "./glob.js";
 export { grepTool } from "./grep.js";

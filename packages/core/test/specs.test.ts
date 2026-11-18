@@ -12,7 +12,7 @@ import {
   parseAcceptanceCriteria,
   parseTasks,
   specCoverage,
-} from "../src/specs.js";
+} from "../src/workspace/specs.js";
 
 describe("specsDir", () => {
   it("defaults to <cwd>/.codepilot/specs", () => {

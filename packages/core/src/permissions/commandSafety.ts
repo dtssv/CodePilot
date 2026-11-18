@@ -1,0 +1,114 @@
+// Shell command structure for permission decisions.
+//
+// Splits a command into the simple commands it runs so permission rules and the
+// read-only allowlist apply to each one, and flags constructs whose effect
+// cannot be judged from the text (command substitution, redirection writes).
+
+import { parseShell, type ShellParse } from "../sandbox/shellParse.js";
+
+/**
+ * `segments`: top-level simple commands (allow rules must cover each one).
+ * `commands`: everything that may run, nested and unwrapped (deny/ask match these).
+ * `opaque`: a substitution, a file-writing redirection or unbalanced quoting.
+ */
+export type ParsedCommand = ShellParse;
+
+export function parseCommand(command: string): ParsedCommand {
+  return parseShell(command);
+}
+
+/**
+ * File paths a command writes to via output redirection (`>`, `>>`, `&>`, `n>`).
+ * Harmless targets (`/dev/null`, fd duplication) and substitution redirects are
+ * skipped; quotes stripped. Best-effort — variable/substitution paths unresolvable.
+ */
+export function extractRedirectWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+  // Match an optional leading fd, the redirect operator, optional whitespace,
+  // then the target token (a quoted string or a run of non-space, non-operator
+  // characters). `&>`/`&>>` and plain `>`/`>>` both write a file.
+  const re = /(?:^|[\s;&|(])(?:\d*&?)?>{1,2}\s*('[^']*'|"[^"]*"|[^\s;&|<>()]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(command)) !== null) {
+    let raw = m[1]!;
+    raw = raw.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+    if (raw.length === 0) continue;
+    // Skip the harmless sinks and fd duplication (`>&1`, `2>&1` — captured as
+    // a bare digit here) / `/dev/null` / `/dev/stdout` style device writes.
+    if (/^\d+$/.test(raw)) continue;
+    if (/^\/dev\/(null|stdout|stderr|fd\/\d+)$/.test(raw)) continue;
+    // A target containing an unexpanded variable or substitution is not a
+    // resolvable literal path — don't guess.
+    if (/[$`]/.test(raw)) continue;
+    targets.push(raw);
+  }
+  return targets;
+}
+
+/** Programs that only read state, whatever their arguments (barring the
+ * per-program exceptions in {@link isReadOnlySegment}). */
+const READ_ONLY_PROGRAMS = new Set([
+  "cat", "head", "tail", "less", "wc", "nl", "ls", "tree", "pwd", "cd", "echo", "printf",
+  "rg", "grep", "egrep", "fgrep", "ag", "find", "fd", "which", "type", "whoami", "id",
+  "file", "stat", "du", "df", "sort", "uniq", "cut", "tr", "column", "comm", "diff", "cmp",
+  "basename", "dirname", "realpath", "readlink", "date", "uname", "hostname", "uptime",
+  "true", "false", "test", "[", "[[", "jq", "md5", "md5sum", "shasum", "sha1sum", "sha256sum",
+  "ps", "lsof", "sed",
+]);
+
+const GIT_READ_ONLY = new Set([
+  "status", "diff", "log", "show", "blame", "rev-parse", "ls-files", "ls-tree", "describe",
+  "shortlog", "cat-file", "grep", "reflog", "merge-base", "rev-list", "name-rev",
+]);
+
+function words(segment: string): string[] {
+  return segment.match(/'[^']*'|"(?:\\.|[^"\\])*"|\S+/g) ?? [];
+}
+
+function unquote(w: string): string {
+  return w.replace(/^(['"])([\s\S]*)\1$/, "$2");
+}
+
+/** Whether one simple command only reads. */
+export function isReadOnlySegment(segment: string): boolean {
+  const argv = words(segment).map(unquote);
+  const prog = argv[0];
+ // `FOO=bar cmd` can change what `cmd` does (PATH, LD_PRELOAD, …).
+  if (!prog || /^[A-Za-z_][A-Za-z0-9_]*=/.test(prog)) return false;
+  const args = argv.slice(1);
+  if (prog === "git") {
+    const sub = args[0];
+    if (!sub) return false;
+    if (GIT_READ_ONLY.has(sub)) return !args.some((a) => a.startsWith("--output") || a === "--ext-diff");
+    if (sub === "branch") return args.slice(1).every((a) => /^(-a|-r|-v|-vv|--all|--list|--show-current|--remotes|--merged|--no-merged|--contains)$/.test(a));
+    if (sub === "remote") return args.slice(1).every((a) => a === "-v" || a === "show" || a === "get-url" || !a.startsWith("-"));
+    if (sub === "stash") return args[1] === "list" || args[1] === "show";
+    if (sub === "tag") return args.length === 1 || args.slice(1).every((a) => a === "-l" || a === "--list" || !a.startsWith("-"));
+    return false;
+  }
+  if (!READ_ONLY_PROGRAMS.has(prog)) return false;
+  switch (prog) {
+    case "find":
+      return !args.some((a) => /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(a));
+    case "fd":
+      return !args.some((a) => a === "-x" || a === "-X" || a.startsWith("--exec"));
+    case "sort":
+    case "tree":
+      return !args.some((a) => a === "-o" || a.startsWith("--output"));
+    case "sed":
+ // Only the `sed -n '<range>p'` read idiom; sed scripts can write (`w`)
+ // or execute (`e`), and -i edits in place.
+      return args[0] === "-n" && /^[\d,$]+p$/.test(args[1] ?? "") && !args.some((a) => a.startsWith("-i"));
+    case "rg":
+      return !args.some((a) => a === "--pre" || a.startsWith("--pre="));
+    default:
+      return true;
+  }
+}
+
+/** Every simple command in `command` only reads, and nothing is hidden in a
+ * substitution or written through a redirection. */
+export function isReadOnlyCommand(command: string): boolean {
+  const { segments, opaque } = parseCommand(command);
+  return !opaque && segments.length > 0 && segments.every(isReadOnlySegment);
+}

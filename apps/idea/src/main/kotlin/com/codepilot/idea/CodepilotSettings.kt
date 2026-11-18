@@ -74,10 +74,10 @@ class CodepilotSettingsConfigurable : Configurable {
     private val defaultModeCombo = ComboBox(CodepilotSettings.defaultModes.toTypedArray())
     private val extraArgsField = JBTextField()
     private val extraEnvArea = JTextArea(4, 40)
-    private val completionCheckbox = javax.swing.JCheckBox("Enable inline (Tab) completion")
+    private val completionCheckbox = javax.swing.JCheckBox(CodePilotBundle.message("settings.completionEnabled"))
     private var panel: JPanel? = null
 
-    override fun getDisplayName(): String = "CodePilot"
+    override fun getDisplayName(): String = CodePilotBundle.message("settings.displayName")
 
     override fun createComponent(): JPanel {
         val settings = CodepilotSettings.getInstance().state
@@ -99,19 +99,18 @@ class CodepilotSettingsConfigurable : Configurable {
         completionCheckbox.toolTipText = "Ghost-text completion as you type. Needs a lightweight `smallModel` distinct from your main chat model (e.g. a local Ollama qwen2.5-coder, or a free Groq / Gemini Flash model); otherwise it stays off."
 
         panel = FormBuilder.createFormBuilder()
-            .addLabeledComponent(JBLabel("`codepilot` executable:"), pathField, 1, false)
-            .addLabeledComponent(JBLabel("Engine mode:"), engineModeCombo, 1, false)
-            .addLabeledComponent(JBLabel("Default model:"), modelField, 1, false)
-            .addLabeledComponent(JBLabel("Permission mode:"), permissionCombo, 1, false)
-            .addLabeledComponent(JBLabel("Default collaboration mode:"), defaultModeCombo, 1, false)
-            .addLabeledComponent(JBLabel("Extra args:"), extraArgsField, 1, false)
-            .addLabeledComponent(JBLabel("Extra env (one per line):"), wrap(extraEnvArea), 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.codepilotPath")), pathField, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.engineMode")), engineModeCombo, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.model")), modelField, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.permissionMode")), permissionCombo, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.defaultMode")), defaultModeCombo, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.extraArgs")), extraArgsField, 1, false)
+            .addLabeledComponent(JBLabel(CodePilotBundle.message("settings.extraEnv")), wrap(extraEnvArea), 1, false)
             .addComponent(completionCheckbox)
             .addVerticalGap(8)
             .panel
 
- // Add a "Reset to defaults" button below.
-        val resetButton = JButton("Reset to defaults").apply {
+        val resetButton = JButton(CodePilotBundle.message("settings.reset")).apply {
             addActionListener {
                 pathField.text = "codepilot"
                 engineModeCombo.selectedItem = "shared"

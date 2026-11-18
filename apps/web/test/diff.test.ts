@@ -81,9 +81,23 @@ describe("fileChangeFromToolCall", () => {
     expect(lines[lines.length - 1]?.text).toMatch(/500 more line/);
   });
 
-  it("keeps the path for payloads it does not model", () => {
-    const change = fileChangeFromToolCall("apply_patch", { path: "src/e.ts" })!;
-    expect(change).toMatchObject({ path: "src/e.ts", operation: "patch", hunks: [] });
+  it("lists files and +/- lines from an apply_patch body", () => {
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/e.ts",
+      "@@",
+      "-old",
+      "+new",
+      "*** Add File: src/f.ts",
+      "+hello",
+      "*** End Patch",
+    ].join("\n");
+    const change = fileChangeFromToolCall("apply_patch", { patch })!;
+    expect(change.path).toBe("src/e.ts, +src/f.ts");
+    expect(change.operation).toBe("patch");
+    expect(change.added).toBe(2);
+    expect(change.removed).toBe(1);
+    expect(change.hunks[0]?.lines.some((l) => l.kind === "meta" && l.text.includes("Update File"))).toBe(true);
     const nb = fileChangeFromToolCall("notebook_edit", { notebook_path: "n.ipynb" })!;
     expect(nb.path).toBe("n.ipynb");
   });

@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { PlanStep, UsageInfo } from "@codepilot/core";
 import type { Row, ToolRow } from "../state/rows.js";
-import { CATEGORY_VERB, toolCategory, toolTarget, touchedFiles, type TouchedFile } from "../state/selectors.js";
+import {
+  deriveUsageMetrics,
+  formatCacheRatio,
+  toolTarget,
+  toolVerb,
+  touchedFiles,
+  type TouchedFile,
+} from "../state/selectors.js";
 import { t } from "../i18n.js";
 import { FileIcon, ListIcon, XIcon } from "./Icons.js";
 
@@ -326,22 +333,7 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
     case "usage":
       return (
         <Block index={index} label={t("Metrics")} tone="info" right={formatClock(step.at)}>
-          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-[10.5px] text-[var(--color-ink-dim)]">
-            <span>{t("Input tokens")}</span>
-            <span className="text-right text-[var(--color-ink)]">{step.usage.input}</span>
-            <span>{t("Output tokens")}</span>
-            <span className="text-right text-[var(--color-ink)]">{step.usage.output}</span>
-            <span>{t("Cache read")}</span>
-            <span className="text-right text-[var(--color-ink)]">{step.usage.cacheRead ?? 0}</span>
-            <span>{t("Cache write")}</span>
-            <span className="text-right text-[var(--color-ink)]">{step.usage.cacheWrite ?? 0}</span>
-            {step.usage.costUSD !== undefined && (
-              <>
-                <span>{t("Cost")}</span>
-                <span className="text-right text-[var(--color-ink)]">${step.usage.costUSD.toFixed(4)}</span>
-              </>
-            )}
-          </div>
+          <TokenGrid usage={step.usage} />
         </Block>
       );
     case "error":
@@ -424,8 +416,7 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
 
 function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: number }): React.ReactElement {
   const [showResult, setShowResult] = useState(false);
-  const cat = toolCategory(tool.name);
-  const target = toolTarget(tool.input) || tool.name;
+  const target = toolTarget(tool.input);
   const cmd =
     tool.name === "bash" || tool.name === "shell" || tool.name === "run_command"
       ? extractCommand(tool.input)
@@ -438,7 +429,7 @@ function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: numbe
   return (
     <Block
       index={index}
-      label={`${t(CATEGORY_VERB[cat])} · ${tool.name}`}
+      label={t(toolVerb(tool.name, tool.input))}
       tone={tone}
       right={[
         formatClock(tool.startedAt ?? at),
@@ -447,7 +438,7 @@ function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: numbe
         .filter(Boolean)
         .join(" · ")}
     >
-      <div className="font-mono text-[11px] text-[var(--color-ink)]">{cmd || target}</div>
+      <div className="font-mono text-[11px] text-[var(--color-ink)]">{cmd || target || "—"}</div>
       {tool.input !== undefined && !cmd && (
         <details className="mt-1">
           <summary className="cursor-pointer text-[10.5px] text-[var(--color-ink-faint)]">
@@ -518,16 +509,27 @@ function Block({
 }
 
 function TokenGrid({ usage }: { usage: UsageInfo }): React.ReactElement {
+  const m = deriveUsageMetrics(usage);
   return (
     <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-[10.5px] text-[var(--color-ink-dim)]">
+      <span>{t("Total tokens")}</span>
+      <span className="text-right text-[var(--color-ink)]">{m.total.toLocaleString()}</span>
       <span>{t("Input tokens")}</span>
-      <span className="text-right text-[var(--color-ink)]">{usage.input}</span>
+      <span className="text-right text-[var(--color-ink)]">{m.input.toLocaleString()}</span>
       <span>{t("Output tokens")}</span>
-      <span className="text-right text-[var(--color-ink)]">{usage.output}</span>
-      <span>{t("Cache read")}</span>
-      <span className="text-right text-[var(--color-ink)]">{usage.cacheRead ?? 0}</span>
-      <span>{t("Cache write")}</span>
-      <span className="text-right text-[var(--color-ink)]">{usage.cacheWrite ?? 0}</span>
+      <span className="text-right text-[var(--color-ink)]">{m.output.toLocaleString()}</span>
+      <span>{t("Cache")}</span>
+      <span className="text-right text-[var(--color-ink)]">{m.cache.toLocaleString()}</span>
+      <span>{t("Cache ratio")}</span>
+      <span className="text-right text-[var(--color-ink)]">{formatCacheRatio(m.cacheRatio)}</span>
+      {(usage.cacheWrite ?? 0) > 0 && (
+        <>
+          <span>{t("Cache write")}</span>
+          <span className="text-right text-[var(--color-ink)]">
+            {(usage.cacheWrite ?? 0).toLocaleString()}
+          </span>
+        </>
+      )}
       {usage.costUSD !== undefined && (
         <>
           <span>{t("Cost")}</span>

@@ -8,8 +8,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Event, UsageInfo } from "../types.js";
 import type { ToolDef } from "./types.js";
-import { SubagentCache } from "../subagentCache.js";
-import { isTransientError } from "../transientError.js";
+import { isTransientError } from "../agent/transientError.js";
 import { BackgroundSubagentRegistry } from "./subagentJobs.js";
 
 /** Named sub-agent types. "explore" and "plan" are read-only; "worker" may
@@ -17,241 +16,83 @@ import { BackgroundSubagentRegistry } from "./subagentJobs.js";
 export const AGENT_TYPES = ["explore", "plan", "worker"] as const;
 export type AgentType = (typeof AGENT_TYPES)[number];
 
+/** Shared agent_type field — keep one copy (not 3× in nested specs). */
+const agentTypeField = z
+  .string()
+  .optional()
+  .describe("explore (default, read+web) | plan | worker (bash/writes) | custom. Shell/mutate → worker.");
+
+const toolsNarrowField = z
+  .array(z.string())
+  .optional()
+  .describe("Narrow the agent_type pool only (cannot widen / cannot grant parent-only tools).");
+
 const taskSpec = z.object({
-  objective: z.string().describe("Clear, self-contained objective for the sub-agent."),
-  agent_type: z
-    .string()
-    .optional()
-    .describe("\"explore\" (default, read-only), \"plan\" (read-only; returns a structured plan), or \"worker\" (may edit files), or the name of a custom sub-agent advertised in your system prompt."),
-  tools: z
-    .array(z.string())
-    .optional()
-    .describe("Restrict/widen to a subset of tool names."),
-  model: z.string().optional().describe("Override the model (default: smallModel)."),
-  maxSteps: z
-    .number()
-    .int()
-    .positive()
-    .max(1000)
-    .optional()
-    .describe(
-      "Optional max agentic turns for the sub-agent. Omit for no turn limit " +
-        "(recommended unless you need a hard cost bound). When set, the sub-agent " +
-        "is urged to synthesize before the cap; on hit the user is asked whether to " +
-        "grant more turns (interactive) — not treated as a hard error.",
-    ),
+  objective: z.string().describe("Self-contained objective."),
+  agent_type: agentTypeField,
+  tools: toolsNarrowField,
+  model: z.string().optional().describe("Model override."),
+  maxSteps: z.number().int().positive().max(1000).optional().describe("Turn cap; omit = unlimited."),
   output_schema: z
     .record(z.string(), z.unknown())
     .optional()
-    .describe(
-      "A JSON schema object the sub-agent's final answer must conform to. " +
-        "When provided, the sub-agent returns a single JSON object (no markdown) " +
-        "and the runner validates + returns it as a fenced ```json block in the " +
-        "conclusion. Use this when you need a machine-readable contract (e.g. " +
-        "{type:'object',properties:{files:{type:'array',items:{type:'string'}}}}). " +
-        "Omit for the default free-text markdown conclusion."
-    ),
-  isolation: z
-    .enum(["none", "worktree"])
-    .optional()
-    .describe(
-      "Filesystem isolation for the sub-agent. \"none\" (default) runs in " +
-        "the parent's cwd. \"worktree\" creates a linked git worktree on a " +
-        "fresh branch and runs the sub-agent there — its edits land in an " +
-        "isolated checkout, never touching the parent's working tree. Use " +
-        "\"worktree\" for parallel fan-outs that each mutate files, or for " +
-        "experiments you want to discard cleanly. Requires the cwd to be a " +
-        "git repo; falls back to \"none\" if git is unavailable."
-    ),
+    .describe("JSON Schema for a machine-readable final answer."),
+  isolation: z.enum(["none", "worktree"]).optional().describe("none (default) | worktree."),
 });
 
 /** One member of a team. */
 const teamMemberSpec = z.object({
-  role: z
-    .enum(["leader", "worker", "specialist"])
-    .describe(
-      "\"leader\" splits the goal into assignments and writes the final report " +
-        "(read-only, at most one per team); \"worker\" does the work; " +
-        "\"specialist\" is a worker with a narrow remit (security, performance…)."
-    ),
-  objective: z
-    .string()
-    .optional()
-    .describe(
-      "What this member does. Omit for workers when the team has a leader — the " +
-        "leader then writes the assignment from the team `objective`."
-    ),
-  name: z
-    .string()
-    .optional()
-    .describe("Display name used in the team log (default \"<role>-<n>\")."),
-  agent_type: z
-    .string()
-    .optional()
-    .describe(
-      "Sub-agent type, or a custom agent name. Defaults to \"explore\" for a " +
-        "leader and \"worker\" for everyone else."
-    ),
-  tools: z.array(z.string()).optional().describe("Restrict this member's tools."),
-  model: z.string().optional().describe("Override this member's model."),
+  role: z.enum(["leader", "worker", "specialist"]).describe("leader | worker | specialist."),
+  objective: z.string().optional().describe("Member objective; leader may assign if omitted."),
+  name: z.string().optional().describe("Display name."),
+  agent_type: agentTypeField,
+  tools: toolsNarrowField,
+  model: z.string().optional().describe("Model override."),
   maxSteps: z.number().int().positive().max(1000).optional(),
 });
 
 const schema = z
   .object({
-    objective: z
-      .string()
-      .optional()
-      .describe("Single-task mode: one self-contained objective."),
-    tasks: z
-      .array(taskSpec)
-      .optional()
-      .describe(
-        "Fan-out mode: several independent objectives executed IN PARALLEL. " +
-          "Each returns its own conclusion. Use for independent explorations."
-      ),
-    agent_type: z
-      .string()
-      .optional()
-      .describe("Agent type for single-task mode (default \"explore\"). Built-ins: \"explore\" (read-only), \"plan\" (read-only; returns a structured plan), \"worker\" (may edit files). May also be a custom agent name."),
-    tools: z
-      .array(z.string())
-      .optional()
-      .describe("Tool subset for single-task mode."),
-    model: z.string().optional().describe("Model override for single-task mode."),
-    maxSteps: z
-      .number()
-      .int()
-      .positive()
-      .max(1000)
-      .optional()
-      .describe("Optional turn cap for single-task mode; omit for unlimited."),
+    objective: z.string().optional().describe("Single-task or team goal."),
+    tasks: z.array(taskSpec).optional().describe("Parallel independent objectives (fan-out)."),
+    agent_type: agentTypeField,
+    tools: toolsNarrowField,
+    model: z.string().optional().describe("Model override (single-task)."),
+    maxSteps: z.number().int().positive().max(1000).optional().describe("Turn cap; omit = unlimited."),
     output_schema: z
       .record(z.string(), z.unknown())
       .optional()
-      .describe("JSON schema the sub-agent's final answer must conform to (single-task mode)."),
-    isolation: z
-      .enum(["none", "worktree"])
-      .optional()
-      .describe("Filesystem isolation for single-task mode (default \"none\")."),
+      .describe("JSON Schema for the final answer (single-task)."),
+    isolation: z.enum(["none", "worktree"]).optional().describe("none (default) | worktree (git only — not tools)."),
     run: z
       .enum(["await", "background"])
       .optional()
-      .describe(
-        "Dispatch mode for single-task mode (default \"await\"). \"await\": block " +
-          "until the sub-agent finishes and return its conclusion inline. " +
-          "\"background\": return immediately with `{session_id, status: \"running\"}` " +
-          "and keep working; when the sub-agent finishes (or fails), a one-time " +
-          "completion summary is delivered to you. Use background to dispatch " +
-          "long-running work you don't need to block on. Control a background run " +
-          "with `subagent_list` / `subagent_wait` / `subagent_interrupt`.",
-      ),
+      .describe("await (default) | background (subagent_list/wait/interrupt)."),
     context: z
       .enum(["fresh", "fork"])
       .optional()
-      .describe(
-        "Starting context for single-task mode (default \"fresh\"). \"fresh\": the " +
-          "sub-agent starts with an empty conversation and sees only the objective " +
-          "— describe everything it needs in `objective`. \"fork\": the sub-agent " +
-          "inherits a copy of THIS conversation's model-visible history as a prefix, " +
-          "so it can see files and references you already read, then works the " +
-          "objective. Use fork when the objective depends on context you've built up " +
-          "and would be lossy to restate. Mutually exclusive with `continue_session_id`.",
-      ),
-    fork_max_tokens: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe(
-        "When `context: \"fork\"`, hard-cap the inherited history to this many " +
-          "estimated tokens (older turns are folded/trimmed). Omit for a sensible default.",
-      ),
+      .describe("fresh (default) | fork parent history. Not with continue_session_id."),
+    fork_max_tokens: z.number().int().positive().optional().describe("Token cap on forked history."),
     omit_memory: z
       .boolean()
       .optional()
-      .describe(
-        "Single-task mode: when true, the sub-agent's system prompt does NOT " +
-          "include the project/user memory index. Useful for a focused `plan` " +
-          "sub-agent that should reason only from the objective and what it reads. " +
-          "Default false.",
-      ),
-    continue_session_id: z
-      .string()
-      .optional()
-      .describe(
-        "Continue a PREVIOUS sub-agent instead of spawning a new one. Pass the " +
-          "`session_id` a prior `task` result reported; `objective` is then sent " +
-          "to that existing sub-agent as a follow-up and it keeps its full " +
-          "conversation and gathered context — do NOT re-describe earlier work. " +
-          "Use this to iterate with the same sub-agent (single-task mode only). " +
-          "Omit to start a fresh sub-agent."
-      ),
-    csv: z
-      .string()
-      .optional()
-      .describe(
-        "CSV batch mode: a CSV string (with a header row) where each data row " +
-          "becomes a separate sub-agent objective. Combine with `csv_template` " +
-          "to control how each row is turned into an objective. The tasks run " +
-          "IN PARALLEL (subject to max_threads). Use for repetitive batch work " +
-          "across many items (e.g. one row per file, one row per PR). Mutually " +
-          "exclusive with `objective` and `tasks`."
-      ),
-    csv_template: z
-      .string()
-      .optional()
-      .describe(
-        "A template string for CSV batch mode. Column values are interpolated " +
-          "by header name, e.g. \"Review the file {path} for security issues " +
-          "and report findings.\" When omitted, the entire CSV row (joined by " +
-          "spaces) is used as the objective."
-      ),
-    team: z
-      .array(teamMemberSpec)
-      .optional()
-      .describe(
-        "Team mode: several agents working on ONE goal (given in `objective`), " +
-          "with roles. Unlike `tasks` (independent objectives), a team can have a " +
-          "`leader` that splits the goal into assignments, members can share one " +
-          "git worktree, edits to the same file by two members are detected and " +
-          "reported, and the results are merged per `merge_strategy`. Use for work " +
-          "that is one job but splits cleanly into disjoint, independently-ownable areas."
-      ),
+      .describe("omit_memory: true — drop project/user memory (audit / clean-room / ignore prior notes)."),
+    continue_session_id: z.string().optional().describe("Resume a prior sub-agent session_id (single-task)."),
+    csv: z.string().optional().describe("CSV batch (header + rows); exclusive with objective/tasks."),
+    csv_template: z.string().optional().describe('Row→objective template, e.g. "Review {path}".'),
+    team: z.array(teamMemberSpec).optional().describe("Role-based team on one objective (vs independent tasks)."),
     merge_strategy: z
       .enum(["leader_summary", "voting", "concat"])
       .optional()
-      .describe(
-        "How team results become one answer. \"leader_summary\" (default when the " +
-          "team has a leader): the leader writes the report. \"voting\": members " +
-          "solved the SAME problem independently and a judge picks the best-supported " +
-          "answer. \"concat\" (default without a leader): every conclusion verbatim, " +
-          "no extra model call."
-      ),
-    shared_worktree: z
-      .boolean()
-      .optional()
-      .describe(
-        "Run every team member in ONE linked git worktree instead of your working " +
-          "tree. Use when the team edits files: their changes land on an isolated " +
-          "branch you can review and merge. Requires a git repo; falls back to the " +
-          "parent cwd with a note."
-      ),
-    team_board: z
-      .boolean()
-      .optional()
-      .describe(
-        "Seed the shared task_board from the leader's assignments (one claimed task " +
-          "per member). Off by default. Turn on for a long team where members should " +
-          "coordinate mid-run via the existing task_board tool (claim / update / " +
-          "complete); leave off for a short team that just runs its assignments once."
-      ),
+      .describe("How team conclusions merge."),
+    shared_worktree: z.boolean().optional().describe("One shared worktree for the whole team."),
+    team_board: z.boolean().optional().describe("Seed task_board from leader assignments."),
   })
   .refine(
     (v) => {
       const modes = [
- // `objective` doubles as the team goal, so it is not its own mode
- // when `team` is present.
+        // `objective` doubles as the team goal, so it is not its own mode
+        // when `team` is present.
         Boolean(v.objective) && !(v.team && v.team.length > 0),
         Boolean(v.tasks && v.tasks.length > 0),
         Boolean(v.csv),
@@ -262,13 +103,11 @@ const schema = z
     {
       message:
         "provide exactly one of `objective` (single task), `tasks` (fan-out), `csv` (batch), or `team` (team mode, with `objective` as the shared goal)",
-    }
+    },
   )
   .refine((v) => !(v.context === "fork" && v.continue_session_id), {
     message:
-      "`context: \"fork\"` and `continue_session_id` are mutually exclusive — a " +
-      "continued sub-agent already has its own conversation; forking the parent's " +
-      "would conflict. Use one or the other.",
+      '`context: "fork"` and `continue_session_id` are mutually exclusive.',
   });
 
 export interface SubagentRunSpec {
@@ -353,6 +192,9 @@ export interface SubagentRunResult {
   * so a later `task` call can pass it as `continue_session_id` to continue
   * the SAME sub-agent instead of dispatching a new one. */
   sessionId?: string;
+ /** True when the run hit its configured turn/step cap (after soft-land).
+  * Parent should resume via continue_session_id if more work is needed. */
+  reachedTurnBudget?: boolean;
 }
 
 /** Emit sub-agent usage onto the parent event stream so session totals
@@ -483,7 +325,7 @@ export class Semaphore {
 
 export const taskTool: ToolDef<typeof schema> & {
   runner?: SubagentRunner;
- /** Max sub-agent nesting depth (default 2). Set by the session. */
+ /** Max sub-agent nesting depth (default 3). Set by the session. */
   maxDepth?: number;
  /** Max concurrently-running sub-agents (default 6). Set by the session.
  * A shared Semaphore enforces this across all task calls. */
@@ -503,10 +345,6 @@ export const taskTool: ToolDef<typeof schema> & {
  /** Session-global monotonic counter so every dispatched sub-agent gets a
   * unique display sequence (`#3`), unlike the per-fan-out `index`. */
   _runSeq?: number;
- /** Durable-cache policy from config. `cacheEnabled` default true; `cacheTtlMs`
-  * from `subagentCache.ttlHours`. Set by the session. */
-  cacheEnabled?: boolean;
-  cacheTtlMs?: number;
  /** Per-session registry of background sub-agents (`run: "background"`). Set by
   * the session; also read by the `subagent_list`/`wait`/`interrupt` control
   * tools. Absent → background dispatch is unavailable (falls back to await). */
@@ -514,15 +352,15 @@ export const taskTool: ToolDef<typeof schema> & {
 } = {
   name: "task",
   description:
-    "Run sub-agents in isolated contexts; only their final conclusion returns. " +
-    "Use for open-ended exploration or parallel independent work (`tasks: [...]`). " +
-    "Default `agent_type: \"explore\"` is read-only; `\"plan\"` is read-only and returns a structured plan; use `\"worker\"` to edit. " +
-    "Skip for a single read/grep. Write self-contained objectives. " +
-    "`isolation: \"worktree\"` for mutating workers that must not touch the main tree. " +
-    "`run: \"background\"` dispatches a single task without blocking (control with " +
-    "subagent_list / subagent_wait / subagent_interrupt). " +
-    "CSV: `csv` + `csv_template` → one agent per row. " +
-    "Team: `objective` + `team: [{role,…}]` when roles must be reconciled (else prefer `tasks`).",
+    "Dispatch a sub-agent; only its final conclusion returns. " +
+    "**When:** broad multi-hop search, parallel independent workstreams, or the user asked for a subagent/`task`. " +
+    "**When not:** a single read/grep/one-file fix — do that yourself. " +
+    "**Briefing:** write the objective as if they have zero chat context — paths/lines, what you already ruled out, and the acceptance bar. " +
+    "Never \"based on your findings, fix…\" (you synthesise; they search or execute). " +
+    "Modes: `objective` (one), `tasks` (parallel), `csv`+`csv_template`, or `objective`+`team`. " +
+    "agent_type: explore | plan | worker — `tools` narrows only (cannot grant parent-only tools). " +
+    "Knobs: isolation=worktree (git only), context=fresh|fork (`fork_max_tokens`), " +
+    "omit_memory: true, run=background, continue_session_id. Pool: `subagentMaxThreads` (default 6).",
   inputSchema: schema,
  // Dispatching is not itself an action: each tool a sub-agent calls goes
  // through the parent's permission engine and prompts (see subagent.ts).
@@ -693,7 +531,7 @@ export const taskTool: ToolDef<typeof schema> & {
           isError: true,
         };
       }
-      const { runTeam, renderTeamResult } = await import("../teams.js");
+      const { runTeam, renderTeamResult } = await import("../subagent/teams.js");
       try {
         const result = await runTeam(
           {
@@ -799,15 +637,6 @@ export const taskTool: ToolDef<typeof schema> & {
     if (granted < specs.length) {
       specs.length = granted;
     }
-    // Durable conclusion cache: a crashed fan-out resumes without re-running
-    // sub-agents that already succeeded. Keyed by (objective+type+cwd+model).
-    // Disabled when there's no project state dir (minimal/test contexts) or
-    // when `subagentCache.enabled` is false. TTL from `subagentCache.ttlHours`.
-    const cacheOn = this.cacheEnabled !== false;
-    const cache =
-      cacheOn && ctx.projectStateDir
-        ? new SubagentCache(ctx.projectStateDir, this.cacheTtlMs)
-        : null;
     const results = await Promise.all(
       specs.map(async (spec, i) => {
         // Session-global unique sequence for this dispatch (for UI labels).
@@ -832,26 +661,11 @@ export const taskTool: ToolDef<typeof schema> & {
           ).catch(() => {});
         };
         progress({ state: "running" });
-        // Durable resume: if this exact sub-agent already succeeded (same
-        // objective/type/cwd/model) in an earlier, interrupted run, reuse the
-        // cached conclusion instead of re-running it. NOT when continuing an
-        // existing sub-agent — a follow-up must reach the live session, never a
-        // cached prior answer.
-        const cacheKey =
-          cache && !spec.resumeSessionId
-            ? { objective: spec.objective, agentType: spec.agentType, cwd: spec.cwd, model: spec.model }
-            : null;
-        if (cache && cacheKey) {
-          const hit = await cache.get(cacheKey);
-          if (hit) {
-            progress({ state: "ok" });
-            return { i, ok: true, text: hit.conclusion, steps: hit.steps, sessionId: ownerId };
-          }
-        }
         // Self-heal: retry a transient failure once (rate-limit / overloaded /
         // timeout / network). Deterministic failures (bad model, empty result)
-        // are not retried — they won't改善 on a second try. Uses the shared
-        // classifier so the sub-agent retry policy matches the agent loop's.
+        // are not retried. Uses the shared classifier so the sub-agent retry
+        // policy matches the agent loop's. Resume an existing run via
+        // continue_session_id — do not memoize conclusions by objective.
         const isTransient = isTransientError;
         const runOnce = () =>
           sem.withPermit(
@@ -866,15 +680,18 @@ export const taskTool: ToolDef<typeof schema> & {
           progress({ state: r.ok ? "ok" : "failed" });
           // Roll sub-agent tokens into the parent only after it finishes.
           emitParentUsage(ctx.emitEvent, r.usage);
-          // Persist a successful conclusion so a later resume can skip it.
-          if (cache && cacheKey && r.ok) {
-            await cache.put(cacheKey, { ok: true, conclusion: r.conclusion, steps: r.steps, ts: Date.now() });
-          }
  // Honour the runner's soft-failure flag (empty conclusion /
  // provider error). Previously we marked every non-throwing run
  // as ok, so "Model not exist" sub-agents looked like successful
  // 0-step explorations.
-          return { i, ok: r.ok, text: r.conclusion, steps: r.steps, sessionId: r.sessionId ?? ownerId };
+          return {
+            i,
+            ok: r.ok,
+            text: r.conclusion,
+            steps: r.steps,
+            sessionId: r.sessionId ?? ownerId,
+            reachedTurnBudget: r.reachedTurnBudget === true,
+          };
         } catch (err) {
           const msg = (err as Error).message;
           // One retry for transient throws too (e.g. timeout rejection).
@@ -883,14 +700,35 @@ export const taskTool: ToolDef<typeof schema> & {
               const r = await runOnce();
               progress({ state: r.ok ? "ok" : "failed" });
               emitParentUsage(ctx.emitEvent, r.usage);
-              return { i, ok: r.ok, text: r.conclusion, steps: r.steps, sessionId: r.sessionId ?? ownerId };
+              return {
+                i,
+                ok: r.ok,
+                text: r.conclusion,
+                steps: r.steps,
+                sessionId: r.sessionId ?? ownerId,
+                reachedTurnBudget: r.reachedTurnBudget === true,
+              };
             } catch (err2) {
               progress({ state: "failed" });
-              return { i, ok: false as const, text: (err2 as Error).message, steps: 0, sessionId: ownerId };
+              return {
+                i,
+                ok: false as const,
+                text: (err2 as Error).message,
+                steps: 0,
+                sessionId: ownerId,
+                reachedTurnBudget: false,
+              };
             }
           }
           progress({ state: "failed" });
-          return { i, ok: false as const, text: msg, steps: 0, sessionId: ownerId };
+          return {
+            i,
+            ok: false as const,
+            text: msg,
+            steps: 0,
+            sessionId: ownerId,
+            reachedTurnBudget: false,
+          };
         }
       })
     );
@@ -901,10 +739,18 @@ export const taskTool: ToolDef<typeof schema> & {
       const r = results[0]!;
       // Surface the sub-agent's session_id so a follow-up can continue the SAME
       // sub-agent via `continue_session_id` instead of spawning a fresh one.
-      const handle = r.sessionId ? ` session_id: ${r.sessionId} (pass as continue_session_id to continue this sub-agent)` : "";
+      const handle = r.sessionId
+        ? ` session_id: ${r.sessionId} (pass as continue_session_id to continue this sub-agent)`
+        : "";
+      const budgetNote = r.reachedTurnBudget ? " [turn budget reached]" : "";
       return r.ok
-        ? { content: `sub-agent completed in ${r.steps} step(s).${handle}\n\nConclusion:\n\n${r.text}` }
-        : { content: `sub-agent failed: ${r.text}${handle}`, isError: true };
+        ? {
+            content: `sub-agent completed in ${r.steps} step(s).${budgetNote}${handle}\n\nConclusion:\n\n${r.text}`,
+          }
+        : {
+            content: `sub-agent failed${budgetNote}: ${r.text}${handle}`,
+            isError: true,
+          };
     }
     const body = results
       .map(

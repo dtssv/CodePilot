@@ -61,10 +61,10 @@ abstract class AddToChatBase(private val newChat: Boolean) : AnAction() {
     }
 }
 
-/** Editor action: add the selection to the CURRENT chat (Cursor "Add to Chat"). */
+/** Editor action: add the selection to the CURRENT chat as a reference, without sending. */
 class AddToChatAction : AddToChatBase(newChat = false)
 
-/** Editor action: add the selection to a NEW chat (Cursor "Add to New Chat"). */
+/** Editor action: add the selection to a NEW chat as a reference, without sending. */
 class AddToNewChatAction : AddToChatBase(newChat = true)
 
 /** Toolbar / Tools-menu shortcut: opens the chat tool window. */
@@ -74,5 +74,21 @@ class ShowToolWindowAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
         ToolWindowManager.getInstance(project).getToolWindow("CodePilot")?.activate(null)
+    }
+}
+
+/** Expand the CodePilot tool window and open the in-panel Settings sheet. */
+class OpenSettingsAction : AnAction() {
+    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
+
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return
+        tw.activate {
+            tw.contentManager.contents.firstOrNull()?.component?.let { comp ->
+                val chat = comp.getClientProperty(ChatToolWindowFactory.CHAT_PANEL_KEY) as? ChatHost
+                chat?.openSettings()
+            }
+        }
     }
 }

@@ -33,6 +33,7 @@ import {
   startNewTaskTool,
   suggestModeTool,
   startGoalTool,
+  goalStatusTool,
   taskTool,
   codeModeTool,
   harnessBridgeTool,
@@ -91,6 +92,17 @@ describe("filterToolsByMode", () => {
     expect(filterToolNames(tools, "agent")).toContain("code_mode");
     expect(filterToolNames(tools, "chat")).not.toContain("code_mode");
     expect(filterToolNames(tools, "plan")).not.toContain("code_mode");
+  });
+
+  it("start_goal and goal_status are agent-only (lean chat/plan tool tables)", () => {
+    const tools = [readFileTool, startGoalTool, goalStatusTool];
+    expect(filterToolNames(tools, "agent")).toEqual(
+      expect.arrayContaining(["start_goal", "goal_status", "read_file"]),
+    );
+    expect(filterToolNames(tools, "chat")).not.toContain("start_goal");
+    expect(filterToolNames(tools, "chat")).not.toContain("goal_status");
+    expect(filterToolNames(tools, "plan")).not.toContain("start_goal");
+    expect(filterToolNames(tools, "plan")).not.toContain("goal_status");
   });
 
   it("plan mode keeps read-only + plan_update + memory_write", () => {
@@ -200,6 +212,7 @@ describe("mode gating is consistent with each built-in's permission tier", () =>
     startNewTaskTool,
     suggestModeTool,
     startGoalTool,
+    goalStatusTool,
     taskTool,
     codeModeTool,
     harnessBridgeTool,
@@ -241,18 +254,25 @@ describe("mode gating is consistent with each built-in's permission tier", () =>
   }
 
   it("keeps every read-tier built-in in chat mode except the deliberately chat-denied ones", () => {
-    // read-tier tools are the safe baseline. Three read-tier tools are
-    // nonetheless denied in chat — the key insight that the permission axis
-    // (approval) and the mode axis (collaboration restriction) are ORTHOGONAL,
-    // and these are exactly where they diverge:
+    // read-tier tools are the safe baseline. Some read-tier tools are
+    // nonetheless denied in chat — the permission axis (approval) and the mode
+    // axis (collaboration restriction) are orthogonal:
     //   - plan_update:  records a planning event; chat wants answers, not plans.
     //   - memory_write: writes memory files — a side effect chat policy forbids.
-    //   - task:         read on the approval axis, but spawns sub-agents that
-    //                   can write/execute, so it is ALWAYS_DENIED in restricted
-    //                   modes (a broad side-effect risk).
-    // Pin that the fall-through keeps every OTHER read tool, so a future read
-    // tool is never accidentally hidden from chat.
-    const CHAT_DENIED_READ = new Set(["plan_update", "memory_write", "task"]);
+    //   - task / subagent_*: spawn or control sub-agents (ALWAYS_DENIED).
+    //   - start_goal / goal_status: goal-loop tools kept agent-only for a lean
+    //     chat/plan tool table.
+    // Pin that the fall-through keeps every OTHER read tool.
+    const CHAT_DENIED_READ = new Set([
+      "plan_update",
+      "memory_write",
+      "task",
+      "subagent_list",
+      "subagent_wait",
+      "subagent_interrupt",
+      "start_goal",
+      "goal_status",
+    ]);
     const chat = new Set(filterToolNames(builtins, "chat"));
     for (const t of builtins) {
       if (t.permission !== "read") continue;

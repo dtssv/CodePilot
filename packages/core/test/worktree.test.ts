@@ -11,7 +11,7 @@ import {
   worktreeDiffStat,
   attachWorktree,
   isGitAvailable,
-} from "../src/worktree.js";
+} from "../src/workspace/worktree.js";
 
 /** Initialise a throwaway git repo at `dir` with one commit on `main`. */
 function initRepo(dir: string): void {

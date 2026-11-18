@@ -9,11 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { buildLiveContext, runAgent } from "../src/agent.js";
-import type { AgentDeps } from "../src/agent.js";
+import { buildLiveContext, runAgent } from "../src/agent/agent.js";
+import type { AgentDeps } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type { ChatProvider, StreamChatOptions, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 

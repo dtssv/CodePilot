@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { streamOnce } from "../src/agent-messages.js";
-import type { AgentDeps } from "../src/agent.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { streamOnce } from "../src/agent/agent-messages.js";
+import type { AgentDeps } from "../src/agent/agent.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import type {

@@ -14,7 +14,7 @@ import {
   scrubChildEnv,
   isSecretEnvKey,
 } from "../src/tools/harnessBridge.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 describe("buildHarnessCommand", () => {
@@ -301,9 +301,9 @@ describe("harness_bridge execution", () => {
   });
 
   it("extracts claude-code JSON envelopes end-to-end (fake claude CLI)", async () => {
- // Stand in for the real `claude` binary: a PATH shim that prints a
- // claude-style JSON envelope. Verifies the tool's claude-code parsing
- // path without requiring the actual CLI.
+// Stands in for the `claude` binary: a PATH shim that prints the JSON
+// envelope the CLI emits ({type, result, is_error}). Exercises the
+// claude-code parse path without the real CLI installed.
     const shim = join(dir, "fake-claude.sh");
     const { writeFile, chmod } = await import("node:fs/promises");
     await writeFile(

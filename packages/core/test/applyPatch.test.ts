@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parsePatch, pathsFromApplyPatch } from "../src/tools/apply_patch.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import { applyPatchTool } from "../src/tools/apply_patch.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileObservationStore } from "../src/fsObservation.js";
+import { FileObservationStore } from "../src/workspace/fsObservation.js";
 import { readFileTool } from "../src/tools/read_file.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -16,7 +16,7 @@ function patchCtx(dir: string, store: FileObservationStore): ToolContext {
     artifact: async () => "art_test",
     readArtifact: async () => "",
     observeFile: (p, s, h) => store.observe(p, s, h),
-    checkFileFresh: (p, s, h) => store.checkFresh(p, s, h),
+    checkFileFresh: (p, s, h, opts) => store.checkFresh(p, s, h, opts),
     reobserveFile: (p, s, h) => store.reobserveAfterWrite(p, s, h),
   } as unknown as ToolContext;
 }
@@ -106,6 +106,7 @@ describe("apply_patch Add File overwrite guard", () => {
 *** End Patch`;
     const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
     expect(res.isError).toBeUndefined();
+    expect(res.content).toMatch(/\+ added new\.js \(\+1\)/);
     expect(existsSync(join(dir, "new.js"))).toBe(true);
     expect(readFileSync(join(dir, "new.js"), "utf-8")).toContain("const x = 1;");
   });
@@ -126,25 +127,24 @@ describe("apply_patch Add File overwrite guard", () => {
     expect(readFileSync(p, "utf-8")).toBe("const original = true;\n");
   });
 
-  it("allows Add File to replace a file observed fresh this session", async () => {
+  it("refuses Add File even when the existing file was observed this session", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
     const p = join(dir, "seen.js");
     writeFileSync(p, "const original = 1;\n");
     const store = new FileObservationStore();
     const ctx = patchCtx(dir, store);
-    // Read it first → observed fresh.
     await readFileTool.execute({ path: "seen.js" }, ctx);
     const patch = `*** Begin Patch
 *** Add File: seen.js
 +const replaced = 2;
 *** End Patch`;
     const res = await applyPatchTool.execute({ patch }, ctx);
-    expect(res.isError).toBeUndefined();
-    expect(res.content).toMatch(/replaced seen\.js/);
-    expect(readFileSync(p, "utf-8")).toContain("const replaced = 2;");
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/already exists/);
+    expect(readFileSync(p, "utf-8")).toBe("const original = 1;\n");
   });
 
-  it("update behaviour is unchanged (read-before-write still enforced)", async () => {
+  it("Update File applies when hunk matches disk even if never read_file'd", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
     const p = join(dir, "u.js");
     writeFileSync(p, "a\n");
@@ -155,7 +155,65 @@ describe("apply_patch Add File overwrite guard", () => {
 -a
 +b
 *** End Patch`;
-    // Not read first → update is refused.
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toMatch(/~ updated u\.js \(\+1\/-1\)/);
+    expect(readFileSync(p, "utf-8")).toBe("b\n");
+  });
+
+  it("chains multiple Update File ops on the same path (no clobber)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-chain-"));
+    const p = join(dir, "discounts.js");
+    writeFileSync(
+      p,
+      [
+        "export function bulk(qty) {",
+        "  if (qty > 10) {",
+        "    return 1;",
+        "  }",
+        "  return 0;",
+        "}",
+        "export function coupon(c) {",
+        '  if (c === "SAVE15") {',
+        "    return 1;",
+        "  }",
+        "  return 0;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: discounts.js
+@@
+-  if (qty > 10) {
++  if (qty >= 10) {
+*** Update File: discounts.js
+@@
+-  if (c === "SAVE15") {
++  if (c.toUpperCase() === "SAVE15") {
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    // Two same-path Updates accumulate hunk stats.
+    expect(res.content).toMatch(/~ updated discounts\.js \(\+2\/-2\)/);
+    const after = readFileSync(p, "utf-8");
+    expect(after).toContain("if (qty >= 10) {");
+    expect(after).toContain('if (c.toUpperCase() === "SAVE15") {');
+    expect(after).not.toContain("if (qty > 10) {");
+  });
+
+  it("Update File refuses when hunk context does not match disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-add-"));
+    const p = join(dir, "u.js");
+    writeFileSync(p, "a\n");
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: u.js
+@@
+-zzz
++b
+*** End Patch`;
     const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
     expect(res.isError).toBe(true);
     expect(readFileSync(p, "utf-8")).toBe("a\n");

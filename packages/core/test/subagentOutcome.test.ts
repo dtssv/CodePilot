@@ -1,24 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   assessSubagentOutcome,
-  parseBudgetExtensionAnswer,
   detectDegenerateText,
   detectRunawayRepetition,
-} from "../src/subagent.js";
+} from "../src/subagent/subagent.js";
 import type { Event } from "../src/types.js";
 import { taskTool } from "../src/tools/task.js";
-
-describe("parseBudgetExtensionAnswer", () => {
-  it("parses continue / unlimited / stop labels", () => {
-    expect(parseBudgetExtensionAnswer(`Continue (+20 turns)`, 20)).toEqual({
-      kind: "more",
-      turns: 20,
-    });
-    expect(parseBudgetExtensionAnswer("Continue (no limit)", 20)).toEqual({ kind: "unlimited" });
-    expect(parseBudgetExtensionAnswer("Stop", 20)).toEqual({ kind: "stop" });
-    expect(parseBudgetExtensionAnswer(undefined, 20)).toEqual({ kind: "stop" });
-  });
-});
 
 describe("assessSubagentOutcome", () => {
   it("marks provider errors with no text as failed and surfaces the message", () => {
@@ -457,41 +444,5 @@ describe("task tool scale guards", () => {
     expect(r.isError).toBeFalsy();
     expect(r.content).toMatch(/recovered/);
     tool._spawned = 0;
-  });
-
-  it("caches a successful sub-agent conclusion and reuses it on a repeat run", async () => {
-    const { mkdtempSync, rmSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const dir = mkdtempSync(join(tmpdir(), "subagent-cache-"));
-    try {
-      const tool = taskTool;
-      let runs = 0;
-      tool.runner = {
-        async run() {
-          runs++;
-          return { ok: true, steps: 3, conclusion: "the answer" };
-        },
-      };
-      tool._sem = undefined;
-      tool._spawned = 0;
-      tool.maxTotal = undefined;
-      const ctx = { cwd: "/tmp", subagentDepth: 0, projectStateDir: dir } as never;
-      const input = { objective: "compute the answer", agent_type: "explore" } as never;
-
-      const first = await tool.execute(input, ctx);
-      expect(runs).toBe(1);
-      expect(first.content).toMatch(/the answer/);
-
-      // Second identical run: the conclusion is served from the durable cache,
-      // the runner is NOT invoked again (resume after a crash would skip it).
-      tool._sem = undefined;
-      tool._spawned = 0;
-      const second = await tool.execute(input, ctx);
-      expect(runs).toBe(1); // unchanged — cache hit
-      expect(second.content).toMatch(/the answer/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });

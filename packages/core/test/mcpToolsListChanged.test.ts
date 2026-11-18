@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { McpManager } from "../src/mcp.js";
+import { McpManager } from "../src/mcp/mcp.js";
 
 /** A mock MCP server that starts with one tool (`flip`). Calling `flip` makes
  * it switch to a second tool set (`flip` + `added`) and emit a

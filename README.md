@@ -1,35 +1,46 @@
 <p align="center"><strong>CodePilot</strong> 是一个在本地运行的编程 Agent。</p>
 
 <p align="center">
-一个命令行工具，同时是全屏终端 UI、浏览器界面、桌面窗，以及 VS Code / IntelliJ 插件。
+一个无头的 Agent 内核，外面套着全屏终端、浏览器、桌面窗和 VS Code / IntelliJ 插件。
 </p>
 
 ---
 
-## 快速开始
+CodePilot 在你的仓库里读代码、改代码、跑命令，直到任务完成。
 
-### 安装
+所有界面都连同一个内核进程：同一个会话可以在终端里开始、在浏览器里接着看、在手机上扫码批准权限。
 
-下载自包含的单文件二进制（内嵌运行时），**无需预装 Node.js 或 npm**。
+## 特性
 
-**macOS / Linux / Windows（Git Bash 或 WSL）：**
+- **多界面，一个内核**：全屏终端、浏览器、桌面窗、VS Code、IntelliJ，以及供程序化调用的 SDK。
+- **多模型**：Anthropic、OpenAI、Gemini、GitHub Copilot，以及任何 OpenAI 兼容网关。
+- **权限与沙箱**：权限决定"要不要问你"，OS 沙箱（macOS / Linux / Windows-WSL）决定"放行后能碰到什么"。危险操作在任何模式下都会再确认一次。
+- **仓库内容默认不执行**：项目里的 MCP 服务器、钩子和插件需要你批准才会运行，内容变化后需要重新批准。
+- **项目指令与记忆**：读取仓库里的 `AGENTS.md` / `CLAUDE.md` 等作为规则；Agent 自己的笔记单独保存，不进仓库。
+- **长会话**：自动压缩上下文；会话以只追加日志保存，可随时恢复，每一轮的改动都能撤销和重做。
+- **长任务**：计划、子代理、后台任务、定时任务，以及多轮推进直到完成的 goal 循环。
+- **扩展**：MCP、技能（`SKILL.md`）、钩子、插件、自定义子代理和斜杠命令。
+
+## 安装
+
+下载自包含的单文件二进制，**无需预装 Node.js**。
+
+macOS / Linux / Windows（Git Bash 或 WSL）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash
 ```
 
-**Windows（PowerShell，原生）：**
+Windows（PowerShell）：
 
 ```powershell
 irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1 | iex
 ```
 
-脚本会从 [Releases](https://github.com/dtssv/CodePilot/releases) 拉取对应平台的 `codepilot-<平台>` 二进制，装到 `~/.codepilot/bin`（Windows 为 `%USERPROFILE%\.codepilot\bin`）并加入 PATH。
+安装到 `~/.codepilot/bin`（Windows 为 `%USERPROFILE%\.codepilot\bin`）并加入 PATH。
 
 <details>
-<summary>指定版本 / 旧版 Windows / 从 Release 手动下载</summary>
-
-指定版本：
+<summary>指定版本 / 旧版 Windows / 手动下载</summary>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.sh | bash -s -- --version v1.0.0
@@ -39,144 +50,79 @@ curl -fsSL https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/instal
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/dtssv/CodePilot/main/scripts/install.ps1))) -Version v1.0.0
 ```
 
-**Windows（旧系统 / cmd.exe）：** 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 后运行（可选带版本号），它会转交给 PowerShell 执行：
+旧系统 / cmd.exe：从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载 `install.cmd` 运行（`install.cmd v1.0.0` 指定版本）。
 
-```bat
-install.cmd
-install.cmd v1.0.0
-```
-
-每个 Release 附带 6 个平台二进制，命名为 `codepilot-<平台>`：
-`darwin-arm64` / `darwin-x64` / `linux-x64` / `linux-arm64` / `win-x64.exe` / `win-arm64.exe`。TUI、命令行、浏览器界面都在这一个文件里。
+也可以直接从 Releases 下载对应平台的 `codepilot-<平台>`：`darwin-arm64` / `darwin-x64` / `linux-x64` / `linux-arm64` / `win-x64.exe` / `win-arm64.exe`。终端界面、命令行和浏览器界面都在这一个文件里。
 
 </details>
 
-### 运行
+## 快速开始
+
+在你要工作的目录里启动：
 
 ```bash
-codepilot            # 全屏终端 UI
-codepilot web        # 在浏览器里打开同一个会话
-codepilot --help     # 所有命令
+cd /path/to/project
+codepilot
 ```
 
-配一个模型密钥即可开始：`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 或 `GITHUB_TOKEN`，也可以在配置里写 OpenAI 兼容网关。
+设置 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 或 `GITHUB_TOKEN` 中的任意一个，或在界面里用 `/connect` 添加密钥，然后直接描述任务。
 
----
+```bash
+codepilot web                                     # 在浏览器里打开同一个会话
+codepilot run "给 src/auth.ts 加上输入校验并补单测"     # 非交互执行
+codepilot goal "把回调风格 API 迁成 async/await"       # 多轮推进直到完成
+codepilot --help                                  # 所有命令
+```
 
-## 使用
+### 模式
 
-**全屏 TUI**——直接运行 `codepilot`。常用斜杠命令：
+协作模式（`/agent`）：
 
-- `/agent chat｜plan｜agent` 切换协作模式，`/mode ask｜auto-edit｜yolo` 切换权限模式
-- `/model` · `/provider` 选模型 / 服务商，`/connect` 向导式添加密钥
+- **agent**：默认，改代码、跑命令。
+- **plan**：只读调研并产出计划，批准后再执行。
+- **chat**：只问答，不改文件、不跑命令。
+
+权限模式（`/mode`）：`ask`（默认，写入和命令都问）、`auto-edit`（文件编辑自动放行）、`auto`（小模型裁决）、`dont-ask`（不问，一律拒绝）、`yolo`（全部放行，危险命令仍会问）。
+
+### 常用命令
+
+- `/model` · `/provider` 切换模型，`/connect` 添加密钥
+- `/resume` 继续历史会话，`/compact` 手动压缩，`/undo` · `/redo` 撤销 / 重做改动
 - `/web` 在浏览器里打开当前会话，`/remote` 生成手机扫码遥控二维码
-- `/export [md｜jsonl]` 导出会话，`/init` 生成 `AGENTS.md`，`/undo` · `/redo` 撤销 / 重做改动
-- `/context` · `/mcp` · `/skills` · `/agents` 查看上下文与运行时状态
+- `/init` 生成 `AGENTS.md`，`/export` 导出会话
+- `/context` · `/mcp` · `/skills` · `/agents` · `/hooks` 查看运行时状态
 - Ctrl+C：忙时取消当前轮，空闲时退出
-
-**跑一次任务**（非交互）：
-
-```bash
-codepilot run "给 src/auth.ts 加上输入校验并补单测"
-codepilot run "…" --cwd ~/proj --permission-mode auto-edit
-```
-
-**长任务循环**：
-
-```bash
-codepilot goal "把回调风格 API 迁成 async/await" --max-rounds 50
-```
-
-**浏览器界面**——`codepilot web` 开起本地服务并打开浏览器（默认 `127.0.0.1:18765`，打印访问 token）；手机扫码用 `--host 0.0.0.0`：
-
-```bash
-codepilot web --host 0.0.0.0        # 局域网可访问；可加 --port / --token / --no-open
-codepilot connect 127.0.0.1:18765 --token <token>   # 终端附着到正在运行的服务
-```
-
-浏览器 / 桌面端里，对话中的文件路径和产出文件都可**点击预览**（Markdown、代码、图片等）。设置面板含：连接器（飞书 / 钉钉 / 企微 / Notion / GitHub 等）、MCP 市场、远程扫码、定时任务。
-
-**桌面窗 / Agent 窗**：
-
-```bash
-codepilot agent ~/my-project        # 任务型 UI，开在 Chrome/Edge app 窗口
-corepack pnpm desktop               # Electron 桌面端（源码运行）
-```
-
-**导出会话**（排查用）：
-
-```bash
-codepilot export                 # 最新会话 → stdout（markdown）
-codepilot export <id> --format jsonl -o out.jsonl
-```
-
-**自动更新**：
-
-```bash
-codepilot update          # 立刻检查并升级
-codepilot update --check  # 只检查不安装
-# 关闭：CODEPILOT_SKIP_UPDATE=1 或启动加 --no-update
-```
-
----
 
 ## 配置
 
-- 用户：`~/.codepilot/config.json`
-- 项目：`<repo>/.codepilot/config.json`（覆盖同名项）
-- 项目说明：仓库根 `CODEPILOT.md` / `AGENTS.md`（作为项目记忆注入）
+用户配置在 `~/.codepilot/config.json`，项目配置在 `<repo>/.codepilot/config.json`（覆盖同名项）。
 
 ```json
 {
   "providers": {
-    "custom-openai": {
+    "my-gateway": {
       "provider": "openai",
-      "displayName": "Custom OpenAI-compatible",
       "baseURL": "http://127.0.0.1:3456/v1",
       "apiKey": "${OPENAI_API_KEY}",
-      "model": "your-model-id",
-      "models": ["your-model-id"]
+      "model": "your-model-id"
     }
   },
   "permissionMode": "ask",
-  "sandbox": { "mode": "workspace-write", "writablePaths": [] }
+  "permissions": { "allow": ["bash(pnpm test *)"], "deny": ["bash(rm -rf *)"] },
+  "sandbox": { "mode": "workspace-write" }
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `providers` | 模型提供方；也可用 `codepilot config` 或界面里切换 |
-| `permissionMode` | `ask` / `auto-edit` / `yolo` |
-| `sandbox.mode` | `workspace-write`（默认）/ `read-only` / `off` |
-| `sandbox.writablePaths` | 额外可写目录 |
-| `mcpServers` | MCP 服务器 |
-
-命令行管理配置：
-
-```bash
-codepilot config show | providers | add | use | remove | templates
-```
-
-**协作模式**（`--mode` 或 `/agent`）：
-
-| 模式 | 用途 |
-|---|---|
-| `chat` | 只问答，不改文件、不跑 bash |
-| `plan` | 只读摸清情况并出计划 |
-| `agent` | 默认：可改代码、跑命令（按权限模式确认） |
-
----
+也可以用 `codepilot config` 在命令行管理。
 
 ## IDE 插件
 
 从 [Releases](https://github.com/dtssv/CodePilot/releases) 下载：
 
-- VS Code：`codepilot-vscode-*.vsix` →「从 VSIX 安装…」
-- IntelliJ：`codepilot-idea-*.zip` →「从磁盘安装插件」
+- VS Code：`codepilot-vscode-*.vsix`，「从 VSIX 安装…」
+- IntelliJ：`codepilot-idea-*.zip`，「从磁盘安装插件」
 
----
-
-## 从源码构建
+## 开发
 
 ```bash
 git clone https://github.com/dtssv/CodePilot.git
@@ -185,29 +131,16 @@ corepack enable
 corepack pnpm install
 corepack pnpm build
 
-alias codepilot='node '"$PWD"'/apps/tui/dist/cli.js'
+corepack pnpm --filter @codepilot/core test   # 测试
+corepack pnpm -r typecheck                    # 类型检查
+corepack pnpm package:all -- --all            # 打包全部，输出在 dist/release/
 ```
 
-打多端产物（输出在 `dist/release/`）：
+| 目录 | 内容 |
+|---|---|
+| `packages/core` | Agent 内核 |
+| `packages/protocol` | JSON-RPC 服务端 / 客户端、命令行入口 |
+| `packages/sdk` | 程序化 SDK |
+| `apps/{tui,web,desktop,vscode,idea}` | 各端界面 |
 
-```bash
-corepack pnpm package:cli -- --all   # 统一 codepilot 二进制（Bun --compile，内嵌 Web UI）
-corepack pnpm package:desktop        # Electron 桌面安装包（.dmg / .exe / .AppImage）
-corepack pnpm package:vscode         # VS Code 扩展（.vsix）
-corepack pnpm package:idea           # IntelliJ 插件（需 JDK 17）
-corepack pnpm package:all -- --all   # 全部
-```
-
-<details>
-<summary>构建与跨平台说明</summary>
-
-- 统一二进制用 Bun `--compile` 打包 TUI 入口，内嵌 Web SPA。裸 `codepilot` 进 TUI；`web` / `serve` / `run` / `goal` / `agent` / `config` / `export` / `update` / `connect` 走命令行。
-- Bun 可从单一宿主交叉编译全部目标，但会内嵌宿主架构的原生插件，故 CI 在各自原生 runner 上构建以得到正确的 `better_sqlite3.node`。
-- Linux 二进制动态链接宿主 glibc：请在**尽量旧的 glibc 环境**（如 CentOS 7 / manylinux 容器）里构建以最大化兼容；**不支持 musl (Alpine)**。
-- Desktop 用 electron-builder；macOS / Windows 的签名需在对应宿主并配好证书。
-
-</details>
-
----
-
-源码：https://github.com/dtssv/CodePilot
+贡献代码前请阅读 [AGENTS.md](AGENTS.md)。

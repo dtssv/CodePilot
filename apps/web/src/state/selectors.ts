@@ -96,14 +96,76 @@ export const CATEGORY_VERB: Record<ToolCategory, string> = {
   other: "Called",
 };
 
-/** The one-line target of a tool call: path, command, pattern, url… */
+export type PatchTouch = { op: "add" | "update" | "delete"; path: string };
+
+/** File ops declared in an apply_patch body (headers only — no full parse). */
+export function patchTouches(patch: string): PatchTouch[] {
+  const out: PatchTouch[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    for (const [prefix, op] of [
+      ["*** Add File: ", "add"],
+      ["*** Update File: ", "update"],
+      ["*** Delete File: ", "delete"],
+    ] as const) {
+      if (line.startsWith(prefix)) {
+        const path = line.slice(prefix.length).trim();
+        if (path) out.push({ op, path });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** Paths a tool call touches (single-file fields or apply_patch headers). */
+export function toolFilePaths(input: unknown): string[] {
+  if (input === undefined || input === null || typeof input !== "object") return [];
+  const o = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filePath", "notebook_path"]) {
+    const v = o[key];
+    if (typeof v === "string" && v.trim() !== "") return [v.trim()];
+  }
+  if (typeof o.patch === "string") return patchTouches(o.patch).map((t) => t.path);
+  return [];
+}
+
+/**
+ * Action verb for a tool step. Prefer what happened (Wrote / Edited / Read…)
+ * over the tool's internal name — apply_patch Add-only reads as Wrote.
+ */
+export function toolVerb(name: string, input?: unknown): string {
+  const cat = toolCategory(name);
+  if (input && typeof input === "object") {
+    const patch = (input as Record<string, unknown>).patch;
+    if (typeof patch === "string") {
+      const touches = patchTouches(patch);
+      if (touches.length > 0 && touches.every((t) => t.op === "add")) return CATEGORY_VERB.write;
+      if (touches.length > 0 && touches.every((t) => t.op === "delete")) return "Deleted";
+    }
+  }
+  if (cat === "other") return name;
+  return CATEGORY_VERB[cat];
+}
+
+/** One-line subject: files (with +/− marks for patch ops), command, pattern… */
 export function toolTarget(input: unknown): string {
   if (input === undefined || input === null) return "";
   if (typeof input !== "object") return oneLine(String(input), 160);
   const o = input as Record<string, unknown>;
-  for (const key of ["command", "path", "file_path", "pattern", "query", "url", "objective", "description", "ref"]) {
+  for (const key of ["command", "path", "file_path", "filePath", "notebook_path", "pattern", "query", "url", "objective", "description", "ref"]) {
     const v = o[key];
     if (typeof v === "string" && v.trim() !== "") return oneLine(v, 160);
+  }
+  if (typeof o.patch === "string") {
+    const touches = patchTouches(o.patch);
+    if (touches.length > 0) {
+      return oneLine(
+        touches
+          .map((t) => (t.op === "add" ? `+ ${t.path}` : t.op === "delete" ? `− ${t.path}` : t.path))
+          .join(" · "),
+        160,
+      );
+    }
   }
   return "";
 }
@@ -214,22 +276,29 @@ export function touchedFiles(rows: Row[]): TouchedFile[] {
   for (const r of rows) {
     if (r.kind !== "tool" || !r.tool.change || r.tool.status === "error") continue;
     const c = r.tool.change;
-    const prev = byPath.get(c.path);
-    const { added, removed } = c;
-    if (prev) {
-      prev.edits += 1;
-      prev.added += added;
-      prev.removed += removed;
-      prev.lastAt = r.at;
-    } else {
-      byPath.set(c.path, {
-        path: c.path,
-        kind: c.operation === "write" ? "written" : "edited",
-        edits: 1,
-        added,
-        removed,
-        lastAt: r.at,
-      });
+    // apply_patch may touch many files — expand from input headers, not the
+    // joined display path on FileChange.
+    const paths = toolFilePaths(r.tool.input);
+    const list = paths.length > 0 ? paths : [c.path];
+    const perFileAdded = list.length > 0 ? Math.round(c.added / list.length) : c.added;
+    const perFileRemoved = list.length > 0 ? Math.round(c.removed / list.length) : c.removed;
+    for (const path of list) {
+      const prev = byPath.get(path);
+      if (prev) {
+        prev.edits += 1;
+        prev.added += perFileAdded;
+        prev.removed += perFileRemoved;
+        prev.lastAt = r.at;
+      } else {
+        byPath.set(path, {
+          path,
+          kind: c.operation === "write" ? "written" : "edited",
+          edits: 1,
+          added: perFileAdded,
+          removed: perFileRemoved,
+          lastAt: r.at,
+        });
+      }
     }
   }
   return [...byPath.values()].sort((a, b) => b.lastAt - a.lastAt);
@@ -276,6 +345,40 @@ export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Derived token totals for UI: total / input / output / cache / cache %. */
+export function deriveUsageMetrics(usage: {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}): {
+  total: number;
+  input: number;
+  output: number;
+  cache: number;
+  cacheRatio: number;
+} {
+  const input = usage.input ?? 0;
+  const output = usage.output ?? 0;
+  const cacheRead = usage.cacheRead ?? 0;
+  const cacheWrite = usage.cacheWrite ?? 0;
+  const cache = cacheRead + cacheWrite;
+  // OpenAI-style: cached_tokens ⊆ prompt_tokens. Anthropic-style: cache
+  // fields are additive (cacheRead can exceed the non-cached input).
+  const inclusive = cacheWrite === 0 && cacheRead > 0 && cacheRead <= input;
+  const total = inclusive ? input + output : input + output + cacheRead + cacheWrite;
+  const promptSide = inclusive ? input : input + cacheRead + cacheWrite;
+  const cacheRatio = promptSide > 0 ? cacheRead / promptSide : 0;
+  return { total, input, output, cache, cacheRatio };
+}
+
+export function formatCacheRatio(ratio: number): string {
+  if (!Number.isFinite(ratio) || ratio <= 0) return "0%";
+  if (ratio >= 0.999) return "100%";
+  if (ratio < 0.01) return `${(ratio * 100).toFixed(1)}%`;
+  return `${Math.round(ratio * 100)}%`;
 }
 
 export type DateBucket = "Today" | "Yesterday" | "Earlier";

@@ -4,13 +4,35 @@
  * @file) and is the only place that interprets keys. Key map: Enter submit
  * (or accept highlighted menu entry); Shift+Enter or `\`+Enter newline;
  * Ctrl+K toggle palette; `/` at col 0 open palette with the rest as query;
- * Ctrl+R reverse history search (again cycles); Up/Down history (menus
- * closed) or menu nav; Tab complete; Esc close menu; Ctrl+C cancel/exit.
+ * Ctrl+R reverse history search (again cycles); Up/Down move between lines,
+ * then history (menus closed) or menu nav; Tab complete; Esc close menu;
+ * Ctrl+G edit in $VISUAL/$EDITOR; Ctrl+C cancel/exit. Line editing:
+ * ←/→, Ctrl+A/E, Alt+B/F, Ctrl+W, Ctrl+U. With `vimMode`, Esc enters
+ * normal mode (see lineEditor.ts).
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { color as palette } from "./theme.js";
 import { isEscape } from "./keys.js";
+import { editInExternalEditor } from "./externalEditor.js";
+import {
+  deleteBackward,
+  deleteRange,
+  deleteWordBackward,
+  enterNormal,
+  initialVim,
+  insertText,
+  lineEnd,
+  lineStart,
+  moveTo,
+  sanitizeComposerText,
+  verticalMove,
+  vimNormalKey,
+  wordBackward,
+  wordForward,
+  type EditState,
+  type VimState,
+} from "./lineEditor.js";
 import type { CommandInfo } from "./commands.js";
 import { listFilesForCompletion } from "./fileComplete.js";
 import { CommandPalette, paletteState, paletteWindow } from "./CommandPalette.js";
@@ -44,6 +66,10 @@ export interface InputBoxProps {
  /** Path of the history file (defaults to ~/.codepilot/tui-history.jsonl).
  * Overridable for tests; pass null to disable persistence. */
   historyPath?: string | null;
+  /** vim key bindings (insert / normal mode). */
+  vimMode?: boolean;
+  /** Surface a one-line notice (e.g. the external editor failed). */
+  onNotice?: (text: string) => void;
 }
 
 /** Which overlay menu (if any) is open. */
@@ -81,7 +107,26 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
     cwd,
     commands,
     historyPath,
+    vimMode = false,
+    onNotice,
   } = props;
+
+ // ---- cursor + vim state --------------------------------------------------
+ // `value` is owned by the parent. When it changes from outside (history,
+ // palette, submit) the cursor jumps to the end.
+  const [cursorPos, setCursorPos] = React.useState(value.length);
+  const emittedRef = React.useRef(value);
+  const cursor = value === emittedRef.current ? Math.min(cursorPos, value.length) : value.length;
+  const [vim, setVim] = React.useState<VimState>(initialVim);
+  const normal = vimMode && vim.mode === "normal";
+  const apply = React.useCallback(
+    (next: EditState) => {
+      emittedRef.current = next.value;
+      setCursorPos(next.cursor);
+      if (next.value !== value) onChange(next.value);
+    },
+    [value, onChange],
+  );
 
  // ---- persistent history -------------------------------------------------
   const historyRef = React.useRef<HistoryEntry[] | null>(null);
@@ -296,7 +341,7 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
             return;
           }
           if (input.length > 0 && !key.ctrl && !key.meta) {
-            onChange(value + input);
+            onChange(value + sanitizeComposerText(input));
             return;
           }
           return; // swallow everything else while the palette is open
@@ -307,7 +352,7 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
             return;
           }
           if (input.length > 0 && !key.ctrl && !key.meta) {
-            setMenu({ ...menu, query: menu.query + input, selected: 0 });
+            setMenu({ ...menu, query: menu.query + sanitizeComposerText(input), selected: 0 });
             return;
           }
           return;
@@ -316,9 +361,20 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
       }
 
  // ---- plain editing ---------------------------------------------------
- // Ink maps \r → key.return and \n → key.enter. Raw-mode terminals send
- // \r, but PTYs/paste paths may deliver \n — treat both as submit.
-      if ((key.return || (key as { enter?: boolean }).enter) && !key.shift) {
+      const state: EditState = { value, cursor };
+
+      if (key.ctrl && input === "g") {
+        const { stdin } = process;
+        const raw = stdin.isTTY ? stdin.isRaw : false;
+        if (stdin.isTTY) stdin.setRawMode(false);
+        const r = editInExternalEditor(value);
+        if (stdin.isTTY) stdin.setRawMode(raw);
+        if (r.ok) apply({ value: r.text, cursor: r.text.length });
+        else onNotice?.(`external editor: ${r.error}`);
+        return;
+      }
+
+      const submit = (ctrl: boolean): void => {
         const text = value.trim();
         if (text.length === 0) return;
  // Persist to history (skip exact duplicates of the latest entry).
@@ -332,33 +388,24 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
         }
         histNavIdxRef.current = -1;
         draftRef.current = "";
-        const delivery = busy && key.ctrl ? "steer" : "auto";
+        if (vimMode) setVim((v) => ({ ...v, mode: "insert", pending: "", undo: [] }));
+        const delivery = busy && ctrl ? "steer" : "auto";
         onSubmit(text, delivery);
-        return;
-      }
-      if (key.return && key.shift) {
-        onChange(value + "\n");
-        return;
-      }
-      if (key.return && value.endsWith("\\")) {
-        onChange(value.slice(0, -1) + "\n");
-        return;
-      }
+      };
 
- // History navigation (menus closed).
-      if (key.upArrow) {
+ // History navigation (menus closed, cursor on the first / last line).
+      const browseHistory = (dir: -1 | 1): void => {
         const entries = historyRef.current ?? [];
-        if (entries.length === 0) return;
         const idx = histNavIdxRef.current;
-        const next = idx === -1 ? 0 : Math.min(entries.length - 1, idx + 1);
-        if (idx === -1) draftRef.current = value;
-        const v = entries[next];
-        if (v !== undefined) onChange(v.text);
-        histNavIdxRef.current = next;
-        return;
-      }
-      if (key.downArrow) {
-        const idx = histNavIdxRef.current;
+        if (dir === -1) {
+          if (entries.length === 0) return;
+          const next = idx === -1 ? 0 : Math.min(entries.length - 1, idx + 1);
+          if (idx === -1) draftRef.current = value;
+          const v = entries[next];
+          if (v !== undefined) onChange(v.text);
+          histNavIdxRef.current = next;
+          return;
+        }
         if (idx === -1) return;
         const next = idx - 1;
         if (next < 0) {
@@ -367,19 +414,132 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
           histNavIdxRef.current = -1;
           return;
         }
-        const entries = historyRef.current ?? [];
         const v = entries[next];
         if (v !== undefined) onChange(v.text);
         histNavIdxRef.current = next;
+      };
+
+ // Ink maps \r → key.return and \n → key.enter. Raw-mode terminals send
+ // \r, but PTYs/paste paths may deliver \n — treat both as submit.
+      const enter = key.return || (key as { enter?: boolean }).enter;
+
+      if (vimMode && vim.mode === "insert" && isEscape(input, key)) {
+        const r = enterNormal(state, vim);
+        setVim(r.vim);
+        apply(r.state);
+        return;
+      }
+
+      if (normal) {
+        if (enter && !key.shift) {
+          submit(key.ctrl);
+          return;
+        }
+        if (isEscape(input, key)) {
+          setVim((v) => ({ ...v, pending: "" }));
+          return;
+        }
+        if (key.ctrl || key.meta) return;
+        const keys = key.leftArrow
+          ? "h"
+          : key.rightArrow
+            ? "l"
+            : key.upArrow
+              ? "k"
+              : key.downArrow
+                ? "j"
+                : key.backspace || key.delete
+                  ? "h"
+                  : input;
+        let cur = state;
+        let v = vim;
+        const chars = [...keys];
+        for (let k = 0; k < chars.length; k++) {
+          const action = vimNormalKey(cur, v, chars[k]!);
+          if (action === null) continue;
+          v = action.vim;
+          if (action.kind === "submit") {
+            setVim(v);
+            submit(false);
+            return;
+          }
+          if (action.kind === "history") {
+            setVim(v);
+            browseHistory(action.dir);
+            return;
+          }
+          cur = action.state;
+          if (v.mode === "insert") {
+ // The rest of a pasted chunk after `i`/`a`/… is typed text.
+            const tail = chars.slice(k + 1).join("");
+            if (tail) cur = insertText(cur, tail);
+            break;
+          }
+        }
+        setVim(v);
+        apply(cur);
+        return;
+      }
+
+      if (enter && !key.shift) {
+        if (value[cursor - 1] === "\\" && key.return) {
+          apply(insertText(deleteBackward(state), "\n"));
+          return;
+        }
+        submit(key.ctrl);
+        return;
+      }
+      if (key.return && key.shift) {
+        apply(insertText(state, "\n"));
+        return;
+      }
+
+      if (key.upArrow || key.downArrow) {
+        const dir = key.upArrow ? -1 : 1;
+        const next = verticalMove(state, dir);
+        if (next === null) browseHistory(dir);
+        else apply(moveTo(state, next));
+        return;
+      }
+      if (key.leftArrow) {
+        apply(moveTo(state, key.meta || key.ctrl ? wordBackward(value, cursor) : cursor - 1));
+        return;
+      }
+      if (key.rightArrow) {
+        apply(moveTo(state, key.meta || key.ctrl ? wordForward(value, cursor) : cursor + 1));
+        return;
+      }
+      if (key.ctrl && input === "a") {
+        apply(moveTo(state, lineStart(value, cursor)));
+        return;
+      }
+      if (key.ctrl && input === "e") {
+        apply(moveTo(state, lineEnd(value, cursor)));
+        return;
+      }
+      if (key.meta && input === "b") {
+        apply(moveTo(state, wordBackward(value, cursor)));
+        return;
+      }
+      if (key.meta && input === "f") {
+        apply(moveTo(state, wordForward(value, cursor)));
+        return;
+      }
+      if (key.ctrl && input === "w") {
+        apply(deleteWordBackward(state));
+        return;
+      }
+      if (key.ctrl && input === "u") {
+        apply(deleteRange(state, lineStart(value, cursor), cursor));
         return;
       }
 
       if (key.backspace || key.delete) {
-        if (value.length > 0) onChange(value.slice(0, -1));
+        apply(deleteBackward(state));
         return;
       }
       if (input.length > 0 && !key.ctrl && !key.meta) {
-        onChange(value + input);
+        apply(insertText(state, input));
         return;
       }
     },
@@ -471,19 +631,39 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
               "Type a message. / for commands, @ for files, Ctrl+R history."}
           </Text>
         ) : (
-          lines.map((line, i) => (
-            <Text key={`l-${i}`}>
-              <Text color={palette.accent}>{i === 0 ? "› " : "  "}</Text>
-              {line.length === 0 ? " " : line}
-            </Text>
-          ))
+          (() => {
+            let offset = 0;
+            return lines.map((line, i) => {
+              const start = offset;
+              offset += line.length + 1;
+              const col = cursor - start;
+              const here = !disabled && col >= 0 && col <= line.length;
+              return (
+                <Text key={`l-${i}`}>
+                  <Text color={palette.accent}>{i === 0 ? "› " : "  "}</Text>
+                  {here ? (
+                    <>
+                      {line.slice(0, col)}
+                      <Text inverse>{line[col] ?? " "}</Text>
+                      {line.slice(col + 1)}
+                    </>
+                  ) : line.length === 0 ? (
+                    " "
+                  ) : (
+                    line
+                  )}
+                </Text>
+              );
+            });
+          })()
         )}
         <Box justifyContent="space-between">
           <Text dimColor>
+            {vimMode ? (normal ? "-- NORMAL -- " : "-- INSERT -- ") : ""}
             {hint ??
               (busy
                 ? "↵ queue · ⌃↵ inject into run · ^C cancel"
-                : "↵ send · ⇧↵ newline · ^K commands · ^R history · ↑↓ history · ^C cancel")}
+                : "↵ send · ⇧↵ newline · ^K commands · ^R history · ^G editor · ^C cancel")}
           </Text>
         </Box>
       </Box>

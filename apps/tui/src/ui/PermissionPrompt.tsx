@@ -9,8 +9,9 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import type { PermissionResolution } from "@codepilot/core";
-import { CATEGORY_VERB, changeCounts, color, glyph, oneLine, toolCategory, toolTarget } from "./theme.js";
+import { changeCounts, color, glyph, oneLine, patchTouches, toolCategory, toolTarget, toolVerb } from "./theme.js";
 import { isEscape } from "./keys.js";
+import { ShellCommand } from "./TranscriptView.js";
 
 export interface PermissionPromptProps {
   toolName: string;
@@ -83,8 +84,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
     { isActive: true },
   );
 
-  const category = toolCategory(toolName);
-  const verb = category === "other" ? toolName : CATEGORY_VERB[category];
+  const verb = toolVerb(toolName, input);
   const target = toolTarget(input);
   const counts = changeCounts(toolName, input);
 
@@ -95,7 +95,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
       </Text>
       <Box marginTop={1}>
         <Text color={color.faint}>{verb} </Text>
-        <Text bold>{target || toolName}</Text>
+        <Text bold>{target || "…"}</Text>
         {counts?.added ? <Text color={color.add}> +{counts.added}</Text> : null}
         {counts?.removed ? <Text color={color.remove}> −{counts.removed}</Text> : null}
       </Box>
@@ -123,19 +123,18 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
               const selected = i === idx;
               return (
                 <Text key={opt.action}>
-                  <Text color={selected ? color.accent : color.faint}>{selected ? "▸ " : "  "}</Text>
+                  <Text color={selected ? color.accent : color.faint}>{selected ? "❯ " : "  "}</Text>
                   <Text bold={selected} color={selected ? color.accent : undefined}>
-                    {opt.label.padEnd(16)}
+                    {opt.label.padEnd(18)}
                   </Text>
-                  <Text color={color.info}> {opt.keyHint.padEnd(4)}</Text>
-                  <Text color={color.faint}>{opt.hint}</Text>
+                  <Text color={color.faint}>{opt.keyHint}</Text>
                 </Text>
               );
             })}
           </Box>
           <Box marginTop={1}>
             <Text color={color.faint}>
-              ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} 1/y once {glyph.dot} 2/a always {glyph.dot} 3/p project {glyph.dot} 4/n deny {glyph.dot} 5/f deny+feedback {glyph.dot} 6/s deny+stop
+              {OPTIONS[idx]!.hint} {glyph.dot} ↑↓ select {glyph.dot} ↵ confirm {glyph.dot} esc deny
             </Text>
           </Box>
         </>
@@ -154,15 +153,8 @@ function DetailPreview({ toolName, input }: { toolName: string; input: unknown }
   if (category === "bash" && typeof o.command === "string") {
     return (
       <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={color.edge} paddingX={1}>
-        {o.command.split("\n").slice(0, 6).map((line, i) => (
-          <Text key={i} color={color.info}>
-            {i === 0 ? "$ " : "  "}
-            {line}
-          </Text>
-        ))}
-        {o.command.split("\n").length > 6 ? (
-          <Text color={color.faint}>  … {o.command.split("\n").length - 6} more lines</Text>
-        ) : null}
+        <ShellCommand command={o.command} maxLines={12} />
+        {typeof o.cwd === "string" ? <Text color={color.faint}>in {o.cwd}</Text> : null}
       </Box>
     );
   }
@@ -175,6 +167,24 @@ function DetailPreview({ toolName, input }: { toolName: string; input: unknown }
           <Text key={i} color={color.add}>+ {oneLine(line, 100)}</Text>
         ))}
         {lines.length > 5 ? <Text color={color.faint}>  … {lines.length - 5} more lines</Text> : null}
+      </Box>
+    );
+  }
+
+  if (category === "edit" && typeof o.patch === "string") {
+    const touches = patchTouches(o.patch);
+    return (
+      <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={color.edge} paddingX={1}>
+        {touches.slice(0, 8).map((t, i) => (
+          <Text key={i}>
+            <Text color={t.op === "add" ? color.add : t.op === "delete" ? color.remove : color.faint}>
+              {t.op === "add" ? "+" : t.op === "delete" ? "−" : "~"}
+            </Text>
+            {" "}
+            {oneLine(t.path, 100)}
+          </Text>
+        ))}
+        {touches.length > 8 ? <Text color={color.faint}>  … {touches.length - 8} more files</Text> : null}
       </Box>
     );
   }

@@ -15,8 +15,8 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { resolveSandbox, wrapCommand } from "../src/sandbox.js";
-import { startNetProxy, type RunningNetProxy } from "../src/netProxy.js";
+import { resolveSandbox, wrapCommand } from "../src/sandbox/sandbox.js";
+import { startNetProxy, type RunningNetProxy } from "../src/workspace/netProxy.js";
 
 function firstExisting(paths: string[]): string | null {
   for (const p of paths) if (existsSync(p)) return p;

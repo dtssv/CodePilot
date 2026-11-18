@@ -9,10 +9,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { buildProgressLedger, isTransientError, runAgent, type AgentDeps } from "../src/agent.js";
-import { buildProviderMessages, compactTranscriptToProviderMessages } from "../src/agent-messages.js";
-import { compact } from "../src/compaction.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { buildProgressLedger, isTransientError, runAgent, type AgentDeps } from "../src/agent/agent.js";
+import { buildProviderMessages, compactTranscriptToProviderMessages } from "../src/agent/agent-messages.js";
+import { compact } from "../src/compaction/compaction.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import { buildOpenAIMessages } from "../src/providers/openai.js";
 import type { ChatProvider, ProviderMessage, StreamChatOptions, StreamEvent } from "../src/providers/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
@@ -448,7 +448,7 @@ describe("live context", () => {
 
 describe("doom-loop read cache", () => {
   it("re-reads a file for real after it was edited", async () => {
-    const { DoomLoopDetector } = await import("../src/doomLoop.js");
+    const { DoomLoopDetector } = await import("../src/agent/doomLoop.js");
     const d = new DoomLoopDetector();
     d.check("read_file", { path: "a.ts" });
     d.recordResult("read_file", { path: "a.ts" }, { content: "old" });
@@ -461,7 +461,7 @@ describe("doom-loop read cache", () => {
 
 describe("pseudo tool-call in reply text", () => {
   it("flags markup tool calls and ignores ordinary prose", async () => {
-    const { looksLikePseudoToolCall } = await import("../src/agent.js");
+    const { looksLikePseudoToolCall } = await import("../src/agent/agent.js");
     // Invocation markup the model sometimes prints instead of calling a tool.
     expect(looksLikePseudoToolCall("<tool_call>read_file<arg_key>path</arg_key></tool_call>")).toBe(true);
     expect(looksLikePseudoToolCall('<function_calls><invoke name="bash"></invoke></function_calls>')).toBe(true);

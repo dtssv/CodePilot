@@ -62,6 +62,27 @@ async function main() {
 
   mkdirSync(dirname(outfile), { recursive: true });
   const esbuild = resolveEsbuild();
+  // ESM → CJS: import.meta.url becomes undefined unless we shim it. Same
+  // treatment as bundle-node.mjs so createRequire + version probes work.
+  const importMetaShim =
+    "var __cp_import_meta_url = require('url').pathToFileURL(__filename).href;";
+  let coreVersion = "0.0.0";
+  try {
+    coreVersion =
+      JSON.parse(readFileSync(join(REPO_ROOT, "packages/core/package.json"), "utf8")).version ??
+      coreVersion;
+  } catch {
+    try {
+      const req = createRequire(import.meta.url);
+      coreVersion =
+        JSON.parse(readFileSync(req.resolve("@codepilot/core/package.json"), "utf8")).version ??
+        coreVersion;
+    } catch {
+      /* keep default */
+    }
+  }
+  const pkgShim = `var __cp_pkg = ${JSON.stringify({ name: "@codepilot/core", version: coreVersion })};`;
+
   log(`esbuild ${entry} → ${outfile}`);
   await esbuild.build({
     entryPoints: [entry],
@@ -71,11 +92,19 @@ async function main() {
     target: "node20",
     format: "cjs",
     sourcemap: false,
+    define: {
+      "import.meta.url": "__cp_import_meta_url",
+    },
     external: ["electron", "fsevents"],
+    banner: { js: `${importMetaShim}\n${pkgShim}` },
     logLevel: "warning",
   });
   let code = readFileSync(outfile, "utf8");
   code = code.replace(/^(#!.*\r?\n)+/, "");
+  code = code.replace(
+    /\b(?:require\d*|req)\s*\(\s*["'](?:(?:\.\.\/)+package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
+    "__cp_pkg",
+  );
   writeFileSync(outfile, code);
   log(`plugin CLI → ${outfile}`);
 }

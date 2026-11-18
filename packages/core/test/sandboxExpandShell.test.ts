@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Session } from "../src/session.js";
+import { Session } from "../src/session/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 
 const instantProvider: ChatProvider = {

@@ -50,6 +50,11 @@ export function fileChangeFromToolCall(
   if (!isFileMutation(toolName)) return null;
   if (typeof input !== "object" || input === null) return null;
   const o = input as Record<string, unknown>;
+
+  if (toolName === "apply_patch" && typeof o.patch === "string") {
+    return fileChangeFromApplyPatch(o.patch);
+  }
+
   const path = firstString(o, ["path", "file_path", "filePath", "notebook_path"]);
   if (!path) return null;
 
@@ -98,14 +103,81 @@ export function fileChangeFromToolCall(
     return { path, operation: "edit", hunks, added, removed, truncated };
   }
 
- // apply_patch / notebook_edit: we do not model their payloads, but the path
- // and operation alone are still worth showing.
+ // notebook_edit (and any other mutate tool with a bare path): path alone.
   return {
     path,
     operation: "patch",
     hunks: [],
     added: 0,
     removed: 0,
+  };
+}
+
+/** Build a reviewable change from an apply_patch body (files + +/- lines). */
+function fileChangeFromApplyPatch(patch: string): FileChange | null {
+  const touches: Array<{ op: "add" | "update" | "delete"; path: string }> = [];
+  for (const line of patch.split(/\r?\n/)) {
+    for (const [prefix, op] of [
+      ["*** Add File: ", "add"],
+      ["*** Update File: ", "update"],
+      ["*** Delete File: ", "delete"],
+    ] as const) {
+      if (line.startsWith(prefix)) {
+        const p = line.slice(prefix.length).trim();
+        if (p) touches.push({ op, path: p });
+        break;
+      }
+    }
+  }
+  if (touches.length === 0) return null;
+
+  const lines: DiffLine[] = [];
+  let added = 0;
+  let removed = 0;
+  let truncated = false;
+  for (const line of patch.split(/\r?\n/)) {
+    if (line === "*** Begin Patch" || line === "*** End Patch" || line === "*** End of File") continue;
+    if (line.startsWith("*** ")) {
+      lines.push({ kind: "meta", text: line.slice(4) });
+      continue;
+    }
+    if (line.startsWith("@@")) {
+      lines.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      added++;
+      if (lines.length < MAX_LINES_PER_HUNK) lines.push({ kind: "add", text: line.slice(1) });
+      else truncated = true;
+      continue;
+    }
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      removed++;
+      if (lines.length < MAX_LINES_PER_HUNK) lines.push({ kind: "remove", text: line.slice(1) });
+      else truncated = true;
+      continue;
+    }
+    if (line.startsWith(" ")) {
+      if (lines.length < MAX_LINES_PER_HUNK) lines.push({ kind: "context", text: line.slice(1) });
+      else truncated = true;
+    }
+  }
+  if (truncated) {
+    lines.push({ kind: "meta", text: `… remaining patch lines not shown` });
+  }
+
+  const path =
+    touches.length === 1
+      ? touches[0]!.path
+      : touches.map((t) => (t.op === "add" ? `+${t.path}` : t.op === "delete" ? `−${t.path}` : t.path)).join(", ");
+  const allAdd = touches.every((t) => t.op === "add");
+  return {
+    path,
+    operation: allAdd ? "write" : "patch",
+    hunks: lines.length ? [{ label: touches.length === 1 ? undefined : `${touches.length} files`, lines }] : [],
+    added,
+    removed,
+    truncated: truncated || undefined,
   };
 }
 

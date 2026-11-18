@@ -133,9 +133,49 @@ function Add-ToUserPath {
   Write-Host "Added $target to your user PATH (restart the terminal for it to take effect everywhere)."
 }
 
+$script:DaemonWasRunning = $false
+$script:DaemonRestartPort = 18765
+
+function Stop-Daemon {
+  $infoPath = Join-Path $Prefix "serve.json"
+  if (Test-Path $infoPath) {
+    try {
+      $info = Get-Content $infoPath -Raw | ConvertFrom-Json
+      if ($info.port) { $script:DaemonRestartPort = [int]$info.port }
+      if ($info.pid) {
+        $proc = Get-Process -Id $info.pid -ErrorAction SilentlyContinue
+        if ($proc) {
+          $script:DaemonWasRunning = $true
+          Write-Host "Stopping running daemon (pid $($info.pid))…"
+          Stop-Process -Id $info.pid -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Milliseconds 500
+        }
+      }
+    } catch { }
+  }
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'codepilot.*serve --daemon' } |
+    ForEach-Object {
+      $script:DaemonWasRunning = $true
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  Remove-Item (Join-Path $Prefix "serve.json") -Force -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $Prefix "server.json") -Force -ErrorAction SilentlyContinue
+}
+
+function Restart-DaemonIfNeeded {
+  if (-not $script:DaemonWasRunning) { return }
+  $cli = Join-Path $BinDir "codepilot.exe"
+  if (-not (Test-Path $cli)) { return }
+  Write-Host "Restarting shared daemon…"
+  Start-Process -FilePath $cli -ArgumentList @("serve", "--daemon", "--port", "$script:DaemonRestartPort") -WindowStyle Hidden
+}
+
+Stop-Daemon
 if ($DistDir) { Install-FromDist } else { Install-FromRelease }
 Confirm-Install
 Add-ToUserPath
+Restart-DaemonIfNeeded
 
 Write-Host ""
 Write-Host "Done. Start with:"

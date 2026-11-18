@@ -31,13 +31,10 @@ export interface StartNewTaskTool extends ToolDef<typeof schema> {
 export const startNewTaskTool: StartNewTaskTool = {
   name: "start_new_task",
   description:
-    "Draw a task boundary: archive the current conversation context and continue with a clean " +
-    "slate, when the current task is DONE and the next request is UNRELATED to it. Use this to " +
-    "avoid carrying a finished task's details into a new one (which wastes context and can cause " +
-    "you to conflate the two). The prior work is summarised and kept on disk — you can still " +
-    "reference it — but it stops being active context. Do NOT use it mid-task, or when the next " +
-    "step builds on what you just did; only at a genuine boundary between independent tasks. " +
-    "When unsure, don't call it.",
+    "Archive the current conversation and continue with a clean slate when the current " +
+    "task is DONE and the next request is UNRELATED. Prior work stays on disk but leaves " +
+    "active context; memory files are kept, and old `art_*` refs may need re-spilling. " +
+    "Do not use mid-task or when the next step builds on this work.",
   inputSchema: schema,
   permission: "read",
   async execute(input, _ctx) {

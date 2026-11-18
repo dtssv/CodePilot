@@ -60,8 +60,8 @@
   color-scheme: light;
 }
 
-/* Named palettes — a codex-style "whole theme" token swap layered on top of
-   the light/dark axis. `data-theme-name` on <html> selects one; each ships a
+/* Named palettes — each palette swaps every colour token at once, layered on
+   top of the light/dark axis. `data-theme-name` on <html> selects one; each ships a
    dark (default) and a light variant so it composes with the Theme toggle.
    "default" sets no attribute → the base tokens above apply. Keep these in
    sync with THEME_NAMES in surface.ts; the TUI mirrors them in

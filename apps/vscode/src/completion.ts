@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 
 import type { CodepilotSettings } from "./config.js";
 import type { Engine } from "./engine.js";
+import { nls } from "./nls.js";
 
 /** Context caps (design §5). Bounds tokens/latency and stabilises the cache key. */
 const PREFIX_CAP = 4000;
@@ -156,9 +157,9 @@ export class CompletionProvider implements vscode.InlineCompletionItemProvider {
     if (this.warnedNoSmallModel) return;
     this.warnedNoSmallModel = true;
     this.notify(
-      "CodePilot completion needs a lightweight model distinct from your main chat model. " +
-        "Configure `smallModel` (or `completion.model`) — e.g. a local Ollama `qwen2.5-coder`, " +
-        "or a free Groq / Gemini Flash model.",
+      nls(
+        "CodePilot completion needs a lightweight model distinct from your main chat model. Configure `smallModel` (or `completion.model`) — e.g. a local Ollama `qwen2.5-coder`, or a free Groq / Gemini Flash model.",
+      ),
     );
   }
 

@@ -4,11 +4,12 @@ import type { CodepilotClient } from "../protocol/client.js";
 import type { AppState } from "../state/reducer.js";
 import {
   currentActivity,
+  deriveUsageMetrics,
+  formatCacheRatio,
   formatTokens,
   planProgress,
-  toolCategory,
-  CATEGORY_VERB,
   toolTarget,
+  toolVerb,
   touchedFiles,
   type TouchedFile,
 } from "../state/selectors.js";
@@ -172,9 +173,9 @@ export function TaskPanel({
         {activity ? (
           <div className="flex items-center gap-2 text-[12px]">
             <SpinnerIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
-            <span className="shrink-0 text-[var(--color-ink-dim)]">{t(CATEGORY_VERB[toolCategory(activity.name)])}</span>
+            <span className="shrink-0 text-[var(--color-ink-dim)]">{t(toolVerb(activity.name, activity.input))}</span>
             <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-ink)]">
-              {toolTarget(activity.input) || activity.name}
+              {toolTarget(activity.input)}
             </span>
           </div>
         ) : (
@@ -185,8 +186,20 @@ export function TaskPanel({
         )}
         {state.usage.input > 0 && (
           <div className="mt-2 text-[11px] text-[var(--color-ink-faint)]">
-            {formatTokens(state.usage.input)} / {formatTokens(state.usage.output)} {t("tokens")}
-            {state.model ? ` · ${state.model}` : ""}
+            {(() => {
+              const m = deriveUsageMetrics(state.usage);
+              return (
+                <>
+                  {formatTokens(m.total)} {t("tokens")}
+                  {` · ${t("in")} ${formatTokens(m.input)}`}
+                  {` · ${t("out")} ${formatTokens(m.output)}`}
+                  {m.cache > 0
+                    ? ` · ${t("cache")} ${formatTokens(m.cache)} (${formatCacheRatio(m.cacheRatio)})`
+                    : ""}
+                  {state.model ? ` · ${state.model}` : ""}
+                </>
+              );
+            })()}
           </div>
         )}
       </Section>
@@ -390,7 +403,7 @@ export function FilePreview({
     truncated?: boolean;
   } | null>(null);
   // The server resolves a bare/relative name to the real workspace-relative
-  // path (e.g. "subagent.ts" → "packages/core/src/subagent.ts"). Open-in-editor
+  // path (e.g. "subagent.ts" → "packages/core/src/subagent/subagent.ts"). Open-in-editor
   // must use THAT, not the original prop, or it joins the wrong path and the
   // host reports "Failed to open path".
   const [resolvedPath, setResolvedPath] = useState<string>(path);

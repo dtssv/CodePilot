@@ -11,7 +11,7 @@
 // identical whether local or remote.
 
 import type { AgentMode, Event, PermissionResolution, QuestionAnswers } from "@codepilot/core";
-import { Peer } from "@codepilot/protocol/rpc";
+import { Peer, RpcError } from "@codepilot/protocol/rpc";
 import { WebSocketTransport } from "@codepilot/protocol/ws";
 
 export interface RemoteSessionOptions {
@@ -39,13 +39,19 @@ export interface RemoteSessionOptions {
   onPromptResolved?: (kind: "permission" | "question", requestId: string) => void;
  /** Connection state changes (for a status line while auto-reconnecting). */
   onConnectionChange?: (state: "connected" | "reconnecting" | "lost") => void;
- /** Consecutive reconnect attempts before the auto-retry loop gives up and
+  /** Consecutive reconnect attempts before the auto-retry loop gives up and
   * goes quiet (default {@link RECONNECT_MAX_ATTEMPTS}). A later user-driven RPC
   * still retries. Exposed mainly for tests. */
   reconnectMaxAttempts?: number;
  /** Initial reconnect backoff in ms (default 300, capped at 5000, doubling).
   * Exposed mainly for tests so the give-up path runs fast. */
   reconnectBackoffMs?: number;
+  /**
+   * When reconnect to the original URL/token fails (daemon replaced or quit
+   * by another client), re-read discovery and/or respawn. Returning a fresh
+   * `{ url, token }` updates this session's endpoint for subsequent attempts.
+   */
+  rediscover?: () => Promise<{ url: string; token?: string } | null>;
 }
 
 type Listener = (e: Event) => void;
@@ -64,6 +70,17 @@ function wsUrl(url: string, token?: string): string {
   if (!/^wss?:\/\//.test(u)) u = `ws://${u}`;
   if (token && !/[?&]token=/.test(u)) u += (u.includes("?") ? "&" : "?") + `token=${encodeURIComponent(token)}`;
   return u;
+}
+
+function normalizeEndpoint(url: string): string {
+  try {
+    const u = new URL(wsUrl(url));
+    u.search = "";
+    u.hash = "";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return url.replace(/\/$/, "");
+  }
 }
 
 /**
@@ -160,10 +177,13 @@ export class RemoteSession {
     await self.fetchConfigSnapshot();
 
     if (sessionId) {
-      const res = await peer.request<unknown, { sessionId: string; events: Event[] }>("session/resume", { sessionId });
+      const res = await self.resumeWithRedirect(peer, sessionId);
       self.events = res.events ?? [];
- // Seed derived state from history.
+      // Seed derived state from history; older pages arrive via session/history.
       for (const e of self.events) self.deriveState(e);
+      if (res.historyTruncated && res.historyBefore !== undefined) {
+        void self.backfillHistory(res.historyBefore);
+      }
     } else {
       const res = await peer.request<unknown, { sessionId: string }>("session/new", { cwd: opts.cwd });
       self.id = res.sessionId;
@@ -175,6 +195,81 @@ export class RemoteSession {
     await self.fetchEndpoint();
     self.opts.onConnectionChange?.("connected");
     return self;
+  }
+
+  /**
+   * Resume a session; on SESSION_LOCKED (−32002) with an owner url, switch to
+   * that daemon once. Falls back to readOnly when no redirect target exists.
+   */
+  private async resumeWithRedirect(
+    peer: Peer,
+    sessionId: string,
+    redirected = false,
+  ): Promise<{
+    sessionId: string;
+    events: Event[];
+    historyTruncated?: boolean;
+    historyBefore?: number;
+    readOnly?: boolean;
+  }> {
+    try {
+      return await peer.request<
+        { sessionId: string },
+        {
+          sessionId: string;
+          events: Event[];
+          historyTruncated?: boolean;
+          historyBefore?: number;
+          readOnly?: boolean;
+        }
+      >("session/resume", { sessionId });
+    } catch (err) {
+      if (!(err instanceof RpcError) || err.code !== -32002) throw err;
+      const owner = (err.data as { owner?: { pid: number; url?: string; token?: string } } | undefined)
+        ?.owner;
+      if (!redirected && owner?.url) {
+        const same =
+          normalizeEndpoint(this.opts.url) === normalizeEndpoint(owner.url) &&
+          (this.opts.token || "") === (owner.token || "");
+        if (!same) {
+          this.opts.url = owner.url;
+          this.opts.token = owner.token;
+          try {
+            this.socket.close();
+          } catch {
+            /* best-effort */
+          }
+          const nextPeer = await this.openPeer();
+          return this.resumeWithRedirect(nextPeer, sessionId, true);
+        }
+      }
+      // No usable redirect — open a disk snapshot.
+      return peer.request("session/resume", { sessionId, readOnly: true });
+    }
+  }
+
+  /** Pull older history pages and prepend into the local event mirror. */
+  private async backfillHistory(before: number): Promise<void> {
+    let cursor: number | undefined = before;
+    for (let page = 0; page < 20 && cursor !== undefined && !this.disposed; page++) {
+      try {
+        type HistoryPage = {
+          events: Event[];
+          historyTruncated: boolean;
+          historyBefore?: number;
+        };
+        const chunk: HistoryPage = await this.peer.request<
+          { sessionId: string; before: number },
+          HistoryPage
+        >("session/history", { sessionId: this.id, before: cursor });
+        const older = chunk.events ?? [];
+        this.events = [...older, ...this.events];
+        for (const e of older) this.deriveState(e);
+        cursor = chunk.historyTruncated ? chunk.historyBefore : undefined;
+      } catch {
+        return;
+      }
+    }
   }
 
  /**
@@ -300,10 +395,7 @@ export class RemoteSession {
         try {
           await this.openPeer();
           if (this.id) {
-            const res = await this.peer.request<unknown, { sessionId: string; events: Event[] }>(
-              "session/resume",
-              { sessionId: this.id },
-            );
+            const res = await this.resumeWithRedirect(this.peer, this.id);
             // Replay any events the UI missed while the socket was down.
             const known = this.events.length;
             const fresh = res.events ?? [];
@@ -314,6 +406,20 @@ export class RemoteSession {
           this.emitConnection("connected");
           return;
         } catch {
+          // Desktop may have replaced/quit the daemon (new token or dead
+          // pid). Re-read serve.json / respawn before the next attempt so we
+          // don't hammer a stale credential until give-up.
+          if (this.opts.rediscover) {
+            try {
+              const next = await this.opts.rediscover();
+              if (next?.url) {
+                this.opts.url = next.url;
+                this.opts.token = next.token;
+              }
+            } catch {
+              /* keep trying the previous endpoint */
+            }
+          }
           if (attempt + 1 >= maxAttempts) {
             this.emitConnection("gave-up");
             return;

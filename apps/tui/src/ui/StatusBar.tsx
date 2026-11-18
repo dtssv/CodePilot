@@ -115,7 +115,7 @@ export function StatusBar({
     );
   }
 
-  const sid = state.sessionId !== undefined ? state.sessionId.slice(0, 8) : undefined;
+  const sid = state.sessionId !== undefined ? (state.sessionId.split("_").pop() ?? state.sessionId).slice(0, 8) : undefined;
   const total =
     state.usage.input +
     state.usage.output +

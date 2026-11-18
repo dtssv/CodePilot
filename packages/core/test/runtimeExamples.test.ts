@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { createRuntimeToolkit, runtimeRegistry } from "../src/runtime.js";
+import { createRuntimeToolkit, runtimeRegistry } from "../src/agent/runtime.js";
 import {
   AuditRuntime,
   missingAuditSections,
@@ -18,11 +18,11 @@ import {
   MCTS_RUNTIME_NAME,
   type MctsCandidate,
 } from "../src/runtimes/index.js";
-import { runAgent, type AgentDeps } from "../src/agent.js";
+import { runAgent, type AgentDeps } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
-import { HookEngine } from "../src/hooks.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
+import { HookEngine } from "../src/hooks/hooks.js";
 import type { Event, ToolUseBlock } from "../src/types.js";
 import type {
   ChatProvider,
@@ -286,7 +286,7 @@ describe("RuntimeToolkit", () => {
     // integration seam: a verbatim-identical mutating call repeated past the
     // refuse threshold is blocked (isError + guidance) and never executed, so
     // a true no-progress loop is stopped — but earlier distinct calls ran.
-    const { REFUSE_THRESHOLD } = await import("../src/doomLoop.js");
+    const { REFUSE_THRESHOLD } = await import("../src/agent/doomLoop.js");
     const toolkit = createRuntimeToolkit();
     const deps = makeDeps(cwd, new MockProvider());
     const identical = call("write_file", { path: "loop.ts", content: "same body" });

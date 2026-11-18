@@ -20,7 +20,7 @@ import {
   bashTool,
 } from "./index.js";
 import { makeLspNavigateTool } from "./lsp_navigate.js";
-import type { LspManager } from "../lsp.js";
+import type { LspManager } from "../workspace/lsp.js";
 import { taskBoardTool } from "./task_board.js";
 
 /** Optional language-server wiring for the read-only `lsp_navigate` tool. The

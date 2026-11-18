@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatUploadNote, materializeUploads, MAX_UPLOAD_BYTES } from "../src/promptFiles.js";
-import { projectHash } from "../src/projectState.js";
+import { formatUploadNote, materializeUploads, MAX_UPLOAD_BYTES } from "../src/workspace/promptFiles.js";
+import { projectHash } from "../src/workspace/projectState.js";
 
 describe("materializeUploads", () => {
   it("writes files under ~/.codepilot/projects/<hash>/uploads and avoids name clashes", async () => {

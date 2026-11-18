@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ReplayProvider, extractReplayTurns } from "../src/replayProvider.js";
+import { ReplayProvider, extractReplayTurns } from "../src/agent/replayProvider.js";
 import type { ContentBlock, Event, ToolUseBlock } from "../src/types.js";
 import type { StreamChatOptions, StreamEvent } from "../src/providers/types.js";
 

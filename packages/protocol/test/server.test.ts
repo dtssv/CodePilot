@@ -91,6 +91,12 @@ class FakeSession {
   getHistory() {
     return [...this.events];
   }
+  rewindTargets(): Array<{ messageId: string; text: string }> {
+    return [];
+  }
+  async rewindConversation(): Promise<never> {
+    throw new Error("Nothing to rewind.");
+  }
   async compact(): Promise<void> {
     /* no-op in the mock */
   }
@@ -586,19 +592,45 @@ describe("server / protocol handlers", () => {
       clientInfo: { name: "t", version: "0" },
     });
     const res = await client.request<
-      { provider: string; apiKey: string; custom: { url: string } },
-      { webSearch: { provider?: string; hasApiKey: boolean; customUrl?: string } }
+      {
+        provider: string;
+        apiKey: string;
+        engineId: string;
+        env: Record<string, string>;
+        custom: { url: string };
+      },
+      {
+        webSearch: {
+          provider?: string;
+          hasApiKey: boolean;
+          customUrl?: string;
+          engineId?: string;
+          env?: Record<string, string>;
+        };
+      }
     >("config/setWebSearch", {
       provider: "custom",
       apiKey: "sk-search-123",
+      engineId: "tavily",
+      env: { SEARXNG_URL: "https://searx.example" },
       custom: { url: "https://api.example.com/s?q={query}" },
     });
     expect(res.webSearch.provider).toBe("custom");
     expect(res.webSearch.hasApiKey).toBe(true);
     expect(res.webSearch.customUrl).toBe("https://api.example.com/s?q={query}");
-    const stored = fakeUserConfig.webSearch as { provider?: string; apiKey?: string; custom?: { url?: string } };
+    expect(res.webSearch.engineId).toBe("tavily");
+    expect(res.webSearch.env).toEqual({ SEARXNG_URL: "https://searx.example" });
+    const stored = fakeUserConfig.webSearch as {
+      provider?: string;
+      apiKey?: string;
+      engineId?: string;
+      env?: Record<string, string>;
+      custom?: { url?: string };
+    };
     expect(stored.provider).toBe("custom");
     expect(stored.custom?.url).toBe("https://api.example.com/s?q={query}");
+    expect(stored.engineId).toBe("tavily");
+    expect(stored.env?.SEARXNG_URL).toBe("https://searx.example");
   });
 
   it("config/setWebSearch(duckduckgo) clears a stale key/template", async () => {
@@ -620,9 +652,16 @@ describe("server / protocol handlers", () => {
     >("config/setWebSearch", { provider: "duckduckgo" });
     expect(res.webSearch.provider).toBe("duckduckgo");
     expect(res.webSearch.hasApiKey).toBe(false);
-    const stored = fakeUserConfig.webSearch as { apiKey?: string; custom?: unknown };
+    const stored = fakeUserConfig.webSearch as {
+      apiKey?: string;
+      custom?: unknown;
+      engineId?: string;
+      env?: unknown;
+    };
     expect(stored.apiKey).toBeUndefined();
     expect(stored.custom).toBeUndefined();
+    expect(stored.engineId).toBeUndefined();
+    expect(stored.env).toBeUndefined();
   });
 
   it("mcp/list-project returns an empty list for a workspace with no project MCP servers", async () => {
@@ -899,10 +938,11 @@ describe("server / protocol handlers", () => {
     expect(final?.content?.[0]?.text).toContain('"message":"boom"');
   });
 
-  it("diagnostics provider yields an empty set when the host does not handle the request", async () => {
+  it("diagnostics provider reports unavailable (null) when the host does not handle the request", async () => {
     registerServer(server, { defaultCwd: "/work", defaultPermissionMode: "ask" });
     // No diagnostics/request handler registered → the reverse request rejects
-    // (method not found); the bridge catches it and the provider returns [].
+    // (method not found); the bridge returns null so the session's own
+    // language servers can answer instead.
 
     const events: Array<{ event?: { type: string; content?: Array<{ text?: string }> } }> = [];
     client.onNotification("event", (params) => {
@@ -921,7 +961,7 @@ describe("server / protocol handlers", () => {
     const final = events
       .map((e) => e.event)
       .find((e) => e?.type === "message" && e.content?.[0]?.text?.includes("diags="));
-    expect(final?.content?.[0]?.text).toContain("diags=[]");
+    expect(final?.content?.[0]?.text).toContain("diags=null");
   });
 
   it("commands/list returns shared built-in commands for the /menu", async () => {
@@ -985,6 +1025,21 @@ describe("server / protocol handlers", () => {
     // clear-context with no prior work returns cleared:false (nothing to archive).
     const cl = await client.request<{ sessionId: string }, { cleared: boolean }>("session/clear-context", { sessionId });
     expect(cl.cleared).toBe(false);
+  });
+
+  it("session/rewindTargets and session/rewind are wired", async () => {
+    registerServer(server, { defaultCwd: process.cwd(), defaultPermissionMode: "ask" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: process.cwd(),
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const { sessionId } = await client.request<{}, { sessionId: string }>("session/new", {});
+    const targets = await client.request<{ sessionId: string }, unknown[]>("session/rewindTargets", { sessionId });
+    expect(targets).toEqual([]);
+    await expect(client.request("session/rewind", { sessionId })).rejects.toBeInstanceOf(RpcError);
+    await expect(client.request("session/rewindTargets", { sessionId: "nope" })).rejects.toBeInstanceOf(RpcError);
   });
 
   it("session/compact rejects an unknown session", async () => {
@@ -1444,7 +1499,61 @@ describe("server / protocol handlers", () => {
       expect(rpc.code).toBe(-32002); // ErrorCode.SessionLocked
       expect((rpc.data as { owner: { pid: number } }).owner.pid).toBe(4242);
       expect((rpc.data as { sessionId: string }).sessionId).toBe("locked-elsewhere");
+      expect((rpc.data as { owner: { url?: string } }).owner.url).toBe("ws://127.0.0.1:9/rpc");
     }
+  });
+
+  it("session/resume historyLimit returns a truncated tail; session/history backfills", async () => {
+    registerServer(server, { defaultCwd: "/work" });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      cwd: "/work",
+      permissionMode: "ask",
+      clientInfo: { name: "t", version: "0" },
+    });
+    const history: unknown[] = [];
+    for (let i = 0; i < 8; i++) {
+      history.push({
+        type: "message",
+        id: `u${i}`,
+        role: "user",
+        content: [{ type: "text", text: `u${i}` }],
+      });
+      history.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "text", text: `a${i}` }],
+      });
+    }
+    const seeded = new FakeSession({ cwd: "/work", history });
+    sessionsById.set(seeded.id, seeded);
+
+    const res = await client.request<
+      { sessionId: string; historyLimit: number },
+      {
+        sessionId: string;
+        events: { id?: string }[];
+        historyTruncated?: boolean;
+        historyBefore?: number;
+      }
+    >("session/resume", { sessionId: seeded.id, historyLimit: 4 });
+    expect(res.historyTruncated).toBe(true);
+    expect(typeof res.historyBefore).toBe("number");
+    expect(res.events.length).toBeLessThan(history.length);
+    expect(res.events.length).toBeGreaterThan(0);
+
+    const older = await client.request<
+      { sessionId: string; before: number; limit: number },
+      { events: unknown[]; historyTruncated: boolean; historyBefore?: number }
+    >("session/history", {
+      sessionId: seeded.id,
+      before: res.historyBefore!,
+      limit: 100,
+    });
+    expect(older.events.length).toBe(res.historyBefore);
+    expect(older.historyTruncated).toBe(false);
+    expect([...older.events, ...res.events]).toHaveLength(history.length);
   });
 
   it("session/fork creates a new session", async () => {

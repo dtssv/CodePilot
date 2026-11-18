@@ -5,43 +5,24 @@ import { mkdir, writeFile, stat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
-import { hashFileContent } from "../fsObservation.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 
 const schema = z.object({
-  path: z
-    .string()
-    .describe("Required. Destination file path (absolute or relative to cwd)."),
-  content: z
-    .string()
-    .describe(
-      "Required. UTF-8 text to persist at `path` (source, config, docs). " +
-        "Not a shell command — do not put scripts-to-run here.",
-    ),
-  createDirs: z
-    .boolean()
-    .optional()
-    .describe("Create parent directories (default true)."),
+  path: z.string().describe("Destination path (absolute or cwd-relative)."),
+  content: z.string().describe("UTF-8 file body (not a shell command to run)."),
+  createDirs: z.boolean().optional().describe("Create parent dirs (default true)."),
   append: z
     .boolean()
     .optional()
-    .describe(
-      "Append `content` to the end of the file instead of overwriting it " +
-        "(default false). Use this to build a large file incrementally across " +
-        "several calls without re-sending the whole body each time. Appending " +
-        "does not require reading the file first (it adds, never replaces).",
-    ),
+    .describe("Append instead of overwrite (default false); no prior read required."),
 });
 
 export const writeFileTool: ToolDef<typeof schema> = {
   name: "write_file",
   description:
-    "Create or overwrite one file on disk. Requires `path` + `content` (the file body). " +
-    "Only for persisting text files — never for running shell commands or other processes " +
-    "(use `bash` with `command` for those). Prefer `edit_file` for " +
-    "partial edits. Read an existing file before overwriting it. Set `append: true` to add " +
-    "to the end instead of overwriting — useful for building a large file across several " +
-    "calls without re-sending the whole body. Never write secrets; sandbox blocks " +
-    "out-of-workspace paths.",
+    "Create/overwrite one text file (`path` + `content`). Partial edits → `edit_file`; " +
+    "run processes → `bash`. Prefer reading before overwrite; `append: true` to grow a file. " +
+    "Never write secrets; sandbox blocks out-of-workspace paths.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
@@ -58,19 +39,16 @@ export const writeFileTool: ToolDef<typeof schema> = {
       .catch(() => null);
     const existed = preStat !== null;
     const appending = input.append === true;
-    // Overwriting an existing file is a mutation: require read-before-write and
-    // block a stale overwrite. Appending only ADDS content (never replaces), so
-    // it does not need the freshness guard — and requiring a prior read would
-    // defeat the point of building a large file incrementally. Creating a new
-    // file is always allowed (preStat null → guard passes).
+    // Overwriting an existing file: block only when a prior observation is
+    // stale. Unobserved overwrites are allowed ; surgical edits
+    // should prefer apply_patch/edit_file. Appending only ADDS content, so it
+    // skips the freshness guard. Creating a new file is always allowed.
     if (!appending) {
-      // Overwrite does not read the file first, so supply a lazy reader: the
-      // current bytes are read ONLY if the mtime/size gate reports stale, to
-      // rescue a false-positive mtime on unchanged content without re-reading
-      // on the fast path.
-      const fresh = await guardFreshWrite(ctx, p, preStat, undefined, () =>
-        readFile(p).catch(() => null),
-      );
+      // Lazy reader: current bytes are read ONLY if the mtime/size gate reports
+      // stale, to rescue a false-positive mtime on unchanged content.
+      const fresh = await guardFreshWrite(ctx, p, preStat, undefined, {
+        readCurrent: () => readFile(p).catch(() => null),
+      });
       if (fresh) return fresh;
     }
     await writeFile(p, input.content, { encoding: "utf-8", flag: appending ? "a" : "w" });
@@ -84,8 +62,9 @@ export const writeFileTool: ToolDef<typeof schema> = {
     }
     const lines = input.content.length === 0 ? 0 : input.content.split(/\r?\n/).length;
     const verb = appending ? (existed ? "appended to" : "created") : existed ? "overwrote" : "wrote";
+    const note = (await ctx.postWrite?.([p], ctx)) ?? "";
     return {
-      content: `${verb} ${p} (${input.content.length} bytes, ${lines} lines${appending ? ", append mode" : ""})`,
+      content: `${verb} ${p} (${input.content.length} bytes, ${lines} lines${appending ? ", append mode" : ""})${note}`,
     };
   },
 };

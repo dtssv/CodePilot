@@ -20,6 +20,8 @@ export interface GeminiProviderOptions {
   baseURL?: string;
   defaultModel?: string;
   smallModel?: string;
+  /** Extra HTTP headers merged into every request. */
+  headers?: Record<string, string>;
 }
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
@@ -54,6 +56,7 @@ export class GeminiProvider implements ChatProvider {
   readonly name = "gemini";
   private readonly apiKey: string;
   private readonly baseURL: string;
+  private readonly extraHeaders: Record<string, string>;
   readonly defaultModel: string;
   readonly smallModel: string;
 
@@ -66,6 +69,7 @@ export class GeminiProvider implements ChatProvider {
     }
     this.apiKey = key;
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.extraHeaders = { ...(opts.headers ?? {}) };
     this.defaultModel = opts.defaultModel ?? "gemini-2.5-flash";
     this.smallModel = opts.smallModel ?? "gemini-2.5-flash";
   }
@@ -107,7 +111,10 @@ export class GeminiProvider implements ChatProvider {
       url,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          ...this.extraHeaders,
+          "content-type": "application/json",
+        },
         body: JSON.stringify(body),
         signal: opts.signal,
       },

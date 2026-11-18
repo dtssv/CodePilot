@@ -30,6 +30,8 @@ export interface OpenAIProviderOptions {
   apiStyle?: "openai" | "azure" | "responses";
   /** Azure `api-version` query param (required when apiStyle === "azure"). */
   azureApiVersion?: string;
+  /** Extra HTTP headers merged into every request (auth headers still win). */
+  headers?: Record<string, string>;
  /** Retry config passed through to fetchWithRetry. When omitted, the
  * provider uses more generous defaults than the bare helper: 8 retries
  * with a 2s base delay, so transient 429s from rate-limited gateways
@@ -52,6 +54,7 @@ export class OpenAIProvider implements ChatProvider {
   private readonly baseURL: string;
   private readonly apiStyle: "openai" | "azure" | "responses";
   private readonly azureApiVersion: string;
+  private readonly extraHeaders: Record<string, string>;
   readonly defaultModel: string;
   readonly smallModel: string;
   private readonly retryOpts: {
@@ -72,6 +75,7 @@ export class OpenAIProvider implements ChatProvider {
     this.apiStyle = opts.apiStyle ?? "openai";
     this.azureApiVersion = opts.azureApiVersion ?? DEFAULT_AZURE_API_VERSION;
     this.baseURL = (opts.baseURL ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.extraHeaders = { ...(opts.headers ?? {}) };
     this.defaultModel = opts.defaultModel ?? "gpt-4o-mini";
     this.smallModel = opts.smallModel ?? "gpt-4o-mini";
     this.retryOpts = {
@@ -108,6 +112,21 @@ export class OpenAIProvider implements ChatProvider {
       : { authorization: `Bearer ${this.apiKey}` };
   }
 
+  /** Merge user headers under auth + content-type (auth wins on collision,
+   * case-insensitive — so a custom `Authorization` cannot leave a duplicate). */
+  private requestHeaders(extra?: Record<string, string>): Record<string, string> {
+    const merged: Record<string, string> = {
+      ...this.extraHeaders,
+      "content-type": "application/json",
+      ...extra,
+    };
+    for (const k of Object.keys(merged)) {
+      const lower = k.toLowerCase();
+      if (lower === "authorization" || lower === "api-key") delete merged[k];
+    }
+    return { ...merged, ...this.authHeaders() };
+  }
+
   async *stream(opts: StreamChatOptions): AsyncIterable<StreamEvent> {
     const body =
       this.apiStyle === "responses"
@@ -122,10 +141,7 @@ export class OpenAIProvider implements ChatProvider {
     try {
       res = await fetchWithRetry(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...this.authHeaders(),
-        },
+        headers: this.requestHeaders(),
         body: JSON.stringify(body),
         signal: opts.signal,
       }, {
@@ -255,23 +271,9 @@ export class OpenAIProvider implements ChatProvider {
             if (fr) finishReason = fr;
           }
         }
-        const usage = payload.usage as
-          | {
-              prompt_tokens?: number;
-              completion_tokens?: number;
-              cached_tokens?: number;
-              prompt_tokens_details?: { cached_tokens?: number };
-            }
-          | undefined;
+        const usage = payload.usage as OpenAIUsagePayload | undefined;
         if (usage) {
-          const info: UsageInfo = {
-            input: usage.prompt_tokens ?? 0,
-            output: usage.completion_tokens ?? 0,
-          };
-          const cached =
-            usage.prompt_tokens_details?.cached_tokens ?? usage.cached_tokens;
-          if (typeof cached === "number") info.cacheRead = cached;
-          yield { kind: "usage", usage: info };
+          yield { kind: "usage", usage: mapOpenAIUsage(usage) };
         }
       }
     } catch (err) {
@@ -321,7 +323,7 @@ export class OpenAIProvider implements ChatProvider {
     if (opts.maxTokens) body.max_tokens = opts.maxTokens;
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", ...this.authHeaders() },
+      headers: this.requestHeaders(),
       body: JSON.stringify(body),
       signal: opts.signal,
     });
@@ -442,16 +444,43 @@ function toParts(content: unknown): unknown[] {
   return [];
 }
 
+/** True when a message's text payload contains the harness runtime wrapper. */
+function contentHasRuntimeContext(content: unknown): boolean {
+  if (typeof content === "string") return content.includes("<runtime_context>");
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (p) =>
+      p &&
+      typeof p === "object" &&
+      (p as { type?: string; text?: string }).type === "text" &&
+      typeof (p as { text?: string }).text === "string" &&
+      (p as { text: string }).text.includes("<runtime_context>"),
+  );
+}
+
 /**
  * Collapse adjacent same-role `system`/`user` messages (from a leading
  * systemPrompt plus runtime_context, or a system demoted to `user`), merging
  * content to satisfy backends that require non-repeating roles.
+ *
+ * Exception: never glue a demoted `<runtime_context>` (volatile `now:`) onto
+ * the preceding user turn. On a sub-agent's first request that merge baked the
+ * timestamp into the task message and busted OpenAI/CCR prefix cache for every
+ * later turn of the same `prompt_cache_key` (CCR showed cache_read=0 despite a
+ * key). Keeping runtime as its own trailing user leaves system+tools+task stable.
  */
 function mergeConsecutiveRoles(messages: unknown[]): unknown[] {
   return mergeAdjacentRoles(messages, (prevRaw, curRaw) => {
     const prev = prevRaw as { role?: string; content?: unknown };
     const cur = curRaw as { role?: string; content?: unknown };
     if (prev.role !== cur.role || (cur.role !== "system" && cur.role !== "user")) return false;
+    // Keep volatile runtime as a separate trailing message for prefix cache.
+    if (
+      cur.role === "user" &&
+      (contentHasRuntimeContext(cur.content) || contentHasRuntimeContext(prev.content))
+    ) {
+      return false;
+    }
     if (cur.role === "system" && typeof prev.content === "string" && typeof cur.content === "string") {
       prev.content = `${prev.content}\n\n${cur.content}`;
       return true;
@@ -709,21 +738,9 @@ async function* streamResponses(
         }
       } else if (event === "response.completed" || event === "response.incomplete") {
         const response = data.response as Record<string, unknown> | undefined;
-        const usage = response?.usage as
-          | {
-              input_tokens?: number;
-              output_tokens?: number;
-              input_tokens_details?: { cached_tokens?: number };
-            }
-          | undefined;
+        const usage = response?.usage as OpenAIUsagePayload | undefined;
         if (usage) {
-          const info: UsageInfo = {
-            input: usage.input_tokens ?? 0,
-            output: usage.output_tokens ?? 0,
-          };
-          const cached = usage.input_tokens_details?.cached_tokens;
-          if (typeof cached === "number") info.cacheRead = cached;
-          yield { kind: "usage", usage: info };
+          yield { kind: "usage", usage: mapOpenAIUsage(usage) };
         }
         if (event === "response.incomplete") {
           const reason = (response?.incomplete_details as { reason?: string } | undefined)?.reason;
@@ -751,4 +768,47 @@ async function* streamResponses(
     if (ev) yield ev;
   }
   yield { kind: "done", finishReason };
+}
+
+/** Chat Completions + Responses usage shapes (OpenAI, DeepSeek, gateways). */
+type OpenAIUsagePayload = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+  };
+};
+
+/** Map provider usage → {@link UsageInfo}. OpenAI itself never reports a
+ * separate cache-write count (first fill is just prompt_tokens); Anthropic-
+ * style gateways and a few OpenAI-compat APIs do. */
+export function mapOpenAIUsage(usage: OpenAIUsagePayload): UsageInfo {
+  const info: UsageInfo = {
+    input: usage.prompt_tokens ?? usage.input_tokens ?? 0,
+    output: usage.completion_tokens ?? usage.output_tokens ?? 0,
+  };
+  const cached =
+    usage.prompt_tokens_details?.cached_tokens ??
+    usage.input_tokens_details?.cached_tokens ??
+    usage.prompt_cache_hit_tokens ??
+    usage.cache_read_input_tokens ??
+    usage.cached_tokens;
+  if (typeof cached === "number") info.cacheRead = cached;
+  const written =
+    usage.prompt_tokens_details?.cache_write_tokens ??
+    usage.input_tokens_details?.cache_write_tokens ??
+    usage.cache_creation_input_tokens;
+  if (typeof written === "number" && written > 0) info.cacheWrite = written;
+  return info;
 }

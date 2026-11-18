@@ -11,8 +11,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolDef } from "./types.js";
 import type { WebFetchConfig } from "../types.js";
-import { projectStatePath } from "../projectState.js";
+import { projectStatePath } from "../workspace/projectState.js";
 import { ARTIFACT_THRESHOLD } from "./_shared.js";
+import { sanitizeUntrustedMcpText } from "../mcp/mcpResultSanitize.js";
 
 const schema = z.object({
   url: z.string().url().describe("http(s) URL to fetch."),
@@ -135,10 +136,9 @@ function domainGate(url: string, cfg?: WebFetchConfig): string | null {
 export const webFetchTool: ToolDef<typeof schema> = {
   name: "web_fetch",
   description:
-    "Fetch a URL as readable text (HTML stripped). Prefer this early when the user " +
-    "points at a page/spec/news post — understand the linked ask (and find asset " +
-    "URLs) before coding from memory. Use `web_search` to discover URLs. Large " +
-    "pages spill to an artifact. Cached ~15m unless `no_cache`; blocked domains refused.",
+    "Fetch a URL as readable text (HTML stripped). Prefer when the user points at a " +
+    "page/spec. Use `web_search` to discover URLs. Large pages spill to an artifact. " +
+    "Cached ~15m unless `no_cache`; blocked domains refused.",
   inputSchema: schema,
   permission: "network",
   async execute(input, ctx) {
@@ -232,6 +232,7 @@ async function renderResult(
   cached: boolean,
   maxChars?: number
 ): Promise<{ content: string; isError: boolean; artifactRef?: string }> {
+  text = sanitizeUntrustedMcpText(text);
   const cap = maxChars ?? 20_000;
   let content: string;
   let artifactRef: string | undefined;

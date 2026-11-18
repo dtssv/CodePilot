@@ -8,8 +8,8 @@
 // unknown permission is fail-closed (serial).
 
 import { describe, expect, it } from "vitest";
-import { runToolsWithBarrier, isParallelSafeTool } from "../src/agent.js";
-import type { ToolExecResult } from "../src/agent-tools.js";
+import { runToolsWithBarrier, isParallelSafeTool } from "../src/agent/agent.js";
+import type { ToolExecResult } from "../src/agent/agent-tools.js";
 
 type Call = { id: string; parallel: boolean };
 

@@ -4,7 +4,7 @@
 // only relax a no-op case or make a destructive tool stricter.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { McpToolDescriptor } from "../src/mcp-types.js";
+import type { McpToolDescriptor } from "../src/mcp/mcp-types.js";
 
 const tools: McpToolDescriptor[] = [
   {
@@ -40,12 +40,12 @@ const { acquireMock } = vi.hoisted(() => ({
   acquireMock: vi.fn(),
 }));
 
-vi.mock("../src/mcp-pool.js", () => ({
+vi.mock("../src/mcp/mcp-pool.js", () => ({
   acquireSharedMcp: acquireMock,
   releaseSharedMcp: async () => {},
 }));
 
-import { startMcp, type SessionMcpHost } from "../src/session-mcp.js";
+import { startMcp, type SessionMcpHost } from "../src/mcp/sessionBind.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import type { CodepilotConfig } from "../src/types.js";
 

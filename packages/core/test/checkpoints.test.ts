@@ -16,7 +16,7 @@ import {
   summariseCheckpointForPrompt,
   CHECKPOINT_SECTIONS,
   makeCheckpointHook,
-} from "../src/checkpoints.js";
+} from "../src/session/checkpoints.js";
 import type { Event } from "../src/types.js";
 
 function makeEvents(n: number, textPerMsg = 20): Event[] {

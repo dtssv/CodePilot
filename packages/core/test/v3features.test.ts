@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { redactSecrets, containsSecretShape, compileRedactionPatterns } from "../src/redact.js";
+import { redactSecrets, containsSecretShape, compileRedactionPatterns } from "../src/permissions/redact.js";
 
 const collect = async (it: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> => {
   const out: StreamEvent[] = [];
@@ -13,12 +13,12 @@ const collect = async (it: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> =
   return out;
 };
 import { FallbackProvider, isFailoverError } from "../src/providers/fallback.js";
-import { HookEngine } from "../src/hooks.js";
+import { HookEngine } from "../src/hooks/hooks.js";
 import { askUserQuestionTool, planDoneTool } from "../src/tools/ask_user.js";
 import { taskTool } from "../src/tools/task.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { ToolContext } from "../src/tools/types.js";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 
 describe("redactSecrets", () => {
   it("masks cloud and provider keys", () => {
@@ -402,7 +402,7 @@ describe("task fan-out schema", () => {
 
   it("exposes a JSON schema that tools/list consumers can read", () => {
     expect(taskTool.name).toBe("task");
-    expect(taskTool.description).toContain("isolated contexts");
-    expect(taskTool.description).toContain("parallel independent");
+    expect(taskTool.description).toContain("only its final conclusion returns");
+    expect(taskTool.description).toMatch(/`tasks` \(parallel/);
   });
 });

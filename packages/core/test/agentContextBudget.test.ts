@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { runAgent, type AgentDeps } from "../src/agent.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { runAgent, type AgentDeps } from "../src/agent/agent.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type { ChatProvider, StreamChatOptions, StreamEvent } from "../src/providers/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
 import { ToolRegistry } from "../src/tools/types.js";

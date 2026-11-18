@@ -10,9 +10,9 @@ import {
   resolveStopVerifyMode,
   resolveStopVerifyForceContinue,
   runBuiltinStopVerify,
-} from "../src/stopVerify.js";
-import { HookEngine } from "../src/hooks.js";
-import { Session } from "../src/session.js";
+} from "../src/agent/stopVerify.js";
+import { HookEngine } from "../src/hooks/hooks.js";
+import { Session } from "../src/session/session.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { Event } from "../src/types.js";
 
@@ -148,7 +148,7 @@ describe("runBuiltinStopVerify", () => {
   });
 
   it("prompt mode silently allows on 429 / rate-limit (no transcript warning)", async () => {
-    const { isTransientJudgeFailure } = await import("../src/stopVerify.js");
+    const { isTransientJudgeFailure } = await import("../src/agent/stopVerify.js");
     expect(
       isTransientJudgeFailure(
         'OpenAI 429: {"error":{"message":"访问限制","cause":"tokens limit for minute"}}',

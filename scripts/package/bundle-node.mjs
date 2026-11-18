@@ -59,11 +59,11 @@ export async function bundleNodeEntry(opts) {
  // Strip shebang(s) — pkg's babel parser rejects `#!` in the entry.
   let code = readFileSync(opts.outfile, "utf8");
   code = code.replace(/^(#!.*\r?\n)+/, "");
-  // `createRequire(...)("../package.json")` and `require("@codepilot/core/package.json")`
+  // `createRequire(...)("…/package.json")` and `require("@codepilot/core/package.json")`
   // are dynamic requires esbuild can't inline; under pkg's /snapshot FS they throw.
   // Rewrite those version-probe calls to the banner-injected literal.
   code = code.replace(
-    /\b(?:require\d*|req)\s*\(\s*["'](?:\.\.\/package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
+    /\b(?:require\d*|req)\s*\(\s*["'](?:(?:\.\.\/)+package\.json|@codepilot\/core\/package\.json)["']\s*\)/g,
     "__cp_pkg",
   );
   writeFileSync(opts.outfile, code);

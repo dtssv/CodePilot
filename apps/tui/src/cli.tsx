@@ -15,6 +15,8 @@ import { render } from "ink";
 import React from "react";
 
 import { App as AppUI } from "./ui/App.js";
+import { TrustPrompt } from "./ui/TrustPrompt.js";
+import { installStderrCapture } from "./stderrCapture.js";
 import { createGoalBridge, createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
 import { runHeadless, parseOutputFormat } from "./headless.js";
@@ -278,6 +280,15 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+ // Ask before the first session in an untrusted folder: creating one loads
+ // the folder's project config, hooks and MCP servers.
+  if (!args.print && !args.mock && process.stdin.isTTY && process.stdout.isTTY) {
+    if (!(await confirmFolderTrust(args.cwd))) {
+      process.stdout.write("Exited without trusting the folder.\n");
+      process.exit(1);
+    }
+  }
+
  // Build a core session. In mock mode (or when core isn't installed yet),
  // fall back to an in-memory mock so the UI is still exercisable.
   let session!: import("@codepilot/core").Session;
@@ -326,6 +337,21 @@ async function main(): Promise<void> {
           onAskUser: (req) => questionBridge.waitAnswers(req),
           onPromptResolved: (kind, requestId) =>
             kind === "permission" ? bridge.dismiss(requestId) : questionBridge.dismiss(requestId),
+          rediscover: async () => {
+            const { readLiveServeInfo, discoverOrSpawnDaemon } = await import("@codepilot/protocol");
+            const live = await readLiveServeInfo();
+            if (live) return { url: live.url, token: live.token || undefined };
+            const relaunch = resolveDaemonLaunch(args.cwd);
+            const again = await discoverOrSpawnDaemon({
+              command: relaunch.command,
+              args: relaunch.args,
+              cwd: args.cwd,
+              env: relaunch.env,
+            });
+            return again.info
+              ? { url: again.info.url, token: again.info.token || undefined }
+              : null;
+          },
         });
         session = remote as unknown as import("@codepilot/core").Session;
         currentRemote = remote;
@@ -536,6 +562,7 @@ async function main(): Promise<void> {
           resumeId: args.resume,
         };
 
+  const restoreStderr = installStderrCapture();
   const instance = render(
     React.createElement(AppUI, {
       session,
@@ -555,6 +582,7 @@ async function main(): Promise<void> {
  // Graceful shutdown: dispose session and unmount Ink on signals.
   const cleanup = async (): Promise<void> => {
     instance.unmount();
+    restoreStderr();
     try {
       await session.dispose();
     } catch {
@@ -566,11 +594,39 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void cleanup());
 
   await instance.waitUntilExit();
+  restoreStderr();
   try {
     await session.dispose();
   } catch {
  /* ignore */
   }
+}
+
+/** Show the trust dialog unless `cwd` is already trusted. Resolves true to continue. */
+async function confirmFolderTrust(cwd: string): Promise<boolean> {
+  let trust: Pick<typeof import("@codepilot/core"), "isFolderTrusted" | "isBroadFolder" | "trustFolder">;
+  try {
+    trust = await import("@codepilot/core");
+  } catch {
+    return true;
+  }
+  if (trust.isFolderTrusted(cwd)) return true;
+  const trusted = await new Promise<boolean>((done) => {
+    const ui = render(
+      React.createElement(TrustPrompt, {
+        cwd,
+        broad: trust.isBroadFolder(cwd),
+        onDecide: (ok: boolean) => {
+          ui.clear();
+          ui.unmount();
+          done(ok);
+        },
+      }),
+      { exitOnCtrlC: false },
+    );
+  });
+  if (trusted) await trust.trustFolder(cwd);
+  return trusted;
 }
 
 // Run. Top-level await keeps the entry simple and lets async errors surface.

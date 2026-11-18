@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSession, getSessionsDir } from "../src/session.js";
+import { createSession, getSessionsDir } from "../src/session/session.js";
 import type { Event } from "../src/types.js";
 
 let workDir: string;

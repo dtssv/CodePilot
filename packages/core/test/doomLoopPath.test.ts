@@ -11,7 +11,7 @@ import {
   readWindow,
   windowOverlapFraction,
   pathKey,
-} from "../src/doomLoop.js";
+} from "../src/agent/doomLoop.js";
 
 // Layer 1 — exact (tool, input) repetition. This is the ONLY layer that
 // hard-denies (refuse) on a count. Because a refusal stops real work, the

@@ -4,7 +4,7 @@
 // The status-line config union is owned by statusLine.ts (the module that
 // renders it); imported for use on CodepilotConfig and re-exported below so the
 // public config type surface stays here.
-import type { StatusLineConfig } from "./statusLine.js";
+import type { StatusLineConfig } from "./config/statusLine.js";
 
 export interface TextBlock {
   type: "text";
@@ -113,7 +113,14 @@ type EventBody =
  * the model can read them on disk. */
       files?: SavedUpload[];
       model?: string;
+ /** Set on the user message that opens a prompt (not on notices, steers or
+  * task boundaries); the targets `/rewind` offers. */
+      turnStart?: boolean;
     }
+ /** Rewind marker: the log from message `toMessageId` up to and including
+  * this event is hidden from both the model view and the displayed history
+  * (liveTranscript / visibleHistory). Append-only — nothing is deleted. */
+  | { type: "rewind"; toMessageId: string }
   | {
       type: "message_delta";
       messageId: string;
@@ -371,6 +378,10 @@ type EventBody =
       baselineId: string;
       afterId: string;
       label: string;
+      /** Shadow-git workspace trees before/after the turn (workspaceTracker.ts);
+       * cover changes made by bash/MCP. Absent when the workspace isn't a git repo. */
+      baseTree?: string;
+      afterTree?: string;
     }
   /** Telemetry: the streaming-degeneration guard stopped a turn whose output
    * collapsed into a short repeating unit. `unit`/`repeats`/`soFarLen` describe
@@ -590,6 +601,17 @@ export interface McpServerConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+ /** stdio, with `inheritEnv: false`: parent environment variable names passed
+  * through on top of the baseline allowlist (mcpChildEnv). */
+  envPassthrough?: string[];
+ /** stdio: `false` limits the inherited environment to a baseline allowlist
+  * plus `envPassthrough` (default true: the full parent environment). */
+  inheritEnv?: boolean;
+ /** stdio: run the server inside the OS sandbox (default off, or on for all
+  * servers via `mcpSandbox`). The object form opts in and adds writable paths
+  * beyond the workspace, temp dirs and package-manager caches; `false` opts
+  * out of `mcpSandbox`. No effect when the session sandbox is off. */
+  sandbox?: boolean | { writablePaths?: string[] };
  /** sse / http: endpoint URL. */
   url?: string;
  /** sse / http: extra HTTP headers (e.g. Authorization). */
@@ -721,6 +743,9 @@ export interface CodepilotConfig {
  * reasoning stream as named events). Only consulted when `provider` is
  * `openai`; other providers ignore it. */
   apiStyle?: "chat" | "responses";
+  /** Extra HTTP headers merged into provider requests (gateway requirements
+   * such as OpenCode / OpenRouter). Auth headers still win on key collision. */
+  headers?: Record<string, string>;
   permissionMode?: PermissionMode;
   maxTokens?: number;
  /** Token threshold to trigger compaction. */
@@ -728,14 +753,14 @@ export interface CodepilotConfig {
    * `window × compactionThreshold`; every provider request is hard-trimmed
    * to stay under the usable window (window − output reserve − system). */
   contextWindow?: number;
- /** Soft fold target for mid-run tool_result pruning (default 48_000).
+ /** Soft fold target for mid-run tool_result pruning (default 32_000).
  * Independent of `contextWindow`: keeps routine turns small/fast. The hard
  * window cap still applies — raising this cannot exceed `contextWindow`. */
   maxContextTokens?: number;
  /** Rolling tool-output window: fold tool_results older than the keep
  * window down to this many, early and
  * independent of the token budget, so numerous small results can't quietly
- * accumulate. Default 24; set 0 to fold all old results. The budget-based
+ * accumulate. Default 12; set 0 to fold all old results. The budget-based
  * fold still applies regardless. */
   maxToolResultsInContext?: number;
  /** Hard upper bound on bytes `read_file` buffers for a single read. A file
@@ -762,6 +787,20 @@ export interface CodepilotConfig {
   * A manual `/compact` can still run and, if it gets back under budget,
   * re-enables auto-compaction. Default 3. */
   autoCompactMaxConsecutiveFailures?: number;
+ /** Files re-attached (current disk content) after a summary compaction drops
+  * the turns that read them. Default 5; 0 disables. */
+  compactRestoreFiles?: number;
+ /** Snapshot the whole workspace (shadow git repo) around each turn so /undo
+  * also reverts files changed by bash/MCP. Git workspaces only. Default true. */
+  undoTracksShell?: boolean;
+ /** Run every stdio MCP server inside the OS sandbox unless it sets
+  * `sandbox: false` (default false: only servers that opt in). */
+  mcpSandbox?: boolean;
+ /** Environment of model-run shells (bash, background jobs, code mode). They
+  * inherit the full environment by default; `excludeSecrets` withholds names
+  * containing KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL except `passthrough`
+  * entries (exact names or `*` globs). */
+  shellEnv?: { excludeSecrets?: boolean; passthrough?: string[] };
  /** Tuning for the `auto` permission mode's background classifier (see
   * {@link PermissionMode}). Only consulted when the mode is `auto`. */
   permissionAuto?: {
@@ -819,9 +858,8 @@ export interface CodepilotConfig {
   * rate after long idle gaps, higher cache-write price). Endpoints that do not
   * support the extended TTL silently fall back to 5m. */
   promptCache?: { ttl?: "5m" | "1h" };
- /** When true, attempt to load the optional pure-JS `gpt-tokenizer` for
-  * provider-accurate token counts (falls back to the built-in heuristic
-  * when the package is not installed). Default false. */
+ /** Count tokens with BPE (`gpt-tokenizer`, o200k_base) instead of the
+  * built-in heuristic. Default true; set false to keep the heuristic. */
   preciseTokens?: boolean;
  /** Structured audit log. `true` logs tool calls/results/errors to
   * `~/.codepilot/audit/`; an object may set a custom `dir`. Default off. */
@@ -844,14 +882,29 @@ export interface CodepilotConfig {
   };
  /** Language-server configs for the `lsp_navigate` tool. Omit to use the
  * built-in TypeScript/JavaScript default. */
-  lsp?: { servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }> };
+  lsp?: {
+    servers?: Array<{ command: string; args?: string[]; languages: string[]; initializationOptions?: Record<string, unknown> }>;
+    /** Language-server errors after each file write, and the `diagnostics`
+     * tool's fallback when no IDE answers. Uses a server only when its
+     * command is on PATH. Default true. */
+    diagnostics?: boolean;
+    /** How long a write waits for fresh diagnostics. Default 5000. */
+    diagnosticsTimeoutMs?: number;
+  };
+  /** Formatters run on each file the agent writes, keyed by name. `$FILE` in
+   * `command` is the absolute path; matched by `extensions`. Runs in the
+   * session sandbox. None by default. */
+  formatter?: Record<
+    string,
+    { command: string[]; extensions: string[]; disabled?: boolean; environment?: Record<string, string> }
+  >;
  /** How external MCP tools are surfaced to the model:
  * - "lazy": hide individual schemas, expose a single `mcp` meta-tool (keeps
  *   the prompt small).
  * - "eager": advertise every MCP tool directly.
  * - "auto" (default): eager when few, lazy once many. */
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
- /** Tool-count threshold for `auto` to switch from eager to lazy. Default 8. */
+ /** Tool-count threshold for `auto` to switch from eager to lazy. Default 2. */
   mcpLazyThreshold?: number;
  /** Progressive disclosure for plugin-contributed tools, mirroring the MCP
   * controls. "eager" (default) advertises every plugin tool schema each turn;
@@ -884,11 +937,26 @@ export interface CodepilotConfig {
   * user's home directory instead. */
   memory?: {
     walkToHome?: boolean;
+    /** Byte budget for instruction files injected verbatim into the system
+     * prompt. Default 32 KiB; 0 disables injection. */
+    instructionsMaxBytes?: number;
     /** Query-time progressive recall of relevant memory topic files into the
      * volatile per-turn context. Default on; skipped when auto-memory is off. */
     autoRecall?: boolean;
     /** Max topic files recalled per turn. Default 5. */
     recallMax?: number;
+    /**
+     * Write policy for the interactive agent (default `"explicit"`):
+     * - `"explicit"` — `memory_write` only when the user asked to remember this
+     *   turn; every write asks for confirmation (except yolo).
+     * - `"free"` — legacy: project-scope writes are silent/auto-allowed.
+     */
+    agentWrite?: "explicit" | "free";
+    /**
+     * Background turn-end extract → drafts (then consolidation). Default
+     * **false**. Set true to re-enable automatic session distillation.
+     */
+    autoExtract?: boolean;
   };
  /** Tool names or bash command regexes that auto-approve.
  * @deprecated prefer `permissions.allow` (same rule syntax). */
@@ -927,7 +995,7 @@ export interface CodepilotConfig {
   * wrapped by the same OS sandbox as `bash` (a stronger isolation boundary,
   * opt-in). The delegated tool calls are proxied back to the parent either way,
   * so both runtimes expose the same API and the same path guard. */
-  codeMode?: { runtime?: "vm" | "subprocess" };
+  codeMode?: { enabled?: boolean; runtime?: "vm" | "subprocess" };
  /** Per-model tool-exposure downgrade. Each rule hides `drop` tools from any
   * model whose id glob-matches an entry in `models`. Applied after mode
   * filtering, so it can only remove tools. Lets a deployment keep the complex
@@ -959,11 +1027,6 @@ export interface CodepilotConfig {
   * grant to the parent does not widen the sub-agent. Custom agents are always
   * independent. */
   subagentPermissions?: "inherit" | "independent";
- /** Durable reuse of a completed sub-agent's conclusion. When a `task` spec
-  * (same objective + agent type + cwd + model) already succeeded within the TTL,
-  * the stored conclusion is returned instead of re-running — makes an
-  * interrupted fan-out resumable. `enabled` default true; `ttlHours` default 24. */
-  subagentCache?: { enabled?: boolean; ttlHours?: number };
  /** Lifecycle hooks (PreToolUse/PostToolUse/Notification/Stop). */
   hooks?: HooksConfig;
  /**
@@ -1129,7 +1192,7 @@ export type {
   StatusLineCommandConfig,
   StatusLineItem,
   StatusLinePresetName,
-} from "./statusLine.js";
+} from "./config/statusLine.js";
 
 export interface WebFetchConfig {
  /** Hard allowlist of fetchable domains, matched by suffix (e.g. `github.com`
@@ -1196,13 +1259,22 @@ export interface WebSearchConfig {
  /** API key for the chosen backend. Supports `${ENV}` interpolation.
   * When omitted, the tool falls back to the provider's conventional env
   * var (BRAVE_API_KEY / SERPER_API_KEY / GOOGLE_API_KEY). Unused by
-  * DuckDuckGo. */
+  * DuckDuckGo. For `custom` / catalog engines, fills any unset `${ENV}`
+  * placeholder in the HTTP template. */
   apiKey?: string;
  /** Google Programmable Search Engine id (`cx`). Required for the
   * `google` backend; falls back to the GOOGLE_CSE_ID env var. */
   cx?: string;
  /** Override the backend endpoint (advanced / self-hosted gateways). */
   endpoint?: string;
+ /** Catalog engine id when `provider` is `custom` (e.g. `tavily`, `bocha`,
+  * `searxng`). Lets settings round-trip the picker without matching on URL. */
+  engineId?: string;
+ /** Values for `${ENV}` placeholders in `custom` templates (e.g.
+  * `{ SEARXNG_URL: "https://searx.example" }`). Process env wins when set;
+  * otherwise these; otherwise `apiKey` as a last-resort fill for any
+  * remaining placeholder. */
+  env?: Record<string, string>;
  /** Preferred result language (ISO-639-1, e.g. `zh`/`en`/`ja`). When omitted,
   * auto-detected from the query (CJK vs. Latin). Mapped to each backend's native
   * param (DDG `kl`, Bing `setlang`, Brave `search_lang`, Google `lr`/`hl`). */
@@ -1211,12 +1283,19 @@ export interface WebSearchConfig {
   * `cn`, `us`, `jp`). When omitted, inferred alongside `language`. Mapped to
   * DDG `kl`, Bing `cc`, Brave `country`, Google `gl`, Serper `gl`. */
   region?: string;
- /** Restrict results by recency: `day` | `week` | `month` | `year`. Mapped
-  * to Brave `freshness`, Google `dateRestrict`, Serper `tbs`, DDG/Bing `df`.
-  * When omitted, no recency filter is applied. */
+  /** Restrict results by recency: `day` | `week` | `month` | `year`. Mapped
+   * to Brave `freshness`, Google `dateRestrict`, Serper `tbs`, DDG/Bing `df`.
+   * When omitted, no recency filter is applied. */
   freshness?: "day" | "week" | "month" | "year";
+ /** Only keep results whose host matches one of these domains (exact or
+  * subdomain). Merged with per-call `allowed_domains` on the tool. */
+  allowedDomains?: string[];
+ /** Drop results whose host matches one of these domains. Merged with
+  * per-call `blocked_domains` on the tool. */
+  blockedDomains?: string[];
  /** HTTP template for the `custom` backend (provider: "custom"). Required
-  * when provider is `custom`; ignored otherwise. */
+  * when provider is `custom`; ignored otherwise. Catalog engines write
+  * their template here; a free-form custom engine edits it directly. */
   custom?: CustomSearchTemplate;
 }
 
@@ -1293,6 +1372,12 @@ export interface SessionOptions {
  * false to keep the process registry untouched — plugin runtime modules
  * execute host code, so hosts that never opt into plugins can skip it. */
   pluginRuntimes?: boolean;
+ /** Content-trust gate for plugin hooks / MCP servers / runtimes. Default: the
+  * `~/.codepilot/plugins/.trust.json` store. */
+  pluginTrust?: {
+    isTrusted(name: string, currentHash: string): boolean;
+    recorded?(name: string): string | null;
+  };
  /** Extra skill directories (e.g. installed plugins' `skills/` dirs) to merge
   * into discovery during `init()`. Set by `createSession` from discovered
   * plugins; hosts rarely pass this directly. */

@@ -3,7 +3,7 @@
 // the loop's internals, which is the point: they show what a plugin runtime
 // can do with nothing but the `RuntimeToolkit`.
 
-import type { AgentDeps, AgentRunResult } from "../agent.js";
+import type { AgentDeps, AgentRunResult } from "../agent/agent.js";
 import type { Event } from "../types.js";
 
 /** The system-prompt triple the agent loop consumes. */

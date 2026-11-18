@@ -205,6 +205,11 @@ export function parseBlocks(src: string): Block[] {
       const items: Array<{ text: string; task?: boolean; done?: boolean }> = [];
       while (i < lines.length) {
         const l = lines[i] ?? "";
+        const nextOrdered = /^\s*\d+[.)]\s+/.test(l);
+        const nextUnordered = /^\s*[-*+]\s+/.test(l);
+        // Do not merge `1. SECTION` with following `-` bullets into one list —
+        // that strips section numbers and renumbers everything as 1,2,3…
+        if (items.length > 0 && (nextOrdered || nextUnordered) && nextOrdered !== ordered) break;
         const m = l.match(/^\s*(?:[-*+]|\d+[.)])\s+(.*)$/);
         if (m) {
           const body = m[1] ?? "";

@@ -6,7 +6,7 @@ import {
   mintRemotePairing,
   redeemRemotePairing,
   revokeAllRemoteControl,
-} from "../src/remoteControl.js";
+} from "../src/workspace/remoteControl.js";
 
 describe("remoteControl one-time pairing", () => {
   afterEach(async () => {

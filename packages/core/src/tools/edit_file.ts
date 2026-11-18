@@ -6,8 +6,8 @@ import { z } from "zod";
 import { readFile, writeFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
-import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
-import { hashFileContent } from "../fsObservation.js";
+import { guardDeliveryWrite, guardPath } from "./_shared.js";
+import { hashFileContent } from "../workspace/fsObservation.js";
 
 /** Detect the dominant line ending so we can restore it after editing. */
 export function detectLineEnding(text: string): "\r\n" | "\n" {
@@ -285,13 +285,12 @@ function lineDelta(before: string, after: string): { added: number; removed: num
 export const editFileTool: ToolDef<typeof schema> = {
   name: "edit_file",
   description:
-    "Search/replace edit on one file (prefer over `write_file`). Understand the target " +
-    "behavior (specs, images, failing tests, surrounding code) before editing. Single: " +
-    "`search`/`replace`; multi: `edits: [{search, replace}]` applied atomically in order. " +
-    "Matches exact → trimmed-line → typographic (smart quotes / dashes / spaces) → unique " +
-    "line → optional `regex`. Ambiguous matches fail unless `global_replace`. Copy search " +
-    "text from `read_file` without line-number prefixes. Must have read the file earlier in " +
-    "this session.",
+    "Search/replace on one file (prefer over write_file). Single: search/replace; " +
+    "multi: edits:[{search,replace}] applied atomically in order against the **original** file " +
+    "(no overlapping regions) — batch related edits in one call. " +
+    "`search` must match disk: copy from read_file without `N|`/`N:` line-number prefixes; " +
+    "use the smallest unique string that cannot match elsewhere. " +
+    "On miss/ambiguous: fix from the error (tighten context or set global_replace) — do not resubmit the same search.",
   inputSchema: schema,
   permission: "write",
   async execute(input, ctx) {
@@ -301,10 +300,7 @@ export const editFileTool: ToolDef<typeof schema> = {
     if (delivery) return delivery;
     const p = resolve(ctx.cwd, input.path);
     let original: string;
-    let preStat: { mtimeMs: number; size: number } | null = null;
     try {
-      const st = await stat(p);
-      preStat = { mtimeMs: st.mtimeMs, size: st.size };
       original = await readFile(p, "utf-8");
     } catch (err) {
       return {
@@ -313,12 +309,8 @@ export const editFileTool: ToolDef<typeof schema> = {
       };
     }
 
-    // Read-before-write + staleness guard: edit_file always targets an
-    // existing file, so an unobserved or externally-changed file is blocked.
-    // We already hold the current content, so pass it for the content-equality
-    // fallback (a jittered mtime on unchanged bytes does not block the edit).
-    const fresh = await guardFreshWrite(ctx, p, preStat, original);
-    if (fresh) return fresh;
+    // No fs_guard here: surgical edits gate on `search` matching live disk
+    // (peer Edit/StrReplace behavior). Blind full-replace tools keep the guard.
 
     // Preserve the file's dominant line ending — the edit strategies are a
     // mix (some keep original \r\n, some normalise to \n), so normalise the
@@ -398,8 +390,9 @@ export const editFileTool: ToolDef<typeof schema> = {
     const delta = lineDelta(original, working);
     const deltaStr =
       delta.added > 0 ? `+${delta.added} lines` : delta.removed > 0 ? `-${delta.removed} lines` : "same line count";
+    const note = (await ctx.postWrite?.([p], ctx)) ?? "";
     return {
-      content: `applied ${applied.length} edit(s) to ${p} (${deltaStr})\n${applied.join("\n")}`,
+      content: `applied ${applied.length} edit(s) to ${p} (${deltaStr})\n${applied.join("\n")}${note}`,
     };
   },
 };

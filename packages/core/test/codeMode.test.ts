@@ -6,7 +6,7 @@ import type { ToolContext } from "../src/tools/types.js";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveSandbox } from "../src/sandbox.js";
+import { resolveSandbox } from "../src/sandbox/sandbox.js";
 
 /** macOS /var → /private/var symlink trips the sandbox realpath check; resolve first. */
 function realTmpdir(): string {
@@ -38,9 +38,9 @@ describe("code_mode", () => {
     // Honest about the in-code permission bypass — not the old "normal
     // permission/sandbox pipeline" claim.
     expect(d).not.toMatch(/normal permission\/sandbox pipeline/);
-    expect(d).toMatch(/do NOT re-run the interactive permission prompt/);
-    expect(d).toMatch(/OS sandbox and path guard/);
-    expect(d).toMatch(/agent` mode/);
+    expect(d).toMatch(/no per-call permission prompts/);
+    expect(d).toMatch(/OS sandbox\/path guard still apply/);
+    expect(d).toMatch(/agent mode only/);
     // JavaScript only (no transpile) — not "TypeScript".
     expect(d).toMatch(/JavaScript/);
     expect(d).not.toMatch(/TypeScript\/JavaScript/);

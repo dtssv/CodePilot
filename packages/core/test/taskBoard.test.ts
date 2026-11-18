@@ -6,7 +6,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { TaskBoard, foldTasks, type TaskBoardEntry } from "../src/taskBoard.js";
+import { TaskBoard, foldTasks, type TaskBoardEntry } from "../src/subagent/taskBoard.js";
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "taskboard-"));

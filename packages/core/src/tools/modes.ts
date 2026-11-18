@@ -32,12 +32,6 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
   // in every mode (e.g. suggest `agent` from `plan`, or draw a task boundary).
   "suggest_mode",
   "start_new_task",
-  // start_goal only emits a request event; the host drives the loop (which
-  // itself runs in whatever mode applies). No file side-effects here.
-  "start_goal",
-  // goal_status just reports the goal's terminal state (read by the goal loop
-  // when one is driving); no file side-effects, useful in any mode.
-  "goal_status",
 ]);
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */
@@ -50,23 +44,26 @@ const PLAN_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "memory_write",
 ]);
 
-/** Tools that are NEVER allowed in restricted modes. */
+/** Tools that are NEVER allowed in restricted modes (agent mode still gets them). */
 const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "bash",
   "bash_kill",
   "write_file",
   "edit_file",
   "task",
- // Control tools for background sub-agents: dispatching needs `task` (denied
- // here), so their companions are denied in restricted modes too.
+  // Control tools for background sub-agents: dispatching needs `task` (denied
+  // here), so their companions are denied in restricted modes too.
   "subagent_list",
   "subagent_wait",
   "subagent_interrupt",
- // Executes arbitrary model-written JS that can write files / run bash — same
- // (actually broader) risk profile as bash, so blocked in chat/plan.
+  // Executes arbitrary model-written JS that can write files / run bash — same
+  // (actually broader) risk profile as bash, so blocked in chat/plan.
   "code_mode",
- // Spawns an external agent subprocess — same risk profile as `task`.
+  // Spawns an external agent subprocess — same risk profile as `task`.
   "harness_bridge",
+  // Goal-loop tools: agent-only so chat/plan tool tables stay lean.
+  "start_goal",
+  "goal_status",
 ]);
 
 /** Tools that are blocked specifically in `chat` mode (state-modifying read-tier tools). */

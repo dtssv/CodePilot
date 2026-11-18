@@ -627,4 +627,45 @@ describe("follow-up queue events", () => {
     expect(s.followUps).toBeUndefined();
     expect(s.lastRequest).toBeUndefined();
   });
+
+  it("session-opened paints a history tail; history-prepend inserts older rows ahead", () => {
+    let s = reducer(initialState("/repo"), {
+      type: "session-opened",
+      sessionId: "s1",
+      agentMode: "agent",
+      history: [
+        { type: "message", id: "u2", role: "user", content: [{ type: "text", text: "later" }] },
+        {
+          type: "message",
+          id: "a2",
+          role: "assistant",
+          content: [{ type: "text", text: "reply later" }],
+        },
+      ],
+      historyBefore: 2,
+    });
+    expect(s.historyBefore).toBe(2);
+    expect(messages(s).map((m) => m.msg.text)).toEqual(["later", "reply later"]);
+
+    s = reducer(s, {
+      type: "history-prepend",
+      events: [
+        { type: "message", id: "u1", role: "user", content: [{ type: "text", text: "earlier" }] },
+        {
+          type: "message",
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "reply earlier" }],
+        },
+      ],
+      historyTruncated: false,
+    });
+    expect(s.historyBefore).toBeUndefined();
+    expect(messages(s).map((m) => m.msg.text)).toEqual([
+      "earlier",
+      "reply earlier",
+      "later",
+      "reply later",
+    ]);
+  });
 });

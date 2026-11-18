@@ -11,11 +11,11 @@ import {
   DEFAULT_RUNTIME_NAME,
   type AgentRuntime,
   type RuntimeFactory,
-} from "../src/runtime.js";
-import { runAgent, type AgentDeps } from "../src/agent.js";
+} from "../src/agent/runtime.js";
+import { runAgent, type AgentDeps } from "../src/agent/agent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { ArtifactStore } from "../src/tools/artifacts.js";
-import { PermissionEngine } from "../src/permissions.js";
+import { PermissionEngine } from "../src/permissions/permissions.js";
 import type {
   ChatProvider,
   StreamChatOptions,

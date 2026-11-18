@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createSession, listSessions, getSessionsDir } from "../src/session.js";
+import { createSession, listSessions, getSessionsDir } from "../src/session/session.js";
 import type { Event } from "../src/types.js";
 
 // HOME is redirected in test/setup.ts before this module is loaded, so
@@ -152,8 +152,8 @@ describe("Session", () => {
     // estimate so the test isn't brittle to estimator tweaks. With
     // maxTokens=1024, hardTrigger = window − 1024 for a small window, so
     // picking hardTrigger = histTokens/0.92 puts history at ~92% of the band.
-    const { estimateEventTokens } = await import("../src/compaction.js");
-    const { estimateTokens } = await import("../src/tokens.js");
+    const { estimateEventTokens } = await import("../src/compaction/compaction.js");
+    const { estimateTokens } = await import("../src/compaction/tokens.js");
     const probe = await createSession({ cwd: workDir, sessionId: id, config: { provider: "openai", apiKey: "k", baseURL: "https://example.com/v1", model: "gpt-4o" } });
     const histTokens = estimateEventTokens(probe.getHistory(), estimateTokens);
     const hardTrigger = Math.ceil(histTokens / 0.92);
@@ -194,7 +194,7 @@ describe("Session", () => {
 
   it("rehydrates offloaded image refs from the artifact store on resume", async () => {
     const { ArtifactStore } = await import("../src/tools/artifacts.js");
-    const { projectStatePath } = await import("../src/projectState.js");
+    const { projectStatePath } = await import("../src/workspace/projectState.js");
     const id = "img-rehydrate";
     // Seed a large base64 as a content-addressed artifact (as persistEvent would).
     const base64 = "QUJD".repeat(4000); // ~16 KB, over the 8 KB offload threshold
@@ -713,7 +713,7 @@ describe("Session async checkpoint", () => {
       events: unknown[];
     };
 
-    const { checkpointExists } = await import("../src/checkpoints.js");
+    const { checkpointExists } = await import("../src/session/checkpoints.js");
 
     // Sanity: the hook exists and the seeded history is loaded (so the turns
     // threshold of 6 is crossed and a checkpoint is warranted).

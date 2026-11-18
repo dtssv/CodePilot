@@ -22,6 +22,7 @@ export type CommandResult =
   | { kind: "pick-agent" }
   | { kind: "pick-theme" }
   | { kind: "set-theme"; name: string }
+  | { kind: "set-vim"; enabled?: boolean }
   | { kind: "pick-session" }
   | { kind: "pick-goal" }
   | { kind: "connect" }
@@ -45,6 +46,7 @@ export type CommandResult =
   | { kind: "export"; format: "markdown" | "jsonl"; outPath?: string }
   | { kind: "undo" }
   | { kind: "redo" }
+  | { kind: "rewind"; count: number; files: boolean }
   | { kind: "init"; force: boolean }
   | { kind: "remote-qr" }
   | { kind: "open-web" }
@@ -197,6 +199,8 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       }
       return { kind: "set-theme", name: rest as ThemeName };
     }
+    case "vim":
+      return rest === "on" || rest === "off" ? { kind: "set-vim", enabled: rest === "on" } : { kind: "set-vim" };
     case "plan":
       return { kind: "show-plan" };
     case "compact":
@@ -243,6 +247,11 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "undo" };
     case "redo":
       return { kind: "redo" };
+    case "rewind": {
+      const parts = rest.split(/\s+/).filter(Boolean);
+      const n = Number(parts.find((p) => /^\d+$/.test(p)) ?? 1);
+      return { kind: "rewind", count: Math.max(1, n), files: !parts.includes("--keep-files") };
+    }
     case "init":
       return { kind: "init", force: /\b--force\b/.test(rest) };
     case "web":

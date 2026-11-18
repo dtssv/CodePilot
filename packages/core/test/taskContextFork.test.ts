@@ -3,7 +3,7 @@
 // instead of starting fresh. Default stays fresh; fork + continue_session_id is
 // rejected. Spec-level tests assert the fields thread through; a provider-message
 // test proves the parent prefix actually reaches the sub-agent's request while
-// the OBJECTIVE preamble is still present.
+// the task + conclusion footer are still present.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { taskTool, type SubagentRunSpec, type SubagentRunResult } from "../src/tools/task.js";
-import { createSubagentRunner } from "../src/subagent.js";
+import { createSubagentRunner } from "../src/subagent/subagent.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import type { Event, CodepilotConfig } from "../src/types.js";
 
@@ -167,7 +167,7 @@ describe("sub-agent context fork (provider messages)", () => {
     },
   ];
 
-  it("fork seeds the parent prefix AND keeps the OBJECTIVE preamble", async () => {
+  it("fork seeds the parent prefix AND keeps the task + footer", async () => {
     const before = bodies.length;
     const runner = makeRunner(parentHistory);
     await runner.run({ objective: "use alpha", cwd: dir, ownerId: "sub_fork_1", context: "fork" });
@@ -176,10 +176,11 @@ describe("sub-agent context fork (provider messages)", () => {
     // The parent's prior content is inherited…
     expect(all).toMatch(/PARENT_MARKER_read file alpha.ts/);
     // …with the inherited-context marker…
-    expect(all).toMatch(/inherited context from the parent/);
-    // …and the sub-agent's own objective preamble is still present.
-    expect(all).toMatch(/OBJECTIVE:/);
+    expect(all).toMatch(/messages below are inherited context from the parent/);
+    // …and the sub-agent's own task + conclusion footer are still present.
     expect(all).toMatch(/use alpha/);
+    expect(all).toMatch(/### Findings/);
+    expect(all).not.toMatch(/OBJECTIVE:/);
   });
 
   it("fresh (no context) does NOT seed the parent prefix", async () => {
@@ -189,6 +190,7 @@ describe("sub-agent context fork (provider messages)", () => {
     const body = bodies[before] as { messages: Array<{ role: string; content: unknown }> };
     const all = JSON.stringify(body.messages);
     expect(all).not.toMatch(/PARENT_MARKER_read file alpha.ts/);
-    expect(all).toMatch(/OBJECTIVE:/);
+    expect(all).toMatch(/standalone/);
+    expect(all).not.toMatch(/OBJECTIVE:/);
   });
 });

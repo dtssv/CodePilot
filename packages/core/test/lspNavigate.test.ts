@@ -9,7 +9,7 @@ import {
   languageIdForPath,
   parseLocations,
   DEFAULT_LSP_SERVERS,
-} from "../src/lsp.js";
+} from "../src/workspace/lsp.js";
 
 describe("languageIdForPath", () => {
   it("maps TypeScript/JavaScript extensions", () => {

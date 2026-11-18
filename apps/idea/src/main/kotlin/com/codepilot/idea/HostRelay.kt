@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.File
+import java.util.Locale
 
 /** The engine as the relay sees it; [EngineProcess] in production. */
 interface LineEngine {
@@ -19,8 +20,8 @@ data class HostInit(val cwd: String, val theme: String, val locale: String)
 /**
  * The IDE side of the web UI's host bridge (apps/web/src/protocol/bridge.ts).
  *
- * page → IDE rpc {line} · ready · restart · openFile {path, line?} · insertText {text}
- * IDE → page rpc {line} · host/init · host/engine · host/theme · host/prompt
+ * page → IDE rpc {line} · ready · restart · openFile · insertText · openSettings · closeSettings · setCwd
+ * IDE → page rpc {line} · host/init · host/engine · host/theme · host/prompt · host/openSettings
  *
  * Messages for the page wait until it reports `ready`; that also (re)sends
  * `host/init`, so a reloaded page picks up where it left off.
@@ -31,6 +32,10 @@ class HostRelay(
     private val openFile: (path: String, line: Int?) -> Unit = { _, _ -> },
     private val insertText: (text: String) -> Unit = { },
     private val onEngineError: (String) -> Unit = {},
+    /** Expand/focus the CodePilot tool window before in-panel settings. */
+    private val onExpandForSettings: () -> Unit = {},
+    /** Restore tool-window width after in-panel settings closes. */
+    private val onRestoreAfterSettings: () -> Unit = {},
 ) {
     lateinit var engine: LineEngine
 
@@ -70,7 +75,16 @@ class HostRelay(
                 openFile(path, line)
             }
             "insertText" -> msg.str("text")?.let { text -> insertText(text) }
+            "openSettings" -> onExpandForSettings()
+            "closeSettings" -> onRestoreAfterSettings()
+            "setCwd" -> { /* UI owns cwd; IDEA is single-project */ }
         }
+    }
+
+    /** Ask the page to open the in-panel Settings sheet (same JCEF view). */
+    fun openSettings() {
+        onExpandForSettings()
+        send(obj("host/openSettings") {})
     }
 
     fun fromEngine(line: String) = send(obj("rpc") { addProperty("line", line) }, keepUntilReady = false)
@@ -137,9 +151,12 @@ class HostRelay(
         get(key)?.takeIf { it.isJsonPrimitive }?.asString
 }
 
-/** Tell the page it is in IntelliJ, with the IDE theme, before it boots. */
-internal fun withPreset(html: String, theme: String): String {
-    val preset = "<script>window.__codepilotHost={kind:\"idea\",theme:\"$theme\"}</script>"
+/** Tell the page it is in IntelliJ, with theme + locale, before it boots. */
+internal fun withPreset(html: String, theme: String, locale: String = Locale.getDefault().language): String {
+    val safeTheme = theme.replace("\"", "")
+    val safeLocale = locale.replace("\"", "")
+    val preset =
+        "<script>window.__codepilotHost={kind:\"idea\",theme:\"$safeTheme\",locale:\"$safeLocale\"}</script>"
     val at = html.indexOf("<head>")
     return if (at < 0) preset + html else html.substring(0, at + 6) + preset + html.substring(at + 6)
 }

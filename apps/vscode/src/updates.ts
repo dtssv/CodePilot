@@ -5,6 +5,8 @@
 
 import * as vscode from "vscode";
 
+import { nls } from "./nls.js";
+
 const DEFAULT_REPO = "dtssv/CodePilot";
 const RELEASES_URL = "https://github.com/dtssv/CodePilot/releases";
 
@@ -76,11 +78,16 @@ export async function notifyExtensionUpdateIfAvailable(
   const check = await checkExtensionUpdate(current);
   if (!check.available || !check.latest) return;
 
+  const openReleases = nls("Open Releases");
   const choice = await vscode.window.showInformationMessage(
-    `CodePilot extension update available: ${check.current} → ${check.latest}. Download the .vsix from Releases (engine updates are separate: Settings → Updates, or \`codepilot update\`).`,
-    "Open Releases",
+    nls(
+      "CodePilot extension update available: {0} → {1}. Download the .vsix from Releases (engine updates are separate: Settings → Updates, or `codepilot update`).",
+      check.current,
+      check.latest,
+    ),
+    openReleases,
   );
-  if (choice === "Open Releases") {
+  if (choice === openReleases) {
     await vscode.env.openExternal(vscode.Uri.parse(check.releasesUrl));
   }
 }
@@ -88,20 +95,31 @@ export async function notifyExtensionUpdateIfAvailable(
 export async function runCheckUpdatesCommand(context: vscode.ExtensionContext): Promise<void> {
   const current = context.extension.packageJSON.version as string;
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "CodePilot: checking extension update…" },
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: nls("CodePilot: checking extension update…"),
+    },
     async () => {
       const check = await checkExtensionUpdate(current);
+      const openReleases = nls("Open Releases");
       if (check.available && check.latest) {
         const choice = await vscode.window.showInformationMessage(
-          `Extension ${check.current} → ${check.latest} available. Engine updates: use CodePilot Settings → Updates or \`codepilot update\`.`,
-          "Open Releases",
+          nls(
+            "Extension {0} → {1} available. Engine updates: use CodePilot Settings → Updates or `codepilot update`.",
+            check.current,
+            check.latest,
+          ),
+          openReleases,
         );
-        if (choice === "Open Releases") {
+        if (choice === openReleases) {
           await vscode.env.openExternal(vscode.Uri.parse(check.releasesUrl));
         }
       } else {
         void vscode.window.showInformationMessage(
-          `CodePilot extension is up to date (${check.current}). Engine updates are checked separately in Settings → Updates.`,
+          nls(
+            "CodePilot extension is up to date ({0}). Engine updates are checked separately in Settings → Updates.",
+            check.current,
+          ),
         );
       }
     },

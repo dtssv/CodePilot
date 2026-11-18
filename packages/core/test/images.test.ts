@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveImageMentions } from "../src/imageMentions.js";
-import { compactTranscriptToProviderMessages } from "../src/agent-messages.js";
+import { resolveImageMentions } from "../src/workspace/imageMentions.js";
+import { compactTranscriptToProviderMessages } from "../src/agent/agent-messages.js";
 import type { Event } from "../src/types.js";
 
 describe("resolveImageMentions", () => {

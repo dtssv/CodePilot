@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BoundedSinkQueue, type SessionEventSink } from "../src/sessionSink.js";
+import { BoundedSinkQueue, type SessionEventSink } from "../src/session/sessionSink.js";
 
 /** Wait for the single-flight background drain to settle. */
 async function tick(): Promise<void> {
