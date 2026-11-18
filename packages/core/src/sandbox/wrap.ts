@@ -4,7 +4,7 @@
 // dependency-free; never throws from detection.
 
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, parse, resolve } from "node:path";
 import type { ResolvedSandbox, SandboxBackend, WrappedCommand, ShellEnvOptions } from "./types.js";
 import {
   buildSandboxUnavailable,
@@ -17,6 +17,26 @@ import { networkDenied, SENSITIVE_READ_PATHS } from "./policy.js";
 // ---------------------------------------------------------------------------
 // Layer 1: process sandbox for bash
 // ---------------------------------------------------------------------------
+
+/** Roots to mount read-write. A root that does not exist yet is mounted
+ * through its nearest existing ancestor, so the sandboxed process can create
+ * it: bwrap refuses to bind a source that is absent. A root whose only existing
+ * ancestor is the filesystem root is dropped — binding `/` read-write would
+ * hand the whole host to the sandboxed command. */
+function bindableRoots(roots: Iterable<string>): string[] {
+  const out = new Set<string>();
+  for (const root of roots) {
+    let candidate = root;
+    while (!existsSync(candidate)) {
+      const parent = dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
+    }
+    if (candidate === parse(candidate).root) continue;
+    out.add(candidate);
+  }
+  return [...out];
+}
 
 export function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
@@ -307,8 +327,8 @@ export function wrapCommand(
       };
     }
     const args: string[] = [launcher];
-    for (const root of policy.writableRoots) {
-      if (existsSync(root)) args.push("--rw", root);
+    for (const root of bindableRoots(policy.writableRoots)) {
+      args.push("--rw", root);
     }
     // Carve protected metadata back out as read-only, AFTER the rw grants so the
     // read-only scope wins for those subpaths (parity with the Seatbelt deny and
@@ -367,8 +387,8 @@ export function wrapCommand(
     };
   }
   const args: string[] = ["bwrap", "--unshare-user-try", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
-  for (const root of policy.writableRoots) {
-    if (existsSync(root)) args.push("--bind", root, root);
+  for (const root of bindableRoots(policy.writableRoots)) {
+    args.push("--bind", root, root);
   }
   // Re-bind protected metadata read-only (after the rw binds, so this wins).
   for (const p of [...policy.protectedSubpaths, ...(policy.controlPaths ?? [])]) {

@@ -601,6 +601,19 @@ describe("wrapCommand", () => {
     expect(w.command).toContain("deny file-write");
   });
 
+  it("mounts a writable root that does not exist yet through its nearest existing parent", async () => {
+    const existing = await mkdtemp(join(tmpdir(), "cp-sbx-absent-"));
+    const missing = join(existing, "nested");
+    const p = resolveSandbox({ writablePaths: [missing] }, cwd);
+    for (const backend of ["bwrap", "landlock"] as const) {
+      const w = wrapCommand("true", p, { backend, landlockPath: "/usr/bin/codepilot-landlock" });
+      // bwrap refuses to bind a source that is absent, so the existing parent is
+      // mounted instead and the process creates the root inside it.
+      expect(w.command).toContain(existing);
+      expect(w.command).not.toContain(missing);
+    }
+  });
+
   it("enforces proxy egress via slirp4netns under bwrap when available", () => {
     const p = {
       ...resolveSandbox({ network: { mode: "proxy", allow: ["*.npmjs.org"] } }, cwd),

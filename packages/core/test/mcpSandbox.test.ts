@@ -69,11 +69,19 @@ describe("MCP stdio sandbox", () => {
   });
 
   it.skipIf(!canSandbox)("expands ~ in a server's extra writable paths", () => {
-    const spec = mcpSpawnSpec(
+    const ctx = { cwd: tmpdir(), openAuthUrl: null, sandbox: {} };
+    const expanded = mcpSpawnSpec(
       { command: "node", args: [], sandbox: { writablePaths: ["~/cp-notes"] } },
-      { cwd: tmpdir(), openAuthUrl: null, sandbox: {} },
+      ctx,
     );
-    expect(spec.args.join(" ")).toContain(join(homedir(), "cp-notes"));
+    const literal = mcpSpawnSpec(
+      { command: "node", args: [], sandbox: { writablePaths: [join(homedir(), "cp-notes")] } },
+      ctx,
+    );
+    // `~` must resolve to the home directory rather than reach the backend as-is.
+    expect(expanded.sandbox).not.toBeNull();
+    expect(expanded.args).toEqual(literal.args);
+    expect(expanded.args.join(" ")).not.toContain("~/cp-notes");
   });
 
   it.skipIf(!canSandbox)("confines a server's writes to the workspace (real backend)", async () => {
