@@ -119,9 +119,15 @@ jobs:
           code=$?
           if [ $code -ne 0 ]; then
             # ::error:: becomes a check-run annotation visible via the API.
+            # Fall back to the log tail when nothing matches, so a failure mode
+            # outside this pattern (a killed worker, a crash) still surfaces.
+            hits=$(grep -E 'FAIL |AssertionError|ELIFECYCLE|Test Files.*failed|ERR_PNPM|Error:|❌|⎯⎯⎯|NODE_MODULE_VERSION|ERR_DLOPEN|Killed|exited unexpectedly|out of memory' test-output.log | head -50 || true)
+            if [ -z "$hits" ]; then
+              hits=$(tail -50 test-output.log)
+            fi
             while IFS= read -r line; do
               echo "::error::$line"
-            done < <(grep -E 'FAIL |AssertionError|ELIFECYCLE|Test Files.*failed|ERR_PNPM|Error:|❌|⎯⎯⎯|NODE_MODULE_VERSION|ERR_DLOPEN' test-output.log | head -50)
+            done <<< "$hits"
             {
               echo "## Test failures (${{ matrix.os }} / node ${{ matrix.node }})"
               echo ""
