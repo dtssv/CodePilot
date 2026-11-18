@@ -188,7 +188,22 @@ describe("WorkspaceTracker", () => {
       await t.pin([v1, v3]);
 
       const shadow = { ...process.env, GIT_DIR: projectStatePath(dir, "shadow-git") };
-      execFileSync("git", ["gc", "--quiet", "--prune=now"], { cwd: dir, env: shadow });
+      // open() starts a background gc on this same GIT_DIR, and git refuses a
+      // second concurrent one, so wait for that gc to release gc.pid.
+      const gcNow = () => {
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          try {
+            execFileSync("git", ["gc", "--quiet", "--prune=now"], { cwd: dir, env: shadow, stdio: ["ignore", "ignore", "pipe"] });
+            return;
+          } catch (err) {
+            const stderr = String((err as { stderr?: Buffer }).stderr ?? "");
+            if (!/gc is already running/.test(stderr) || Date.now() > deadline) throw err;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          }
+        }
+      };
+      gcNow();
       const exists = (sha: string) => {
         try {
           execFileSync("git", ["cat-file", "-e", sha], { cwd: dir, env: shadow, stdio: "ignore" });

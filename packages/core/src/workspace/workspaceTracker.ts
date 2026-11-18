@@ -216,7 +216,6 @@ async function maintain(gitDir: string, top: string, env: NodeJS.ProcessEnv): Pr
     const now = Date.now();
     const stamp = join(gitDir, "codepilot-gc");
     if (existsSync(stamp) && now - (await stat(stamp)).mtimeMs < GC_INTERVAL_MS) return;
-    await writeFile(stamp, "");
     const stale: string[] = [];
     for (const name of await readdir(gitDir)) {
       if (!name.startsWith("index-")) continue;
@@ -235,6 +234,10 @@ async function maintain(gitDir: string, top: string, env: NodeJS.ProcessEnv): Pr
       }
     }
     await run(["gc", "--quiet", "--prune=7.days.ago"], { cwd: top, env });
+    // Stamped only after gc succeeds: git refuses a second concurrent gc
+    // ("gc is already running"), and a stamp written beforehand would suppress
+    // the retry for a week while unpinned objects pile up.
+    await writeFile(stamp, "");
   } catch {
     /* best-effort */
   }
