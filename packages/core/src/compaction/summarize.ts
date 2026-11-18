@@ -1,8 +1,9 @@
 // Summarisation, transcript views, and hard-trim compaction pipeline.
 
-import type {
-  Event,
-  PlanStep,
+import {
+  normalizePlanStepStatus,
+  type Event,
+  type PlanStep,
 } from "../types.js";
 import type { ChatProvider } from "../providers/types.js";
 import { estimateTokens as defaultTokenEstimator } from "./tokens.js";
@@ -727,7 +728,13 @@ export function mergeCompactInstructions(sources: {
 export function extractPlan(events: Event[]): PlanStep[] | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
-    if (e.type === "plan") return e.steps;
+    if (e.type === "plan") {
+      // Coerce legacy `blocked` (and any unknown) so resumed JSONL stays valid.
+      return e.steps.map((s) => ({
+        ...s,
+        status: normalizePlanStepStatus(s.status as string),
+      }));
+    }
   }
   return undefined;
 }

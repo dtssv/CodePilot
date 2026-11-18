@@ -200,40 +200,20 @@ describe("estimateEventsTokens", () => {
 });
 
 describe("lookupContextWindow", () => {
-  it("returns the Claude Sonnet 4.5 window for the right id", () => {
-    const w = lookupContextWindow("claude-sonnet-4-5");
-    expect(w.contextWindow).toBe(200_000);
-    expect(w.compactionThreshold).toBe(160_000);
-  });
-
-  it("returns the Claude 4-1 window", () => {
-    expect(lookupContextWindow("claude-opus-4-1").contextWindow).toBe(200_000);
-  });
-
-  it("returns 128k for GPT-4o", () => {
-    expect(lookupContextWindow("gpt-4o").contextWindow).toBe(128_000);
-  });
-
-  it("returns 1M for GPT-4.1", () => {
-    expect(lookupContextWindow("gpt-4.1").contextWindow).toBe(1_000_000);
-  });
-
-  it("returns 64k for deepseek-chat", () => {
-    expect(lookupContextWindow("deepseek-chat").contextWindow).toBe(64_000);
-  });
-
-  it("returns 128k for glm-4-plus", () => {
-    expect(lookupContextWindow("glm-4-plus").contextWindow).toBe(128_000);
-  });
-
-  it("returns 128k for kimi-k2", () => {
-    expect(lookupContextWindow("kimi-k2").contextWindow).toBe(128_000);
-  });
-
-  it("falls back to 200k default for unknown models", () => {
-    const w = lookupContextWindow("totally-unknown-xyz");
-    expect(w.contextWindow).toBe(200_000);
-    expect(w.compactionThreshold).toBe(160_000);
+  it("ignores model id and returns the 200k default", () => {
+    for (const id of [
+      "claude-sonnet-4-5",
+      "gpt-4o",
+      "gpt-4.1",
+      "deepseek-chat",
+      "glm-4-plus",
+      "kimi-k2",
+      "totally-unknown-xyz",
+    ]) {
+      const w = lookupContextWindow(id);
+      expect(w.contextWindow).toBe(200_000);
+      expect(w.compactionThreshold).toBe(160_000);
+    }
   });
 
   it("respects an explicit fallback", () => {
@@ -248,7 +228,8 @@ describe("resolveCompactionThreshold", () => {
     expect(resolveCompactionThreshold("gpt-4o", 50_000)).toBe(40_000);
   });
 
-  it("uses the model's table when no configWindow", () => {
+  it("uses 80% of the default window when no configWindow", () => {
     expect(resolveCompactionThreshold("claude-sonnet-4-5", undefined)).toBe(160_000);
+    expect(resolveCompactionThreshold("deepseek-v4.1-flash", undefined)).toBe(160_000);
   });
 });

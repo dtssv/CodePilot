@@ -22,8 +22,9 @@ import {
 export function setPermissionMode(host: SandboxHost, mode: PermissionMode): PermissionMode {
   host.config = { ...host.config, permissionMode: mode };
   host.permissions.setMode(mode);
-  // Refresh volatile `<runtime>permission:` for the next turn.
-  void host.rebuildSystemPrompt().catch(() => undefined);
+  // Refresh volatile `<runtime>permission:` for the next turn — do not
+  // re-snapshot git/memory into the cached stableContext.
+  void host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
   return mode;
 }
 

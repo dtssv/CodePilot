@@ -62,7 +62,7 @@ export type CompactHost = {
   ): Promise<CompactionResult>;
   persistEvent(e: Event): Promise<void>;
   notify(e: Event): void;
-  rebuildSystemPrompt(): Promise<void>;
+  rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
   autoCompactDisabled: boolean;
   compactFailStreak: number;
   compactNoopStreak: number;
@@ -492,7 +492,10 @@ export async function sessionMaybeCompact(
  // Notify listeners of the new compaction event.
   const compactionEvent = host.events.find((e) => e.type === "compaction");
   if (compactionEvent) host.notify(compactionEvent);
-  await host.rebuildSystemPrompt();
+  // History prefix is intentionally busted by compaction; keep the cached
+  // system static+stable so the next turn can still hit the system/tools
+  // breakpoint. Plan / resume notes refresh via the volatile tail.
+  await host.rebuildSystemPrompt({ scope: "volatile" });
  // PostCompact hooks fire after the new state is committed.
   const summary = compactionEvent && compactionEvent.type === "compaction"
     ? compactionEvent.summary

@@ -405,11 +405,11 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // Overrides the budget derived from reasoningEffort.
     thinkingBudget: z.number().int().nonnegative().max(200_000).optional(),
     contextWindow: z.number().int().positive().optional(),
+    // Soft mid-history fold target. Opt-in — omit to keep append-only sends
+    // (prompt-cache friendly); when set, capped by contextWindow at runtime.
     maxContextTokens: z.number().int().positive().optional(),
-    // Rolling tool-output window: fold tool_results older than the keep window
-    // down to this many, independent of the token budget, so numerous small
-    // results can't quietly accumulate. Default 12; 0 folds all old results;
-    // omit/large disables the early trim (budget-based fold still applies).
+    // Rolling tool-output window (count-based). Opt-in — omit disables;
+    // 0 folds all old results. Mid-history rewrite breaks prompt cache.
     maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),

@@ -22,6 +22,9 @@ export async function buildHarnessSuffix(
   const env = await provider.snapshot(ctx.cwd);
 
   const stableOut: string[] = [];
+  // Keep <environment> free of session-mutable fields (delivery_roots,
+  // permission, sandbox). Those ride `<runtime>` / sessionNotes so a mid-
+  // session grant or mode flip does not rewrite the cached stableContext.
   stableOut.push(`<environment>
 provider: ${ctx.provider ?? "auto"}
 model: ${ctx.model ?? "(default)"}
@@ -34,9 +37,6 @@ cwd: ${env.cwd}
 workspace_root: ${env.workspaceRoot ?? env.cwd}
 scratch_dir: ${ctx.scratchDir ?? "(unset)"}
 project_state_dir: ${ctx.projectStateDir ?? "(unset)"}
-delivery_roots: ${(ctx.deliveryRoots && ctx.deliveryRoots.length > 0
-    ? ctx.deliveryRoots.join(", ")
-    : env.cwd)}
 timezone: ${env.timezone}
 </environment>`);
   stableOut.push(renderGitIdentityBlock(env.git));
@@ -55,18 +55,39 @@ timezone: ${env.timezone}
     }
   }
 
+  const volatile = await buildVolatileHarness(ctx, opts, env);
+  return { stable: stableOut.join("\n\n"), volatile };
+}
+
+/**
+ * Volatile harness only (runtime / mode guidance / plan / session notes).
+ * Used when refreshing the trailing tail without re-snapshotting git/memory
+ * into the cached stableContext.
+ */
+export async function buildVolatileHarness(
+  ctx: SystemPromptContext,
+  opts: { mode: HarnessMode; modeGuidance?: string; outputStyleGuidance?: string },
+  envSnapshot?: EnvironmentSnapshot,
+): Promise<string> {
+  const provider = ctx.environmentProvider ?? defaultEnvironmentProvider;
+  const env = envSnapshot ?? (await provider.snapshot(ctx.cwd));
   const volatileOut: string[] = [];
   // Parent keeps `now:` (second-precision session clock, refreshed on each
   // user turn — see Session.refreshRuntimeClock). Sub-agents omit it: a demoted
   // runtime_context used to merge into the task user turn on turn 1 and the
   // changing timestamp busted OpenAI/CCR prefix cache for the rest of the child
   // run. Mode/profile are stable for the whole sub-agent dispatch.
+  const deliveryRoots =
+    ctx.deliveryRoots && ctx.deliveryRoots.length > 0
+      ? ctx.deliveryRoots.join(", ")
+      : env.cwd;
   const runtimeLines: string[] = [];
   if (opts.mode !== "subagent") runtimeLines.push(`now: ${env.now}`);
   runtimeLines.push(
     `mode: ${ctx.mode ?? "agent"}`,
     `permission: ${ctx.permissionMode ?? "ask"}`,
     `output_style: ${ctx.outputStyle ?? "concise"}`,
+    `delivery_roots: ${deliveryRoots}`,
   );
   if (opts.mode === "subagent") {
     runtimeLines.push(
@@ -92,7 +113,7 @@ ${opts.outputStyleGuidance ?? ""}`.trim());
     volatileOut.push(`<session_notes>\n${ctx.sessionNotes.trim()}\n</session_notes>`);
   }
 
-  return { stable: stableOut.join("\n\n"), volatile: volatileOut.join("\n\n") };
+  return volatileOut.join("\n\n");
 }
 
 function renderGitIdentityBlock(git: EnvironmentSnapshot["git"]): string {
@@ -154,13 +175,7 @@ export function renderPlanBlock(plan: PlanStep[] | undefined): string {
   if (!plan || plan.length === 0) return "";
   const lines = plan.map((s) => {
     const mark =
-      s.status === "completed"
-        ? "[x]"
-        : s.status === "in_progress"
-          ? "[~]"
-          : s.status === "blocked"
-            ? "[!]"
-            : "[ ]";
+      s.status === "completed" ? "[x]" : s.status === "in_progress" ? "[~]" : "[ ]";
     return `${mark} ${s.id} — ${s.title} (${s.status})`;
   });
   return `<plan>

@@ -474,8 +474,6 @@ function PlanItem({ steps }: { steps: PlanStep[] }): React.ReactElement {
               <Text color={color.add}>{glyph.ok} </Text>
             ) : s.status === "in_progress" ? (
               <Text color={color.accent}>{glyph.active} </Text>
-            ) : s.status === "blocked" ? (
-              <Text color={color.remove}>{glyph.fail} </Text>
             ) : (
               <Text color={color.faint}>{glyph.pending} </Text>
             )}

@@ -39,7 +39,7 @@ export type ConfigHost = {
   lastProviderInputTokens: number;
   contextAnchor: { input: number; eventCount: number } | null;
   permissions: PermissionEngine;
-  rebuildSystemPrompt(): Promise<void>;
+  rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
   persistEvent(e: Event): Promise<void>;
   notify(e: Event): void;
 };
@@ -352,7 +352,8 @@ export async function setOutputStyle(host: ConfigHost, style: OutputStyle): Prom
   if (host.disposed) throw new Error("session disposed");
   if (host.outputStyle === style) return;
   host.outputStyle = style;
-  await host.rebuildSystemPrompt();
+  // Output-style guidance rides the volatile Collaboration Modes block.
+  await host.rebuildSystemPrompt({ scope: "volatile" });
 }
 
 /** Returns the host surface (default "cli"). */

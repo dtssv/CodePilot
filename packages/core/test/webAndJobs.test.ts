@@ -256,6 +256,26 @@ describe("bash background jobs", () => {
     expect(out.isError).toBe(true);
   });
 
+  it("attachJobCommandForDisplay adds the shell command for transcript UI", async () => {
+    const { attachJobCommandForDisplay } = await import("../src/tools/bashJobs.js");
+    const start = await bashTool.execute(
+      { command: "sleep 60", run_in_background: true },
+      sandboxOffCtx(),
+    );
+    const id = start.content.match(/job_[a-f0-9]{8}/)![0];
+    const enriched = (await attachJobCommandForDisplay(dir, {
+      job_id: id,
+      tail: 120,
+    })) as { job_id: string; tail: number; command?: string; status?: string };
+    expect(enriched.job_id).toBe(id);
+    expect(enriched.tail).toBe(120);
+    expect(enriched.command).toContain("sleep 60");
+    expect(enriched.status).toBe("running");
+    // Unknown id stays opaque (no invented command).
+    const unknown = await attachJobCommandForDisplay(dir, { job_id: "job_deadbeef" });
+    expect(unknown).toEqual({ job_id: "job_deadbeef" });
+  });
+
   it("times out a foreground command that spawns a pipe-holding grandchild, without hanging", async () => {
  // A shell that backgrounds a long sleep which INHERITS stdout, then the
  // shell itself waits. Before the process-group kill fix, SIGTERM hit only

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt, assembleSections, type StaticSection } from "../src/systemPrompt/index.js";
+import {
+  buildSystemPrompt,
+  refreshVolatileSystemPrompt,
+  assembleSections,
+  type StaticSection,
+} from "../src/systemPrompt/index.js";
 import type { EnvironmentProvider, EnvironmentSnapshot } from "../src/config/env.js";
 import { taskTool } from "../src/tools/task.js";
 
@@ -322,6 +327,32 @@ describe("buildSystemPrompt static prefix", () => {
     expect(yolo.stableContext).not.toMatch(/permission: yolo/);
   });
 
+  it("surfaces delivery_roots in <runtime>, not the cached stableContext", async () => {
+    const base = await buildSystemPrompt(baseCtx);
+    expect(base.volatileSuffix).toMatch(/delivery_roots: \/work/);
+    expect(base.stableContext).not.toMatch(/delivery_roots:/);
+    expect(base.staticPrefix).not.toMatch(/delivery_roots:/);
+
+    const granted = await buildSystemPrompt({
+      ...baseCtx,
+      deliveryRoots: ["/work", "/tmp/out"],
+    });
+    expect(granted.volatileSuffix).toMatch(/delivery_roots: \/work, \/tmp\/out/);
+    expect(granted.stableContext).not.toMatch(/delivery_roots:/);
+    // Mid-session delivery grant must leave the cached prefix byte-identical.
+    expect(granted.staticPrefix).toBe(base.staticPrefix);
+    expect(granted.stableContext).toBe(base.stableContext);
+    expect(granted.volatileSuffix).not.toBe(base.volatileSuffix);
+  });
+
+  it("changing permissionMode leaves the cached prefix byte-identical", async () => {
+    const ask = await buildSystemPrompt({ ...baseCtx, permissionMode: "ask" });
+    const yolo = await buildSystemPrompt({ ...baseCtx, permissionMode: "yolo" });
+    expect(yolo.staticPrefix).toBe(ask.staticPrefix);
+    expect(yolo.stableContext).toBe(ask.stableContext);
+    expect(yolo.volatileSuffix).not.toBe(ask.volatileSuffix);
+  });
+
   it("the static prefix does NOT include any time/cwd/git memory strings (cache-friendly)", async () => {
     const out = await buildSystemPrompt(baseCtx);
     expect(out.staticPrefix).not.toContain("<environment>");
@@ -607,14 +638,13 @@ describe("buildSystemPrompt dynamic suffix", () => {
         { id: "a", title: "first", status: "completed" },
         { id: "b", title: "second", status: "in_progress" },
         { id: "c", title: "third", status: "pending" },
-        { id: "d", title: "fourth", status: "blocked" },
       ],
     });
     expect(out.volatileSuffix).toContain("<plan>");
     expect(out.volatileSuffix).toContain("[x] a — first (completed)");
     expect(out.volatileSuffix).toContain("[~] b — second (in_progress)");
     expect(out.volatileSuffix).toContain("[ ] c — third (pending)");
-    expect(out.volatileSuffix).toContain("[!] d — fourth (blocked)");
+    expect(out.volatileSuffix).not.toContain("[!]");
     expect(out.volatileSuffix).toContain("</plan>");
   });
 
@@ -652,6 +682,51 @@ describe("buildSystemPrompt dynamic suffix", () => {
     expect(a.volatileSuffix).toContain("2026-01-01T00:00:00Z");
     expect(b.volatileSuffix).toContain("2026-06-30T23:59:59Z");
     expect(b.volatileSuffix).toContain("work");
+  });
+
+  it("refreshVolatileSystemPrompt freezes stable even when git branch drifts", async () => {
+    // Session end-of-turn / permission rebuilds used to re-snapshot git into
+    // stableContext. Volatile refresh must reuse the prior bytes even if the
+    // live env now reports a different branch.
+    const envOn = (branch: string, now: string): EnvironmentProvider => ({
+      async snapshot(cwd: string) {
+        return {
+          os: "x",
+          hostname: "h",
+          user: "u",
+          shell: "/bin/sh",
+          node: "v0",
+          cwd,
+          now,
+          timezone: "UTC",
+          git: { inRepo: true, root: "/w", branch, lastCommitSha: "abc", lastCommit: "wip" },
+        };
+      },
+    });
+    const first = await buildSystemPrompt({
+      ...baseCtx,
+      environmentProvider: envOn("main", "2026-01-01T00:00:00Z"),
+    });
+    expect(first.stableContext).toContain("branch: main");
+
+    const refreshed = await refreshVolatileSystemPrompt(
+      { staticPrefix: first.staticPrefix, stableContext: first.stableContext },
+      {
+        ...baseCtx,
+        permissionMode: "yolo",
+        deliveryRoots: ["/work", "/tmp/out"],
+        plan: [{ id: "s", title: "next", status: "pending" }],
+        environmentProvider: envOn("feature/x", "2026-01-01T00:00:05Z"),
+      },
+    );
+    expect(refreshed.staticPrefix).toBe(first.staticPrefix);
+    expect(refreshed.stableContext).toBe(first.stableContext);
+    expect(refreshed.stableContext).toContain("branch: main");
+    expect(refreshed.stableContext).not.toContain("feature/x");
+    expect(refreshed.volatileSuffix).toMatch(/permission: yolo/);
+    expect(refreshed.volatileSuffix).toMatch(/delivery_roots: \/work, \/tmp\/out/);
+    expect(refreshed.volatileSuffix).toContain("next");
+    expect(refreshed.volatileSuffix).toContain("2026-01-01T00:00:05Z");
   });
 
   it("does not duplicate a tool list in the suffix (names live in the tools array)", async () => {

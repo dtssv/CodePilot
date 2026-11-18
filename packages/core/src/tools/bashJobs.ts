@@ -232,6 +232,36 @@ export function listJobs(cwd: string): JobMeta[] {
   return [...registryFor(cwd).jobs.values()].map((j) => j.meta);
 }
 
+/** Tools whose model input is only a `job_id` (opaque to the UI without the
+ * underlying shell command). */
+export const JOB_DISPLAY_TOOLS: ReadonlySet<string> = new Set([
+  "bash_output",
+  "bash_kill",
+  "write_stdin",
+]);
+
+/**
+ * Attach `command` + `status` onto a job-tool input for UI / permission copy.
+ * Fail-soft: unknown job or missing `job_id` returns `input` unchanged.
+ * Does not remove `job_id` — callers that parse the schema still see it.
+ */
+export async function attachJobCommandForDisplay(
+  cwd: string,
+  input: unknown,
+): Promise<unknown> {
+  if (!input || typeof input !== "object") return input;
+  const o = input as Record<string, unknown>;
+  if (typeof o.job_id !== "string" || !o.job_id) return input;
+  if (typeof o.command === "string" && o.command.trim()) return input;
+  const job = await getJob(cwd, o.job_id);
+  if (!job) return input;
+  return {
+    ...o,
+    command: job.meta.displayCommand ?? job.meta.command,
+    status: job.meta.status,
+  };
+}
+
 /**
  * Build an actionable "unknown job" error: list jobs that actually exist this
  * session (with status) rather than a dead-end bare id, so the model can

@@ -54,10 +54,22 @@ export interface EventMeta {
   version?: string;
 }
 
+/** Plan step progress.
+ * Abandoned work is omitted from the next `plan_update`, not kept as a status.
+ * Stuck work: ask the user (or `goal_status: blocked` inside a goal loop). */
+export type PlanStepStatus = "pending" | "in_progress" | "completed";
+
 export interface PlanStep {
   id: string;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "blocked";
+  status: PlanStepStatus;
+}
+
+/** Coerce legacy / unknown plan statuses (e.g. historical `blocked`) to a
+ * supported value so resumed JSONL and old plan files still type-check. */
+export function normalizePlanStepStatus(raw: string): PlanStepStatus {
+  if (raw === "completed" || raw === "in_progress" || raw === "pending") return raw;
+  return "pending";
 }
 
 export interface UsageInfo {
@@ -753,15 +765,13 @@ export interface CodepilotConfig {
    * `window × compactionThreshold`; every provider request is hard-trimmed
    * to stay under the usable window (window − output reserve − system). */
   contextWindow?: number;
- /** Soft fold target for mid-run tool_result pruning (default 32_000).
- * Independent of `contextWindow`: keeps routine turns small/fast. The hard
- * window cap still applies — raising this cannot exceed `contextWindow`. */
+ /** Soft mid-history fold target (tokens). Opt-in: when unset, the send view
+ * stays append-only until hard-window trim / auto-compact so prompt-cache
+ * prefixes survive. When set, capped by `contextWindow`. */
   maxContextTokens?: number;
- /** Rolling tool-output window: fold tool_results older than the keep
- * window down to this many, early and
- * independent of the token budget, so numerous small results can't quietly
- * accumulate. Default 12; set 0 to fold all old results. The budget-based
- * fold still applies regardless. */
+ /** Rolling tool-output window: fold tool_results older than the keep window
+ * down to this many (count-based, independent of token budget). Opt-in —
+ * unset disables early mid-history rewrites; 0 folds all old results. */
   maxToolResultsInContext?: number;
  /** Hard upper bound on bytes `read_file` buffers for a single read. A file
   * larger than this is refused before its contents are read, so a huge file

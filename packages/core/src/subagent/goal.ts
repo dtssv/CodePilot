@@ -84,7 +84,7 @@ Additional rules:
 - Do not call \`memory_write\` unless the user explicitly asked you to remember something this turn. Do not persist one-off procedures or push to user/global scope on your own.
 - Do not commit, push, or perform other destructive operations unless the user explicitly asked.
 - Prefer \`task\` for parallel exploration; do not serialise independent reads.
-- If a step has been \`in_progress\` for more than two rounds without progress, mark it \`blocked\` and stop.
+- If a step has been \`in_progress\` for more than two rounds without progress, stop and call \`goal_status\` with \`status: "blocked"\` (explain why). Do not invent a plan-step blocked status — omit the step or leave it pending.
 
 The loop will continue until you report a status (via the \`goal_status\` tool or the text marker) or it hits the round cap.`;
 

@@ -35,7 +35,7 @@ export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
 export interface PlanStep {
   id: string;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "blocked";
+  status: "pending" | "in_progress" | "completed";
 }
 
 export interface UsageInfo {

@@ -139,7 +139,7 @@ export type PromptHost = {
   notify(e: Event): void;
   drainFollowUps(): Promise<void>;
   grantSandboxForMentionedRoots(dirs: string[]): Promise<void>;
-  rebuildSystemPrompt(): Promise<void>;
+  rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
   recallRelevantMemories(query: string): Promise<string | null>;
   historyFingerprint(): string;
   ensureContextUnderWindow(): Promise<void>;
@@ -321,7 +321,8 @@ export async function sessionPrompt(host: PromptHost,
     // prompt in ask-mode; auto-granted in auto-edit/yolo), so a user-named
     // path "just works" without the LLM negotiating for it.
     await host.grantSandboxForMentionedRoots(mentionedRoots).catch(() => undefined);
-    await host.rebuildSystemPrompt().catch(() => undefined);
+    // Delivery/sandbox notes only — keep cached static+stable intact.
+    await host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
   }
 
   const mentioned = await resolveImageMentions(effectivePrompt, host.cwd);
@@ -709,7 +710,11 @@ export async function sessionPrompt(host: PromptHost,
       }
 
       await host.maybeCompact();
-      await host.rebuildSystemPrompt().catch(() => undefined);
+      // End-of-turn: refresh plan / sandbox notes / permission tail only.
+      // Full rebuild would re-snapshot git+memory and bust the cached prefix
+      // even when nothing stable changed (memoryIndexDirty gates a full rebuild
+      // on the next prompt() entry above).
+      await host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
       await host.maybeCheckpoint();
 
       // User cancel: do not let Stop hooks force a continue.

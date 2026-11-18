@@ -187,8 +187,7 @@ function renderTaskTree(plan: PlanStep[] | undefined): string {
     .map((s) => {
       const icon =
         s.status === "completed" ? "✅" :
-        s.status === "in_progress" ? "🔄" :
-        s.status === "blocked" ? "🟡" : "🔵";
+        s.status === "in_progress" ? "🔄" : "🔵";
       return `${icon} ${s.id} — ${s.title}`;
     })
     .join("\n");

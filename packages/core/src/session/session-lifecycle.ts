@@ -74,7 +74,7 @@ export type LifecycleHost = PersistHost & {
   onMcpOpenAuthUrl?: SessionOptions["onMcpOpenAuthUrl"];
   onMcpServerRequest?: SessionOptions["onMcpServerRequest"];
   loadFromDisk(): Promise<void>;
-  rebuildSystemPrompt(): Promise<void>;
+  rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
   steerSystem(text: string): void;
   notify(e: Event): void;
   cancel(): void;

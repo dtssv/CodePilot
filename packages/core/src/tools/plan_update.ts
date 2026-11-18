@@ -9,7 +9,7 @@ import type { ToolDef } from "./types.js";
 const stepSchema = z.object({
   id: z.string().optional(),
   title: z.string(),
-  status: z.enum(["pending", "in_progress", "completed", "blocked"]),
+  status: z.enum(["pending", "in_progress", "completed"]),
 });
 
 const schema = z.object({
@@ -20,11 +20,12 @@ export const planUpdateTool: ToolDef<typeof schema> = {
   name: "plan_update",
   description:
     "Replace the structured plan (survives compaction). Steps: `{id?, title, status}` " +
-    "pending|in_progress|completed|blocked — at most one in_progress; " +
+    "pending|in_progress|completed — at most one in_progress; " +
     "`completed` when the deliverable exists (file or non-file outcome) and was verified if claimed; " +
-    "`blocked` with the reason in the title. Titles name path + check when useful " +
-    "(not vague Investigate/Fix/Done). When/how to plan: system Planning section; " +
-    "`start_goal` is the multi-round alternative.",
+    "omit steps you are no longer doing (do not keep abandoned work). " +
+    "If stuck, ask the user — there is no blocked step status. " +
+    "Titles name path + check when useful (not vague Investigate/Fix/Done). " +
+    "When/how to plan: system Planning section; `start_goal` is the multi-round alternative.",
   inputSchema: schema,
   permission: "read",
   async execute(input) {

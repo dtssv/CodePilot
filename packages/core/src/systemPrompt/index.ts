@@ -27,6 +27,10 @@ export {
   blocksForContext,
   type PromptProfile,
 } from "./profiles.js";
-export { buildSystemPrompt, renderPlanBlock } from "./build.js";
+export {
+  buildSystemPrompt,
+  refreshVolatileSystemPrompt,
+  renderPlanBlock,
+} from "./build.js";
 
 export type { EnvironmentProvider, EnvironmentSnapshot, GitStatus } from "../config/env.js";

@@ -1472,8 +1472,10 @@ export class Session {
     };
   }
 
-  private async rebuildSystemPrompt(): Promise<void> {
-    return sessionRebuildSystemPromptImpl(this as unknown as PersistHost);
+  private async rebuildSystemPrompt(
+    opts?: { scope?: "full" | "volatile" },
+  ): Promise<void> {
+    return sessionRebuildSystemPromptImpl(this as unknown as PersistHost, opts);
   }
 
   /**

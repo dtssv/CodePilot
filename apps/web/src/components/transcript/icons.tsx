@@ -57,13 +57,6 @@ export function StepMark({ status }: { status: PlanStep["status"] }): React.Reac
       </span>
     );
   }
-  if (status === "blocked") {
-    return (
-      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--color-remove-dim)] text-[var(--color-remove)]">
-        <XIcon className="h-2.5 w-2.5" />
-      </span>
-    );
-  }
   return <span className="mt-0.5 h-4 w-4 shrink-0 rounded-full border-[1.5px] border-[var(--color-edge)]" />;
 }
 

@@ -29,9 +29,9 @@ export interface SystemPromptContext {
    */
   extra?: string;
   /**
-   * Session-variant harness notes (sandbox posture, delivery roots, resume,
-   * custom agents). Rides the volatile tail so granting a writable root does
-   * not bust the cached system prefix.
+   * Session-variant harness notes (sandbox posture, resume, custom agents).
+   * Rides the volatile tail so granting a writable root does not bust the
+   * cached system prefix. Delivery roots live in `<runtime>`, not here.
    */
   sessionNotes?: string;
   model?: string;
@@ -54,7 +54,8 @@ export interface SystemPromptContext {
   projectStateDir?: string;
   /**
    * Directories where intentional project deliverables should land.
-   * Defaults to `[cwd]`.
+   * Defaults to `[cwd]`. Surfaced in volatile `<runtime>` so mid-session
+   * grants do not rewrite the cached stableContext.
    */
   deliveryRoots?: string[];
   /**

@@ -9,6 +9,7 @@ export type {
   ContentBlock,
   EventMeta,
   PlanStep,
+  PlanStepStatus,
   UsageInfo,
   Event,
   InterruptedRunInfo,
@@ -53,6 +54,7 @@ export type {
 // Runtime value: the single source of truth for supported provider names.
 export { PROVIDER_NAMES } from "./types.js";
 export { PERMISSION_PRESETS } from "./types.js";
+export { normalizePlanStepStatus } from "./types.js";
 
 // ---- Config ----
 export { loadConfig, mergeConfig } from "./config/config.js";

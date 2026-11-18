@@ -9,7 +9,11 @@ import {
   formatSandboxPromptNote,
   type ResolvedSandbox,
 } from "../sandbox/sandbox.js";
-import { buildSystemPrompt, type OutputStyle } from "../systemPrompt/index.js";
+import {
+  buildSystemPrompt,
+  refreshVolatileSystemPrompt,
+  type OutputStyle,
+} from "../systemPrompt/index.js";
 import { renderCustomAgentsBlock, type CustomAgent } from "../skills/customAgents.js";
 import type { Skill } from "../skills/skills.js";
 import { extractPlan, liveTranscript } from "../compaction/compaction.js";
@@ -355,7 +359,48 @@ export async function sessionPersistEvent(host: PersistHost, e: Event): Promise<
   }
 }
 
-export async function sessionRebuildSystemPrompt(host: PersistHost): Promise<void> {
+/** Scope for {@link sessionRebuildSystemPrompt}.
+ * - `full` — rebuild staticPrefix + stableContext + volatile (model/tools/
+ *   memory/skills/git snapshot). Busts the cached system prefix when those
+ *   inputs change.
+ * - `volatile` — reuse cached static+stable; refresh only the trailing tail
+ *   (permission / sandbox notes / delivery / plan / mode guidance). Prefer
+ *   this for mid-session grants and end-of-turn refreshes so a git checkout
+ *   or memory re-read cannot rewrite the prompt-cache prefix. */
+export type SystemPromptRebuildScope = "full" | "volatile";
+
+export async function sessionRebuildSystemPrompt(
+  host: PersistHost,
+  opts: { scope?: SystemPromptRebuildScope } = {},
+): Promise<void> {
+  const scope = opts.scope ?? "full";
+  const prev = host.systemPromptCache;
+  if (
+    scope === "volatile" &&
+    prev?.staticPrefix &&
+    prev.stableContext
+  ) {
+    host.systemPromptCache = await refreshVolatileSystemPrompt(
+      { staticPrefix: prev.staticPrefix, stableContext: prev.stableContext },
+      {
+        cwd: host.cwd,
+        sessionId: host.id,
+        hostSurface: host.hostSurface,
+        memory: {},
+        plan: extractPlan(host.events),
+        toolNames: [],
+        deliveryRoots: host.deliveryRoots,
+        sessionNotes: await buildSessionNotes(host),
+        model: host.model,
+        provider: host.config.provider ?? "anthropic",
+        mode: host.mode,
+        permissionMode: host.permissions.getMode(),
+        outputStyle: host.outputStyle,
+      },
+    );
+    return;
+  }
+
   const memory = summariseMemory(await readMemory(host.cwd));
  // Workspace instruction files are the repo's rules: injected verbatim
  // (byte-capped), unlike the agent-written MEMORY.md notes in memory.project,
@@ -397,56 +442,7 @@ export async function sessionRebuildSystemPrompt(host: PersistHost): Promise<voi
     model: host.model,
     toolExposure: host.config.toolExposure,
   });
- // Sandbox posture: lean mode/network + extras (while granted). Permission
- // tier rides `<runtime>permission:` via buildSystemPrompt. Volatile
- // sessionNotes so a writable-root grant does not bust the cached prefix.
- // delivery_roots already live in <environment>.
-  const sb = host.sandbox;
-  const sandboxNote =
-    sb.mode === "off"
-      ? `Sandbox: mode=off (no OS confinement).`
-      : formatSandboxPromptNote({
-          mode: sb.mode,
-          network: sb.network,
-          extraWritablePaths: sb.writablePaths,
-          unavailableHint: host._sandboxUnavailable
-            ? buildSandboxUnavailable().hint
-            : undefined,
-        });
- // Advertise custom sub-agents.
-  const customAgentsBlock = renderCustomAgentsBlock(host.customAgents);
- // If a checkpoint exists for this session, append a short summary of
- // it to the system prompt. This is what enables a "resume" without
- // replaying the JSONL: the agent sees the last checkpoint's distilled
- // state plus the events added since the checkpoint boundary.
-  const checkpoint = await readCheckpoint(host.cwd, host.id);
-  let resumeNote = checkpoint
-    ? `\n\n${summariseCheckpointForPrompt(checkpoint)}`
-    : "";
- // One-shot recovery only for a true crash/restart (stale running status).
- // A normal text-only turn end is not an interrupt — do not inject this.
-  if (host.resumedFromInterrupt) {
-    resumeNote +=
-      `\n\n<interrupted_run>\n` +
-      `The previous run in this session was cut off by a crash or server restart ` +
-      `(not a normal end-of-turn, and not a user cancel). Treat the user's next ` +
-      `message as continuing the same conversation:\n` +
-      `- Read the plan and the checkpoint above to see which steps are already ` +
-      `done — do NOT repeat completed work.\n` +
-      `- Resume at the first unfinished step and stay inside the original task.\n` +
-      `- If the prior state is unclear, briefly say what you think is done and ` +
-      `ask before redoing it.\n` +
-      `</interrupted_run>`;
-  }
-  // Project bootstrap stays in cached `extra`. Sandbox / resume / custom
-  // agents are session-variant → `sessionNotes` (volatile).
-  const sessionNotes = [
-    customAgentsBlock,
-    resumeNote.trim(),
-    sandboxNote,
-  ]
-    .filter((s) => s && s.trim().length > 0)
-    .join("\n\n");
+  const sessionNotes = await buildSessionNotes(host);
   host.systemPromptCache = await buildSystemPrompt({
     cwd: host.cwd,
     sessionId: host.id,
@@ -466,4 +462,52 @@ export async function sessionRebuildSystemPrompt(host: PersistHost): Promise<voi
     permissionMode: host.permissions.getMode(),
     outputStyle: host.outputStyle,
   });
+}
+
+/** Sandbox / resume / custom-agent notes for the volatile `<session_notes>` tail. */
+async function buildSessionNotes(host: PersistHost): Promise<string> {
+  // Sandbox posture: lean mode/network + extras (while granted) → sessionNotes.
+  // Permission + delivery_roots ride `<runtime>` so mid-session grants / mode
+  // flips only rewrite the volatile tail, not the cached stableContext.
+  const sb = host.sandbox;
+  const sandboxNote =
+    sb.mode === "off"
+      ? `Sandbox: mode=off (no OS confinement).`
+      : formatSandboxPromptNote({
+          mode: sb.mode,
+          network: sb.network,
+          extraWritablePaths: sb.writablePaths,
+          unavailableHint: host._sandboxUnavailable
+            ? buildSandboxUnavailable().hint
+            : undefined,
+        });
+  const customAgentsBlock = renderCustomAgentsBlock(host.customAgents);
+  const checkpoint = await readCheckpoint(host.cwd, host.id);
+  let resumeNote = checkpoint
+    ? `\n\n${summariseCheckpointForPrompt(checkpoint)}`
+    : "";
+  // One-shot recovery only for a true crash/restart (stale running status).
+  // A normal text-only turn end is not an interrupt — do not inject this.
+  if (host.resumedFromInterrupt) {
+    resumeNote +=
+      `\n\n<interrupted_run>\n` +
+      `The previous run in this session was cut off by a crash or server restart ` +
+      `(not a normal end-of-turn, and not a user cancel). Treat the user's next ` +
+      `message as continuing the same conversation:\n` +
+      `- Read the plan and the checkpoint above to see which steps are already ` +
+      `done — do NOT repeat completed work.\n` +
+      `- Resume at the first unfinished step and stay inside the original task.\n` +
+      `- If the prior state is unclear, briefly say what you think is done and ` +
+      `ask before redoing it.\n` +
+      `</interrupted_run>`;
+  }
+  // Project bootstrap stays in cached `extra`. Sandbox / resume / custom
+  // agents are session-variant → `sessionNotes` (volatile).
+  return [
+    customAgentsBlock,
+    resumeNote.trim(),
+    sandboxNote,
+  ]
+    .filter((s) => s && s.trim().length > 0)
+    .join("\n\n");
 }

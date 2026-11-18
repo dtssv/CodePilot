@@ -51,7 +51,7 @@ export type SandboxHost = {
   ) => Promise<PermissionResolution>;
   steerSystem(text: string): void;
   startPersistentShell(): PersistentShell | null;
-  rebuildSystemPrompt(): Promise<void>;
+  rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
 };
 
 /** Current sandbox policy (read-only view for hosts/tests). */
@@ -68,7 +68,7 @@ export function addDeliveryRoot(host: SandboxHost, dir: string): void {
   // Keep the permission engine's boundary check in sync — a delivery root is
   // part of the in-boundary working set.
   host.permissions.setDeliveryRoots(host.deliveryRoots);
-  void host.rebuildSystemPrompt().catch(() => undefined);
+  void host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
 }
 
 /** Current delivery roots (copy). */
@@ -171,6 +171,9 @@ export async function expandWritablePath(
   if (opts.persist) {
     await persistSandboxWritablePath(dir);
   }
+  // Refresh volatile sessionNotes (sandbox extras) only — writable-path
+  // grants must not rewrite the cached stableContext / staticPrefix.
+  void host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
   return resolve(dir);
 }
 
@@ -217,6 +220,9 @@ export function setSandboxMode(
     }
     host.persistentShell = host.startPersistentShell();
   }
+  // Refresh volatile sandbox note in sessionNotes; mode flips stay off the
+  // cached stable prefix (delivery/permission already ride `<runtime>`).
+  void host.rebuildSystemPrompt({ scope: "volatile" }).catch(() => undefined);
   return getSandboxStatus(host);
 }
 

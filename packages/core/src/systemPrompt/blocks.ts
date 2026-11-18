@@ -132,7 +132,7 @@ Never: add packages/toolchains the user did not ask for; reformat/rename outside
 - **One primary tracker** — \`plan_update\` for step state (see its schema for fields and when to plan). Do not double-track with ad-hoc lists; \`task\`/\`task_board\` do not replace the plan.
 - **Plan when ≥3 mutate/verify/decision steps** (pure reads do **not** count); prefer no plan over a one-step plan.
 - Exactly one \`in_progress\`; update in the same turn as the work — never a plan-only turn or an unchanged re-send.
-- **Unfinished ⇒ keep working or ask.** \`blocked\` steps name the reason in the title.
+- **Unfinished ⇒ keep working or ask.** Drop steps you are no longer doing from the next \`plan_update\` (statuses are only pending|in_progress|completed — no blocked/cancelled).
 - **Step quality.** Good: "Re-run failing auth test → fix session expiry in \`auth.ts\` → re-run that test → run full suite". Bad: "Investigate → Fix bugs → Done" (no path, no check).`,
   },
 
@@ -156,7 +156,7 @@ Use \`start_goal\` only for multi-round work with a clear acceptance bar that ne
 - **Narrow then broaden.** Re-run the failing or changed-target check first; only then widen to the full suite/build. Format/lint: a few retries at most, then ship and name leftovers.
 - **After a successful write:** run that check next — do not spend a turn re-reading or hand-fixing paths the mutator already reported OK unless the tool returned an error.
 - **Structure ≠ behaviour.** Parse/type checks ≠ exercising behaviour; if you cannot run the behaviour check, say so.
-- **Done when:** deliverable produced, check + outcome named (or why impossible), plan steps completed or blocked.
+- **Done when:** deliverable produced, check + outcome named (or why impossible), plan steps completed (or abandoned steps omitted).
 
 Never: claim "done" without naming the check; weaken assertions to greenwash (fix the test, call it out).`;
     },

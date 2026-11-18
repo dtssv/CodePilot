@@ -707,25 +707,25 @@ export class PermissionEngine {
     }
     if (typeof o.job_id !== "string" || !o.job_id) return;
     // Lazy import avoids a permissions ↔ bashJobs cycle at module load.
-    const { getJob } = await import("../tools/bashJobs.js");
-    const job = await getJob(cwd, o.job_id);
-    if (!job) {
+    const { attachJobCommandForDisplay } = await import("../tools/bashJobs.js");
+    const enriched = (await attachJobCommandForDisplay(cwd, o)) as Record<
+      string,
+      unknown
+    >;
+    const command = typeof enriched.command === "string" ? enriched.command : undefined;
+    const status = typeof enriched.status === "string" ? enriched.status : undefined;
+    if (!command) {
       req.reason = `${req.reason} (unknown job ${o.job_id})`;
       return;
     }
-    const command = job.meta.displayCommand ?? job.meta.command;
-    const status = job.meta.status;
-    req.input = {
-      ...o,
-      command,
-      status,
-    };
+    req.input = enriched;
+    const statusBit = status ? ` (${status})` : "";
     if (req.toolName === "bash_kill") {
-      req.reason = `Stop background job ${o.job_id} (${status}): ${command}`;
+      req.reason = `Stop background job ${o.job_id}${statusBit}: ${command}`;
     } else if (req.toolName === "write_stdin") {
-      req.reason = `Send stdin to background job ${o.job_id} (${status}): ${command}`;
+      req.reason = `Send stdin to background job ${o.job_id}${statusBit}: ${command}`;
     } else {
-      req.reason = `Read output of background job ${o.job_id} (${status}): ${command}`;
+      req.reason = `Read output of background job ${o.job_id}${statusBit}: ${command}`;
     }
   }
 

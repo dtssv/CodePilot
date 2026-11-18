@@ -1,6 +1,11 @@
-// Token estimation + per-model context windows.
+// Token estimation + context-window fallback (config is the source of truth).
 // `estimateTokens` delegates to a swappable tokenizer: a zero-dependency
 // heuristic by default, or `gpt-tokenizer` (o200k_base) if installed.
+
+import {
+  DEFAULT_MODEL_CONTEXT_WINDOW,
+  DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+} from "../config/config.js";
 
 /** A single estimator. Pure, total, no allocation beyond locals. */
 export type TokenEstimator = (text: string) => number;
@@ -193,8 +198,8 @@ export function estimateObjectTokens(value: unknown): number {
 }
 
 // ---------------------------------------------------------------------------
-// Per-model context windows. Canonical source of truth for shipped models;
-// unknown models fall back to a configurable default.
+// Context-window fallback when `config.contextWindow` is unset. Per-model
+// budgets live in provider `modelCapabilities` — not a hard-coded id table.
 // ---------------------------------------------------------------------------
 
 export interface ModelContextWindow {
@@ -206,25 +211,21 @@ export interface ModelContextWindow {
   maxOutputTokens: number;
 }
 
-/** Look up the context window for a model id, falling back to a default. */
+/** Default window used when config does not set `contextWindow`. Model id is
+ * ignored — new models do not need an entry here. */
 export function lookupContextWindow(
-  model: string | undefined,
-  fallback = 200_000
+  _model?: string | undefined,
+  fallback = DEFAULT_MODEL_CONTEXT_WINDOW,
 ): ModelContextWindow {
-  const id = (model ?? "").toLowerCase().trim();
-  const m = MODEL_CONTEXT_WINDOWS.find((entry) => entry.match(id));
-  if (m) {
-    return m.window;
-  }
   const threshold = Math.floor(fallback * 0.8);
   return {
     contextWindow: fallback,
     compactionThreshold: threshold,
-    maxOutputTokens: 4096,
+    maxOutputTokens: DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
   };
 }
 
-/** Resolve the effective compaction threshold. Config override > 80% of model. */
+/** Resolve the effective compaction threshold. Config override > 80% of default. */
 export function resolveCompactionThreshold(
   model: string | undefined,
   configWindow: number | undefined
@@ -284,141 +285,6 @@ export function estimateCostUSD(
     ((usage.cacheWrite ?? 0) / m) * (input * 1.25)
   );
 }
-
-interface ModelEntry {
- /** Substring matcher — any model id containing this string matches. */
-  match: (id: string) => boolean;
-  window: ModelContextWindow;
-}
-
-// Note: ordering matters — most specific matchers first. The match helper
-// receives a lowercased, trimmed model id.
-const MODEL_CONTEXT_WINDOWS: ModelEntry[] = [
- // Claude (Anthropic).
-  {
-    match: (id) => id.includes("claude-opus-4-1") || id.includes("claude-opus-4.1"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("claude-opus-4") || id.includes("claude-4-opus"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("claude-sonnet-4-5") || id.includes("claude-3-5-sonnet"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("claude-sonnet-4") || id.includes("claude-4-sonnet"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("claude-haiku-4-5") || id.includes("claude-3-5-haiku"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("claude-haiku") || id.includes("claude-3-haiku"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("claude"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 4096 },
-  },
- // OpenAI / GPT.
-  {
-    match: (id) => id.includes("gpt-4.1") || id.includes("gpt-4-1"),
-    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 16_384 },
-  },
-  {
-    match: (id) => id.includes("gpt-4o-mini"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("gpt-4o"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("gpt-4-turbo"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("gpt-4") || id === "gpt4",
-    window: { contextWindow: 8_192, compactionThreshold: 6_500, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("gpt-3.5") || id.includes("gpt-3"),
-    window: { contextWindow: 16_385, compactionThreshold: 13_000, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("o1-mini") || id.includes("o3-mini"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 16_384 },
-  },
-  {
-    match: (id) => id.includes("o1-preview") || id.includes("o1") || id.includes("o3"),
-    window: { contextWindow: 200_000, compactionThreshold: 160_000, maxOutputTokens: 16_384 },
-  },
- // DeepSeek.
-  {
-    match: (id) => id.includes("deepseek-v3") || id.includes("deepseek-chat"),
-    window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("deepseek-r1") || id.includes("deepseek-reasoner"),
-    window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("deepseek"),
-    window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 8192 },
-  },
- // GLM (Zhipu / Z.ai).
-  {
-    match: (id) => id.includes("glm-4-plus") || id.includes("glm-4-Plus"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("glm-4-long") || id.includes("glm-4-long"),
-    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("glm-4") || id.includes("glm4"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("glm-zero") || id.includes("glm-z1"),
-    window: { contextWindow: 16_000, compactionThreshold: 12_800, maxOutputTokens: 4096 },
-  },
-  {
-    match: (id) => id.includes("glm"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 4096 },
-  },
- // Kimi (Moonshot).
-  {
-    match: (id) => id.includes("kimi-k2") || id.includes("moonshot-v1-128k") || id.includes("moonshot-v1-256k"),
-    window: { contextWindow: 128_000, compactionThreshold: 102_400, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("kimi") || id.includes("moonshot"),
-    window: { contextWindow: 32_000, compactionThreshold: 25_600, maxOutputTokens: 4096 },
-  },
- // GitHub Copilot — typically a thin proxy over an OpenAI model.
-  {
-    match: (id) => id.startsWith("copilot-") || id.startsWith("copilot/"),
-    window: { contextWindow: 64_000, compactionThreshold: 51_200, maxOutputTokens: 4096 },
-  },
- // Google Gemini.
-  {
-    match: (id) => id.includes("gemini-2.5-pro") || id.includes("gemini-1.5-pro"),
-    window: { contextWindow: 2_000_000, compactionThreshold: 1_600_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) =>
-      id.includes("gemini-2.5-flash") || id.includes("gemini-2.0-flash") || id.includes("gemini-1.5-flash"),
-    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 8192 },
-  },
-  {
-    match: (id) => id.includes("gemini"),
-    window: { contextWindow: 1_000_000, compactionThreshold: 800_000, maxOutputTokens: 8192 },
-  },
-];
 
 /** Sum of events' token estimates, using the segmented estimator by default. */
 export function estimateEventsTokens<T>(

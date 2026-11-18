@@ -3,14 +3,15 @@
 // Three tiers (cache-friendly):
 //   1. staticPrefix  — identity + policy sections (byte-stable for a given tool-set)
 //   2. stableContext — lean env / git identity / thin memory index / skills
-//   3. volatileSuffix — now / mode / plan / session notes (sandbox, resume, …)
+//   3. volatileSuffix — now / mode / permission / delivery_roots / plan /
+//                       session notes (sandbox, resume, …)
 //
 // Static sections come from fixed blocks + profiles (see blocks.ts / profiles.ts).
 // Sub-agents use a dedicated specialist path — see subagentPrompt.ts.
 
 import { assembleSections } from "./assemble.js";
 import { materializeBlocks } from "./blocks.js";
-import { buildHarnessSuffix, renderPlanBlock } from "./harness.js";
+import { buildHarnessSuffix, buildVolatileHarness, renderPlanBlock } from "./harness.js";
 import { blocksForContext } from "./profiles.js";
 import { buildSubagentSystemPrompt } from "./subagentPrompt.js";
 import type { OutputStyle, SystemPromptContext, SystemPromptResult } from "./types.js";
@@ -36,13 +37,45 @@ export async function buildSystemPrompt(
     modeGuidance: modeGuidance(ctx.mode ?? "agent", ctx.toolNames),
     outputStyleGuidance: outputStyleGuidance(ctx.outputStyle ?? "concise"),
   });
+  return assembleResult(staticPrefix, stable, volatile);
+}
+
+/**
+ * Refresh only the volatile tail, reusing a previously built cached prefix.
+ * Callers use this when permission / sandbox / delivery / plan / output-style
+ * change — anything that must NOT rewrite staticPrefix or stableContext (and
+ * must not re-snapshot git/memory into the cached system block).
+ */
+export async function refreshVolatileSystemPrompt(
+  previous: Pick<SystemPromptResult, "staticPrefix" | "stableContext">,
+  ctx: SystemPromptContext,
+): Promise<SystemPromptResult> {
+  const volatile = await buildVolatileHarness(ctx, {
+    mode: ctx.subagent ? "subagent" : "parent",
+    modeGuidance: modeGuidance(ctx.mode ?? "agent", ctx.toolNames),
+    outputStyleGuidance: outputStyleGuidance(ctx.outputStyle ?? "concise"),
+  });
+  return assembleResult(previous.staticPrefix, previous.stableContext, volatile);
+}
+
+function assembleResult(
+  staticPrefix: string,
+  stable: string,
+  volatile: string,
+): SystemPromptResult {
   const full =
     staticPrefix +
     (staticPrefix.endsWith("\n") ? "" : "\n") +
     "\n" +
     stable +
     (volatile ? `\n\n${volatile}` : "");
-  return { staticPrefix, stableContext: stable, volatileSuffix: volatile, dynamicSuffix: stable, full };
+  return {
+    staticPrefix,
+    stableContext: stable,
+    volatileSuffix: volatile,
+    dynamicSuffix: stable,
+    full,
+  };
 }
 
 function buildStaticPrefix(ctx: SystemPromptContext): string {

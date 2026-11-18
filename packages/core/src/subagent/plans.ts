@@ -6,7 +6,7 @@
 import { mkdir, writeFile, readFile, readdir, unlink, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
-import type { PlanStep } from "../types.js";
+import { normalizePlanStepStatus, type PlanStep } from "../types.js";
 import { projectStatePath } from "../workspace/projectState.js";
 
 export interface PlanFile {
@@ -82,10 +82,8 @@ export async function writePlanFile(
     lines.push("_(no steps recorded — call `plan_update` before `plan_done`)_");
   } else {
     for (const s of steps) {
-      const mark = s.status === "completed" ? "[x]"
-        : s.status === "in_progress" ? "[~]"
-        : s.status === "blocked" ? "[!]"
-        : "[ ]";
+      const mark =
+        s.status === "completed" ? "[x]" : s.status === "in_progress" ? "[~]" : "[ ]";
       lines.push(`- ${mark} \`${s.id}\` — ${s.title} (${s.status})`);
     }
   }
@@ -229,13 +227,11 @@ function parsePlanFile(text: string, path: string, slug: string): PlanFile | und
     const m = line.match(/^\s*- \[([ x~!])\] `([^`]+)` — (.+?) \((\w+)\)\s*$/);
     if (m) {
       const mark = m[1]!;
-      const status = mark === "x" ? "completed"
-        : mark === "~" ? "in_progress"
-        : mark === "!" ? "blocked"
-        : "pending";
- // Prefer the explicit status in parens over the checkbox mark.
-      const declared = m[4] as PlanStep["status"];
-      steps.push({ id: m[2]!, title: m[3]!, status: declared ?? status });
+      const fromMark =
+        mark === "x" ? "completed" : mark === "~" ? "in_progress" : "pending";
+      // Prefer the explicit status in parens; coerce legacy `blocked` / `!`.
+      const declared = m[4] ? normalizePlanStepStatus(m[4]) : fromMark;
+      steps.push({ id: m[2]!, title: m[3]!, status: declared });
     }
   }
  // Parse notes from the `## Notes` section.

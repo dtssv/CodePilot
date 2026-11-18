@@ -18,9 +18,7 @@ export function PlanChecklist({ steps, dense = false }: { steps: PlanStep[]; den
                 ? "text-[var(--color-ink-faint)] line-through decoration-[var(--color-ink-faint)]/50"
                 : s.status === "in_progress"
                   ? "font-medium text-[var(--color-ink)]"
-                  : s.status === "blocked"
-                    ? "text-[var(--color-remove)]"
-                    : "text-[var(--color-ink-dim)]"
+                  : "text-[var(--color-ink-dim)]"
             }
           >
             {s.title}

@@ -44,6 +44,10 @@ import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO,
 import { classifyProviderFailure, isTransientError } from "../transientError.js";
 import { estimateTokens, lookupContextWindow } from "../../compaction/tokens.js";
 import {
+  JOB_DISPLAY_TOOLS,
+  attachJobCommandForDisplay,
+} from "../../tools/bashJobs.js";
+import {
   isAbortError,
   isAbortMessage,
   isParallelSafeTool,
@@ -243,12 +247,17 @@ export async function runAgent(
       maxOutputTokens: modelWindow.maxOutputTokens,
     }).hardTrigger,
   );
-  // Soft fold target for speed (default 32K); still capped by hardBudget.
-  const softBudget = deps.config.maxContextTokens ?? 32_000;
-  const contextBudget = Math.max(8_000, Math.min(hardBudget, softBudget));
-  // Rolling tool-output window: fold old tool_results down to this many
-  // early, before budget pressure. Default 12.
-  const maxUnfoldedToolResults = deps.config.maxToolResultsInContext ?? 12;
+  // Soft mid-history fold is opt-in (`maxContextTokens`). Default is
+  // append-only until hard-window / auto-compact — rewriting earlier
+  // tool_results every turn breaks provider prompt cache (keep
+  // the prefix byte-stable and only replace on real compaction).
+  const softConfigured = deps.config.maxContextTokens;
+  const contextBudget =
+    softConfigured !== undefined && softConfigured > 0
+      ? Math.max(8_000, Math.min(hardBudget, softConfigured))
+      : undefined;
+  // Rolling tool-output window is also opt-in (`maxToolResultsInContext`).
+  const maxUnfoldedToolResults = deps.config.maxToolResultsInContext;
   /** Last provider-reported input size, used for next-turn pressure checks. */
   let lastInputTokens = Math.max(0, deps.lastProviderInputTokens ?? 0);
 
@@ -936,16 +945,27 @@ export async function runAgent(
                 },
               });
               break;
-            case "tool_call":
+            case "tool_call": {
               toolCalls.push(ev.toolCall);
               callIds.add(ev.toolCall.id);
+              // Transcript/UI: bash_output/kill/stdin only carry job_id — attach
+              // the real command so the card is not opaque JSON. Execution still
+              // uses `ev.toolCall.input` (job_id only) from `toolCalls`.
+              let displayInput = ev.toolCall.input;
+              if (JOB_DISPLAY_TOOLS.has(ev.toolCall.name)) {
+                displayInput = await attachJobCommandForDisplay(
+                  deps.cwd,
+                  ev.toolCall.input,
+                ).catch(() => ev.toolCall.input);
+              }
               await emit({
                 type: "tool_call",
                 id: ev.toolCall.id,
                 name: ev.toolCall.name,
-                input: ev.toolCall.input,
+                input: displayInput,
               });
               break;
+            }
             case "usage": {
               // Providers often emit the same usage snapshot twice (chunk + final).
               // Treat each stream event as an absolute snapshot for THIS request,

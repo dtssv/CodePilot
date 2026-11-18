@@ -170,9 +170,10 @@ function stripEventImages(e: Event): Event {
 }
 
 /**
- * Fold old tool results toward the soft budget, then hard-trim to the
- * model window. Long single-prompt runs never reach the post-prompt
- * compaction alone, so this is what keeps each turn inside the window.
+ * Optionally fold old tool results (soft budget / rolling window), then
+ * hard-trim to the model window. Soft passes are skipped when neither
+ * `softBudget` nor `maxUnfoldedToolResults` is set so the send view stays
+ * append-only and the prompt-cache prefix survives across turns.
  */
 function foldForBudget(
   events: Event[],
@@ -180,17 +181,30 @@ function foldForBudget(
   hardBudget?: number,
   maxUnfoldedToolResults?: number,
 ): { events: Event[]; foldedCount: number } {
-  // The first pass folds oversized old results (size-based) AND enforces the
-  // rolling tool-output window (count-based, token-independent) so the live
-  // transcript's backlog of small-but-numerous results stays bounded from the
-  // start — not only once a budget threshold is crossed.
-  const first = foldToolResults(events, {
-    keepRecentMessages: 8,
-    maxUnfoldedToolResults,
-  });
-  let out = first.events;
-  let totalFolded = first.foldedCount;
+  let out = events;
+  let totalFolded = 0;
   const soft = softBudget && softBudget > 0 ? softBudget : undefined;
+  const rolling =
+    maxUnfoldedToolResults !== undefined && maxUnfoldedToolResults >= 0
+      ? maxUnfoldedToolResults
+      : undefined;
+
+  // Mid-history rewrite only when the operator opted into soft fold or a
+  // rolling tool-result window. Unconditional size-fold here used to run
+  // every turn and permanently capped cache hits well below 95%.
+  if (soft !== undefined || rolling !== undefined) {
+    const first = foldToolResults(events, {
+      keepRecentMessages: 8,
+      ...(rolling !== undefined ? { maxUnfoldedToolResults: rolling } : {}),
+      // When only the rolling window is set, skip size-based folds so we
+      // only collapse by count; soft budget still uses the default minChars.
+      ...(soft === undefined && rolling !== undefined
+        ? { minChars: Number.POSITIVE_INFINITY }
+        : {}),
+    });
+    out = first.events;
+    totalFolded = first.foldedCount;
+  }
   if (soft) {
     for (const keep of [6, 4, 2]) {
       if (estimateEventTokens(out, estimateTokens) < soft * 0.75) break;
