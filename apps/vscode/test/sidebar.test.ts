@@ -68,6 +68,7 @@ function setup(html?: string) {
   const provider = new ChatViewProvider(ctx, {
     engine: engine as unknown as Engine,
     cwd: () => "/work",
+    folders: () => ["/work"],
     onEngineError: (m) => errors.push(m),
   });
   const view = { webview: new FakeWebview() };

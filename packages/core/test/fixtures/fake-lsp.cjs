@@ -5,6 +5,7 @@
 const mode = process.argv[2];
 let buf = Buffer.alloc(0);
 let blocked = false;
+const queued = [];
 const docs = new Map();
 const send = (m) => {
   const b = JSON.stringify({ jsonrpc: "2.0", ...m });
@@ -17,8 +18,14 @@ const diags = (text) =>
       : []);
 const publish = (uri, version) => send({ method: "textDocument/publishDiagnostics", params: { uri, version, diagnostics: diags(docs.get(uri)) } });
 function handle(m) {
-  if (m.id === "reg1" && m.method === undefined) { blocked = false; return; }
-  if (blocked) return;
+  if (m.id === "reg1" && m.method === undefined) {
+    blocked = false;
+    // Replay what arrived while blocked: a real server still processes
+    // notifications sent before it answered our request.
+    for (const q of queued.splice(0)) handle(q);
+    return;
+  }
+  if (blocked) { queued.push(m); return; }
   switch (m.method) {
     case "initialize":
       return send({ id: m.id, result: { capabilities: mode === "pull" ? { diagnosticProvider: { interFileDependencies: false } } : {} } });
