@@ -115,6 +115,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # GitHub runs this script with `bash -eo pipefail`; `-e` would exit at
+          # the failing pipeline below and skip every diagnostic after it.
+          set +e
           pnpm -r --no-bail test 2>&1 | tee test-output.log
           code=$?
           if [ $code -ne 0 ]; then
@@ -125,8 +128,10 @@ jobs:
             if [ -z "$hits" ]; then
               hits=$(tail -50 test-output.log)
             fi
+            # Escape the characters a workflow command treats as syntax.
+            esc() { local s="$1"; s=${s//'%'/'%25'}; s=${s//$'\r'/'%0D'}; s=${s//$'\n'/'%0A'}; printf '%s' "$s"; }
             while IFS= read -r line; do
-              echo "::error::$line"
+              echo "::error::$(esc "$line")"
             done <<< "$hits"
             {
               echo "## Test failures (${{ matrix.os }} / node ${{ matrix.node }})"
